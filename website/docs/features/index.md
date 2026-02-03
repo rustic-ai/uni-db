@@ -10,6 +10,7 @@ Uni is an embedded, multi-model graph database that unifies graph, vector, docum
 | [Multi-Model Data Model](data-model-multimodal.md) | Graph + vector + document + columnar in one DB | Knowledge graphs, AI apps, mixed workloads |
 | [OpenCypher Querying](cypher-querying.md) | Familiar graph query language with extensions | Graph traversal and pattern matching |
 | [Columnar Analytics](columnar-analytics.md) | Vectorized scans, filters, aggregates | Fast analytics without a separate warehouse |
+| [Window Functions](window-functions.md) | OVER clauses for ranking and running totals | Partitioned analytics in a single query |
 | [Vector Search](vector-search.md) | ANN search with HNSW/IVF_PQ/Flat | Semantic search, RAG, similarity |
 | [Full-Text + JSON Search](full-text-json-search.md) | Text search over properties and JSON paths | Documents, metadata search |
 | [Schema & Indexing](schema-indexing.md) | Typed properties, constraints, and indexes | Performance, governance, stability |

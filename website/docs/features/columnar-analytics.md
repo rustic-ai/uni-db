@@ -7,6 +7,7 @@ Uni executes filters, projections, and aggregations using columnar, vectorized e
 - Vectorized scans and predicate pushdown.
 - Aggregations like `COUNT`, `SUM`, `AVG`, `COLLECT`.
 - Columnar storage via LanceDB.
+- Windowed analytics via `OVER (...)` clauses (see [Window Functions](window-functions.md)).
 
 ## Example
 
