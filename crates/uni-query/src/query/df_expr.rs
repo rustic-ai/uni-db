@@ -41,6 +41,20 @@ use std::ops::Not;
 use std::sync::Arc;
 use uni_cypher::ast::{BinaryOp, CypherLiteral, Expr, UnaryOp};
 
+/// Type of a variable in the query context.
+///
+/// Used to determine the identity column when a bare variable is referenced
+/// (e.g., `n` in `RETURN n` should resolve to `n._vid` for nodes).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VariableKind {
+    /// Node variable - identity is `_vid`
+    Node,
+    /// Edge/relationship variable - identity is `_eid`
+    Edge,
+    /// Path variable - kept as-is (struct with nodes/relationships)
+    Path,
+}
+
 /// Convert a Cypher expression to a DataFusion expression.
 ///
 /// Translates the Cypher AST representation into DataFusion's expression model
@@ -90,6 +104,25 @@ pub fn cypher_expr_to_df(expr: &Expr, context: Option<&TranslationContext>) -> R
             // Direct identifier becomes a column reference
             // Use Column::from_name() to avoid treating dots as table.column qualifiers
             // This is critical for transformed property expressions like "e.salary"
+            //
+            // When variable kind is known, resolve to identity column:
+            // - Node variables: n → n._vid
+            // - Edge variables: r → r._eid
+            // - Path variables: p → p (kept as-is, struct column)
+            if let Some(ctx) = context
+                && let Some(kind) = ctx.variable_kinds.get(name)
+            {
+                return match kind {
+                    VariableKind::Node => {
+                        Ok(DfExpr::Column(Column::from_name(format!("{}._vid", name))))
+                    }
+                    VariableKind::Edge => {
+                        Ok(DfExpr::Column(Column::from_name(format!("{}._eid", name))))
+                    }
+                    VariableKind::Path => Ok(DfExpr::Column(Column::from_name(name))),
+                };
+            }
+            // Fallback for unknown variables
             Ok(DfExpr::Column(Column::from_name(name)))
         }
 
@@ -391,6 +424,9 @@ pub struct TranslationContext {
 
     /// Known variable to label mapping (for type inference).
     pub variable_labels: std::collections::HashMap<String, String>,
+
+    /// Variable kinds (node, edge, path) for identity column resolution.
+    pub variable_kinds: std::collections::HashMap<String, VariableKind>,
 }
 
 impl TranslationContext {

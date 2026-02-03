@@ -48,6 +48,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 use uni_common::core::id::{Eid, Vid};
+use uni_store::runtime::l0_visibility;
 use uni_store::storage::direction::Direction;
 
 /// BFS result: (target_vid, hop_count, node_path, edge_path)
@@ -388,7 +389,6 @@ impl ExecutionPlan for GraphTraverseExec {
             edge_properties: self.edge_properties.clone(),
             target_properties: self.target_properties.clone(),
             target_label_name: self.target_label_name.clone(),
-            target_label_id: self.target_label_id,
             graph_ctx: self.graph_ctx.clone(),
             optional: self.optional,
             schema: self.schema.clone(),
@@ -441,11 +441,8 @@ struct GraphTraverseStream {
     /// Target vertex properties to materialize.
     target_properties: Vec<String>,
 
-    /// Target label name for property resolution.
+    /// Target label name for property resolution and filtering.
     target_label_name: Option<String>,
-
-    /// Optional target label filter.
-    target_label_id: Option<u16>,
 
     /// Graph execution context.
     graph_ctx: Arc<GraphExecutionContext>,
@@ -495,9 +492,15 @@ impl GraphTraverseStream {
                 let neighbors = self.graph_ctx.get_neighbors(vid, edge_type, self.direction);
 
                 for (target_vid, eid) in neighbors {
-                    if let Some(target_label) = self.target_label_id {
-                        let target_label_from_vid = (target_vid.as_u64() >> 48) as u16;
-                        if target_label_from_vid != target_label {
+                    // Filter by target label using L0 visibility.
+                    // VIDs no longer embed label information, so we must look up labels.
+                    if let Some(ref label_name) = self.target_label_name {
+                        let query_ctx = self.graph_ctx.query_context();
+                        let vertex_labels = l0_visibility::get_vertex_labels(target_vid, &query_ctx);
+                        // If L0 returns labels, check they contain the target label.
+                        // If L0 returns empty, the vertex is in storage (not in L0), so we trust
+                        // it was already filtered correctly by the dataset scan.
+                        if !vertex_labels.is_empty() && !vertex_labels.contains(label_name) {
                             continue;
                         }
                     }

@@ -33,7 +33,7 @@
 //! Cypher expressions are translated to DataFusion expressions using
 //! [`cypher_expr_to_df`] from the `df_expr` module.
 
-use crate::query::df_expr::{TranslationContext, cypher_expr_to_df};
+use crate::query::df_expr::{TranslationContext, VariableKind, cypher_expr_to_df};
 use crate::query::df_graph::traverse::GraphVariableLengthTraverseExec;
 use crate::query::df_graph::{
     GraphExecutionContext, GraphExtIdLookupExec, GraphScanExec, GraphShortestPathExec,
@@ -204,15 +204,17 @@ impl HybridPhysicalPlanner {
         }
     }
 
-    /// Build a `TranslationContext` from the stored params (if any).
-    fn translation_context(&self) -> Option<TranslationContext> {
-        if self.params.is_empty() {
-            None
-        } else {
-            Some(TranslationContext {
-                parameters: self.params.clone(),
-                variable_labels: HashMap::new(),
-            })
+    /// Build a `TranslationContext` with variable kinds collected from a LogicalPlan.
+    ///
+    /// This is used for expression translation in filters, projections, etc.
+    /// where bare variable references need to resolve to identity columns.
+    fn translation_context_for_plan(&self, plan: &LogicalPlan) -> TranslationContext {
+        let mut variable_kinds = HashMap::new();
+        collect_variable_kinds(plan, &mut variable_kinds);
+        TranslationContext {
+            parameters: self.params.clone(),
+            variable_labels: HashMap::new(),
+            variable_kinds,
         }
     }
 
@@ -399,7 +401,7 @@ impl HybridPhysicalPlanner {
 
                 // Plan DataFusion window aggregates if present
                 if !df_exprs.is_empty() {
-                    self.plan_window_aggregate(input_plan, &df_exprs)
+                    self.plan_window_aggregate(input_plan, &df_exprs, Some(input.as_ref()))
                 } else {
                     Ok(input_plan)
                 }
@@ -574,7 +576,15 @@ impl HybridPhysicalPlanner {
 
         // Apply filter if present
         if let Some(filter_expr) = filter {
-            let df_filter = cypher_expr_to_df(filter_expr, self.translation_context().as_ref())?;
+            // Build context with the node variable kind for this ext_id lookup
+            let mut variable_kinds = HashMap::new();
+            variable_kinds.insert(variable.to_string(), VariableKind::Node);
+            let ctx = TranslationContext {
+                parameters: self.params.clone(),
+                variable_labels: HashMap::new(),
+                variable_kinds,
+            };
+            let df_filter = cypher_expr_to_df(filter_expr, Some(&ctx))?;
             let schema = lookup_plan.schema();
 
             let session = self.session_ctx.read();
@@ -664,7 +674,15 @@ impl HybridPhysicalPlanner {
 
         // Apply filter if present
         if let Some(filter_expr) = filter {
-            let df_filter = cypher_expr_to_df(filter_expr, self.translation_context().as_ref())?;
+            // Build context with the node variable kind for this scan
+            let mut variable_kinds = HashMap::new();
+            variable_kinds.insert(variable.to_string(), VariableKind::Node);
+            let ctx = TranslationContext {
+                parameters: self.params.clone(),
+                variable_labels: HashMap::new(),
+                variable_kinds,
+            };
+            let df_filter = cypher_expr_to_df(filter_expr, Some(&ctx))?;
             let schema = scan_plan.schema();
 
             let session = self.session_ctx.read();
@@ -745,6 +763,9 @@ impl HybridPhysicalPlanner {
             };
 
             // Single-hop traversal
+            // Note: target_label_id is not passed here because VIDs no longer embed label info.
+            // Label filtering for traversals is handled via the fallback executor when DataFusion
+            // cannot handle the query, or via explicit filter predicates.
             Arc::new(GraphTraverseExec::new(
                 input_plan,
                 source_col,
@@ -755,7 +776,7 @@ impl HybridPhysicalPlanner {
                 edge_properties,
                 target_properties,
                 target_label_name,
-                None, // target_label_id filter applied later
+                None, // VIDs don't embed label - use VidLabelsIndex instead
                 self.graph_ctx.clone(),
                 optional,
             ))
@@ -781,7 +802,22 @@ impl HybridPhysicalPlanner {
 
         // Apply target filter if present
         if let Some(filter_expr) = target_filter {
-            let df_filter = cypher_expr_to_df(filter_expr, self.translation_context().as_ref())?;
+            // Build context with variable kinds for this traverse
+            let mut variable_kinds = HashMap::new();
+            variable_kinds.insert(source_variable.to_string(), VariableKind::Node);
+            variable_kinds.insert(target_variable.to_string(), VariableKind::Node);
+            if let Some(sv) = step_variable {
+                variable_kinds.insert(sv.to_string(), VariableKind::Edge);
+            }
+            if let Some(pv) = path_variable {
+                variable_kinds.insert(pv.to_string(), VariableKind::Path);
+            }
+            let ctx = TranslationContext {
+                parameters: self.params.clone(),
+                variable_labels: HashMap::new(),
+                variable_kinds,
+            };
+            let df_filter = cypher_expr_to_df(filter_expr, Some(&ctx))?;
             let final_filter = if optional {
                 // For OPTIONAL MATCH, allow NULL rows through (unmatched rows have NULL target VID)
                 let target_vid_col = format!("{}._vid", target_variable);
@@ -848,7 +884,8 @@ impl HybridPhysicalPlanner {
         let input_plan = self.plan_internal(input, all_properties)?;
         let schema = input_plan.schema();
 
-        let df_predicate = cypher_expr_to_df(predicate, self.translation_context().as_ref())?;
+        let ctx = self.translation_context_for_plan(input);
+        let df_predicate = cypher_expr_to_df(predicate, Some(&ctx))?;
 
         let session = self.session_ctx.read();
         let physical_predicate =
@@ -870,7 +907,7 @@ impl HybridPhysicalPlanner {
     ) -> Result<Arc<dyn ExecutionPlan>> {
         // Route through plan_internal_with_aliases to propagate aliases to Sort
         let input_plan = self.plan_internal_with_aliases(input, all_properties, alias_map)?;
-        self.plan_project_from_input(input_plan, projections)
+        self.plan_project_from_input(input_plan, projections, Some(input))
     }
 
     /// Build projection expressions from an already-planned input.
@@ -878,6 +915,7 @@ impl HybridPhysicalPlanner {
         &self,
         input_plan: Arc<dyn ExecutionPlan>,
         projections: &[(Expr, Option<String>)],
+        context_plan: Option<&LogicalPlan>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
         let input_plan = input_plan;
         let schema = input_plan.schema();
@@ -889,6 +927,9 @@ impl HybridPhysicalPlanner {
         // Use DefaultPhysicalPlanner to properly resolve UDFs
         use datafusion::physical_planner::PhysicalPlanner;
         let planner = datafusion::physical_planner::DefaultPhysicalPlanner::default();
+
+        // Build translation context with variable kinds if we have a logical plan
+        let ctx = context_plan.map(|p| self.translation_context_for_plan(p));
 
         let mut exprs: Vec<(Arc<dyn datafusion::physical_expr::PhysicalExpr>, String)> = Vec::new();
 
@@ -923,7 +964,17 @@ impl HybridPhysicalPlanner {
                     }
                     continue;
                 }
-                // Fall through to normal translation if no matching columns
+
+                // If we have matching columns but no property columns (just _vid/_eid),
+                // explicitly error to trigger fallback which will materialize the node.
+                // This prevents bare variable translation to identity from succeeding here.
+                if !matching_fields.is_empty() {
+                    return Err(anyhow::anyhow!(
+                        "No property columns for variable '{}' - fallback required",
+                        var_name
+                    ));
+                }
+                // Fall through to normal translation if no matching columns at all
             }
 
             // Handle RETURN * (wildcard) — expand to all input columns
@@ -937,7 +988,7 @@ impl HybridPhysicalPlanner {
                 continue;
             }
 
-            let df_expr = cypher_expr_to_df(expr, self.translation_context().as_ref())?;
+            let df_expr = cypher_expr_to_df(expr, ctx.as_ref())?;
             // Resolve DummyUdf placeholders to registered UDFs
             let resolved_expr = Self::resolve_udfs(&df_expr, &state)?;
             let physical_expr = planner.create_physical_expr(&resolved_expr, &df_schema, &state)?;
@@ -968,11 +1019,14 @@ impl HybridPhysicalPlanner {
         use datafusion::physical_planner::PhysicalPlanner;
         let planner = datafusion::physical_planner::DefaultPhysicalPlanner::default();
 
+        // Build translation context with variable kinds from the input plan
+        let ctx = self.translation_context_for_plan(input);
+
         // Translate group by expressions
         let mut group_exprs: Vec<(Arc<dyn datafusion::physical_expr::PhysicalExpr>, String)> =
             Vec::new();
         for expr in group_by {
-            let df_expr = cypher_expr_to_df(expr, self.translation_context().as_ref())?;
+            let df_expr = cypher_expr_to_df(expr, Some(&ctx))?;
             // Resolve DummyUdf placeholders to registered UDFs
             let resolved_expr = Self::resolve_udfs(&df_expr, &state)?;
             let physical_expr = planner.create_physical_expr(&resolved_expr, &df_schema, &state)?;
@@ -983,7 +1037,7 @@ impl HybridPhysicalPlanner {
         let physical_group_by = PhysicalGroupBy::new_single(group_exprs);
 
         // Translate aggregates
-        let aggr_exprs = self.translate_aggregates(aggregates, &schema, &state)?;
+        let aggr_exprs = self.translate_aggregates(aggregates, &schema, &state, &ctx)?;
 
         // Filter expressions must match aggregate expressions in length.
         let filter_exprs = vec![None; aggr_exprs.len()];
@@ -1027,6 +1081,7 @@ impl HybridPhysicalPlanner {
         aggregates: &[Expr],
         schema: &SchemaRef,
         state: &SessionState,
+        ctx: &TranslationContext,
     ) -> Result<Vec<Arc<AggregateFunctionExpr>>> {
         use datafusion::functions_aggregate::expr_fn::{avg, count, max, min, sum};
 
@@ -1050,7 +1105,7 @@ impl HybridPhysicalPlanner {
                 if args.is_empty() {
                     return Err(anyhow!("{}() requires an argument", name_lower));
                 }
-                cypher_expr_to_df(&args[0], self.translation_context().as_ref())
+                cypher_expr_to_df(&args[0], Some(ctx))
             };
 
             let df_agg = match name_lower.as_str() {
@@ -1117,6 +1172,9 @@ impl HybridPhysicalPlanner {
 
         let session = self.session_ctx.read();
 
+        // Build translation context with variable kinds from the input plan
+        let ctx = self.translation_context_for_plan(input);
+
         // Translate sort expressions to DataFusion's SortExpr (a.k.a. Sort struct)
         // SortItem has `ascending: bool`, so use it directly
         // Default nulls_first to false for ASC, true for DESC
@@ -1137,7 +1195,7 @@ impl HybridPhysicalPlanner {
                     }
                 }
 
-                let df_expr = cypher_expr_to_df(&sort_expr, self.translation_context().as_ref())?;
+                let df_expr = cypher_expr_to_df(&sort_expr, Some(&ctx))?;
                 let asc = item.ascending;
                 let nulls_first = !asc; // Standard SQL behavior: nulls last for ASC, first for DESC
 
@@ -1248,6 +1306,7 @@ impl HybridPhysicalPlanner {
         &self,
         input: Arc<dyn ExecutionPlan>,
         window_exprs: &[Expr],
+        context_plan: Option<&LogicalPlan>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
         use datafusion::functions_aggregate::average::avg_udaf;
         use datafusion::functions_aggregate::count::count_udaf;
@@ -1264,8 +1323,8 @@ impl HybridPhysicalPlanner {
         let session = self.session_ctx.read();
         let state = session.state();
 
-        // Translate each window expression to DataFusion WindowExpr
-        let tx_ctx = self.translation_context();
+        // Build translation context with variable kinds if we have a logical plan
+        let tx_ctx = context_plan.map(|p| self.translation_context_for_plan(p));
         let mut window_expr_list = Vec::new();
 
         for expr in window_exprs {
@@ -1692,6 +1751,155 @@ fn wider_numeric_type(
         a.clone()
     } else {
         b.clone()
+    }
+}
+
+
+/// Recursively collect variable kinds (node, edge, path) from a LogicalPlan.
+///
+/// This information is used by the expression translator to resolve bare variable
+/// references to their identity columns (e.g., `n` → `n._vid` for nodes).
+fn collect_variable_kinds(plan: &LogicalPlan, kinds: &mut HashMap<String, VariableKind>) {
+    match plan {
+        LogicalPlan::Scan { variable, .. } => {
+            kinds.insert(variable.clone(), VariableKind::Node);
+        }
+        LogicalPlan::ExtIdLookup { variable, .. } => {
+            kinds.insert(variable.clone(), VariableKind::Node);
+        }
+        LogicalPlan::VectorKnn { variable, .. } => {
+            kinds.insert(variable.clone(), VariableKind::Node);
+        }
+        LogicalPlan::InvertedIndexLookup { variable, .. } => {
+            kinds.insert(variable.clone(), VariableKind::Node);
+        }
+        LogicalPlan::Traverse {
+            input,
+            source_variable,
+            target_variable,
+            step_variable,
+            path_variable,
+            ..
+        } => {
+            collect_variable_kinds(input, kinds);
+            kinds.insert(source_variable.clone(), VariableKind::Node);
+            kinds.insert(target_variable.clone(), VariableKind::Node);
+            if let Some(sv) = step_variable {
+                kinds.insert(sv.clone(), VariableKind::Edge);
+            }
+            if let Some(pv) = path_variable {
+                kinds.insert(pv.clone(), VariableKind::Path);
+            }
+        }
+        LogicalPlan::ShortestPath {
+            input,
+            source_variable,
+            target_variable,
+            path_variable,
+            ..
+        } => {
+            collect_variable_kinds(input, kinds);
+            kinds.insert(source_variable.clone(), VariableKind::Node);
+            kinds.insert(target_variable.clone(), VariableKind::Node);
+            kinds.insert(path_variable.clone(), VariableKind::Path);
+        }
+        LogicalPlan::AllShortestPaths {
+            input,
+            source_variable,
+            target_variable,
+            path_variable,
+            ..
+        } => {
+            collect_variable_kinds(input, kinds);
+            kinds.insert(source_variable.clone(), VariableKind::Node);
+            kinds.insert(target_variable.clone(), VariableKind::Node);
+            kinds.insert(path_variable.clone(), VariableKind::Path);
+        }
+        LogicalPlan::QuantifiedPattern {
+            input,
+            pattern_plan,
+            path_variable,
+            start_variable,
+            binding_variable,
+            ..
+        } => {
+            collect_variable_kinds(input, kinds);
+            collect_variable_kinds(pattern_plan, kinds);
+            kinds.insert(start_variable.clone(), VariableKind::Node);
+            kinds.insert(binding_variable.clone(), VariableKind::Node);
+            if let Some(pv) = path_variable {
+                kinds.insert(pv.clone(), VariableKind::Path);
+            }
+        }
+        // Wrapper nodes: recurse into input(s)
+        LogicalPlan::Filter { input, .. }
+        | LogicalPlan::Project { input, .. }
+        | LogicalPlan::Sort { input, .. }
+        | LogicalPlan::Limit { input, .. }
+        | LogicalPlan::Aggregate { input, .. }
+        | LogicalPlan::Distinct { input, .. }
+        | LogicalPlan::Window { input, .. }
+        | LogicalPlan::Unwind { input, .. }
+        | LogicalPlan::Create { input, .. }
+        | LogicalPlan::Merge { input, .. }
+        | LogicalPlan::Set { input, .. }
+        | LogicalPlan::Remove { input, .. }
+        | LogicalPlan::Delete { input, .. }
+        | LogicalPlan::Foreach { input, .. }
+        | LogicalPlan::SubqueryCall { input, .. } => {
+            collect_variable_kinds(input, kinds);
+        }
+        LogicalPlan::Union { left, right, .. }
+        | LogicalPlan::CrossJoin { left, right, .. } => {
+            collect_variable_kinds(left, kinds);
+            collect_variable_kinds(right, kinds);
+        }
+        LogicalPlan::Apply {
+            input, subquery, ..
+        } => {
+            collect_variable_kinds(input, kinds);
+            collect_variable_kinds(subquery, kinds);
+        }
+        LogicalPlan::RecursiveCTE {
+            initial, recursive, ..
+        } => {
+            collect_variable_kinds(initial, kinds);
+            collect_variable_kinds(recursive, kinds);
+        }
+        LogicalPlan::Explain { plan } => {
+            collect_variable_kinds(plan, kinds);
+        }
+        // Leaf nodes with no variables or not applicable
+        LogicalPlan::Empty
+        | LogicalPlan::LoadCsv { .. }
+        | LogicalPlan::ProcedureCall { .. }
+        | LogicalPlan::CreateVectorIndex { .. }
+        | LogicalPlan::CreateFullTextIndex { .. }
+        | LogicalPlan::CreateScalarIndex { .. }
+        | LogicalPlan::CreateJsonFtsIndex { .. }
+        | LogicalPlan::DropIndex { .. }
+        | LogicalPlan::ShowIndexes { .. }
+        | LogicalPlan::Copy { .. }
+        | LogicalPlan::Backup { .. }
+        | LogicalPlan::ShowDatabase
+        | LogicalPlan::ShowConfig
+        | LogicalPlan::ShowStatistics
+        | LogicalPlan::Vacuum
+        | LogicalPlan::Checkpoint
+        | LogicalPlan::CopyTo { .. }
+        | LogicalPlan::CopyFrom { .. }
+        | LogicalPlan::CreateLabel(_)
+        | LogicalPlan::CreateEdgeType(_)
+        | LogicalPlan::AlterLabel(_)
+        | LogicalPlan::AlterEdgeType(_)
+        | LogicalPlan::DropLabel(_)
+        | LogicalPlan::DropEdgeType(_)
+        | LogicalPlan::CreateConstraint(_)
+        | LogicalPlan::DropConstraint(_)
+        | LogicalPlan::ShowConstraints(_)
+        | LogicalPlan::Begin
+        | LogicalPlan::Commit
+        | LogicalPlan::Rollback => {}
     }
 }
 
