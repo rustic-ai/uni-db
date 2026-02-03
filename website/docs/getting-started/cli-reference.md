@@ -1,6 +1,6 @@
 # CLI Reference
 
-Complete reference for the `uni` command-line interface. The CLI provides tools for data import, query execution, and server management.
+Complete reference for the `uni` command-line interface. The CLI provides tools for data import, query execution, and snapshot management.
 
 ## Synopsis
 
@@ -148,62 +148,6 @@ uni snapshot create "nightly" --path ./storage
 **`restore`** — Restore the database to a specific snapshot ID.
 ```bash
 uni snapshot restore <ID> --path ./storage
-```
-
----
-
-### `start` — Start Server
-
-Start the Uni HTTP API server for remote access.
-
-#### Synopsis
-
-```bash
-uni start [OPTIONS]
-```
-
-#### Options
-
-| Option | Description | Default |
-|--------|-------------|---------|
-| `--port <PORT>` | HTTP port to listen on | 8080 |
-| `--path <PATH>` | Storage directory path | `./storage` |
-| `--cors-origins <ORIGINS>` | Allowed CORS origins (comma-separated, `*` for any) | `http://localhost:3000` |
-| `--api-key <KEY>` | Require `X-API-Key` header for API requests | (unset) |
-
-#### Examples
-
-**Start on default port:**
-```bash
-uni start --path ./my-graph
-```
-
-**Restrict CORS + require API key:**
-```bash
-uni start \
-  --path ./my-graph \
-  --cors-origins "https://myapp.example" \
-  --api-key "secret"
-```
-
-#### API Endpoints
-
-When the server is running:
-
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/` | GET | Web UI (static) |
-| `/assets/*` | GET | Static assets |
-| `/health` | GET | Health check |
-| `/api/v1/query` | POST | Execute Cypher query |
-| `/api/v1/metrics` | GET | Prometheus metrics |
-
-**Query API example:**
-```bash
-curl -X POST http://localhost:8080/api/v1/query \
-  -H "Content-Type: application/json" \
-  -H "X-API-Key: secret" \
-  -d '{"query": "MATCH (n) RETURN COUNT(n)"}'
 ```
 
 ---

@@ -92,7 +92,7 @@ let db = Uni::open("./fraud_graph")
 
 ### 3. Streaming Ingestion
 
-Use the **HTTP API** or **Rust bindings** to ingest transactions as they happen.
+Use the **embedded Rust API** to ingest transactions as they happen.
 
 ```rust
 // Rust API Example (parameterized Cypher)

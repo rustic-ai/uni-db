@@ -4,7 +4,7 @@ This guide covers strategies for optimizing Uni's performance across query execu
 
 ## Performance Overview
 
-Uni's performance characteristics:
+Uni's performance characteristics (indicative numbers from internal benchmarks; see the Benchmarks doc for details):
 
 | Operation | Typical Latency | Optimization Target |
 |-----------|-----------------|---------------------|
@@ -325,8 +325,8 @@ Property cache sizing is currently fixed internally. If you need explicit contro
 View the query plan without execution:
 
 ```bash
-uni query "MATCH (p:Paper) WHERE p.year > 2020 RETURN p.title" \
-    --explain --path ./storage
+uni query "EXPLAIN MATCH (p:Paper) WHERE p.year > 2020 RETURN p.title" \
+    --path ./storage
 ```
 
 Output:
@@ -346,8 +346,8 @@ Index usage: BTree (paper_year)
 Execute with timing breakdown:
 
 ```bash
-uni query "MATCH (p:Paper)-[:CITES]->(c) RETURN COUNT(c)" \
-    --profile --path ./storage
+uni query "PROFILE MATCH (p:Paper)-[:CITES]->(c) RETURN COUNT(c)" \
+    --path ./storage
 ```
 
 Output:

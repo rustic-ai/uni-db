@@ -18,7 +18,7 @@ async fn main() -> Result<()> {
     // Run a query
     let results = db.query("MATCH (p:Paper) WHERE p.year > 2020 RETURN p.title LIMIT 10").await?;
 
-    for row in &results {
+    for row in results.iter() {
         let title: String = row.get("p.title")?;
         println!("{}", title);
     }

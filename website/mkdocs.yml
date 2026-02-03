@@ -12,7 +12,6 @@ nav:
       - Overview: getting-started/index.md
       - Installation: getting-started/installation.md
       - Quick Start: getting-started/quickstart.md
-      - Programming Guide: getting-started/programming-guide.md
       - CLI Reference: getting-started/cli-reference.md
   - Concepts:
       - Overview: concepts/index.md
@@ -24,6 +23,7 @@ nav:
       - Concurrency: concepts/concurrency.md
   - Guides:
       - Overview: guides/index.md
+      - Programming Guide: getting-started/programming-guide.md
       - Cypher Querying: guides/cypher-querying.md
       - Vector Search: guides/vector-search.md
       - Data Ingestion: guides/data-ingestion.md
@@ -61,6 +61,7 @@ nav:
       - Vectorized Execution: internals/vectorized-execution.md
       - Storage Engine: internals/storage-engine.md
       - Query Planning: internals/query-planning.md
+      - Query Rewriting: internals/query-rewriting.md
       - Mutation Spec: internals/mutation_spec.md
       - API Gap Plan: internals/api-gap-plan.md
       - Benchmarks: internals/benchmarks.md
@@ -69,14 +70,13 @@ nav:
       - Rust API: reference/rust-api.md
       - Python API: reference/python-api.md
       - Pydantic OGM: reference/pydantic-ogm.md
-      - REST API: reference/rest-api.md
       - Configuration: reference/configuration.md
       - Troubleshooting: reference/troubleshooting.md
       - Limitations: reference/limitations.md
       - Glossary: reference/glossary.md
   - API Docs:
-      - Rust API (rustdoc): api/rust/uni/index.html
-      - Python API (pdoc): api/python/index.html
+      - Rust API (Generated): api/rust/index.md
+      - Python API (Generated): api/python/index.md
 
 theme:
   name: material

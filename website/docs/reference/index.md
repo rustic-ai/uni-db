@@ -27,13 +27,6 @@ Type-safe Python models with Pydantic validation.
 
 <div class="feature-card">
 
-### [REST API](rest-api.md)
-HTTP API reference for remote query execution and monitoring.
-
-</div>
-
-<div class="feature-card">
-
 ### [Configuration](configuration.md)
 All configuration options for storage, runtime, and queries.
 

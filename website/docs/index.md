@@ -4,7 +4,7 @@
 
 ## The Embedded Multi-Model Graph Database
 
-**Uni** is a high-performance, embedded database that unifies **graph**, **vector**, **document**, and **columnar** workloads in a single engine. Built in Rust for speed and safety, Uni delivers sub-millisecond graph traversals, semantic vector search, and analytical queries—all without the operational complexity of distributed systems.
+**Uni** is a high-performance, embedded database that unifies **graph**, **vector**, **document**, and **columnar** workloads in a single engine. Built in Rust for speed and safety, Uni delivers low-millisecond graph traversals, semantic vector search, and analytical queries—all without the operational complexity of distributed systems.
 
 <div class="quick-links" markdown>
 <a href="getting-started/installation.html" class="quick-link">Installation</a>
@@ -26,7 +26,7 @@ Modern applications need more than one data model. Knowledge graphs require rela
 | Capability | Description |
 |------------|-------------|
 | **Graph Traversals** | Navigate billions of edges with O(1) adjacency lookups via CSR-cached topology |
-| **Vector Search** | Sub-2ms approximate nearest neighbor queries powered by Lance's HNSW indexes |
+| **Vector Search** | Low-millisecond approximate nearest neighbor queries powered by Lance's HNSW indexes |
 | **Document Storage** | Store and query nested JSON with path-based indexing |
 | **Columnar Analytics** | Vectorized aggregations with predicate pushdown to storage |
 | **OpenCypher Queries** | Familiar graph query syntax with vectorized execution |

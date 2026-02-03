@@ -124,7 +124,10 @@ except Exception:
 Scoped sessions with variables:
 
 ```python
-session = db.session().set("user_id", 123).build()
+builder = db.session()
+builder.set("user_id", 123)
+session = builder.build()
+
 results = session.query("MATCH (n:Person) RETURN n")
 user_id = session.get("user_id")
 ```
@@ -152,28 +155,21 @@ stats = writer.commit()
 print(f"Inserted {stats.vertices_inserted} vertices")
 ```
 
-### VectorSearch
+### Vector Search
 
-Vector similarity search:
+Vector similarity search is exposed via Cypher:
 
 ```python
 # Create vector index
 db.add_property("Document", "embedding", "vector:128", False)
 db.create_vector_index("Document", "embedding", "cosine")
 
-# Search
-query_vec = [0.1, 0.2, ...]  # 128 dimensions
-matches = db.vector_search("Document", "embedding", query_vec, k=10)
-
-for match in matches:
-    print(f"VID: {match.vid}, Distance: {match.distance}")
-
-# Builder pattern with threshold
-matches = (
-    db.vector_search_with("Document", "embedding", query_vec)
-    .k(10)
-    .threshold(0.5)
-    .search()
+# Search via Cypher
+query_vec = [0.1, 0.2, 0.3]  # 128 dimensions
+results = db.query(
+    "CALL uni.vector.query('Document', 'embedding', $vec, 10) "
+    "YIELD vid, distance RETURN vid, distance",
+    {"vec": query_vec},
 )
 ```
 
@@ -215,25 +211,9 @@ print(f"Total time: {profile['total_time_ms']}ms")
 print(f"Peak memory: {profile['peak_memory_bytes']} bytes")
 ```
 
-## Snapshots
+## Snapshots (Planned)
 
-Point-in-time snapshots:
-
-```python
-# Create snapshot
-snapshot_id = db.create_snapshot("before_migration")
-
-# List snapshots
-for snap in db.list_snapshots():
-    print(f"{snap.snapshot_id}: {snap.name} ({snap.vertex_count} vertices)")
-
-# Open read-only view at snapshot
-old_db = db.at_snapshot(snapshot_id)
-results = old_db.query("MATCH (n) RETURN count(n)")
-
-# Restore to snapshot
-db.restore_snapshot(snapshot_id)
-```
+Snapshot management is available in the Rust API, but is not yet exposed in the Python bindings.
 
 ## Error Handling
 
@@ -252,4 +232,4 @@ except RuntimeError as e:
 
 ## Full API Documentation
 
-See the [auto-generated pdoc documentation](../api/python/index.html) for complete API details.
+See the [auto-generated pdoc documentation](../api/python/index.md) for complete API details.

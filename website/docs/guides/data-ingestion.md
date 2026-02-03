@@ -13,7 +13,7 @@ Uni supports multiple ingestion patterns:
 │    BULK IMPORT      │   STREAMING WRITE   │      PROGRAMMATIC API           │
 ├─────────────────────┼─────────────────────┼─────────────────────────────────┤
 │ • JSONL files       │ • Real-time inserts │ • Rust crate API                │
-│ • CLI import        │ • HTTP API          │ • Writer interface              │
+│ • CLI import        │ • Embedded API      │ • Writer interface              │
 │ • One-time load     │ • Continuous        │ • Fine-grained control          │
 ├─────────────────────┼─────────────────────┼─────────────────────────────────┤
 │ Best for:           │ Best for:           │ Best for:                       │
@@ -183,17 +183,9 @@ MATCH (src:Paper {id: edge.src}), (dst:Paper {id: edge.dst})
 CREATE (src)-[:CITES]->(dst)
 ```
 
-### HTTP API
+### HTTP API (Planned)
 
-```bash
-# Create via HTTP
-curl -X POST http://localhost:8080/query \
-  -H "Content-Type: application/json" \
-  -d '{
-    "query": "CREATE (p:Paper {title: $title, year: $year})",
-    "params": {"title": "New Paper", "year": 2024}
-  }'
-```
+Uni does not expose an HTTP API in the current CLI. Use the CLI or embedded Rust/Python APIs for ingestion.
 
 ---
 

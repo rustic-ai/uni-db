@@ -132,32 +132,9 @@ cargo install uni
 
 ---
 
-### Method 3: Docker
+### Method 3: Docker (Planned)
 
-Run Uni in a containerized environment:
-
-```bash
-# Build the Docker image
-docker build -t uni:latest .
-
-# Run with local storage mounted
-docker run -v $(pwd)/storage:/data uni:latest \
-    query "MATCH (n) RETURN n LIMIT 10" --path /data
-```
-
-**Docker Compose example:**
-
-```yaml
-version: '3.8'
-services:
-  uni:
-    build: .
-    volumes:
-      - ./storage:/data
-    command: ["start", "--path", "/data", "--port", "8080"]
-    environment:
-      - RUST_LOG=info
-```
+Container images and a supported Docker workflow are not published yet. If you need containerization today, build Uni from source inside your own base image and run it via the CLI.
 
 ---
 
@@ -186,11 +163,9 @@ Usage: uni <COMMAND>
 
 Commands:
   import    Import data from JSONL
-  start     Start the server
   query     Execute a Cypher query
   repl      Start the interactive REPL
   snapshot  Manage snapshots
-  start   Start the HTTP server
   help    Print this message or the help of the given subcommand(s)
 
 Options:
