@@ -7,29 +7,13 @@ Uni is an embedded, multi-model graph database with OpenCypher queries,
 and columnar analytics.
 """
 
+from __future__ import annotations
+
 from typing import Any
 
 # =============================================================================
 # Data Classes
 # =============================================================================
-
-class LabelInfo:
-    """Information about a vertex label."""
-
-    name: str
-    """Label name."""
-
-    count: int
-    """Approximate vertex count."""
-
-    properties: list[PropertyInfo]
-    """List of properties defined on this label."""
-
-    indexes: list[IndexInfo]
-    """List of indexes on this label."""
-
-    constraints: list[ConstraintInfo]
-    """List of constraints on this label."""
 
 class PropertyInfo:
     """Information about a property."""
@@ -75,6 +59,24 @@ class ConstraintInfo:
 
     enabled: bool
     """Whether the constraint is enabled."""
+
+class LabelInfo:
+    """Information about a vertex label."""
+
+    name: str
+    """Label name."""
+
+    count: int
+    """Approximate vertex count."""
+
+    properties: list[PropertyInfo]
+    """List of properties defined on this label."""
+
+    indexes: list[IndexInfo]
+    """List of indexes on this label."""
+
+    constraints: list[ConstraintInfo]
+    """List of constraints on this label."""
 
 class BulkStats:
     """Statistics from a bulk loading operation."""
