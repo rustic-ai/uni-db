@@ -13,6 +13,21 @@ nav:
       - Installation: getting-started/installation.md
       - Quick Start: getting-started/quickstart.md
       - CLI Reference: getting-started/cli-reference.md
+  - Features:
+      - Overview: features/index.md
+      - Embedded & Serverless: features/embedded-serverless.md
+      - Multi-Model Data Model: features/data-model-multimodal.md
+      - OpenCypher Querying: features/cypher-querying.md
+      - Columnar Analytics: features/columnar-analytics.md
+      - Vector Search: features/vector-search.md
+      - Full-Text + JSON Search: features/full-text-json-search.md
+      - Schema & Indexing: features/schema-indexing.md
+      - Graph Algorithms: features/graph-algorithms.md
+      - Transactions & Consistency: features/transactions-consistency.md
+      - Snapshots & Time Travel: features/snapshots-time-travel.md
+      - Bulk Ingest: features/bulk-ingest.md
+      - Storage & Cloud Durability: features/storage-cloud.md
+      - APIs & Tooling: features/apis-tooling.md
   - Concepts:
       - Overview: concepts/index.md
       - Architecture: concepts/architecture.md
