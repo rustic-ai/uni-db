@@ -1754,7 +1754,6 @@ fn wider_numeric_type(
     }
 }
 
-
 /// Recursively collect variable kinds (node, edge, path) from a LogicalPlan.
 ///
 /// This information is used by the expression translator to resolve bare variable
@@ -1849,8 +1848,7 @@ fn collect_variable_kinds(plan: &LogicalPlan, kinds: &mut HashMap<String, Variab
         | LogicalPlan::SubqueryCall { input, .. } => {
             collect_variable_kinds(input, kinds);
         }
-        LogicalPlan::Union { left, right, .. }
-        | LogicalPlan::CrossJoin { left, right, .. } => {
+        LogicalPlan::Union { left, right, .. } | LogicalPlan::CrossJoin { left, right, .. } => {
             collect_variable_kinds(left, kinds);
             collect_variable_kinds(right, kinds);
         }

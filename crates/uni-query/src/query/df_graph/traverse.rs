@@ -496,7 +496,8 @@ impl GraphTraverseStream {
                     // VIDs no longer embed label information, so we must look up labels.
                     if let Some(ref label_name) = self.target_label_name {
                         let query_ctx = self.graph_ctx.query_context();
-                        let vertex_labels = l0_visibility::get_vertex_labels(target_vid, &query_ctx);
+                        let vertex_labels =
+                            l0_visibility::get_vertex_labels(target_vid, &query_ctx);
                         // If L0 returns labels, check they contain the target label.
                         // If L0 returns empty, the vertex is in storage (not in L0), so we trust
                         // it was already filtered correctly by the dataset scan.

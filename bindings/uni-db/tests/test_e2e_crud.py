@@ -13,7 +13,6 @@ Tests cover the full spectrum of CRUD operations:
 """
 
 
-
 class TestVertexCRUD:
     """Tests for vertex CRUD operations."""
 

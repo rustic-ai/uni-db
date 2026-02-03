@@ -21,7 +21,6 @@ Tests cover the full range of Cypher query capabilities including:
 """
 
 
-
 class TestParameterizedQueries:
     """Tests for parameterized queries using the sync API."""
 
