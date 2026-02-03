@@ -37,6 +37,9 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y mold protobuf-compiler
 
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
       - name: Cache cargo
         uses: actions/cache@v4
         with:
@@ -55,7 +58,7 @@ jobs:
         run: cargo clippy --all-targets --all-features -- -D warnings
 
       - name: Run tests
-        run: cargo test --all
+        run: cargo nextest run --all
 
   # Cloud storage integration tests with LocalStack
   # Runs after test job to reuse cached dependencies
@@ -170,7 +173,7 @@ jobs:
 
       - name: Run Python tests (uni-db)
         working-directory: bindings/uni-db
-        run: poetry run pytest tests/ -v
+        run: poetry run pytest tests/ -v -n auto
 
       - name: Install Python dependencies (uni-pydantic)
         working-directory: bindings/uni-pydantic
@@ -182,7 +185,7 @@ jobs:
 
       - name: Run Python tests (uni-pydantic)
         working-directory: bindings/uni-pydantic
-        run: poetry run pytest tests/ -v
+        run: poetry run pytest tests/ -v -n auto
 
   # Build documentation and check examples
   # Runs after test job to reuse cached dependencies
