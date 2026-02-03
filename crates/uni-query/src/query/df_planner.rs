@@ -374,6 +374,7 @@ impl HybridPhysicalPlanner {
 
             // === Unsupported (for now) ===
             LogicalPlan::Create { .. }
+            | LogicalPlan::CreateBatch { .. }
             | LogicalPlan::Merge { .. }
             | LogicalPlan::Set { .. }
             | LogicalPlan::Remove { .. }
@@ -1840,6 +1841,7 @@ fn collect_variable_kinds(plan: &LogicalPlan, kinds: &mut HashMap<String, Variab
         | LogicalPlan::Window { input, .. }
         | LogicalPlan::Unwind { input, .. }
         | LogicalPlan::Create { input, .. }
+        | LogicalPlan::CreateBatch { input, .. }
         | LogicalPlan::Merge { input, .. }
         | LogicalPlan::Set { input, .. }
         | LogicalPlan::Remove { input, .. }

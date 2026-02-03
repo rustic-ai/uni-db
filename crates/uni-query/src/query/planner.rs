@@ -77,6 +77,14 @@ pub enum LogicalPlan {
         input: Box<LogicalPlan>,
         pattern: Pattern,
     },
+    /// Batched CREATE operations for multiple consecutive CREATE clauses.
+    ///
+    /// This variant combines multiple CREATE patterns into a single plan node
+    /// to avoid deep recursion when executing many CREATEs sequentially.
+    CreateBatch {
+        input: Box<LogicalPlan>,
+        patterns: Vec<Pattern>,
+    },
     Merge {
         input: Box<LogicalPlan>,
         pattern: Pattern,
@@ -893,10 +901,28 @@ impl QueryPlanner {
                     }
                 }
                 Clause::Create(create_clause) => {
-                    plan = LogicalPlan::Create {
-                        input: Box::new(plan),
-                        pattern: create_clause.pattern.clone(),
-                    };
+                    // Batch consecutive CREATEs to avoid deep recursion
+                    match &mut plan {
+                        LogicalPlan::CreateBatch { patterns, .. } => {
+                            // Append to existing batch
+                            patterns.push(create_clause.pattern.clone());
+                        }
+                        LogicalPlan::Create { input, pattern } => {
+                            // Convert single Create to CreateBatch with both patterns
+                            let first_pattern = pattern.clone();
+                            plan = LogicalPlan::CreateBatch {
+                                input: input.clone(),
+                                patterns: vec![first_pattern, create_clause.pattern.clone()],
+                            };
+                        }
+                        _ => {
+                            // Start new Create (may become batch if more CREATEs follow)
+                            plan = LogicalPlan::Create {
+                                input: Box::new(plan),
+                                pattern: create_clause.pattern.clone(),
+                            };
+                        }
+                    }
                     // Add variables from created nodes and relationships to scope
                     for path in &create_clause.pattern.paths {
                         for element in &path.elements {

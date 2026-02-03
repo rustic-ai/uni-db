@@ -620,7 +620,7 @@ impl Executor {
             LogicalPlan::ExtIdLookup { .. } => "read_extid_lookup",
             LogicalPlan::Traverse { .. } => "read_traverse",
             LogicalPlan::VectorKnn { .. } => "read_vector",
-            LogicalPlan::Create { .. } => "write_create",
+            LogicalPlan::Create { .. } | LogicalPlan::CreateBatch { .. } => "write_create",
             LogicalPlan::Merge { .. } => "write_merge",
             LogicalPlan::Delete { .. } => "write_delete",
             LogicalPlan::Set { .. } => "write_set",
@@ -698,6 +698,7 @@ impl Executor {
     fn contains_write_operations(plan: &LogicalPlan) -> bool {
         match plan {
             LogicalPlan::Create { .. }
+            | LogicalPlan::CreateBatch { .. }
             | LogicalPlan::Merge { .. }
             | LogicalPlan::Delete { .. }
             | LogicalPlan::Set { .. }
@@ -2315,6 +2316,34 @@ impl Executor {
                     }
                     Ok(rows)
                 }
+                LogicalPlan::CreateBatch { input, patterns } => {
+                    // Execute input plan once (no recursion per pattern)
+                    let mut rows = self
+                        .execute_subplan(*input, prop_manager, params, ctx)
+                        .await?;
+
+                    if let Some(writer_lock) = &self.writer {
+                        let mut writer = writer_lock.write().await;
+                        // For each row, execute all patterns sequentially.
+                        // Later patterns can reference variables from earlier patterns.
+                        for row in &mut rows {
+                            for pattern in &patterns {
+                                self.execute_create_pattern(
+                                    pattern,
+                                    row,
+                                    &mut writer,
+                                    prop_manager,
+                                    params,
+                                    ctx,
+                                )
+                                .await?;
+                            }
+                        }
+                    } else {
+                        return Err(anyhow!("Write operation requires a Writer"));
+                    }
+                    Ok(rows)
+                }
                 LogicalPlan::Delete {
                     input,
                     items,
@@ -2681,6 +2710,14 @@ impl Executor {
             LogicalPlan::Create { pattern, .. } => {
                 self.execute_create_pattern(&pattern, scope, writer, prop_manager, params, ctx)
                     .await?;
+            }
+            LogicalPlan::CreateBatch { patterns, .. } => {
+                // Execute all patterns sequentially; later patterns can reference
+                // variables from earlier ones.
+                for pattern in &patterns {
+                    self.execute_create_pattern(pattern, scope, writer, prop_manager, params, ctx)
+                        .await?;
+                }
             }
             LogicalPlan::Merge {
                 pattern,
