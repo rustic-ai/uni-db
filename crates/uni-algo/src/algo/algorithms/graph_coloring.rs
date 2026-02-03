@@ -76,7 +76,7 @@ impl Algorithm for GraphColoring {
 
             for i in 0..n {
                 if colors[i].is_none() {
-                    let sat = saturation[i] as i32;
+                    let sat = saturation[i];
 
                     let deg = degree[i] as i32;
 
