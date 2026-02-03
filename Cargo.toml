@@ -11,6 +11,18 @@ members = [
     "crates/uni-cypher",
     "crates/uni-tck",
 ]
+# Exclude uni-tck from default builds - run on-demand only
+default-members = [
+    "crates/uni-common",
+    "crates/uni-store",
+    "crates/uni-algo",
+    "crates/uni-query",
+    "crates/uni-cli",
+    "crates/uni",
+    "crates/uni-crdt",
+    "bindings/uni-db",
+    "crates/uni-cypher",
+]
 resolver = "2"
 
 [workspace.package]
