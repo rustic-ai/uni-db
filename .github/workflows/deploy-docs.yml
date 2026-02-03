@@ -85,7 +85,7 @@ jobs:
       - name: Build Rust documentation
         run: |
           cargo doc --no-deps --document-private-items \
-            -p uni \
+            -p uni-db \
             -p uni-common \
             -p uni-query \
             -p uni-store \
