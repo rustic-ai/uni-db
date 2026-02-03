@@ -20,18 +20,22 @@ fn test_date_function() {
 #[test]
 fn test_time_function() {
     let res = eval_scalar_function("TIME", &[json!("10:30:00")]).unwrap();
-    assert_eq!(res.as_str().unwrap(), "10:30:00.000000");
+    // Time with zero seconds is formatted as HH:MM (seconds omitted per TCK spec)
+    assert_eq!(res.as_str().unwrap(), "10:30");
 
     let res = eval_scalar_function("TIME", &[json!("2023-01-15 10:30:00")]).unwrap();
-    assert_eq!(res.as_str().unwrap(), "10:30:00.000000");
+    assert_eq!(res.as_str().unwrap(), "10:30");
+
+    // Time with non-zero seconds is formatted with seconds
+    let res = eval_scalar_function("TIME", &[json!("10:30:45")]).unwrap();
+    assert_eq!(res.as_str().unwrap(), "10:30:45");
 }
 
 #[test]
 fn test_datetime_function() {
     let res = eval_scalar_function("DATETIME", &[json!("2023-01-15 10:30:00")]).unwrap();
-    // Output depends on how parser handles "space" separator - parse_datetime_utc uses DateTime::parse_from_str
-    // Implementation uses .to_rfc3339() which produces "2023-01-15T10:30:00+00:00"
-    assert_eq!(res.as_str().unwrap(), "2023-01-15T10:30:00+00:00");
+    // Output is RFC3339 format with Z suffix for UTC
+    assert_eq!(res.as_str().unwrap(), "2023-01-15T10:30:00Z");
 }
 
 #[test]
@@ -91,8 +95,10 @@ fn test_localdatetime_function() {
     assert!(s.contains("T"), "Expected RFC3339 format with T separator");
     assert!(s.len() >= 19, "Expected at least YYYY-MM-DDTHH:MM:SS");
 
-    // Should fail with arguments
-    assert!(eval_scalar_function("LOCALDATETIME", &[json!("arg")]).is_err());
+    // Should work with string argument too
+    let res = eval_scalar_function("LOCALDATETIME", &[json!("2023-01-15T10:30:00")]).unwrap();
+    // Format omits seconds when they are zero
+    assert_eq!(res.as_str().unwrap(), "2023-01-15T10:30");
 }
 
 #[test]
@@ -104,6 +110,7 @@ fn test_localtime_function() {
     assert!(s.contains(":"), "Expected time format with colons");
     assert!(s.len() >= 8, "Expected at least HH:MM:SS");
 
-    // Should fail with arguments
-    assert!(eval_scalar_function("LOCALTIME", &[json!("arg")]).is_err());
+    // Should work with string argument too (zero seconds omitted per TCK spec)
+    let res = eval_scalar_function("LOCALTIME", &[json!("10:30:00")]).unwrap();
+    assert_eq!(res.as_str().unwrap(), "10:30");
 }

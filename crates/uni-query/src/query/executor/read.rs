@@ -867,6 +867,23 @@ impl Executor {
                     if base_val.is_null() {
                         return Ok(Value::Null);
                     }
+
+                    // Check if base_val is a temporal string and prop_name is a temporal accessor
+                    if let Value::String(s) = &base_val {
+                        use crate::query::datetime::{
+                            eval_duration_accessor, eval_temporal_accessor, is_duration_accessor,
+                            is_duration_string, is_temporal_accessor, is_temporal_string,
+                        };
+
+                        if is_temporal_string(s) && is_temporal_accessor(prop_name) {
+                            return eval_temporal_accessor(s, prop_name);
+                        }
+
+                        if is_duration_string(s) && is_duration_accessor(prop_name) {
+                            return eval_duration_accessor(s, prop_name);
+                        }
+                    }
+
                     Err(anyhow!(
                         "Cannot access property '{}' on {:?}",
                         prop_name,

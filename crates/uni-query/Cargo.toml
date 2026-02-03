@@ -31,6 +31,7 @@ lance-datafusion = "1.0.1"
 lancedb = { workspace = true }
 regex = { workspace = true }
 chrono = { workspace = true }
+chrono-tz = { workspace = true }
 indexmap = "2.0"
 parking_lot = { workspace = true }
 metrics = { workspace = true }
