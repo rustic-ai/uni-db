@@ -1,0 +1,63 @@
+# OS and editor noise
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*.tmp
+.idea/
+.vscode/
+
+# Local secrets
+.env
+.env.*
+!.env.example
+
+# Rust / Cargo
+/target/
+**/*.rs.bk
+Cargo.lock
+
+# Storage and Data
+/storage/
+demos/demo01/data/
+demos/demo01/storage/
+demos/demo01/schema.json
+**/tmp/
+
+# ML/Embedding caches
+.fastembed_cache/
+
+# Coverage reports
+tarpaulin-report.html
+.coverage/
+.playwright-mcp/
+
+# Website build output
+website/site/
+
+# Performance profiling data
+perf.data
+perf.data.old
+
+
+# Sonar
+.sonar/
+.scannerwork/
+coverage/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.mypy_cache/
+.ruff_cache/
+bindings/*/test_db_*/
+test_db_*/
+*.proptest-regressions
+
+CLAUDE.md
+GEMINI.md
+
+.claude/
+.serena/

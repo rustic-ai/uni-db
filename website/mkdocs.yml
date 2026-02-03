@@ -1,0 +1,133 @@
+site_name: Uni Documentation
+site_description: The Embedded Multi-Model Graph Database - Graph, Vector, Document, and Columnar workloads unified
+site_url: https://rustic-ai.github.io/uni
+repo_url: https://github.com/rustic-ai/uni
+repo_name: rustic-ai/uni
+
+copyright: Copyright &copy; 2024-2026 Dragonscale Industries Inc. - Part of The Rustic Initiative
+
+nav:
+  - Home: index.md
+  - Getting Started:
+      - Overview: getting-started/index.md
+      - Installation: getting-started/installation.md
+      - Quick Start: getting-started/quickstart.md
+      - Programming Guide: getting-started/programming-guide.md
+      - CLI Reference: getting-started/cli-reference.md
+  - Concepts:
+      - Overview: concepts/index.md
+      - Architecture: concepts/architecture.md
+      - Data Model: concepts/data-model.md
+      - Identity Model: concepts/identity.md
+      - CRDT Types: concepts/crdt-types.md
+      - Indexing: concepts/indexing.md
+      - Concurrency: concepts/concurrency.md
+  - Guides:
+      - Overview: guides/index.md
+      - Cypher Querying: guides/cypher-querying.md
+      - Vector Search: guides/vector-search.md
+      - Data Ingestion: guides/data-ingestion.md
+      - Schema Design: guides/schema-design.md
+      - Pydantic OGM: guides/pydantic-ogm.md
+      - Performance Tuning: guides/performance-tuning.md
+  - Use Cases:
+      - Overview: use-cases/index.md
+      - RAG & Knowledge Graphs: use-cases/rag-knowledge-graph.md
+      - Fraud Detection: use-cases/fraud-detection.md
+      - Recommendation Engines: use-cases/recommendation-engine.md
+      - Supply Chain & BOM: use-cases/supply-chain.md
+  - Examples:
+      - Overview: examples/index.md
+      - Python:
+          - Supply Chain: examples/python/supply_chain.ipynb
+          - Recommendation: examples/python/recommendation.ipynb
+          - RAG: examples/python/rag.ipynb
+          - Fraud Detection: examples/python/fraud_detection.ipynb
+          - Sales Analytics: examples/python/sales_analytics.ipynb
+      - Pydantic OGM:
+          - Supply Chain: examples/pydantic/supply_chain.ipynb
+          - Recommendation: examples/pydantic/recommendation.ipynb
+          - RAG: examples/pydantic/rag.ipynb
+          - Fraud Detection: examples/pydantic/fraud_detection.ipynb
+          - Sales Analytics: examples/pydantic/sales_analytics.ipynb
+      - Rust:
+          - Supply Chain: examples/rust/supply_chain.ipynb
+          - Recommendation: examples/rust/recommendation.ipynb
+          - RAG: examples/rust/rag.ipynb
+          - Fraud Detection: examples/rust/fraud_detection.ipynb
+          - Sales Analytics: examples/rust/sales_analytics.ipynb
+  - Internals:
+      - Overview: internals/index.md
+      - Vectorized Execution: internals/vectorized-execution.md
+      - Storage Engine: internals/storage-engine.md
+      - Query Planning: internals/query-planning.md
+      - Mutation Spec: internals/mutation_spec.md
+      - API Gap Plan: internals/api-gap-plan.md
+      - Benchmarks: internals/benchmarks.md
+  - Reference:
+      - Overview: reference/index.md
+      - Rust API: reference/rust-api.md
+      - Python API: reference/python-api.md
+      - Pydantic OGM: reference/pydantic-ogm.md
+      - REST API: reference/rest-api.md
+      - Configuration: reference/configuration.md
+      - Troubleshooting: reference/troubleshooting.md
+      - Limitations: reference/limitations.md
+      - Glossary: reference/glossary.md
+  - API Docs:
+      - Rust API (rustdoc): api/rust/uni/index.html
+      - Python API (pdoc): api/python/index.html
+
+theme:
+  name: material
+  icon:
+    repo: fontawesome/brands/github
+  # favicon: assets/images/favicon.png
+  # logo: assets/images/logo.svg
+  primary: custom
+  features:
+    - content.tabs.link
+
+extra_css:
+  - assets/stylesheets/theme.css
+
+extra_javascript:
+  - https://unpkg.com/mermaid@10/dist/mermaid.min.js
+  - assets/javascripts/mermaid-init.js
+
+plugins:
+  - search
+  - mkdocs-jupyter:
+      include_source: true
+      # Execute notebooks during build (requires uni package installed)
+      # Alternative: run website/execute_notebooks.py to pre-execute
+      execute: true
+      execute_ignore:
+        - "examples/rust/*.ipynb"  # Rust notebooks require evcxr kernel
+      allow_errors: false
+      theme: light
+      include_requirejs: true
+      # Kernel for Python notebooks
+      kernel_name: python3
+
+markdown_extensions:
+  - admonition
+  - toc:
+      permalink: true
+  - attr_list
+  - md_in_html
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_div_format
+  - pymdownx.tabbed:
+      alternate_style: true
+      slugify: !!python/object/apply:pymdownx.slugs.slugify
+        kwds:
+          case: lower
+  - pymdownx.tasklist:
+      custom_checkbox: true

@@ -1,0 +1,62 @@
+[package]
+name = "uni-db"
+description = "Embedded graph database with OpenCypher queries, vector search, and columnar storage"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
+
+[dependencies]
+uni-common = { workspace = true }
+uni-store = { workspace = true }
+uni-algo = { workspace = true }
+uni-query = { workspace = true }
+uni-crdt = { workspace = true }
+tokio = { workspace = true }
+futures = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+log = { workspace = true }
+metrics = { workspace = true }
+arrow-array = { workspace = true }
+arrow-schema = { workspace = true }
+uuid = { workspace = true }
+object_store = { workspace = true }
+url = { workspace = true }
+chrono = { workspace = true }
+
+[dev-dependencies]
+criterion = "0.5"
+uni-cypher = { workspace = true }
+tempfile = { workspace = true }
+rand = { workspace = true }
+arrow = { workspace = true }
+lance = { workspace = true }
+lancedb = { workspace = true }
+parquet = { workspace = true }
+csv = { workspace = true }
+env_logger = { workspace = true }
+
+[[bench]]
+name = "algo_benchmarks"
+harness = false
+
+[[bench]]
+name = "comprehensive"
+harness = false
+
+[[bench]]
+name = "micro_benchmarks"
+harness = false
+
+[features]
+snapshot-internals = []
+storage-internals = []

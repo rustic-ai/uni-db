@@ -1,0 +1,30 @@
+[package]
+name = "uni-algo"
+description = "Graph algorithms for Uni - PageRank, Louvain, shortest paths, and more"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+uni-common = { workspace = true }
+uni-store = { workspace = true }
+tokio = { workspace = true }
+futures = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+log = { workspace = true }
+rayon = { workspace = true }
+smallvec = { workspace = true }
+fxhash = { workspace = true }
+parking_lot = { workspace = true }
+rand = { workspace = true }
+ordered-float = { workspace = true }
+arrow-array = { workspace = true }
+arrow-schema = { workspace = true }
+lancedb = { workspace = true }
+async-stream = "0.3"

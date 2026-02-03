@@ -1,0 +1,32 @@
+[env]
+# Stack Overflow Fix for Debug Builds
+#
+# Problem: Algorithm integration tests (algo_edge_cases, algo_integration) fail with
+# "thread has overflowed its stack" in debug builds. The default stack size (typically
+# 2MB on Linux) is insufficient for the deeply nested async state machines generated
+# by the query executor and algorithm procedures.
+#
+# Root Cause: Rust async functions compile to state machines where all local variables
+# across await points are stored in the future's state. In debug builds, these aren't
+# optimized, resulting in very large stack frames. The algo execution path involves:
+#   Executor::execute -> execute_procedure -> AlgoProcedure::execute ->
+#   ProjectionBuilder::build -> multiple async Lance/Arrow operations
+#
+# This chain creates futures with large captured state that exceed the default stack.
+#
+# Solution: Increase minimum stack size to 8MB for test threads.
+#
+# Note: This only affects debug builds. Release builds optimize the state machines
+# and don't exhibit this issue. A more permanent fix would involve boxing large
+# futures in the hot path, but that adds runtime overhead.
+RUST_MIN_STACK = "8388608"
+
+[build]
+rustflags = ["-C", "link-arg=-fuse-ld=mold"]
+
+[profile.dev]
+debug = 1  # Line tables only - saves ~50% debug info size
+
+[profile.dev.package."*"]
+opt-level = 2  # Optimize dependencies even in dev builds
+

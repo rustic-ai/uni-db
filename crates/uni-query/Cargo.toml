@@ -1,0 +1,50 @@
+[package]
+name = "uni-query"
+description = "OpenCypher query parser, planner, and vectorized executor for Uni"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+uni-common = { workspace = true }
+uni-store = { workspace = true }
+uni-algo = { workspace = true }
+uni-crdt = { workspace = true }
+uni-cypher = { workspace = true }
+tokio = { workspace = true }
+object_store = { workspace = true }
+bytes = { workspace = true }
+futures = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+log = { workspace = true }
+arrow = { workspace = true }
+arrow-array = { workspace = true }
+arrow-schema = { workspace = true }
+lance = { workspace = true }
+lance-datafusion = "1.0.1"
+lancedb = { workspace = true }
+regex = { workspace = true }
+chrono = { workspace = true }
+indexmap = "2.0"
+parking_lot = { workspace = true }
+metrics = { workspace = true }
+csv = { workspace = true }
+reqwest = { workspace = true }
+parquet = { workspace = true }
+rand = { workspace = true }
+base64 = "0.21"
+jsonb = "0.5.3"
+datafusion = { workspace = true }
+
+[features]
+default = []
+
+[dev-dependencies]
+tempfile = { workspace = true }
+proptest = { workspace = true }

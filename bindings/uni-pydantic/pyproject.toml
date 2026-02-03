@@ -1,0 +1,81 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2024-2026 Dragonscale Team
+
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"
+
+[project]
+name = "uni-pydantic"
+version = "0.1.0"
+description = "Pydantic-based OGM (Object-Graph Mapping) for Uni Graph Database"
+authors = [
+    { name = "Dragonscale Industries Inc.", email = "dev@dragonscale.ai" }
+]
+license = { text = "Apache-2.0" }
+readme = "README.md"
+requires-python = ">=3.10"
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Database",
+    "Typing :: Typed",
+]
+dependencies = [
+    "pydantic>=2.0.0,<3.0.0",
+    "uni-db>=0.1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "ruff>=0.1.0",
+    "mypy>=1.0.0",
+    "pytest>=7.0.0",
+]
+
+[project.urls]
+Homepage = "https://www.rustic.ai"
+Documentation = "https://rustic-ai.github.io/uni"
+Repository = "https://github.com/rustic-ai/uni"
+
+[tool.poetry]
+name = "uni-pydantic"
+version = "0.1.0"
+description = "Pydantic-based OGM (Object-Graph Mapping) for Uni Graph Database"
+authors = ["Dragonscale Industries Inc. <dev@dragonscale.ai>"]
+license = "Apache-2.0"
+readme = "README.md"
+packages = [{ include = "uni_pydantic", from = "src" }]
+
+[tool.poetry.dependencies]
+python = ">=3.10,<4.0"
+pydantic = ">=2.0.0,<3.0.0"
+uni-db = { path = "../uni-db", develop = true }
+
+[tool.poetry-monorepo.deps]
+enabled = true
+
+[tool.poetry.group.dev.dependencies]
+ruff = ">=0.1.0"
+mypy = ">=1.0.0"
+pytest = ">=7.0.0"
+pytest-asyncio = "^1.3.0"
+
+[tool.ruff]
+line-length = 88
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W", "UP"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+ignore_missing_imports = true

@@ -1,0 +1,92 @@
+[build-system]
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "uni-db"
+version = "0.1.0"
+description = "Python bindings for Uni Graph Database"
+authors = [
+    { name = "Dragonscale Industries Inc.", email = "dev@dragonscale.ai" }
+]
+license = { text = "Apache-2.0" }
+requires-python = ">=3.10"
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Programming Language :: Python :: Implementation :: PyPy",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Database",
+    "Topic :: Database :: Database Engines/Servers",
+]
+
+[project.urls]
+Homepage = "https://www.rustic.ai"
+Documentation = "https://rustic-ai.github.io/uni"
+Repository = "https://github.com/rustic-ai/uni"
+Issues = "https://github.com/rustic-ai/uni/issues"
+
+[project.optional-dependencies]
+dev = [
+    "ruff>=0.1.0",
+    "black>=23.0.0",
+    "mypy>=1.0.0",
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.23.0",
+]
+docs = [
+    "pdoc>=14.0.0",
+]
+
+[tool.poetry]
+name = "uni-db"
+version = "0.1.0"
+description = "Python bindings for Uni Graph Database"
+authors = ["Dragonscale Industries Inc. <dev@dragonscale.ai>"]
+license = "Apache-2.0"
+readme = "README.md"
+package-mode = false
+
+[tool.poetry.dependencies]
+python = ">=3.10"
+maturin = ">=1.0,<2.0"
+
+[tool.poetry.group.dev.dependencies]
+ruff = ">=0.1.0"
+black = ">=23.0.0"
+mypy = ">=1.0.0"
+pytest = ">=7.0.0"
+pytest-asyncio = ">=0.25.0"
+patchelf = ">=0.17"
+pytest-xdist = "^3.8.0"
+
+[tool.poetry.group.docs.dependencies]
+pdoc = ">=14.0.0"
+
+[tool.black]
+line-length = 88
+target-version = ['py310']
+include = '\.pyi?$'
+
+[tool.ruff]
+line-length = 88
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W", "UP"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+
+[tool.maturin]
+module-name = "uni_db._uni_db"
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+ignore_missing_imports = true

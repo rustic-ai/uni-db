@@ -1,0 +1,105 @@
+# Release Workflow
+#
+# Orchestrates the release process: validates versions, creates tags,
+# and triggers publishing workflows for both Rust and Python.
+
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release (e.g., 0.1.0)'
+        required: true
+        type: string
+      create_tag:
+        description: 'Create git tag'
+        type: boolean
+        default: true
+
+jobs:
+  validate:
+    name: Validate versions
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check version consistency
+        id: check
+        run: |
+          VERSION="${{ inputs.version }}"
+
+          # Get version from workspace Cargo.toml
+          CARGO_VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+
+          # Get version from uni-db pyproject.toml
+          PYPI_VERSION=$(grep '^version' bindings/uni-db/pyproject.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+
+          # Get version from uni-pydantic pyproject.toml
+          PYDANTIC_VERSION=$(grep '^version' bindings/uni-pydantic/pyproject.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+
+          echo "Input version: $VERSION"
+          echo "Cargo.toml version: $CARGO_VERSION"
+          echo "uni-db pyproject.toml version: $PYPI_VERSION"
+          echo "uni-pydantic pyproject.toml version: $PYDANTIC_VERSION"
+
+          # Validate versions match
+          if [ "$VERSION" != "$CARGO_VERSION" ]; then
+            echo "Error: Input version ($VERSION) does not match Cargo.toml ($CARGO_VERSION)"
+            exit 1
+          fi
+
+          if [ "$VERSION" != "$PYPI_VERSION" ]; then
+            echo "Error: Input version ($VERSION) does not match uni-db pyproject.toml ($PYPI_VERSION)"
+            exit 1
+          fi
+
+          if [ "$VERSION" != "$PYDANTIC_VERSION" ]; then
+            echo "Error: Input version ($VERSION) does not match uni-pydantic pyproject.toml ($PYDANTIC_VERSION)"
+            exit 1
+          fi
+
+          echo "All versions match: $VERSION"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+  create-tag:
+    name: Create git tag
+    runs-on: ubuntu-latest
+    needs: validate
+    if: inputs.create_tag == true
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create and push tag
+        run: |
+          VERSION="v${{ needs.validate.outputs.version }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "$VERSION" -m "Release $VERSION"
+          git push origin "$VERSION"
+
+  create-release:
+    name: Create GitHub Release
+    runs-on: ubuntu-latest
+    needs: [validate, create-tag]
+    if: always() && needs.validate.result == 'success' && (needs.create-tag.result == 'success' || needs.create-tag.result == 'skipped')
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: v${{ needs.validate.outputs.version }}
+          name: Release v${{ needs.validate.outputs.version }}
+          generate_release_notes: true
+          draft: false
+          prerelease: ${{ contains(needs.validate.outputs.version, '-') }}

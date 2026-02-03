@@ -1,0 +1,75 @@
+# Docker Compose configuration for cloud storage testing
+#
+# Usage:
+#   docker-compose -f tests/docker-compose.cloud.yml up -d
+#   AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test cargo test -- --ignored
+#   docker-compose -f tests/docker-compose.cloud.yml down
+
+version: '3.8'
+
+services:
+  localstack:
+    image: localstack/localstack:latest
+    container_name: uni-localstack
+    ports:
+      - "4566:4566"    # LocalStack Gateway
+      - "4510-4559:4510-4559"  # External services
+    environment:
+      # Services to enable
+      - SERVICES=s3
+      # Debug logging
+      - DEBUG=1
+      # Persistence (optional, for debugging)
+      - PERSISTENCE=0
+      # Test credentials
+      - AWS_ACCESS_KEY_ID=test
+      - AWS_SECRET_ACCESS_KEY=test
+      - AWS_DEFAULT_REGION=us-east-1
+    volumes:
+      - "${LOCALSTACK_VOLUME_DIR:-./volume}:/var/lib/localstack"
+      - "/var/run/docker.sock:/var/run/docker.sock"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4566/_localstack/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # Optional: MinIO for S3-compatible testing
+  minio:
+    image: minio/minio:latest
+    container_name: uni-minio
+    ports:
+      - "9000:9000"    # S3 API
+      - "9001:9001"    # Console
+    environment:
+      - MINIO_ROOT_USER=minioadmin
+      - MINIO_ROOT_PASSWORD=minioadmin
+    command: server /data --console-address ":9001"
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    profiles:
+      - minio
+
+  # Optional: Azurite for Azure Blob Storage testing
+  azurite:
+    image: mcr.microsoft.com/azure-storage/azurite:latest
+    container_name: uni-azurite
+    ports:
+      - "10000:10000"  # Blob service
+      - "10001:10001"  # Queue service
+      - "10002:10002"  # Table service
+    command: azurite --blobHost 0.0.0.0 --queueHost 0.0.0.0 --tableHost 0.0.0.0 --loose
+    volumes:
+      - azurite-data:/data
+    profiles:
+      - azure
+
+volumes:
+  minio-data:
+  azurite-data:

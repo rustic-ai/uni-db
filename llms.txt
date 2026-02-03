@@ -1,0 +1,1346 @@
+# Uni - Embedded Graph Database
+
+> Uni is an embedded, object-store-backed graph database with OpenCypher queries, columnar analytics, and vector search. Use this reference when building Rust applications with Uni.
+
+## Quick Start
+
+```rust
+use uni_db::Uni;
+
+#[tokio::main]
+async fn main() -> uni_db::Result<()> {
+    // Create in-memory database
+    let db = Uni::in_memory().build().await?;
+
+    // Define schema
+    db.schema()
+        .label("Person")
+        .property("name", DataType::String)
+        .property("age", DataType::Int32)
+        .done()
+        .edge_type("KNOWS", &["Person"], &["Person"])
+        .apply()
+        .await?;
+
+    // Create data
+    db.execute("CREATE (:Person {name: 'Alice', age: 30})").await?;
+    db.execute("CREATE (:Person {name: 'Bob', age: 25})").await?;
+    db.execute("MATCH (a:Person {name: 'Alice'}), (b:Person {name: 'Bob'}) CREATE (a)-[:KNOWS]->(b)").await?;
+
+    // Query data
+    let results = db.query("MATCH (p:Person) RETURN p.name, p.age ORDER BY p.age").await?;
+    for row in results.rows() {
+        println!("{}: {}", row.get::<String>("p.name")?, row.get::<i32>("p.age")?);
+    }
+
+    Ok(())
+}
+```
+
+## Dependencies
+
+```toml
+[dependencies]
+uni-db = "0.1"
+tokio = { version = "1", features = ["full"] }
+```
+
+---
+
+## Database Initialization
+
+### Opening a Database
+
+```rust
+// In-memory (ephemeral)
+let db = Uni::in_memory().build().await?;
+
+// Temporary directory (auto-cleaned)
+let db = Uni::temporary().build().await?;
+
+// File-based persistence
+let db = Uni::open("./my_graph").build().await?;
+
+// Open existing only (fail if not exists)
+let db = Uni::open_existing("./my_graph").build().await?;
+
+// Create new only (fail if exists)
+let db = Uni::create("./my_graph").build().await?;
+
+// Object storage (S3/GCS/Azure)
+let db = Uni::open("s3://bucket/path").build().await?;
+let db = Uni::open("gs://bucket/path").build().await?;
+let db = Uni::open("az://account/container").build().await?;
+
+// Hybrid: local WAL + remote storage
+let db = Uni::open("s3://bucket/path")
+    .hybrid("./local_cache", "s3://bucket/path")
+    .build().await?;
+
+// With configuration
+let db = Uni::open("./my_graph")
+    .cache_size(1024 * 1024 * 1024)  // 1GB adjacency cache
+    .parallelism(8)                   // Worker threads
+    .schema_file("schema.json")       // Load schema from file
+    .build().await?;
+
+// Time-travel: open at specific snapshot
+let db = Uni::open("./my_graph")
+    .at_snapshot("snapshot_id")
+    .build().await?;
+```
+
+### Cloud Storage Configuration
+
+```rust
+use uni_db::CloudStorageConfig;
+
+// S3 from environment variables (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, etc.)
+let config = CloudStorageConfig::s3_from_env("my-bucket");
+
+// S3 with explicit configuration (supports S3-compatible services like MinIO, LocalStack)
+let config = CloudStorageConfig::S3 {
+    bucket: "my-bucket".to_string(),
+    region: Some("us-east-1".to_string()),
+    endpoint: Some("http://localhost:4566".to_string()),  // For LocalStack
+    access_key_id: Some("key".to_string()),
+    secret_access_key: Some("secret".to_string()),
+    session_token: None,
+    virtual_hosted_style: false,
+};
+
+// GCS from environment (GOOGLE_APPLICATION_CREDENTIALS)
+let config = CloudStorageConfig::gcs_from_env("my-bucket");
+
+// GCS with service account
+let config = CloudStorageConfig::Gcs {
+    bucket: "my-bucket".to_string(),
+    service_account_path: Some("/path/to/service-account.json".to_string()),
+    service_account_key: None,
+};
+
+// Azure from environment (AZURE_STORAGE_ACCOUNT, AZURE_STORAGE_ACCESS_KEY)
+let config = CloudStorageConfig::azure_from_env("my-container");
+
+// Azure with explicit configuration
+let config = CloudStorageConfig::Azure {
+    container: "my-container".to_string(),
+    account: "mystorageaccount".to_string(),
+    access_key: Some("key".to_string()),
+    sas_token: None,
+};
+
+let db = Uni::open(&config.to_url())
+    .cloud_config(config)
+    .build().await?;
+```
+
+### Synchronous API
+
+```rust
+use uni_db::UniSync;
+
+let db = UniSync::in_memory()?;
+db.execute("CREATE (:Person {name: 'Alice'})")?;
+let results = db.query("MATCH (n:Person) RETURN n.name")?;
+```
+
+---
+
+## Schema Definition
+
+### Data Types
+
+```rust
+use uni_db::DataType;
+
+DataType::String
+DataType::Int32
+DataType::Int64
+DataType::Float32
+DataType::Float64
+DataType::Bool
+DataType::Timestamp    // Unix timestamp
+DataType::Date         // Calendar date
+DataType::Time         // Time of day
+DataType::DateTime     // Date + time
+DataType::Duration     // Time duration
+DataType::Json         // JSON object
+DataType::Vector { dimensions: 768 }  // Vector embedding
+DataType::List(Box::new(DataType::String))  // List of strings
+DataType::Map(Box::new(DataType::String), Box::new(DataType::Int64))  // Map
+```
+
+### Defining Labels and Edge Types
+
+```rust
+db.schema()
+    // Vertex label
+    .label("Person")
+    .property("name", DataType::String)           // Required
+    .property_nullable("email", DataType::String) // Optional
+    .property("age", DataType::Int32)
+    .done()
+
+    // Document label (flexible JSON properties)
+    .label("Article")
+    .property("title", DataType::String)
+    .document()  // Allows arbitrary JSON properties
+    .done()
+
+    // Label with vector embedding
+    .label("Document")
+    .property("content", DataType::String)
+    .vector("embedding", 768)  // 768-dimensional vector
+    .done()
+
+    // Edge type with properties
+    .edge_type("KNOWS", &["Person"], &["Person"])
+    .property("since", DataType::Int32)
+    .property("weight", DataType::Float64)
+    .done()
+
+    // Edge type between multiple labels
+    .edge_type("AUTHORED", &["Person"], &["Article", "Document"])
+    .done()
+
+    .apply()
+    .await?;
+```
+
+### Schema via Cypher DDL
+
+```cypher
+-- Create label with properties
+CALL uni.schema.createLabel('Person', {
+  properties: {
+    name: 'String',
+    age: 'Int64',
+    email: 'String'
+  }
+})
+YIELD success
+RETURN success
+
+-- Create edge type
+CALL uni.schema.createEdgeType('KNOWS', ['Person'], ['Person'], {
+  properties: {
+    since: 'Int64',
+    weight: 'Float64'
+  }
+})
+YIELD success
+RETURN success
+
+-- Create indexes
+CALL uni.schema.createIndex('Person', 'email', {type: 'scalar'})
+  YIELD success RETURN success
+
+CALL uni.schema.createIndex('Document', 'embedding', {
+  type: 'vector', dimension: 384, metric: 'cosine'
+})
+YIELD success RETURN success
+
+CALL uni.schema.createIndex('Article', 'content', {type: 'fulltext'})
+  YIELD success RETURN success
+
+-- Create constraints
+CALL uni.schema.createConstraint('Person', 'unique', ['email'])
+  YIELD success RETURN success
+
+-- Drop operations
+CALL uni.schema.dropIndex('person_email_idx') YIELD success RETURN success
+CALL uni.schema.dropLabel('TempNode') YIELD success RETURN success
+CALL uni.schema.dropEdgeType('TEMP_REL') YIELD success RETURN success
+CALL uni.schema.dropConstraint('person_email_unique') YIELD success RETURN success
+```
+
+### Index Types
+
+```rust
+use uni_db::{IndexType, VectorIndexCfg, VectorAlgo, VectorMetric, ScalarType};
+
+// Vector indexes
+IndexType::Vector(VectorIndexCfg {
+    algorithm: VectorAlgo::Hnsw { m: 16, ef_construction: 200 },
+    metric: VectorMetric::Cosine,
+})
+
+IndexType::Vector(VectorIndexCfg {
+    algorithm: VectorAlgo::IvfPq { partitions: 100, sub_vectors: 8 },
+    metric: VectorMetric::L2,
+})
+
+IndexType::Vector(VectorIndexCfg {
+    algorithm: VectorAlgo::Flat,
+    metric: VectorMetric::Dot,
+})
+
+// Scalar indexes
+IndexType::Scalar(ScalarType::BTree)   // Range queries, STARTS WITH optimization
+IndexType::Scalar(ScalarType::Hash)    // Equality lookups
+IndexType::Scalar(ScalarType::Bitmap)  // Low-cardinality columns
+
+// Full-text search
+IndexType::FullText
+
+// Adding indexes to schema
+db.schema()
+    .label("Product")
+    .property("name", DataType::String)
+    .property("price", DataType::Float64)
+    .vector("embedding", 512)
+    .index("name", IndexType::FullText)
+    .index("price", IndexType::Scalar(ScalarType::BTree))
+    .index("embedding", IndexType::Vector(VectorIndexCfg {
+        algorithm: VectorAlgo::Hnsw { m: 16, ef_construction: 200 },
+        metric: VectorMetric::Cosine,
+    }))
+    .done()
+    .apply()
+    .await?;
+```
+
+---
+
+## Cypher Queries
+
+### Read Queries
+
+```rust
+// Simple query
+let results = db.query("MATCH (n:Person) RETURN n").await?;
+
+// With WHERE clause
+let results = db.query("MATCH (n:Person) WHERE n.age > 25 RETURN n.name").await?;
+
+// Pattern matching with relationships
+let results = db.query("
+    MATCH (a:Person)-[r:KNOWS]->(b:Person)
+    RETURN a.name, b.name, r.since
+").await?;
+
+// OPTIONAL MATCH (returns null for non-matching patterns)
+let results = db.query("
+    MATCH (p:Person)
+    OPTIONAL MATCH (p)-[r:KNOWS]->(friend:Person)
+    RETURN p.name, friend.name
+").await?;
+
+// Variable-length paths
+let results = db.query("
+    MATCH (a:Person {name: 'Alice'})-[:KNOWS*1..3]->(b:Person)
+    RETURN DISTINCT b.name
+").await?;
+
+// Aggregations
+let results = db.query("
+    MATCH (p:Person)-[:PURCHASED]->(o:Order)
+    RETURN p.name, count(o) as order_count, sum(o.total) as total_spent
+    ORDER BY total_spent DESC
+    LIMIT 10
+").await?;
+
+// WITH clause for query chaining
+let results = db.query("
+    MATCH (p:Person)-[:PURCHASED]->(o:Order)
+    WITH p, count(o) AS orders, sum(o.total) AS spent
+    WHERE orders > 5
+    RETURN p.name, orders, spent
+    ORDER BY spent DESC
+").await?;
+
+// UNWIND for expanding lists
+let results = db.query("
+    UNWIND ['Alice', 'Bob', 'Carol'] AS name
+    MATCH (p:Person {name: name})
+    RETURN p.name, p.age
+").await?;
+
+// CASE/WHEN expressions
+let results = db.query("
+    MATCH (p:Person)
+    RETURN p.name,
+           CASE WHEN p.age < 18 THEN 'minor'
+                WHEN p.age < 65 THEN 'adult'
+                ELSE 'senior' END AS category
+").await?;
+
+// UNION
+let results = db.query("
+    MATCH (n:Person) RETURN n.name AS name
+    UNION
+    MATCH (n:Company) RETURN n.name AS name
+").await?;
+
+// Time-travel queries
+let results = db.query("
+    MATCH (p:Person) VERSION AS OF '2025-01-15'
+    RETURN p.name, p.age
+").await?;
+
+let results = db.query("
+    MATCH (p:Person) TIMESTAMP AS OF '2025-01-15T10:30:00Z'
+    RETURN p.name, p.age
+").await?;
+
+// Process results
+for row in results.rows() {
+    let name: String = row.get("p.name")?;
+    let count: i64 = row.get("order_count")?;
+    println!("{}: {} orders", name, count);
+}
+```
+
+### Parametrized Queries
+
+```rust
+let results = db.query_with("MATCH (n:Person {name: $name}) RETURN n")
+    .param("name", "Alice")
+    .fetch_all()
+    .await?;
+
+// Multiple parameters
+let results = db.query_with("
+    MATCH (n:Person)
+    WHERE n.age >= $min_age AND n.age <= $max_age
+    RETURN n.name, n.age
+")
+    .param("min_age", 18)
+    .param("max_age", 65)
+    .timeout(std::time::Duration::from_secs(30))
+    .max_memory(1024 * 1024 * 512)  // 512MB limit
+    .fetch_all()
+    .await?;
+
+// Streaming large results
+let mut cursor = db.query_with("MATCH (n:Person) RETURN n")
+    .query_cursor()
+    .await?;
+
+while let Some(row) = cursor.next().await? {
+    // Process row by row
+}
+```
+
+### Write Queries
+
+```rust
+// Create nodes
+db.execute("CREATE (:Person {name: 'Alice', age: 30})").await?;
+
+// Create multiple nodes
+db.execute("
+    CREATE (:Person {name: 'Bob'}),
+           (:Person {name: 'Carol'}),
+           (:Company {name: 'Acme'})
+").await?;
+
+// Create relationships
+db.execute("
+    MATCH (a:Person {name: 'Alice'}), (b:Person {name: 'Bob'})
+    CREATE (a)-[:KNOWS {since: 2020}]->(b)
+").await?;
+
+// MERGE (create if not exists)
+db.execute("MERGE (:Person {name: 'Alice'})").await?;
+
+// Update properties
+db.execute("
+    MATCH (n:Person {name: 'Alice'})
+    SET n.age = 31, n.updated_at = datetime()
+").await?;
+
+// Delete
+db.execute("MATCH (n:Person {name: 'Temp'}) DELETE n").await?;
+
+// Detach delete (delete node and all relationships)
+db.execute("MATCH (n:Person {name: 'Alice'}) DETACH DELETE n").await?;
+
+// Remove property
+db.execute("MATCH (n:Person) REMOVE n.temporary_field").await?;
+```
+
+### Query Analysis
+
+```rust
+// EXPLAIN: show logical query plan without executing
+let plan = db.query("EXPLAIN MATCH (p:Person)-[:KNOWS]->(f) RETURN p.name, f.name").await?;
+
+// PROFILE: execute and show operator-level metrics
+let profile = db.query("PROFILE MATCH (p:Person)-[:KNOWS]->(f) RETURN p.name, f.name").await?;
+```
+
+### Cypher Syntax Reference
+
+```cypher
+-- Node patterns
+(n)                          -- Any node
+(n:Person)                   -- Node with label
+(n:Person {name: 'Alice'})   -- Node with properties
+(n:Person:Employee)          -- Multiple labels
+
+-- Relationship patterns
+-[r]->                       -- Outgoing relationship
+<-[r]-                       -- Incoming relationship
+-[r]-                        -- Any direction
+-[r:KNOWS]->                 -- With type
+-[r:KNOWS {since: 2020}]->   -- With properties
+-[r:KNOWS|FOLLOWS]->         -- Multiple types (OR)
+-[*1..3]->                   -- Variable length (1 to 3 hops)
+-[*]->                       -- Any length
+
+-- OPTIONAL MATCH (left-outer-join semantics)
+OPTIONAL MATCH (p)-[:KNOWS]->(friend)
+
+-- WHERE clauses
+WHERE n.age > 30
+WHERE n.name = 'Alice'
+WHERE n.name STARTS WITH 'A'
+WHERE n.name ENDS WITH 'e'
+WHERE n.name CONTAINS 'lic'
+WHERE n.name =~ 'A.*'        -- Regex pattern matching
+WHERE n.tags IN ['a', 'b']
+WHERE n.active IS NOT NULL
+WHERE n.age > 20 AND n.age < 40
+WHERE n.status = 'active' OR n.vip = true
+WHERE NOT n.deleted
+
+-- WITH (query chaining and intermediate aggregation)
+MATCH (p:Person)-[:KNOWS]->(f)
+WITH p, count(f) AS friends
+WHERE friends > 5
+RETURN p.name, friends
+
+-- UNWIND (expand list to rows)
+UNWIND $names AS name
+MATCH (p:Person {name: name})
+RETURN p
+
+-- CASE/WHEN
+CASE WHEN n.age < 18 THEN 'minor'
+     WHEN n.age < 65 THEN 'adult'
+     ELSE 'senior' END
+
+-- Aggregations
+count(n)
+sum(n.value)
+avg(n.value)
+min(n.value)
+max(n.value)
+collect(n.name)              -- Collect into list
+
+-- RETURN
+RETURN n
+RETURN n.name, n.age
+RETURN n.name AS person_name
+RETURN DISTINCT n.category
+RETURN *                     -- All variables
+
+-- ORDER BY, LIMIT, SKIP
+ORDER BY n.name ASC
+ORDER BY n.age DESC, n.name
+LIMIT 10
+SKIP 20
+SKIP 20 LIMIT 10
+
+-- UNION
+MATCH (n:Person) RETURN n.name UNION MATCH (n:Company) RETURN n.name
+
+-- Time-travel queries
+MATCH (n:Person) VERSION AS OF '2025-01-15' RETURN n
+MATCH (n:Person) TIMESTAMP AS OF '2025-01-15T10:30:00Z' RETURN n
+
+-- Query analysis
+EXPLAIN MATCH (n:Person) RETURN n
+PROFILE MATCH (n:Person) RETURN n
+```
+
+### Cypher Functions Reference
+
+```cypher
+-- Math functions
+abs(n.value)                 -- Absolute value
+ceil(n.value)                -- Round up
+floor(n.value)               -- Round down
+round(n.value)               -- Round to nearest integer
+sqrt(n.value)                -- Square root
+sign(n.value)                -- Sign (-1, 0, or 1)
+log(n.value)                 -- Natural logarithm
+log10(n.value)               -- Base-10 logarithm
+exp(n.value)                 -- e^x
+power(base, exp)             -- Exponentiation (also: pow)
+sin(n.value), cos(n.value), tan(n.value)  -- Trigonometric
+
+-- String functions
+toUpper(s), upper(s)         -- Uppercase
+toLower(s), lower(s)         -- Lowercase
+trim(s), ltrim(s), rtrim(s)  -- Trim whitespace
+reverse(s)                   -- Reverse string
+replace(s, search, replace)  -- Replace substring
+split(s, delimiter)          -- Split into list
+substring(s, start, length)  -- Extract substring
+left(s, length)              -- Left characters
+right(s, length)             -- Right characters
+lpad(s, length, pad)         -- Left pad
+rpad(s, length, pad)         -- Right pad
+
+-- Type conversion
+toInteger(value), toInt(value)   -- Convert to integer
+toFloat(value)                   -- Convert to float
+toString(value)                  -- Convert to string
+toBoolean(value), toBool(value)  -- Convert to boolean
+
+-- List/Collection functions
+size(list)                   -- List/Map/String length
+keys(map)                    -- Map keys
+head(list)                   -- First element
+tail(list)                   -- All but first element
+last(list)                   -- Last element
+length(path)                 -- Path length (relationship count)
+nodes(path)                  -- Nodes in path
+relationships(path)          -- Relationships in path
+range(start, end)            -- Create range list
+
+-- Null handling
+coalesce(a, b, 'default')    -- First non-null value
+nullif(a, b)                 -- Return null if a equals b
+
+-- Node/Relationship functions
+id(n)                        -- Internal node/edge ID
+labels(n)                    -- Node labels
+type(r)                      -- Relationship type
+properties(n)                -- All properties as map
+
+-- Date/Time
+date()                       -- Current date
+datetime()                   -- Current datetime
+time()                       -- Current time
+duration({days: 1, hours: 2})  -- Duration literal
+
+-- Temporal validity (uni extensions)
+uni.temporal.validAt(entity, 'start_prop', 'end_prop', datetime('2023-06-15'))
+-- Returns true if start_prop <= timestamp < end_prop (half-open interval)
+
+-- Bitwise operations (uni extensions)
+uni.bitwise.or(a, b)        -- Bitwise OR
+uni.bitwise.and(a, b)       -- Bitwise AND
+uni.bitwise.xor(a, b)       -- Bitwise XOR
+uni.bitwise.not(a)           -- Bitwise NOT
+uni.bitwise.shiftLeft(v, n)  -- Left shift
+uni.bitwise.shiftRight(v, n) -- Right shift
+```
+
+---
+
+## Vector Search
+
+Vector search is performed through Cypher procedures. Data must be flushed (`db.flush().await?`) before new vectors are searchable.
+
+### Vector Search via Cypher
+
+```cypher
+-- Basic vector search
+CALL uni.vector.query('Document', 'embedding', $query_vector, 10)
+YIELD node, distance
+RETURN node, distance
+ORDER BY distance ASC
+
+-- With post-filtering
+CALL uni.vector.query('Document', 'embedding', $query_vector, 10)
+YIELD node, distance
+WHERE node.category = 'tech'
+RETURN node, distance
+```
+
+### Vector Search from Rust
+
+```rust
+// Vector search via parametrized Cypher
+let query_vec = vec![0.1, 0.2, 0.3, /* ... 768 dims */];
+let results = db.query_with("
+    CALL uni.vector.query('Document', 'embedding', $vec, 10)
+    YIELD node, distance
+    RETURN node, distance
+    ORDER BY distance ASC
+")
+    .param("vec", query_vec)
+    .fetch_all()
+    .await?;
+```
+
+### Vector Distance Functions
+
+```cypher
+-- Vector similarity (requires vector index)
+cosine(v1, v2)               -- Cosine similarity
+euclidean(v1, v2)            -- Euclidean (L2) distance
+dot(v1, v2)                  -- Dot product (inner product)
+```
+
+---
+
+## Graph Algorithms
+
+Uni provides 36+ graph algorithms accessible via Cypher procedures under the `uni.algo.*` namespace.
+
+### Centrality Algorithms
+
+```cypher
+CALL uni.algo.pageRank(['Person'], ['KNOWS']) YIELD nodeId, score
+CALL uni.algo.betweenness(['Person'], ['KNOWS']) YIELD nodeId, score
+CALL uni.algo.closeness(['Person'], ['KNOWS']) YIELD nodeId, score
+CALL uni.algo.degreeCentrality(['Person'], ['KNOWS']) YIELD nodeId, score
+CALL uni.algo.eigenvectorCentrality(['Person'], ['KNOWS']) YIELD nodeId, score
+CALL uni.algo.harmonicCentrality(['Person'], ['KNOWS']) YIELD nodeId, score
+CALL uni.algo.katzCentrality(['Person'], ['KNOWS']) YIELD nodeId, score
+```
+
+### Community Detection
+
+```cypher
+CALL uni.algo.wcc(['Person'], ['KNOWS']) YIELD nodeId, componentId
+CALL uni.algo.scc(['Person'], ['KNOWS']) YIELD nodeId, componentId
+CALL uni.algo.louvain(['Person'], ['KNOWS']) YIELD nodeId, communityId
+CALL uni.algo.labelPropagation(['Person'], ['KNOWS']) YIELD nodeId, communityId
+CALL uni.algo.kcore(['Person'], ['KNOWS']) YIELD nodeId, coreNumber
+```
+
+### Path Finding
+
+```cypher
+CALL uni.algo.shortestPath(sourceId, targetId, ['KNOWS']) YIELD nodeId, distance
+CALL uni.algo.allPairsShortestPath(['Person'], ['KNOWS']) YIELD sourceNodeId, targetNodeId, distance
+CALL uni.algo.astar(sourceId, targetId, ['KNOWS']) YIELD nodeId, distance
+CALL uni.algo.bellmanFord(sourceId, ['KNOWS']) YIELD nodeId, distance
+CALL uni.algo.bidirectionalDijkstra(sourceId, targetId, ['KNOWS']) YIELD nodeId, distance
+CALL uni.algo.kShortestPaths(sourceId, targetId, 3, ['KNOWS']) YIELD pathIndex, nodeId, distance
+CALL uni.algo.allSimplePaths(sourceId, targetId, ['KNOWS']) YIELD path
+```
+
+### Structural Analysis
+
+```cypher
+CALL uni.algo.triangleCount(['Person'], ['KNOWS']) YIELD nodeId, triangleCount
+CALL uni.algo.hasCycle(['Task'], ['DEPENDS_ON']) YIELD hasCycle
+CALL uni.algo.bridges(['Person'], ['KNOWS']) YIELD sourceNodeId, targetNodeId
+CALL uni.algo.articulationPoints(['Person'], ['KNOWS']) YIELD nodeId
+CALL uni.algo.isBipartite(['Person'], ['KNOWS']) YIELD isBipartite, partition
+CALL uni.algo.elementaryCircuits(['Person'], ['KNOWS']) YIELD circuit
+CALL uni.algo.graphColoring(['Person'], ['KNOWS']) YIELD nodeId, color
+CALL uni.algo.maximalCliques(['Person'], ['KNOWS']) YIELD clique
+```
+
+### Graph Metrics and Optimization
+
+```cypher
+CALL uni.algo.graphMetrics(['Person'], ['KNOWS']) YIELD nodeCount, edgeCount, density, avgDegree, maxDegree
+CALL uni.algo.diameter(['Person'], ['KNOWS']) YIELD diameter
+CALL uni.algo.mst(['Person'], ['KNOWS']) YIELD sourceNodeId, targetNodeId, weight
+CALL uni.algo.maxMatching(['Person'], ['KNOWS']) YIELD sourceNodeId, targetNodeId
+CALL uni.algo.dinic(sourceId, sinkId, ['PIPE']) YIELD maxFlow
+CALL uni.algo.fordFulkerson(sourceId, sinkId, ['PIPE']) YIELD maxFlow
+CALL uni.algo.nodeSimilarity(['Person'], ['KNOWS']) YIELD node1, node2, similarity
+```
+
+### Traversal
+
+```cypher
+CALL uni.algo.randomWalk(['Person'], ['KNOWS'], 10, 5) YIELD path
+CALL uni.algo.topologicalSort(['Task'], ['DEPENDS_ON']) YIELD nodeId, order
+```
+
+---
+
+## Database Administration Procedures
+
+```cypher
+-- Compact storage (merge L1 delta runs into L2 base)
+CALL uni.admin.compact()
+  YIELD files_compacted, bytes_before, bytes_after
+RETURN files_compacted, bytes_before, bytes_after
+
+-- Check compaction status
+CALL uni.admin.compactionStatus()
+  YIELD l1_runs, l1_size_bytes, in_progress, pending
+RETURN l1_runs, l1_size_bytes, in_progress, pending
+
+-- Create named snapshot
+CALL uni.admin.snapshot.create('v1.0')
+  YIELD snapshot_id
+RETURN snapshot_id
+
+-- List snapshots
+CALL uni.admin.snapshot.list()
+  YIELD snapshot_id, name, created_at
+RETURN snapshot_id, name, created_at
+ORDER BY created_at DESC
+
+-- Restore to snapshot
+CALL uni.admin.snapshot.restore('01HJP3QW8XKZT4QGFXVM2C7D9R')
+  YIELD status
+RETURN status
+```
+
+### Schema Introspection Procedures
+
+```cypher
+-- List all labels
+CALL uni.schema.labels()
+  YIELD label, nodeCount, propertyCount, indexCount
+RETURN label, nodeCount
+
+-- List edge types
+CALL uni.schema.edgeTypes()
+  YIELD type, sourceLabels, targetLabels, propertyCount
+RETURN type, sourceLabels, targetLabels
+
+-- List indexes
+CALL uni.schema.indexes()
+  YIELD name, type, label, properties, state
+RETURN name, type, label, properties
+
+-- List constraints
+CALL uni.schema.constraints()
+  YIELD name, type, enabled, label, properties
+RETURN name, type, label, properties
+
+-- Detailed label info
+CALL uni.schema.labelInfo('Person')
+  YIELD property, dataType, nullable, indexed, unique
+RETURN property, dataType, indexed
+```
+
+---
+
+## Transactions
+
+### Basic Transactions
+
+```rust
+// Closure-based (auto-commit on success, rollback on error)
+db.transaction(|tx| Box::pin(async move {
+    tx.execute("CREATE (:Account {id: 1, balance: 100})").await?;
+    tx.execute("CREATE (:Account {id: 2, balance: 50})").await?;
+    Ok(())
+})).await?;
+
+// Manual transaction control
+let tx = db.begin().await?;
+tx.execute("MATCH (a:Account {id: 1}) SET a.balance = a.balance - 10").await?;
+tx.execute("MATCH (a:Account {id: 2}) SET a.balance = a.balance + 10").await?;
+tx.commit().await?;
+
+// Query within transaction
+let tx = db.begin().await?;
+let results = tx.query("MATCH (a:Account) RETURN a.balance").await?;
+tx.commit().await?;
+
+// Rollback
+let tx = db.begin().await?;
+tx.execute("CREATE (:Temp {data: 'test'})").await?;
+tx.rollback().await?;  // Changes discarded
+```
+
+---
+
+## Bulk Operations
+
+```rust
+// Bulk insert vertices
+let properties = vec![
+    [("name", "Alice"), ("age", 30)].into(),
+    [("name", "Bob"), ("age", 25)].into(),
+    [("name", "Carol"), ("age", 35)].into(),
+];
+let vids = db.bulk_insert_vertices("Person", properties).await?;
+
+// Bulk insert edges
+let edges = vec![
+    (vids[0], vids[1], [("since", 2020)].into()),
+    (vids[1], vids[2], [("since", 2021)].into()),
+];
+db.bulk_insert_edges("KNOWS", edges).await?;
+```
+
+---
+
+## Snapshots and Time-Travel
+
+```rust
+// Create snapshot
+let snapshot_id = db.create_snapshot("v1.0").await?;
+
+// List snapshots
+let snapshots = db.list_snapshots().await?;
+for snap in snapshots {
+    println!("{}: {} ({})", snap.id, snap.name, snap.created_at);
+}
+
+// Time-travel query (read-only view at snapshot)
+let historical = Uni::open("./my_graph")
+    .at_snapshot(&snapshot_id)
+    .build()
+    .await?;
+let old_data = historical.query("MATCH (n) RETURN count(n)").await?;
+
+// Time-travel via Cypher syntax
+let results = db.query("
+    MATCH (p:Person) VERSION AS OF '2025-01-15'
+    RETURN p.name, p.age
+").await?;
+
+// Restore snapshot
+db.restore_snapshot(&snapshot_id).await?;
+```
+
+---
+
+## Persistence and Maintenance
+
+```rust
+// Flush L0 buffer to storage (required before vector search on new data)
+db.flush().await?;
+
+// Manual compaction
+let stats = db.compact_label("Person").await?;
+println!("Compacted {} vertices", stats.vertices_compacted);
+
+let stats = db.compact_edge_type("KNOWS").await?;
+println!("Compacted {} edges", stats.edges_compacted);
+
+// Wait for background compaction
+db.wait_for_compaction().await?;
+```
+
+---
+
+## Configuration
+
+```rust
+use uni_db::{UniConfig, CompactionConfig, WriteThrottleConfig, ObjectStoreConfig};
+use std::time::Duration;
+
+let config = UniConfig {
+    cache_size: 1024 * 1024 * 1024,      // 1GB adjacency cache
+    parallelism: 8,                       // Worker threads
+    batch_size: 1024,                     // Query batch size
+    max_frontier_size: 1_000_000,         // Traversal limit
+    auto_flush_threshold: 10_000,         // Mutations before auto-flush
+    auto_flush_interval: Some(Duration::from_secs(5)),  // Time-based flush
+    auto_flush_min_mutations: 1,          // Min mutations for time-based flush
+    wal_enabled: true,                    // Write-ahead logging
+    query_timeout: Duration::from_secs(30),
+    max_query_memory: 1024 * 1024 * 1024, // 1GB per query
+    compaction: CompactionConfig {
+        enabled: true,
+        max_l1_runs: 4,
+        max_l1_size_bytes: 256 * 1024 * 1024,
+        max_l1_age: Duration::from_secs(3600),
+        check_interval: Duration::from_secs(30),
+        worker_threads: 1,
+    },
+    throttle: WriteThrottleConfig {
+        soft_limit: 8,
+        hard_limit: 16,
+        base_delay: Duration::from_millis(10),
+    },
+    object_store: ObjectStoreConfig {
+        connect_timeout: Duration::from_secs(10),
+        read_timeout: Duration::from_secs(30),
+        write_timeout: Duration::from_secs(60),
+        max_retries: 3,
+        retry_backoff_base: Duration::from_millis(100),
+        retry_backoff_max: Duration::from_secs(10),
+    },
+    ..Default::default()
+};
+
+let db = Uni::open("./my_graph")
+    .config(config)
+    .build()
+    .await?;
+```
+
+### Server Mode Configuration
+
+```rust
+use uni_db::{ServerConfig, FileSandboxConfig, DeploymentMode};
+
+// Development server (permissive - NOT for production)
+let server_config = ServerConfig::development();
+
+// Production server with security
+let server_config = ServerConfig::production(
+    vec!["https://myapp.com".to_string()],  // Allowed CORS origins
+    "my-secret-api-key".to_string(),        // Required API key
+);
+
+// File sandbox for secure file operations (BACKUP, COPY, EXPORT)
+let sandbox = FileSandboxConfig::sandboxed(vec![
+    PathBuf::from("/var/lib/uni/data"),
+    PathBuf::from("/var/lib/uni/backups"),
+]);
+```
+
+---
+
+## Error Handling
+
+```rust
+use uni_db::{Result, UniError};
+
+match db.query("MATCH (n:Person) RETURN n").await {
+    Ok(results) => { /* process results */ }
+    Err(UniError::Parse { message, line, column, .. }) => {
+        eprintln!("Syntax error at {}:{}: {}", line, column, message);
+    }
+    Err(UniError::Query { message, query }) => {
+        eprintln!("Query failed: {} in '{}'", message, query);
+    }
+    Err(UniError::LabelNotFound { label }) => {
+        eprintln!("Label '{}' not defined in schema", label);
+    }
+    Err(UniError::TransactionConflict { message }) => {
+        eprintln!("Transaction conflict: {}", message);
+    }
+    Err(e) => {
+        eprintln!("Error: {}", e);
+    }
+}
+```
+
+---
+
+## Query Optimization
+
+### Index-Aware Predicate Pushdown
+
+Uni automatically optimizes queries using available indexes in order of selectivity:
+
+1. **UID lookup** (`_uid = 'xxx'`) - O(1) hash lookup
+2. **JSON FTS** (`column CONTAINS 'term'`) - BM25 full-text search
+3. **JsonPath index** (`prop = 'value'` for indexed paths)
+4. **BTree prefix scan** (`STARTS WITH 'prefix'`) - Range scan on BTree indexes
+5. **Lance scan filter** - Columnar filter pushdown
+6. **Residual** - Application-level evaluation
+
+### STARTS WITH Optimization
+
+When a property has a BTree index, `STARTS WITH` predicates are automatically converted to efficient range scans:
+
+```cypher
+-- With BTree index on name, this becomes a range scan:
+-- name >= 'John' AND name < 'Joho'
+MATCH (n:Person) WHERE n.name STARTS WITH 'John' RETURN n
+```
+
+### Regex Pattern Matching
+
+```cypher
+-- Match names starting with A followed by any characters
+MATCH (n:Person) WHERE n.name =~ 'A.*' RETURN n.name
+
+-- Match email patterns
+MATCH (n:Person) WHERE n.email =~ '.*@example\\.com' RETURN n
+```
+
+---
+
+## Common Patterns
+
+### Knowledge Graph
+
+```rust
+db.schema()
+    .label("Entity")
+    .property("name", DataType::String)
+    .property("type", DataType::String)
+    .vector("embedding", 768)
+    .done()
+    .edge_type("RELATED_TO", &["Entity"], &["Entity"])
+    .property("relation", DataType::String)
+    .property("confidence", DataType::Float64)
+    .done()
+    .apply()
+    .await?;
+
+// Add entities and relationships
+db.execute("CREATE (:Entity {name: 'Albert Einstein', type: 'Person'})").await?;
+db.execute("CREATE (:Entity {name: 'Theory of Relativity', type: 'Theory'})").await?;
+db.execute("
+    MATCH (a:Entity {name: 'Albert Einstein'}), (b:Entity {name: 'Theory of Relativity'})
+    CREATE (a)-[:RELATED_TO {relation: 'developed', confidence: 1.0}]->(b)
+").await?;
+```
+
+### Social Network
+
+```rust
+db.schema()
+    .label("User")
+    .property("username", DataType::String)
+    .property("joined", DataType::DateTime)
+    .done()
+    .label("Post")
+    .property("content", DataType::String)
+    .property("created", DataType::DateTime)
+    .done()
+    .edge_type("FOLLOWS", &["User"], &["User"])
+    .edge_type("POSTED", &["User"], &["Post"])
+    .edge_type("LIKES", &["User"], &["Post"])
+    .apply()
+    .await?;
+
+// Find friends of friends
+let results = db.query_with("
+    MATCH (me:User {username: $user})-[:FOLLOWS]->()-[:FOLLOWS]->(fof:User)
+    WHERE NOT (me)-[:FOLLOWS]->(fof) AND me <> fof
+    RETURN DISTINCT fof.username
+    LIMIT 10
+")
+    .param("user", "alice")
+    .fetch_all()
+    .await?;
+
+// Community detection
+let communities = db.query("
+    CALL uni.algo.louvain(['User'], ['FOLLOWS'])
+    YIELD nodeId, communityId
+    RETURN communityId, count(nodeId) AS size
+    ORDER BY size DESC
+").await?;
+```
+
+### RAG (Retrieval-Augmented Generation)
+
+```rust
+db.schema()
+    .label("Document")
+    .property("content", DataType::String)
+    .property("source", DataType::String)
+    .vector("embedding", 1536)
+    .index("embedding", IndexType::Vector(VectorIndexCfg {
+        algorithm: VectorAlgo::Hnsw { m: 16, ef_construction: 200 },
+        metric: VectorMetric::Cosine,
+    }))
+    .done()
+    .apply()
+    .await?;
+
+// Store document with embedding
+let embedding = embed_text("Document content here...");  // Your embedding function
+db.execute(&format!(
+    "CREATE (:Document {{content: $content, source: $source, embedding: {}}})",
+    format!("{:?}", embedding)
+))
+    .param("content", "Document content here...")
+    .param("source", "manual.pdf")
+    .fetch_all()
+    .await?;
+
+db.flush().await?;  // Required before vector search
+
+// Retrieve similar documents via Cypher
+let query_embedding = embed_text("user question");
+let docs = db.query_with("
+    CALL uni.vector.query('Document', 'embedding', $vec, 5)
+    YIELD node, distance
+    RETURN node, distance
+    ORDER BY distance ASC
+")
+    .param("vec", query_embedding)
+    .fetch_all()
+    .await?;
+```
+
+### Fraud Detection
+
+```rust
+db.schema()
+    .label("Account")
+    .property("id", DataType::String)
+    .property("created_at", DataType::DateTime)
+    .done()
+    .label("Device")
+    .property("fingerprint", DataType::String)
+    .done()
+    .edge_type("LOGGED_IN_FROM", &["Account"], &["Device"])
+    .edge_type("TRANSFERRED_TO", &["Account"], &["Account"])
+    .property("amount", DataType::Float64)
+    .property("timestamp", DataType::DateTime)
+    .done()
+    .apply()
+    .await?;
+
+// Find accounts sharing devices (potential fraud ring)
+let results = db.query("
+    MATCH (a1:Account)-[:LOGGED_IN_FROM]->(d:Device)<-[:LOGGED_IN_FROM]-(a2:Account)
+    WHERE a1 <> a2
+    RETURN a1.id, a2.id, d.fingerprint
+").await?;
+
+// Detect cycles in money transfers
+let results = db.query("
+    CALL uni.algo.hasCycle(['Account'], ['TRANSFERRED_TO'])
+    YIELD hasCycle
+    RETURN hasCycle
+").await?;
+```
+
+### Supply Chain
+
+```rust
+db.schema()
+    .label("Product")
+    .property("sku", DataType::String)
+    .property("name", DataType::String)
+    .done()
+    .label("Supplier")
+    .property("name", DataType::String)
+    .property("country", DataType::String)
+    .done()
+    .label("Warehouse")
+    .property("location", DataType::String)
+    .property("capacity", DataType::Int64)
+    .done()
+    .edge_type("SUPPLIES", &["Supplier"], &["Product"])
+    .property("lead_time_days", DataType::Int32)
+    .property("cost", DataType::Float64)
+    .done()
+    .edge_type("STORED_AT", &["Product"], &["Warehouse"])
+    .property("quantity", DataType::Int64)
+    .done()
+    .apply()
+    .await?;
+
+// Find supply chain path
+let results = db.query_with("
+    MATCH path = (s:Supplier)-[:SUPPLIES*1..5]->(p:Product)-[:STORED_AT]->(w:Warehouse)
+    WHERE p.sku = $sku
+    RETURN s.name, w.location, length(path)
+")
+    .param("sku", "ABC123")
+    .fetch_all()
+    .await?;
+```
+
+### Temporal Data
+
+```cypher
+-- Find all events valid at a specific point in time
+MATCH (e:Event)
+WHERE uni.temporal.validAt(e, 'valid_from', 'valid_to', datetime('2023-06-15'))
+RETURN e.name, e.valid_from, e.valid_to
+
+-- Historical graph snapshot via time-travel
+MATCH (p:Person) VERSION AS OF '2024-06-01'
+RETURN p.name, p.age
+```
+
+---
+
+## Python Bindings
+
+Uni provides Python bindings via PyO3 for use in Python applications and Jupyter notebooks.
+
+```python
+import uni_db
+
+# Create database (multiple modes)
+db = uni_db.Database.in_memory()
+db = uni_db.Database.temporary()
+db = uni_db.Database.open("./my_graph")
+db = uni_db.Database.open_existing("./my_graph")
+db = uni_db.Database.create("./my_graph")
+
+# Define schema
+db.schema() \
+    .label("Person") \
+    .property("name", uni_db.DataType.String) \
+    .property("age", uni_db.DataType.Int32) \
+    .done() \
+    .edge_type("KNOWS", ["Person"], ["Person"]) \
+    .apply()
+
+# Execute write queries
+db.execute("CREATE (:Person {name: 'Alice', age: 30})")
+db.execute("CREATE (:Person {name: 'Bob', age: 25})")
+
+# Query data
+results = db.query("MATCH (p:Person) RETURN p.name, p.age ORDER BY p.age")
+for row in results:
+    print(f"{row['p.name']}: {row['p.age']}")
+
+# Parametrized queries
+results = db.query("MATCH (n:Person {name: $name}) RETURN n", params={"name": "Alice"})
+
+# Query plan analysis
+plan = db.explain("MATCH (p:Person)-[:KNOWS]->(f) RETURN p.name")
+profile = db.profile("MATCH (p:Person)-[:KNOWS]->(f) RETURN p.name")
+
+# Transactions
+tx = db.begin()
+tx.execute("CREATE (:Temp {data: 'test'})")
+tx.commit()  # or tx.rollback()
+
+# Bulk operations
+db.bulk_insert_vertices("Person", [{"name": "Carol", "age": 35}])
+
+# Vector search via Cypher
+db.flush()  # Required before vector search on new data
+results = db.query("""
+    CALL uni.vector.query('Document', 'embedding', $vec, 10)
+    YIELD node, distance
+    RETURN node, distance
+""", params={"vec": query_vector})
+
+# Maintenance
+db.flush()
+db.compact_label("Person")
+db.compact_edge_type("KNOWS")
+```
+
+---
+
+## Jupyter Notebook Examples
+
+Uni includes Jupyter notebooks demonstrating common use cases:
+
+| Notebook | Description |
+|----------|-------------|
+| `supply_chain.ipynb` | BOM explosion, cost rollup, supplier analysis |
+| `recommendation.ipynb` | Collaborative filtering, vector similarity |
+| `rag.ipynb` | Retrieval-Augmented Generation with knowledge graphs |
+| `fraud_detection.ipynb` | Cycle detection, shared device analysis |
+| `sales_analytics.ipynb` | Graph traversal with columnar aggregations |
+
+Available in `examples/rust/` (evcxr), `bindings/uni-db/examples/` (Python), and `bindings/uni-pydantic/examples/` (Pydantic OGM).
+
+---
+
+## Architecture Notes
+
+- **Parser**: Pest PEG-based OpenCypher parser with custom extensions
+- **Query Engine**: DataFusion-powered vectorized execution with graph-specific operators
+- **Storage**: Lance columnar format with dual CSR adjacency for fast traversal
+- **Concurrency**: Single-writer, multi-reader with snapshot isolation
+- **WAL**: Write-ahead logging for durability
+- **Indexes**: Lance-native vector indexes (HNSW, IVF-PQ, Flat) and scalar indexes (BTree, Hash, Bitmap)
+- **Compaction**: LSM-style (L0 memory -> L1 sorted runs -> L2 merged)
+- **Object Store**: Supports local filesystem, S3, GCS, Azure via object_store crate
+- **Hybrid Storage**: Local WAL + remote object storage for fast writes with durable storage
+- **Identity**: Dual identity — 64-bit VID (label_id:16 | offset:48) for O(1) indexing + 32-byte UniId (SHA3-256) for stable references
+- **CRDT Support**: Built-in CRDT types (GCounter, GSet, ORSet, LWWRegister, LWWMap, RGA) for conflict-free replication
+
+---
+
+## Further Reading
+
+- Architecture design: `docs/DESIGN.md`
+- Storage layer design: `docs/STORAGE_DESIGN.md`
+- Query execution path: `docs/QUERY_EXECUTION_PATH.md`
+- Function & procedure reference: `docs/FUNCTION_REFERENCE.md`
+- Language extensions: `docs/LANGUAGE_EXTENSIONS.md`
+- Cypher parser design: `docs/CYPHER_PARSER_DESIGN.md`
+- Full documentation site: https://rustic-ai.github.io/uni

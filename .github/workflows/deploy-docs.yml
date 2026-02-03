@@ -1,0 +1,118 @@
+name: Deploy Documentation
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'website/**'
+      - 'crates/**/*.rs'
+      - 'bindings/uni-db/**'
+      - '.github/workflows/deploy-docs.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mold protobuf-compiler
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Cache pip dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/pyproject.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      # Build Rust crates (required by Python bindings and cargo doc)
+      - name: Build Rust crates
+        run: cargo build --release
+
+      # Build and install Python bindings (notebooks need uni_db)
+      - name: Build Python bindings
+        run: |
+          pip install maturin
+          cd bindings/uni-db
+          maturin build --release
+          pip install ../../target/wheels/*.whl
+
+      # Install uni-pydantic and its dependencies (pydantic notebooks need it)
+      # uni-db requirement is satisfied by wheel installed above
+      - name: Install uni-pydantic
+        run: |
+          pip install ./bindings/uni-pydantic
+
+      # Install MkDocs and all dependencies for notebook execution
+      - name: Install MkDocs dependencies
+        run: |
+          pip install mkdocs mkdocs-material mkdocs-jupyter pymdown-extensions pdoc
+
+      # Build MkDocs (executes notebooks via mkdocs-jupyter, cleans site directory)
+      - name: Build MkDocs Documentation
+        run: |
+          cd website
+          mkdocs build
+
+      # Build and copy API docs AFTER MkDocs (since mkdocs cleans site/)
+      - name: Build Rust documentation
+        run: |
+          cargo doc --no-deps --document-private-items \
+            -p uni \
+            -p uni-common \
+            -p uni-query \
+            -p uni-store \
+            -p uni-algo \
+            -p uni-crdt
+          mkdir -p website/site/api/rust
+          cp -r target/doc/* website/site/api/rust/
+
+      - name: Build Python documentation
+        run: |
+          pdoc -o website/site/api/python uni_db uni_pydantic
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: ./website/site
+
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

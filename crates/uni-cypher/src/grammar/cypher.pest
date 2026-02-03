@@ -1,0 +1,767 @@
+// ═══════════════════════════════════════════════════════════════════════════
+// WHITESPACE AND COMMENTS (automatically skipped)
+// ═══════════════════════════════════════════════════════════════════════════
+
+WHITESPACE = _{ " " | "\t" | "\n" | "\r" }
+COMMENT = _{ 
+    "//" ~ (!"\n" ~ ANY)* 
+    | "/*" ~ (!"*/" ~ ANY)* ~ "*/" 
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// KEYWORDS (case-insensitive)
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Query keywords
+MATCH     = @{ ^"match" ~ !ident_char }
+OPTIONAL  = @{ ^"optional" ~ !ident_char }
+WHERE     = @{ ^"where" ~ !ident_char }
+CREATE    = @{ ^"create" ~ !ident_char }
+MERGE     = @{ ^"merge" ~ !ident_char }
+SET       = @{ ^"set" ~ !ident_char }
+REMOVE    = @{ ^"remove" ~ !ident_char }
+DELETE    = @{ ^"delete" ~ !ident_char }
+RETURN    = @{ ^"return" ~ !ident_char }
+WITH      = @{ ^"with" ~ !ident_char }
+UNWIND    = @{ ^"unwind" ~ !ident_char }
+ORDER     = @{ ^"order" ~ !ident_char }
+BY        = @{ ^"by" ~ !ident_char }
+ASC       = @{ (^"ascending" | ^"asc") ~ !ident_char }
+DESC      = @{ (^"descending" | ^"desc") ~ !ident_char }
+SKIP      = @{ ^"skip" ~ !ident_char }
+LIMIT     = @{ ^"limit" ~ !ident_char }
+AS        = @{ ^"as" ~ !ident_char }
+DISTINCT  = @{ ^"distinct" ~ !ident_char }
+UNION     = @{ ^"union" ~ !ident_char }
+ALL       = @{ ^"all" ~ !ident_char }
+CALL      = @{ ^"call" ~ !ident_char }
+YIELD     = @{ ^"yield" ~ !ident_char }
+
+// Boolean/logical
+AND       = @{ ^"and" ~ !ident_char }
+OR        = @{ ^"or" ~ !ident_char }
+XOR       = @{ ^"xor" ~ !ident_char }
+NOT       = @{ ^"not" ~ !ident_char }
+IN        = @{ ^"in" ~ !ident_char }
+IS        = @{ ^"is" ~ !ident_char }
+NULL      = @{ ^"null" ~ !ident_char }
+TRUE      = @{ ^"true" ~ !ident_char }
+FALSE     = @{ ^"false" ~ !ident_char }
+CONTAINS  = @{ ^"contains" ~ !ident_char }
+STARTS    = @{ ^"starts" ~ !ident_char }
+ENDS      = @{ ^"ends" ~ !ident_char }
+
+// CASE expression
+CASE      = @{ ^"case" ~ !ident_char }
+WHEN      = @{ ^"when" ~ !ident_char }
+THEN      = @{ ^"then" ~ !ident_char }
+ELSE      = @{ ^"else" ~ !ident_char }
+END       = @{ ^"end" ~ !ident_char }
+
+// Quantifiers
+ANY_KW    = @{ ^"any" ~ !ident_char }
+SINGLE    = @{ ^"single" ~ !ident_char }
+NONE      = @{ ^"none" ~ !ident_char }
+
+// Subquery expressions
+EXISTS    = @{ ^"exists" ~ !ident_char }
+COUNT     = @{ ^"count" ~ !ident_char }
+COLLECT   = @{ ^"collect" ~ !ident_char }
+REDUCE    = @{ ^"reduce" ~ !ident_char }
+
+// DDL/Schema
+LABEL     = @{ ^"label" ~ !ident_char }
+EDGE      = @{ ^"edge" ~ !ident_char }
+INDEX     = @{ ^"index" ~ !ident_char }
+INDEXES   = @{ ^"indexes" ~ !ident_char }
+CONSTRAINT = @{ ^"constraint" ~ !ident_char }
+CONSTRAINTS = @{ ^"constraints" ~ !ident_char }
+VECTOR    = @{ ^"vector" ~ !ident_char }
+FULLTEXT  = @{ ^"fulltext" ~ !ident_char }
+PROPERTY  = @{ ^"property" ~ !ident_char }
+UNIQUE    = @{ ^"unique" ~ !ident_char }
+OPTIONS   = @{ ^"options" ~ !ident_char }
+ON        = @{ ^"on" ~ !ident_char }
+FOR       = @{ ^"for" ~ !ident_char }
+NODE      = @{ ^"node" ~ !ident_char }
+RELATIONSHIP = @{ ^"relationship" ~ !ident_char }
+
+// Admin/Transaction
+DROP_KW   = @{ ^"drop" ~ !ident_char }
+SHOW      = @{ ^"show" ~ !ident_char }
+ALTER     = @{ ^"alter" ~ !ident_char }
+BEGIN     = @{ ^"begin" ~ !ident_char }
+COMMIT    = @{ ^"commit" ~ !ident_char }
+ROLLBACK  = @{ ^"rollback" ~ !ident_char }
+TRANSACTION = @{ ^"transaction" ~ !ident_char }
+VACUUM    = @{ ^"vacuum" ~ !ident_char }
+CHECKPOINT = @{ ^"checkpoint" ~ !ident_char }
+DATABASE  = @{ ^"database" ~ !ident_char }
+CONFIG    = @{ ^"config" ~ !ident_char }
+STATISTICS = @{ ^"statistics" ~ !ident_char }
+BACKUP    = @{ ^"backup" ~ !ident_char }
+COPY      = @{ ^"copy" ~ !ident_char }
+TO        = @{ ^"to" ~ !ident_char }
+FROM      = @{ ^"from" ~ !ident_char }
+IF        = @{ ^"if" ~ !ident_char }
+EXPLAIN   = @{ ^"explain" ~ !ident_char }
+DETACH    = @{ ^"detach" ~ !ident_char }
+OVER      = @{ ^"over" ~ !ident_char }
+PARTITION = @{ ^"partition" ~ !ident_char }
+LOAD      = @{ ^"load" ~ !ident_char }
+CSV       = @{ ^"csv" ~ !ident_char }
+HEADERS   = @{ ^"headers" ~ !ident_char }
+FIELDTERMINATOR = @{ ^"fieldterminator" ~ !ident_char }
+RECURSIVE = @{ ^"recursive" ~ !ident_char }
+VALID_AT  = @{ ^"valid_at" ~ !ident_char }
+JSON      = @{ ^"json" ~ !ident_char }
+ASSERT    = @{ ^"assert" ~ !ident_char }
+KEY       = @{ ^"key" ~ !ident_char }
+TYPE      = @{ ^"type" ~ !ident_char }
+DEFAULT   = @{ ^"default" ~ !ident_char }
+ADD       = @{ ^"add" ~ !ident_char }
+RENAME    = @{ ^"rename" ~ !ident_char }
+EACH      = @{ ^"each" ~ !ident_char }
+
+// Time-travel keywords
+VERSION      = @{ ^"version" ~ !ident_char }
+TIMESTAMP_KW = @{ ^"timestamp" ~ !ident_char }
+OF           = @{ ^"of" ~ !ident_char }
+
+// Helper to prevent keywords matching as identifier prefixes
+ident_char = _{ ASCII_ALPHANUMERIC | "_" }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// LITERALS AND IDENTIFIERS
+// ═══════════════════════════════════════════════════════════════════════════
+
+identifier = @{
+    !keyword_reserved ~ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")*
+    | "`" ~ (!("`") ~ ANY)* ~ "`"
+}
+
+// Reserved keywords - these CANNOT be used as identifiers
+keyword_reserved = {
+    MATCH | OPTIONAL | WHERE | CREATE | MERGE | SET | REMOVE | DELETE | DETACH |
+    RETURN | WITH | UNWIND | UNION | CALL | YIELD |
+    DISTINCT | ORDER | BY | ASC | DESC | SKIP | LIMIT | AS |
+    AND | OR | XOR | NOT |
+    IN | CONTAINS | STARTS | ENDS | IS |
+    NULL | TRUE | FALSE |
+    CASE | WHEN | THEN | ELSE | END |
+    IF | FROM | TO | ON |
+    DROP_KW | ALTER | SHOW |
+    OVER | PARTITION | EXPLAIN | LOAD | CSV | HEADERS |
+    RECURSIVE | VALID_AT | EACH | FIELDTERMINATOR
+}
+
+// Non-reserved keywords - can be used as identifiers in most contexts
+// These are recognized as keywords only in specific grammar rules
+keyword_nonreserved = {
+    ALL | ANY_KW | SINGLE | NONE | EXISTS | COUNT | COLLECT | REDUCE |
+    LABEL | EDGE | INDEX | INDEXES | CONSTRAINT | CONSTRAINTS |
+    PROPERTY | UNIQUE | ASSERT | KEY | TYPE | DEFAULT | ADD | RENAME |
+    VECTOR | FULLTEXT | JSON | OPTIONS | FOR | NODE | RELATIONSHIP |
+    BEGIN | COMMIT | ROLLBACK | TRANSACTION | VACUUM | CHECKPOINT |
+    DATABASE | CONFIG | STATISTICS | BACKUP | COPY |
+    VERSION | TIMESTAMP_KW | OF
+}
+
+// All keywords (for backward compatibility in some rules)
+keyword = { keyword_reserved | keyword_nonreserved }
+
+// Allow keywords as identifiers in certain contexts
+identifier_or_keyword = @{
+    (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")*
+    | "`" ~ (!"`" ~ ANY)* ~ "`"
+}
+
+// Function names - allow function keywords and common Neo4j function names
+function_name = @{
+    COLLECT | TYPE | COUNT | EXISTS | ANY_KW | ALL | NONE | SINGLE | REDUCE
+    // Common Neo4j functions that may be keywords or reserved words
+    | ^"head" ~ !ident_char
+    | ^"tail" ~ !ident_char
+    | ^"last" ~ !ident_char
+    | ^"nodes" ~ !ident_char
+    | ^"relationships" ~ !ident_char
+    | ^"labels" ~ !ident_char
+    | ^"keys" ~ !ident_char
+    | ^"properties" ~ !ident_char
+    // Regular identifiers as function names
+    | identifier
+}
+
+// Alias identifiers after AS can be keywords
+alias_identifier = @{
+    (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")*
+    | "`" ~ (!"`" ~ ANY)* ~ "`"
+}
+
+integer = @{
+    "-"? ~ (
+        ("0x" | "0X") ~ (ASCII_HEX_DIGIT | "_")+          // Hexadecimal
+        | ("0o" | "0O") ~ (ASCII_OCT_DIGIT | "_")+        // Octal
+        | ASCII_DIGIT ~ (ASCII_DIGIT | "_")*              // Decimal with optional underscores
+    )
+}
+
+float = @{
+    "-"? ~ (ASCII_DIGIT | "_")+ ~ "." ~ (ASCII_DIGIT | "_")+ ~ (("e" | "E") ~ ("+" | "-")? ~ (ASCII_DIGIT | "_")+)?  // 1.0, 1.0e5
+    | "-"? ~ (ASCII_DIGIT | "_")+ ~ ("e" | "E") ~ ("+" | "-")? ~ (ASCII_DIGIT | "_")+                                 // 1e5
+    | "-"? ~ "." ~ (ASCII_DIGIT | "_")+ ~ (("e" | "E") ~ ("+" | "-")? ~ (ASCII_DIGIT | "_")+)?                        // .1, .1e5
+}
+
+infinity = @{ "-"? ~ (^"inf" | ^"infinity") ~ !ident_char }
+nan = @{ ^"nan" ~ !ident_char }
+
+string = @{
+    "'" ~ single_quote_char* ~ "'"
+    | "\"" ~ double_quote_char* ~ "\""
+}
+
+single_quote_char = {
+    !(("'" | "\\")) ~ ANY          // Regular char
+    | "\\\\"                        // Escaped backslash
+    | "\\'"                         // Escaped single quote
+    | "\\n" | "\\t" | "\\r"        // Common escapes
+    | "\\b" | "\\f"                 // Backspace, form feed
+    | "\\u" ~ ASCII_HEX_DIGIT{4}   // Unicode escape
+    | "''"                          // SQL-style (for compatibility)
+    | "\\" ~ ANY                    // Catch-all for regex escapes like \., \$, \d, etc.
+}
+
+double_quote_char = {
+    !(("\"" | "\\")) ~ ANY
+    | "\\\\"
+    | "\\\""
+    | "\\n" | "\\t" | "\\r"
+    | "\\b" | "\\f"
+    | "\\u" ~ ASCII_HEX_DIGIT{4}
+    | "\\" ~ ANY                    // Catch-all for regex escapes like \., \$, \d, etc.
+}
+
+parameter = @{ "$" ~ (ASCII_ALPHANUMERIC | "_")+ }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// OPERATORS
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Longer operators MUST be defined before shorter ones to avoid partial matching
+regex_match = { "=~" }
+approx_eq = { "~=" }
+lt_eq     = { "<=" }
+gt_eq     = { ">=" }
+not_eq    = { "<>" | "!=" }
+eq        = { "=" }
+lt        = { "<" }
+gt        = { ">" }
+
+plus      = { "+" }
+minus     = { "-" }
+star      = { "*" }
+slash     = { "/" }
+percent   = { "%" }
+caret     = { "^" }
+pipe      = { "|" }
+plus_eq   = { "+=" }
+
+arrow_right = { "->" }
+arrow_left  = { "<-" }
+arrow_bidirectional = { "<-->" }
+dot_dot     = { ".." }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// EXPRESSIONS (Precedence via rule hierarchy)
+// ═══════════════════════════════════════════════════════════════════════════
+
+expression = { or_expression }
+
+// OR has lowest precedence
+or_expression = { xor_expression ~ (OR ~ xor_expression)* }
+
+xor_expression = { and_expression ~ (XOR ~ and_expression)* }
+
+and_expression = { not_expression ~ (AND ~ not_expression)* }
+
+not_expression = { NOT* ~ comparison_expression }
+
+comparison_expression = {
+    additive_expression ~ comparison_tail*
+}
+
+comparison_tail = {
+    // Regex match BEFORE eq to prevent partial matching
+    regex_match ~ additive_expression
+    // Standard comparisons
+    | (not_eq | lt_eq | gt_eq | lt | gt | approx_eq | eq) ~ additive_expression
+    // Special predicates
+    | IS ~ NOT? ~ NULL
+    | IS ~ UNIQUE
+    | IS ~ ":" ~ identifier_or_keyword                        // IS :Label
+    | ":" ~ identifier_or_keyword                             // Bare :Label
+    | IN ~ additive_expression
+    | CONTAINS ~ additive_expression
+    | STARTS ~ WITH ~ additive_expression
+    | ENDS ~ WITH ~ additive_expression
+    | VALID_AT ~ ("(" ~ expression ~ ("," ~ string ~ "," ~ string)? ~ ")" | expression)
+}
+
+additive_expression = { multiplicative_expression ~ ((plus | minus) ~ multiplicative_expression)* }
+
+multiplicative_expression = { power_expression ~ ((star | slash | percent) ~ power_expression)* }
+
+power_expression = { unary_expression ~ (caret ~ unary_expression)* }
+
+unary_expression = { minus? ~ postfix_expression }
+
+postfix_expression = { primary_expression ~ postfix_suffix* }
+
+postfix_suffix = {
+    "." ~ identifier_or_keyword                              // Property access
+    | "[" ~ expression ~ "]"                                  // Index
+    | "[" ~ expression? ~ dot_dot ~ expression? ~ "]"        // Slice
+    | "(" ~ DISTINCT? ~ expression_list? ~ ")" ~ window_spec? // Function call with optional DISTINCT
+    | "{" ~ map_projection_items ~ "}"                       // Map projection
+}
+
+window_spec = { OVER ~ "(" ~ partition_clause? ~ order_clause? ~ ")" }
+partition_clause = { PARTITION ~ BY ~ expression_list }
+order_clause = { ORDER ~ BY ~ sort_items }
+
+primary_expression = {
+    literal
+    | parameter
+    | case_expression
+    | exists_expression
+    | count_subquery
+    | collect_subquery
+    | quantifier_expression
+    | reduce_expression
+    | list_expression                                         // Handles all [...] cases
+    | map_literal
+    | pattern_expression                                       // Pattern as boolean: (n)-->(m)
+    | "(" ~ expression ~ ")"
+    | COUNT ~ "(" ~ DISTINCT? ~ count_args ~ ")" ~ window_spec?
+    | EXISTS ~ "(" ~ expression_list ~ ")"
+    | function_name                                           // Function names (including keywords)
+    | identifier                                              // Variable
+}
+
+// Pattern used as expression (boolean test): (n)-->(m) returns true if pattern exists
+pattern_expression = { node_pattern ~ (relationship_pattern ~ node_pattern)+ }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// LIST EXPRESSIONS
+// ═══════════════════════════════════════════════════════════════════════════
+
+list_expression = {
+    "[" ~ "]"                                                 // Empty list
+    | "[" ~ pattern_comprehension_body ~ "]"                  // Pattern comprehension
+    | "[" ~ list_comprehension_body ~ "]"                     // List comprehension  
+    | "[" ~ expression ~ ("," ~ expression)* ~ "]"            // List literal
+}
+
+// Pattern comprehension: [p = (n)-->(m) WHERE ... | expr] or [(n)-->(m) | expr]
+pattern_comprehension_body = {
+    (identifier ~ "=")? ~ pattern_path ~ (WHERE ~ expression)? ~ pipe ~ expression
+}
+
+// List comprehension: [x IN list WHERE pred | expr] or [x IN list WHERE pred] or [x IN list | expr]
+list_comprehension_body = {
+    identifier ~ IN ~ comprehension_source ~ (WHERE ~ expression)? ~ (pipe ~ expression)?
+}
+
+// Source expression for IN clause - stops before pipe to avoid ambiguity
+// Uses comparison_expression which doesn't include pipe
+comprehension_source = { comparison_expression }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// LITERALS
+// ═══════════════════════════════════════════════════════════════════════════
+
+literal = {
+    infinity                                                  // Must come before float!
+    | nan                                                     // Must come before float!
+    | float                                                   // Must come before integer!
+    | integer
+    | string
+    | TRUE
+    | FALSE
+    | NULL
+}
+
+map_literal = { "{" ~ (map_entry ~ ("," ~ map_entry)*)? ~ "}" }
+map_entry = { (string | identifier_or_keyword) ~ ":" ~ expression }
+
+map_projection_items = { map_projection_item ~ ("," ~ map_projection_item)* }
+map_projection_item = {
+    "." ~ star                                                // .*
+    | "." ~ identifier_or_keyword                             // .property
+    | identifier_or_keyword ~ ":" ~ expression                // key: expr
+    | identifier                                              // variable
+}
+
+expression_list = { expression ~ ("," ~ expression)* }
+
+count_args = { star | expression_list }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PATTERNS
+// ═══════════════════════════════════════════════════════════════════════════
+
+pattern = { pattern_path ~ ("," ~ pattern_path)* }
+
+pattern_path = {
+    (identifier ~ "=")? ~ (shortest_path_pattern | pattern_element+)
+}
+
+shortest_path_pattern = {
+    (^"shortestpath" | ^"allshortestpaths") ~ "(" ~ pattern_element+ ~ ")"
+}
+
+pattern_element = {
+    node_pattern ~ (relationship_pattern ~ node_pattern)*
+    | parenthesized_pattern
+}
+
+parenthesized_pattern = {
+    "(" ~ (identifier ~ "=")? ~ pattern_part ~ (WHERE ~ expression)? ~ ")" ~ path_quantifier?
+}
+
+pattern_part = {
+    node_pattern ~ (relationship_pattern ~ node_pattern)*
+}
+
+path_quantifier = {
+    plus                                          // +
+    | star                                        // *
+    | "{" ~ integer ~ "}"                         // {3}
+    | "{" ~ integer? ~ "," ~ integer? ~ "}"       // {2,5}
+}
+
+node_pattern = {
+    "(" ~ identifier? ~ node_labels? ~ node_predicate? ~ ")"
+}
+
+node_predicate = {
+    properties ~ WHERE ~ expression
+    | WHERE ~ expression
+    | properties
+}
+
+node_labels = { (":" ~ identifier_or_keyword)+ }
+
+relationship_pattern = {
+    arrow_left ~ "[" ~ relationship_detail ~ "]" ~ arrow_right // <-[]->, bidirectional with detail
+    | arrow_left ~ "[" ~ relationship_detail ~ "]" ~ minus      // <-[]-, incoming with detail
+    | minus ~ "[" ~ relationship_detail ~ "]" ~ arrow_right     // -[]->, outgoing with detail
+    | minus ~ "[" ~ relationship_detail ~ "]" ~ minus           // -[]-, undirected with detail
+    | arrow_bidirectional                                        // <-->, undirected shorthand
+    | arrow_left ~ minus                                         // <--, incoming
+    | minus ~ arrow_right                                        // -->, outgoing
+    | minus ~ minus                                              // --, undirected
+}
+
+relationship_detail = {
+    identifier? ~ relationship_types? ~ range_literal? ~ rel_predicate?
+}
+
+rel_predicate = {
+    properties ~ WHERE ~ expression
+    | WHERE ~ expression
+    | properties
+}
+
+relationship_types = { ":" ~ identifier_or_keyword ~ (pipe ~ ":"? ~ identifier_or_keyword)* }
+
+range_literal = { star ~ integer? ~ (dot_dot ~ integer?)? }
+
+properties = { map_literal | parameter }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// QUERY STRUCTURE
+// ═══════════════════════════════════════════════════════════════════════════
+
+query = { SOI ~ union_query ~ time_travel_clause? ~ EOI }
+
+time_travel_clause = {
+    VERSION ~ AS ~ OF ~ string
+  | TIMESTAMP_KW ~ AS ~ OF ~ string
+}
+
+union_query = {
+    single_query ~ (union_operator ~ single_query)*
+}
+
+union_operator = { UNION ~ ALL? }
+
+single_query = {
+    explain_query
+    | statement
+    | schema_command
+    | transaction_command
+}
+
+statement = { clause+ }
+
+clause = {
+    match_clause
+    | create_clause
+    | merge_clause
+    | delete_clause
+    | set_clause
+    | remove_clause
+    | with_recursive_clause
+    | with_clause
+    | return_clause
+    | unwind_clause
+    | call_clause
+    | load_csv_clause
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// CLAUSES
+// ═══════════════════════════════════════════════════════════════════════════
+
+match_clause = { OPTIONAL? ~ MATCH ~ pattern ~ where_clause? }
+
+where_clause = { WHERE ~ expression }
+
+create_clause = { CREATE ~ pattern }
+
+merge_clause = { MERGE ~ pattern_path ~ merge_action* }
+merge_action = { ON ~ (MATCH | CREATE) ~ set_clause }
+
+delete_clause = { DETACH? ~ DELETE ~ expression_list }
+
+set_clause = { SET ~ set_item ~ ("," ~ set_item)* }
+set_item = {
+    identifier ~ plus_eq ~ expression                         // n += {props}
+    | identifier ~ node_labels                                // n:Label
+    | property_expr ~ eq ~ expression                         // n.prop = value
+    | identifier ~ eq ~ expression                            // n = m
+}
+property_expr = { ("(" ~ identifier ~ ")" | identifier) ~ ("." ~ identifier_or_keyword)+ }
+property_expression_list = { property_expr ~ ("," ~ property_expr)* }
+
+remove_clause = { REMOVE ~ remove_item ~ ("," ~ remove_item)* }
+remove_item = {
+    property_expr                                             // n.prop
+    | identifier ~ node_labels                                // n:Label
+}
+
+return_clause = { 
+    RETURN ~ DISTINCT? ~ return_items ~ order_clause? ~ skip_clause? ~ limit_clause? 
+}
+
+with_clause = {
+    WITH ~ DISTINCT? ~ return_items ~ order_clause? ~ skip_clause? ~ limit_clause? ~ where_clause?
+}
+
+with_recursive_clause = {
+    WITH ~ RECURSIVE ~ identifier ~ AS ~ "(" ~ union_query ~ ")"
+}
+
+return_items = {
+    star ~ ("," ~ return_item)*                               // RETURN *, items
+    | return_item ~ ("," ~ return_item)*                      // RETURN items
+}
+return_item = { expression ~ (AS ~ alias_identifier)? }
+
+sort_items = { sort_item ~ ("," ~ sort_item)* }
+sort_item = { expression ~ (ASC | DESC)? }
+
+skip_clause = { SKIP ~ expression }
+limit_clause = { LIMIT ~ expression }
+
+unwind_clause = { UNWIND ~ expression ~ AS ~ identifier }
+
+call_clause = {
+    CALL ~ "{" ~ statement ~ "}"                              // Subquery
+    | CALL ~ qualified_name ~ ("(" ~ expression_list? ~ ")")? ~ yield_clause?  // Procedure
+}
+qualified_name = { identifier_or_keyword ~ ("." ~ identifier_or_keyword)* }
+yield_clause = { YIELD ~ yield_items ~ where_clause? }
+yield_items = {
+    star
+    | yield_item ~ ("," ~ yield_item)*
+}
+yield_item = { identifier_or_keyword ~ (AS ~ alias_identifier)? }
+
+load_csv_clause = {
+    LOAD ~ CSV ~ (WITH ~ HEADERS)? ~ FROM ~ expression ~ AS ~ identifier 
+    ~ (FIELDTERMINATOR ~ string)?
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SPECIAL EXPRESSIONS
+// ═══════════════════════════════════════════════════════════════════════════
+
+case_expression = {
+    CASE ~ expression? ~ when_clause+ ~ else_clause? ~ END
+}
+when_clause = { WHEN ~ expression ~ THEN ~ expression }
+else_clause = { ELSE ~ expression }
+
+// EXISTS can contain a full statement OR a pattern with optional WHERE
+exists_expression = { EXISTS ~ "{" ~ exists_subquery_content ~ "}" }
+
+exists_subquery_content = {
+    statement
+    | pattern ~ where_clause?
+}
+
+count_subquery = { COUNT ~ "{" ~ (statement | pattern) ~ "}" }
+
+collect_subquery = { COLLECT ~ "{" ~ statement ~ "}" }
+
+quantifier_expression = {
+    (ALL | ANY_KW | SINGLE | NONE) ~ "(" ~ identifier ~ IN ~ expression ~ WHERE ~ expression ~ ")"
+}
+
+reduce_expression = {
+    REDUCE ~ "(" ~ identifier ~ eq ~ expression ~ ","
+    ~ identifier ~ IN ~ comprehension_source ~ pipe ~ expression ~ ")"
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SCHEMA COMMANDS
+// ═══════════════════════════════════════════════════════════════════════════
+
+schema_command = {
+    create_vector_index
+    | create_fulltext_index
+    | create_scalar_index
+    | create_json_index
+    | drop_index
+    | create_constraint
+    | drop_constraint
+    | create_label
+    | create_edge_type
+    | alter_label
+    | alter_edge_type
+    | drop_label
+    | drop_edge_type
+    | show_constraints
+    | show_indexes
+    | show_database
+    | show_config
+    | show_statistics
+    | vacuum_command
+    | checkpoint_command
+    | backup_command
+    | copy_to
+    | copy_from
+}
+
+create_vector_index = {
+    CREATE ~ VECTOR ~ INDEX ~ identifier ~ if_not_exists?
+    ~ FOR ~ "(" ~ identifier ~ (":" ~ identifier_or_keyword)? ~ ")"
+    ~ ON ~ ("(" ~ property_expr ~ ")" | property_expr)
+    ~ (OPTIONS ~ map_literal)?
+}
+
+create_fulltext_index = {
+    CREATE ~ FULLTEXT ~ INDEX ~ identifier ~ if_not_exists?
+    ~ FOR ~ "(" ~ identifier ~ (":" ~ identifier_or_keyword)? ~ ")"
+    ~ ON ~ EACH? ~ "[" ~ property_expression_list ~ "]"
+    ~ (OPTIONS ~ map_literal)?
+}
+
+create_scalar_index = {
+    CREATE ~ INDEX ~ if_not_exists? ~ identifier
+    ~ FOR ~ "(" ~ identifier ~ ":" ~ identifier_or_keyword ~ ")"
+    ~ ON ~ "(" ~ index_expression_list ~ ")"
+    ~ where_clause?
+    ~ (OPTIONS ~ map_literal)?
+}
+
+index_expression_list = { expression ~ ("," ~ expression)* }
+
+create_json_index = {
+    CREATE ~ JSON ~ FULLTEXT ~ INDEX ~ identifier_or_keyword ~ if_not_exists?
+    ~ FOR ~ "(" ~ identifier ~ ":" ~ identifier_or_keyword ~ ")" ~ ON ~ identifier
+    ~ (OPTIONS ~ map_literal)?
+}
+
+drop_index = { DROP_KW ~ INDEX ~ if_exists? ~ identifier }
+
+create_constraint = {
+    CREATE ~ CONSTRAINT ~ if_not_exists? ~ identifier?
+    ~ ON ~ "(" ~ identifier ~ ":" ~ identifier_or_keyword ~ ")"
+    ~ ASSERT ~ constraint_assertion
+}
+constraint_assertion = {
+    EXISTS ~ "(" ~ property_expr ~ ")"                        // EXISTS(n.prop)
+    | property_expr ~ IS ~ UNIQUE                             // n.prop IS UNIQUE
+    | property_expr ~ IS ~ NODE? ~ KEY                        // n.prop IS KEY
+    | "(" ~ identifier_list ~ ")" ~ IS ~ (NODE | RELATIONSHIP)? ~ (UNIQUE | KEY)  // Fallback
+    | expression                                              // CHECK constraint with arbitrary expression
+}
+
+drop_constraint = { DROP_KW ~ CONSTRAINT ~ if_exists? ~ identifier }
+
+create_label = {
+    CREATE ~ LABEL ~ if_not_exists? ~ identifier_or_keyword 
+    ~ "(" ~ property_definitions ~ ")"
+}
+
+create_edge_type = {
+    CREATE ~ EDGE ~ TYPE ~ if_not_exists? ~ identifier_or_keyword
+    ~ ("(" ~ property_definitions? ~ ")")? 
+    ~ FROM ~ identifier_or_keyword ~ TO ~ identifier_or_keyword
+}
+
+alter_label = { ALTER ~ LABEL ~ identifier_or_keyword ~ alter_action }
+alter_edge_type = { ALTER ~ EDGE ~ TYPE ~ identifier_or_keyword ~ alter_action }
+
+alter_action = {
+    ADD ~ PROPERTY ~ property_definition
+    | DROP_KW ~ PROPERTY ~ identifier
+    | RENAME ~ PROPERTY ~ identifier ~ TO ~ identifier
+}
+
+drop_label = { DROP_KW ~ LABEL ~ if_exists? ~ identifier_or_keyword }
+drop_edge_type = { DROP_KW ~ EDGE ~ TYPE ~ if_exists? ~ identifier_or_keyword }
+
+show_constraints = { SHOW ~ CONSTRAINTS ~ constraint_target? }
+constraint_target = {
+    ON ~ "(" ~ identifier_or_keyword ~ ")"
+    | ON ~ EDGE ~ "(" ~ identifier_or_keyword ~ ")"
+}
+
+show_indexes = { SHOW ~ (VECTOR | FULLTEXT)? ~ INDEXES }
+show_database = { SHOW ~ DATABASE }
+show_config = { SHOW ~ CONFIG }
+show_statistics = { SHOW ~ STATISTICS }
+vacuum_command = { VACUUM }
+checkpoint_command = { CHECKPOINT }
+backup_command = { BACKUP ~ TO ~ string }
+
+copy_to = { COPY ~ identifier_or_keyword ~ TO ~ string ~ (WITH ~ map_literal)? }
+copy_from = { COPY ~ identifier_or_keyword ~ FROM ~ string ~ (WITH ~ map_literal)? }
+
+property_definitions = { property_definition ~ ("," ~ property_definition)* }
+property_definition = {
+    identifier ~ identifier_or_keyword ~ nullable_constraint? ~ UNIQUE? ~ default_value?
+}
+nullable_constraint = { NOT ~ NULL | NULL }
+default_value = { DEFAULT ~ expression }
+
+if_not_exists = { IF ~ NOT ~ EXISTS }
+if_exists = { IF ~ EXISTS }
+identifier_list = { identifier_or_keyword ~ ("," ~ identifier_or_keyword)* }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// TRANSACTION COMMANDS
+// ═══════════════════════════════════════════════════════════════════════════
+
+transaction_command = {
+    BEGIN ~ TRANSACTION?
+    | COMMIT
+    | ROLLBACK
+}
+
+// EXPLAIN wrapper
+explain_query = { EXPLAIN ~ (statement | schema_command) }

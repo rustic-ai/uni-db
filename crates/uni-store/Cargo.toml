@@ -1,0 +1,45 @@
+[package]
+name = "uni-store"
+description = "Storage layer for Uni graph database - Lance datasets, LSM deltas, and WAL"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+uni-common = { workspace = true }
+uni-crdt = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+jsonb = "0.5.3"
+anyhow = { workspace = true }
+tracing = { workspace = true }
+log = { workspace = true }
+arrow = { workspace = true }
+arrow-array = { workspace = true }
+arrow-schema = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+parking_lot = { workspace = true }
+bytes = { workspace = true }
+async-trait = { workspace = true }
+tempfile = { workspace = true }
+dashmap = "6.0"
+lru = "0.16"
+metrics = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+futures = "0.3"
+lance = { workspace = true }
+lance-index = { version = "1.0.1" }
+lance-linalg = { version = "1.0.1" }
+lancedb = { workspace = true }
+fastembed = { workspace = true }
+object_store = { workspace = true }
+url = { workspace = true }
+sha3 = "0.10.8"
+
+[dev-dependencies]
+tempfile = { workspace = true }
+proptest = { workspace = true }
