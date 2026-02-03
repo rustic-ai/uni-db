@@ -56,6 +56,13 @@ bindings/*/test_db_*/
 test_db_*/
 *.proptest-regressions
 
+# Generated docs
+bindings/uni-db/docs/
+bindings/uni-pydantic/docs/
+
+# Local binaries
+bin/
+
 CLAUDE.md
 GEMINI.md
 
