@@ -149,7 +149,7 @@ jobs:
 
       - name: Install Python dependencies (uni-db)
         working-directory: bindings/uni-db
-        run: poetry install
+        run: poetry install --with dev
 
       - name: Build Python bindings (uni-db)
         working-directory: bindings/uni-db
@@ -165,7 +165,7 @@ jobs:
 
       - name: Install Python dependencies (uni-pydantic)
         working-directory: bindings/uni-pydantic
-        run: poetry install
+        run: poetry install --with dev
 
       - name: Lint Python code (uni-pydantic)
         working-directory: bindings/uni-pydantic
