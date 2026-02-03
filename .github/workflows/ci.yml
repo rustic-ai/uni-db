@@ -20,9 +20,10 @@ env:
 
 jobs:
   # Basic tests and lints
+  # Uses xlarge runner for faster builds (8 cores, 32GB RAM)
   test:
     name: Test
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-xlarge
     steps:
       - uses: actions/checkout@v4
 
