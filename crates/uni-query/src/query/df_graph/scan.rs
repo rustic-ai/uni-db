@@ -3,12 +3,12 @@
 
 //! Graph scan execution plan for DataFusion.
 //!
-//! This module provides [`GraphScanExec`], a DataFusion [`ExecutionPlan`] that scans
+//! This module provides [`GraphScanExec`], a DataFusion `ExecutionPlan` that scans
 //! vertices or edges from storage with property materialization. It wraps the
 //! underlying Lance table scan with:
 //!
 //! - MVCC resolution via L0 buffer overlays
-//! - Property column materialization from [`PropertyManager`]
+//! - Property column materialization from `PropertyManager`
 //! - Filter pushdown to storage layer
 //!
 //! # Column Naming Convention

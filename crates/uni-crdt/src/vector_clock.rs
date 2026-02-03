@@ -38,7 +38,7 @@ impl VectorClock {
     }
 
     /// Returns true if self causally happened before other.
-    /// A < B iff for all k: A[k] <= B[k] AND exists k: A[k] < B[k].
+    /// A < B iff for all k: A\[k\] <= B\[k\] AND exists k: A\[k\] < B\[k\].
     pub fn happened_before(&self, other: &VectorClock) -> bool {
         let mut strictly_less = false;
 

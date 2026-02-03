@@ -334,7 +334,6 @@ impl Uni {
                     raw.count_rows(None)
                         .await
                         .map_err(|e| UniError::Internal(anyhow::anyhow!(e)))?
-                        as usize
                 } else {
                     0
                 }

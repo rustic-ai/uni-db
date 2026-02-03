@@ -31,7 +31,7 @@
 //! # Expression Translation
 //!
 //! Cypher expressions are translated to DataFusion expressions using
-//! [`cypher_expr_to_df`] from the [`df_expr`] module.
+//! [`cypher_expr_to_df`] from the `df_expr` module.
 
 use crate::query::df_expr::{TranslationContext, cypher_expr_to_df};
 use crate::query::df_graph::traverse::GraphVariableLengthTraverseExec;

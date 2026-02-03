@@ -685,7 +685,7 @@ pub enum ListAfterIdentifier {
         more: Vec<Expr>,
     },
 
-    /// [id, ...] or [id] - List literal with simple identifier element
+    /// \[id, ...\] or \[id\] - List literal with simple identifier element
     SimpleTail { more: Vec<Expr> },
 }
 
@@ -719,7 +719,7 @@ impl ListAfterIdentifier {
 }
 
 /// Expression suffix for building complex expressions after an identifier.
-/// Used to parse things like: id.prop, id[0], id(), id+1, etc.
+/// Used to parse things like: id.prop, id\[0\], id(), id+1, etc.
 #[derive(Debug, Clone)]
 pub enum ExprSuffix {
     // Postfix operators

@@ -4,13 +4,13 @@
 
 //! Custom graph operators for DataFusion execution.
 //!
-//! This module provides DataFusion [`ExecutionPlan`] implementations for graph-specific
+//! This module provides DataFusion `ExecutionPlan` implementations for graph-specific
 //! operations that cannot be expressed in standard relational algebra:
 //!
 //! - [`GraphScanExec`]: Scans vertices/edges with property materialization
 //! - [`GraphExtIdLookupExec`]: Looks up a vertex by external ID
 //! - [`GraphTraverseExec`]: Single-hop edge traversal using CSR adjacency
-//! - [`GraphVariableLengthTraverseExec`]: Multi-hop BFS traversal
+//! - `GraphVariableLengthTraverseExec`: Multi-hop BFS traversal
 //! - [`GraphShortestPathExec`]: Shortest path computation
 //!
 //! # Architecture
