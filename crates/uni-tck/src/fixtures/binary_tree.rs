@@ -14,17 +14,24 @@ pub async fn load_binary_tree_1(db: &Uni) -> Result<()> {
 
     // Create a simple binary tree structure
     // Root node
-    db.execute("CREATE (root:Node {id: 0, value: 'root'})").await?;
+    db.execute("CREATE (root:Node {id: 0, value: 'root'})")
+        .await?;
 
     // Left subtree
-    db.execute("CREATE (left:Node {id: 1, value: 'left'})").await?;
-    db.execute("CREATE (ll:Node {id: 3, value: 'left-left'})").await?;
-    db.execute("CREATE (lr:Node {id: 4, value: 'left-right'})").await?;
+    db.execute("CREATE (left:Node {id: 1, value: 'left'})")
+        .await?;
+    db.execute("CREATE (ll:Node {id: 3, value: 'left-left'})")
+        .await?;
+    db.execute("CREATE (lr:Node {id: 4, value: 'left-right'})")
+        .await?;
 
     // Right subtree
-    db.execute("CREATE (right:Node {id: 2, value: 'right'})").await?;
-    db.execute("CREATE (rl:Node {id: 5, value: 'right-left'})").await?;
-    db.execute("CREATE (rr:Node {id: 6, value: 'right-right'})").await?;
+    db.execute("CREATE (right:Node {id: 2, value: 'right'})")
+        .await?;
+    db.execute("CREATE (rl:Node {id: 5, value: 'right-left'})")
+        .await?;
+    db.execute("CREATE (rr:Node {id: 6, value: 'right-right'})")
+        .await?;
 
     // Create edges (relationships)
     // Note: This is a simplified version, actual implementation

@@ -22,7 +22,9 @@ pub fn match_result(
 
     let expected_cols = validate_columns(actual, expected_rows)?;
 
-    for (i, (actual_row, expected_row)) in actual.rows().iter().zip(expected_rows.iter()).enumerate() {
+    for (i, (actual_row, expected_row)) in
+        actual.rows().iter().zip(expected_rows.iter()).enumerate()
+    {
         compare_row(actual_row, expected_row, &expected_cols, i)?;
     }
 
@@ -53,20 +55,29 @@ pub fn match_result_unordered(
     for (i, actual_row) in actual.rows().iter().enumerate() {
         let match_idx = unmatched.iter().position(|expected_row| {
             expected_cols.iter().all(|col| {
-                let Some(expected_val) = expected_row.get(col) else { return false };
-                let Some(actual_val) = actual_row.value(col) else { return false };
+                let Some(expected_val) = expected_row.get(col) else {
+                    return false;
+                };
+                let Some(actual_val) = actual_row.value(col) else {
+                    return false;
+                };
                 values_equal(actual_val, expected_val)
             })
         });
 
         match match_idx {
-            Some(idx) => { unmatched.remove(idx); }
+            Some(idx) => {
+                unmatched.remove(idx);
+            }
             None => return Err(format!("No match found for actual row {}", i)),
         }
     }
 
     if !unmatched.is_empty() {
-        return Err(format!("{} expected rows were not matched", unmatched.len()));
+        return Err(format!(
+            "{} expected rows were not matched",
+            unmatched.len()
+        ));
     }
 
     Ok(())
@@ -78,7 +89,7 @@ fn validate_columns(
     expected_rows: &[HashMap<String, Value>],
 ) -> Result<Vec<String>, String> {
     let expected_cols: Vec<String> = expected_rows[0].keys().cloned().collect();
-    let actual_cols: Vec<String> = actual.columns().iter().cloned().collect();
+    let actual_cols: Vec<String> = actual.columns().to_vec();
 
     for col in &expected_cols {
         if !actual_cols.contains(col) {
@@ -103,11 +114,14 @@ fn compare_row(
 ) -> Result<(), String> {
     for col in columns {
         let expected_val = expected_row.get(col).ok_or_else(|| {
-            format!("Expected column '{}' not found in expected row {}", col, row_index)
+            format!(
+                "Expected column '{}' not found in expected row {}",
+                col, row_index
+            )
         })?;
-        let actual_val = actual_row.value(col).ok_or_else(|| {
-            format!("Column '{}' not found in actual row {}", col, row_index)
-        })?;
+        let actual_val = actual_row
+            .value(col)
+            .ok_or_else(|| format!("Column '{}' not found in actual row {}", col, row_index))?;
 
         if !values_equal(actual_val, expected_val) {
             return Err(format!(
@@ -192,17 +206,17 @@ mod tests {
 
     #[test]
     fn test_values_equal_floats() {
-        assert!(values_equal(&Value::Float(3.14), &Value::Float(3.14)));
-        assert!(values_equal(
-            &Value::Float(1.0 + 1e-11),
-            &Value::Float(1.0)
-        ));
+        assert!(values_equal(&Value::Float(3.15), &Value::Float(3.15)));
+        assert!(values_equal(&Value::Float(1.0 + 1e-11), &Value::Float(1.0)));
         assert!(!values_equal(&Value::Float(1.0), &Value::Float(2.0)));
     }
 
     #[test]
     fn test_values_equal_nan() {
-        assert!(values_equal(&Value::Float(f64::NAN), &Value::Float(f64::NAN)));
+        assert!(values_equal(
+            &Value::Float(f64::NAN),
+            &Value::Float(f64::NAN)
+        ));
     }
 
     #[test]

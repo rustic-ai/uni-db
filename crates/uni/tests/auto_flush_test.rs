@@ -19,7 +19,7 @@ async fn test_l0_auto_flush_threshold() -> anyhow::Result<()> {
 
     // 1. Setup Schema
     let schema_manager = SchemaManager::load(&schema_path).await?;
-    let person_lbl = schema_manager.add_label("Person")?;
+    let _person_lbl = schema_manager.add_label("Person")?;
     schema_manager.save().await?;
     let schema_manager = Arc::new(schema_manager);
 

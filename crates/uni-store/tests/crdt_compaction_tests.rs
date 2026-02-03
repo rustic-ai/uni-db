@@ -65,7 +65,7 @@ mod basic_compaction {
         let schema_manager = Arc::new(SchemaManager::load_from_store(store, &schema_path).await?);
 
         // Setup schema with CRDT property
-        let label_id = schema_manager.add_label("Counter")?;
+        let _label_id = schema_manager.add_label("Counter")?;
         schema_manager.add_property(
             "Counter",
             "count",
@@ -121,7 +121,7 @@ mod basic_compaction {
 
         let schema_manager = Arc::new(SchemaManager::load_from_store(store, &schema_path).await?);
 
-        let label_id = schema_manager.add_label("Counter")?;
+        let _label_id = schema_manager.add_label("Counter")?;
         schema_manager.add_property(
             "Counter",
             "count",
@@ -183,7 +183,7 @@ mod tombstone_handling {
 
         let schema_manager = Arc::new(SchemaManager::load_from_store(store, &schema_path).await?);
 
-        let label_id = schema_manager.add_label("Counter")?;
+        let _label_id = schema_manager.add_label("Counter")?;
         schema_manager.add_property(
             "Counter",
             "count",
@@ -236,7 +236,7 @@ mod multiple_crdt_types {
 
         let schema_manager = Arc::new(SchemaManager::load_from_store(store, &schema_path).await?);
 
-        let label_id = schema_manager.add_label("MultiCrdt")?;
+        let _label_id = schema_manager.add_label("MultiCrdt")?;
         schema_manager.add_property(
             "MultiCrdt",
             "counter",
@@ -327,7 +327,7 @@ mod mixed_properties {
 
         let schema_manager = Arc::new(SchemaManager::load_from_store(store, &schema_path).await?);
 
-        let label_id = schema_manager.add_label("MixedNode")?;
+        let _label_id = schema_manager.add_label("MixedNode")?;
         schema_manager.add_property(
             "MixedNode",
             "counter",
@@ -405,7 +405,7 @@ mod large_scale {
 
         let schema_manager = Arc::new(SchemaManager::load_from_store(store, &schema_path).await?);
 
-        let label_id = schema_manager.add_label("Counter")?;
+        let _label_id = schema_manager.add_label("Counter")?;
         schema_manager.add_property(
             "Counter",
             "count",
@@ -475,7 +475,7 @@ mod edge_compaction {
 
         let schema_manager = Arc::new(SchemaManager::load_from_store(store, &schema_path).await?);
 
-        let label_id = schema_manager.add_label("Node")?;
+        let _label_id = schema_manager.add_label("Node")?;
         let edge_type = schema_manager.add_edge_type(
             "CONNECTS",
             vec!["Node".to_string()],

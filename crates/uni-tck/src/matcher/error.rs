@@ -82,9 +82,9 @@ fn classify_phase(error: &UniError) -> ErrorPhase {
         | UniError::LabelNotFound { .. }
         | UniError::EdgeTypeNotFound { .. } => ErrorPhase::CompileTime,
 
-        UniError::Type { .. }
-        | UniError::Constraint { .. }
-        | UniError::PropertyNotFound { .. } => ErrorPhase::Runtime,
+        UniError::Type { .. } | UniError::Constraint { .. } | UniError::PropertyNotFound { .. } => {
+            ErrorPhase::Runtime
+        }
 
         _ => ErrorPhase::Runtime,
     }
@@ -144,8 +144,14 @@ mod tests {
 
     #[test]
     fn test_tck_error_type_from_str() {
-        assert_eq!("SyntaxError".parse::<TckErrorType>().unwrap(), TckErrorType::SyntaxError);
-        assert_eq!("TypeError".parse::<TckErrorType>().unwrap(), TckErrorType::TypeError);
+        assert_eq!(
+            "SyntaxError".parse::<TckErrorType>().unwrap(),
+            TckErrorType::SyntaxError
+        );
+        assert_eq!(
+            "TypeError".parse::<TckErrorType>().unwrap(),
+            TckErrorType::TypeError
+        );
         assert_eq!(
             "FooBar".parse::<TckErrorType>().unwrap(),
             TckErrorType::Unknown("FooBar".to_string())

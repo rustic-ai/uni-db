@@ -125,10 +125,7 @@ fn list(input: &str) -> IResult<&str, Vec<Value>> {
 fn map_parser(input: &str) -> IResult<&str, HashMap<String, Value>> {
     let (input, pairs) = delimited(
         preceded(multispace0, char('{')),
-        separated_list0(
-            preceded(multispace0, char(',')),
-            map_entry,
-        ),
+        separated_list0(preceded(multispace0, char(',')), map_entry),
         preceded(multispace0, char('}')),
     )(input)?;
 
@@ -160,11 +157,14 @@ fn node(input: &str) -> IResult<&str, Node> {
     let (input, _) = multispace0(input)?;
     let (input, _) = char(')')(input)?;
 
-    Ok((input, Node {
-        vid: Vid::from(0),
-        label: label.unwrap_or_default().to_string(),
-        properties: properties.unwrap_or_default(),
-    }))
+    Ok((
+        input,
+        Node {
+            vid: Vid::from(0),
+            label: label.unwrap_or_default().to_string(),
+            properties: properties.unwrap_or_default(),
+        },
+    ))
 }
 
 fn edge(input: &str) -> IResult<&str, Edge> {
@@ -177,13 +177,16 @@ fn edge(input: &str) -> IResult<&str, Edge> {
     let (input, _) = multispace0(input)?;
     let (input, _) = char(']')(input)?;
 
-    Ok((input, Edge {
-        eid: Eid::from(0),
-        edge_type: edge_type.unwrap_or_default().to_string(),
-        src: Vid::from(0),
-        dst: Vid::from(0),
-        properties: properties.unwrap_or_default(),
-    }))
+    Ok((
+        input,
+        Edge {
+            eid: Eid::from(0),
+            edge_type: edge_type.unwrap_or_default().to_string(),
+            src: Vid::from(0),
+            dst: Vid::from(0),
+            properties: properties.unwrap_or_default(),
+        },
+    ))
 }
 
 /// Parse a path `<n0-[r1]->n1>`. Currently only handles empty paths.
@@ -194,10 +197,13 @@ fn path(input: &str) -> IResult<&str, Path> {
     let (input, _) = multispace0(input)?;
     let (input, _) = char('>')(input)?;
 
-    Ok((input, Path {
-        nodes: vec![],
-        edges: vec![],
-    }))
+    Ok((
+        input,
+        Path {
+            nodes: vec![],
+            edges: vec![],
+        },
+    ))
 }
 
 #[cfg(test)]
@@ -223,14 +229,20 @@ mod tests {
 
     #[test]
     fn test_parse_float() {
-        assert_eq!(parse_value("3.14").unwrap(), Value::Float(3.14));
+        assert_eq!(parse_value("3.15").unwrap(), Value::Float(3.15));
         assert_eq!(parse_value("-2.5").unwrap(), Value::Float(-2.5));
     }
 
     #[test]
     fn test_parse_string() {
-        assert_eq!(parse_value("'hello'").unwrap(), Value::String("hello".to_string()));
-        assert_eq!(parse_value("'world'").unwrap(), Value::String("world".to_string()));
+        assert_eq!(
+            parse_value("'hello'").unwrap(),
+            Value::String("hello".to_string())
+        );
+        assert_eq!(
+            parse_value("'world'").unwrap(),
+            Value::String("world".to_string())
+        );
     }
 
     #[test]

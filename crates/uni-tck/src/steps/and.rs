@@ -1,5 +1,5 @@
-use cucumber::then;
 use crate::UniWorld;
+use cucumber::then;
 
 #[then("no side effects")]
 async fn no_side_effects(world: &mut UniWorld) {

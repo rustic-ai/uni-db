@@ -21,7 +21,7 @@ async fn test_reader_isolation_lifecycle() -> anyhow::Result<()> {
 
     // 1. Setup
     let schema_manager = SchemaManager::load(&path.join("schema.json")).await?;
-    let person_lbl = schema_manager.add_label("Person")?;
+    let _person_lbl = schema_manager.add_label("Person")?;
     schema_manager.add_property("Person", "name", DataType::String, false)?;
     schema_manager.save().await?;
     let schema_manager = Arc::new(schema_manager);

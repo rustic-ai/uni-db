@@ -39,6 +39,12 @@ pub struct SideEffects {
     pub labels_after: HashSet<String>,
 }
 
+impl Default for UniWorld {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl UniWorld {
     pub fn new() -> Self {
         Self {
@@ -62,8 +68,12 @@ impl UniWorld {
 
     /// Capture graph state before a mutation for side-effect tracking.
     pub async fn capture_state_before(&mut self) -> anyhow::Result<()> {
-        self.side_effects.nodes_before = self.count_by_query("MATCH (n) RETURN count(n) as count").await;
-        self.side_effects.edges_before = self.count_by_query("MATCH ()-[r]->() RETURN count(r) as count").await;
+        self.side_effects.nodes_before = self
+            .count_by_query("MATCH (n) RETURN count(n) as count")
+            .await;
+        self.side_effects.edges_before = self
+            .count_by_query("MATCH ()-[r]->() RETURN count(r) as count")
+            .await;
         self.side_effects.properties_before = 0; // TODO: implement property counting
         self.side_effects.labels_before = self.get_labels().await?;
         Ok(())
@@ -71,8 +81,12 @@ impl UniWorld {
 
     /// Capture graph state after a mutation for side-effect tracking.
     pub async fn capture_state_after(&mut self) -> anyhow::Result<()> {
-        self.side_effects.nodes_after = self.count_by_query("MATCH (n) RETURN count(n) as count").await;
-        self.side_effects.edges_after = self.count_by_query("MATCH ()-[r]->() RETURN count(r) as count").await;
+        self.side_effects.nodes_after = self
+            .count_by_query("MATCH (n) RETURN count(n) as count")
+            .await;
+        self.side_effects.edges_after = self
+            .count_by_query("MATCH ()-[r]->() RETURN count(r) as count")
+            .await;
         self.side_effects.properties_after = 0; // TODO: implement property counting
         self.side_effects.labels_after = self.get_labels().await?;
         Ok(())

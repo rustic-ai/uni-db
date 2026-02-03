@@ -21,7 +21,7 @@ async fn test_vector_clock_integration() -> anyhow::Result<()> {
     let schema_path = ObjectStorePath::from("schema.json");
 
     let schema_manager = Arc::new(SchemaManager::load_from_store(store, &schema_path).await?);
-    let label_id = schema_manager.add_label("Person")?;
+    let _label_id = schema_manager.add_label("Person")?;
     schema_manager.save().await?;
 
     let storage = Arc::new(StorageManager::new(path, schema_manager.clone()).await?);

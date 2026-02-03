@@ -18,7 +18,7 @@ async fn test_snapshot_creation_on_flush() -> anyhow::Result<()> {
 
     // 1. Setup Schema
     let schema_manager = SchemaManager::load(&schema_path).await?;
-    let person_lbl = schema_manager.add_label("Person")?;
+    let _person_lbl = schema_manager.add_label("Person")?;
     let knows_type =
         schema_manager.add_edge_type("knows", vec!["Person".into()], vec!["Person".into()])?;
     schema_manager.save().await?;

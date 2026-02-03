@@ -1,12 +1,17 @@
-use cucumber::then;
-use crate::UniWorld;
-use crate::matcher::{ErrorPhase, TckErrorType, match_error, match_result, match_result_unordered};
+use crate::matcher::{match_error, match_result, match_result_unordered, ErrorPhase, TckErrorType};
 use crate::parser::parse_table;
+use crate::UniWorld;
+use cucumber::then;
 
 #[then("the result should be empty")]
 async fn result_should_be_empty(world: &mut UniWorld) {
     let result = world.result().expect("No result found");
-    assert_eq!(result.len(), 0, "Expected empty result, but got {} rows", result.len());
+    assert_eq!(
+        result.len(),
+        0,
+        "Expected empty result, but got {} rows",
+        result.len()
+    );
 }
 
 #[then(regex = r"^the result should be, in any order:$")]

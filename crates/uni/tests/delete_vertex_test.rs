@@ -16,7 +16,7 @@ async fn test_delete_vertex_persistence() -> anyhow::Result<()> {
     let path = temp_dir.path();
 
     let schema_manager = SchemaManager::load(&path.join("schema.json")).await?;
-    let person_lbl = schema_manager.add_label("Person")?;
+    let _person_lbl = schema_manager.add_label("Person")?;
     schema_manager.add_property("Person", "name", DataType::String, false)?;
     schema_manager.save().await?;
     let schema_manager = Arc::new(schema_manager);
