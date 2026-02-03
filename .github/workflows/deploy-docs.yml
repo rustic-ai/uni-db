@@ -39,6 +39,9 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y mold protobuf-compiler
 
+      - name: Check initial disk space
+        run: df -h
+
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
@@ -63,12 +66,19 @@ jobs:
           cd bindings/uni-db
           maturin build --release
           pip install ../../target/wheels/*.whl
+          rm -rf ../../target/wheels  # Clean up wheels after install
 
       # Install uni-pydantic and its dependencies (pydantic notebooks need it)
       # uni-db requirement is satisfied by wheel installed above
       - name: Install uni-pydantic
         run: |
           pip install ./bindings/uni-pydantic
+
+      # Clean up release artifacts to free disk space (keep wheels)
+      - name: Clean up build artifacts
+        run: |
+          rm -rf target/release
+          df -h
 
       # Install MkDocs and all dependencies for notebook execution
       - name: Install MkDocs dependencies
