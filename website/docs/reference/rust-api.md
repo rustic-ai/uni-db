@@ -574,11 +574,11 @@ println!("Loaded {} vertices, rebuilt {} indexes in {:?}",
 
 ---
 
-## Snapshots
+## Snapshots and Time Travel
 
-Read-only access to historical database states.
+Create/list/restore snapshots, and query historical state via Cypher.
 
-### Snapshot Management
+### Snapshot Management (Rust API)
 
 ```rust
 impl Uni {
@@ -586,77 +586,47 @@ impl Uni {
     /// Returns the snapshot ID
     pub async fn create_snapshot(&self, name: Option<&str>) -> Result<String>;
 
-    /// Create a persisted named snapshot that can be retrieved later
+    /// Create a persisted named snapshot
     pub async fn create_named_snapshot(&self, name: &str) -> Result<String>;
 
     /// List all available snapshots
-    pub async fn list_snapshots(&self) -> Result<Vec<SnapshotInfo>>;
-
-    /// Open a read-only view at a specific snapshot ID
-    pub async fn at_snapshot(&self, snapshot_id: &str) -> Result<Uni>;
-
-    /// Open a read-only view at a named snapshot
-    pub async fn open_named_snapshot(&self, name: &str) -> Result<Uni>;
+    pub async fn list_snapshots(&self) -> Result<Vec<SnapshotManifest>>;
 
     /// Restore database to a snapshot state
     /// Note: Requires restart or re-opening to fully take effect
     pub async fn restore_snapshot(&self, snapshot_id: &str) -> Result<()>;
 }
-
-/// Snapshot metadata
-#[derive(Debug, Clone)]
-pub struct SnapshotInfo {
-    pub id: String,
-    pub name: Option<String>,
-    pub created_at: DateTime<Utc>,
-    pub version: u64,
-}
 ```
 
-### Snapshot Example
-
-```rust
-// Create a named snapshot before making changes
-let snapshot_id = db.create_named_snapshot("before_migration").await?;
-println!("Created snapshot: {}", snapshot_id);
-
-// List available snapshots
-let snapshots = db.list_snapshots().await?;
-for snap in &snapshots {
-    println!("{}: {} ({})", snap.id, snap.name.as_deref().unwrap_or("-"), snap.created_at);
-}
-
-// Open a read-only view at a named snapshot
-let historical = db.open_named_snapshot("before_migration").await?;
-
-// Query historical data
-let old_results = historical.query("MATCH (n) RETURN count(n) AS c").await?;
-println!("Count at snapshot: {}", old_results[0].get::<i64>("c")?);
-
-// Writes fail on snapshot readers
-let result = historical.execute("CREATE (n:Test)").await;
-assert!(result.is_err()); // WriteOnReadOnly error
-
-// Or open by snapshot ID
-let historical2 = db.at_snapshot(&snapshots[0].id).await?;
-```
-
-### Snapshot Procedures
-
-Snapshots can also be managed via Cypher:
+### Snapshot Procedures (Cypher)
 
 ```cypher
-// Create a named snapshot
 CALL uni.admin.snapshot.create('before_migration')
 YIELD snapshot_id
 
-// List snapshots
 CALL uni.admin.snapshot.list()
-YIELD snapshot_id, name, created_at, version_hwm, schema_version
+YIELD snapshot_id, name, created_at, version_hwm
 
-// Restore to a snapshot
 CALL uni.admin.snapshot.restore('before_migration')
 YIELD status
+```
+
+### Time Travel Queries (Cypher)
+
+```rust
+// Query a specific snapshot by ID
+let results = db.query(r#"
+    MATCH (n:Person)
+    RETURN n.name AS name
+    VERSION AS OF 'snap_123'
+"#).await?;
+
+// Query the snapshot that was current at a timestamp
+let results = db.query(r#"
+    MATCH (n:Person)
+    RETURN n.name AS name
+    TIMESTAMP AS OF '2025-02-01T12:00:00Z'
+"#).await?;
 ```
 
 ---
@@ -1212,93 +1182,34 @@ Note: Scalar index variants other than `BTree` are accepted but currently map to
 
 ## Vector Search
 
-### Basic Vector Search
+Vector search is exposed via Cypher:
+
+### Procedure Call
 
 ```rust
-impl Uni {
-    /// Perform vector similarity search
-    pub async fn vector_search(
-        &self,
-        label: &str,
-        property: &str,
-        query: Vec<f32>,
-        k: usize,
-    ) -> Result<Vec<VectorMatch>>;
-
-    /// Vector search with options
-    pub fn vector_search_with(
-        &self,
-        label: &str,
-        property: &str,
-        query: Vec<f32>,
-    ) -> VectorSearchBuilder<'_>;
-}
-
-/// Vector search result
-#[derive(Clone, Debug)]
-pub struct VectorMatch {
-    pub vid: Vid,
-    pub distance: f32,
-}
-```
-
-### VectorSearchBuilder
-
-```rust
-/// Fluent builder for vector searches
-pub struct VectorSearchBuilder<'a> {
-    // Internal state
-}
-
-impl<'a> VectorSearchBuilder<'a> {
-    /// Set number of results to return
-    pub fn k(self, k: usize) -> Self;
-
-    /// Set distance threshold (filter out results above this)
-    pub fn threshold(self, threshold: f32) -> Self;
-
-    /// Add a filter predicate (Lance/DataFusion filter expression)
-    pub fn filter(self, filter: &str) -> Self;
-
-    /// Execute search and return matches
-    pub async fn search(self) -> Result<Vec<VectorMatch>>;
-
-    /// Execute search and fetch full nodes
-    pub async fn fetch_nodes(self) -> Result<Vec<(Node, f32)>>;
-}
-```
-
-### Vector Search Examples
-
-```rust
-// Simple vector search
 let query_embedding = embedding_service.embed("machine learning")?;
-let matches = db.vector_search("Paper", "embedding", query_embedding, 10).await?;
 
-for m in matches {
-    println!("VID: {}, Distance: {:.4}", m.vid, m.distance);
-}
-
-// Vector search with filters and fetch nodes
-let results = db.vector_search_with("Paper", "embedding", query_embedding)
-    .k(20)
-    .threshold(0.5)
-    .filter("year >= 2020")
-    .fetch_nodes()
+let results = db.query_with(r#"
+    CALL uni.vector.query('Paper', 'embedding', $vec, 10)
+    YIELD node, distance
+    RETURN node.title AS title, distance
+    ORDER BY distance
+"#)
+    .param("vec", query_embedding.clone())
+    .fetch_all()
     .await?;
+```
 
-for (node, distance) in results {
-    println!("{} ({:.4})", node.get::<String>("title")?, distance);
-}
+### Operator Form (`~=`) with Scores
 
-// Vector search via Cypher
-let results = db.query_with(
-    "CALL uni.vector.query('Paper', 'embedding', $vec, 10)
-     YIELD node, distance
-     WHERE node.year >= 2020
-     RETURN node.title, distance
-     ORDER BY distance"
-)
+```rust
+let results = db.query_with(r#"
+    MATCH (p:Paper)
+    WHERE p.embedding ~= $vec
+    RETURN p.title AS title, p._score AS score
+    ORDER BY score DESC
+    LIMIT 10
+"#)
     .param("vec", query_embedding)
     .fetch_all()
     .await?;
@@ -1838,11 +1749,11 @@ The following features exist internally but have limited or no exposure through 
 | Transactions | ✅ | ✅ | `begin()`, `transaction()` |
 | Schema definition | ✅ | ✅ | `schema()` builder |
 | Schema introspection | ✅ | ✅ | `list_labels()`, `get_label_info()`, `uni.schema.labels()` |
-| Vector search | ✅ | ✅ | `vector_search()` + `uni.vector.query()` |
+| Vector search | ✅ | ✅ | `uni.vector.query()` + `~=` operator |
 | PageRank / WCC | ✅ | ✅ | `algo().pagerank()` |
 | Session variables | ✅ | ✅ | `session().set().build()` + `$session.*` |
 | Bulk loading | ✅ | — | `bulk_writer()` with deferred indexing |
-| Snapshots | ✅ | ✅ | `create_named_snapshot()`, `open_named_snapshot()`, `uni.admin.snapshot.*` |
+| Snapshots | ✅ | ✅ | `create_named_snapshot()`, `uni.admin.snapshot.*` |
 | EXPLAIN/PROFILE | ✅ | ✅ | `explain()`, `profile()` |
 | Compaction control | ✅ | — | `compact_label()`, `wait_for_compaction()` |
 | Index management | ✅ | — | `rebuild_indexes()`, `index_rebuild_status()` |

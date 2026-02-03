@@ -1451,7 +1451,7 @@ YIELD snapshot_id
 
 // List available snapshots
 CALL uni.admin.snapshot.list()
-YIELD snapshot_id, name, created_at, version_hwm, schema_version
+YIELD snapshot_id, name, created_at, version_hwm
 
 // Restore to a snapshot
 CALL uni.admin.snapshot.restore('before_migration')

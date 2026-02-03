@@ -43,17 +43,17 @@ Uni includes a sample dataset based on academic papers and citations, perfect fo
 
 **Vertices (`papers.jsonl`):**
 ```json
-{"id": "paper_001", "title": "Attention Is All You Need", "year": 2017, "venue": "NeurIPS", "embedding": [0.12, -0.34, ...]}
-{"id": "paper_002", "title": "BERT: Pre-training of Deep Bidirectional Transformers", "year": 2018, "venue": "NAACL", "embedding": [0.08, -0.21, ...]}
+{"vid": 0, "title": "Attention Is All You Need", "year": 2017, "citation_count": 3593, "embedding": [0.12, -0.34, ...]}
+{"vid": 1, "title": "BERT: Pre-training of Deep Bidirectional Transformers", "year": 2018, "citation_count": 1021, "embedding": [0.08, -0.21, ...]}
 ```
 
 **Edges (`citations.jsonl`):**
 ```json
-{"src": "paper_002", "dst": "paper_001"}
-{"src": "paper_003", "dst": "paper_001"}
+{"src_vid": 1, "dst_vid": 0}
+{"src_vid": 2, "dst_vid": 0}
 ```
 
-The `src` paper cites the `dst` paper. In graph terms: `(paper_002)-[:CITES]->(paper_001)`.
+The `src_vid` paper cites the `dst_vid` paper. In graph terms: `(vid=1)-[:CITES]->(vid=0)`.
 
 ---
 
@@ -82,7 +82,7 @@ Import complete!
 ```
 
 The import process:
-1. **Schema Setup** — Creates `Paper` + `CITES` and a JSON index on `_doc.venue`
+1. **Schema Setup** — Creates `Paper` + `CITES`
 2. **Load Papers** — Inserts properties using provided `vid` values
 3. **Flush Papers** — Persists vertex data to storage
 4. **Load Citations** — Inserts edges using `src_vid` / `dst_vid`

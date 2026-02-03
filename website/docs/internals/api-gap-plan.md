@@ -9,7 +9,7 @@ This document outlines the plan to expose internal Uni features. Many features h
 | [Background Compaction](#1-background-compaction) | ✅ **Implemented** | `compact_label()`, `compact_edge_type()`, `wait_for_compaction()` |
 | [S3/GCS Storage](#2-s3gcs-storage-backend) | 🚧 **Planned** | `std::fs` in metadata ops still blocks this |
 | [FTS Queries](#3-full-text-search-queries) | ✅ **Implemented** | CONTAINS, STARTS WITH, ENDS WITH operators working |
-| [Snapshot Management](#4-snapshot-management) | ✅ **Implemented** | `create_snapshot()`, `create_named_snapshot()`, `open_named_snapshot()`, etc. |
+| [Snapshot Management](#4-snapshot-management) | ✅ **Implemented** | `create_snapshot()`, `create_named_snapshot()`, `list_snapshots()`, `restore_snapshot()` |
 
 ---
 
@@ -472,9 +472,8 @@ The following APIs are now available:
 - `create_snapshot(name)` - Create a point-in-time snapshot
 - `create_named_snapshot(name)` - Create a persisted named snapshot
 - `list_snapshots()` - List all available snapshots
-- `at_snapshot(snapshot_id)` - Open read-only view at snapshot ID
-- `open_named_snapshot(name)` - Open read-only view at named snapshot
 - `restore_snapshot(snapshot_id)` - Restore database to snapshot state
+- Time travel queries via `VERSION AS OF` / `TIMESTAMP AS OF`
 
 ### Original State (Historical)
 
@@ -489,42 +488,9 @@ The following APIs are now available:
 
 ```rust
 impl Uni {
-    /// Create a named snapshot
-    pub async fn create_snapshot(&self, name: &str) -> Result<SnapshotId>;
-
-    /// List all snapshots
-    pub async fn list_snapshots(&self) -> Result<Vec<SnapshotInfo>>;
-
-    /// Get snapshot details
-    pub async fn get_snapshot(&self, id: &SnapshotId) -> Result<SnapshotInfo>;
-
-    /// Restore to a snapshot (creates new database state)
-    pub async fn restore_snapshot(&self, id: &SnapshotId) -> Result<()>;
-
-    /// Delete a snapshot
-    pub async fn delete_snapshot(&self, id: &SnapshotId) -> Result<()>;
-
-    /// Open database at specific snapshot (read-only)
-    pub fn at_snapshot(&self, id: &SnapshotId) -> Result<UniSnapshot>;
-}
-
-pub struct SnapshotInfo {
-    pub id: SnapshotId,
-    pub name: Option<String>,
-    pub created_at: SystemTime,
-    pub vertex_count: u64,
-    pub edge_count: u64,
-    pub size_bytes: u64,
-}
-
-/// Read-only view at a snapshot
-pub struct UniSnapshot {
-    // ...
-}
-
-impl UniSnapshot {
-    pub async fn query(&self, cypher: &str) -> Result<QueryResult>;
-    // No mutation methods
+    pub async fn create_snapshot(&self, name: Option<&str>) -> Result<String>;
+    pub async fn list_snapshots(&self) -> Result<Vec<SnapshotManifest>>;
+    pub async fn restore_snapshot(&self, id: &str) -> Result<()>;
 }
 ```
 
@@ -537,7 +503,7 @@ YIELD snapshotId, createdAt
 
 -- List snapshots
 CALL uni.admin.snapshot.list()
-YIELD snapshotId, name, createdAt, vertexCount, edgeCount
+YIELD snapshot_id, name, created_at, version_hwm
 
 -- Restore snapshot
 CALL uni.admin.snapshot.restore($snapshotId)
@@ -547,14 +513,10 @@ CALL uni.admin.snapshot.restore($snapshotId)
 
 | Task | Effort |
 |------|--------|
-| Expose `create_snapshot()` | 0.5 day |
-| Expose `list_snapshots()` / `get_snapshot()` | 0.5 day |
-| Implement `restore_snapshot()` | 0.5 day |
-| Implement `at_snapshot()` read-only view | 0.5 day |
-| Cypher procedures | 0.5 day |
-| Tests | 0.5 day |
+| Polish snapshot metadata (optional) | 0.5 day |
+| Expand time-travel query coverage | 0.5 day |
 
-**Total: 2-3 days**
+**Total: ~1 day**
 
 ---
 

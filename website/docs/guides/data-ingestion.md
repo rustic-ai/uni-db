@@ -35,8 +35,8 @@ The fastest way to load large datasets.
 Each line is a JSON object representing a **Paper** vertex for the built-in demo importer:
 
 ```json
-{"vid": 0, "title": "Attention Is All You Need", "year": 2017, "citation_count": 3593, "embedding": [0.12, -0.34, ...], "_doc": {"venue": "NeurIPS"}}
-{"vid": 1, "title": "BERT", "year": 2018, "citation_count": 1021, "embedding": [0.08, -0.21, ...], "_doc": {"venue": "NAACL"}}
+{"vid": 0, "title": "Attention Is All You Need", "year": 2017, "citation_count": 3593, "embedding": [0.12, -0.34, ...]}
+{"vid": 1, "title": "BERT", "year": 2018, "citation_count": 1021, "embedding": [0.08, -0.21, ...]}
 ```
 
 **Required Fields:**
@@ -47,7 +47,6 @@ Each line is a JSON object representing a **Paper** vertex for the built-in demo
 - `embedding` (Array[Float])
 
 **Optional Fields:**
-- `_doc` (Object): JSON document payload (stored for document labels)
 - Additional fields are ignored by the CLI importer
 
 #### Edges (JSONL)
@@ -96,13 +95,13 @@ uni import semantic-scholar \
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                                                                             │
 │   [1] SCHEMA SETUP                                                          │
-│       └── Create Paper label, CITES edge type, JSON index on _doc.venue     │
+│       └── Create Paper label, CITES edge type                                │
 │                                                                             │
 │   [2] PAPERS PASS                                                           │
 │       ├── Stream papers JSONL                                               │
 │       ├── Use provided VIDs (`vid`)                                         │
 │       ├── Insert properties (title/year/citation_count/embedding)           │
-│       └── Store _doc JSON (optional)                                        │
+│       └── Store schema-defined properties                                   │
 │                                                                             │
 │   [3] FLUSH PAPERS                                                          │
 │       └── Persist vertex data to storage                                    │
@@ -125,7 +124,6 @@ uni import semantic-scholar \
 The `uni import` command uses a **fixed schema** for the demo dataset:
 - Label: `Paper` (document label) with properties `title`, `year`, `citation_count`, `embedding`
 - Edge type: `CITES` (`Paper` → `Paper`)
-- JSON index on `_doc.venue`
 
 The CLI importer **does not** infer or accept a custom schema. For custom schemas, use:
 - **Cypher DDL** (`CREATE LABEL`, `CREATE EDGE TYPE`, `CREATE INDEX`), or

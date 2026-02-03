@@ -68,8 +68,6 @@ pub struct UniConfig {
     /// Write throttling configuration
     pub throttle: WriteThrottleConfig,
 
-    /// Optional snapshot ID to open the database at (time-travel)
-    pub at_snapshot: Option<String>,
 
     /// File sandbox configuration for BACKUP/COPY commands
     pub file_sandbox: FileSandboxConfig,
@@ -100,7 +98,6 @@ pub struct UniConfig {
 | `auto_flush_interval` | duration | 5s | Time-based flush interval (None to disable) |
 | `auto_flush_min_mutations` | count | 1 | Minimum mutations for time-based flush |
 | `wal_enabled` | bool | true | Enable write-ahead logging |
-| `at_snapshot` | string | None | Open database at specific snapshot |
 | `query_timeout` | duration | 30s | Default query execution timeout |
 | `max_query_memory` | bytes | 1 GB | Maximum memory per query |
 

@@ -279,20 +279,18 @@ Before inserting data, define your graph schema with vertex labels, edge types, 
 
 ### Quick Schema Methods
 
-For simple cases, use the direct methods:
+For simple cases, use the schema builder (Rust) or direct schema calls (Python):
 
 === "Rust"
 
     ```rust
-    // Create label
-    db.create_label("Person").await?;
-
-    // Add property (label, name, type)
-    db.add_property("Person", "name", DataType::String, false).await?;  // required
-    db.add_property("Person", "email", DataType::String, true).await?;  // nullable
-
-    // Create index
-    db.create_scalar_index("Person", "name", ScalarType::BTree).await?;
+    db.schema()
+        .label("Person")
+            .property("name", DataType::String)
+            .property_nullable("email", DataType::String)
+            .index("name", IndexType::Scalar(ScalarType::BTree))
+        .apply()
+        .await?;
     ```
 
 === "Python"
@@ -800,32 +798,26 @@ Store and search vector embeddings for semantic similarity.
 === "Rust"
 
     ```rust
-    // Simple vector search
     let query_vec = compute_embedding("deep learning neural networks");
-    let matches = db.vector_search("Document", "embedding", query_vec.clone(), 10).await?;
 
-    for m in &matches {
-        println!("VID: {}, Distance: {:.4}", m.vid, m.distance);
-    }
-
-    // Vector search with builder (filters and options)
-    let results = db.vector_search_with("Document", "embedding", query_vec)
-        .k(20)
-        .threshold(0.5)  // Only results with distance < 0.5
-        .filter("category = 'tutorial'")
-        .fetch_nodes()
-        .await?;
-
-    for (node, distance) in results {
-        println!("{} ({:.4})", node.get::<String>("title")?, distance);
-    }
-
-    // Vector search via Cypher
+    // Vector search via Cypher (procedure)
     let results = db.query_with(r#"
         CALL uni.vector.query('Document', 'embedding', $vec, 10)
         YIELD node, distance
         RETURN node.title AS title, distance
         ORDER BY distance
+    "#)
+        .param("vec", query_vec.clone())
+        .fetch_all()
+        .await?;
+
+    // Vector search via Cypher (operator)
+    let results = db.query_with(r#"
+        MATCH (d:Document)
+        WHERE d.embedding ~= $vec
+        RETURN d.title AS title, d._score AS score
+        ORDER BY score DESC
+        LIMIT 10
     "#)
         .param("vec", query_vec)
         .fetch_all()
@@ -835,26 +827,9 @@ Store and search vector embeddings for semantic similarity.
 === "Python"
 
     ```python
-    # Simple vector search
     query_vec = compute_embedding("deep learning neural networks")
-    matches = db.vector_search("Document", "embedding", query_vec, k=10)
 
-    for m in matches:
-        print(f"VID: {m.vid}, Distance: {m.distance:.4f}")
-
-    # Vector search with builder (filters and options)
-    results = (
-        db.vector_search_with("Document", "embedding", query_vec)
-        .k(20)
-        .threshold(0.5)  # Only results with distance < 0.5
-        .filter("category = 'tutorial'")
-        .search()
-    )
-
-    for m in results:
-        print(f"VID: {m.vid}, Distance: {m.distance:.4f}")
-
-    # Vector search via Cypher
+    # Vector search via Cypher (procedure)
     results = db.query_with("""
         CALL uni.vector.query('Document', 'embedding', $vec, 10)
         YIELD node, distance
@@ -864,6 +839,15 @@ Store and search vector embeddings for semantic similarity.
 
     for row in results:
         print(f"{row['title']}: {row['distance']:.4f}")
+
+    # Vector search via Cypher (operator)
+    results = db.query_with("""
+        MATCH (d:Document)
+        WHERE d.embedding ~= $vec
+        RETURN d.title AS title, d._score AS score
+        ORDER BY score DESC
+        LIMIT 10
+    """).param("vec", query_vec).fetch_all()
     ```
 
 ---
@@ -986,12 +970,10 @@ Sessions provide scoped context for multi-tenant queries.
 
     ```python
     # Create session with tenant context
-    session = (
-        db.session()
-        .set("tenant_id", "acme-corp")
-        .set("user_id", "user-123")
-        .build()
-    )
+    builder = db.session()
+    builder.set("tenant_id", "acme-corp")
+    builder.set("user_id", "user-123")
+    session = builder.build()
 
     # Execute queries with session context
     results = session.query("""
@@ -1041,51 +1023,44 @@ Analyze query execution plans.
 
 ---
 
-## Snapshots
+## Time Travel Queries
 
-Access historical database states.
+Access historical database states using Cypher clauses.
 
 === "Rust"
 
     ```rust
-    // Create a named snapshot
-    let snapshot_id = db.create_snapshot(Some("before_migration")).await?;
+    // Query a specific snapshot by ID
+    let results = db.query(r#"
+        MATCH (n:Person)
+        RETURN n.name AS name
+        VERSION AS OF 'snap_123'
+    "#).await?;
 
-    // List all snapshots
-    for snap in db.list_snapshots().await? {
-        println!("{}: {} ({})",
-            snap.id,
-            snap.name.as_deref().unwrap_or("-"),
-            snap.created_at
-        );
-    }
-
-    // Open read-only view at snapshot
-    let historical = db.at_snapshot(&snapshot_id).await?;
-    let old_count = historical.query("MATCH (n) RETURN count(n) AS c").await?;
-    println!("Count at snapshot: {}", old_count[0].get::<i64>("c")?);
-
-    // Restore to snapshot
-    db.restore_snapshot(&snapshot_id).await?;
+    // Query the snapshot that was current at a timestamp
+    let results = db.query(r#"
+        MATCH (n:Person)
+        RETURN n.name AS name
+        TIMESTAMP AS OF '2025-02-01T12:00:00Z'
+    "#).await?;
     ```
 
 === "Python"
 
     ```python
-    # Create a named snapshot
-    snapshot_id = db.create_snapshot("before_migration")
+    # Query a specific snapshot by ID
+    results = db.query("""
+        MATCH (n:Person)
+        RETURN n.name AS name
+        VERSION AS OF 'snap_123'
+    """)
 
-    # List all snapshots
-    for snap in db.list_snapshots():
-        print(f"{snap.snapshot_id}: {snap.name or '-'} ({snap.vertex_count} vertices)")
-
-    # Open read-only view at snapshot
-    historical = db.at_snapshot(snapshot_id)
-    old_results = historical.query("MATCH (n) RETURN count(n) AS c")
-    print(f"Count at snapshot: {old_results[0]['c']}")
-
-    # Restore to snapshot
-    db.restore_snapshot(snapshot_id)
+    # Query the snapshot that was current at a timestamp
+    results = db.query("""
+        MATCH (n:Person)
+        RETURN n.name AS name
+        TIMESTAMP AS OF '2025-02-01T12:00:00Z'
+    """)
     ```
 
 ---

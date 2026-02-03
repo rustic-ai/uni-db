@@ -136,6 +136,18 @@ ORDER BY distance
 - `distance`: Raw distance value (lower is better)
 - `score`: Normalized similarity score (higher is better, range 0-1)
 
+### Operator Form (`~=`) with Scores
+
+You can also use the `~=` operator to run a vector search and get a similarity score:
+
+```cypher
+MATCH (p:Paper)
+WHERE p.embedding ~= $query_vector
+RETURN p.title, p._score AS score
+ORDER BY score DESC
+LIMIT 10
+```
+
 ### With Distance Threshold
 
 Filter results by maximum distance:
