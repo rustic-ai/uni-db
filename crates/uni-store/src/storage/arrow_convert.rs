@@ -643,32 +643,23 @@ impl<'a> PropertyExtractor<'a> {
     {
         let mut builder = Time64MicrosecondBuilder::with_capacity(len);
         for (i, &is_deleted) in deleted.iter().enumerate().take(len) {
+            if is_deleted {
+                builder.append_value(0);
+                continue;
+            }
+
             let val = get_props(i);
-            let micros = if is_deleted || val.is_none() {
-                Some(0)
-            } else if let Some(v) = val.and_then(|v| v.as_i64()) {
+            let micros = if let Some(v) = val.and_then(|v| v.as_i64()) {
                 Some(v)
             } else if let Some(s) = val.and_then(|v| v.as_str()) {
-                // Try parsing time
-                match chrono::NaiveTime::parse_from_str(s, "%H:%M:%S")
-                    .or_else(|_| chrono::NaiveTime::parse_from_str(s, "%H:%M:%S%.f"))
-                {
-                    Ok(time) => {
-                        use chrono::Timelike;
-                        Some(
-                            time.num_seconds_from_midnight() as i64 * 1_000_000
-                                + time.nanosecond() as i64 / 1000,
-                        )
-                    }
-                    Err(_) => None,
-                }
+                // Try parsing time string in various formats
+                // Supported: "HH:MM", "HH:MM:SS", "HH:MM:SS.fff", etc.
+                parse_time_string_to_micros(s)
             } else {
                 None
             };
 
-            if is_deleted {
-                builder.append_value(0);
-            } else if let Some(v) = micros {
+            if let Some(v) = micros {
                 builder.append_value(v);
             } else {
                 builder.append_null();
@@ -688,7 +679,20 @@ impl<'a> PropertyExtractor<'a> {
     {
         let mut builder = DurationMicrosecondBuilder::with_capacity(len);
         for (i, &is_deleted) in deleted.iter().enumerate().take(len) {
-            let val = get_props(i).and_then(|v| v.as_i64());
+            let raw_val = get_props(i);
+            // Try to get microseconds from i64, or parse from ISO 8601 string
+            let val = raw_val.and_then(|v| {
+                v.as_i64().or_else(|| {
+                    v.as_str().and_then(|s| {
+                        // Parse ISO 8601 duration string (e.g., "PT1H30M")
+                        if s.starts_with('P') || s.starts_with('p') {
+                            parse_iso8601_duration_to_micros(s).ok()
+                        } else {
+                            None
+                        }
+                    })
+                })
+            });
             if val.is_none() && is_deleted {
                 builder.append_value(0);
             } else if let Some(v) = val {
@@ -1057,6 +1061,73 @@ pub fn build_edge_column<'a>(
     let deleted = vec![false; len];
     let extractor = PropertyExtractor::new(name, data_type);
     extractor.build_column(len, &deleted, get_props)
+}
+
+/// Parse a time string to microseconds since midnight.
+///
+/// Supports formats: "HH:MM", "HH:MM:SS", "HH:MM:SS.fff", etc.
+fn parse_time_string_to_micros(s: &str) -> Option<i64> {
+    use chrono::Timelike;
+
+    // Try various formats
+    let time = chrono::NaiveTime::parse_from_str(s, "%H:%M:%S%.f")
+        .or_else(|_| chrono::NaiveTime::parse_from_str(s, "%H:%M:%S"))
+        .or_else(|_| chrono::NaiveTime::parse_from_str(s, "%H:%M"))
+        .ok()?;
+
+    Some(time.num_seconds_from_midnight() as i64 * 1_000_000 + time.nanosecond() as i64 / 1000)
+}
+
+/// Parse ISO 8601 duration string to microseconds.
+///
+/// Supports formats like "PT1H30M", "P1D", "PT90S", etc.
+/// This is a simplified parser for duration storage conversion.
+fn parse_iso8601_duration_to_micros(s: &str) -> Result<i64> {
+    let s = s.trim();
+    if !s.starts_with('P') && !s.starts_with('p') {
+        return Err(anyhow!("Duration must start with 'P'"));
+    }
+
+    const MICROS_PER_SECOND: i64 = 1_000_000;
+    const MICROS_PER_MINUTE: i64 = 60 * MICROS_PER_SECOND;
+    const MICROS_PER_HOUR: i64 = 60 * MICROS_PER_MINUTE;
+    const MICROS_PER_DAY: i64 = 24 * MICROS_PER_HOUR;
+
+    let mut total_micros: i64 = 0;
+    let mut in_time_part = false;
+    let mut num_str = String::new();
+
+    for c in s[1..].chars() {
+        if c == 'T' || c == 't' {
+            in_time_part = true;
+            continue;
+        }
+
+        if c.is_ascii_digit() || c == '.' {
+            num_str.push(c);
+        } else {
+            if num_str.is_empty() {
+                continue;
+            }
+
+            let value: f64 = num_str.parse().map_err(|_| anyhow!("Invalid number"))?;
+            num_str.clear();
+
+            let micros = match c.to_ascii_uppercase() {
+                'Y' => (value * 365.25 * MICROS_PER_DAY as f64) as i64,
+                'M' if !in_time_part => (value * 30.0 * MICROS_PER_DAY as f64) as i64, // months
+                'W' => (value * 7.0 * MICROS_PER_DAY as f64) as i64,
+                'D' => (value * MICROS_PER_DAY as f64) as i64,
+                'H' => (value * MICROS_PER_HOUR as f64) as i64,
+                'M' if in_time_part => (value * MICROS_PER_MINUTE as f64) as i64, // minutes
+                'S' => (value * MICROS_PER_SECOND as f64) as i64,
+                _ => return Err(anyhow!("Unknown duration unit: {}", c)),
+            };
+            total_micros += micros;
+        }
+    }
+
+    Ok(total_micros)
 }
 
 #[cfg(test)]

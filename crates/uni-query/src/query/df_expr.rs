@@ -837,8 +837,10 @@ fn translate_function_call(
         }
         "SIGN" => {
             require_arg(&df_args, "sign")?;
-            Ok(datafusion::functions::math::expr_fn::signum(first_arg(
-                &df_args,
+            // Cast to Float64 for Int64 compatibility (DataFusion signum doesn't support Int64)
+            Ok(datafusion::functions::math::expr_fn::signum(cast_expr(
+                first_arg(&df_args),
+                datafusion::arrow::datatypes::DataType::Float64,
             )))
         }
         "SQRT" => {

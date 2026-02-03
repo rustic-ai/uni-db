@@ -200,13 +200,25 @@ pub fn is_date_value(val: &Value) -> bool {
     }
 }
 
-/// Check if value is a duration (ISO 8601 string starting with 'P' or i64 microseconds).
+/// Check if value is a duration (ISO 8601 string starting with 'P').
+///
+/// Note: Numbers are NOT automatically treated as durations. The duration()
+/// function can accept numbers as microseconds, but arbitrary numbers in
+/// arithmetic expressions should not be interpreted as durations.
 pub fn is_duration_value(val: &Value) -> bool {
     match val {
         Value::String(s) => s.starts_with('P') || s.starts_with('p'),
-        Value::Number(n) => n.is_i64(),
         _ => false,
     }
+}
+
+/// Check if a value is a duration string OR an integer (microseconds).
+///
+/// This is used for temporal arithmetic where integers are implicitly treated
+/// as durations when paired with datetime/date values. For standalone type
+/// checking, use `is_duration_value` instead.
+pub fn is_duration_or_micros(val: &Value) -> bool {
+    is_duration_value(val) || matches!(val, Value::Number(n) if n.is_i64())
 }
 
 /// Convert a duration value (ISO 8601 string or i64 micros) to microseconds.

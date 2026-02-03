@@ -13,7 +13,7 @@ use std::cmp::Ordering;
 use crate::query::datetime::{
     CypherDuration, add_duration_to_date, add_duration_to_datetime, datetime_difference,
     duration_to_micros, eval_datetime_function, is_date_value, is_datetime_value,
-    is_duration_value, parse_datetime_utc,
+    is_duration_or_micros, is_duration_value, parse_datetime_utc,
 };
 use crate::query::spatial::eval_spatial_function;
 use uni_cypher::ast::BinaryOp;
@@ -94,22 +94,22 @@ pub fn eval_binary_op(left: &Value, op: &BinaryOp, right: &Value) -> Result<Valu
                 }
             } else if let (Value::String(l), Value::String(r)) = (left, right) {
                 Ok(Value::String(format!("{}{}", l, r)))
-            } else if is_datetime_value(left) && is_duration_value(right) {
-                // datetime + duration
+            } else if is_datetime_value(left) && is_duration_or_micros(right) {
+                // datetime + duration (ISO 8601 string or i64 microseconds)
                 let dt_str = left.as_str().unwrap();
                 let micros = duration_to_micros(right)?;
                 Ok(Value::String(add_duration_to_datetime(dt_str, micros)?))
-            } else if is_date_value(left) && is_duration_value(right) {
-                // date + duration
+            } else if is_date_value(left) && is_duration_or_micros(right) {
+                // date + duration (ISO 8601 string or i64 microseconds)
                 let dt_str = left.as_str().unwrap();
                 let micros = duration_to_micros(right)?;
                 Ok(Value::String(add_duration_to_date(dt_str, micros)?))
-            } else if is_duration_value(left) && is_datetime_value(right) {
+            } else if is_duration_or_micros(left) && is_datetime_value(right) {
                 // duration + datetime
                 let dt_str = right.as_str().unwrap();
                 let micros = duration_to_micros(left)?;
                 Ok(Value::String(add_duration_to_datetime(dt_str, micros)?))
-            } else if is_duration_value(left) && is_date_value(right) {
+            } else if is_duration_or_micros(left) && is_date_value(right) {
                 // duration + date
                 let dt_str = right.as_str().unwrap();
                 let micros = duration_to_micros(left)?;
@@ -124,13 +124,13 @@ pub fn eval_binary_op(left: &Value, op: &BinaryOp, right: &Value) -> Result<Valu
             }
         }
         BinaryOp::Sub => {
-            if is_datetime_value(left) && is_duration_value(right) {
-                // datetime - duration
+            if is_datetime_value(left) && is_duration_or_micros(right) {
+                // datetime - duration (ISO 8601 string or i64 microseconds)
                 let dt_str = left.as_str().unwrap();
                 let micros = duration_to_micros(right)?;
                 Ok(Value::String(add_duration_to_datetime(dt_str, -micros)?))
-            } else if is_date_value(left) && is_duration_value(right) {
-                // date - duration
+            } else if is_date_value(left) && is_duration_or_micros(right) {
+                // date - duration (ISO 8601 string or i64 microseconds)
                 let dt_str = left.as_str().unwrap();
                 let micros = duration_to_micros(right)?;
                 Ok(Value::String(add_duration_to_date(dt_str, -micros)?))
