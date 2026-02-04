@@ -7,6 +7,39 @@ use uni_common::core::schema::{DataType, SchemaManager};
 
 use uni_query::query::planner::QueryPlanner;
 
+/// Create a SchemaManager backed by a temporary directory.
+/// Returns (SchemaManager, TempDir). TempDir must be kept alive for the duration of the test.
+async fn setup_schema() -> (SchemaManager, tempfile::TempDir) {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("schema.json");
+    let schema_manager = SchemaManager::load(&path).await.unwrap();
+    (schema_manager, dir)
+}
+
+/// Build a QueryPlanner from a SchemaManager.
+fn planner_from(schema_manager: &SchemaManager) -> QueryPlanner {
+    QueryPlanner::new(Arc::new(schema_manager.schema()))
+}
+
+/// Assert that planning the given Cypher query fails with an error containing `expected_code`.
+fn assert_plan_error(planner: &QueryPlanner, cypher: &str, expected_code: &str) {
+    let ast = uni_query::parse_cypher(cypher).unwrap();
+    let res = planner.plan(ast);
+    assert!(
+        res.is_err(),
+        "Expected error containing '{}' for query: {}",
+        expected_code,
+        cypher,
+    );
+    let err_msg = res.unwrap_err().to_string();
+    assert!(
+        err_msg.contains(expected_code),
+        "Error should mention {}, got: {}",
+        expected_code,
+        err_msg,
+    );
+}
+
 /// Test that unknown labels are handled via ScanMainByLabel (schemaless support).
 #[tokio::test]
 async fn test_planner_missing_label() {
@@ -132,4 +165,215 @@ async fn test_planner_vector_search_validation() {
     let res = planner.plan(ast);
     assert!(res.is_ok());
     // This confirms Planner doesn't validate procedure args deeply yet.
+}
+
+// ============================================================================
+// Semantic Validation Tests
+// ============================================================================
+
+#[tokio::test]
+async fn test_semantic_undefined_variable_in_delete() {
+    let (schema_manager, _dir) = setup_schema().await;
+    schema_manager.add_label("Person").unwrap();
+    schema_manager.save().await.unwrap();
+    let planner = planner_from(&schema_manager);
+
+    assert_plan_error(&planner, "MATCH (n:Person) DELETE m", "UndefinedVariable");
+}
+
+#[tokio::test]
+async fn test_semantic_invalid_argument_type_in_delete() {
+    let (schema_manager, _dir) = setup_schema().await;
+    schema_manager.add_label("Person").unwrap();
+    schema_manager.save().await.unwrap();
+    let planner = planner_from(&schema_manager);
+
+    assert_plan_error(
+        &planner,
+        "UNWIND [1, 2, 3] AS x DELETE x",
+        "InvalidArgumentType",
+    );
+}
+
+#[tokio::test]
+async fn test_semantic_invalid_argument_type_in_limit() {
+    let (schema_manager, _dir) = setup_schema().await;
+    schema_manager.add_label("Person").unwrap();
+    schema_manager.save().await.unwrap();
+    let planner = planner_from(&schema_manager);
+
+    assert_plan_error(
+        &planner,
+        "MATCH (n:Person) RETURN n LIMIT 1.5",
+        "InvalidArgumentType",
+    );
+}
+
+#[tokio::test]
+async fn test_semantic_variable_type_conflict() {
+    let (schema_manager, _dir) = setup_schema().await;
+    schema_manager.add_label("Person").unwrap();
+    schema_manager
+        .add_edge_type(
+            "KNOWS",
+            vec!["Person".to_string()],
+            vec!["Person".to_string()],
+        )
+        .unwrap();
+    schema_manager.save().await.unwrap();
+    let planner = planner_from(&schema_manager);
+
+    assert_plan_error(
+        &planner,
+        "MATCH (n:Person)-[n:KNOWS]->(m:Person) RETURN n, m",
+        "VariableTypeConflict",
+    );
+}
+
+#[tokio::test]
+async fn test_semantic_edge_as_node_same_pattern() {
+    let (schema_manager, _dir) = setup_schema().await;
+    schema_manager.add_label("Person").unwrap();
+    schema_manager
+        .add_edge_type(
+            "KNOWS",
+            vec!["Person".to_string()],
+            vec!["Person".to_string()],
+        )
+        .unwrap();
+    schema_manager.save().await.unwrap();
+    let planner = planner_from(&schema_manager);
+
+    assert_plan_error(
+        &planner,
+        "MATCH (a:Person)-[r:KNOWS]->(b:Person), (r) RETURN r",
+        "VariableTypeConflict",
+    );
+}
+
+#[tokio::test]
+async fn test_semantic_variable_already_bound_in_yield() {
+    let (schema_manager, _dir) = setup_schema().await;
+    let planner = planner_from(&schema_manager);
+
+    assert_plan_error(
+        &planner,
+        "CALL db.info() YIELD name, name AS name RETURN name",
+        "VariableAlreadyBound",
+    );
+}
+
+#[tokio::test]
+async fn test_semantic_variable_already_bound_in_create() {
+    let (schema_manager, _dir) = setup_schema().await;
+    schema_manager.add_label("Person").unwrap();
+    schema_manager.save().await.unwrap();
+    let planner = planner_from(&schema_manager);
+
+    assert_plan_error(
+        &planner,
+        "MATCH (n:Person) CREATE (n:Person)",
+        "VariableAlreadyBound",
+    );
+}
+
+#[tokio::test]
+async fn test_semantic_undefined_variable_in_return() {
+    let (schema_manager, _dir) = setup_schema().await;
+    schema_manager.add_label("Person").unwrap();
+    schema_manager.save().await.unwrap();
+    let planner = planner_from(&schema_manager);
+
+    assert_plan_error(&planner, "MATCH (n:Person) RETURN x", "UndefinedVariable");
+}
+
+#[tokio::test]
+async fn test_semantic_undefined_variable_in_where() {
+    let (schema_manager, _dir) = setup_schema().await;
+    schema_manager.add_label("Person").unwrap();
+    schema_manager.save().await.unwrap();
+    let planner = planner_from(&schema_manager);
+
+    assert_plan_error(
+        &planner,
+        "MATCH (n:Person) WHERE m.name = 'Alice' RETURN n",
+        "UndefinedVariable",
+    );
+}
+
+#[tokio::test]
+async fn test_semantic_aggregation_in_where() {
+    let (schema_manager, _dir) = setup_schema().await;
+    schema_manager.add_label("Person").unwrap();
+    schema_manager.save().await.unwrap();
+    let planner = planner_from(&schema_manager);
+
+    assert_plan_error(
+        &planner,
+        "MATCH (n:Person) WHERE count(n) > 5 RETURN n",
+        "InvalidAggregation",
+    );
+}
+
+#[tokio::test]
+async fn test_semantic_negative_skip() {
+    let (schema_manager, _dir) = setup_schema().await;
+    schema_manager.add_label("Person").unwrap();
+    schema_manager.save().await.unwrap();
+    let planner = planner_from(&schema_manager);
+
+    assert_plan_error(
+        &planner,
+        "MATCH (n:Person) RETURN n SKIP -1",
+        "NegativeIntegerArgument",
+    );
+}
+
+#[tokio::test]
+async fn test_semantic_negative_limit() {
+    let (schema_manager, _dir) = setup_schema().await;
+    schema_manager.add_label("Person").unwrap();
+    schema_manager.save().await.unwrap();
+    let planner = planner_from(&schema_manager);
+
+    assert_plan_error(
+        &planner,
+        "MATCH (n:Person) RETURN n LIMIT -1",
+        "NegativeIntegerArgument",
+    );
+}
+
+#[tokio::test]
+async fn test_semantic_labels_on_edge() {
+    let (schema_manager, _dir) = setup_schema().await;
+    schema_manager.add_label("Person").unwrap();
+    schema_manager
+        .add_edge_type(
+            "KNOWS",
+            vec!["Person".to_string()],
+            vec!["Person".to_string()],
+        )
+        .unwrap();
+    schema_manager.save().await.unwrap();
+    let planner = planner_from(&schema_manager);
+
+    assert_plan_error(
+        &planner,
+        "MATCH (n:Person)-[r:KNOWS]->(m:Person) RETURN labels(r)",
+        "InvalidArgumentType",
+    );
+}
+
+#[tokio::test]
+async fn test_semantic_type_on_node() {
+    let (schema_manager, _dir) = setup_schema().await;
+    schema_manager.add_label("Person").unwrap();
+    schema_manager.save().await.unwrap();
+    let planner = planner_from(&schema_manager);
+
+    assert_plan_error(
+        &planner,
+        "MATCH (n:Person) RETURN type(n)",
+        "InvalidArgumentType",
+    );
 }

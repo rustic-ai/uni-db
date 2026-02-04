@@ -23,11 +23,26 @@ fn into_parse_error(e: impl std::fmt::Display) -> UniError {
     }
 }
 
-/// Convert an error into `UniError::Query` with the original query string for diagnostics.
+/// Convert an error into the appropriate `UniError` type.
+/// Errors starting with "SyntaxError:" are treated as parse/syntax errors.
+/// All other errors are query/semantic errors.
 fn into_query_error(e: impl std::fmt::Display, cypher: &str) -> UniError {
-    UniError::Query {
-        message: e.to_string(),
-        query: Some(cypher.to_string()),
+    let msg = e.to_string();
+    // Errors containing "SyntaxError:" prefix should be treated as syntax errors
+    // This covers validation errors like VariableTypeConflict, UndefinedVariable, etc.
+    if msg.starts_with("SyntaxError:") {
+        UniError::Parse {
+            message: msg,
+            position: None,
+            line: None,
+            column: None,
+            context: Some(cypher.to_string()),
+        }
+    } else {
+        UniError::Query {
+            message: msg,
+            query: Some(cypher.to_string()),
+        }
     }
 }
 

@@ -3499,12 +3499,22 @@ impl Executor {
                 ],
             };
 
+            // For Direction::Both, deduplicate edges by eid.
+            // This prevents the same edge being counted twice (once outgoing, once incoming).
+            let mut seen_edges: HashSet<Eid> = HashSet::new();
+            let is_undirected = matches!(direction, Direction::Both);
+
             for dir in &directions_to_check {
                 let edges = graph.neighbors(current, *dir);
 
                 for edge in edges {
                     // Filter by edge type if specified
                     if !edge_type_ids.is_empty() && !edge_type_ids.contains(&edge.edge_type) {
+                        continue;
+                    }
+
+                    // Deduplicate edges for undirected patterns
+                    if is_undirected && !seen_edges.insert(edge.eid) {
                         continue;
                     }
 

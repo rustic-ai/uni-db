@@ -20,6 +20,501 @@ use uni_cypher::ast::{
     ShowConstraints, SortItem, Statement, WindowSpec, WithClause, WithRecursiveClause,
 };
 
+/// Type of variable in scope for semantic validation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VariableType {
+    /// Node variable (from MATCH (n), CREATE (n), etc.)
+    Node,
+    /// Edge/relationship variable (from MATCH ()-[r]->(), etc.)
+    Edge,
+    /// Path variable (from MATCH p = (a)-[*]->(b), etc.)
+    Path,
+    /// Scalar variable (from WITH expr AS x, UNWIND list AS item, etc.)
+    Scalar,
+}
+
+/// Information about a variable in scope.
+#[derive(Debug, Clone)]
+pub struct VariableInfo {
+    pub name: String,
+    pub var_type: VariableType,
+}
+
+impl VariableInfo {
+    pub fn new(name: String, var_type: VariableType) -> Self {
+        Self { name, var_type }
+    }
+}
+
+/// Find a variable in scope by name.
+fn find_var_in_scope<'a>(vars: &'a [VariableInfo], name: &str) -> Option<&'a VariableInfo> {
+    vars.iter().find(|v| v.name == name)
+}
+
+/// Check if a variable is in scope.
+fn is_var_in_scope(vars: &[VariableInfo], name: &str) -> bool {
+    vars.iter().any(|v| v.name == name)
+}
+
+/// Add a variable to scope with type conflict validation.
+/// Returns an error if the variable already exists with a different type.
+fn add_var_to_scope(
+    vars: &mut Vec<VariableInfo>,
+    name: &str,
+    var_type: VariableType,
+) -> Result<()> {
+    if name.is_empty() {
+        return Ok(());
+    }
+
+    if let Some(existing) = find_var_in_scope(vars, name) {
+        // Check for type conflict
+        if existing.var_type != var_type {
+            return Err(anyhow!(
+                "SyntaxError: VariableTypeConflict - Variable '{}' already defined as {:?}, cannot use as {:?}",
+                name,
+                existing.var_type,
+                var_type
+            ));
+        }
+        // Variable already exists with same type - OK
+    } else {
+        vars.push(VariableInfo::new(name.to_string(), var_type));
+    }
+    Ok(())
+}
+
+/// Convert VariableInfo vec to String vec for backward compatibility
+fn vars_to_strings(vars: &[VariableInfo]) -> Vec<String> {
+    vars.iter().map(|v| v.name.clone()).collect()
+}
+
+/// Collect all variable names referenced in an expression
+fn collect_expr_variables(expr: &Expr) -> Vec<String> {
+    let mut vars = Vec::new();
+    collect_expr_variables_inner(expr, &mut vars);
+    vars
+}
+
+fn collect_expr_variables_inner(expr: &Expr, vars: &mut Vec<String>) {
+    match expr {
+        Expr::Variable(name) => {
+            if !vars.contains(name) {
+                vars.push(name.clone());
+            }
+        }
+        Expr::Property(base, _) => {
+            collect_expr_variables_inner(base, vars);
+        }
+        Expr::BinaryOp { left, right, .. } => {
+            collect_expr_variables_inner(left, vars);
+            collect_expr_variables_inner(right, vars);
+        }
+        Expr::UnaryOp { expr: e, .. }
+        | Expr::IsNull(e)
+        | Expr::IsNotNull(e)
+        | Expr::IsUnique(e) => {
+            collect_expr_variables_inner(e, vars);
+        }
+        Expr::FunctionCall { args, .. } => {
+            for arg in args {
+                collect_expr_variables_inner(arg, vars);
+            }
+        }
+        Expr::List(items) => {
+            for item in items {
+                collect_expr_variables_inner(item, vars);
+            }
+        }
+        Expr::Case {
+            expr: case_expr,
+            when_then,
+            else_expr,
+        } => {
+            if let Some(e) = case_expr {
+                collect_expr_variables_inner(e, vars);
+            }
+            for (w, t) in when_then {
+                collect_expr_variables_inner(w, vars);
+                collect_expr_variables_inner(t, vars);
+            }
+            if let Some(e) = else_expr {
+                collect_expr_variables_inner(e, vars);
+            }
+        }
+        Expr::Map(entries) => {
+            for (_, v) in entries {
+                collect_expr_variables_inner(v, vars);
+            }
+        }
+        // Literals and other non-variable expressions
+        _ => {}
+    }
+}
+
+/// Validate function call argument types.
+/// Returns error if type constraints are violated.
+fn validate_function_call(name: &str, args: &[Expr], vars_in_scope: &[VariableInfo]) -> Result<()> {
+    let name_lower = name.to_lowercase();
+
+    // labels() requires Node
+    if name_lower == "labels"
+        && let Some(Expr::Variable(var_name)) = args.first()
+        && let Some(info) = find_var_in_scope(vars_in_scope, var_name)
+        && info.var_type != VariableType::Node
+    {
+        return Err(anyhow!(
+            "SyntaxError: InvalidArgumentType - labels() requires a node argument"
+        ));
+    }
+
+    // type() requires Edge
+    if name_lower == "type"
+        && let Some(Expr::Variable(var_name)) = args.first()
+        && let Some(info) = find_var_in_scope(vars_in_scope, var_name)
+        && info.var_type != VariableType::Edge
+    {
+        return Err(anyhow!(
+            "SyntaxError: InvalidArgumentType - type() requires a relationship argument"
+        ));
+    }
+
+    // properties() requires Node/Edge/Map (not scalar literals)
+    if name_lower == "properties"
+        && let Some(arg) = args.first()
+    {
+        match arg {
+            Expr::Literal(CypherLiteral::Integer(_))
+            | Expr::Literal(CypherLiteral::Float(_))
+            | Expr::Literal(CypherLiteral::String(_))
+            | Expr::Literal(CypherLiteral::Bool(_)) => {
+                return Err(anyhow!(
+                    "SyntaxError: InvalidArgumentType - properties() requires a node, relationship, or map"
+                ));
+            }
+            Expr::Variable(var_name) => {
+                if let Some(info) = find_var_in_scope(vars_in_scope, var_name)
+                    && info.var_type == VariableType::Scalar
+                {
+                    return Err(anyhow!(
+                        "SyntaxError: InvalidArgumentType - properties() requires a node, relationship, or map"
+                    ));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // nodes()/relationships() require Path
+    if (name_lower == "nodes" || name_lower == "relationships")
+        && let Some(Expr::Variable(var_name)) = args.first()
+        && let Some(info) = find_var_in_scope(vars_in_scope, var_name)
+        && info.var_type != VariableType::Path
+    {
+        return Err(anyhow!(
+            "SyntaxError: InvalidArgumentType - {}() requires a path argument",
+            name_lower
+        ));
+    }
+
+    Ok(())
+}
+
+/// Check if an expression is a non-boolean literal.
+fn is_non_boolean_literal(expr: &Expr) -> bool {
+    matches!(
+        expr,
+        Expr::Literal(CypherLiteral::Integer(_))
+            | Expr::Literal(CypherLiteral::Float(_))
+            | Expr::Literal(CypherLiteral::String(_))
+            | Expr::List(_)
+    )
+}
+
+/// Validate boolean expressions (AND/OR/NOT require boolean arguments).
+fn validate_boolean_expression(expr: &Expr) -> Result<()> {
+    match expr {
+        Expr::BinaryOp { left, op, right } => {
+            if matches!(op, BinaryOp::And | BinaryOp::Or | BinaryOp::Xor) {
+                let op_name = format!("{:?}", op).to_uppercase();
+                for operand in [left.as_ref(), right.as_ref()] {
+                    if is_non_boolean_literal(operand) {
+                        return Err(anyhow!(
+                            "SyntaxError: InvalidArgumentType - {} requires boolean arguments",
+                            op_name
+                        ));
+                    }
+                }
+            }
+            validate_boolean_expression(left)?;
+            validate_boolean_expression(right)?;
+        }
+        Expr::UnaryOp {
+            op: uni_cypher::ast::UnaryOp::Not,
+            expr: inner,
+        } => {
+            if is_non_boolean_literal(inner) {
+                return Err(anyhow!(
+                    "SyntaxError: InvalidArgumentType - NOT requires a boolean argument"
+                ));
+            }
+            validate_boolean_expression(inner)?;
+        }
+        Expr::FunctionCall { args, .. } => {
+            for arg in args {
+                validate_boolean_expression(arg)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Validate that all variables used in an expression are in scope.
+fn validate_expression_variables(expr: &Expr, vars_in_scope: &[VariableInfo]) -> Result<()> {
+    let used_vars = collect_expr_variables(expr);
+    for var in used_vars {
+        if !is_var_in_scope(vars_in_scope, &var) {
+            return Err(anyhow!(
+                "SyntaxError: UndefinedVariable - Variable '{}' not defined",
+                var
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Check if an expression contains any aggregate function (recursively).
+fn contains_aggregate_recursive(expr: &Expr) -> bool {
+    match expr {
+        Expr::FunctionCall { name, args, .. } => {
+            let is_agg = matches!(
+                name.to_lowercase().as_str(),
+                "count" | "sum" | "avg" | "min" | "max" | "collect" | "stdev" | "stdevp"
+            );
+            is_agg || args.iter().any(contains_aggregate_recursive)
+        }
+        Expr::BinaryOp { left, right, .. } => {
+            contains_aggregate_recursive(left) || contains_aggregate_recursive(right)
+        }
+        Expr::UnaryOp { expr: e, .. }
+        | Expr::IsNull(e)
+        | Expr::IsNotNull(e)
+        | Expr::IsUnique(e) => contains_aggregate_recursive(e),
+        Expr::List(items) => items.iter().any(contains_aggregate_recursive),
+        Expr::Case {
+            expr,
+            when_then,
+            else_expr,
+        } => {
+            expr.as_deref().is_some_and(contains_aggregate_recursive)
+                || when_then.iter().any(|(w, t)| {
+                    contains_aggregate_recursive(w) || contains_aggregate_recursive(t)
+                })
+                || else_expr
+                    .as_deref()
+                    .is_some_and(contains_aggregate_recursive)
+        }
+        Expr::In { expr, list } => {
+            contains_aggregate_recursive(expr) || contains_aggregate_recursive(list)
+        }
+        Expr::Property(base, _) => contains_aggregate_recursive(base),
+        _ => false,
+    }
+}
+
+/// Validate that no aggregation functions appear in WHERE clause.
+fn validate_no_aggregation_in_where(predicate: &Expr) -> Result<()> {
+    if contains_aggregate_recursive(predicate) {
+        return Err(anyhow!(
+            "SyntaxError: InvalidAggregation - Aggregation functions not allowed in WHERE"
+        ));
+    }
+    Ok(())
+}
+
+/// Parse and validate a non-negative integer expression for SKIP or LIMIT.
+/// Returns `Ok(Some(n))` for valid integers, or an error for negative/float/other values.
+fn parse_non_negative_integer(expr: &Expr, clause_name: &str) -> Result<Option<usize>> {
+    match expr {
+        Expr::Literal(CypherLiteral::Integer(n)) => {
+            if *n < 0 {
+                return Err(anyhow!(
+                    "SyntaxError: NegativeIntegerArgument - {} requires non-negative integer",
+                    clause_name
+                ));
+            }
+            Ok(Some(*n as usize))
+        }
+        Expr::Literal(CypherLiteral::Float(_)) => Err(anyhow!(
+            "SyntaxError: InvalidArgumentType - {} requires integer, got float",
+            clause_name
+        )),
+        _ => Err(anyhow!(
+            "SyntaxError: InvalidArgumentType - {} must be an integer literal",
+            clause_name
+        )),
+    }
+}
+
+/// Validate that aggregation functions are not nested.
+fn validate_no_nested_aggregation(expr: &Expr) -> Result<()> {
+    if let Expr::FunctionCall { name, args, .. } = expr
+        && matches!(
+            name.to_lowercase().as_str(),
+            "count" | "sum" | "avg" | "min" | "max" | "collect" | "stdev" | "stdevp"
+        )
+    {
+        for arg in args {
+            if contains_aggregate_recursive(arg) {
+                return Err(anyhow!(
+                    "SyntaxError: NestedAggregation - Cannot nest aggregation functions"
+                ));
+            }
+        }
+    }
+    // Recurse into nested expressions
+    match expr {
+        Expr::BinaryOp { left, right, .. } => {
+            validate_no_nested_aggregation(left)?;
+            validate_no_nested_aggregation(right)?;
+        }
+        Expr::FunctionCall { args, .. } => {
+            for arg in args {
+                validate_no_nested_aggregation(arg)?;
+            }
+        }
+        Expr::List(items) => {
+            for item in items {
+                validate_no_nested_aggregation(item)?;
+            }
+        }
+        Expr::Case {
+            expr,
+            when_then,
+            else_expr,
+        } => {
+            if let Some(e) = expr {
+                validate_no_nested_aggregation(e)?;
+            }
+            for (w, t) in when_then {
+                validate_no_nested_aggregation(w)?;
+                validate_no_nested_aggregation(t)?;
+            }
+            if let Some(e) = else_expr {
+                validate_no_nested_aggregation(e)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Validate that all variables referenced in properties are defined,
+/// either in scope or in the local CREATE variable list.
+fn validate_property_variables(
+    properties: &Option<Expr>,
+    vars_in_scope: &[VariableInfo],
+    create_vars: &[&str],
+) -> Result<()> {
+    if let Some(props) = properties {
+        for var in collect_expr_variables(props) {
+            if !is_var_in_scope(vars_in_scope, &var) && !create_vars.contains(&var.as_str()) {
+                return Err(anyhow!(
+                    "SyntaxError: UndefinedVariable - Variable '{}' not defined",
+                    var
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Check that a variable name is not already bound in scope or in the local CREATE list.
+/// Used to prevent rebinding in CREATE clauses.
+fn check_not_already_bound(
+    name: &str,
+    vars_in_scope: &[VariableInfo],
+    create_vars: &[&str],
+) -> Result<()> {
+    if is_var_in_scope(vars_in_scope, name) {
+        return Err(anyhow!(
+            "SyntaxError: VariableAlreadyBound - Variable '{}' already defined",
+            name
+        ));
+    }
+    if create_vars.contains(&name) {
+        return Err(anyhow!(
+            "SyntaxError: VariableAlreadyBound - Variable '{}' already defined in CREATE",
+            name
+        ));
+    }
+    Ok(())
+}
+
+/// Recursively validate an expression for type errors, undefined variables, etc.
+fn validate_expression(expr: &Expr, vars_in_scope: &[VariableInfo]) -> Result<()> {
+    // Validate function calls
+    if let Expr::FunctionCall { name, args, .. } = expr {
+        validate_function_call(name, args, vars_in_scope)?;
+        // Recurse into arguments
+        for arg in args {
+            validate_expression(arg, vars_in_scope)?;
+        }
+    }
+
+    // Validate boolean operators
+    validate_boolean_expression(expr)?;
+
+    // Validate no nested aggregation
+    validate_no_nested_aggregation(expr)?;
+
+    // Recurse into sub-expressions
+    match expr {
+        Expr::BinaryOp { left, right, .. } => {
+            validate_expression(left, vars_in_scope)?;
+            validate_expression(right, vars_in_scope)?;
+        }
+        Expr::UnaryOp { expr: e, .. }
+        | Expr::IsNull(e)
+        | Expr::IsNotNull(e)
+        | Expr::IsUnique(e) => {
+            validate_expression(e, vars_in_scope)?;
+        }
+        Expr::Property(base, _) => {
+            validate_expression(base, vars_in_scope)?;
+        }
+        Expr::List(items) => {
+            for item in items {
+                validate_expression(item, vars_in_scope)?;
+            }
+        }
+        Expr::Case {
+            expr: case_expr,
+            when_then,
+            else_expr,
+        } => {
+            if let Some(e) = case_expr {
+                validate_expression(e, vars_in_scope)?;
+            }
+            for (w, t) in when_then {
+                validate_expression(w, vars_in_scope)?;
+                validate_expression(t, vars_in_scope)?;
+            }
+            if let Some(e) = else_expr {
+                validate_expression(e, vars_in_scope)?;
+            }
+        }
+        Expr::In { expr, list } => {
+            validate_expression(expr, vars_in_scope)?;
+            validate_expression(list, vars_in_scope)?;
+        }
+        _ => {}
+    }
+
+    Ok(())
+}
+
 #[derive(Debug, Clone)]
 pub enum LogicalPlan {
     Union {
@@ -576,6 +1071,17 @@ impl QueryPlanner {
             Query::Union { left, right, all } => {
                 let l = self.plan_with_scope(*left, vars.clone())?;
                 let r = self.plan_with_scope(*right, vars)?;
+
+                // Validate that both sides have the same column names
+                let left_cols = Self::extract_projection_columns(&l);
+                let right_cols = Self::extract_projection_columns(&r);
+
+                if left_cols != right_cols {
+                    return Err(anyhow!(
+                        "SyntaxError: DifferentColumnsInUnion - UNION queries must have same column names"
+                    ));
+                }
+
                 Ok(LogicalPlan::Union {
                     left: Box::new(l),
                     right: Box::new(r),
@@ -602,11 +1108,36 @@ impl QueryPlanner {
         format!("_anon_{}", id)
     }
 
+    /// Extract projection column names from a logical plan.
+    /// Used for UNION column validation.
+    fn extract_projection_columns(plan: &LogicalPlan) -> Vec<String> {
+        match plan {
+            LogicalPlan::Project { projections, .. } => projections
+                .iter()
+                .map(|(expr, alias)| alias.clone().unwrap_or_else(|| expr.to_string_repr()))
+                .collect(),
+            LogicalPlan::Limit { input, .. }
+            | LogicalPlan::Sort { input, .. }
+            | LogicalPlan::Distinct { input, .. }
+            | LogicalPlan::Filter { input, .. } => Self::extract_projection_columns(input),
+            LogicalPlan::Aggregate {
+                group_by,
+                aggregates,
+                ..
+            } => {
+                let mut cols: Vec<String> = group_by.iter().map(|e| e.to_string_repr()).collect();
+                cols.extend(aggregates.iter().map(|e| e.to_string_repr()));
+                cols
+            }
+            _ => Vec::new(),
+        }
+    }
+
     fn plan_return_clause(
         &self,
         return_clause: &ReturnClause,
         plan: LogicalPlan,
-        vars_in_scope: &Vec<String>,
+        vars_in_scope: &[VariableInfo],
     ) -> Result<LogicalPlan> {
         let mut plan = plan;
         let mut group_by = Vec::new();
@@ -619,21 +1150,27 @@ impl QueryPlanner {
                 ReturnItem::All => {
                     // RETURN * - add all variables in scope
                     for v in vars_in_scope {
-                        projections.push((Expr::Variable(v.clone()), Some(v.clone())));
-                        if !group_by.contains(&Expr::Variable(v.clone())) {
-                            group_by.push(Expr::Variable(v.clone()));
+                        projections.push((Expr::Variable(v.name.clone()), Some(v.name.clone())));
+                        if !group_by.contains(&Expr::Variable(v.name.clone())) {
+                            group_by.push(Expr::Variable(v.name.clone()));
                         }
                     }
                 }
                 ReturnItem::Expr { expr, alias } => {
                     if matches!(expr, Expr::Wildcard) {
                         for v in vars_in_scope {
-                            projections.push((Expr::Variable(v.clone()), Some(v.clone())));
-                            if !group_by.contains(&Expr::Variable(v.clone())) {
-                                group_by.push(Expr::Variable(v.clone()));
+                            projections
+                                .push((Expr::Variable(v.name.clone()), Some(v.name.clone())));
+                            if !group_by.contains(&Expr::Variable(v.name.clone())) {
+                                group_by.push(Expr::Variable(v.name.clone()));
                             }
                         }
                     } else {
+                        // Validate expression variables are defined
+                        validate_expression_variables(expr, vars_in_scope)?;
+                        // Validate function argument types and boolean operators
+                        validate_expression(expr, vars_in_scope)?;
+
                         projections.push((expr.clone(), alias.clone()));
                         if expr.is_aggregate() {
                             has_agg = true;
@@ -738,6 +1275,11 @@ impl QueryPlanner {
         }
 
         if let Some(order_by) = &return_clause.order_by {
+            // Validate ORDER BY expressions
+            for item in order_by {
+                validate_expression_variables(&item.expr, vars_in_scope)?;
+                validate_expression(&item.expr, vars_in_scope)?;
+            }
             plan = LogicalPlan::Sort {
                 input: Box::new(plan),
                 order_by: order_by.clone(),
@@ -745,28 +1287,23 @@ impl QueryPlanner {
         }
 
         if return_clause.skip.is_some() || return_clause.limit.is_some() {
-            let skip = if let Some(expr) = &return_clause.skip {
-                match expr {
-                    Expr::Literal(CypherLiteral::Integer(n)) => Some(*n as usize),
-                    _ => return Err(anyhow!("SKIP must be an integer literal")),
-                }
-            } else {
-                None
-            };
-
-            let limit = if let Some(expr) = &return_clause.limit {
-                match expr {
-                    Expr::Literal(CypherLiteral::Integer(n)) => Some(*n as usize),
-                    _ => return Err(anyhow!("LIMIT must be an integer literal")),
-                }
-            } else {
-                None
-            };
+            let skip = return_clause
+                .skip
+                .as_ref()
+                .map(|e| parse_non_negative_integer(e, "SKIP"))
+                .transpose()?
+                .flatten();
+            let fetch = return_clause
+                .limit
+                .as_ref()
+                .map(|e| parse_non_negative_integer(e, "LIMIT"))
+                .transpose()?
+                .flatten();
 
             plan = LogicalPlan::Limit {
                 input: Box::new(plan),
                 skip,
-                fetch: limit,
+                fetch,
             };
         }
 
@@ -834,7 +1371,11 @@ impl QueryPlanner {
             };
         }
 
-        let mut vars_in_scope = initial_vars;
+        // Convert initial vars to VariableInfo (treat as Scalar since they come from outer scope)
+        let mut vars_in_scope: Vec<VariableInfo> = initial_vars
+            .into_iter()
+            .map(|name| VariableInfo::new(name, VariableType::Scalar))
+            .collect();
 
         for clause in query.clauses {
             match clause {
@@ -847,7 +1388,7 @@ impl QueryPlanner {
                         expr: unwind.expr.clone(),
                         variable: unwind.variable.clone(),
                     };
-                    vars_in_scope.push(unwind.variable.clone());
+                    add_var_to_scope(&mut vars_in_scope, &unwind.variable, VariableType::Scalar)?;
                 }
                 Clause::LoadCsv(load_csv) => {
                     plan = LogicalPlan::LoadCsv {
@@ -856,7 +1397,7 @@ impl QueryPlanner {
                         with_headers: load_csv.with_headers,
                         field_terminator: load_csv.field_terminator,
                     };
-                    vars_in_scope.push(load_csv.variable.clone());
+                    add_var_to_scope(&mut vars_in_scope, &load_csv.variable, VariableType::Scalar)?;
                 }
                 Clause::Call(call_clause) => {
                     match &call_clause.kind {
@@ -864,14 +1405,28 @@ impl QueryPlanner {
                             procedure,
                             arguments,
                         } => {
+                            // Validate for duplicate yield names (VariableAlreadyBound)
+                            let mut yield_names = Vec::new();
+                            for item in &call_clause.yield_items {
+                                let output_name = item.alias.as_ref().unwrap_or(&item.name);
+                                if yield_names.contains(output_name) {
+                                    return Err(anyhow!(
+                                        "SyntaxError: VariableAlreadyBound - Variable '{}' already appears in YIELD clause",
+                                        output_name
+                                    ));
+                                }
+                                yield_names.push(output_name.clone());
+                            }
+
                             let mut yields = Vec::new();
                             for item in &call_clause.yield_items {
                                 yields.push((item.name.clone(), item.alias.clone()));
-                                if let Some(a) = &item.alias {
-                                    vars_in_scope.push(a.clone());
-                                } else {
-                                    vars_in_scope.push(item.name.clone());
-                                }
+                                let var_name = item.alias.as_ref().unwrap_or(&item.name);
+                                add_var_to_scope(
+                                    &mut vars_in_scope,
+                                    var_name,
+                                    VariableType::Scalar,
+                                )?;
                             }
                             plan = LogicalPlan::ProcedureCall {
                                 procedure_name: procedure.clone(),
@@ -881,16 +1436,20 @@ impl QueryPlanner {
                         }
                         CallKind::Subquery(query) => {
                             // Plan subquery with current variables in scope
-                            let subquery_plan =
-                                self.plan_with_scope(*query.clone(), vars_in_scope.clone())?;
+                            let subquery_plan = self
+                                .plan_with_scope(*query.clone(), vars_to_strings(&vars_in_scope))?;
 
                             // Extract variables from subquery RETURN clause
                             let subquery_vars = Self::collect_plan_variables(&subquery_plan);
 
-                            // Add new variables to scope
+                            // Add new variables to scope (as Scalar since they come from subquery projection)
                             for var in subquery_vars {
-                                if !vars_in_scope.contains(&var) {
-                                    vars_in_scope.push(var);
+                                if !is_var_in_scope(&vars_in_scope, &var) {
+                                    add_var_to_scope(
+                                        &mut vars_in_scope,
+                                        &var,
+                                        VariableType::Scalar,
+                                    )?;
                                 }
                             }
 
@@ -917,20 +1476,92 @@ impl QueryPlanner {
                         for element in &path.elements {
                             if let PatternElement::Node(n) = element {
                                 if let Some(v) = &n.variable
-                                    && !vars_in_scope.contains(v)
+                                    && !is_var_in_scope(&vars_in_scope, v)
                                 {
-                                    vars_in_scope.push(v.clone());
+                                    add_var_to_scope(&mut vars_in_scope, v, VariableType::Node)?;
                                 }
                             } else if let PatternElement::Relationship(r) = element
                                 && let Some(v) = &r.variable
-                                && !vars_in_scope.contains(v)
+                                && !is_var_in_scope(&vars_in_scope, v)
                             {
-                                vars_in_scope.push(v.clone());
+                                add_var_to_scope(&mut vars_in_scope, v, VariableType::Edge)?;
                             }
                         }
                     }
                 }
                 Clause::Create(create_clause) => {
+                    // Validate CREATE patterns:
+                    // - Nodes with labels/properties are "creations" - can't rebind existing variables
+                    // - Bare nodes (v) are "references" if bound, "creations" if not
+                    // - Relationships are always creations - can't rebind
+                    // - Within CREATE, each new variable can only be defined once
+                    // - Variables used in properties must be defined
+                    let mut create_vars: Vec<&str> = Vec::new();
+                    for path in &create_clause.pattern.paths {
+                        for element in &path.elements {
+                            match element {
+                                PatternElement::Node(n) => {
+                                    validate_property_variables(
+                                        &n.properties,
+                                        &vars_in_scope,
+                                        &create_vars,
+                                    )?;
+
+                                    if let Some(v) = n.variable.as_deref()
+                                        && !v.is_empty()
+                                    {
+                                        // A node is a "creation" if it has labels or properties
+                                        let is_creation =
+                                            !n.labels.is_empty() || n.properties.is_some();
+
+                                        if is_creation {
+                                            check_not_already_bound(
+                                                v,
+                                                &vars_in_scope,
+                                                &create_vars,
+                                            )?;
+                                            create_vars.push(v);
+                                        }
+                                        // Bare node (v) - if already in scope, it's a reference (OK)
+                                        // If not in scope, it will be added to scope later
+                                    }
+                                }
+                                PatternElement::Relationship(r) => {
+                                    validate_property_variables(
+                                        &r.properties,
+                                        &vars_in_scope,
+                                        &create_vars,
+                                    )?;
+
+                                    // Validate relationship constraints for CREATE
+                                    if r.types.len() != 1 {
+                                        return Err(anyhow!(
+                                            "SyntaxError: NoSingleRelationshipType - Exactly one relationship type required for CREATE"
+                                        ));
+                                    }
+                                    if r.direction == Direction::Both {
+                                        return Err(anyhow!(
+                                            "SyntaxError: RequiresDirectedRelationship - Only directed relationships are supported in CREATE"
+                                        ));
+                                    }
+                                    if r.range.is_some() {
+                                        return Err(anyhow!(
+                                            "SyntaxError: CreatingVarLength - Variable length relationships cannot be created"
+                                        ));
+                                    }
+
+                                    if let Some(v) = r.variable.as_deref()
+                                        && !v.is_empty()
+                                    {
+                                        check_not_already_bound(v, &vars_in_scope, &create_vars)?;
+                                        create_vars.push(v);
+                                    }
+                                }
+                                PatternElement::Parenthesized { .. } => {}
+                            }
+                        }
+                    }
+
                     // Batch consecutive CREATEs to avoid deep recursion
                     match &mut plan {
                         LogicalPlan::CreateBatch { patterns, .. } => {
@@ -960,17 +1591,23 @@ impl QueryPlanner {
                                 PatternElement::Node(n) => {
                                     if let Some(var) = &n.variable
                                         && !var.is_empty()
-                                        && !vars_in_scope.contains(var)
                                     {
-                                        vars_in_scope.push(var.clone());
+                                        add_var_to_scope(
+                                            &mut vars_in_scope,
+                                            var,
+                                            VariableType::Node,
+                                        )?;
                                     }
                                 }
                                 PatternElement::Relationship(r) => {
                                     if let Some(var) = &r.variable
                                         && !var.is_empty()
-                                        && !vars_in_scope.contains(var)
                                     {
-                                        vars_in_scope.push(var.clone());
+                                        add_var_to_scope(
+                                            &mut vars_in_scope,
+                                            var,
+                                            VariableType::Edge,
+                                        )?;
                                     }
                                 }
                                 PatternElement::Parenthesized { .. } => {
@@ -993,6 +1630,27 @@ impl QueryPlanner {
                     };
                 }
                 Clause::Delete(delete_clause) => {
+                    // Validate DELETE targets - must be defined and must be entities (Node/Edge/Path)
+                    for item in &delete_clause.items {
+                        let vars_used = collect_expr_variables(item);
+                        for var in &vars_used {
+                            // Check if variable is defined
+                            if let Some(info) = find_var_in_scope(&vars_in_scope, var) {
+                                // Check if variable is an entity type (Node, Edge, Path), not Scalar
+                                if info.var_type == VariableType::Scalar {
+                                    return Err(anyhow!(
+                                        "SyntaxError: InvalidArgumentType - DELETE requires node or relationship, '{}' is a scalar value",
+                                        var
+                                    ));
+                                }
+                            } else {
+                                return Err(anyhow!(
+                                    "SyntaxError: UndefinedVariable - Variable '{}' not defined",
+                                    var
+                                ));
+                            }
+                        }
+                    }
                     plan = LogicalPlan::Delete {
                         input: Box::new(plan),
                         items: delete_clause.items.clone(),
@@ -1008,14 +1666,31 @@ impl QueryPlanner {
                 Clause::WithRecursive(with_recursive) => {
                     // Plan the recursive CTE
                     plan = self.plan_with_recursive(&with_recursive, plan, &vars_in_scope)?;
-                    // Add the CTE name to the scope
-                    vars_in_scope.push(with_recursive.name.clone());
+                    // Add the CTE name to the scope (as Scalar since it's a table reference)
+                    add_var_to_scope(
+                        &mut vars_in_scope,
+                        &with_recursive.name,
+                        VariableType::Scalar,
+                    )?;
                 }
                 Clause::Return(return_clause) => {
                     plan = self.plan_return_clause(&return_clause, plan, &vars_in_scope)?;
                 } // All Clause variants are handled above - no catch-all needed
             }
         }
+
+        // Wrap write operations without RETURN in Limit(0) per OpenCypher spec.
+        // CREATE (n) should return 0 rows, but CREATE (n) RETURN n should return 1 row.
+        // If RETURN was used, the plan will have been wrapped in Project, so we only
+        // wrap terminal Create/CreateBatch nodes.
+        let plan = match &plan {
+            LogicalPlan::Create { .. } | LogicalPlan::CreateBatch { .. } => LogicalPlan::Limit {
+                input: Box::new(plan),
+                skip: None,
+                fetch: Some(0),
+            },
+            _ => plan,
+        };
 
         Ok(plan)
     }
@@ -1337,7 +2012,7 @@ impl QueryPlanner {
         &self,
         match_clause: &MatchClause,
         plan: LogicalPlan,
-        vars_in_scope: &mut Vec<String>,
+        vars_in_scope: &mut Vec<VariableInfo>,
     ) -> Result<LogicalPlan> {
         let mut plan = plan;
 
@@ -1366,7 +2041,7 @@ impl QueryPlanner {
         &self,
         path: &PathPattern,
         plan: LogicalPlan,
-        vars_in_scope: &mut Vec<String>,
+        vars_in_scope: &mut Vec<VariableInfo>,
         mode: &ShortestPathMode,
     ) -> Result<LogicalPlan> {
         let mut plan = plan;
@@ -1409,8 +2084,8 @@ impl QueryPlanner {
             .clone()
             .ok_or_else(|| anyhow!("shortestPath must be assigned to a variable"))?;
 
-        let source_bound = vars_in_scope.contains(&source_var);
-        let target_bound = vars_in_scope.contains(&target_var);
+        let source_bound = is_var_in_scope(vars_in_scope, &source_var);
+        let target_bound = is_var_in_scope(vars_in_scope, &target_var);
 
         // Plan source node if not bound
         if !source_bound {
@@ -1512,12 +2187,12 @@ impl QueryPlanner {
         };
 
         if !source_bound {
-            vars_in_scope.push(source_var);
+            add_var_to_scope(vars_in_scope, &source_var, VariableType::Node)?;
         }
         if !target_bound {
-            vars_in_scope.push(target_var);
+            add_var_to_scope(vars_in_scope, &target_var, VariableType::Node)?;
         }
-        vars_in_scope.push(path_var);
+        add_var_to_scope(vars_in_scope, &path_var, VariableType::Path)?;
 
         Ok(sp_plan)
     }
@@ -1530,7 +2205,7 @@ impl QueryPlanner {
         &self,
         path: &PathPattern,
         plan: LogicalPlan,
-        vars_in_scope: &mut Vec<String>,
+        vars_in_scope: &mut Vec<VariableInfo>,
         optional: bool,
     ) -> Result<LogicalPlan> {
         let mut plan = plan;
@@ -1544,6 +2219,49 @@ impl QueryPlanner {
             .count();
 
         let mut path_variable = path.variable.clone();
+
+        // Check for VariableAlreadyBound: path variable already in scope
+        if let Some(pv) = &path_variable
+            && !pv.is_empty()
+            && is_var_in_scope(vars_in_scope, pv)
+        {
+            return Err(anyhow!(
+                "SyntaxError: VariableAlreadyBound - Variable '{}' already defined",
+                pv
+            ));
+        }
+
+        // Check for VariableAlreadyBound: path variable conflicts with element variables
+        if let Some(pv) = &path_variable
+            && !pv.is_empty()
+        {
+            for element in elements {
+                match element {
+                    PatternElement::Node(n) => {
+                        if let Some(v) = &n.variable
+                            && v == pv
+                        {
+                            return Err(anyhow!(
+                                "SyntaxError: VariableAlreadyBound - Variable '{}' already defined",
+                                pv
+                            ));
+                        }
+                    }
+                    PatternElement::Relationship(r) => {
+                        if let Some(v) = &r.variable
+                            && v == pv
+                        {
+                            return Err(anyhow!(
+                                "SyntaxError: VariableAlreadyBound - Variable '{}' already defined",
+                                pv
+                            ));
+                        }
+                    }
+                    PatternElement::Parenthesized { .. } => {}
+                }
+            }
+        }
+
         if path_variable.is_some() && rel_count > 1 {
             return Err(anyhow!(
                 "Named path variables not yet supported for multi-hop patterns (e.g. (a)-[]->(b)-[]->(c))"
@@ -1558,9 +2276,20 @@ impl QueryPlanner {
                     if variable.is_empty() {
                         variable = self.next_anon_var();
                     }
-                    let is_bound = !variable.is_empty() && vars_in_scope.contains(&variable);
+                    let is_bound =
+                        !variable.is_empty() && is_var_in_scope(vars_in_scope, &variable);
 
                     if is_bound {
+                        // Check for type conflict - can't use an Edge/Path as a Node
+                        if let Some(info) = find_var_in_scope(vars_in_scope, &variable)
+                            && info.var_type != VariableType::Node
+                        {
+                            return Err(anyhow!(
+                                "SyntaxError: VariableTypeConflict - Variable '{}' already defined as {:?}, cannot use as Node",
+                                variable,
+                                info.var_type
+                            ));
+                        }
                         if let Some(prop_filter) = self.properties_to_expr(&variable, &n.properties)
                         {
                             plan = LogicalPlan::Filter {
@@ -1571,7 +2300,7 @@ impl QueryPlanner {
                     } else {
                         plan = self.plan_unbound_node(n, &variable, plan, optional)?;
                         if !variable.is_empty() {
-                            vars_in_scope.push(variable.clone());
+                            add_var_to_scope(vars_in_scope, &variable, VariableType::Node)?;
                         }
                     }
 
@@ -1656,7 +2385,7 @@ impl QueryPlanner {
                         .filter(|v| !v.is_empty())
                         .unwrap_or_else(|| self.next_anon_var());
 
-                    if vars_in_scope.contains(&source_variable) {
+                    if is_var_in_scope(vars_in_scope, &source_variable) {
                         // Source is already bound, apply property filter if needed
                         if let Some(prop_filter) =
                             self.properties_to_expr(&source_variable, &source_node.properties)
@@ -1670,7 +2399,7 @@ impl QueryPlanner {
                         // Source is unbound, scan it
                         plan =
                             self.plan_unbound_node(source_node, &source_variable, plan, optional)?;
-                        vars_in_scope.push(source_variable.clone());
+                        add_var_to_scope(vars_in_scope, &source_variable, VariableType::Node)?;
                     }
 
                     // Plan traverse with quantified relationship
@@ -1700,7 +2429,7 @@ impl QueryPlanner {
     fn plan_traverse_with_source(
         &self,
         plan: LogicalPlan,
-        vars_in_scope: &mut Vec<String>,
+        vars_in_scope: &mut Vec<VariableInfo>,
         params: TraverseParams<'_>,
         source_variable: &str,
     ) -> Result<(LogicalPlan, String)> {
@@ -1732,7 +2461,46 @@ impl QueryPlanner {
             target_variable = self.next_anon_var();
         }
         let _target_is_bound =
-            !target_variable.is_empty() && vars_in_scope.contains(&target_variable);
+            !target_variable.is_empty() && is_var_in_scope(vars_in_scope, &target_variable);
+
+        // Check for VariableTypeConflict: relationship variable used as node
+        // e.g., ()-[r]-(r) where r is both the edge and a node endpoint
+        if let Some(rel_var) = &params.rel.variable
+            && !rel_var.is_empty()
+            && rel_var == &target_variable
+        {
+            return Err(anyhow!(
+                "SyntaxError: VariableTypeConflict - Variable '{}' already defined as relationship, cannot use as node",
+                rel_var
+            ));
+        }
+
+        // Check for VariableTypeConflict: node/path variable reused as relationship
+        // e.g., (r)-[r]-() or r = ()-[]-(), ()-[r]-()
+        if let Some(rel_var) = &params.rel.variable
+            && !rel_var.is_empty()
+            && let Some(info) = find_var_in_scope(vars_in_scope, rel_var)
+            && info.var_type != VariableType::Edge
+        {
+            return Err(anyhow!(
+                "SyntaxError: VariableTypeConflict - Variable '{}' already defined as {:?}, cannot use as relationship",
+                rel_var,
+                info.var_type
+            ));
+        }
+
+        // Check for VariableTypeConflict: target node variable already bound as non-Node
+        // e.g., ()-[r]-()-[]-(r) where r was added as Edge, now used as target node
+        if _target_is_bound
+            && let Some(info) = find_var_in_scope(vars_in_scope, &target_variable)
+            && info.var_type != VariableType::Node
+        {
+            return Err(anyhow!(
+                "SyntaxError: VariableTypeConflict - Variable '{}' already defined as {:?}, cannot use as Node",
+                target_variable,
+                info.var_type
+            ));
+        }
 
         // If all requested types are unknown (schemaless), use TraverseMainByType
         // This allows queries like MATCH (a)-[:UnknownType]->(b) to work
@@ -1776,15 +2544,15 @@ impl QueryPlanner {
 
             // Add the bound variables to scope
             if let Some(sv) = &step_var {
-                vars_in_scope.push(sv.clone());
+                add_var_to_scope(vars_in_scope, sv, VariableType::Edge)?;
             }
             if let Some(pv) = &path_var
-                && !vars_in_scope.contains(pv)
+                && !is_var_in_scope(vars_in_scope, pv)
             {
-                vars_in_scope.push(pv.clone());
+                add_var_to_scope(vars_in_scope, pv, VariableType::Path)?;
             }
-            if !vars_in_scope.contains(&target_variable) {
-                vars_in_scope.push(target_variable.clone());
+            if !is_var_in_scope(vars_in_scope, &target_variable) {
+                add_var_to_scope(vars_in_scope, &target_variable, VariableType::Node)?;
             }
 
             return Ok((plan, target_variable));
@@ -1861,15 +2629,15 @@ impl QueryPlanner {
 
         // Add the bound variables to scope
         if let Some(sv) = &step_var {
-            vars_in_scope.push(sv.clone());
+            add_var_to_scope(vars_in_scope, sv, VariableType::Edge)?;
         }
         if let Some(pv) = &path_var
-            && !vars_in_scope.contains(pv)
+            && !is_var_in_scope(vars_in_scope, pv)
         {
-            vars_in_scope.push(pv.clone());
+            add_var_to_scope(vars_in_scope, pv, VariableType::Path)?;
         }
-        if !vars_in_scope.contains(&target_variable) {
-            vars_in_scope.push(target_variable.clone());
+        if !is_var_in_scope(vars_in_scope, &target_variable) {
+            add_var_to_scope(vars_in_scope, &target_variable, VariableType::Node)?;
         }
 
         Ok((plan, target_variable))
@@ -2000,7 +2768,7 @@ impl QueryPlanner {
     fn _plan_traverse(
         &self,
         plan: LogicalPlan,
-        vars_in_scope: &mut Vec<String>,
+        vars_in_scope: &mut Vec<VariableInfo>,
         params: TraverseParams<'_>,
     ) -> Result<LogicalPlan> {
         let source_variable = match params._source_part {
@@ -2017,8 +2785,17 @@ impl QueryPlanner {
         &self,
         predicate: &Expr,
         plan: LogicalPlan,
-        vars_in_scope: &[String],
+        vars_in_scope: &[VariableInfo],
     ) -> Result<LogicalPlan> {
+        // Validate no aggregation functions in WHERE clause
+        validate_no_aggregation_in_where(predicate)?;
+
+        // Validate all variables used are in scope
+        validate_expression_variables(predicate, vars_in_scope)?;
+
+        // Validate expression types (function args, boolean operators)
+        validate_expression(predicate, vars_in_scope)?;
+
         let mut plan = plan;
 
         // Transform VALID_AT macro to function call
@@ -2084,12 +2861,12 @@ impl QueryPlanner {
         // 3. Push eligible predicates to Scan OR Traverse filters
         for var in vars_in_scope {
             // Check if var is produced by a Scan
-            if Self::find_scan_label_id(&plan, var).is_some() {
+            if Self::find_scan_label_id(&plan, &var.name).is_some() {
                 let (pushable, residual) =
-                    Self::extract_variable_predicates(&current_predicate, var);
+                    Self::extract_variable_predicates(&current_predicate, &var.name);
 
                 for pred in pushable {
-                    plan = Self::push_predicate_to_scan(plan, var, pred);
+                    plan = Self::push_predicate_to_scan(plan, &var.name, pred);
                 }
 
                 if let Some(r) = residual {
@@ -2097,13 +2874,13 @@ impl QueryPlanner {
                 } else {
                     current_predicate = Expr::TRUE;
                 }
-            } else if Self::is_traverse_target(&plan, var) {
+            } else if Self::is_traverse_target(&plan, &var.name) {
                 // Push to Traverse
                 let (pushable, residual) =
-                    Self::extract_variable_predicates(&current_predicate, var);
+                    Self::extract_variable_predicates(&current_predicate, &var.name);
 
                 for pred in pushable {
-                    plan = Self::push_predicate_to_traverse(plan, var, pred);
+                    plan = Self::push_predicate_to_traverse(plan, &var.name, pred);
                 }
 
                 if let Some(r) = residual {
@@ -2133,13 +2910,13 @@ impl QueryPlanner {
         &self,
         predicate: &Expr,
         plan: &LogicalPlan,
-        vars_in_scope: &[String],
+        vars_in_scope: &[VariableInfo],
     ) -> Result<Expr> {
         // ... (unchanged)
         let mut rewritten = predicate.clone();
 
         for var in vars_in_scope {
-            if let Some(label_id) = Self::find_scan_label_id(plan, var) {
+            if let Some(label_id) = Self::find_scan_label_id(plan, &var.name) {
                 // Find label name
                 let label_name = self.schema.label_name_by_id(label_id).map(str::to_owned);
 
@@ -2153,8 +2930,12 @@ impl QueryPlanner {
                                 self.gen_expr_cache.get(&(label.clone(), gen_col.clone()))
                             {
                                 // Rewrite 'rewritten' replacing occurrences of schema_expr with gen_col
-                                rewritten =
-                                    Self::replace_expression(rewritten, schema_expr, var, gen_col);
+                                rewritten = Self::replace_expression(
+                                    rewritten,
+                                    schema_expr,
+                                    &var.name,
+                                    gen_col,
+                                );
                             }
                         }
                     }
@@ -2502,28 +3283,29 @@ impl QueryPlanner {
         &self,
         with_clause: &WithClause,
         plan: LogicalPlan,
-        vars_in_scope: &[String],
-    ) -> Result<(LogicalPlan, Vec<String>)> {
+        vars_in_scope: &[VariableInfo],
+    ) -> Result<(LogicalPlan, Vec<VariableInfo>)> {
         let mut plan = plan;
         let mut group_by: Vec<Expr> = Vec::new();
         let mut aggregates: Vec<Expr> = Vec::new();
         let mut has_agg = false;
         let mut projections = Vec::new();
-        let mut new_vars = Vec::new();
+        let mut new_vars: Vec<VariableInfo> = Vec::new();
 
         for item in &with_clause.items {
             match item {
                 ReturnItem::All => {
                     // WITH * - add all variables in scope
                     for v in vars_in_scope {
-                        projections.push((Expr::Variable(v.clone()), Some(v.clone())));
+                        projections.push((Expr::Variable(v.name.clone()), Some(v.name.clone())));
                     }
                     new_vars.extend(vars_in_scope.iter().cloned());
                 }
                 ReturnItem::Expr { expr, alias } => {
                     if matches!(expr, Expr::Wildcard) {
                         for v in vars_in_scope {
-                            projections.push((Expr::Variable(v.clone()), Some(v.clone())));
+                            projections
+                                .push((Expr::Variable(v.name.clone()), Some(v.name.clone())));
                         }
                         new_vars.extend(vars_in_scope.iter().cloned());
                     } else {
@@ -2535,10 +3317,16 @@ impl QueryPlanner {
                             group_by.push(expr.clone());
                         }
 
+                        // WITH creates scalar bindings for its outputs
                         if let Some(a) = alias {
-                            new_vars.push(a.clone());
+                            new_vars.push(VariableInfo::new(a.clone(), VariableType::Scalar));
                         } else if let Expr::Variable(v) = expr {
-                            new_vars.push(v.clone());
+                            // Preserve the original type if the variable is just passed through
+                            if let Some(existing) = find_var_in_scope(vars_in_scope, v) {
+                                new_vars.push(existing.clone());
+                            } else {
+                                new_vars.push(VariableInfo::new(v.clone(), VariableType::Scalar));
+                            }
                         }
                     }
                 }
@@ -2576,6 +3364,46 @@ impl QueryPlanner {
             };
         }
 
+        // Validate and apply ORDER BY for WITH clause
+        if let Some(order_by) = &with_clause.order_by {
+            for item in order_by {
+                validate_expression_variables(&item.expr, vars_in_scope)?;
+                validate_expression(&item.expr, vars_in_scope)?;
+                // Aggregation functions not allowed in ORDER BY of WITH
+                if contains_aggregate_recursive(&item.expr) {
+                    return Err(anyhow!(
+                        "SyntaxError: InvalidAggregation - Aggregation functions not allowed in ORDER BY of WITH"
+                    ));
+                }
+            }
+            plan = LogicalPlan::Sort {
+                input: Box::new(plan),
+                order_by: order_by.clone(),
+            };
+        }
+
+        // Validate and apply SKIP/LIMIT for WITH clause
+        let skip = with_clause
+            .skip
+            .as_ref()
+            .map(|e| parse_non_negative_integer(e, "SKIP"))
+            .transpose()?
+            .flatten();
+        let fetch = with_clause
+            .limit
+            .as_ref()
+            .map(|e| parse_non_negative_integer(e, "LIMIT"))
+            .transpose()?
+            .flatten();
+
+        if skip.is_some() || fetch.is_some() {
+            plan = LogicalPlan::Limit {
+                input: Box::new(plan),
+                skip,
+                fetch,
+            };
+        }
+
         if let Some(predicate) = &with_clause.where_clause {
             plan = LogicalPlan::Filter {
                 input: Box::new(plan),
@@ -2596,17 +3424,18 @@ impl QueryPlanner {
         &self,
         with_recursive: &WithRecursiveClause,
         _prev_plan: LogicalPlan,
-        vars_in_scope: &[String],
+        vars_in_scope: &[VariableInfo],
     ) -> Result<LogicalPlan> {
         // WITH RECURSIVE requires a UNION query with anchor and recursive parts
         match &*with_recursive.query {
             Query::Union { left, right, .. } => {
                 // Plan the anchor (initial) query with current scope
-                let initial_plan = self.plan_with_scope(*left.clone(), vars_in_scope.to_vec())?;
+                let initial_plan =
+                    self.plan_with_scope(*left.clone(), vars_to_strings(vars_in_scope))?;
 
                 // Plan the recursive query with the CTE name added to scope
                 // so it can reference itself
-                let mut recursive_scope = vars_in_scope.to_vec();
+                let mut recursive_scope = vars_to_strings(vars_in_scope);
                 recursive_scope.push(with_recursive.name.clone());
                 let recursive_plan = self.plan_with_scope(*right.clone(), recursive_scope)?;
 
