@@ -27,31 +27,30 @@ pub fn eval_binary_op(left: &Value, op: &BinaryOp, right: &Value) -> Result<Valu
         BinaryOp::Eq => Ok(Value::Bool(left == right)),
         BinaryOp::NotEq => Ok(Value::Bool(left != right)),
         BinaryOp::And => {
-            let l = left
-                .as_bool()
-                .ok_or_else(|| anyhow!("Expected bool for AND left operand"))?;
-            let r = right
-                .as_bool()
-                .ok_or_else(|| anyhow!("Expected bool for AND right operand"))?;
-            Ok(Value::Bool(l && r))
+            // Three-valued logic: false dominates, null propagates with true
+            match (left.as_bool(), right.as_bool()) {
+                (Some(false), _) | (_, Some(false)) => Ok(Value::Bool(false)),
+                (Some(true), Some(true)) => Ok(Value::Bool(true)),
+                _ if left.is_null() || right.is_null() => Ok(Value::Null),
+                _ => Err(anyhow!("Expected bool for AND operands")),
+            }
         }
         BinaryOp::Or => {
-            let l = left
-                .as_bool()
-                .ok_or_else(|| anyhow!("Expected bool for OR left operand"))?;
-            let r = right
-                .as_bool()
-                .ok_or_else(|| anyhow!("Expected bool for OR right operand"))?;
-            Ok(Value::Bool(l || r))
+            // Three-valued logic: true dominates, null propagates with false
+            match (left.as_bool(), right.as_bool()) {
+                (Some(true), _) | (_, Some(true)) => Ok(Value::Bool(true)),
+                (Some(false), Some(false)) => Ok(Value::Bool(false)),
+                _ if left.is_null() || right.is_null() => Ok(Value::Null),
+                _ => Err(anyhow!("Expected bool for OR operands")),
+            }
         }
         BinaryOp::Xor => {
-            let l = left
-                .as_bool()
-                .ok_or_else(|| anyhow!("Expected bool for XOR left operand"))?;
-            let r = right
-                .as_bool()
-                .ok_or_else(|| anyhow!("Expected bool for XOR right operand"))?;
-            Ok(Value::Bool(l ^ r))
+            // Three-valued logic: any null operand returns null
+            match (left.as_bool(), right.as_bool()) {
+                (Some(l), Some(r)) => Ok(Value::Bool(l ^ r)),
+                _ if left.is_null() || right.is_null() => Ok(Value::Null),
+                _ => Err(anyhow!("Expected bool for XOR operands")),
+            }
         }
         BinaryOp::Gt => eval_comparison(left, right, |ordering| ordering.is_gt()),
         BinaryOp::Lt => eval_comparison(left, right, |ordering| ordering.is_lt()),
@@ -1863,5 +1862,119 @@ mod tests {
         let result = eval_binary_op(&json!("hello"), &BinaryOp::Regex, &json!(123));
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("pattern string"));
+    }
+
+    #[test]
+    fn test_and_null_handling() {
+        // Three-valued logic: false dominates, null propagates with true
+
+        // false AND null = false (false dominates)
+        assert_eq!(
+            eval_binary_op(&Value::Bool(false), &BinaryOp::And, &Value::Null).unwrap(),
+            Value::Bool(false)
+        );
+        assert_eq!(
+            eval_binary_op(&Value::Null, &BinaryOp::And, &Value::Bool(false)).unwrap(),
+            Value::Bool(false)
+        );
+
+        // true AND null = null
+        assert_eq!(
+            eval_binary_op(&Value::Bool(true), &BinaryOp::And, &Value::Null).unwrap(),
+            Value::Null
+        );
+        assert_eq!(
+            eval_binary_op(&Value::Null, &BinaryOp::And, &Value::Bool(true)).unwrap(),
+            Value::Null
+        );
+
+        // null AND null = null
+        assert_eq!(
+            eval_binary_op(&Value::Null, &BinaryOp::And, &Value::Null).unwrap(),
+            Value::Null
+        );
+
+        // Non-null cases still work
+        assert_eq!(
+            eval_binary_op(&Value::Bool(true), &BinaryOp::And, &Value::Bool(true)).unwrap(),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            eval_binary_op(&Value::Bool(true), &BinaryOp::And, &Value::Bool(false)).unwrap(),
+            Value::Bool(false)
+        );
+    }
+
+    #[test]
+    fn test_or_null_handling() {
+        // Three-valued logic: true dominates, null propagates with false
+
+        // true OR null = true (true dominates)
+        assert_eq!(
+            eval_binary_op(&Value::Bool(true), &BinaryOp::Or, &Value::Null).unwrap(),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            eval_binary_op(&Value::Null, &BinaryOp::Or, &Value::Bool(true)).unwrap(),
+            Value::Bool(true)
+        );
+
+        // false OR null = null
+        assert_eq!(
+            eval_binary_op(&Value::Bool(false), &BinaryOp::Or, &Value::Null).unwrap(),
+            Value::Null
+        );
+        assert_eq!(
+            eval_binary_op(&Value::Null, &BinaryOp::Or, &Value::Bool(false)).unwrap(),
+            Value::Null
+        );
+
+        // null OR null = null
+        assert_eq!(
+            eval_binary_op(&Value::Null, &BinaryOp::Or, &Value::Null).unwrap(),
+            Value::Null
+        );
+
+        // Non-null cases still work
+        assert_eq!(
+            eval_binary_op(&Value::Bool(false), &BinaryOp::Or, &Value::Bool(false)).unwrap(),
+            Value::Bool(false)
+        );
+        assert_eq!(
+            eval_binary_op(&Value::Bool(true), &BinaryOp::Or, &Value::Bool(false)).unwrap(),
+            Value::Bool(true)
+        );
+    }
+
+    #[test]
+    fn test_xor_null_handling() {
+        // Three-valued logic: any null operand returns null
+
+        assert_eq!(
+            eval_binary_op(&Value::Bool(true), &BinaryOp::Xor, &Value::Null).unwrap(),
+            Value::Null
+        );
+        assert_eq!(
+            eval_binary_op(&Value::Bool(false), &BinaryOp::Xor, &Value::Null).unwrap(),
+            Value::Null
+        );
+        assert_eq!(
+            eval_binary_op(&Value::Null, &BinaryOp::Xor, &Value::Bool(true)).unwrap(),
+            Value::Null
+        );
+        assert_eq!(
+            eval_binary_op(&Value::Null, &BinaryOp::Xor, &Value::Null).unwrap(),
+            Value::Null
+        );
+
+        // Non-null cases still work
+        assert_eq!(
+            eval_binary_op(&Value::Bool(true), &BinaryOp::Xor, &Value::Bool(false)).unwrap(),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            eval_binary_op(&Value::Bool(true), &BinaryOp::Xor, &Value::Bool(true)).unwrap(),
+            Value::Bool(false)
+        );
     }
 }

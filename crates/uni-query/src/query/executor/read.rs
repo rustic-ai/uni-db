@@ -749,6 +749,9 @@ impl Executor {
             LogicalPlan::Scan { .. } => "read_scan",
             LogicalPlan::ExtIdLookup { .. } => "read_extid_lookup",
             LogicalPlan::Traverse { .. } => "read_traverse",
+            LogicalPlan::TraverseMainByType { .. } => "read_traverse_main",
+            LogicalPlan::ScanAll { .. } => "read_scan_all",
+            LogicalPlan::ScanMainByLabel { .. } => "read_scan_main",
             LogicalPlan::VectorKnn { .. } => "read_vector",
             LogicalPlan::Create { .. } | LogicalPlan::CreateBatch { .. } => "write_create",
             LogicalPlan::Merge { .. } => "write_merge",
@@ -1338,8 +1341,12 @@ impl Executor {
                         .await?;
                     match op {
                         UnaryOp::Not => {
-                            let b = val.as_bool().ok_or(anyhow!("Expected bool for NOT"))?;
-                            Ok(Value::Bool(!b))
+                            // Three-valued logic: NOT null = null
+                            match val.as_bool() {
+                                Some(b) => Ok(Value::Bool(!b)),
+                                None if val.is_null() => Ok(Value::Null),
+                                None => Err(anyhow!("Expected bool for NOT")),
+                            }
                         }
                         UnaryOp::Neg => {
                             if let Some(i) = val.as_i64() {
@@ -2271,6 +2278,55 @@ impl Executor {
                         Ok(traverse_results)
                     }
                 }
+                LogicalPlan::TraverseMainByType {
+                    type_name,
+                    input,
+                    direction,
+                    source_variable,
+                    target_variable,
+                    step_variable,
+                    min_hops,
+                    max_hops,
+                    optional,
+                    target_filter,
+                    path_variable,
+                } => {
+                    let input_matches = self
+                        .execute_subplan(*input, prop_manager, params, ctx)
+                        .await?;
+                    let traverse_results = self
+                        .execute_traverse_main_by_type(
+                            input_matches,
+                            &type_name,
+                            &direction,
+                            &source_variable,
+                            &target_variable,
+                            &step_variable,
+                            min_hops,
+                            max_hops,
+                            optional,
+                            &path_variable,
+                            prop_manager,
+                            ctx,
+                        )
+                        .await?;
+
+                    // Apply target_filter if present
+                    if let Some(filter) = target_filter {
+                        let mut filtered = Vec::new();
+                        for row in traverse_results {
+                            let res = self
+                                .evaluate_expr(&filter, &row, prop_manager, params, ctx)
+                                .await?;
+                            if res.as_bool().unwrap_or(false) {
+                                filtered.push(row);
+                            }
+                        }
+                        Ok(filtered)
+                    } else {
+                        Ok(traverse_results)
+                    }
+                }
                 LogicalPlan::Filter { input, predicate } => {
                     let input_matches = self
                         .execute_subplan(*input, prop_manager, params, ctx)
@@ -3090,6 +3146,182 @@ impl Executor {
                 new_matches.push(new_m);
             }
         }
+        Ok(new_matches)
+    }
+
+    /// Executes a schemaless graph traversal by type name using the main edges table.
+    ///
+    /// This is used for edge types not defined in the schema (e.g., MATCH (a)-[:UnknownType]->(b)).
+    /// It scans the main edges table for edges with the given type name.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the traversal times out or encounters a storage error.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Graph traversal requires many parameters"
+    )]
+    pub(crate) async fn execute_traverse_main_by_type(
+        &self,
+        input_matches: Vec<HashMap<String, Value>>,
+        type_name: &str,
+        direction: &Direction,
+        source_variable: &str,
+        target_variable: &str,
+        step_variable: &Option<String>,
+        min_hops: usize,
+        max_hops: usize,
+        optional: bool,
+        path_variable: &Option<String>,
+        prop_manager: &PropertyManager,
+        ctx: Option<&QueryContext>,
+    ) -> Result<Vec<HashMap<String, Value>>> {
+        use uni_store::storage::main_edge::MainEdgeDataset;
+
+        // For now, only support single-hop traversal for schemaless edges
+        if min_hops != 1 || max_hops != 1 {
+            return Err(anyhow!(
+                "Variable-length paths not yet supported for schemaless edge types"
+            ));
+        }
+
+        // Get edges from main table
+        let lancedb = self.storage.lancedb_store();
+        let mut edges_by_type =
+            MainEdgeDataset::find_edges_by_type_name(lancedb, type_name).await?;
+
+        // Helper to collect edges from an L0 buffer
+        fn collect_l0_edges(
+            l0: &uni_store::runtime::l0::L0Buffer,
+            type_name: &str,
+            edges: &mut Vec<(Eid, Vid, Vid, uni_common::Properties)>,
+        ) {
+            for eid in l0.eids_for_type(type_name) {
+                if let Some((src, dst)) = l0.get_edge_endpoints(eid) {
+                    let props = l0.edge_properties.get(&eid).cloned().unwrap_or_default();
+                    edges.push((eid, src, dst, props));
+                }
+            }
+        }
+
+        // Add edges from L0 buffers
+        if let Some(ctx) = ctx {
+            collect_l0_edges(&ctx.l0.read(), type_name, &mut edges_by_type);
+
+            if let Some(tx_l0_arc) = &ctx.transaction_l0 {
+                collect_l0_edges(&tx_l0_arc.read(), type_name, &mut edges_by_type);
+            }
+
+            for pending_l0_arc in &ctx.pending_flush_l0s {
+                collect_l0_edges(&pending_l0_arc.read(), type_name, &mut edges_by_type);
+            }
+        }
+
+        // Deduplicate by eid (in case edge appears in both storage and L0)
+        let mut seen_eids = std::collections::HashSet::new();
+        edges_by_type.retain(|(eid, _, _, _)| seen_eids.insert(*eid));
+
+        let mut new_matches = Vec::new();
+
+        for input_row in input_matches {
+            // Check timeout between rows
+            if let Some(ctx) = ctx {
+                ctx.check_timeout()?;
+            }
+
+            let source_vid = match input_row
+                .get(source_variable)
+                .and_then(|v| Self::vid_from_value(v).ok())
+            {
+                Some(v) => v,
+                None => {
+                    if optional {
+                        let mut new_m = input_row.clone();
+                        new_m.insert(target_variable.to_string(), Value::Null);
+                        if let Some(sv) = step_variable {
+                            new_m.insert(sv.clone(), Value::Null);
+                        }
+                        if let Some(pv) = path_variable {
+                            new_m.insert(pv.clone(), Value::Null);
+                        }
+                        new_matches.push(new_m);
+                    }
+                    continue;
+                }
+            };
+
+            let mut found = false;
+
+            // Find edges matching source and direction
+            for (eid, src_vid, dst_vid, edge_props) in &edges_by_type {
+                let (matches, target_vid) = match direction {
+                    Direction::Outgoing => (*src_vid == source_vid, *dst_vid),
+                    Direction::Incoming => (*dst_vid == source_vid, *src_vid),
+                    Direction::Both => {
+                        if *src_vid == source_vid {
+                            (true, *dst_vid)
+                        } else if *dst_vid == source_vid {
+                            (true, *src_vid)
+                        } else {
+                            (false, Vid::new(0))
+                        }
+                    }
+                };
+
+                if !matches {
+                    continue;
+                }
+
+                found = true;
+                let mut new_row = input_row.clone();
+
+                // Build target node value
+                let target_props = prop_manager
+                    .get_all_vertex_props_with_ctx(target_vid, ctx)
+                    .await?
+                    .unwrap_or_default();
+                let mut target_json: serde_json::Map<String, Value> =
+                    target_props.into_iter().collect();
+                target_json.insert("_vid".to_string(), json!(target_vid.as_u64()));
+                new_row.insert(target_variable.to_string(), Value::Object(target_json));
+
+                // Build step (relationship) variable if present
+                if let Some(sv) = step_variable {
+                    let mut edge_json: serde_json::Map<String, Value> =
+                        edge_props.clone().into_iter().collect();
+                    edge_json.insert("_eid".to_string(), json!(eid.as_u64()));
+                    edge_json.insert("_type".to_string(), json!(type_name));
+                    edge_json.insert("_src".to_string(), json!(src_vid.as_u64()));
+                    edge_json.insert("_dst".to_string(), json!(dst_vid.as_u64()));
+                    new_row.insert(sv.clone(), Value::Object(edge_json));
+                }
+
+                // Path variable not fully supported for schemaless yet
+                if let Some(pv) = path_variable {
+                    // Build a minimal path representation
+                    let path_obj = json!({
+                        "nodes": [source_vid.as_u64(), target_vid.as_u64()],
+                        "relationships": [eid.as_u64()]
+                    });
+                    new_row.insert(pv.clone(), path_obj);
+                }
+
+                new_matches.push(new_row);
+            }
+
+            if !found && optional {
+                let mut new_m = input_row.clone();
+                new_m.insert(target_variable.to_string(), Value::Null);
+                if let Some(sv) = step_variable {
+                    new_m.insert(sv.clone(), Value::Null);
+                }
+                if let Some(pv) = path_variable {
+                    new_m.insert(pv.clone(), Value::Null);
+                }
+                new_matches.push(new_m);
+            }
+        }
+
         Ok(new_matches)
     }
 
