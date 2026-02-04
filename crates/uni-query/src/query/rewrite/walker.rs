@@ -296,7 +296,17 @@ impl<'a> ExpressionWalker<'a> {
     /// Walk and rewrite an expression tree
     pub fn rewrite_expr(&mut self, expr: Expr) -> Expr {
         match expr {
-            Expr::PatternComprehension { .. } => todo!("PatternComprehension support in rewriter"),
+            Expr::PatternComprehension {
+                path_variable,
+                pattern,
+                where_clause,
+                map_expr,
+            } => Expr::PatternComprehension {
+                path_variable,
+                pattern, // Pattern structure doesn't need rewriting
+                where_clause: where_clause.map(|e| Box::new(self.rewrite_expr(*e))),
+                map_expr: Box::new(self.rewrite_expr(*map_expr)),
+            },
             // TODO: Recurse into CollectSubquery inner query for consistency
             // with Exists and CountSubquery handling below
             Expr::CollectSubquery(_) => expr,

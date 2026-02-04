@@ -480,6 +480,7 @@ impl GraphTraverseStream {
             })?;
 
         let mut expanded_rows: Vec<(usize, Vid, u64)> = Vec::new();
+        let is_undirected = matches!(self.direction, Direction::Both);
 
         for (row_idx, source_vid) in source_vids.iter().enumerate() {
             let Some(src) = source_vid else {
@@ -487,11 +488,19 @@ impl GraphTraverseStream {
             };
 
             let vid = Vid::from(src);
+            // For Direction::Both, deduplicate edges by eid within each source.
+            // This prevents the same edge being counted twice (once outgoing, once incoming).
+            let mut seen_edges: HashSet<u64> = HashSet::new();
 
             for &edge_type in &self.edge_type_ids {
                 let neighbors = self.graph_ctx.get_neighbors(vid, edge_type, self.direction);
 
                 for (target_vid, eid) in neighbors {
+                    // Deduplicate edges for undirected patterns
+                    if is_undirected && !seen_edges.insert(eid.as_u64()) {
+                        continue;
+                    }
+
                     // Filter by target label using L0 visibility.
                     // VIDs no longer embed label information, so we must look up labels.
                     if let Some(ref label_name) = self.target_label_name {
@@ -1153,6 +1162,8 @@ impl GraphVariableLengthTraverseExecData {
         visited.insert(source);
         queue.push_back((source, 0, vec![source], vec![]));
 
+        let is_undirected = matches!(self.direction, Direction::Both);
+
         while let Some((current, depth, node_path, edge_path)) = queue.pop_front() {
             // Emit result if within hop range
             if depth >= self.min_hops && depth <= self.max_hops && depth > 0 {
@@ -1169,7 +1180,16 @@ impl GraphVariableLengthTraverseExecData {
                 self.graph_ctx
                     .get_neighbors(current, self.edge_type_id, self.direction);
 
+            // For Direction::Both, deduplicate edges by eid at each hop.
+            // This prevents the same edge being found twice (once outgoing, once incoming).
+            let mut seen_edges_at_hop: HashSet<u64> = HashSet::new();
+
             for (neighbor, eid) in neighbors {
+                // Deduplicate edges for undirected patterns
+                if is_undirected && !seen_edges_at_hop.insert(eid.as_u64()) {
+                    continue;
+                }
+
                 if !visited.contains(&neighbor) {
                     visited.insert(neighbor);
                     let mut new_node_path = node_path.clone();

@@ -90,6 +90,9 @@ pub struct GraphScanExec {
     /// Whether this is an edge scan (vs vertex scan).
     is_edge_scan: bool,
 
+    /// Whether this is a schemaless scan (uses main table instead of per-label table).
+    is_schemaless: bool,
+
     /// Output schema with materialized property columns.
     schema: SchemaRef,
 
@@ -140,10 +143,61 @@ impl GraphScanExec {
             projected_properties,
             filter,
             is_edge_scan: false,
+            is_schemaless: false,
             schema,
             properties,
             metrics: ExecutionPlanMetricsSet::new(),
         }
+    }
+
+    /// Create a new schemaless vertex scan.
+    ///
+    /// Scans the main vertices table for vertices with the given label name.
+    /// Properties are extracted from props_json (all treated as Utf8/JSON).
+    /// This is used for labels that aren't in the schema.
+    pub fn new_schemaless_vertex_scan(
+        graph_ctx: Arc<GraphExecutionContext>,
+        label_name: impl Into<String>,
+        variable: impl Into<String>,
+        projected_properties: Vec<String>,
+        filter: Option<Arc<dyn PhysicalExpr>>,
+    ) -> Self {
+        let label = label_name.into();
+        let variable = variable.into();
+
+        // Build schema - all properties are Utf8 (from JSON) except _vid
+        let schema = Self::build_schemaless_vertex_schema(&variable, &projected_properties);
+        let properties = Self::compute_properties(schema.clone());
+
+        Self {
+            graph_ctx,
+            label,
+            variable,
+            projected_properties,
+            filter,
+            is_edge_scan: false,
+            is_schemaless: true,
+            schema,
+            properties,
+            metrics: ExecutionPlanMetricsSet::new(),
+        }
+    }
+
+    /// Build schema for schemaless vertex scan (all properties as Utf8).
+    fn build_schemaless_vertex_schema(variable: &str, properties: &[String]) -> SchemaRef {
+        let mut fields = vec![Field::new(
+            format!("{}._vid", variable),
+            DataType::UInt64,
+            false,
+        )];
+
+        for prop in properties {
+            let col_name = format!("{}.{}", variable, prop);
+            // All schemaless properties are treated as Utf8 (JSON strings)
+            fields.push(Field::new(&col_name, DataType::Utf8, true));
+        }
+
+        Arc::new(Schema::new(fields))
     }
 
     /// Create a new graph scan for edges.
@@ -173,6 +227,7 @@ impl GraphScanExec {
             projected_properties,
             filter,
             is_edge_scan: true,
+            is_schemaless: false,
             schema,
             properties,
             metrics: ExecutionPlanMetricsSet::new(),
@@ -310,6 +365,7 @@ impl ExecutionPlan for GraphScanExec {
             self.variable.clone(),
             self.projected_properties.clone(),
             self.is_edge_scan,
+            self.is_schemaless,
             self.schema.clone(),
             metrics,
         )))
@@ -351,6 +407,9 @@ struct GraphScanStream {
     /// Whether this is an edge scan.
     is_edge_scan: bool,
 
+    /// Whether this is a schemaless scan.
+    is_schemaless: bool,
+
     /// Output schema.
     schema: SchemaRef,
 
@@ -363,12 +422,14 @@ struct GraphScanStream {
 
 impl GraphScanStream {
     /// Create a new graph scan stream.
+    #[expect(clippy::too_many_arguments)]
     fn new(
         graph_ctx: Arc<GraphExecutionContext>,
         label: String,
         variable: String,
         properties: Vec<String>,
         is_edge_scan: bool,
+        is_schemaless: bool,
         schema: SchemaRef,
         metrics: BaselineMetrics,
     ) -> Self {
@@ -378,6 +439,7 @@ impl GraphScanStream {
             variable,
             properties,
             is_edge_scan,
+            is_schemaless,
             schema,
             state: GraphScanState::Init,
             metrics,
@@ -471,6 +533,181 @@ async fn scan_vertex_vids_static(
     vids.dedup();
 
     Ok(vids)
+}
+
+/// Scan vertex VIDs from main table by label name (schemaless).
+///
+/// Uses the main vertices table with `array_contains(labels, 'X')` filter.
+/// This is used for labels that aren't in the schema (schemaless mode).
+async fn scan_vertex_vids_by_label_name_static(
+    graph_ctx: &GraphExecutionContext,
+    label_name: &str,
+) -> DFResult<Vec<Vid>> {
+    use uni_store::storage::main_vertex::MainVertexDataset;
+
+    let storage = graph_ctx.storage();
+    let l0_ctx = graph_ctx.l0_context();
+    let lancedb_store = storage.lancedb_store();
+
+    // Step 1: Query main vertices table
+    let mut vids = MainVertexDataset::find_vids_by_label_name(lancedb_store, label_name)
+        .await
+        .map_err(|e| datafusion::error::DataFusionError::Execution(e.to_string()))?;
+
+    // Step 2: Overlay L0 buffers (same pattern as scan_vertex_vids_static)
+    for pending_l0 in &l0_ctx.pending_flush_l0s {
+        let guard = pending_l0.read();
+        vids.extend(guard.vids_for_label(label_name));
+    }
+
+    if let Some(ref current_l0) = l0_ctx.current_l0 {
+        let guard = current_l0.read();
+        vids.extend(guard.vids_for_label(label_name));
+    }
+
+    if let Some(ref tx_l0) = l0_ctx.transaction_l0 {
+        let guard = tx_l0.read();
+        vids.extend(guard.vids_for_label(label_name));
+    }
+
+    // Deduplicate
+    vids.sort_unstable();
+    vids.dedup();
+
+    Ok(vids)
+}
+
+/// Materialize a batch of schemaless vertices with their properties.
+///
+/// Fetches properties from the main vertices table's props_json column.
+/// All properties are returned as Utf8 (JSON strings).
+pub(crate) async fn materialize_schemaless_vertex_batch_static(
+    graph_ctx: &GraphExecutionContext,
+    variable: &str,
+    label_name: &str,
+    properties: &[String],
+    schema: &SchemaRef,
+    vids: Vec<Vid>,
+) -> DFResult<RecordBatch> {
+    use uni_store::storage::main_vertex::MainVertexDataset;
+
+    if vids.is_empty() {
+        return Ok(RecordBatch::new_empty(schema.clone()));
+    }
+
+    let storage = graph_ctx.storage();
+    let l0_ctx = graph_ctx.l0_context();
+    let lancedb_store = storage.lancedb_store();
+
+    // Fetch properties from main table
+    let mut props_map = MainVertexDataset::find_batch_props_by_vids(lancedb_store, &vids)
+        .await
+        .map_err(|e| datafusion::error::DataFusionError::Execution(e.to_string()))?;
+
+    // Overlay L0 buffer properties (L0 takes precedence)
+    for &vid in &vids {
+        // Check all L0 layers for this VID's properties
+        let l0_props = accumulate_l0_vertex_props(vid, l0_ctx);
+        if let Some(l0_props) = l0_props {
+            // Merge L0 properties, taking precedence over storage
+            let entry = props_map.entry(vid).or_default();
+            for (k, v) in l0_props {
+                entry.insert(k, v);
+            }
+        }
+    }
+
+    // Filter out vertices not in props_map (either deleted or not found)
+    let valid_vids: Vec<Vid> = vids
+        .into_iter()
+        .filter(|vid| props_map.contains_key(vid))
+        .collect();
+
+    build_schemaless_vertex_record_batch(variable, label_name, properties, schema, &valid_vids, &props_map)
+}
+
+/// Accumulate properties for a vertex from all L0 layers.
+fn accumulate_l0_vertex_props(
+    vid: Vid,
+    l0_ctx: &crate::query::df_graph::L0Context,
+) -> Option<Properties> {
+    let mut result: Option<Properties> = None;
+
+    // Pending flush L0s (oldest first)
+    for pending_l0 in &l0_ctx.pending_flush_l0s {
+        let guard = pending_l0.read();
+        if let Some(props) = guard.vertex_properties.get(&vid) {
+            let entry = result.get_or_insert_with(Properties::new);
+            for (k, v) in props {
+                entry.insert(k.clone(), v.clone());
+            }
+        }
+    }
+
+    // Current L0
+    if let Some(ref current_l0) = l0_ctx.current_l0 {
+        let guard = current_l0.read();
+        if let Some(props) = guard.vertex_properties.get(&vid) {
+            let entry = result.get_or_insert_with(Properties::new);
+            for (k, v) in props {
+                entry.insert(k.clone(), v.clone());
+            }
+        }
+    }
+
+    // Transaction L0
+    if let Some(ref tx_l0) = l0_ctx.transaction_l0 {
+        let guard = tx_l0.read();
+        if let Some(props) = guard.vertex_properties.get(&vid) {
+            let entry = result.get_or_insert_with(Properties::new);
+            for (k, v) in props {
+                entry.insert(k.clone(), v.clone());
+            }
+        }
+    }
+
+    result
+}
+
+/// Build a RecordBatch from schemaless VIDs and their properties.
+///
+/// All property values are converted to Utf8 (JSON strings).
+fn build_schemaless_vertex_record_batch(
+    _variable: &str,
+    _label_name: &str,
+    _properties: &[String],
+    schema: &SchemaRef,
+    vids: &[Vid],
+    props_map: &HashMap<Vid, Properties>,
+) -> DFResult<RecordBatch> {
+    if vids.is_empty() {
+        return Ok(RecordBatch::new_empty(schema.clone()));
+    }
+
+    let mut columns: Vec<ArrayRef> = Vec::with_capacity(schema.fields().len());
+
+    // Build _vid column
+    let vid_values: Vec<u64> = vids.iter().map(|v| v.as_u64()).collect();
+    columns.push(Arc::new(UInt64Array::from(vid_values)));
+
+    // Build property columns (all as Utf8)
+    for field in schema.fields().iter().skip(1) {
+        // Extract property name from field name (e.g., "n.name" -> "name")
+        let prop_name = field.name().split('.').nth(1).unwrap_or(field.name());
+
+        let mut builder = StringBuilder::new();
+        for vid in vids {
+            match get_property_value(vid, props_map, prop_name) {
+                Some(Value::String(s)) => builder.append_value(s),
+                Some(Value::Null) | None => builder.append_null(),
+                Some(other) => builder.append_value(other.to_string()),
+            }
+        }
+        columns.push(Arc::new(builder.finish()));
+    }
+
+    RecordBatch::try_new(schema.clone(), columns)
+        .map_err(|e| datafusion::error::DataFusionError::ArrowError(Box::new(e), None))
 }
 
 /// Scan all EIDs for a given edge type.
@@ -1293,6 +1530,7 @@ impl Stream for GraphScanStream {
                     let variable = self.variable.clone();
                     let properties = self.properties.clone();
                     let is_edge_scan = self.is_edge_scan;
+                    let is_schemaless = self.is_schemaless;
                     let schema = self.schema.clone();
 
                     let fut = async move {
@@ -1314,8 +1552,23 @@ impl Stream for GraphScanStream {
                             )
                             .await?;
                             Ok(Some(batch))
+                        } else if is_schemaless {
+                            // Schemaless vertex scan - use main table
+                            let vids =
+                                scan_vertex_vids_by_label_name_static(&graph_ctx, &label).await?;
+                            // Materialize batch from main table's props_json
+                            let batch = materialize_schemaless_vertex_batch_static(
+                                &graph_ctx,
+                                &variable,
+                                &label,
+                                &properties,
+                                &schema,
+                                vids,
+                            )
+                            .await?;
+                            Ok(Some(batch))
                         } else {
-                            // Scan vertex VIDs
+                            // Known label vertex scan - use per-label table
                             let vids = scan_vertex_vids_static(&graph_ctx, &label).await?;
                             // Materialize batch
                             let batch = materialize_vertex_batch_static(

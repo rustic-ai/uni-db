@@ -91,7 +91,9 @@ pub enum VariableKind {
 /// ```
 pub fn cypher_expr_to_df(expr: &Expr, context: Option<&TranslationContext>) -> Result<DfExpr> {
     match expr {
-        Expr::PatternComprehension { .. } => todo!("PatternComprehension support"),
+        Expr::PatternComprehension { .. } => Err(anyhow!(
+            "Pattern comprehensions require fallback executor (graph traversal)"
+        )),
         // TODO: Resolve wildcard to concrete expressions per DataFusion guidance
         // See: https://github.com/apache/datafusion/issues/7765
         #[allow(deprecated)]
