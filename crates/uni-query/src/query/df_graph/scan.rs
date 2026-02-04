@@ -234,16 +234,6 @@ impl GraphScanExec {
         }
     }
 
-    /// Resolve the Arrow data type for a property, handling system columns like overflow_json.
-    fn resolve_property_type(
-        prop: &str,
-        schema_props: Option<
-            &std::collections::HashMap<String, uni_common::core::schema::PropertyMeta>,
-        >,
-    ) -> DataType {
-        resolve_property_type(prop, schema_props)
-    }
-
     /// Build output schema for vertex scan with proper Arrow types.
     fn build_vertex_schema(
         variable: &str,
@@ -259,7 +249,7 @@ impl GraphScanExec {
         let label_props = uni_schema.properties.get(label);
         for prop in properties {
             let col_name = format!("{}.{}", variable, prop);
-            let arrow_type = Self::resolve_property_type(prop, label_props);
+            let arrow_type = resolve_property_type(prop, label_props);
             fields.push(Field::new(&col_name, arrow_type, true));
         }
         Arc::new(Schema::new(fields))
@@ -280,7 +270,7 @@ impl GraphScanExec {
         let edge_props = uni_schema.properties.get(edge_type);
         for prop in properties {
             let col_name = format!("{}.{}", variable, prop);
-            let arrow_type = Self::resolve_property_type(prop, edge_props);
+            let arrow_type = resolve_property_type(prop, edge_props);
             fields.push(Field::new(&col_name, arrow_type, true));
         }
         Arc::new(Schema::new(fields))
@@ -509,23 +499,9 @@ async fn scan_vertex_vids_static(
         }
     }
 
-    // Step 2: Overlay L0 buffers
-    // Pending flush L0s (oldest to newest)
-    for pending_l0 in &l0_ctx.pending_flush_l0s {
-        let guard = pending_l0.read();
-        vids.extend(guard.vids_for_label(label));
-    }
-
-    // Current L0
-    if let Some(ref current_l0) = l0_ctx.current_l0 {
-        let guard = current_l0.read();
-        vids.extend(guard.vids_for_label(label));
-    }
-
-    // Transaction L0
-    if let Some(ref tx_l0) = l0_ctx.transaction_l0 {
-        let guard = tx_l0.read();
-        vids.extend(guard.vids_for_label(label));
+    // Step 2: Overlay L0 buffers (pending flush, current, transaction)
+    for l0 in l0_ctx.iter_l0_buffers() {
+        vids.extend(l0.read().vids_for_label(label));
     }
 
     // Deduplicate
@@ -554,20 +530,9 @@ async fn scan_vertex_vids_by_label_name_static(
         .await
         .map_err(|e| datafusion::error::DataFusionError::Execution(e.to_string()))?;
 
-    // Step 2: Overlay L0 buffers (same pattern as scan_vertex_vids_static)
-    for pending_l0 in &l0_ctx.pending_flush_l0s {
-        let guard = pending_l0.read();
-        vids.extend(guard.vids_for_label(label_name));
-    }
-
-    if let Some(ref current_l0) = l0_ctx.current_l0 {
-        let guard = current_l0.read();
-        vids.extend(guard.vids_for_label(label_name));
-    }
-
-    if let Some(ref tx_l0) = l0_ctx.transaction_l0 {
-        let guard = tx_l0.read();
-        vids.extend(guard.vids_for_label(label_name));
+    // Step 2: Overlay L0 buffers (pending flush, current, transaction)
+    for l0 in l0_ctx.iter_l0_buffers() {
+        vids.extend(l0.read().vids_for_label(label_name));
     }
 
     // Deduplicate
@@ -623,7 +588,14 @@ pub(crate) async fn materialize_schemaless_vertex_batch_static(
         .filter(|vid| props_map.contains_key(vid))
         .collect();
 
-    build_schemaless_vertex_record_batch(variable, label_name, properties, schema, &valid_vids, &props_map)
+    build_schemaless_vertex_record_batch(
+        variable,
+        label_name,
+        properties,
+        schema,
+        &valid_vids,
+        &props_map,
+    )
 }
 
 /// Accumulate properties for a vertex from all L0 layers.
@@ -633,31 +605,9 @@ fn accumulate_l0_vertex_props(
 ) -> Option<Properties> {
     let mut result: Option<Properties> = None;
 
-    // Pending flush L0s (oldest first)
-    for pending_l0 in &l0_ctx.pending_flush_l0s {
-        let guard = pending_l0.read();
-        if let Some(props) = guard.vertex_properties.get(&vid) {
-            let entry = result.get_or_insert_with(Properties::new);
-            for (k, v) in props {
-                entry.insert(k.clone(), v.clone());
-            }
-        }
-    }
-
-    // Current L0
-    if let Some(ref current_l0) = l0_ctx.current_l0 {
-        let guard = current_l0.read();
-        if let Some(props) = guard.vertex_properties.get(&vid) {
-            let entry = result.get_or_insert_with(Properties::new);
-            for (k, v) in props {
-                entry.insert(k.clone(), v.clone());
-            }
-        }
-    }
-
-    // Transaction L0
-    if let Some(ref tx_l0) = l0_ctx.transaction_l0 {
-        let guard = tx_l0.read();
+    // Iterate all L0 buffers in order: pending flush (oldest first), current, then transaction
+    for l0 in l0_ctx.iter_l0_buffers() {
+        let guard = l0.read();
         if let Some(props) = guard.vertex_properties.get(&vid) {
             let entry = result.get_or_insert_with(Properties::new);
             for (k, v) in props {
