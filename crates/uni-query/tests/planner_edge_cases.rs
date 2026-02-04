@@ -38,6 +38,8 @@ async fn test_planner_missing_label() {
 
 #[tokio::test]
 async fn test_planner_missing_edge_type() {
+    // This test verifies that unknown edge types are handled gracefully
+    // using schemaless support (TraverseMainByType plan) instead of erroring.
     let dir = tempdir().unwrap();
     let path = dir.path().join("schema.json");
     let schema_manager = SchemaManager::load(&path).await.unwrap();
@@ -51,10 +53,13 @@ async fn test_planner_missing_edge_type() {
     let ast = uni_query::parse_cypher(sql).unwrap();
 
     let res = planner.plan(ast);
-    if let Ok(plan) = &res {
-        println!("Plan: {:?}", plan);
-    }
-    assert!(res.is_err());
+    // With schemaless edge support, unknown edge types should succeed
+    // and generate a TraverseMainByType plan (not error)
+    assert!(
+        res.is_ok(),
+        "Expected schemaless edge support to handle unknown type, got: {:?}",
+        res.err()
+    );
 }
 
 #[tokio::test]

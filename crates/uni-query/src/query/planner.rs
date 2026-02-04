@@ -84,6 +84,21 @@ pub enum LogicalPlan {
         path_variable: Option<String>,
         edge_properties: std::collections::HashSet<String>,
     },
+    /// Traverse main edges table filtering by type name (MATCH (a)-[:Unknown]->(b)).
+    /// Used for edge types not defined in schema (schemaless support).
+    TraverseMainByType {
+        type_name: String,
+        input: Box<LogicalPlan>,
+        direction: Direction,
+        source_variable: String,
+        target_variable: String,
+        step_variable: Option<String>,
+        min_hops: usize,
+        max_hops: usize,
+        optional: bool,
+        target_filter: Option<Expr>,
+        path_variable: Option<String>,
+    },
     Filter {
         input: Box<LogicalPlan>,
         predicate: Expr,
@@ -1691,22 +1706,24 @@ impl QueryPlanner {
     ) -> Result<(LogicalPlan, String)> {
         let mut edge_type_ids = Vec::new();
         let mut dst_labels = Vec::new();
+        let mut unknown_types = Vec::new();
 
         if params.rel.types.is_empty() {
-            // All types
+            // All types - use known schema types
             for meta in self.schema.edge_types.values() {
                 edge_type_ids.push(meta.id);
                 dst_labels.extend(meta.dst_labels.iter().cloned());
             }
         } else {
             for type_name in &params.rel.types {
-                let edge_meta = self
-                    .schema
-                    .edge_types
-                    .get(type_name)
-                    .ok_or_else(|| anyhow!("Edge type {} not found", type_name))?;
-                edge_type_ids.push(edge_meta.id);
-                dst_labels.extend(edge_meta.dst_labels.iter().cloned());
+                if let Some(edge_meta) = self.schema.edge_types.get(type_name) {
+                    // Known type - use standard Traverse with type_id
+                    edge_type_ids.push(edge_meta.id);
+                    dst_labels.extend(edge_meta.dst_labels.iter().cloned());
+                } else {
+                    // Unknown type - will use TraverseMainByType
+                    unknown_types.push(type_name.clone());
+                }
             }
         }
 
@@ -1717,13 +1734,75 @@ impl QueryPlanner {
         let _target_is_bound =
             !target_variable.is_empty() && vars_in_scope.contains(&target_variable);
 
+        // If all requested types are unknown (schemaless), use TraverseMainByType
+        // This allows queries like MATCH (a)-[:UnknownType]->(b) to work
+        if !unknown_types.is_empty() && edge_type_ids.is_empty() {
+            // All types are unknown - use schemaless traversal
+            // For now, we only support single unknown type
+            if unknown_types.len() > 1 {
+                return Err(anyhow!(
+                    "Multiple unknown edge types in a single pattern not yet supported: {:?}",
+                    unknown_types
+                ));
+            }
+
+            let min_hops = params.rel.range.as_ref().and_then(|r| r.min).unwrap_or(1) as usize;
+            let max_hops = params.rel.range.as_ref().and_then(|r| r.max).unwrap_or(1) as usize;
+            let is_variable_length = min_hops > 1 || max_hops > 1 || min_hops != max_hops;
+
+            let (step_var, path_var) = if is_variable_length {
+                (
+                    None,
+                    params.rel.variable.clone().or(params.path_variable.clone()),
+                )
+            } else {
+                (params.rel.variable.clone(), params.path_variable.clone())
+            };
+
+            let plan = LogicalPlan::TraverseMainByType {
+                type_name: unknown_types.into_iter().next().unwrap(),
+                input: Box::new(plan),
+                direction: params.rel.direction.clone(),
+                source_variable: source_variable.to_string(),
+                target_variable: target_variable.clone(),
+                step_variable: step_var.clone(),
+                min_hops,
+                max_hops,
+                optional: params.optional,
+                target_filter: self
+                    .properties_to_expr(&target_variable, &params.target_node.properties),
+                path_variable: path_var.clone(),
+            };
+
+            // Add the bound variables to scope
+            if let Some(sv) = &step_var {
+                vars_in_scope.push(sv.clone());
+            }
+            if let Some(pv) = &path_var
+                && !vars_in_scope.contains(pv)
+            {
+                vars_in_scope.push(pv.clone());
+            }
+            if !vars_in_scope.contains(&target_variable) {
+                vars_in_scope.push(target_variable.clone());
+            }
+
+            return Ok((plan, target_variable));
+        }
+
+        // If we have a mix of known and unknown types, error for now
+        // (could be extended to Union of Traverse + TraverseMainByType)
+        if !unknown_types.is_empty() {
+            return Err(anyhow!(
+                "Mixed known and unknown edge types not yet supported. Unknown: {:?}",
+                unknown_types
+            ));
+        }
+
         let target_label_meta = if let Some(label_name) = params.target_node.labels.first() {
             // Use first label for target_label_id
-            Some(
-                self.schema
-                    .get_label_case_insensitive(label_name)
-                    .ok_or_else(|| anyhow!("Label {} not found", label_name))?,
-            )
+            // For schemaless support, allow unknown target labels
+            self.schema.get_label_case_insensitive(label_name)
         } else if !_target_is_bound {
             // Infer from edge type(s)
             let unique_dsts: Vec<_> = dst_labels
@@ -1733,13 +1812,10 @@ impl QueryPlanner {
                 .collect();
             if unique_dsts.len() == 1 {
                 let label_name = &unique_dsts[0];
-                Some(
-                    self.schema
-                        .get_label_case_insensitive(label_name)
-                        .ok_or_else(|| {
-                            anyhow!("Label {} not found (inferred from edge)", label_name)
-                        })?,
-                )
+                self.schema.get_label_case_insensitive(label_name)
+            } else if unique_dsts.is_empty() {
+                // No destination labels inferred - allow any target
+                None
             } else {
                 return Err(anyhow!(
                     "Target node must have label (inference ambiguous or not supported for multiple dst labels)"

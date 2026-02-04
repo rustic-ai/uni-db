@@ -19,12 +19,13 @@ use crate::lancedb::LanceDbStore;
 use crate::storage::arrow_convert::build_timestamp_column_from_eid_map;
 use anyhow::{Result, anyhow};
 use arrow_array::builder::StringBuilder;
-use arrow_array::{ArrayRef, BooleanArray, RecordBatch, UInt64Array};
+use arrow_array::{Array, ArrayRef, BooleanArray, RecordBatch, UInt64Array};
 use arrow_schema::{DataType, Field, Schema as ArrowSchema, TimeUnit};
+use futures::TryStreamExt;
 use lancedb::Table;
 use lancedb::index::Index as LanceDbIndex;
 use lancedb::index::scalar::BTreeIndexBuilder;
-use lancedb::query::{ExecutableQuery, QueryBase};
+use lancedb::query::{ExecutableQuery, QueryBase, Select};
 use std::collections::HashMap;
 use std::sync::Arc;
 use uni_common::Properties;
@@ -288,6 +289,207 @@ impl MainEdgeDataset {
         }
 
         Ok(None)
+    }
+
+    /// Open the main edges table.
+    ///
+    /// Returns None if the table doesn't exist yet.
+    pub async fn open_table(store: &LanceDbStore) -> Result<Option<Table>> {
+        let table_name = Self::table_name();
+
+        if !store.table_exists(table_name).await? {
+            return Ok(None);
+        }
+
+        let table = store.open_table(table_name).await?;
+        Ok(Some(table))
+    }
+
+    /// Execute a query on the main edges table.
+    ///
+    /// Returns empty vec if table doesn't exist.
+    async fn execute_query(
+        store: &LanceDbStore,
+        filter: &str,
+        columns: Option<Vec<&str>>,
+    ) -> Result<Vec<RecordBatch>> {
+        let Some(table) = Self::open_table(store).await? else {
+            return Ok(Vec::new());
+        };
+
+        let mut query = table.query();
+        query = query.only_if(filter);
+
+        if let Some(cols) = columns {
+            query = query.select(Select::Columns(
+                cols.into_iter().map(String::from).collect(),
+            ));
+        }
+
+        let batches = query
+            .execute()
+            .await
+            .map_err(|e| anyhow!("Query failed: {}", e))?;
+
+        batches.try_collect().await.map_err(Into::into)
+    }
+
+    /// Extract EIDs from record batches.
+    fn extract_eids(batches: &[RecordBatch]) -> Vec<Eid> {
+        let mut eids = Vec::new();
+        for batch in batches {
+            if let Some(eid_col) = batch.column_by_name("_eid")
+                && let Some(eid_arr) = eid_col.as_any().downcast_ref::<UInt64Array>()
+            {
+                for i in 0..eid_arr.len() {
+                    if !eid_arr.is_null(i) {
+                        eids.push(Eid::new(eid_arr.value(i)));
+                    }
+                }
+            }
+        }
+        eids
+    }
+
+    /// Find all non-deleted EIDs from the main edges table.
+    pub async fn find_all_eids(store: &LanceDbStore) -> Result<Vec<Eid>> {
+        let batches = Self::execute_query(store, "_deleted = false", Some(vec!["_eid"])).await?;
+        Ok(Self::extract_eids(&batches))
+    }
+
+    /// Find EIDs by type name in the main edges table.
+    pub async fn find_eids_by_type_name(store: &LanceDbStore, type_name: &str) -> Result<Vec<Eid>> {
+        let filter = format!(
+            "_deleted = false AND type = '{}'",
+            type_name.replace('\'', "''")
+        );
+        let batches = Self::execute_query(store, &filter, Some(vec!["_eid"])).await?;
+        Ok(Self::extract_eids(&batches))
+    }
+
+    /// Find properties for an edge by EID in the main edges table.
+    ///
+    /// Returns the props_json parsed into a Properties HashMap if found.
+    /// This is used as a fallback for unknown/schemaless edge types.
+    pub async fn find_props_by_eid(store: &LanceDbStore, eid: Eid) -> Result<Option<Properties>> {
+        let filter = format!("_eid = {} AND _deleted = false", eid.as_u64());
+        let batches =
+            Self::execute_query(store, &filter, Some(vec!["props_json", "_version"])).await?;
+
+        if batches.is_empty() {
+            return Ok(None);
+        }
+
+        // Find the row with highest version (latest)
+        let mut best_props: Option<Properties> = None;
+        let mut best_version: u64 = 0;
+
+        for batch in &batches {
+            let props_col = batch.column_by_name("props_json");
+            let version_col = batch.column_by_name("_version");
+
+            if let (Some(props_arr), Some(ver_arr)) = (
+                props_col.and_then(|c| c.as_any().downcast_ref::<arrow_array::StringArray>()),
+                version_col.and_then(|c| c.as_any().downcast_ref::<UInt64Array>()),
+            ) {
+                for i in 0..batch.num_rows() {
+                    let version = if ver_arr.is_null(i) {
+                        0
+                    } else {
+                        ver_arr.value(i)
+                    };
+
+                    if version >= best_version {
+                        best_version = version;
+                        best_props = Some(Self::parse_props_json(props_arr, i)?);
+                    }
+                }
+            }
+        }
+
+        Ok(best_props)
+    }
+
+    /// Parse props_json from a StringArray at the given index.
+    fn parse_props_json(arr: &arrow_array::StringArray, idx: usize) -> Result<Properties> {
+        if arr.is_null(idx) || arr.value(idx).is_empty() {
+            return Ok(Properties::new());
+        }
+        serde_json::from_str(arr.value(idx))
+            .map_err(|e| anyhow!("Failed to parse props_json: {}", e))
+    }
+
+    /// Find edge type name by EID in the main edges table.
+    pub async fn find_type_by_eid(store: &LanceDbStore, eid: Eid) -> Result<Option<String>> {
+        let filter = format!("_eid = {} AND _deleted = false", eid.as_u64());
+        let batches = Self::execute_query(store, &filter, Some(vec!["type"])).await?;
+
+        for batch in batches {
+            if batch.num_rows() > 0
+                && let Some(type_col) = batch.column_by_name("type")
+                && let Some(type_arr) = type_col.as_any().downcast_ref::<arrow_array::StringArray>()
+                && !type_arr.is_null(0)
+            {
+                return Ok(Some(type_arr.value(0).to_string()));
+            }
+        }
+
+        Ok(None)
+    }
+
+    /// Find edge data (eid, src_vid, dst_vid, props) by type name in the main edges table.
+    ///
+    /// Returns all non-deleted edges with the given type name.
+    pub async fn find_edges_by_type_name(
+        store: &LanceDbStore,
+        type_name: &str,
+    ) -> Result<Vec<(Eid, Vid, Vid, Properties)>> {
+        let filter = format!(
+            "_deleted = false AND type = '{}'",
+            type_name.replace('\'', "''")
+        );
+        // Fetch all columns for edge data
+        let batches = Self::execute_query(store, &filter, None).await?;
+
+        let mut edges = Vec::new();
+        for batch in &batches {
+            Self::extract_edges_from_batch(batch, &mut edges)?;
+        }
+
+        Ok(edges)
+    }
+
+    /// Extract edge data from a record batch.
+    fn extract_edges_from_batch(
+        batch: &RecordBatch,
+        edges: &mut Vec<(Eid, Vid, Vid, Properties)>,
+    ) -> Result<()> {
+        let eid_col = batch.column_by_name("_eid");
+        let src_col = batch.column_by_name("src_vid");
+        let dst_col = batch.column_by_name("dst_vid");
+        let props_col = batch.column_by_name("props_json");
+
+        if let (Some(eid_arr), Some(src_arr), Some(dst_arr), Some(props_arr)) = (
+            eid_col.and_then(|c| c.as_any().downcast_ref::<UInt64Array>()),
+            src_col.and_then(|c| c.as_any().downcast_ref::<UInt64Array>()),
+            dst_col.and_then(|c| c.as_any().downcast_ref::<UInt64Array>()),
+            props_col.and_then(|c| c.as_any().downcast_ref::<arrow_array::StringArray>()),
+        ) {
+            for i in 0..batch.num_rows() {
+                if eid_arr.is_null(i) || src_arr.is_null(i) || dst_arr.is_null(i) {
+                    continue;
+                }
+
+                let eid = Eid::new(eid_arr.value(i));
+                let src_vid = Vid::new(src_arr.value(i));
+                let dst_vid = Vid::new(dst_arr.value(i));
+                let props = Self::parse_props_json(props_arr, i)?;
+
+                edges.push((eid, src_vid, dst_vid, props));
+            }
+        }
+
+        Ok(())
     }
 }
 

@@ -451,6 +451,34 @@ impl L0Buffer {
         self.edge_types.get(&eid).map(|s| s.as_str())
     }
 
+    /// Returns all EIDs in edge_types that match the given type name.
+    /// Used for L0 overlay during schemaless edge scanning.
+    pub fn eids_for_type(&self, type_name: &str) -> Vec<Eid> {
+        self.edge_types
+            .iter()
+            .filter(|(eid, etype)| *etype == type_name && !self.tombstones.contains_key(eid))
+            .map(|(eid, _)| *eid)
+            .collect()
+    }
+
+    /// Returns all edge EIDs in the L0 buffer (non-tombstoned).
+    ///
+    /// Used for schemaless scanning (MATCH ()-[r]->() without type).
+    pub fn all_edge_eids(&self) -> Vec<Eid> {
+        self.edge_endpoints
+            .keys()
+            .filter(|eid| !self.tombstones.contains_key(eid))
+            .copied()
+            .collect()
+    }
+
+    /// Returns edge endpoint data (src_vid, dst_vid) for an EID.
+    pub fn get_edge_endpoints(&self, eid: Eid) -> Option<(Vid, Vid)> {
+        self.edge_endpoints
+            .get(&eid)
+            .map(|(src, dst, _)| (*src, *dst))
+    }
+
     #[instrument(skip(self, other), level = "trace")]
     pub fn merge(&mut self, other: &L0Buffer) -> Result<()> {
         trace!(

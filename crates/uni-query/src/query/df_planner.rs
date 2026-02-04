@@ -254,10 +254,12 @@ impl HybridPhysicalPlanner {
                 optional: _,
             } => self.plan_scan(*label_id, variable, filter.as_ref(), all_properties),
 
-            // ScanAll and ScanMainByLabel are not supported in vectorized execution
+            // ScanAll, ScanMainByLabel, and TraverseMainByType are not supported in vectorized execution
             // Fall back to row-based execution
-            LogicalPlan::ScanAll { .. } | LogicalPlan::ScanMainByLabel { .. } => Err(anyhow!(
-                "Schemaless scans (ScanAll/ScanMainByLabel) require fallback execution"
+            LogicalPlan::ScanAll { .. }
+            | LogicalPlan::ScanMainByLabel { .. }
+            | LogicalPlan::TraverseMainByType { .. } => Err(anyhow!(
+                "Schemaless scans/traversals require fallback execution"
             )),
 
             LogicalPlan::Traverse {
@@ -1786,6 +1788,24 @@ fn collect_variable_kinds(plan: &LogicalPlan, kinds: &mut HashMap<String, Variab
             kinds.insert(variable.clone(), VariableKind::Node);
         }
         LogicalPlan::Traverse {
+            input,
+            source_variable,
+            target_variable,
+            step_variable,
+            path_variable,
+            ..
+        } => {
+            collect_variable_kinds(input, kinds);
+            kinds.insert(source_variable.clone(), VariableKind::Node);
+            kinds.insert(target_variable.clone(), VariableKind::Node);
+            if let Some(sv) = step_variable {
+                kinds.insert(sv.clone(), VariableKind::Edge);
+            }
+            if let Some(pv) = path_variable {
+                kinds.insert(pv.clone(), VariableKind::Path);
+            }
+        }
+        LogicalPlan::TraverseMainByType {
             input,
             source_variable,
             target_variable,

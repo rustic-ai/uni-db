@@ -278,3 +278,77 @@ async fn test_schemaless_performance() -> Result<()> {
 
     Ok(())
 }
+
+#[tokio::test]
+async fn test_schemaless_unknown_edge_type_returns_empty() -> Result<()> {
+    // Test that querying with an unknown edge type returns empty results
+    // instead of erroring (schemaless edge support).
+    let temp_dir = tempdir()?;
+    let path = temp_dir.path();
+    let db = Uni::open(path.to_str().unwrap()).build().await?;
+
+    // Create only the Person label - no edge types defined
+    db.schema().label("Person").apply().await?;
+
+    // Create some vertices
+    db.execute("CREATE (:Person {name: 'Alice'})").await?;
+    db.execute("CREATE (:Person {name: 'Bob'})").await?;
+
+    // Query with an unknown edge type - should return empty, not error
+    let results = db
+        .query("MATCH (a:Person)-[:UNKNOWN_TYPE]->(b:Person) RETURN a.name, b.name")
+        .await?;
+
+    // Should return empty results, not error
+    assert_eq!(results.len(), 0);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_schemaless_edge_type_query_with_data() -> Result<()> {
+    // Test that we can query edges by type name, and schemaless support
+    // returns empty when the type doesn't exist (rather than erroring).
+    //
+    // Note: CREATE currently requires edge types to be defined in schema.
+    // This test verifies the MATCH side works for unknown types.
+    let temp_dir = tempdir()?;
+    let path = temp_dir.path();
+    let db = Uni::open(path.to_str().unwrap()).build().await?;
+
+    // Create Person label and a known edge type
+    db.schema()
+        .label("Person")
+        .edge_type("KNOWS", &["Person"], &["Person"])
+        .apply()
+        .await?;
+
+    // Create vertices and an edge with the KNOWN type
+    db.execute("CREATE (:Person {name: 'Alice', ext_id: 'alice'})")
+        .await?;
+    db.execute("CREATE (:Person {name: 'Bob', ext_id: 'bob'})")
+        .await?;
+    db.execute(
+        "MATCH (a:Person {ext_id: 'alice'}), (b:Person {ext_id: 'bob'}) 
+         CREATE (a)-[:KNOWS {weight: 0.5, note: 'friends'}]->(b)",
+    )
+    .await?;
+
+    // Query using the KNOWN edge type - should work
+    let results = db
+        .query("MATCH (a:Person)-[r:KNOWS]->(b:Person) RETURN a.name, b.name, r.weight")
+        .await?;
+    assert_eq!(results.len(), 1);
+    let row = &results.rows()[0];
+    assert_eq!(row.get::<String>("a.name")?, "Alice");
+    assert_eq!(row.get::<String>("b.name")?, "Bob");
+    assert_eq!(row.get::<f64>("r.weight")?, 0.5);
+
+    // Query using an UNKNOWN edge type - should return empty (not error)
+    let results = db
+        .query("MATCH (a:Person)-[r:UNKNOWN_TYPE]->(b:Person) RETURN a.name, b.name")
+        .await?;
+    assert_eq!(results.len(), 0);
+
+    Ok(())
+}

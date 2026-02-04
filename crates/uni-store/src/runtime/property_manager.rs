@@ -336,6 +336,14 @@ impl PropertyManager {
             }
         }
 
+        // Fallback to main edges table props_json for unknown/schemaless types
+        use crate::storage::main_edge::MainEdgeDataset;
+        if let Some(props) = MainEdgeDataset::find_props_by_eid(lancedb_store, eid).await?
+            && !props.is_empty()
+        {
+            return Ok(Some(props));
+        }
+
         Ok(None)
     }
 
