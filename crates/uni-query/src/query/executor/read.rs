@@ -2698,8 +2698,8 @@ impl Executor {
                     } else {
                         return Err(anyhow!("Write operation requires a Writer"));
                     }
-                    // OpenCypher spec: CREATE without RETURN returns empty result
-                    Ok(vec![])
+                    // Return rows with created entities for RETURN clause projection
+                    Ok(rows)
                 }
                 LogicalPlan::CreateBatch { input, patterns } => {
                     // Execute input plan once (no recursion per pattern)
@@ -2727,8 +2727,8 @@ impl Executor {
                     } else {
                         return Err(anyhow!("Write operation requires a Writer"));
                     }
-                    // OpenCypher spec: CREATE without RETURN returns empty result
-                    Ok(vec![])
+                    // Return rows with created entities for RETURN clause projection
+                    Ok(rows)
                 }
                 LogicalPlan::Delete {
                     input,
