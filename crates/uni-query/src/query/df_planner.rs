@@ -254,13 +254,19 @@ impl HybridPhysicalPlanner {
                 optional: _,
             } => self.plan_scan(*label_id, variable, filter.as_ref(), all_properties),
 
-            // ScanAll, ScanMainByLabel, and TraverseMainByType are not supported in vectorized execution
+            // ScanMainByLabel is now supported via schemaless scan
+            LogicalPlan::ScanMainByLabel {
+                label_name,
+                variable,
+                filter,
+                optional: _,
+            } => self.plan_schemaless_scan(label_name, variable, filter.as_ref(), all_properties),
+
+            // ScanAll and TraverseMainByType are not yet supported in vectorized execution
             // Fall back to row-based execution
-            LogicalPlan::ScanAll { .. }
-            | LogicalPlan::ScanMainByLabel { .. }
-            | LogicalPlan::TraverseMainByType { .. } => Err(anyhow!(
-                "Schemaless scans/traversals require fallback execution"
-            )),
+            LogicalPlan::ScanAll { .. } | LogicalPlan::TraverseMainByType { .. } => {
+                Err(anyhow!("ScanAll/TraverseMainByType require fallback execution"))
+            }
 
             LogicalPlan::Traverse {
                 input,
@@ -684,6 +690,56 @@ impl HybridPhysicalPlanner {
         // Apply filter if present
         if let Some(filter_expr) = filter {
             // Build context with the node variable kind for this scan
+            let mut variable_kinds = HashMap::new();
+            variable_kinds.insert(variable.to_string(), VariableKind::Node);
+            let ctx = TranslationContext {
+                parameters: self.params.clone(),
+                variable_labels: HashMap::new(),
+                variable_kinds,
+            };
+            let df_filter = cypher_expr_to_df(filter_expr, Some(&ctx))?;
+            let schema = scan_plan.schema();
+
+            let session = self.session_ctx.read();
+            let physical_filter =
+                self.create_physical_filter_expr(&df_filter, &schema, &session)?;
+
+            Ok(Arc::new(FilterExec::try_new(physical_filter, scan_plan)?))
+        } else {
+            Ok(scan_plan)
+        }
+    }
+
+    /// Plan a schemaless vertex scan using the main vertices table.
+    ///
+    /// Used for labels that aren't in the schema - queries the main table
+    /// with `array_contains(labels, 'X')` filter and extracts properties from `props_json`.
+    fn plan_schemaless_scan(
+        &self,
+        label_name: &str,
+        variable: &str,
+        filter: Option<&Expr>,
+        all_properties: &HashMap<String, HashSet<String>>,
+    ) -> Result<Arc<dyn ExecutionPlan>> {
+        // Get properties for this variable (default to empty if not found)
+        let properties: Vec<String> = all_properties
+            .get(variable)
+            .map(|s| s.iter().cloned().collect())
+            .unwrap_or_default();
+
+        // Create the schemaless scan
+        let scan = GraphScanExec::new_schemaless_vertex_scan(
+            self.graph_ctx.clone(),
+            label_name.to_string(),
+            variable.to_string(),
+            properties,
+            None, // Filter will be applied as FilterExec on top
+        );
+
+        let scan_plan: Arc<dyn ExecutionPlan> = Arc::new(scan);
+
+        // Apply filter if present
+        if let Some(filter_expr) = filter {
             let mut variable_kinds = HashMap::new();
             variable_kinds.insert(variable.to_string(), VariableKind::Node);
             let ctx = TranslationContext {

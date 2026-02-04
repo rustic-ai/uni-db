@@ -4011,7 +4011,19 @@ fn collect_properties_from_expr_into(
     properties: &mut HashMap<String, std::collections::HashSet<String>>,
 ) {
     match expr {
-        Expr::PatternComprehension { .. } => todo!("PatternComprehension support in planner"),
+        Expr::PatternComprehension {
+            where_clause,
+            map_expr,
+            ..
+        } => {
+            // Collect properties from the WHERE clause and map expression.
+            // The pattern itself creates local bindings that don't need
+            // property collection from the outer scope.
+            if let Some(where_expr) = where_clause {
+                collect_properties_from_expr_into(where_expr, properties);
+            }
+            collect_properties_from_expr_into(map_expr, properties);
+        }
         Expr::Variable(name) => {
             // Handle transformed property expressions like "e.dept" (after transform_window_expr_properties)
             if let Some((var, prop)) = name.split_once('.') {

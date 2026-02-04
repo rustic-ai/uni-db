@@ -458,6 +458,77 @@ impl MainVertexDataset {
         Ok(vids)
     }
 
+    /// Batch-fetch properties for multiple VIDs from the main vertices table.
+    ///
+    /// Returns a HashMap mapping VIDs to their parsed properties.
+    /// Non-deleted vertices are returned with properties from props_json.
+    /// This is used for schemaless vertex scans via DataFusion.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the table query fails or JSON parsing fails.
+    pub async fn find_batch_props_by_vids(
+        store: &LanceDbStore,
+        vids: &[Vid],
+    ) -> Result<HashMap<Vid, Properties>> {
+        let table_name = Self::table_name();
+
+        if vids.is_empty() || !store.table_exists(table_name).await? {
+            return Ok(HashMap::new());
+        }
+
+        let table = store.open_table(table_name).await?;
+
+        // Build IN clause for VIDs
+        let vid_list: Vec<String> = vids.iter().map(|v| v.as_u64().to_string()).collect();
+        let query = format!("_vid IN ({}) AND _deleted = false", vid_list.join(", "));
+
+        let batches = table
+            .query()
+            .only_if(query)
+            .select(lancedb::query::Select::Columns(vec![
+                "_vid".to_string(),
+                "props_json".to_string(),
+            ]))
+            .execute()
+            .await
+            .map_err(|e| anyhow!("Query failed: {}", e))?;
+
+        use futures::TryStreamExt;
+        let results: Vec<RecordBatch> = batches.try_collect().await?;
+
+        let mut props_map = HashMap::new();
+
+        for batch in results {
+            let vid_col = batch.column_by_name("_vid");
+            let props_col = batch.column_by_name("props_json");
+
+            if let (Some(vid_arr), Some(props_arr)) = (
+                vid_col.and_then(|c| c.as_any().downcast_ref::<UInt64Array>()),
+                props_col.and_then(|c| c.as_any().downcast_ref::<arrow_array::StringArray>()),
+            ) {
+                for i in 0..batch.num_rows() {
+                    if vid_arr.is_null(i) {
+                        continue;
+                    }
+                    let vid = Vid::new(vid_arr.value(i));
+
+                    let props: Properties = if props_arr.is_null(i) || props_arr.value(i).is_empty()
+                    {
+                        Properties::new()
+                    } else {
+                        serde_json::from_str(props_arr.value(i))
+                            .map_err(|e| anyhow!("Failed to parse props_json: {}", e))?
+                    };
+
+                    props_map.insert(vid, props);
+                }
+            }
+        }
+
+        Ok(props_map)
+    }
+
     /// Find properties for a vertex by VID in the main vertices table.
     ///
     /// Returns the props_json parsed into a Properties HashMap if found.

@@ -1034,7 +1034,8 @@ impl Executor {
     ) -> Result<()> {
         for path in &pattern.paths {
             let mut prev_vid: Option<Vid> = None;
-            type PendingRel = (String, u16, Option<Expr>, Direction);
+            // (rel_var, type_id, type_name, props_expr, direction)
+            type PendingRel = (String, u16, String, Option<Expr>, Direction);
             let mut rel_pending: Option<PendingRel> = None;
 
             for element in &path.elements {
@@ -1106,7 +1107,7 @@ impl Executor {
 
                         let current_vid = vid.unwrap();
 
-                        if let Some((rel_var, type_id, rel_props_expr, _dir)) = rel_pending.take()
+                        if let Some((rel_var, type_id, type_name, rel_props_expr, _dir)) = rel_pending.take()
                             && let Some(src) = prev_vid
                         {
                             let is_rel_bound = !rel_var.is_empty() && row.contains_key(&rel_var);
@@ -1127,6 +1128,12 @@ impl Executor {
                                 writer
                                     .insert_edge(src, current_vid, type_id, eid, rel_props)
                                     .await?;
+
+                                // Store type name for schemaless edges (sentinel u16::MAX)
+                                // This is needed for traversal and flush
+                                if type_id == u16::MAX {
+                                    writer.set_edge_type(eid, type_name.clone());
+                                }
 
                                 if !rel_var.is_empty() {
                                     let edge_obj = json!({
@@ -1149,17 +1156,21 @@ impl Executor {
                         }
                         let type_name = &r.types[0];
                         let schema = self.storage.schema_manager().schema();
-                        let type_meta = schema
+
+                        // Support schemaless edge types: use sentinel u16::MAX for unknown types
+                        let type_id = schema
                             .edge_types
                             .get(type_name)
-                            .ok_or_else(|| anyhow!("Type {} not found", type_name))?;
+                            .map(|meta| meta.id)
+                            .unwrap_or(u16::MAX);
 
                         if r.direction == Direction::Incoming {
                             return Err(anyhow!("CREATE only supports outgoing relationships"));
                         }
                         rel_pending = Some((
                             r.variable.clone().unwrap_or_default(),
-                            type_meta.id,
+                            type_id,
+                            type_name.clone(),
                             r.properties.clone(),
                             r.direction.clone(),
                         ));

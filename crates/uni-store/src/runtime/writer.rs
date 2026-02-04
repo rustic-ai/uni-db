@@ -796,6 +796,17 @@ impl Writer {
         l0_guard.get_edge_type(eid).map(|s| s.to_string())
     }
 
+    /// Set the type name for an edge (used for schemaless edge types).
+    /// This is called during CREATE for edge types not found in the schema.
+    pub fn set_edge_type(&self, eid: Eid, type_name: String) {
+        let l0 = if let Some(tx_l0) = &self.transaction_l0 {
+            tx_l0.clone()
+        } else {
+            self.l0_manager.get_current()
+        };
+        l0.write().set_edge_type(eid, type_name);
+    }
+
     /// Evaluate a simple CHECK constraint expression.
     /// Supports: "property op value" (e.g., "age > 18", "status = 'active'")
     fn evaluate_check_constraint(&self, expression: &str, properties: &Properties) -> Result<bool> {
@@ -1979,6 +1990,10 @@ impl Writer {
         let lancedb_store = self.storage.lancedb_store();
 
         for (&edge_type_id, entries) in entries_by_type.iter() {
+            // Skip schemaless edges (sentinel u16::MAX) - they only go to main edges table
+            if edge_type_id == u16::MAX {
+                continue;
+            }
             let edge_type_name = schema
                 .edge_type_name_by_id(edge_type_id)
                 .ok_or_else(|| anyhow!("Edge type ID {} not found in schema", edge_type_id))?;
@@ -2122,7 +2137,9 @@ impl Writer {
 
         // 3. Write to main unified tables (dual-write for fast ID-based lookups)
         // 3.1 Write to main edges table
-        if !entries_by_type.is_empty() {
+        // Collect data while holding the lock, then release before async operations
+        let (main_edges, edge_created_at_map, edge_updated_at_map) = {
+            let old_l0 = old_l0_arc.read();
             let mut main_edges: Vec<(
                 uni_common::core::id::Eid,
                 Vid,
@@ -2136,17 +2153,26 @@ impl Writer {
             let mut edge_updated_at_map: HashMap<uni_common::core::id::Eid, i64> = HashMap::new();
 
             for (&edge_type_id, entries) in entries_by_type.iter() {
-                let edge_type_name = schema
-                    .edge_type_name_by_id(edge_type_id)
-                    .unwrap_or("unknown");
-
                 for entry in entries {
+                    // For schemaless edges (sentinel u16::MAX), get type name from L0
+                    let edge_type_name = if edge_type_id == u16::MAX {
+                        old_l0
+                            .get_edge_type(entry.eid)
+                            .map(|s| s.to_string())
+                            .unwrap_or_else(|| "unknown".to_string())
+                    } else {
+                        schema
+                            .edge_type_name_by_id(edge_type_id)
+                            .unwrap_or("unknown")
+                            .to_string()
+                    };
+
                     let deleted = matches!(entry.op, Op::Delete);
                     main_edges.push((
                         entry.eid,
                         entry.src_vid,
                         entry.dst_vid,
-                        edge_type_name.to_string(),
+                        edge_type_name,
                         entry.properties.clone(),
                         deleted,
                         entry.version,
@@ -2161,16 +2187,18 @@ impl Writer {
                 }
             }
 
-            if !main_edges.is_empty() {
-                let main_edge_batch = MainEdgeDataset::build_record_batch(
-                    &main_edges,
-                    Some(&edge_created_at_map),
-                    Some(&edge_updated_at_map),
-                )?;
-                let main_edge_table =
-                    MainEdgeDataset::write_batch_lancedb(lancedb_store, main_edge_batch).await?;
-                MainEdgeDataset::ensure_default_indexes_lancedb(&main_edge_table).await?;
-            }
+            (main_edges, edge_created_at_map, edge_updated_at_map)
+        }; // Lock released here
+
+        if !main_edges.is_empty() {
+            let main_edge_batch = MainEdgeDataset::build_record_batch(
+                &main_edges,
+                Some(&edge_created_at_map),
+                Some(&edge_updated_at_map),
+            )?;
+            let main_edge_table =
+                MainEdgeDataset::write_batch_lancedb(lancedb_store, main_edge_batch).await?;
+            MainEdgeDataset::ensure_default_indexes_lancedb(&main_edge_table).await?;
         }
 
         // 3.2 Write to main vertices table

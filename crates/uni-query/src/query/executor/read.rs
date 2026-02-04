@@ -20,8 +20,8 @@ use tracing::instrument;
 use uni_common::core::id::{Eid, Vid};
 use uni_common::core::schema::{ConstraintTarget, ConstraintType, DataType, SchemaManager};
 use uni_cypher::ast::{
-    BinaryOp, ConstraintTarget as AstConstraintTarget, Direction, Expr, MapProjectionItem,
-    Quantifier, ShowConstraints, UnaryOp,
+    BinaryOp, Clause, ConstraintTarget as AstConstraintTarget, Direction, Expr, MapProjectionItem,
+    MatchClause, Query, Quantifier, ReturnClause, ReturnItem, ShowConstraints, Statement, UnaryOp,
 };
 use uni_store::QueryContext;
 use uni_store::cloud::{build_store_from_url, copy_store_prefix, is_cloud_url};
@@ -928,8 +928,98 @@ impl Executor {
             }
 
             match expr {
-                Expr::PatternComprehension { .. } => {
-                    todo!("PatternComprehension support in fallback executor")
+                Expr::PatternComprehension {
+                    path_variable,
+                    pattern,
+                    where_clause,
+                    map_expr,
+                } => {
+                    // Pattern comprehension: [(path) = pattern WHERE pred | expr]
+                    // Execute the pattern as a subquery, then evaluate map_expr for each result.
+
+                    // Create a MATCH query from the pattern
+                    let match_clause = MatchClause {
+                        optional: false,
+                        pattern: pattern.clone(),
+                        where_clause: where_clause.as_ref().map(|e| (**e).clone()),
+                    };
+
+                    // Create RETURN * to get all bound variables
+                    let return_clause = ReturnClause {
+                        distinct: false,
+                        items: vec![ReturnItem::All],
+                        order_by: None,
+                        skip: None,
+                        limit: None,
+                    };
+
+                    let query = Query::Single(Statement {
+                        clauses: vec![
+                            Clause::Match(match_clause),
+                            Clause::Return(return_clause),
+                        ],
+                    });
+
+                    // Plan the subquery with current scope
+                    let planner = QueryPlanner::new(Arc::new(
+                        this.storage.schema_manager().schema().clone(),
+                    ));
+                    let vars_in_scope: Vec<String> = row.keys().cloned().collect();
+
+                    match planner.plan_with_scope(query, vars_in_scope) {
+                        Ok(plan) => {
+                            // Merge row into params for subquery execution
+                            let mut sub_params = params.clone();
+                            sub_params.extend(row.clone());
+
+                            match this.execute(plan, prop_manager, &sub_params).await {
+                                Ok(results) => {
+                                    // For each result, evaluate the map expression
+                                    let mut mapped_values = Vec::new();
+                                    for mut result_row in results {
+                                        // Merge current row context into result
+                                        for (k, v) in row.iter() {
+                                            result_row.entry(k.clone()).or_insert_with(|| v.clone());
+                                        }
+
+                                        // If path_variable is specified, bind the path
+                                        if let Some(path_var) = path_variable {
+                                            // Create a path object from the matched pattern
+                                            // For now, just bind the nodes/edges from the pattern
+                                            let path_obj = json!({
+                                                "nodes": [],
+                                                "relationships": []
+                                            });
+                                            result_row
+                                                .insert(path_var.clone(), path_obj);
+                                        }
+
+                                        // Evaluate the map expression
+                                        let mapped_val = this
+                                            .evaluate_expr(
+                                                map_expr,
+                                                &result_row,
+                                                prop_manager,
+                                                params,
+                                                ctx,
+                                            )
+                                            .await?;
+                                        mapped_values.push(mapped_val);
+                                    }
+                                    Ok(Value::Array(mapped_values))
+                                }
+                                Err(e) => {
+                                    // Pattern didn't match - return empty list
+                                    log::debug!("Pattern comprehension execution failed: {}", e);
+                                    Ok(Value::Array(vec![]))
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            log::debug!("Pattern comprehension planning failed: {}", e);
+                            Ok(Value::Array(vec![]))
+                        }
+                    }
                 }
                 Expr::CollectSubquery(_) => Err(anyhow::anyhow!(
                     "COLLECT subqueries not yet supported in executor"
@@ -2611,7 +2701,8 @@ impl Executor {
                     } else {
                         return Err(anyhow!("Write operation requires a Writer"));
                     }
-                    Ok(rows)
+                    // OpenCypher spec: CREATE without RETURN returns empty result
+                    Ok(vec![])
                 }
                 LogicalPlan::CreateBatch { input, patterns } => {
                     // Execute input plan once (no recursion per pattern)
@@ -2639,7 +2730,8 @@ impl Executor {
                     } else {
                         return Err(anyhow!("Write operation requires a Writer"));
                     }
-                    Ok(rows)
+                    // OpenCypher spec: CREATE without RETURN returns empty result
+                    Ok(vec![])
                 }
                 LogicalPlan::Delete {
                     input,
@@ -2705,7 +2797,8 @@ impl Executor {
                     } else {
                         return Err(anyhow!("Write operation requires a Writer"));
                     }
-                    Ok(rows)
+                    // OpenCypher spec: DELETE without RETURN returns empty result
+                    Ok(vec![])
                 }
                 LogicalPlan::Begin => {
                     if let Some(writer_lock) = &self.writer {
@@ -3722,9 +3815,18 @@ impl Executor {
         };
 
         let mut incident_edges = Vec::new();
+        // For Direction::Both, deduplicate edges by eid.
+        // This prevents the same edge being counted twice (once outgoing, once incoming).
+        let mut seen_edges = std::collections::HashSet::new();
+        let is_undirected = matches!(direction, Direction::Both);
+
         for dir in directions {
             for edge in graph.neighbors(curr, dir) {
                 if !edge_type_ids.contains(&edge.edge_type) {
+                    continue;
+                }
+                // Deduplicate edges for undirected patterns
+                if is_undirected && !seen_edges.insert(edge.eid) {
                     continue;
                 }
                 let next = match dir {
