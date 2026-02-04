@@ -21,7 +21,6 @@ use std::sync::Arc;
 #[pyclass]
 pub struct Transaction {
     pub(crate) inner: Arc<Uni>,
-    pub(crate) rt: tokio::runtime::Handle,
     pub(crate) completed: bool,
 }
 
@@ -42,8 +41,7 @@ impl Transaction {
         }
         let rust_params = convert::prepare_params(py, params)?;
 
-        let rows = self
-            .rt
+        let rows = pyo3_async_runtimes::tokio::get_runtime()
             .block_on(core::query_core(&self.inner, cypher, rust_params))
             .map_err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>)?;
 
@@ -57,7 +55,7 @@ impl Transaction {
                 "Transaction already completed",
             ));
         }
-        self.rt
+        pyo3_async_runtimes::tokio::get_runtime()
             .block_on(core::commit_transaction_core(&self.inner))
             .map_err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>)?;
         self.completed = true;
@@ -71,7 +69,7 @@ impl Transaction {
                 "Transaction already completed",
             ));
         }
-        self.rt
+        pyo3_async_runtimes::tokio::get_runtime()
             .block_on(core::rollback_transaction_core(&self.inner))
             .map_err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>)?;
         self.completed = true;
@@ -87,7 +85,6 @@ impl Transaction {
 #[pyclass]
 pub struct Database {
     pub(crate) inner: Arc<Uni>,
-    pub(crate) rt: tokio::runtime::Runtime,
 }
 
 #[pymethods]
@@ -95,23 +92,12 @@ impl Database {
     /// Create or open a database at the given path.
     #[new]
     fn new(path: &str) -> PyResult<Self> {
-        let rt = tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
-            .map_err(|e| {
-                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                    "Failed to create runtime: {}",
-                    e
-                ))
-            })?;
-
-        let uni = rt
+        let uni = pyo3_async_runtimes::tokio::get_runtime()
             .block_on(async { Uni::open(path).build().await })
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))?;
 
         Ok(Database {
             inner: Arc::new(uni),
-            rt,
         })
     }
 
@@ -129,8 +115,7 @@ impl Database {
     ) -> PyResult<Vec<Py<PyAny>>> {
         let rust_params = convert::prepare_params(py, params)?;
 
-        let rows = self
-            .rt
+        let rows = pyo3_async_runtimes::tokio::get_runtime()
             .block_on(core::query_core(&self.inner, cypher, rust_params))
             .map_err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>)?;
 
@@ -141,7 +126,6 @@ impl Database {
     fn query_with(&self, cypher: &str) -> QueryBuilder {
         QueryBuilder {
             inner: self.inner.clone(),
-            rt: self.rt.handle().clone(),
             cypher: cypher.to_string(),
             params: HashMap::new(),
             timeout_secs: None,
@@ -159,11 +143,11 @@ impl Database {
     ) -> PyResult<usize> {
         let rust_params = convert::prepare_params(py, params)?;
         if rust_params.is_empty() {
-            self.rt
+            pyo3_async_runtimes::tokio::get_runtime()
                 .block_on(core::execute_core(&self.inner, cypher))
                 .map_err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>)
         } else {
-            self.rt
+            pyo3_async_runtimes::tokio::get_runtime()
                 .block_on(core::execute_with_params_core(
                     &self.inner,
                     cypher,
@@ -175,8 +159,7 @@ impl Database {
 
     /// Explain the query plan without executing.
     fn explain(&self, py: Python, cypher: &str) -> PyResult<Py<PyAny>> {
-        let output = self
-            .rt
+        let output = pyo3_async_runtimes::tokio::get_runtime()
             .block_on(core::explain_core(&self.inner, cypher))
             .map_err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>)?;
 
@@ -220,8 +203,7 @@ impl Database {
 
     /// Profile query execution with operator-level statistics.
     fn profile(&self, py: Python, cypher: &str) -> PyResult<(Vec<Py<PyAny>>, Py<PyAny>)> {
-        let (results, profile) = self
-            .rt
+        let (results, profile) = pyo3_async_runtimes::tokio::get_runtime()
             .block_on(core::profile_core(&self.inner, cypher))
             .map_err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>)?;
 
@@ -258,21 +240,19 @@ impl Database {
 
     /// Begin a new transaction.
     fn begin(&self) -> PyResult<Transaction> {
-        let handle = self.rt.handle().clone();
-        handle
+        pyo3_async_runtimes::tokio::get_runtime()
             .block_on(core::begin_transaction_core(&self.inner))
             .map_err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>)?;
 
         Ok(Transaction {
             inner: self.inner.clone(),
-            rt: handle,
             completed: false,
         })
     }
 
     /// Flush all uncommitted changes to persistent storage.
     fn flush(&self) -> PyResult<()> {
-        self.rt
+        pyo3_async_runtimes::tokio::get_runtime()
             .block_on(core::flush_core(&self.inner))
             .map_err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>)?;
         Ok(())
@@ -286,7 +266,6 @@ impl Database {
     fn schema(&self) -> SchemaBuilder {
         SchemaBuilder {
             inner: self.inner.clone(),
-            rt: self.rt.handle().clone(),
             pending_labels: Vec::new(),
             pending_edge_types: Vec::new(),
             pending_properties: Vec::new(),
@@ -296,7 +275,7 @@ impl Database {
 
     /// Create a label.
     fn create_label(&self, name: &str) -> PyResult<u16> {
-        self.rt
+        pyo3_async_runtimes::tokio::get_runtime()
             .block_on(core::create_label_core(&self.inner, name))
             .map_err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>)
     }
@@ -311,7 +290,7 @@ impl Database {
     ) -> PyResult<u16> {
         let from = from_labels.unwrap_or_default();
         let to = to_labels.unwrap_or_default();
-        self.rt
+        pyo3_async_runtimes::tokio::get_runtime()
             .block_on(core::create_edge_type_core(&self.inner, name, from, to))
             .map_err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>)
     }
@@ -326,7 +305,7 @@ impl Database {
     ) -> PyResult<()> {
         let dt = core::parse_data_type(data_type)
             .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
-        self.rt
+        pyo3_async_runtimes::tokio::get_runtime()
             .block_on(core::add_property_core(
                 &self.inner,
                 label_or_type,
@@ -340,36 +319,35 @@ impl Database {
 
     /// Check if a label exists.
     fn label_exists(&self, name: &str) -> PyResult<bool> {
-        self.rt
+        pyo3_async_runtimes::tokio::get_runtime()
             .block_on(core::label_exists_core(&self.inner, name))
             .map_err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>)
     }
 
     /// Check if an edge type exists.
     fn edge_type_exists(&self, name: &str) -> PyResult<bool> {
-        self.rt
+        pyo3_async_runtimes::tokio::get_runtime()
             .block_on(core::edge_type_exists_core(&self.inner, name))
             .map_err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>)
     }
 
     /// Get all label names.
     fn list_labels(&self) -> PyResult<Vec<String>> {
-        self.rt
+        pyo3_async_runtimes::tokio::get_runtime()
             .block_on(core::list_labels_core(&self.inner))
             .map_err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>)
     }
 
     /// Get all edge type names.
     fn list_edge_types(&self) -> PyResult<Vec<String>> {
-        self.rt
+        pyo3_async_runtimes::tokio::get_runtime()
             .block_on(core::list_edge_types_core(&self.inner))
             .map_err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>)
     }
 
     /// Get detailed information about a label.
     fn get_label_info(&self, name: &str) -> PyResult<Option<LabelInfo>> {
-        let info = self
-            .rt
+        let info = pyo3_async_runtimes::tokio::get_runtime()
             .block_on(core::get_label_info_core(&self.inner, name))
             .map_err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>)?;
 
@@ -435,14 +413,14 @@ impl Database {
 
     /// Load schema from a JSON file.
     fn load_schema(&self, path: &str) -> PyResult<()> {
-        self.rt
+        pyo3_async_runtimes::tokio::get_runtime()
             .block_on(core::load_schema_core(&self.inner, path))
             .map_err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>)
     }
 
     /// Save schema to a JSON file.
     fn save_schema(&self, path: &str) -> PyResult<()> {
-        self.rt
+        pyo3_async_runtimes::tokio::get_runtime()
             .block_on(core::save_schema_core(&self.inner, path))
             .map_err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>)
     }
@@ -453,7 +431,7 @@ impl Database {
 
     /// Create a scalar index on a property.
     fn create_scalar_index(&self, label: &str, property: &str, index_type: &str) -> PyResult<()> {
-        self.rt
+        pyo3_async_runtimes::tokio::get_runtime()
             .block_on(core::create_scalar_index_core(
                 &self.inner,
                 label,
@@ -466,7 +444,7 @@ impl Database {
 
     /// Create a vector index on a property.
     fn create_vector_index(&self, label: &str, property: &str, metric: &str) -> PyResult<()> {
-        self.rt
+        pyo3_async_runtimes::tokio::get_runtime()
             .block_on(core::create_vector_index_core(
                 &self.inner,
                 label,
@@ -485,7 +463,6 @@ impl Database {
     fn session(&self) -> SessionBuilder {
         SessionBuilder {
             inner: self.inner.clone(),
-            rt: self.rt.handle().clone(),
             variables: HashMap::new(),
         }
     }
@@ -498,7 +475,6 @@ impl Database {
     fn bulk_writer(&self) -> BulkWriterBuilder {
         BulkWriterBuilder {
             inner: self.inner.clone(),
-            rt: self.rt.handle().clone(),
             defer_vector_indexes: true,
             defer_scalar_indexes: true,
             batch_size: 10_000,
@@ -523,8 +499,7 @@ impl Database {
             rust_props.push(map);
         }
 
-        let vids = self
-            .rt
+        let vids = pyo3_async_runtimes::tokio::get_runtime()
             .block_on(core::bulk_insert_vertices_core(
                 &self.inner,
                 label,
@@ -552,7 +527,7 @@ impl Database {
             rust_edges.push((::uni_db::Vid::from(src), ::uni_db::Vid::from(dst), map));
         }
 
-        self.rt
+        pyo3_async_runtimes::tokio::get_runtime()
             .block_on(core::bulk_insert_edges_core(
                 &self.inner,
                 edge_type,

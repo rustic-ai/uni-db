@@ -20,11 +20,12 @@ def test_invalid_cypher_syntax(empty_db):
 
 
 def test_query_non_existent_label(social_db):
-    """Query on non-existent label should raise RuntimeError."""
+    """Query on non-existent label returns empty results (schemaless scan)."""
     db = social_db
-    # This engine raises RuntimeError for non-existent labels
-    with pytest.raises(RuntimeError):
-        db.query("MATCH (n:NonExistentLabel) RETURN n")
+    # The engine supports unknown labels via ScanMainByLabel (schemaless)
+    # and returns an empty result set rather than raising an error
+    result = db.query("MATCH (n:NonExistentLabel) RETURN n")
+    assert result == []
 
 
 def test_type_mismatch_in_property(social_db):

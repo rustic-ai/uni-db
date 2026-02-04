@@ -22,7 +22,6 @@ use std::sync::Arc;
 #[pyclass]
 pub struct AsyncDatabase {
     inner: Arc<Uni>,
-    rt: Arc<tokio::runtime::Runtime>,
 }
 
 #[pymethods]
@@ -30,19 +29,6 @@ impl AsyncDatabase {
     /// Open or create a database at the given path.
     #[staticmethod]
     fn open<'py>(py: Python<'py>, path: String) -> PyResult<Bound<'py, PyAny>> {
-        let rt = Arc::new(
-            tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()
-                .map_err(|e| {
-                    PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                        "Failed to create runtime: {}",
-                        e
-                    ))
-                })?,
-        );
-        let rt2 = rt.clone();
-        let _guard = rt.enter();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let uni = Uni::open(&path)
                 .build()
@@ -50,7 +36,6 @@ impl AsyncDatabase {
                 .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))?;
             Ok(AsyncDatabase {
                 inner: Arc::new(uni),
-                rt: rt2,
             })
         })
     }
@@ -58,19 +43,6 @@ impl AsyncDatabase {
     /// Create a temporary in-memory database.
     #[staticmethod]
     fn temporary<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let rt = Arc::new(
-            tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()
-                .map_err(|e| {
-                    PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                        "Failed to create runtime: {}",
-                        e
-                    ))
-                })?,
-        );
-        let rt2 = rt.clone();
-        let _guard = rt.enter();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let uni = Uni::temporary()
                 .build()
@@ -78,7 +50,6 @@ impl AsyncDatabase {
                 .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))?;
             Ok(AsyncDatabase {
                 inner: Arc::new(uni),
-                rt: rt2,
             })
         })
     }
@@ -110,7 +81,6 @@ impl AsyncDatabase {
     ) -> PyResult<Bound<'py, PyAny>> {
         let rust_params = convert::prepare_params(py, params)?;
         let inner = self.inner.clone();
-        let _guard = self.rt.enter();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let rows = core::query_core(&inner, &cypher, rust_params)
                 .await
@@ -129,7 +99,6 @@ impl AsyncDatabase {
     ) -> PyResult<Bound<'py, PyAny>> {
         let rust_params = convert::prepare_params(py, params)?;
         let inner = self.inner.clone();
-        let _guard = self.rt.enter();
         if rust_params.is_empty() {
             pyo3_async_runtimes::tokio::future_into_py(py, async move {
                 core::execute_core(&inner, &cypher)
@@ -148,7 +117,6 @@ impl AsyncDatabase {
     /// Explain the query plan without executing.
     fn explain<'py>(&self, py: Python<'py>, cypher: String) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
-        let _guard = self.rt.enter();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let output = core::explain_core(&inner, &cypher)
                 .await
@@ -198,7 +166,6 @@ impl AsyncDatabase {
     /// Profile query execution with operator-level statistics.
     fn profile<'py>(&self, py: Python<'py>, cypher: String) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
-        let _guard = self.rt.enter();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let (results, profile) = core::profile_core(&inner, &cypher)
                 .await
@@ -238,7 +205,6 @@ impl AsyncDatabase {
     /// Flush all uncommitted changes to persistent storage.
     fn flush<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
-        let _guard = self.rt.enter();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             core::flush_core(&inner)
                 .await
@@ -253,15 +219,12 @@ impl AsyncDatabase {
     /// Begin a new async transaction.
     fn begin<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
-        let rt = self.rt.clone();
-        let _guard = self.rt.enter();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             core::begin_transaction_core(&inner)
                 .await
                 .map_err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>)?;
             Ok(AsyncTransaction {
                 inner,
-                rt,
                 completed: false,
             })
         })
@@ -274,7 +237,6 @@ impl AsyncDatabase {
     /// Create a label.
     fn create_label<'py>(&self, py: Python<'py>, name: String) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
-        let _guard = self.rt.enter();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             core::create_label_core(&inner, &name)
                 .await
@@ -294,7 +256,6 @@ impl AsyncDatabase {
         let from = from_labels.unwrap_or_default();
         let to = to_labels.unwrap_or_default();
         let inner = self.inner.clone();
-        let _guard = self.rt.enter();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             core::create_edge_type_core(&inner, &name, from, to)
                 .await
@@ -314,7 +275,6 @@ impl AsyncDatabase {
         let dt = core::parse_data_type(&data_type)
             .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
         let inner = self.inner.clone();
-        let _guard = self.rt.enter();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             core::add_property_core(&inner, &label_or_type, &name, dt, nullable)
                 .await
@@ -325,7 +285,6 @@ impl AsyncDatabase {
     /// Check if a label exists.
     fn label_exists<'py>(&self, py: Python<'py>, name: String) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
-        let _guard = self.rt.enter();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             core::label_exists_core(&inner, &name)
                 .await
@@ -336,7 +295,6 @@ impl AsyncDatabase {
     /// Check if an edge type exists.
     fn edge_type_exists<'py>(&self, py: Python<'py>, name: String) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
-        let _guard = self.rt.enter();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             core::edge_type_exists_core(&inner, &name)
                 .await
@@ -347,7 +305,6 @@ impl AsyncDatabase {
     /// List all label names.
     fn list_labels<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
-        let _guard = self.rt.enter();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             core::list_labels_core(&inner)
                 .await
@@ -358,7 +315,6 @@ impl AsyncDatabase {
     /// List all edge type names.
     fn list_edge_types<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
-        let _guard = self.rt.enter();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             core::list_edge_types_core(&inner)
                 .await
@@ -369,7 +325,6 @@ impl AsyncDatabase {
     /// Get detailed information about a label.
     fn get_label_info<'py>(&self, py: Python<'py>, name: String) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
-        let _guard = self.rt.enter();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let info = core::get_label_info_core(&inner, &name)
                 .await
@@ -440,7 +395,6 @@ impl AsyncDatabase {
     /// Load schema from a JSON file.
     fn load_schema<'py>(&self, py: Python<'py>, path: String) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
-        let _guard = self.rt.enter();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             core::load_schema_core(&inner, &path)
                 .await
@@ -451,7 +405,6 @@ impl AsyncDatabase {
     /// Save schema to a JSON file.
     fn save_schema<'py>(&self, py: Python<'py>, path: String) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
-        let _guard = self.rt.enter();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             core::save_schema_core(&inner, &path)
                 .await
@@ -472,7 +425,6 @@ impl AsyncDatabase {
         index_type: String,
     ) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
-        let _guard = self.rt.enter();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             core::create_scalar_index_core(&inner, &label, &property, &index_type)
                 .await
@@ -489,7 +441,6 @@ impl AsyncDatabase {
         metric: String,
     ) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
-        let _guard = self.rt.enter();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             core::create_vector_index_core(&inner, &label, &property, &metric)
                 .await
@@ -505,7 +456,6 @@ impl AsyncDatabase {
     fn session(&self) -> AsyncSessionBuilder {
         AsyncSessionBuilder {
             inner: self.inner.clone(),
-            rt: self.rt.clone(),
             variables: HashMap::new(),
         }
     }
@@ -518,7 +468,6 @@ impl AsyncDatabase {
     fn bulk_writer(&self) -> AsyncBulkWriterBuilder {
         AsyncBulkWriterBuilder {
             inner: self.inner.clone(),
-            rt: self.rt.clone(),
             defer_vector_indexes: true,
             defer_scalar_indexes: true,
             batch_size: 10_000,
@@ -544,7 +493,6 @@ impl AsyncDatabase {
         }
 
         let inner = self.inner.clone();
-        let _guard = self.rt.enter();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let vids = core::bulk_insert_vertices_core(&inner, &label, rust_props)
                 .await
@@ -571,7 +519,6 @@ impl AsyncDatabase {
         }
 
         let inner = self.inner.clone();
-        let _guard = self.rt.enter();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             core::bulk_insert_edges_core(&inner, &edge_type, rust_edges)
                 .await
@@ -583,7 +530,6 @@ impl AsyncDatabase {
     fn query_with(&self, cypher: String) -> AsyncQueryBuilder {
         AsyncQueryBuilder {
             inner: self.inner.clone(),
-            rt: self.rt.clone(),
             cypher,
             params: HashMap::new(),
             timeout_secs: None,
@@ -595,7 +541,6 @@ impl AsyncDatabase {
     fn schema(&self) -> AsyncSchemaBuilder {
         AsyncSchemaBuilder {
             inner: self.inner.clone(),
-            rt: self.rt.clone(),
             pending_labels: Vec::new(),
             pending_edge_types: Vec::new(),
             pending_properties: Vec::new(),
@@ -712,19 +657,6 @@ impl AsyncDatabaseBuilder {
         let cache_size = self.cache_size;
         let parallelism = self.parallelism;
 
-        let rt = Arc::new(
-            tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()
-                .map_err(|e| {
-                    PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                        "Failed to create runtime: {}",
-                        e
-                    ))
-                })?,
-        );
-        let rt2 = rt.clone();
-        let _guard = rt.enter();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let uni = core::build_database_core(
                 &uri,
@@ -739,7 +671,6 @@ impl AsyncDatabaseBuilder {
 
             Ok(AsyncDatabase {
                 inner: Arc::new(uni),
-                rt: rt2,
             })
         })
     }
@@ -753,7 +684,6 @@ impl AsyncDatabaseBuilder {
 #[pyclass]
 pub struct AsyncTransaction {
     inner: Arc<Uni>,
-    rt: Arc<tokio::runtime::Runtime>,
     completed: bool,
 }
 
@@ -774,7 +704,6 @@ impl AsyncTransaction {
         }
         let rust_params = convert::prepare_params(py, params)?;
         let inner = self.inner.clone();
-        let _guard = self.rt.enter();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let rows = core::query_core(&inner, &cypher, rust_params)
                 .await
@@ -792,7 +721,6 @@ impl AsyncTransaction {
         }
         self.completed = true;
         let inner = self.inner.clone();
-        let _guard = self.rt.enter();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             core::commit_transaction_core(&inner)
                 .await
@@ -809,7 +737,6 @@ impl AsyncTransaction {
         }
         self.completed = true;
         let inner = self.inner.clone();
-        let _guard = self.rt.enter();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             core::rollback_transaction_core(&inner)
                 .await
@@ -820,11 +747,6 @@ impl AsyncTransaction {
     /// Async context manager support.
     fn __aenter__<'py>(slf: Bound<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let obj: Py<PyAny> = slf.into_any().unbind();
-        let rt_clone = {
-            let borrowed = obj.bind(py).cast::<Self>().unwrap();
-            borrowed.borrow().rt.clone()
-        };
-        let _guard = rt_clone.enter();
         pyo3_async_runtimes::tokio::future_into_py(py, async move { Ok(obj) })
     }
 
@@ -838,7 +760,6 @@ impl AsyncTransaction {
     ) -> PyResult<Bound<'py, PyAny>> {
         if self.completed {
             // Already committed or rolled back
-            let _guard = self.rt.enter();
             return pyo3_async_runtimes::tokio::future_into_py(py, async move {
                 Ok(false) // Don't suppress exceptions
             });
@@ -846,7 +767,6 @@ impl AsyncTransaction {
         self.completed = true;
         let inner = self.inner.clone();
         let has_exception = !exc_type.is_none(py);
-        let _guard = self.rt.enter();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             if has_exception {
                 core::rollback_transaction_core(&inner)
@@ -871,7 +791,6 @@ impl AsyncTransaction {
 #[derive(Clone)]
 pub struct AsyncSessionBuilder {
     inner: Arc<Uni>,
-    rt: Arc<tokio::runtime::Runtime>,
     variables: HashMap<String, serde_json::Value>,
 }
 
@@ -888,7 +807,6 @@ impl AsyncSessionBuilder {
     fn build(&self) -> PyResult<AsyncSession> {
         Ok(AsyncSession {
             inner: self.inner.clone(),
-            rt: self.rt.clone(),
             variables: self.variables.clone(),
         })
     }
@@ -899,7 +817,6 @@ impl AsyncSessionBuilder {
 #[derive(Clone)]
 pub struct AsyncSession {
     inner: Arc<Uni>,
-    rt: Arc<tokio::runtime::Runtime>,
     variables: HashMap<String, serde_json::Value>,
 }
 
@@ -944,7 +861,6 @@ impl AsyncSession {
     ) -> PyResult<Bound<'py, PyAny>> {
         let rust_params = self.build_session_params(py, params)?;
         let inner = self.inner.clone();
-        let _guard = self.rt.enter();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let rows = core::query_core(&inner, &cypher, rust_params)
                 .await
@@ -957,7 +873,6 @@ impl AsyncSession {
     fn execute<'py>(&self, py: Python<'py>, cypher: String) -> PyResult<Bound<'py, PyAny>> {
         let rust_params = self.build_session_params(py, None)?;
         let inner = self.inner.clone();
-        let _guard = self.rt.enter();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             core::execute_with_params_core(&inner, &cypher, rust_params)
                 .await
@@ -983,7 +898,6 @@ impl AsyncSession {
 #[derive(Clone)]
 pub struct AsyncBulkWriterBuilder {
     inner: Arc<Uni>,
-    rt: Arc<tokio::runtime::Runtime>,
     defer_vector_indexes: bool,
     defer_scalar_indexes: bool,
     batch_size: usize,
@@ -1020,7 +934,6 @@ impl AsyncBulkWriterBuilder {
     fn build(&self) -> PyResult<AsyncBulkWriter> {
         Ok(AsyncBulkWriter {
             inner: self.inner.clone(),
-            rt: self.rt.clone(),
             stats: Arc::new(std::sync::Mutex::new(BulkStats::default())),
             aborted: false,
             committed: false,
@@ -1032,7 +945,6 @@ impl AsyncBulkWriterBuilder {
 #[pyclass]
 pub struct AsyncBulkWriter {
     inner: Arc<Uni>,
-    rt: Arc<tokio::runtime::Runtime>,
     stats: Arc<std::sync::Mutex<BulkStats>>,
     aborted: bool,
     committed: bool,
@@ -1065,7 +977,6 @@ impl AsyncBulkWriter {
 
         let inner = self.inner.clone();
         let stats = self.stats.clone();
-        let _guard = self.rt.enter();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let vids = core::bulk_insert_vertices_core(&inner, &label, rust_props)
                 .await
@@ -1103,7 +1014,6 @@ impl AsyncBulkWriter {
 
         let inner = self.inner.clone();
         let stats = self.stats.clone();
-        let _guard = self.rt.enter();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             core::bulk_insert_edges_core(&inner, &edge_type, rust_edges)
                 .await
@@ -1125,7 +1035,6 @@ impl AsyncBulkWriter {
         self.committed = true;
         let stats = self.stats.clone();
         let inner = self.inner.clone();
-        let _guard = self.rt.enter();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             core::flush_core(&inner)
                 .await
@@ -1155,7 +1064,6 @@ impl AsyncBulkWriter {
 #[pyclass]
 pub struct AsyncQueryBuilder {
     inner: Arc<Uni>,
-    rt: Arc<tokio::runtime::Runtime>,
     cypher: String,
     params: HashMap<String, Py<PyAny>>,
     timeout_secs: Option<f64>,
@@ -1203,7 +1111,6 @@ impl AsyncQueryBuilder {
         let cypher = self.cypher.clone();
         let timeout_secs = self.timeout_secs;
         let max_memory = self.max_memory;
-        let _guard = self.rt.enter();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let rows =
                 core::query_builder_core(&inner, &cypher, rust_params, timeout_secs, max_memory)
@@ -1223,7 +1130,6 @@ impl AsyncQueryBuilder {
 #[derive(Clone)]
 pub struct AsyncSchemaBuilder {
     inner: Arc<Uni>,
-    rt: Arc<tokio::runtime::Runtime>,
     pending_labels: Vec<String>,
     pending_edge_types: Vec<(String, Vec<String>, Vec<String>)>,
     pending_properties: Vec<(String, String, uni_common::core::schema::DataType, bool)>,
@@ -1236,7 +1142,6 @@ impl AsyncSchemaBuilder {
     fn label(&self, name: &str) -> PyResult<AsyncLabelBuilder> {
         Ok(AsyncLabelBuilder {
             parent_inner: self.inner.clone(),
-            parent_rt: self.rt.clone(),
             parent_labels: self.pending_labels.clone(),
             parent_edge_types: self.pending_edge_types.clone(),
             parent_properties: self.pending_properties.clone(),
@@ -1256,7 +1161,6 @@ impl AsyncSchemaBuilder {
     ) -> PyResult<AsyncEdgeTypeBuilder> {
         Ok(AsyncEdgeTypeBuilder {
             parent_inner: self.inner.clone(),
-            parent_rt: self.rt.clone(),
             parent_labels: self.pending_labels.clone(),
             parent_edge_types: self.pending_edge_types.clone(),
             parent_properties: self.pending_properties.clone(),
@@ -1275,7 +1179,6 @@ impl AsyncSchemaBuilder {
         let edge_types = self.pending_edge_types.clone();
         let properties = self.pending_properties.clone();
         let indexes = self.pending_indexes.clone();
-        let _guard = self.rt.enter();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             core::apply_schema_core(&inner, &labels, &edge_types, &properties, &indexes)
                 .await
@@ -1289,7 +1192,6 @@ impl AsyncSchemaBuilder {
 #[derive(Clone)]
 pub struct AsyncLabelBuilder {
     parent_inner: Arc<Uni>,
-    parent_rt: Arc<tokio::runtime::Runtime>,
     parent_labels: Vec<String>,
     parent_edge_types: Vec<(String, Vec<String>, Vec<String>)>,
     parent_properties: Vec<(String, String, uni_common::core::schema::DataType, bool)>,
@@ -1363,7 +1265,6 @@ impl AsyncLabelBuilder {
 
         Ok(AsyncSchemaBuilder {
             inner: self.parent_inner.clone(),
-            rt: self.parent_rt.clone(),
             pending_labels: labels,
             pending_edge_types: self.parent_edge_types.clone(),
             pending_properties: properties,
@@ -1382,7 +1283,6 @@ impl AsyncLabelBuilder {
 #[derive(Clone)]
 pub struct AsyncEdgeTypeBuilder {
     parent_inner: Arc<Uni>,
-    parent_rt: Arc<tokio::runtime::Runtime>,
     parent_labels: Vec<String>,
     parent_edge_types: Vec<(String, Vec<String>, Vec<String>)>,
     parent_properties: Vec<(String, String, uni_common::core::schema::DataType, bool)>,
@@ -1435,7 +1335,6 @@ impl AsyncEdgeTypeBuilder {
 
         Ok(AsyncSchemaBuilder {
             inner: self.parent_inner.clone(),
-            rt: self.parent_rt.clone(),
             pending_labels: self.parent_labels.clone(),
             pending_edge_types: edge_types,
             pending_properties: properties,

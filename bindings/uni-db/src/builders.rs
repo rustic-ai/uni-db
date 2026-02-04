@@ -114,17 +114,7 @@ impl DatabaseBuilder {
 
     /// Build and return the Database instance.
     fn build(&self) -> PyResult<crate::sync_api::Database> {
-        let rt = tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
-            .map_err(|e| {
-                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                    "Failed to create runtime: {}",
-                    e
-                ))
-            })?;
-
-        let uni = rt
+        let uni = pyo3_async_runtimes::tokio::get_runtime()
             .block_on(core::build_database_core(
                 &self.uri,
                 self.mode,
@@ -137,7 +127,6 @@ impl DatabaseBuilder {
 
         Ok(crate::sync_api::Database {
             inner: Arc::new(uni),
-            rt,
         })
     }
 }
@@ -150,7 +139,6 @@ impl DatabaseBuilder {
 #[pyclass]
 pub struct QueryBuilder {
     pub(crate) inner: Arc<Uni>,
-    pub(crate) rt: tokio::runtime::Handle,
     pub(crate) cypher: String,
     pub(crate) params: HashMap<String, Py<PyAny>>,
     pub(crate) timeout_secs: Option<f64>,
@@ -194,8 +182,7 @@ impl QueryBuilder {
             rust_params.insert(k.clone(), val);
         }
 
-        let rows = self
-            .rt
+        let rows = pyo3_async_runtimes::tokio::get_runtime()
             .block_on(core::query_builder_core(
                 &self.inner,
                 &self.cypher,
@@ -218,7 +205,6 @@ impl QueryBuilder {
 #[derive(Clone)]
 pub struct SchemaBuilder {
     pub(crate) inner: Arc<Uni>,
-    pub(crate) rt: tokio::runtime::Handle,
     pub(crate) pending_labels: Vec<String>,
     pub(crate) pending_edge_types: Vec<(String, Vec<String>, Vec<String>)>,
     pub(crate) pending_properties: Vec<(String, String, DataType, bool)>,
@@ -231,7 +217,6 @@ impl SchemaBuilder {
     fn label(&self, name: &str) -> PyResult<LabelBuilder> {
         Ok(LabelBuilder {
             parent_inner: self.inner.clone(),
-            parent_rt: self.rt.clone(),
             parent_labels: self.pending_labels.clone(),
             parent_edge_types: self.pending_edge_types.clone(),
             parent_properties: self.pending_properties.clone(),
@@ -251,7 +236,6 @@ impl SchemaBuilder {
     ) -> PyResult<EdgeTypeBuilder> {
         Ok(EdgeTypeBuilder {
             parent_inner: self.inner.clone(),
-            parent_rt: self.rt.clone(),
             parent_labels: self.pending_labels.clone(),
             parent_edge_types: self.pending_edge_types.clone(),
             parent_properties: self.pending_properties.clone(),
@@ -265,7 +249,7 @@ impl SchemaBuilder {
 
     /// Apply all pending schema changes.
     fn apply(&self) -> PyResult<()> {
-        self.rt
+        pyo3_async_runtimes::tokio::get_runtime()
             .block_on(core::apply_schema_core(
                 &self.inner,
                 &self.pending_labels,
@@ -283,7 +267,6 @@ impl SchemaBuilder {
 #[derive(Clone)]
 pub struct LabelBuilder {
     parent_inner: Arc<Uni>,
-    parent_rt: tokio::runtime::Handle,
     parent_labels: Vec<String>,
     parent_edge_types: Vec<(String, Vec<String>, Vec<String>)>,
     parent_properties: Vec<(String, String, DataType, bool)>,
@@ -354,7 +337,6 @@ impl LabelBuilder {
 
         Ok(SchemaBuilder {
             inner: self.parent_inner.clone(),
-            rt: self.parent_rt.clone(),
             pending_labels: labels,
             pending_edge_types: self.parent_edge_types.clone(),
             pending_properties: properties,
@@ -373,7 +355,6 @@ impl LabelBuilder {
 #[derive(Clone)]
 pub struct EdgeTypeBuilder {
     parent_inner: Arc<Uni>,
-    parent_rt: tokio::runtime::Handle,
     parent_labels: Vec<String>,
     parent_edge_types: Vec<(String, Vec<String>, Vec<String>)>,
     parent_properties: Vec<(String, String, DataType, bool)>,
@@ -426,7 +407,6 @@ impl EdgeTypeBuilder {
 
         Ok(SchemaBuilder {
             inner: self.parent_inner.clone(),
-            rt: self.parent_rt.clone(),
             pending_labels: self.parent_labels.clone(),
             pending_edge_types: edge_types,
             pending_properties: properties,
@@ -449,7 +429,6 @@ impl EdgeTypeBuilder {
 #[derive(Clone)]
 pub struct SessionBuilder {
     pub(crate) inner: Arc<Uni>,
-    pub(crate) rt: tokio::runtime::Handle,
     pub(crate) variables: HashMap<String, serde_json::Value>,
 }
 
@@ -466,7 +445,6 @@ impl SessionBuilder {
     fn build(&self) -> PyResult<Session> {
         Ok(Session {
             inner: self.inner.clone(),
-            rt: self.rt.clone(),
             variables: self.variables.clone(),
         })
     }
@@ -477,7 +455,6 @@ impl SessionBuilder {
 #[derive(Clone)]
 pub struct Session {
     pub(crate) inner: Arc<Uni>,
-    pub(crate) rt: tokio::runtime::Handle,
     pub(crate) variables: HashMap<String, serde_json::Value>,
 }
 
@@ -522,8 +499,7 @@ impl Session {
     ) -> PyResult<Vec<Py<PyAny>>> {
         let rust_params = self.build_session_params(py, params)?;
 
-        let rows = self
-            .rt
+        let rows = pyo3_async_runtimes::tokio::get_runtime()
             .block_on(core::query_core(&self.inner, cypher, rust_params))
             .map_err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>)?;
 
@@ -534,7 +510,7 @@ impl Session {
     fn execute(&self, py: Python, cypher: &str) -> PyResult<usize> {
         let rust_params = self.build_session_params(py, None)?;
 
-        self.rt
+        pyo3_async_runtimes::tokio::get_runtime()
             .block_on(core::execute_with_params_core(
                 &self.inner,
                 cypher,
@@ -561,7 +537,6 @@ impl Session {
 #[derive(Clone)]
 pub struct BulkWriterBuilder {
     pub(crate) inner: Arc<Uni>,
-    pub(crate) rt: tokio::runtime::Handle,
     pub(crate) defer_vector_indexes: bool,
     pub(crate) defer_scalar_indexes: bool,
     pub(crate) batch_size: usize,
@@ -598,7 +573,6 @@ impl BulkWriterBuilder {
     fn build(&self) -> PyResult<BulkWriter> {
         Ok(BulkWriter {
             inner: self.inner.clone(),
-            rt: self.rt.clone(),
             stats: BulkStats::default(),
             aborted: false,
             committed: false,
@@ -610,7 +584,6 @@ impl BulkWriterBuilder {
 #[pyclass]
 pub struct BulkWriter {
     inner: Arc<Uni>,
-    rt: tokio::runtime::Handle,
     stats: BulkStats,
     aborted: bool,
     committed: bool,
@@ -641,8 +614,7 @@ impl BulkWriter {
             rust_props.push(map);
         }
 
-        let vids = self
-            .rt
+        let vids = pyo3_async_runtimes::tokio::get_runtime()
             .block_on(core::bulk_insert_vertices_core(
                 &self.inner,
                 label,
@@ -678,7 +650,7 @@ impl BulkWriter {
             rust_edges.push((::uni_db::Vid::from(src), ::uni_db::Vid::from(dst), map));
         }
 
-        self.rt
+        pyo3_async_runtimes::tokio::get_runtime()
             .block_on(core::bulk_insert_edges_core(
                 &self.inner,
                 edge_type,
@@ -698,7 +670,7 @@ impl BulkWriter {
             ));
         }
 
-        self.rt
+        pyo3_async_runtimes::tokio::get_runtime()
             .block_on(core::flush_core(&self.inner))
             .map_err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>)?;
 
