@@ -7,6 +7,7 @@ use uni_common::core::schema::{DataType, SchemaManager};
 
 use uni_query::query::planner::QueryPlanner;
 
+/// Test that unknown labels are handled via ScanMainByLabel (schemaless support).
 #[tokio::test]
 async fn test_planner_missing_label() {
     let dir = tempdir().unwrap();
@@ -21,10 +22,18 @@ async fn test_planner_missing_label() {
     let ast = uni_query::parse_cypher(sql).unwrap();
 
     let res = planner.plan(ast);
-    if let Ok(plan) = &res {
-        println!("Plan: {:?}", plan);
-    }
-    assert!(res.is_err(), "Planner should fail for missing label");
+    // Now supports unknown labels via ScanMainByLabel (schemaless)
+    assert!(
+        res.is_ok(),
+        "Planner should handle unknown labels via ScanMainByLabel"
+    );
+    let plan = res.unwrap();
+    // Check that the plan contains ScanMainByLabel
+    let plan_str = format!("{:?}", plan);
+    assert!(
+        plan_str.contains("ScanMainByLabel"),
+        "Plan should use ScanMainByLabel for unknown labels"
+    );
 }
 
 #[tokio::test]

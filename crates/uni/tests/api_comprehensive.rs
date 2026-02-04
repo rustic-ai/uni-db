@@ -62,13 +62,18 @@ async fn test_error_handling() -> Result<()> {
     let res = db.query("MATCH (n").await;
     assert!(matches!(res, Err(UniError::Parse { .. })));
 
-    // 2. Missing Label
-    // Note: Scan on missing label might return empty or error depending on implementation.
-    // In Executor, it returns error "Label ID X not found" if ID not resolved,
-    // or if label name not in schema.
+    // 2. Unknown Label - now supported via schemaless mode (ScanMainByLabel)
+    // Instead of erroring, it returns empty results for unknown labels
     let res = db.query("MATCH (n:NonExistent) RETURN n").await;
-    // Current implementation: planner looks up label. If not found, returns error.
-    assert!(res.is_err());
+    // Schemaless support: unknown labels return empty result set (not an error)
+    assert!(
+        res.is_ok(),
+        "Unknown labels should succeed with empty results"
+    );
+    assert!(
+        res.unwrap().rows().is_empty(),
+        "Unknown label should return no rows"
+    );
 
     // 3. Type Mismatch (Schema constraint)
     db.schema()

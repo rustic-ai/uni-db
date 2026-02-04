@@ -367,6 +367,165 @@ impl MainVertexDataset {
 
         Ok(None)
     }
+
+    /// Find all non-deleted VIDs in the main vertices table.
+    ///
+    /// Returns all VIDs where `_deleted = false`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the table query fails.
+    pub async fn find_all_vids(store: &LanceDbStore) -> Result<Vec<Vid>> {
+        let table_name = Self::table_name();
+
+        if !store.table_exists(table_name).await? {
+            return Ok(Vec::new());
+        }
+
+        let table = store.open_table(table_name).await?;
+        let query = "_deleted = false";
+
+        let batches = table
+            .query()
+            .only_if(query)
+            .select(lancedb::query::Select::Columns(vec!["_vid".to_string()]))
+            .execute()
+            .await
+            .map_err(|e| anyhow!("Query failed: {}", e))?;
+
+        use futures::TryStreamExt;
+        let results: Vec<RecordBatch> = batches.try_collect().await?;
+
+        let mut vids = Vec::new();
+        for batch in results {
+            if let Some(vid_col) = batch.column_by_name("_vid")
+                && let Some(vid_arr) = vid_col.as_any().downcast_ref::<UInt64Array>()
+            {
+                for i in 0..vid_arr.len() {
+                    if !vid_arr.is_null(i) {
+                        vids.push(Vid::new(vid_arr.value(i)));
+                    }
+                }
+            }
+        }
+
+        Ok(vids)
+    }
+
+    /// Find VIDs by label name in the main vertices table.
+    ///
+    /// Searches for vertices where the labels array contains the given label
+    /// and `_deleted = false`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the table query fails.
+    pub async fn find_vids_by_label_name(store: &LanceDbStore, label: &str) -> Result<Vec<Vid>> {
+        let table_name = Self::table_name();
+
+        if !store.table_exists(table_name).await? {
+            return Ok(Vec::new());
+        }
+
+        let table = store.open_table(table_name).await?;
+        // Use SQL array_contains to filter by label
+        let query = format!("_deleted = false AND array_contains(labels, '{}')", label);
+
+        let batches = table
+            .query()
+            .only_if(query)
+            .select(lancedb::query::Select::Columns(vec!["_vid".to_string()]))
+            .execute()
+            .await
+            .map_err(|e| anyhow!("Query failed: {}", e))?;
+
+        use futures::TryStreamExt;
+        let results: Vec<RecordBatch> = batches.try_collect().await?;
+
+        let mut vids = Vec::new();
+        for batch in results {
+            if let Some(vid_col) = batch.column_by_name("_vid")
+                && let Some(vid_arr) = vid_col.as_any().downcast_ref::<UInt64Array>()
+            {
+                for i in 0..vid_arr.len() {
+                    if !vid_arr.is_null(i) {
+                        vids.push(Vid::new(vid_arr.value(i)));
+                    }
+                }
+            }
+        }
+
+        Ok(vids)
+    }
+
+    /// Find properties for a vertex by VID in the main vertices table.
+    ///
+    /// Returns the props_json parsed into a Properties HashMap if found.
+    /// This is used as a fallback for unknown/schemaless labels.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the table query fails or JSON parsing fails.
+    pub async fn find_props_by_vid(store: &LanceDbStore, vid: Vid) -> Result<Option<Properties>> {
+        let table_name = Self::table_name();
+
+        if !store.table_exists(table_name).await? {
+            return Ok(None);
+        }
+
+        let table = store.open_table(table_name).await?;
+        let query = format!("_vid = {} AND _deleted = false", vid.as_u64());
+
+        let batches = table
+            .query()
+            .only_if(query)
+            .select(lancedb::query::Select::Columns(vec![
+                "props_json".to_string(),
+                "_version".to_string(),
+            ]))
+            .execute()
+            .await
+            .map_err(|e| anyhow!("Query failed: {}", e))?;
+
+        use futures::TryStreamExt;
+        let results: Vec<RecordBatch> = batches.try_collect().await?;
+
+        // Find the row with highest version (latest)
+        let mut best_props: Option<Properties> = None;
+        let mut best_version: u64 = 0;
+
+        for batch in results {
+            let props_col = batch.column_by_name("props_json");
+            let version_col = batch.column_by_name("_version");
+
+            if let (Some(props_arr), Some(ver_arr)) = (
+                props_col.and_then(|c| c.as_any().downcast_ref::<arrow_array::StringArray>()),
+                version_col.and_then(|c| c.as_any().downcast_ref::<UInt64Array>()),
+            ) {
+                for i in 0..batch.num_rows() {
+                    let version = if ver_arr.is_null(i) {
+                        0
+                    } else {
+                        ver_arr.value(i)
+                    };
+
+                    if version >= best_version {
+                        best_version = version;
+                        if props_arr.is_null(i) || props_arr.value(i).is_empty() {
+                            best_props = Some(Properties::new());
+                        } else {
+                            let json_str = props_arr.value(i);
+                            let parsed: Properties = serde_json::from_str(json_str)
+                                .map_err(|e| anyhow!("Failed to parse props_json: {}", e))?;
+                            best_props = Some(parsed);
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(best_props)
+    }
 }
 
 #[cfg(test)]

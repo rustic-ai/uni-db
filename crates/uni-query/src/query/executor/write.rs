@@ -1066,39 +1066,24 @@ impl Executor {
                                 }
                             }
 
-                            // Validate that node has at least one label
-                            if n.labels.is_empty() {
-                                return Err(anyhow!("CREATE node must have at least one label"));
-                            }
-
+                            // Support unlabeled nodes and unknown labels (schemaless)
                             let schema = self.storage.schema_manager().schema();
 
-                            // Validate ALL labels exist in schema
-                            for label_name in &n.labels {
-                                if schema.get_label_case_insensitive(label_name).is_none() {
-                                    return Err(anyhow!(
-                                        "Label {} not found in schema",
-                                        label_name
-                                    ));
-                                }
-                            }
-
-                            // Use first label for VID generation (primary label)
-                            let first_label = &n.labels[0];
-                            // Validate label exists in schema
-                            schema.get_label_case_insensitive(first_label).unwrap();
+                            // VID generation is label-independent
                             let new_vid = writer.next_vid().await?;
 
-                            // Enrich with generated columns for ALL labels
+                            // Enrich with generated columns only for known labels
                             for label_name in &n.labels {
-                                self.enrich_properties_with_generated_columns(
-                                    label_name,
-                                    &mut props,
-                                    prop_manager,
-                                    params,
-                                    ctx,
-                                )
-                                .await?;
+                                if schema.get_label_case_insensitive(label_name).is_some() {
+                                    self.enrich_properties_with_generated_columns(
+                                        label_name,
+                                        &mut props,
+                                        prop_manager,
+                                        params,
+                                        ctx,
+                                    )
+                                    .await?;
+                                }
                             }
 
                             // Insert vertex and get back final properties (includes auto-generated embeddings)

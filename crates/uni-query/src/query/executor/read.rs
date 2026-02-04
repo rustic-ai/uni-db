@@ -238,6 +238,136 @@ impl Executor {
         Ok(verified_vids)
     }
 
+    /// Scan all vertices from main table (schemaless MATCH (n)).
+    ///
+    /// Returns VIDs from the main vertices table combined with L0 buffers.
+    async fn scan_all_vertices(
+        &self,
+        variable: &str,
+        filter: Option<&Expr>,
+        ctx: Option<&QueryContext>,
+        prop_manager: &PropertyManager,
+        params: &HashMap<String, Value>,
+    ) -> Result<Vec<Vid>> {
+        use uni_store::storage::main_vertex::MainVertexDataset;
+
+        // Get VIDs from main table
+        let lancedb = self.storage.lancedb_store();
+        let mut candidates = MainVertexDataset::find_all_vids(lancedb).await?;
+
+        // Add VIDs from L0 buffers
+        if let Some(ctx) = ctx {
+            // Main L0 - get all VIDs regardless of label
+            candidates.extend(ctx.l0.read().all_vertex_vids());
+
+            // Transaction L0
+            if let Some(tx_l0_arc) = &ctx.transaction_l0 {
+                candidates.extend(tx_l0_arc.read().all_vertex_vids());
+            }
+
+            // Pending flush L0s
+            for pending_l0_arc in &ctx.pending_flush_l0s {
+                candidates.extend(pending_l0_arc.read().all_vertex_vids());
+            }
+        }
+
+        candidates.sort_unstable();
+        candidates.dedup();
+
+        // Verify and filter
+        let mut verified_vids = Vec::new();
+        for vid in candidates {
+            let Some(props) = prop_manager.get_all_vertex_props_with_ctx(vid, ctx).await? else {
+                continue; // Deleted
+            };
+
+            if let Some(expr) = filter {
+                let mut props_json: serde_json::Map<String, Value> = props.into_iter().collect();
+                props_json.insert("_vid".to_string(), json!(vid.as_u64()));
+
+                let mut row = HashMap::new();
+                row.insert(variable.to_string(), Value::Object(props_json));
+
+                let res = self
+                    .evaluate_expr(expr, &row, prop_manager, params, ctx)
+                    .await?;
+                if res.as_bool().unwrap_or(false) {
+                    verified_vids.push(vid);
+                }
+            } else {
+                verified_vids.push(vid);
+            }
+        }
+
+        Ok(verified_vids)
+    }
+
+    /// Scan main table for vertices with a specific label (schemaless unknown label).
+    ///
+    /// Returns VIDs where the labels array contains the given label name.
+    async fn scan_main_by_label(
+        &self,
+        label_name: &str,
+        variable: &str,
+        filter: Option<&Expr>,
+        ctx: Option<&QueryContext>,
+        prop_manager: &PropertyManager,
+        params: &HashMap<String, Value>,
+    ) -> Result<Vec<Vid>> {
+        use uni_store::storage::main_vertex::MainVertexDataset;
+
+        // Get VIDs from main table filtered by label
+        let lancedb = self.storage.lancedb_store();
+        let mut candidates =
+            MainVertexDataset::find_vids_by_label_name(lancedb, label_name).await?;
+
+        // Add VIDs from L0 buffers that have this label
+        if let Some(ctx) = ctx {
+            // Main L0
+            candidates.extend(ctx.l0.read().vids_for_label(label_name));
+
+            // Transaction L0
+            if let Some(tx_l0_arc) = &ctx.transaction_l0 {
+                candidates.extend(tx_l0_arc.read().vids_for_label(label_name));
+            }
+
+            // Pending flush L0s
+            for pending_l0_arc in &ctx.pending_flush_l0s {
+                candidates.extend(pending_l0_arc.read().vids_for_label(label_name));
+            }
+        }
+
+        candidates.sort_unstable();
+        candidates.dedup();
+
+        // Verify and filter
+        let mut verified_vids = Vec::new();
+        for vid in candidates {
+            let Some(props) = prop_manager.get_all_vertex_props_with_ctx(vid, ctx).await? else {
+                continue; // Deleted
+            };
+
+            if let Some(expr) = filter {
+                let mut props_json: serde_json::Map<String, Value> = props.into_iter().collect();
+                props_json.insert("_vid".to_string(), json!(vid.as_u64()));
+
+                let mut row = HashMap::new();
+                row.insert(variable.to_string(), Value::Object(props_json));
+
+                let res = self
+                    .evaluate_expr(expr, &row, prop_manager, params, ctx)
+                    .await?;
+                if res.as_bool().unwrap_or(false) {
+                    verified_vids.push(vid);
+                }
+            } else {
+                verified_vids.push(vid);
+            }
+        }
+
+        Ok(verified_vids)
+    }
+
     /// Scan vertices that have ALL the specified labels (intersection semantics).
     pub(crate) async fn scan_multi_labels_with_filter(
         &self,
@@ -1994,6 +2124,100 @@ impl Executor {
                     } else {
                         Ok(vec![])
                     }
+                }
+                LogicalPlan::ScanAll {
+                    variable,
+                    filter,
+                    optional,
+                } => {
+                    // Scan all vertices from main table (schemaless MATCH (n))
+                    let vids = self
+                        .scan_all_vertices(&variable, filter.as_ref(), ctx, prop_manager, params)
+                        .await?;
+
+                    if vids.is_empty() && optional {
+                        let mut map = HashMap::new();
+                        map.insert(variable.clone(), Value::Null);
+                        return Ok(vec![map]);
+                    }
+
+                    // Build result rows with properties from main table
+                    let lancedb = self.storage.lancedb_store();
+                    let mut matches = Vec::new();
+                    for vid in vids {
+                        // Get properties from property manager (will fallback to main table)
+                        let props_opt =
+                            prop_manager.get_all_vertex_props_with_ctx(vid, ctx).await?;
+
+                        // Get labels from main table
+                        let labels =
+                            uni_store::storage::main_vertex::MainVertexDataset::find_labels_by_vid(
+                                lancedb, vid,
+                            )
+                            .await?
+                            .unwrap_or_default();
+
+                        let mut props_json: serde_json::Map<String, Value> = props_opt
+                            .map(|p| p.into_iter().collect())
+                            .unwrap_or_default();
+
+                        props_json.insert("_vid".to_string(), json!(vid.as_u64()));
+                        let label_str = if labels.is_empty() {
+                            String::new()
+                        } else {
+                            labels.join(":")
+                        };
+                        props_json.insert("_label".to_string(), json!(label_str));
+
+                        let mut map = HashMap::new();
+                        map.insert(variable.clone(), Value::Object(props_json));
+                        matches.push(map);
+                    }
+                    Ok(matches)
+                }
+                LogicalPlan::ScanMainByLabel {
+                    label_name,
+                    variable,
+                    filter,
+                    optional,
+                } => {
+                    // Scan main table for vertices with unknown label (schemaless)
+                    let vids = self
+                        .scan_main_by_label(
+                            &label_name,
+                            &variable,
+                            filter.as_ref(),
+                            ctx,
+                            prop_manager,
+                            params,
+                        )
+                        .await?;
+
+                    if vids.is_empty() && optional {
+                        let mut map = HashMap::new();
+                        map.insert(variable.clone(), Value::Null);
+                        return Ok(vec![map]);
+                    }
+
+                    // Build result rows with properties from main table
+                    let mut matches = Vec::new();
+                    for vid in vids {
+                        // Get properties from property manager (will fallback to main table)
+                        let props_opt =
+                            prop_manager.get_all_vertex_props_with_ctx(vid, ctx).await?;
+
+                        let mut props_json: serde_json::Map<String, Value> = props_opt
+                            .map(|p| p.into_iter().collect())
+                            .unwrap_or_default();
+
+                        props_json.insert("_vid".to_string(), json!(vid.as_u64()));
+                        props_json.insert("_label".to_string(), json!(label_name.clone()));
+
+                        let mut map = HashMap::new();
+                        map.insert(variable.clone(), Value::Object(props_json));
+                        matches.push(map);
+                    }
+                    Ok(matches)
                 }
                 LogicalPlan::Traverse {
                     input,

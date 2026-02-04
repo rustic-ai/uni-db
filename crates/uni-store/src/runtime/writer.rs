@@ -343,14 +343,21 @@ impl Writer {
 
     /// Validates vertex constraints for a vertex with the given labels.
     /// Labels must be passed explicitly since the vertex may not yet be in L0.
+    /// Unknown labels (not in schema) are skipped.
     async fn validate_vertex_constraints(
         &self,
         vid: Vid,
         properties: &Properties,
         labels: &[String],
     ) -> Result<()> {
-        // Validate constraints for each label
+        let schema = self.schema_manager.schema();
+
+        // Validate constraints only for known labels
         for label in labels {
+            // Skip unknown labels (schemaless support)
+            if schema.get_label_case_insensitive(label).is_none() {
+                continue;
+            }
             self.validate_vertex_constraints_for_label(vid, properties, label)
                 .await?;
         }

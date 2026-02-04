@@ -415,6 +415,13 @@ impl L0Buffer {
             .collect()
     }
 
+    /// Returns all vertex VIDs in the L0 buffer.
+    ///
+    /// Used for schemaless scanning (MATCH (n) without label).
+    pub fn all_vertex_vids(&self) -> Vec<Vid> {
+        self.vertex_labels.keys().copied().collect()
+    }
+
     /// Returns all VIDs in vertex_labels that match any of the given label names.
     /// Used for L0 overlay during multi-label vertex scanning.
     pub fn vids_for_labels(&self, label_names: &[&str]) -> Vec<Vid> {

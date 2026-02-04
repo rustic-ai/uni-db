@@ -4,6 +4,7 @@
 use crate::runtime::context::QueryContext;
 use crate::runtime::l0::L0Buffer;
 use crate::runtime::l0_visibility;
+use crate::storage::main_vertex::MainVertexDataset;
 use crate::storage::manager::StorageManager;
 use crate::storage::value_codec::{self, CrdtDecodeMode};
 use anyhow::{Result, anyhow};
@@ -1287,6 +1288,14 @@ impl PropertyManager {
                     )?;
                 }
             }
+        }
+
+        // Fallback to main table props_json for unknown/schemaless labels
+        if merged_props.is_none()
+            && let Some(main_props) =
+                MainVertexDataset::find_props_by_vid(self.storage.lancedb_store(), vid).await?
+        {
+            return Ok(Some(main_props));
         }
 
         Ok(merged_props)

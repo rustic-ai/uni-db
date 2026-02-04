@@ -42,6 +42,21 @@ pub enum LogicalPlan {
         filter: Option<Expr>,
         optional: bool,
     },
+    /// Scan all vertices from main table (MATCH (n) without label).
+    /// Used for schemaless queries that don't specify any label.
+    ScanAll {
+        variable: String,
+        filter: Option<Expr>,
+        optional: bool,
+    },
+    /// Scan main table filtering by label name (MATCH (n:Unknown)).
+    /// Used for labels not defined in schema (schemaless support).
+    ScanMainByLabel {
+        label_name: String,
+        variable: String,
+        filter: Option<Expr>,
+        optional: bool,
+    },
     LoadCsv {
         url: String,
         variable: String,
@@ -1784,7 +1799,7 @@ impl QueryPlanner {
         Ok((plan, target_variable))
     }
 
-    /// Plan an unbound node (creates a Scan, ExtIdLookup, or CrossJoin).
+    /// Plan an unbound node (creates a Scan, ScanAll, ScanMainByLabel, ExtIdLookup, or CrossJoin).
     fn plan_unbound_node(
         &self,
         node: &NodePattern,
@@ -1843,33 +1858,65 @@ impl QueryPlanner {
                 };
             }
 
-            return Err(anyhow!(
-                "Node must have either a label or ext_id property for lookup"
-            ));
+            // No ext_id: create ScanAll for unlabeled node pattern
+            let prop_filter = self.properties_to_expr(variable, &node.properties);
+            let scan_all = LogicalPlan::ScanAll {
+                variable: variable.to_string(),
+                filter: prop_filter,
+                optional,
+            };
+
+            return if matches!(plan, LogicalPlan::Empty) {
+                Ok(scan_all)
+            } else {
+                Ok(LogicalPlan::CrossJoin {
+                    left: Box::new(plan),
+                    right: Box::new(scan_all),
+                })
+            };
         }
+
         // Use first label for label_id (primary label for dataset selection)
         let label_name = &node.labels[0];
-        let label_meta = self
-            .schema
-            .get_label_case_insensitive(label_name)
-            .ok_or_else(|| anyhow!("Label {} not found", label_name))?;
 
-        let prop_filter = self.properties_to_expr(variable, &node.properties);
-        let scan = LogicalPlan::Scan {
-            label_id: label_meta.id,
-            labels: node.labels.clone(),
-            variable: variable.to_string(),
-            filter: prop_filter,
-            optional,
-        };
+        // Check if label exists in schema
+        if let Some(label_meta) = self.schema.get_label_case_insensitive(label_name) {
+            // Known label: use standard Scan
+            let prop_filter = self.properties_to_expr(variable, &node.properties);
+            let scan = LogicalPlan::Scan {
+                label_id: label_meta.id,
+                labels: node.labels.clone(),
+                variable: variable.to_string(),
+                filter: prop_filter,
+                optional,
+            };
 
-        if matches!(plan, LogicalPlan::Empty) {
-            Ok(scan)
+            if matches!(plan, LogicalPlan::Empty) {
+                Ok(scan)
+            } else {
+                Ok(LogicalPlan::CrossJoin {
+                    left: Box::new(plan),
+                    right: Box::new(scan),
+                })
+            }
         } else {
-            Ok(LogicalPlan::CrossJoin {
-                left: Box::new(plan),
-                right: Box::new(scan),
-            })
+            // Unknown label: use ScanMainByLabel for schemaless support
+            let prop_filter = self.properties_to_expr(variable, &node.properties);
+            let scan_main = LogicalPlan::ScanMainByLabel {
+                label_name: label_name.clone(),
+                variable: variable.to_string(),
+                filter: prop_filter,
+                optional,
+            };
+
+            if matches!(plan, LogicalPlan::Empty) {
+                Ok(scan_main)
+            } else {
+                Ok(LogicalPlan::CrossJoin {
+                    left: Box::new(plan),
+                    right: Box::new(scan_main),
+                })
+            }
         }
     }
 
