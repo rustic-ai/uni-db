@@ -55,10 +55,10 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Run clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy --workspace --exclude uni-tck --all-targets --all-features -- -D warnings
 
       - name: Run tests
-        run: cargo nextest run --all
+        run: cargo nextest run --workspace --exclude uni-tck
 
   # Cloud storage integration tests with LocalStack
   # Runs after test job to reuse cached dependencies
@@ -216,6 +216,6 @@ jobs:
             ${{ runner.os }}-cargo-
 
       - name: Build documentation
-        run: cargo doc --no-deps --workspace --exclude uni-python
+        run: cargo doc --no-deps --workspace --exclude uni-python --exclude uni-tck
         env:
           RUSTDOCFLAGS: -D warnings

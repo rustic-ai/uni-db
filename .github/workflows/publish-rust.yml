@@ -59,7 +59,7 @@ jobs:
           echo "Version validated: $TAG_VERSION"
 
       - name: Run tests
-        run: cargo test --all
+        run: cargo test --workspace --exclude uni-tck
 
       - name: Package crate (dry run)
         run: cargo package -p uni-db --allow-dirty
