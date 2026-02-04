@@ -21,7 +21,7 @@ use uni_common::core::id::{Eid, Vid};
 use uni_common::core::schema::{ConstraintTarget, ConstraintType, DataType, SchemaManager};
 use uni_cypher::ast::{
     BinaryOp, Clause, ConstraintTarget as AstConstraintTarget, Direction, Expr, MapProjectionItem,
-    MatchClause, Query, Quantifier, ReturnClause, ReturnItem, ShowConstraints, Statement, UnaryOp,
+    MatchClause, Quantifier, Query, ReturnClause, ReturnItem, ShowConstraints, Statement, UnaryOp,
 };
 use uni_store::QueryContext;
 use uni_store::cloud::{build_store_from_url, copy_store_prefix, is_cloud_url};
@@ -954,16 +954,12 @@ impl Executor {
                     };
 
                     let query = Query::Single(Statement {
-                        clauses: vec![
-                            Clause::Match(match_clause),
-                            Clause::Return(return_clause),
-                        ],
+                        clauses: vec![Clause::Match(match_clause), Clause::Return(return_clause)],
                     });
 
                     // Plan the subquery with current scope
-                    let planner = QueryPlanner::new(Arc::new(
-                        this.storage.schema_manager().schema().clone(),
-                    ));
+                    let planner =
+                        QueryPlanner::new(Arc::new(this.storage.schema_manager().schema().clone()));
                     let vars_in_scope: Vec<String> = row.keys().cloned().collect();
 
                     match planner.plan_with_scope(query, vars_in_scope) {
@@ -979,7 +975,9 @@ impl Executor {
                                     for mut result_row in results {
                                         // Merge current row context into result
                                         for (k, v) in row.iter() {
-                                            result_row.entry(k.clone()).or_insert_with(|| v.clone());
+                                            result_row
+                                                .entry(k.clone())
+                                                .or_insert_with(|| v.clone());
                                         }
 
                                         // If path_variable is specified, bind the path
@@ -990,8 +988,7 @@ impl Executor {
                                                 "nodes": [],
                                                 "relationships": []
                                             });
-                                            result_row
-                                                .insert(path_var.clone(), path_obj);
+                                            result_row.insert(path_var.clone(), path_obj);
                                         }
 
                                         // Evaluate the map expression

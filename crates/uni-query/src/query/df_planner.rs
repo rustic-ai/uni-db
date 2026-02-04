@@ -264,9 +264,9 @@ impl HybridPhysicalPlanner {
 
             // ScanAll and TraverseMainByType are not yet supported in vectorized execution
             // Fall back to row-based execution
-            LogicalPlan::ScanAll { .. } | LogicalPlan::TraverseMainByType { .. } => {
-                Err(anyhow!("ScanAll/TraverseMainByType require fallback execution"))
-            }
+            LogicalPlan::ScanAll { .. } | LogicalPlan::TraverseMainByType { .. } => Err(anyhow!(
+                "ScanAll/TraverseMainByType require fallback execution"
+            )),
 
             LogicalPlan::Traverse {
                 input,

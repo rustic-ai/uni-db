@@ -1107,7 +1107,8 @@ impl Executor {
 
                         let current_vid = vid.unwrap();
 
-                        if let Some((rel_var, type_id, type_name, rel_props_expr, _dir)) = rel_pending.take()
+                        if let Some((rel_var, type_id, type_name, rel_props_expr, _dir)) =
+                            rel_pending.take()
                             && let Some(src) = prev_vid
                         {
                             let is_rel_bound = !rel_var.is_empty() && row.contains_key(&rel_var);
