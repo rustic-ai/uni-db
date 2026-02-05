@@ -32,6 +32,7 @@ use datafusion::logical_expr::{
     Volatility,
 };
 use datafusion::prelude::SessionContext;
+use datafusion::scalar::ScalarValue;
 use lance_datafusion::udf::json::{
     json_get_bool_udf, json_get_float_udf, json_get_int_udf, json_get_string_udf,
 };
@@ -88,6 +89,58 @@ pub fn register_cypher_udfs(ctx: &SessionContext) -> DFResult<()> {
     ctx.register_udf(json_get_int_udf());
     ctx.register_udf(json_get_float_udf());
     ctx.register_udf(json_get_bool_udf());
+
+    // Temporal constructor UDFs
+    for name in &[
+        "date",
+        "time",
+        "localtime",
+        "localdatetime",
+        "datetime",
+        "duration",
+    ] {
+        ctx.register_udf(create_temporal_udf(name));
+    }
+
+    // Temporal dotted function UDFs
+    for name in &[
+        "duration.between",
+        "duration.inmonths",
+        "duration.indays",
+        "duration.inseconds",
+        "datetime.fromepoch",
+        "datetime.fromepochmillis",
+        "date.truncate",
+        "time.truncate",
+        "datetime.truncate",
+        "localdatetime.truncate",
+        "localtime.truncate",
+        "datetime.transaction",
+        "datetime.statement",
+        "datetime.realtime",
+        "date.transaction",
+        "date.statement",
+        "date.realtime",
+        "time.transaction",
+        "time.statement",
+        "time.realtime",
+        "localtime.transaction",
+        "localtime.statement",
+        "localtime.realtime",
+        "localdatetime.transaction",
+        "localdatetime.statement",
+        "localdatetime.realtime",
+    ] {
+        ctx.register_udf(create_temporal_udf(name));
+    }
+
+    // Duration property accessor UDF
+    ctx.register_udf(create_duration_property_udf());
+
+    // Temporal extraction UDFs (year, month, day, etc.)
+    for name in &["year", "month", "day", "hour", "minute", "second"] {
+        ctx.register_udf(create_temporal_udf(name));
+    }
 
     Ok(())
 }
@@ -950,6 +1003,238 @@ impl ScalarUDFImpl for ShiftRightUdf {
 }
 
 impl_udf_eq_hash!(ShiftRightUdf);
+
+// ============================================================================
+// Temporal UDFs — delegate to eval_datetime_function in datetime.rs
+// ============================================================================
+
+/// Create a temporal UDF that delegates to `eval_datetime_function`.
+///
+/// Accepts variadic Utf8 arguments and returns Utf8 (or Int64 for extraction
+/// functions like year/month/day). Internally converts Arrow scalars to
+/// `serde_json::Value`, calls the datetime module, and converts back.
+fn create_temporal_udf(name: &str) -> ScalarUDF {
+    ScalarUDF::new_from_impl(TemporalUdf::new(name.to_string()))
+}
+
+#[derive(Debug)]
+struct TemporalUdf {
+    name: String,
+    signature: Signature,
+}
+
+impl TemporalUdf {
+    fn new(name: String) -> Self {
+        Self {
+            name,
+            // Accept zero or more args of any type — the datetime module validates.
+            // OneOf is required because VariadicAny alone rejects zero-arg calls.
+            signature: Signature::new(
+                TypeSignature::OneOf(vec![
+                    TypeSignature::Exact(vec![]),
+                    TypeSignature::VariadicAny,
+                ]),
+                Volatility::Immutable,
+            ),
+        }
+    }
+}
+
+impl_udf_eq_hash!(TemporalUdf);
+
+impl ScalarUDFImpl for TemporalUdf {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn signature(&self) -> &Signature {
+        &self.signature
+    }
+
+    fn return_type(&self, _arg_types: &[DataType]) -> DFResult<DataType> {
+        // Temporal functions return Utf8 (ISO strings) or Int64 (extraction).
+        // DataFusion doesn't dispatch on return type, so Utf8 is safe here;
+        // the actual value written to the result column will be cast downstream.
+        Ok(DataType::Utf8)
+    }
+
+    fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DFResult<ColumnarValue> {
+        let json_args = columnar_args_to_json(&args.args)?;
+        let func_name = self.name.to_uppercase();
+
+        let result = crate::query::datetime::eval_datetime_function(&func_name, &json_args)
+            .map_err(|e| {
+                datafusion::error::DataFusionError::Execution(format!("{}(): {}", self.name, e))
+            })?;
+
+        json_value_to_columnar(&result)
+    }
+}
+
+/// Create a UDF for accessing duration component properties.
+///
+/// Called as `_duration_property(duration_string, component_name)`.
+/// Returns an Int64 value for the requested component.
+fn create_duration_property_udf() -> ScalarUDF {
+    ScalarUDF::new_from_impl(DurationPropertyUdf::new())
+}
+
+#[derive(Debug)]
+struct DurationPropertyUdf {
+    signature: Signature,
+}
+
+impl DurationPropertyUdf {
+    fn new() -> Self {
+        Self {
+            signature: Signature::new(
+                TypeSignature::Exact(vec![DataType::Utf8, DataType::Utf8]),
+                Volatility::Immutable,
+            ),
+        }
+    }
+}
+
+impl_udf_eq_hash!(DurationPropertyUdf);
+
+impl ScalarUDFImpl for DurationPropertyUdf {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn name(&self) -> &str {
+        "_duration_property"
+    }
+
+    fn signature(&self) -> &Signature {
+        &self.signature
+    }
+
+    fn return_type(&self, _arg_types: &[DataType]) -> DFResult<DataType> {
+        Ok(DataType::Int64)
+    }
+
+    fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DFResult<ColumnarValue> {
+        if args.args.len() != 2 {
+            return Err(datafusion::error::DataFusionError::Execution(
+                "_duration_property requires 2 arguments (duration_string, component)".to_string(),
+            ));
+        }
+
+        let dur_str = extract_scalar_utf8(&args.args[0])?;
+        let component = extract_scalar_utf8(&args.args[1])?;
+
+        let result =
+            crate::query::datetime::eval_duration_accessor(&dur_str, &component).map_err(|e| {
+                datafusion::error::DataFusionError::Execution(format!(
+                    "_duration_property(): {}",
+                    e
+                ))
+            })?;
+
+        // Duration accessors return integers.
+        match result {
+            serde_json::Value::Number(n) => {
+                let i = n.as_i64().ok_or_else(|| {
+                    datafusion::error::DataFusionError::Execution(
+                        "Duration accessor returned non-integer".to_string(),
+                    )
+                })?;
+                Ok(ColumnarValue::Scalar(ScalarValue::Int64(Some(i))))
+            }
+            _ => Err(datafusion::error::DataFusionError::Execution(
+                "Duration accessor returned unexpected type".to_string(),
+            )),
+        }
+    }
+}
+
+/// Convert DataFusion `ColumnarValue` arguments to `serde_json::Value` for the datetime module.
+fn columnar_args_to_json(args: &[ColumnarValue]) -> DFResult<Vec<serde_json::Value>> {
+    args.iter()
+        .map(|arg| match arg {
+            ColumnarValue::Scalar(scalar) => scalar_to_json(scalar),
+            ColumnarValue::Array(arr) if arr.len() == 1 => {
+                // Single-row array — extract the scalar.
+                let scalar = ScalarValue::try_from_array(arr, 0).map_err(|e| {
+                    datafusion::error::DataFusionError::Execution(format!(
+                        "Cannot extract scalar from array: {e}"
+                    ))
+                })?;
+                scalar_to_json(&scalar)
+            }
+            ColumnarValue::Array(_) => Err(datafusion::error::DataFusionError::Execution(
+                "Temporal UDFs do not support batched array execution yet".to_string(),
+            )),
+        })
+        .collect()
+}
+
+/// Convert a single `ScalarValue` to `serde_json::Value`.
+fn scalar_to_json(scalar: &ScalarValue) -> DFResult<serde_json::Value> {
+    match scalar {
+        ScalarValue::Utf8(Some(s)) | ScalarValue::LargeUtf8(Some(s)) => {
+            // Try to parse as JSON object (for map arguments serialized as JSON).
+            if s.starts_with('{')
+                && let Ok(obj) = serde_json::from_str::<serde_json::Value>(s)
+            {
+                return Ok(obj);
+            }
+            Ok(serde_json::Value::String(s.clone()))
+        }
+        ScalarValue::Int64(Some(i)) => Ok(serde_json::json!(*i)),
+        ScalarValue::Int32(Some(i)) => Ok(serde_json::json!(*i as i64)),
+        ScalarValue::Float64(Some(f)) => Ok(serde_json::json!(*f)),
+        ScalarValue::Boolean(Some(b)) => Ok(serde_json::json!(*b)),
+        ScalarValue::Null
+        | ScalarValue::Utf8(None)
+        | ScalarValue::Int64(None)
+        | ScalarValue::Float64(None) => Ok(serde_json::Value::Null),
+        other => Err(datafusion::error::DataFusionError::Execution(format!(
+            "Unsupported scalar type for temporal function: {other:?}"
+        ))),
+    }
+}
+
+/// Convert a `serde_json::Value` result back to `ColumnarValue`.
+fn json_value_to_columnar(val: &serde_json::Value) -> DFResult<ColumnarValue> {
+    match val {
+        serde_json::Value::String(s) => {
+            Ok(ColumnarValue::Scalar(ScalarValue::Utf8(Some(s.clone()))))
+        }
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                Ok(ColumnarValue::Scalar(ScalarValue::Int64(Some(i))))
+            } else if let Some(f) = n.as_f64() {
+                Ok(ColumnarValue::Scalar(ScalarValue::Float64(Some(f))))
+            } else {
+                Err(datafusion::error::DataFusionError::Execution(
+                    "Temporal function returned unsupported number type".to_string(),
+                ))
+            }
+        }
+        serde_json::Value::Bool(b) => Ok(ColumnarValue::Scalar(ScalarValue::Boolean(Some(*b)))),
+        serde_json::Value::Null => Ok(ColumnarValue::Scalar(ScalarValue::Utf8(None))),
+        other => Err(datafusion::error::DataFusionError::Execution(format!(
+            "Temporal function returned unsupported type: {other:?}"
+        ))),
+    }
+}
+
+/// Extract a scalar Utf8 string from a `ColumnarValue`.
+fn extract_scalar_utf8(val: &ColumnarValue) -> DFResult<String> {
+    match val {
+        ColumnarValue::Scalar(ScalarValue::Utf8(Some(s)))
+        | ColumnarValue::Scalar(ScalarValue::LargeUtf8(Some(s))) => Ok(s.clone()),
+        _ => Err(datafusion::error::DataFusionError::Execution(
+            "Expected Utf8 scalar".to_string(),
+        )),
+    }
+}
 
 // ============================================================================
 // JSON UDFs - Now using Lance's built-in implementations

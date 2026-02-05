@@ -76,6 +76,7 @@ pub struct Uni {
     pub(crate) properties: Arc<PropertyManager>,
     pub(crate) writer: Option<Arc<RwLock<Writer>>>,
     pub(crate) config: UniConfig,
+    pub(crate) procedure_registry: Arc<uni_query::ProcedureRegistry>,
 }
 
 impl Uni {
@@ -148,12 +149,18 @@ impl Uni {
             properties: prop_manager,
             writer: None,
             config: self.config.clone(),
+            procedure_registry: self.procedure_registry.clone(),
         })
     }
 
     /// Get configuration
     pub fn config(&self) -> &UniConfig {
         &self.config
+    }
+
+    /// Returns the procedure registry for registering test procedures.
+    pub fn procedure_registry(&self) -> &Arc<uni_query::ProcedureRegistry> {
+        &self.procedure_registry
     }
 
     /// Get current schema (read-only snapshot)
@@ -1016,6 +1023,7 @@ impl UniBuilder {
             properties: prop_manager,
             writer: Some(writer),
             config: self.config,
+            procedure_registry: Arc::new(uni_query::ProcedureRegistry::new()),
         })
     }
 

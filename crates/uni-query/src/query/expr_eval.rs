@@ -11,9 +11,10 @@ use serde_json::{Value, json};
 use std::cmp::Ordering;
 
 use crate::query::datetime::{
-    CypherDuration, add_duration_to_date, add_duration_to_datetime, datetime_difference,
-    duration_to_micros, eval_datetime_function, is_date_value, is_datetime_value,
-    is_duration_or_micros, is_duration_value, parse_datetime_utc,
+    CypherDuration, TemporalType, add_cypher_duration_to_date, add_cypher_duration_to_datetime,
+    add_cypher_duration_to_localdatetime, add_cypher_duration_to_localtime,
+    add_cypher_duration_to_time, classify_temporal, eval_datetime_function, is_duration_value,
+    parse_datetime_utc, parse_duration_from_value, parse_duration_to_cypher,
 };
 use crate::query::spatial::eval_spatial_function;
 use uni_cypher::ast::BinaryOp;
@@ -83,74 +84,10 @@ pub fn eval_binary_op(left: &Value, op: &BinaryOp, right: &Value) -> Result<Valu
                 .ok_or_else(|| anyhow!("Right side of ENDS WITH must be a string"))?;
             Ok(Value::Bool(l.ends_with(r)))
         }
-        BinaryOp::Add => {
-            if let (Some(l), Some(r)) = (left.as_f64(), right.as_f64()) {
-                // Determine if result should be int or float
-                if left.is_i64() && right.is_i64() {
-                    Ok(json!(left.as_i64().unwrap() + right.as_i64().unwrap()))
-                } else {
-                    Ok(json!(l + r))
-                }
-            } else if let (Value::String(l), Value::String(r)) = (left, right) {
-                Ok(Value::String(format!("{}{}", l, r)))
-            } else if is_datetime_value(left) && is_duration_or_micros(right) {
-                // datetime + duration (ISO 8601 string or i64 microseconds)
-                let dt_str = left.as_str().unwrap();
-                let micros = duration_to_micros(right)?;
-                Ok(Value::String(add_duration_to_datetime(dt_str, micros)?))
-            } else if is_date_value(left) && is_duration_or_micros(right) {
-                // date + duration (ISO 8601 string or i64 microseconds)
-                let dt_str = left.as_str().unwrap();
-                let micros = duration_to_micros(right)?;
-                Ok(Value::String(add_duration_to_date(dt_str, micros)?))
-            } else if is_duration_or_micros(left) && is_datetime_value(right) {
-                // duration + datetime
-                let dt_str = right.as_str().unwrap();
-                let micros = duration_to_micros(left)?;
-                Ok(Value::String(add_duration_to_datetime(dt_str, micros)?))
-            } else if is_duration_or_micros(left) && is_date_value(right) {
-                // duration + date
-                let dt_str = right.as_str().unwrap();
-                let micros = duration_to_micros(left)?;
-                Ok(Value::String(add_duration_to_date(dt_str, micros)?))
-            } else if is_duration_value(left) && is_duration_value(right) {
-                // duration + duration
-                let total_micros = duration_to_micros(left)? + duration_to_micros(right)?;
-                let duration = CypherDuration::from_micros(total_micros);
-                Ok(Value::String(duration.to_iso8601()))
-            } else {
-                Err(anyhow!("Invalid types for addition"))
-            }
-        }
-        BinaryOp::Sub => {
-            if is_datetime_value(left) && is_duration_or_micros(right) {
-                // datetime - duration (ISO 8601 string or i64 microseconds)
-                let dt_str = left.as_str().unwrap();
-                let micros = duration_to_micros(right)?;
-                Ok(Value::String(add_duration_to_datetime(dt_str, -micros)?))
-            } else if is_date_value(left) && is_duration_or_micros(right) {
-                // date - duration (ISO 8601 string or i64 microseconds)
-                let dt_str = left.as_str().unwrap();
-                let micros = duration_to_micros(right)?;
-                Ok(Value::String(add_duration_to_date(dt_str, -micros)?))
-            } else if is_datetime_value(left) && is_datetime_value(right) {
-                // datetime - datetime -> duration (return ISO 8601)
-                let dt1 = left.as_str().unwrap();
-                let dt2 = right.as_str().unwrap();
-                let micros = datetime_difference(dt1, dt2)?;
-                let duration = CypherDuration::from_micros(micros);
-                Ok(Value::String(duration.to_iso8601()))
-            } else if is_duration_value(left) && is_duration_value(right) {
-                // duration - duration
-                let diff_micros = duration_to_micros(left)? - duration_to_micros(right)?;
-                let duration = CypherDuration::from_micros(diff_micros);
-                Ok(Value::String(duration.to_iso8601()))
-            } else {
-                eval_numeric_op(left, right, |a, b| a - b)
-            }
-        }
-        BinaryOp::Mul => eval_numeric_op(left, right, |a, b| a * b),
-        BinaryOp::Div => eval_numeric_op(left, right, |a, b| a / b),
+        BinaryOp::Add => eval_add(left, right),
+        BinaryOp::Sub => eval_sub(left, right),
+        BinaryOp::Mul => eval_mul(left, right),
+        BinaryOp::Div => eval_div(left, right),
         BinaryOp::Mod => eval_numeric_op(left, right, |a, b| a % b),
         BinaryOp::Pow => eval_numeric_op(left, right, |a, b| a.powf(b)),
         BinaryOp::Regex => {
@@ -234,7 +171,156 @@ where
     }
 }
 
-/// Helper for comparisons between two values.
+// ============================================================================
+// Temporal-aware arithmetic operations
+// ============================================================================
+
+/// Add a duration to a temporal value, dispatching by temporal type.
+fn add_temporal_duration(temporal_str: &str, dur: &CypherDuration) -> Result<Value> {
+    let ttype = classify_temporal(temporal_str)
+        .ok_or_else(|| anyhow!("Cannot classify temporal value: {}", temporal_str))?;
+    let result = match ttype {
+        TemporalType::Date => add_cypher_duration_to_date(temporal_str, dur)?,
+        TemporalType::LocalTime => add_cypher_duration_to_localtime(temporal_str, dur)?,
+        TemporalType::Time => add_cypher_duration_to_time(temporal_str, dur)?,
+        TemporalType::LocalDateTime => add_cypher_duration_to_localdatetime(temporal_str, dur)?,
+        TemporalType::DateTime => add_cypher_duration_to_datetime(temporal_str, dur)?,
+        TemporalType::Duration => return Err(anyhow!("Cannot add duration to duration this way")),
+    };
+    Ok(Value::String(result))
+}
+
+/// Evaluate addition with temporal-aware dispatch.
+fn eval_add(left: &Value, right: &Value) -> Result<Value> {
+    // Numeric addition
+    if let (Some(l), Some(r)) = (left.as_f64(), right.as_f64()) {
+        if left.is_i64() && right.is_i64() {
+            return Ok(json!(left.as_i64().unwrap() + right.as_i64().unwrap()));
+        }
+        return Ok(json!(l + r));
+    }
+
+    // String concatenation
+    if let (Value::String(l), Value::String(r)) = (left, right) {
+        let l_type = classify_temporal(l);
+        let r_type = classify_temporal(r);
+
+        match (l_type, r_type) {
+            // temporal + duration
+            (Some(lt), Some(TemporalType::Duration)) if lt != TemporalType::Duration => {
+                let dur = parse_duration_to_cypher(r)?;
+                return add_temporal_duration(l, &dur);
+            }
+            // duration + temporal
+            (Some(TemporalType::Duration), Some(rt)) if rt != TemporalType::Duration => {
+                let dur = parse_duration_to_cypher(l)?;
+                return add_temporal_duration(r, &dur);
+            }
+            // duration + duration (component-wise)
+            (Some(TemporalType::Duration), Some(TemporalType::Duration)) => {
+                let d1 = parse_duration_to_cypher(l)?;
+                let d2 = parse_duration_to_cypher(r)?;
+                return Ok(Value::String(d1.add(&d2).to_iso8601()));
+            }
+            // Not temporal: string concatenation
+            _ => return Ok(Value::String(format!("{}{}", l, r))),
+        }
+    }
+
+    // temporal string + integer microseconds
+    if let (Value::String(s), Value::Number(_)) = (left, right)
+        && classify_temporal(s).is_some_and(|t| t != TemporalType::Duration)
+    {
+        let dur = parse_duration_from_value(right)?;
+        return add_temporal_duration(s, &dur);
+    }
+    // integer microseconds + temporal string
+    if let (Value::Number(_), Value::String(s)) = (left, right)
+        && classify_temporal(s).is_some_and(|t| t != TemporalType::Duration)
+    {
+        let dur = parse_duration_from_value(left)?;
+        return add_temporal_duration(s, &dur);
+    }
+
+    Err(anyhow!("Invalid types for addition"))
+}
+
+/// Evaluate subtraction with temporal-aware dispatch.
+fn eval_sub(left: &Value, right: &Value) -> Result<Value> {
+    // temporal - duration
+    if let (Value::String(l), Value::String(r)) = (left, right) {
+        let l_type = classify_temporal(l);
+        let r_type = classify_temporal(r);
+
+        match (l_type, r_type) {
+            // temporal - duration -> negate duration and add
+            (Some(lt), Some(TemporalType::Duration)) if lt != TemporalType::Duration => {
+                let dur = parse_duration_to_cypher(r)?.negate();
+                return add_temporal_duration(l, &dur);
+            }
+            // duration - duration (component-wise)
+            (Some(TemporalType::Duration), Some(TemporalType::Duration)) => {
+                let d1 = parse_duration_to_cypher(l)?;
+                let d2 = parse_duration_to_cypher(r)?;
+                return Ok(Value::String(d1.sub(&d2).to_iso8601()));
+            }
+            // Same temporal types: compute difference as duration
+            (Some(lt), Some(rt))
+                if lt != TemporalType::Duration && rt != TemporalType::Duration && lt == rt =>
+            {
+                // Use the duration.between logic
+                let args = [left.clone(), right.clone()];
+                return crate::query::datetime::eval_datetime_function("DURATION.BETWEEN", &args);
+            }
+            _ => {}
+        }
+    }
+
+    // temporal - integer microseconds
+    if let (Value::String(s), Value::Number(_)) = (left, right)
+        && classify_temporal(s).is_some_and(|t| t != TemporalType::Duration)
+    {
+        let dur = parse_duration_from_value(right)?.negate();
+        return add_temporal_duration(s, &dur);
+    }
+
+    eval_numeric_op(left, right, |a, b| a - b)
+}
+
+/// Evaluate multiplication with duration support.
+fn eval_mul(left: &Value, right: &Value) -> Result<Value> {
+    // duration * number
+    if let (Value::String(s), Some(factor)) = (left, right.as_f64())
+        && is_duration_value(left)
+    {
+        let dur = parse_duration_to_cypher(s)?;
+        return Ok(Value::String(dur.multiply(factor).to_iso8601()));
+    }
+    // number * duration
+    if let (Some(factor), Value::String(s)) = (left.as_f64(), right)
+        && is_duration_value(right)
+    {
+        let dur = parse_duration_to_cypher(s)?;
+        return Ok(Value::String(dur.multiply(factor).to_iso8601()));
+    }
+
+    eval_numeric_op(left, right, |a, b| a * b)
+}
+
+/// Evaluate division with duration support.
+fn eval_div(left: &Value, right: &Value) -> Result<Value> {
+    // duration / number
+    if let (Value::String(s), Some(divisor)) = (left, right.as_f64())
+        && is_duration_value(left)
+    {
+        let dur = parse_duration_to_cypher(s)?;
+        return Ok(Value::String(dur.divide(divisor).to_iso8601()));
+    }
+
+    eval_numeric_op(left, right, |a, b| a / b)
+}
+
+/// Helper for comparisons between two values with temporal awareness.
 fn eval_comparison<F>(left: &Value, right: &Value, check: F) -> Result<Value>
 where
     F: Fn(Ordering) -> bool,
@@ -249,9 +335,94 @@ where
         return Ok(Value::Bool(check(ord)));
     }
     if let (Some(l), Some(r)) = (left.as_str(), right.as_str()) {
+        // Temporal-aware comparison
+        if let (Some(lt), Some(rt)) = (classify_temporal(l), classify_temporal(r))
+            && lt == rt
+        {
+            return eval_temporal_comparison(l, r, lt, &check);
+        }
+        // Fall through to lexicographic comparison
         return Ok(Value::Bool(check(l.cmp(r))));
     }
     Err(anyhow!("Comparison only supported for numbers and strings"))
+}
+
+/// Compare two temporal values of the same type.
+fn eval_temporal_comparison<F>(l: &str, r: &str, ttype: TemporalType, check: &F) -> Result<Value>
+where
+    F: Fn(Ordering) -> bool,
+{
+    match ttype {
+        TemporalType::Date => {
+            let ld = chrono::NaiveDate::parse_from_str(l, "%Y-%m-%d")
+                .map_err(|_| anyhow!("Cannot parse date: {}", l))?;
+            let rd = chrono::NaiveDate::parse_from_str(r, "%Y-%m-%d")
+                .map_err(|_| anyhow!("Cannot parse date: {}", r))?;
+            Ok(Value::Bool(check(ld.cmp(&rd))))
+        }
+        TemporalType::LocalTime => {
+            let lt = parse_time_for_cmp(l)?;
+            let rt = parse_time_for_cmp(r)?;
+            Ok(Value::Bool(check(lt.cmp(&rt))))
+        }
+        TemporalType::Time => {
+            // Normalize to UTC nanoseconds for comparison
+            let ln = time_with_tz_to_utc_nanos(l)?;
+            let rn = time_with_tz_to_utc_nanos(r)?;
+            Ok(Value::Bool(check(ln.cmp(&rn))))
+        }
+        TemporalType::LocalDateTime => {
+            let ldt = parse_local_datetime_for_cmp(l)?;
+            let rdt = parse_local_datetime_for_cmp(r)?;
+            Ok(Value::Bool(check(ldt.cmp(&rdt))))
+        }
+        TemporalType::DateTime => {
+            let ldt = parse_datetime_utc(l)?;
+            let rdt = parse_datetime_utc(r)?;
+            Ok(Value::Bool(check(ldt.cmp(&rdt))))
+        }
+        TemporalType::Duration => Err(anyhow!("Durations are not orderable")),
+    }
+}
+
+/// Parse a time string for comparison.
+fn parse_time_for_cmp(s: &str) -> Result<chrono::NaiveTime> {
+    chrono::NaiveTime::parse_from_str(s, "%H:%M:%S%.f")
+        .or_else(|_| chrono::NaiveTime::parse_from_str(s, "%H:%M:%S"))
+        .or_else(|_| chrono::NaiveTime::parse_from_str(s, "%H:%M"))
+        .map_err(|_| anyhow!("Cannot parse time: {}", s))
+}
+
+/// Parse a local datetime string for comparison.
+fn parse_local_datetime_for_cmp(s: &str) -> Result<chrono::NaiveDateTime> {
+    chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S%.f")
+        .or_else(|_| chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S"))
+        .or_else(|_| chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M"))
+        .map_err(|_| anyhow!("Cannot parse localdatetime: {}", s))
+}
+
+const NANOS_PER_SECOND_CMP: i64 = 1_000_000_000;
+
+/// Normalize a time-with-timezone string to UTC nanoseconds for comparison.
+fn time_with_tz_to_utc_nanos(s: &str) -> Result<i64> {
+    use chrono::Timelike;
+    let (_, time, tz_info) = crate::query::datetime::parse_datetime_with_tz(s)?;
+    let local_nanos = time.hour() as i64 * 3_600 * NANOS_PER_SECOND_CMP
+        + time.minute() as i64 * 60 * NANOS_PER_SECOND_CMP
+        + time.second() as i64 * NANOS_PER_SECOND_CMP
+        + time.nanosecond() as i64;
+
+    // Subtract timezone offset to get UTC
+    let offset_secs: i64 = match tz_info {
+        Some(ref tz) => {
+            let today = chrono::NaiveDate::from_ymd_opt(2000, 1, 1).unwrap();
+            let ndt = chrono::NaiveDateTime::new(today, time);
+            tz.offset_for_local(&ndt)?.local_minus_utc() as i64
+        }
+        None => 0,
+    };
+
+    Ok(local_nanos - offset_secs * NANOS_PER_SECOND_CMP)
 }
 
 // ============================================================================
@@ -1777,10 +1948,10 @@ mod tests {
         let dt1 = json!("2024-01-02T00:00:00Z");
         let dt2 = json!("2024-01-01T00:00:00Z");
         let result = eval_binary_op(&dt1, &BinaryOp::Sub, &dt2).unwrap();
-        // Result is now ISO 8601 duration string (1 day = P1D)
+        // Result is now ISO 8601 duration string (1 day = PT24H for datetime types)
         let dur_str = result.as_str().unwrap();
         assert!(dur_str.starts_with('P'));
-        assert!(dur_str.contains("1D")); // 1 day
+        assert!(dur_str.contains("24H")); // 24 hours
     }
 
     // Bitwise operator tests removed - bitwise operations now use functions (uni_bitwise_*)

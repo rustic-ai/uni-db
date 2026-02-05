@@ -129,12 +129,47 @@ pub fn cypher_expr_to_df(expr: &Expr, context: Option<&TranslationContext>) -> R
         }
 
         Expr::Property(base, prop) => {
-            // Convert to column name: "{variable}.{property}"
-            // Use Column::from_name() to treat the entire string as a single unqualified column name,
-            // avoiding DataFusion's qualified column interpretation of "table.column"
-            let var_name = extract_variable_name(base)?;
-            let col_name = format!("{}.{}", var_name, prop);
-            Ok(DfExpr::Column(Column::from_name(col_name)))
+            // Check if this is a duration property accessor (e.g., dur.days, dur.seconds).
+            // If the base is not a known graph entity (node/edge) and the property name
+            // is a valid duration accessor, emit a _duration_property UDF call.
+            if let Ok(var_name) = extract_variable_name(base) {
+                let is_graph_entity = context
+                    .and_then(|ctx| ctx.variable_kinds.get(&var_name))
+                    .is_some_and(|k| matches!(k, VariableKind::Node | VariableKind::Edge));
+
+                if !is_graph_entity && crate::query::datetime::is_duration_accessor(prop) {
+                    let base_expr = DfExpr::Column(Column::from_name(var_name));
+                    return Ok(DfExpr::ScalarFunction(
+                        datafusion::logical_expr::expr::ScalarFunction {
+                            func: Arc::new(datafusion::logical_expr::ScalarUDF::new_from_impl(
+                                DummyUdf::new("_duration_property".to_string()),
+                            )),
+                            args: vec![base_expr, lit(prop.to_string())],
+                        },
+                    ));
+                }
+
+                // Standard property access: "{variable}.{property}" column reference.
+                let col_name = format!("{}.{}", var_name, prop);
+                Ok(DfExpr::Column(Column::from_name(col_name)))
+            } else {
+                // Base is a complex expression (e.g., function call result).
+                // Try duration accessor first, otherwise fall back to column.
+                if crate::query::datetime::is_duration_accessor(prop) {
+                    let base_expr = cypher_expr_to_df(base, context)?;
+                    return Ok(DfExpr::ScalarFunction(
+                        datafusion::logical_expr::expr::ScalarFunction {
+                            func: Arc::new(datafusion::logical_expr::ScalarUDF::new_from_impl(
+                                DummyUdf::new("_duration_property".to_string()),
+                            )),
+                            args: vec![base_expr, lit(prop.to_string())],
+                        },
+                    ));
+                }
+                let var_name = extract_variable_name(base)?;
+                let col_name = format!("{}.{}", var_name, prop);
+                Ok(DfExpr::Column(Column::from_name(col_name)))
+            }
         }
 
         Expr::ArrayIndex { array, index } => {
@@ -235,12 +270,17 @@ pub fn cypher_expr_to_df(expr: &Expr, context: Option<&TranslationContext>) -> R
             }
         }
 
-        Expr::Map(_entries) => {
-            // Maps are not directly supported in DataFusion scalar expressions
-            // Convert to a struct if needed
-            Err(anyhow!(
-                "Map literals not yet supported in DataFusion translation"
-            ))
+        Expr::Map(entries) => {
+            // Serialize map literals to a JSON string.  Temporal constructors
+            // like date({year:1984, month:10, day:11}) receive the JSON string
+            // and parse it back into a serde_json::Value::Object inside the UDF.
+            let mut json_map = serde_json::Map::new();
+            for (key, val_expr) in entries {
+                let json_val = try_cypher_expr_to_json_literal(val_expr)?;
+                json_map.insert(key.clone(), json_val);
+            }
+            let json_str = serde_json::Value::Object(json_map).to_string();
+            Ok(lit(json_str))
         }
 
         Expr::IsNull(inner) => {
@@ -459,6 +499,44 @@ fn extract_variable_name(expr: &Expr) -> Result<String> {
             "Cannot extract variable name from expression: {:?}",
             expr
         )),
+    }
+}
+
+/// Try to evaluate a Cypher expression as a JSON literal value.
+///
+/// Used for serializing map entries to JSON when the map is passed
+/// to a temporal constructor UDF.  Only handles expressions that can
+/// be resolved at translation time (literals, negation of literals).
+///
+/// # Errors
+///
+/// Returns an error if the expression is not a compile-time literal.
+fn try_cypher_expr_to_json_literal(expr: &Expr) -> Result<serde_json::Value> {
+    match expr {
+        Expr::Literal(CypherLiteral::Integer(i)) => Ok(serde_json::json!(*i)),
+        Expr::Literal(CypherLiteral::Float(f)) => Ok(serde_json::json!(*f)),
+        Expr::Literal(CypherLiteral::String(s)) => Ok(serde_json::json!(s)),
+        Expr::Literal(CypherLiteral::Bool(b)) => Ok(serde_json::json!(*b)),
+        Expr::Literal(CypherLiteral::Null) => Ok(serde_json::Value::Null),
+        Expr::UnaryOp {
+            op: UnaryOp::Neg,
+            expr: inner,
+        } => {
+            let val = try_cypher_expr_to_json_literal(inner)?;
+            match val {
+                serde_json::Value::Number(n) => {
+                    if let Some(i) = n.as_i64() {
+                        Ok(serde_json::json!(-i))
+                    } else if let Some(f) = n.as_f64() {
+                        Ok(serde_json::json!(-f))
+                    } else {
+                        Err(anyhow!("Cannot negate number: {n}"))
+                    }
+                }
+                _ => Err(anyhow!("Cannot negate non-number in map literal")),
+            }
+        }
+        _ => Err(anyhow!("Map entry is not a compile-time literal: {expr:?}")),
     }
 }
 
@@ -936,23 +1014,53 @@ fn translate_function_call(
         "E" if df_args.is_empty() => Ok(lit(std::f64::consts::E)),
         "PI" if df_args.is_empty() => Ok(lit(std::f64::consts::PI)),
 
-        // Date/time functions
-        "DATETIME" => {
-            if df_args.is_empty() {
-                // datetime() with no args → current timestamp
-                Ok(datafusion::functions::datetime::expr_fn::now())
-            } else {
-                // datetime(string) → CAST(arg AS Timestamp)
-                require_arg(&df_args, "datetime")?;
-                Ok(cast_expr(
-                    first_arg(&df_args),
-                    datafusion::arrow::datatypes::DataType::Timestamp(
-                        datafusion::arrow::datatypes::TimeUnit::Microsecond,
-                        Some("UTC".into()),
-                    ),
-                ))
-            }
-        }
+        // Temporal constructors and functions — handled by registered UDFs.
+        // The TemporalUdf delegates to eval_datetime_function() in datetime.rs.
+        "DATE"
+        | "TIME"
+        | "LOCALTIME"
+        | "LOCALDATETIME"
+        | "DATETIME"
+        | "DURATION"
+        | "YEAR"
+        | "MONTH"
+        | "DAY"
+        | "HOUR"
+        | "MINUTE"
+        | "SECOND"
+        | "DURATION.BETWEEN"
+        | "DURATION.INMONTHS"
+        | "DURATION.INDAYS"
+        | "DURATION.INSECONDS"
+        | "DATETIME.FROMEPOCH"
+        | "DATETIME.FROMEPOCHMILLIS"
+        | "DATE.TRUNCATE"
+        | "TIME.TRUNCATE"
+        | "DATETIME.TRUNCATE"
+        | "LOCALDATETIME.TRUNCATE"
+        | "LOCALTIME.TRUNCATE"
+        | "DATETIME.TRANSACTION"
+        | "DATETIME.STATEMENT"
+        | "DATETIME.REALTIME"
+        | "DATE.TRANSACTION"
+        | "DATE.STATEMENT"
+        | "DATE.REALTIME"
+        | "TIME.TRANSACTION"
+        | "TIME.STATEMENT"
+        | "TIME.REALTIME"
+        | "LOCALTIME.TRANSACTION"
+        | "LOCALTIME.STATEMENT"
+        | "LOCALTIME.REALTIME"
+        | "LOCALDATETIME.TRANSACTION"
+        | "LOCALDATETIME.STATEMENT"
+        | "LOCALDATETIME.REALTIME" => Ok(DfExpr::ScalarFunction(
+            datafusion::logical_expr::expr::ScalarFunction {
+                func: Arc::new(datafusion::logical_expr::ScalarUDF::new_from_impl(
+                    DummyUdf::new(name.to_lowercase()),
+                )),
+                args: df_args,
+            },
+        )),
 
         // Null handling
         "COALESCE" => {

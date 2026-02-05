@@ -14,6 +14,98 @@ use uni_cypher::ast::Expr;
 use uni_store::QueryContext;
 use uni_store::runtime::property_manager::PropertyManager;
 
+/// Value type for procedure parameters and outputs.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ProcedureValueType {
+    /// Cypher STRING type.
+    String,
+    /// Cypher INTEGER type.
+    Integer,
+    /// Cypher FLOAT type.
+    Float,
+    /// Cypher NUMBER type (accepts both INTEGER and FLOAT).
+    Number,
+    /// Cypher BOOLEAN type.
+    Boolean,
+    /// Accepts any value type.
+    Any,
+}
+
+/// Single parameter declaration for a registered procedure.
+#[derive(Debug, Clone)]
+pub struct ProcedureParam {
+    /// Parameter name as declared in the procedure signature.
+    pub name: std::string::String,
+    /// Expected type for this parameter.
+    pub param_type: ProcedureValueType,
+}
+
+/// Single output column declaration for a registered procedure.
+#[derive(Debug, Clone)]
+pub struct ProcedureOutput {
+    /// Output column name as declared in the procedure signature.
+    pub name: std::string::String,
+    /// Type of the output column.
+    pub output_type: ProcedureValueType,
+}
+
+/// A procedure registered at runtime with static mock data.
+///
+/// Used by the TCK harness to define test procedures that the query
+/// engine can call via `CALL proc.name(args) YIELD columns`.
+#[derive(Debug, Clone)]
+pub struct RegisteredProcedure {
+    /// Fully qualified procedure name (e.g. `test.my.proc`).
+    pub name: std::string::String,
+    /// Declared input parameters.
+    pub params: Vec<ProcedureParam>,
+    /// Declared output columns.
+    pub outputs: Vec<ProcedureOutput>,
+    /// Mock data rows keyed by column name.
+    pub data: Vec<HashMap<std::string::String, Value>>,
+}
+
+/// Thread-safe registry of test procedures.
+///
+/// Procedures are registered before query execution (typically by TCK
+/// step definitions) and looked up by the executor at runtime.
+#[derive(Debug, Default)]
+pub struct ProcedureRegistry {
+    procedures: std::sync::RwLock<HashMap<std::string::String, RegisteredProcedure>>,
+}
+
+impl ProcedureRegistry {
+    /// Creates an empty registry.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Registers a procedure, replacing any existing one with the same name.
+    pub fn register(&self, proc_def: RegisteredProcedure) {
+        self.procedures
+            .write()
+            .expect("ProcedureRegistry lock poisoned")
+            .insert(proc_def.name.clone(), proc_def);
+    }
+
+    /// Looks up a procedure by fully qualified name.
+    pub fn get(&self, name: &str) -> Option<RegisteredProcedure> {
+        self.procedures
+            .read()
+            .expect("ProcedureRegistry lock poisoned")
+            .get(name)
+            .cloned()
+    }
+
+    /// Removes all registered procedures.
+    pub fn clear(&self) {
+        self.procedures
+            .write()
+            .expect("ProcedureRegistry lock poisoned")
+            .clear();
+    }
+}
+
 /// Calculate normalized score from distance based on the distance metric.
 fn calculate_score(
     distance: f32,
@@ -786,7 +878,145 @@ impl Executor {
                     Value::Bool(success),
                 )])])
             }
-            _ => Err(anyhow!("Unknown procedure {}", name)),
+            _ => {
+                // Check external procedure registry
+                if let Some(registry) = &self.procedure_registry
+                    && let Some(proc_def) = registry.get(name)
+                {
+                    return self
+                        .execute_registered_procedure(
+                            &proc_def,
+                            args,
+                            yield_items,
+                            prop_manager,
+                            params,
+                            ctx,
+                        )
+                        .await;
+                }
+                Err(anyhow!("ProcedureNotFound: Unknown procedure '{}'", name))
+            }
         }
     }
+
+    /// Executes a procedure from the external registry.
+    ///
+    /// Evaluates arguments, validates count and types against the procedure
+    /// declaration, filters data rows by matching input columns, and projects
+    /// the requested output columns.
+    ///
+    /// # Errors
+    ///
+    /// Returns `InvalidNumberOfArguments` if the argument count is wrong,
+    /// or `InvalidArgumentType` if an argument has an incompatible type.
+    async fn execute_registered_procedure<'a>(
+        &'a self,
+        proc_def: &RegisteredProcedure,
+        args: &[Expr],
+        yield_items: &[String],
+        prop_manager: &'a PropertyManager,
+        params: &'a HashMap<String, Value>,
+        ctx: Option<&'a QueryContext>,
+    ) -> Result<Vec<HashMap<String, Value>>> {
+        let empty_row = HashMap::new();
+
+        // Evaluate arguments
+        let mut evaluated_args = Vec::with_capacity(args.len());
+        for arg in args {
+            evaluated_args.push(
+                self.evaluate_expr(arg, &empty_row, prop_manager, params, ctx)
+                    .await?,
+            );
+        }
+
+        // Validate argument count
+        if evaluated_args.len() != proc_def.params.len() {
+            return Err(anyhow!(
+                "InvalidNumberOfArguments: Procedure '{}' expects {} argument(s), got {}",
+                proc_def.name,
+                proc_def.params.len(),
+                evaluated_args.len()
+            ));
+        }
+
+        // Validate argument types
+        for (i, (arg_val, param)) in evaluated_args.iter().zip(&proc_def.params).enumerate() {
+            if !arg_val.is_null() && !check_type_compatible(arg_val, &param.param_type) {
+                return Err(anyhow!(
+                    "InvalidArgumentType: Argument {} ('{}') of procedure '{}' has incompatible type",
+                    i,
+                    param.name,
+                    proc_def.name
+                ));
+            }
+        }
+
+        // Filter data rows: keep rows where input columns match the provided args
+        let filtered: Vec<&HashMap<String, Value>> = proc_def
+            .data
+            .iter()
+            .filter(|row| {
+                for (param, arg_val) in proc_def.params.iter().zip(&evaluated_args) {
+                    if let Some(row_val) = row.get(&param.name)
+                        && !values_match(row_val, arg_val)
+                    {
+                        return false;
+                    }
+                }
+                true
+            })
+            .collect();
+
+        // Collect output column names
+        let output_names: Vec<&str> = proc_def.outputs.iter().map(|o| o.name.as_str()).collect();
+
+        // Project output columns, applying yield_items filtering
+        let results = filtered
+            .into_iter()
+            .map(|row| {
+                let mut result = HashMap::new();
+                if yield_items.is_empty() {
+                    // Return all output columns
+                    for name in &output_names {
+                        if let Some(val) = row.get(*name) {
+                            result.insert((*name).to_string(), val.clone());
+                        }
+                    }
+                } else {
+                    for yield_name in yield_items {
+                        if let Some(val) = row.get(yield_name.as_str()) {
+                            result.insert(yield_name.clone(), val.clone());
+                        }
+                    }
+                }
+                result
+            })
+            .collect();
+
+        Ok(results)
+    }
+}
+
+/// Checks whether a JSON value is compatible with a procedure type.
+fn check_type_compatible(val: &Value, expected: &ProcedureValueType) -> bool {
+    match expected {
+        ProcedureValueType::Any => true,
+        ProcedureValueType::String => val.is_string(),
+        ProcedureValueType::Boolean => val.is_boolean(),
+        ProcedureValueType::Integer => val.is_i64() || val.is_u64(),
+        ProcedureValueType::Float => val.is_f64() || val.is_i64() || val.is_u64(),
+        ProcedureValueType::Number => val.is_number(),
+    }
+}
+
+/// Checks whether two JSON values match for input-column filtering.
+fn values_match(row_val: &Value, arg_val: &Value) -> bool {
+    if arg_val.is_null() || row_val.is_null() {
+        return arg_val.is_null() && row_val.is_null();
+    }
+    // Compare numbers by f64 to handle int/float cross-comparison
+    if let (Some(a), Some(b)) = (row_val.as_f64(), arg_val.as_f64()) {
+        return (a - b).abs() < f64::EPSILON;
+    }
+    row_val == arg_val
 }

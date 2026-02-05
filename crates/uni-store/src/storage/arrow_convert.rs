@@ -1063,16 +1063,36 @@ pub fn build_edge_column<'a>(
     extractor.build_column(len, &deleted, get_props)
 }
 
+/// Strip a timezone suffix ("Z", "+HH:MM", "-HH:MM") from a time string.
+///
+/// Arrow Time64 stores offset-naive microseconds since midnight, so timezone
+/// information must be removed before parsing.
+fn strip_timezone_suffix(s: &str) -> &str {
+    if let Some(bare) = s.strip_suffix('Z') {
+        return bare;
+    }
+    let bytes = s.as_bytes();
+    if bytes.len() >= 6 {
+        let sign_pos = bytes.len() - 6;
+        if (bytes[sign_pos] == b'+' || bytes[sign_pos] == b'-') && bytes[sign_pos + 3] == b':' {
+            return &s[..sign_pos];
+        }
+    }
+    s
+}
+
 /// Parse a time string to microseconds since midnight.
 ///
 /// Supports formats: "HH:MM", "HH:MM:SS", "HH:MM:SS.fff", etc.
+/// Timezone suffixes ("Z", "+HH:MM", "-HH:MM") are stripped before parsing.
 fn parse_time_string_to_micros(s: &str) -> Option<i64> {
     use chrono::Timelike;
 
-    // Try various formats
-    let time = chrono::NaiveTime::parse_from_str(s, "%H:%M:%S%.f")
-        .or_else(|_| chrono::NaiveTime::parse_from_str(s, "%H:%M:%S"))
-        .or_else(|_| chrono::NaiveTime::parse_from_str(s, "%H:%M"))
+    let bare = strip_timezone_suffix(s);
+
+    let time = chrono::NaiveTime::parse_from_str(bare, "%H:%M:%S%.f")
+        .or_else(|_| chrono::NaiveTime::parse_from_str(bare, "%H:%M:%S"))
+        .or_else(|_| chrono::NaiveTime::parse_from_str(bare, "%H:%M"))
         .ok()?;
 
     Some(time.num_seconds_from_midnight() as i64 * 1_000_000 + time.nanosecond() as i64 / 1000)

@@ -31,6 +31,18 @@ pub enum VariableType {
     Path,
     /// Scalar variable (from WITH expr AS x, UNWIND list AS item, etc.)
     Scalar,
+    /// Imported from outer scope with unknown type (from plan_with_scope string vars).
+    /// Compatible with any concrete type — allows subqueries to re-bind the variable.
+    Imported,
+}
+
+impl VariableType {
+    /// Returns true if this type is compatible with the expected type.
+    ///
+    /// `Imported` is always compatible because the actual type is unknown at plan time.
+    fn is_compatible_with(self, expected: VariableType) -> bool {
+        self == expected || self == VariableType::Imported
+    }
 }
 
 /// Information about a variable in scope.
@@ -67,9 +79,13 @@ fn add_var_to_scope(
         return Ok(());
     }
 
-    if let Some(existing) = find_var_in_scope(vars, name) {
-        // Check for type conflict
-        if existing.var_type != var_type {
+    if let Some(existing) = vars.iter_mut().find(|v| v.name == name) {
+        if existing.var_type == VariableType::Imported {
+            // Imported vars upgrade to the concrete type
+            existing.var_type = var_type;
+        } else if var_type == VariableType::Imported || existing.var_type == var_type {
+            // New type is Imported (keep existing) or same type — no conflict
+        } else {
             return Err(anyhow!(
                 "SyntaxError: VariableTypeConflict - Variable '{}' already defined as {:?}, cannot use as {:?}",
                 name,
@@ -77,7 +93,6 @@ fn add_var_to_scope(
                 var_type
             ));
         }
-        // Variable already exists with same type - OK
     } else {
         vars.push(VariableInfo::new(name.to_string(), var_type));
     }
@@ -161,7 +176,7 @@ fn validate_function_call(name: &str, args: &[Expr], vars_in_scope: &[VariableIn
     if name_lower == "labels"
         && let Some(Expr::Variable(var_name)) = args.first()
         && let Some(info) = find_var_in_scope(vars_in_scope, var_name)
-        && info.var_type != VariableType::Node
+        && !info.var_type.is_compatible_with(VariableType::Node)
     {
         return Err(anyhow!(
             "SyntaxError: InvalidArgumentType - labels() requires a node argument"
@@ -172,7 +187,7 @@ fn validate_function_call(name: &str, args: &[Expr], vars_in_scope: &[VariableIn
     if name_lower == "type"
         && let Some(Expr::Variable(var_name)) = args.first()
         && let Some(info) = find_var_in_scope(vars_in_scope, var_name)
-        && info.var_type != VariableType::Edge
+        && !info.var_type.is_compatible_with(VariableType::Edge)
     {
         return Err(anyhow!(
             "SyntaxError: InvalidArgumentType - type() requires a relationship argument"
@@ -209,7 +224,7 @@ fn validate_function_call(name: &str, args: &[Expr], vars_in_scope: &[VariableIn
     if (name_lower == "nodes" || name_lower == "relationships")
         && let Some(Expr::Variable(var_name)) = args.first()
         && let Some(info) = find_var_in_scope(vars_in_scope, var_name)
-        && info.var_type != VariableType::Path
+        && !info.var_type.is_compatible_with(VariableType::Path)
     {
         return Err(anyhow!(
             "SyntaxError: InvalidArgumentType - {}() requires a path argument",
@@ -1275,10 +1290,27 @@ impl QueryPlanner {
         }
 
         if let Some(order_by) = &return_clause.order_by {
-            // Validate ORDER BY expressions
+            // Build an extended scope that includes RETURN aliases so ORDER BY
+            // can reference them (e.g. RETURN n.age AS age ORDER BY age).
+            let order_by_scope: Vec<VariableInfo> = {
+                let mut scope = vars_in_scope.to_vec();
+                for (expr, alias) in &projections {
+                    if let Some(a) = alias
+                        && !is_var_in_scope(&scope, a)
+                    {
+                        scope.push(VariableInfo::new(a.clone(), VariableType::Scalar));
+                    } else if let Expr::Variable(v) = expr
+                        && !is_var_in_scope(&scope, v)
+                    {
+                        scope.push(VariableInfo::new(v.clone(), VariableType::Scalar));
+                    }
+                }
+                scope
+            };
+            // Validate ORDER BY expressions against the extended scope
             for item in order_by {
-                validate_expression_variables(&item.expr, vars_in_scope)?;
-                validate_expression(&item.expr, vars_in_scope)?;
+                validate_expression_variables(&item.expr, &order_by_scope)?;
+                validate_expression(&item.expr, &order_by_scope)?;
             }
             plan = LogicalPlan::Sort {
                 input: Box::new(plan),
@@ -1358,12 +1390,41 @@ impl QueryPlanner {
     }
 
     fn plan_single(&self, query: Statement, initial_vars: Vec<String>) -> Result<LogicalPlan> {
+        let typed_vars: Vec<VariableInfo> = initial_vars
+            .into_iter()
+            .map(|name| VariableInfo::new(name, VariableType::Imported))
+            .collect();
+        self.plan_single_typed(query, typed_vars)
+    }
+
+    /// Rewrite a query then plan it, preserving typed variable scope when possible.
+    ///
+    /// For `Query::Single` statements, uses `plan_single_typed` to carry typed
+    /// variable info through and avoid false type-conflict errors in subqueries.
+    /// For unions and other compound queries, falls back to `plan_with_scope`.
+    fn rewrite_and_plan_typed(
+        &self,
+        query: Query,
+        typed_vars: &[VariableInfo],
+    ) -> Result<LogicalPlan> {
+        let rewritten = crate::query::rewrite::rewrite_query(query)?;
+        match rewritten {
+            Query::Single(stmt) => self.plan_single_typed(stmt, typed_vars.to_vec()),
+            other => self.plan_with_scope(other, vars_to_strings(typed_vars)),
+        }
+    }
+
+    fn plan_single_typed(
+        &self,
+        query: Statement,
+        initial_vars: Vec<VariableInfo>,
+    ) -> Result<LogicalPlan> {
         let mut plan = LogicalPlan::Empty;
 
         if !initial_vars.is_empty() {
             let projections = initial_vars
                 .iter()
-                .map(|v| (Expr::Variable(v.clone()), Some(v.clone())))
+                .map(|v| (Expr::Variable(v.name.clone()), Some(v.name.clone())))
                 .collect();
             plan = LogicalPlan::Project {
                 input: Box::new(plan),
@@ -1371,11 +1432,7 @@ impl QueryPlanner {
             };
         }
 
-        // Convert initial vars to VariableInfo (treat as Scalar since they come from outer scope)
-        let mut vars_in_scope: Vec<VariableInfo> = initial_vars
-            .into_iter()
-            .map(|name| VariableInfo::new(name, VariableType::Scalar))
-            .collect();
+        let mut vars_in_scope: Vec<VariableInfo> = initial_vars;
 
         for clause in query.clauses {
             match clause {
@@ -1422,10 +1479,12 @@ impl QueryPlanner {
                             for item in &call_clause.yield_items {
                                 yields.push((item.name.clone(), item.alias.clone()));
                                 let var_name = item.alias.as_ref().unwrap_or(&item.name);
+                                // Use Imported because procedure return types are unknown
+                                // at plan time (could be nodes, edges, or scalars)
                                 add_var_to_scope(
                                     &mut vars_in_scope,
                                     var_name,
-                                    VariableType::Scalar,
+                                    VariableType::Imported,
                                 )?;
                             }
                             plan = LogicalPlan::ProcedureCall {
@@ -1435,9 +1494,8 @@ impl QueryPlanner {
                             };
                         }
                         CallKind::Subquery(query) => {
-                            // Plan subquery with current variables in scope
-                            let subquery_plan = self
-                                .plan_with_scope(*query.clone(), vars_to_strings(&vars_in_scope))?;
+                            let subquery_plan =
+                                self.rewrite_and_plan_typed(*query.clone(), &vars_in_scope)?;
 
                             // Extract variables from subquery RETURN clause
                             let subquery_vars = Self::collect_plan_variables(&subquery_plan);
@@ -2282,7 +2340,7 @@ impl QueryPlanner {
                     if is_bound {
                         // Check for type conflict - can't use an Edge/Path as a Node
                         if let Some(info) = find_var_in_scope(vars_in_scope, &variable)
-                            && info.var_type != VariableType::Node
+                            && !info.var_type.is_compatible_with(VariableType::Node)
                         {
                             return Err(anyhow!(
                                 "SyntaxError: VariableTypeConflict - Variable '{}' already defined as {:?}, cannot use as Node",
@@ -2480,7 +2538,7 @@ impl QueryPlanner {
         if let Some(rel_var) = &params.rel.variable
             && !rel_var.is_empty()
             && let Some(info) = find_var_in_scope(vars_in_scope, rel_var)
-            && info.var_type != VariableType::Edge
+            && !info.var_type.is_compatible_with(VariableType::Edge)
         {
             return Err(anyhow!(
                 "SyntaxError: VariableTypeConflict - Variable '{}' already defined as {:?}, cannot use as relationship",
@@ -2493,7 +2551,7 @@ impl QueryPlanner {
         // e.g., ()-[r]-()-[]-(r) where r was added as Edge, now used as target node
         if _target_is_bound
             && let Some(info) = find_var_in_scope(vars_in_scope, &target_variable)
-            && info.var_type != VariableType::Node
+            && !info.var_type.is_compatible_with(VariableType::Node)
         {
             return Err(anyhow!(
                 "SyntaxError: VariableTypeConflict - Variable '{}' already defined as {:?}, cannot use as Node",
@@ -3365,10 +3423,11 @@ impl QueryPlanner {
         }
 
         // Validate and apply ORDER BY for WITH clause
+        // Use new_vars (which includes WITH aliases) instead of vars_in_scope
         if let Some(order_by) = &with_clause.order_by {
             for item in order_by {
-                validate_expression_variables(&item.expr, vars_in_scope)?;
-                validate_expression(&item.expr, vars_in_scope)?;
+                validate_expression_variables(&item.expr, &new_vars)?;
+                validate_expression(&item.expr, &new_vars)?;
                 // Aggregation functions not allowed in ORDER BY of WITH
                 if contains_aggregate_recursive(&item.expr) {
                     return Err(anyhow!(
@@ -3430,14 +3489,17 @@ impl QueryPlanner {
         match &*with_recursive.query {
             Query::Union { left, right, .. } => {
                 // Plan the anchor (initial) query with current scope
-                let initial_plan =
-                    self.plan_with_scope(*left.clone(), vars_to_strings(vars_in_scope))?;
+                let initial_plan = self.rewrite_and_plan_typed(*left.clone(), vars_in_scope)?;
 
                 // Plan the recursive query with the CTE name added to scope
                 // so it can reference itself
-                let mut recursive_scope = vars_to_strings(vars_in_scope);
-                recursive_scope.push(with_recursive.name.clone());
-                let recursive_plan = self.plan_with_scope(*right.clone(), recursive_scope)?;
+                let mut recursive_scope = vars_in_scope.to_vec();
+                recursive_scope.push(VariableInfo::new(
+                    with_recursive.name.clone(),
+                    VariableType::Scalar,
+                ));
+                let recursive_plan =
+                    self.rewrite_and_plan_typed(*right.clone(), &recursive_scope)?;
 
                 Ok(LogicalPlan::RecursiveCTE {
                     cte_name: with_recursive.name.clone(),

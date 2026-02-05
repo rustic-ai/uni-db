@@ -69,7 +69,16 @@ pub fn match_result_unordered(
             Some(idx) => {
                 unmatched.remove(idx);
             }
-            None => return Err(format!("No match found for actual row {}", i)),
+            None => {
+                let actual_vals: Vec<_> = expected_cols
+                    .iter()
+                    .map(|col| (col.clone(), actual_row.value(col).cloned()))
+                    .collect();
+                return Err(format!(
+                    "No match found for actual row {}. Actual values: {:?}. Expected: {:?}",
+                    i, actual_vals, unmatched
+                ));
+            }
         }
     }
 

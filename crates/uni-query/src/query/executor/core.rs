@@ -14,6 +14,8 @@ use uni_store::runtime::l0_manager::L0Manager;
 use uni_store::runtime::writer::Writer;
 use uni_store::storage::manager::StorageManager;
 
+use super::procedure::ProcedureRegistry;
+
 #[derive(Debug)]
 pub(crate) enum Accumulator {
     Count(i64),
@@ -129,6 +131,8 @@ pub struct Executor {
     pub(crate) config: uni_common::config::UniConfig,
     /// Cache for parsed generation expressions to avoid re-parsing on every row
     pub(crate) gen_expr_cache: Arc<RwLock<HashMap<GenExprCacheKey, Expr>>>,
+    /// External procedure registry for test/user-defined procedures.
+    pub(crate) procedure_registry: Option<Arc<ProcedureRegistry>>,
 }
 
 impl Executor {
@@ -142,6 +146,7 @@ impl Executor {
             file_sandbox: uni_common::config::FileSandboxConfig::default(),
             config: uni_common::config::UniConfig::default(),
             gen_expr_cache: Arc::new(RwLock::new(HashMap::new())),
+            procedure_registry: None,
         }
     }
 
@@ -155,7 +160,13 @@ impl Executor {
             file_sandbox: uni_common::config::FileSandboxConfig::default(),
             config: uni_common::config::UniConfig::default(),
             gen_expr_cache: Arc::new(RwLock::new(HashMap::new())),
+            procedure_registry: None,
         }
+    }
+
+    /// Sets the external procedure registry for user-defined procedures.
+    pub fn set_procedure_registry(&mut self, registry: Arc<ProcedureRegistry>) {
+        self.procedure_registry = Some(registry);
     }
 
     /// Set the file sandbox configuration for BACKUP/COPY/EXPORT commands.

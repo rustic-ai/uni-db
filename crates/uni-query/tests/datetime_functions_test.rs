@@ -19,23 +19,28 @@ fn test_date_function() {
 
 #[test]
 fn test_time_function() {
+    // Cypher time() always includes timezone (defaults to +00:00 when unspecified).
     let res = eval_scalar_function("TIME", &[json!("10:30:00")]).unwrap();
-    // Time with zero seconds is formatted as HH:MM (seconds omitted per TCK spec)
-    assert_eq!(res.as_str().unwrap(), "10:30");
+    assert_eq!(res.as_str().unwrap(), "10:30+00:00");
 
-    let res = eval_scalar_function("TIME", &[json!("2023-01-15 10:30:00")]).unwrap();
-    assert_eq!(res.as_str().unwrap(), "10:30");
-
-    // Time with non-zero seconds is formatted with seconds
+    // Time with non-zero seconds includes seconds and timezone.
     let res = eval_scalar_function("TIME", &[json!("10:30:45")]).unwrap();
-    assert_eq!(res.as_str().unwrap(), "10:30:45");
+    assert_eq!(res.as_str().unwrap(), "10:30:45+00:00");
+
+    // Time with explicit timezone preserves it.
+    let res = eval_scalar_function("TIME", &[json!("10:30:45+01:00")]).unwrap();
+    assert_eq!(res.as_str().unwrap(), "10:30:45+01:00");
 }
 
 #[test]
 fn test_datetime_function() {
-    let res = eval_scalar_function("DATETIME", &[json!("2023-01-15 10:30:00")]).unwrap();
-    // Output is RFC3339 format with Z suffix for UTC
-    assert_eq!(res.as_str().unwrap(), "2023-01-15T10:30:00Z");
+    // Standard Cypher datetime uses T separator (not space).
+    let res = eval_scalar_function("DATETIME", &[json!("2023-01-15T10:30:00Z")]).unwrap();
+    assert_eq!(res.as_str().unwrap(), "2023-01-15T10:30:00+00:00");
+
+    // Datetime with explicit timezone.
+    let res = eval_scalar_function("DATETIME", &[json!("2023-01-15T10:30:00+05:00")]).unwrap();
+    assert_eq!(res.as_str().unwrap(), "2023-01-15T10:30:00+05:00");
 }
 
 #[test]

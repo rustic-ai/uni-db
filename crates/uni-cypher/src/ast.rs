@@ -1461,7 +1461,7 @@ impl Expr {
                     BinaryOp::ApproxEq => "~=",
                 };
                 format!(
-                    "({} {} {})",
+                    "{} {} {}",
                     left.to_string_repr(),
                     op_str,
                     right.to_string_repr()
