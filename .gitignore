@@ -68,3 +68,6 @@ GEMINI.md
 
 .claude/
 .serena/
+
+# Git worktrees
+.worktrees/
