@@ -35,5 +35,5 @@ pub struct VertexData {
 #[derive(Clone, Copy, Debug)]
 pub struct EdgeData {
     pub eid: Eid,
-    pub edge_type: u16,
+    pub edge_type: u32,
 }

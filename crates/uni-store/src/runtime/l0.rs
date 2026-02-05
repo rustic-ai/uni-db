@@ -24,7 +24,7 @@ pub struct TombstoneEntry {
     pub eid: Eid,
     pub src_vid: Vid,
     pub dst_vid: Vid,
-    pub edge_type: u16,
+    pub edge_type: u32,
 }
 
 use std::sync::Arc;
@@ -47,7 +47,7 @@ pub struct L0Buffer {
     /// Vertex properties (stored separately from topology)
     pub vertex_properties: HashMap<Vid, Properties>,
     /// Edge endpoint lookup: eid -> (src, dst, type)
-    pub edge_endpoints: HashMap<Eid, (Vid, Vid, u16)>,
+    pub edge_endpoints: HashMap<Eid, (Vid, Vid, u32)>,
     /// Vertex labels (VID -> list of label names)
     /// New in storage design: vertices can have multiple labels
     pub vertex_labels: HashMap<Vid, Vec<String>>,
@@ -246,7 +246,7 @@ impl L0Buffer {
 
         // Cascade delete: collect all edges connected to this vertex and create tombstones
         // This ensures edges in L0 get proper tombstones that will be flushed to L1
-        let edges_to_delete: Vec<(Eid, Vid, Vid, u16)> = self
+        let edges_to_delete: Vec<(Eid, Vid, Vid, u32)> = self
             .edge_endpoints
             .iter()
             .filter(|(_, (src, dst, _))| *src == vid || *dst == vid)
@@ -281,7 +281,7 @@ impl L0Buffer {
         &mut self,
         src_vid: Vid,
         dst_vid: Vid,
-        edge_type: u16,
+        edge_type: u32,
         eid: Eid,
         properties: Properties,
     ) -> Result<()> {
@@ -339,7 +339,7 @@ impl L0Buffer {
         eid: Eid,
         src_vid: Vid,
         dst_vid: Vid,
-        edge_type: u16,
+        edge_type: u32,
     ) -> Result<()> {
         self.current_version += 1;
         let version = self.current_version;
@@ -382,7 +382,7 @@ impl L0Buffer {
     pub fn get_neighbors(
         &self,
         vid: Vid,
-        edge_type: u16,
+        edge_type: u32,
         direction: Direction,
     ) -> Vec<(Vid, Eid, u64)> {
         let edges = self.graph.neighbors(vid, direction);
@@ -546,7 +546,7 @@ impl L0Buffer {
 
                     // Cascade delete: collect all edges connected to this vertex and create tombstones
                     // This mirrors the logic in delete_vertex() to ensure WAL replay produces the same state
-                    let edges_to_delete: Vec<(Eid, Vid, Vid, u16)> = self
+                    let edges_to_delete: Vec<(Eid, Vid, Vid, u32)> = self
                         .edge_endpoints
                         .iter()
                         .filter(|(_, (src, dst, _))| *src == vid || *dst == vid)

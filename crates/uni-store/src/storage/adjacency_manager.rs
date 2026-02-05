@@ -30,7 +30,8 @@ use uni_common::core::id::{Eid, Vid};
 /// Data flush never invalidates or rebuilds the CSR.
 pub struct AdjacencyManager {
     /// Main CSR per `(edge_type, direction)` — all alive edges.
-    main_csr: DashMap<(u16, Direction), Arc<MainCsr>>,
+    /// Edge type is u32 with bit 31 = 0 for schema'd, 1 for schemaless.
+    main_csr: DashMap<(u32, Direction), Arc<MainCsr>>,
 
     /// Active L0-csr segment (current writes go here).
     active_overlay: Arc<RwLock<L0CsrSegment>>,
@@ -65,7 +66,7 @@ impl AdjacencyManager {
     ///
     /// Reads Main CSR + frozen segments + active overlay, minus tombstones.
     /// Tombstones from any layer remove edges from all lower layers.
-    pub fn get_neighbors(&self, vid: Vid, edge_type: u16, direction: Direction) -> Vec<(Vid, Eid)> {
+    pub fn get_neighbors(&self, vid: Vid, edge_type: u32, direction: Direction) -> Vec<(Vid, Eid)> {
         let mut result: HashMap<Eid, Vid> = HashMap::new();
 
         for &dir in direction.expand() {
@@ -117,7 +118,7 @@ impl AdjacencyManager {
     pub fn get_neighbors_at_version(
         &self,
         vid: Vid,
-        edge_type: u16,
+        edge_type: u32,
         direction: Direction,
         version: u64,
     ) -> Vec<(Vid, Eid)> {
@@ -186,14 +187,14 @@ impl AdjacencyManager {
     }
 
     /// Records an edge insertion into the L0-csr overlay (both directions).
-    pub fn insert_edge(&self, src: Vid, dst: Vid, eid: Eid, edge_type: u16, version: u64) {
+    pub fn insert_edge(&self, src: Vid, dst: Vid, eid: Eid, edge_type: u32, version: u64) {
         let active = self.active_overlay.read();
         active.insert_edge(src, dst, eid, edge_type, version, Direction::Outgoing);
         active.insert_edge(dst, src, eid, edge_type, version, Direction::Incoming);
     }
 
     /// Records a tombstone for a deleted edge in the L0-csr overlay.
-    pub fn add_tombstone(&self, eid: Eid, src: Vid, dst: Vid, edge_type: u16, version: u64) {
+    pub fn add_tombstone(&self, eid: Eid, src: Vid, dst: Vid, edge_type: u32, version: u64) {
         let active = self.active_overlay.read();
         active.add_tombstone(eid, src, dst, edge_type, version);
     }
@@ -201,14 +202,14 @@ impl AdjacencyManager {
     /// Sets the Main CSR for a specific edge type and direction.
     ///
     /// Used by `warm()` to install a freshly built CSR from storage.
-    pub fn set_main_csr(&self, edge_type: u16, direction: Direction, csr: MainCsr) {
+    pub fn set_main_csr(&self, edge_type: u32, direction: Direction, csr: MainCsr) {
         let size = csr.memory_usage();
         self.main_csr.insert((edge_type, direction), Arc::new(csr));
         self.current_bytes.fetch_add(size, Ordering::Relaxed);
     }
 
     /// Checks whether a Main CSR exists for the given edge type and direction.
-    pub fn has_csr(&self, edge_type: u16, direction: Direction) -> bool {
+    pub fn has_csr(&self, edge_type: u32, direction: Direction) -> bool {
         self.main_csr.contains_key(&(edge_type, direction))
     }
 
@@ -216,7 +217,7 @@ impl AdjacencyManager {
     ///
     /// Returns `true` if a Main CSR exists or the overlay has entries for
     /// this edge type and direction.
-    pub fn is_active_for(&self, edge_type: u16, direction: Direction) -> bool {
+    pub fn is_active_for(&self, edge_type: u32, direction: Direction) -> bool {
         let active = self.active_overlay.read();
         direction.expand().iter().any(|&d| {
             self.main_csr.contains_key(&(edge_type, d)) || active.has_entries_for(edge_type, d)
@@ -254,7 +255,7 @@ impl AdjacencyManager {
         };
 
         // Step 3: Collect all (edge_type, direction) keys from segments + existing CSRs
-        let mut all_keys: HashSet<(u16, Direction)> = HashSet::new();
+        let mut all_keys: HashSet<(u32, Direction)> = HashSet::new();
         for segment in &segments {
             for key in segment.inserts.keys() {
                 all_keys.insert(*key);
@@ -350,7 +351,7 @@ impl AdjacencyManager {
     pub async fn warm(
         &self,
         storage: &StorageManager,
-        edge_type_id: u16,
+        edge_type_id: u32,
         direction: Direction,
         version: Option<u64>,
     ) -> anyhow::Result<()> {

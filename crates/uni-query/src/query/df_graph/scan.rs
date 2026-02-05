@@ -1525,7 +1525,10 @@ impl Stream for GraphScanStream {
                             let eids = scan_edge_eids_static(&graph_ctx, &label).await?;
                             // Materialize batch with properties
                             let batch = materialize_edge_batch_static(
-                                &graph_ctx, &properties, &schema, eids,
+                                &graph_ctx,
+                                &properties,
+                                &schema,
+                                eids,
                             )
                             .await?;
                             Ok(Some(batch))
@@ -1548,10 +1551,9 @@ impl Stream for GraphScanStream {
                             // Known label vertex scan - use per-label table
                             let vids = scan_vertex_vids_static(&graph_ctx, &label).await?;
                             // Materialize batch
-                            let batch = materialize_vertex_batch_static(
-                                &graph_ctx, &label, &schema, vids,
-                            )
-                            .await?;
+                            let batch =
+                                materialize_vertex_batch_static(&graph_ctx, &label, &schema, vids)
+                                    .await?;
                             Ok(Some(batch))
                         }
                     };

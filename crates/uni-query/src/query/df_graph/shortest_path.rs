@@ -67,7 +67,7 @@ pub struct GraphShortestPathExec {
     target_column: String,
 
     /// Edge type IDs to traverse.
-    edge_type_ids: Vec<u16>,
+    edge_type_ids: Vec<u32>,
 
     /// Traversal direction.
     direction: Direction,
@@ -116,7 +116,7 @@ impl GraphShortestPathExec {
         input: Arc<dyn ExecutionPlan>,
         source_column: impl Into<String>,
         target_column: impl Into<String>,
-        edge_type_ids: Vec<u16>,
+        edge_type_ids: Vec<u32>,
         direction: Direction,
         path_variable: impl Into<String>,
         graph_ctx: Arc<GraphExecutionContext>,
@@ -283,7 +283,7 @@ struct GraphShortestPathStream {
     target_column: String,
 
     /// Edge type IDs to traverse.
-    edge_type_ids: Vec<u16>,
+    edge_type_ids: Vec<u32>,
 
     /// Traversal direction.
     direction: Direction,

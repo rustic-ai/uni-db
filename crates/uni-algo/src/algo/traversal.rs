@@ -16,12 +16,12 @@ use uni_store::storage::direction::Direction;
 /// where projection overhead isn't justified.
 pub struct DirectTraversal<'a> {
     am: &'a AdjacencyManager,
-    edge_types: Vec<u16>,
+    edge_types: Vec<u32>,
 }
 
 impl<'a> DirectTraversal<'a> {
     /// Create a new direct traversal context.
-    pub fn new(am: &'a AdjacencyManager, edge_types: Vec<u16>) -> Self {
+    pub fn new(am: &'a AdjacencyManager, edge_types: Vec<u32>) -> Self {
         Self { am, edge_types }
     }
 

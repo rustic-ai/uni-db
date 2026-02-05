@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2024-2026 Dragonscale Team
 
+use crate::core::edge_type::{MAX_SCHEMA_TYPE_ID, is_schemaless_edge_type, make_schemaless_id};
 use crate::sync::{acquire_read, acquire_write};
 use anyhow::{Result, anyhow};
 use chrono::{DateTime, Utc};
@@ -169,7 +170,8 @@ pub struct LabelMeta {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct EdgeTypeMeta {
-    pub id: u16, // TypeId
+    /// See [`crate::core::edge_type::EdgeTypeId`] for bit-layout details.
+    pub id: u32,
     pub src_labels: Vec<String>,
     pub dst_labels: Vec<String>,
     #[serde(default = "default_state")]
@@ -199,6 +201,60 @@ pub struct Constraint {
     pub enabled: bool,
 }
 
+/// Bidirectional registry for dynamically-assigned schemaless edge type IDs.
+///
+/// Edge types not defined in the schema are assigned IDs at runtime with
+/// bit 31 set (see [`crate::core::edge_type`]). This registry maintains
+/// the name-to-ID and ID-to-name mappings for those types.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SchemalessEdgeTypeRegistry {
+    name_to_id: HashMap<String, u32>,
+    id_to_name: HashMap<u32, String>,
+    /// Next local ID to assign (0 is reserved for invalid).
+    next_local_id: u32,
+}
+
+impl SchemalessEdgeTypeRegistry {
+    pub fn new() -> Self {
+        Self {
+            name_to_id: HashMap::new(),
+            id_to_name: HashMap::new(),
+            next_local_id: 1,
+        }
+    }
+
+    /// Returns the schemaless ID for `type_name`, assigning a new one if needed.
+    pub fn get_or_assign_id(&mut self, type_name: &str) -> u32 {
+        if let Some(&id) = self.name_to_id.get(type_name) {
+            return id;
+        }
+
+        let id = make_schemaless_id(self.next_local_id);
+        self.next_local_id += 1;
+
+        self.name_to_id.insert(type_name.to_string(), id);
+        self.id_to_name.insert(id, type_name.to_string());
+
+        id
+    }
+
+    /// Looks up the edge type name for a schemaless ID.
+    pub fn type_name_by_id(&self, type_id: u32) -> Option<&str> {
+        self.id_to_name.get(&type_id).map(String::as_str)
+    }
+
+    /// Returns `true` if `type_name` has already been assigned a schemaless ID.
+    pub fn contains(&self, type_name: &str) -> bool {
+        self.name_to_id.contains_key(type_name)
+    }
+}
+
+impl Default for SchemalessEdgeTypeRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Schema {
     pub schema_version: u32,
@@ -209,6 +265,9 @@ pub struct Schema {
     pub indexes: Vec<IndexDefinition>,
     #[serde(default)]
     pub constraints: Vec<Constraint>,
+    /// Registry for schemaless edge types (dynamically assigned IDs)
+    #[serde(default)]
+    pub schemaless_registry: SchemalessEdgeTypeRegistry,
 }
 
 impl Default for Schema {
@@ -220,6 +279,7 @@ impl Default for Schema {
             properties: HashMap::new(),
             indexes: Vec::new(),
             constraints: Vec::new(),
+            schemaless_registry: SchemalessEdgeTypeRegistry::new(),
         }
     }
 }
@@ -245,7 +305,7 @@ impl Schema {
     ///
     /// Performs a linear scan over all edge types. This is efficient because
     /// the number of edge types in a schema is typically small.
-    pub fn edge_type_name_by_id(&self, type_id: u16) -> Option<&str> {
+    pub fn edge_type_name_by_id(&self, type_id: u32) -> Option<&str> {
         self.edge_types
             .iter()
             .find(|(_, meta)| meta.id == type_id)
@@ -253,7 +313,7 @@ impl Schema {
     }
 
     /// Returns the edge type ID for a given type name.
-    pub fn edge_type_id_by_name(&self, type_name: &str) -> Option<u16> {
+    pub fn edge_type_id_by_name(&self, type_name: &str) -> Option<u32> {
         self.edge_types.get(type_name).map(|meta| meta.id)
     }
 
@@ -306,9 +366,34 @@ impl Schema {
     }
 
     /// Get edge type ID with case-insensitive lookup.
-    pub fn edge_type_id_by_name_case_insensitive(&self, type_name: &str) -> Option<u16> {
+    pub fn edge_type_id_by_name_case_insensitive(&self, type_name: &str) -> Option<u32> {
         self.get_edge_type_case_insensitive(type_name)
             .map(|meta| meta.id)
+    }
+
+    /// Returns the edge type ID for `type_name`, checking the schema first
+    /// and falling back to the schemaless registry (assigning a new ID if needed).
+    ///
+    /// Requires `&mut self` because it may assign a new schemaless ID.
+    /// Use [`edge_type_id_by_name`](Self::edge_type_id_by_name) for read-only schema lookups.
+    pub fn get_or_assign_edge_type_id(&mut self, type_name: &str) -> u32 {
+        if let Some(id) = self.edge_type_id_by_name(type_name) {
+            return id;
+        }
+        self.schemaless_registry.get_or_assign_id(type_name)
+    }
+
+    /// Returns the edge type name for `type_id`, checking both the schema
+    /// and schemaless registries. Returns an owned `String` because the
+    /// name may come from either registry.
+    pub fn edge_type_name_by_id_unified(&self, type_id: u32) -> Option<String> {
+        if is_schemaless_edge_type(type_id) {
+            self.schemaless_registry
+                .type_name_by_id(type_id)
+                .map(str::to_owned)
+        } else {
+            self.edge_type_name_by_id(type_id).map(str::to_owned)
+        }
     }
 }
 
@@ -656,14 +741,21 @@ impl SchemaManager {
             + 1
     }
 
-    pub fn next_type_id(&self) -> u16 {
-        self.schema()
+    pub fn next_type_id(&self) -> u32 {
+        let max_schema_id = self
+            .schema()
             .edge_types
             .values()
             .map(|t| t.id)
             .max()
-            .unwrap_or(0)
-            + 1
+            .unwrap_or(0);
+
+        // Ensure we stay in schema'd ID space (bit 31 = 0)
+        if max_schema_id >= MAX_SCHEMA_TYPE_ID {
+            panic!("Schema edge type ID exhaustion");
+        }
+
+        max_schema_id + 1
     }
 
     pub fn add_label(&self, name: &str) -> Result<u16> {
@@ -689,13 +781,18 @@ impl SchemaManager {
         name: &str,
         src_labels: Vec<String>,
         dst_labels: Vec<String>,
-    ) -> Result<u16> {
+    ) -> Result<u32> {
         let mut schema = acquire_write(&self.schema, "schema")?;
         if schema.edge_types.contains_key(name) {
             return Err(anyhow!("Edge type '{}' already exists", name));
         }
 
         let id = schema.edge_types.values().map(|t| t.id).max().unwrap_or(0) + 1;
+
+        // Ensure we stay in schema'd ID space (bit 31 = 0)
+        if id >= MAX_SCHEMA_TYPE_ID {
+            return Err(anyhow!("Schema edge type ID exhaustion"));
+        }
 
         schema.edge_types.insert(
             name.to_string(),
@@ -707,6 +804,20 @@ impl SchemaManager {
             },
         );
         Ok(id)
+    }
+
+    /// Delegates to [`Schema::get_or_assign_edge_type_id`].
+    pub fn get_or_assign_edge_type_id(&self, type_name: &str) -> u32 {
+        let mut schema = acquire_write(&self.schema, "schema")
+            .expect("Schema lock poisoned - a thread panicked while holding it");
+        schema.get_or_assign_edge_type_id(type_name)
+    }
+
+    /// Delegates to [`Schema::edge_type_name_by_id_unified`].
+    pub fn edge_type_name_by_id_unified(&self, type_id: u32) -> Option<String> {
+        let schema = acquire_read(&self.schema, "schema")
+            .expect("Schema lock poisoned - a thread panicked while holding it");
+        schema.edge_type_name_by_id_unified(type_id)
     }
 
     pub fn add_property(

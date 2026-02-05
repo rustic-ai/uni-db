@@ -160,7 +160,7 @@ impl Writer {
 
     /// Allocates the next EID.
     /// Note: In the new design, EIDs are pure auto-increment (no type embedding).
-    pub async fn next_eid(&self, _type_id: u16) -> Result<Eid> {
+    pub async fn next_eid(&self, _type_id: u32) -> Result<Eid> {
         self.allocator.allocate_eid().await
     }
 
@@ -1491,7 +1491,7 @@ impl Writer {
         &mut self,
         src_vid: Vid,
         dst_vid: Vid,
-        edge_type: u16,
+        edge_type: u32,
         eid: Eid,
         mut properties: Properties,
     ) -> Result<()> {
@@ -1534,7 +1534,7 @@ impl Writer {
         eid: Eid,
         src_vid: Vid,
         dst_vid: Vid,
-        edge_type: u16,
+        edge_type: u32,
     ) -> Result<()> {
         let start = std::time::Instant::now();
         self.check_write_pressure().await?;
@@ -1857,7 +1857,7 @@ impl Writer {
         } // Drop locks
 
         // 2. Acquire Read lock on Old L0 for flushing
-        let mut entries_by_type: HashMap<u16, Vec<L1Entry>> = HashMap::new();
+        let mut entries_by_type: HashMap<u32, Vec<L1Entry>> = HashMap::new();
         let mut vertices_by_label: HashMap<u16, Vec<(Vid, Properties, bool, u64)>> = HashMap::new();
         // Collect vertex timestamps from L0 for flushing to storage
         let mut vertex_created_at: HashMap<Vid, i64> = HashMap::new();
@@ -1990,18 +1990,17 @@ impl Writer {
         let lancedb_store = self.storage.lancedb_store();
 
         for (&edge_type_id, entries) in entries_by_type.iter() {
-            // Skip schemaless edges (sentinel u16::MAX) - they only go to main edges table
-            if edge_type_id == u16::MAX {
-                continue;
-            }
-            let edge_type_name = schema
-                .edge_type_name_by_id(edge_type_id)
-                .ok_or_else(|| anyhow!("Edge type ID {} not found in schema", edge_type_id))?;
+            // Get edge type name from unified lookup (handles both schema'd and schemaless)
+            let edge_type_name = self
+                .storage
+                .schema_manager()
+                .edge_type_name_by_id_unified(edge_type_id)
+                .ok_or_else(|| anyhow!("Edge type ID {} not found", edge_type_id))?;
 
             // FWD Run (sorted by src_vid)
             let mut fwd_entries = entries.clone();
             fwd_entries.sort_by_key(|e| e.src_vid);
-            let fwd_ds = self.storage.delta_dataset(edge_type_name, "fwd")?;
+            let fwd_ds = self.storage.delta_dataset(&edge_type_name, "fwd")?;
             let fwd_batch = fwd_ds.build_record_batch(&fwd_entries, &schema)?;
 
             // Write using LanceDB
@@ -2011,7 +2010,7 @@ impl Writer {
             // BWD Run (sorted by dst_vid)
             let mut bwd_entries = entries.clone();
             bwd_entries.sort_by_key(|e| e.dst_vid);
-            let bwd_ds = self.storage.delta_dataset(edge_type_name, "bwd")?;
+            let bwd_ds = self.storage.delta_dataset(&edge_type_name, "bwd")?;
             let bwd_batch = bwd_ds.build_record_batch(&bwd_entries, &schema)?;
 
             let bwd_table = bwd_ds.write_run_lancedb(lancedb_store, bwd_batch).await?;
@@ -2139,7 +2138,7 @@ impl Writer {
         // 3.1 Write to main edges table
         // Collect data while holding the lock, then release before async operations
         let (main_edges, edge_created_at_map, edge_updated_at_map) = {
-            let old_l0 = old_l0_arc.read();
+            let _old_l0 = old_l0_arc.read();
             let mut main_edges: Vec<(
                 uni_common::core::id::Eid,
                 Vid,
@@ -2154,18 +2153,12 @@ impl Writer {
 
             for (&edge_type_id, entries) in entries_by_type.iter() {
                 for entry in entries {
-                    // For schemaless edges (sentinel u16::MAX), get type name from L0
-                    let edge_type_name = if edge_type_id == u16::MAX {
-                        old_l0
-                            .get_edge_type(entry.eid)
-                            .map(|s| s.to_string())
-                            .unwrap_or_else(|| "unknown".to_string())
-                    } else {
-                        schema
-                            .edge_type_name_by_id(edge_type_id)
-                            .unwrap_or("unknown")
-                            .to_string()
-                    };
+                    // Get edge type name from unified lookup (handles both schema'd and schemaless)
+                    let edge_type_name = self
+                        .storage
+                        .schema_manager()
+                        .edge_type_name_by_id_unified(edge_type_id)
+                        .unwrap_or_else(|| "unknown".to_string());
 
                     let deleted = matches!(entry.op, Op::Delete);
                     main_edges.push((

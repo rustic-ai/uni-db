@@ -287,7 +287,7 @@ impl Database {
         name: &str,
         from_labels: Option<Vec<String>>,
         to_labels: Option<Vec<String>>,
-    ) -> PyResult<u16> {
+    ) -> PyResult<u32> {
         let from = from_labels.unwrap_or_default();
         let to = to_labels.unwrap_or_default();
         pyo3_async_runtimes::tokio::get_runtime()

@@ -19,8 +19,8 @@ pub struct ShadowEdge {
     pub neighbor_vid: Vid,
     /// Edge ID.
     pub eid: Eid,
-    /// Edge type ID.
-    pub edge_type: u16,
+    /// Edge type ID (bit 31 = 0 for schema'd, 1 for schemaless).
+    pub edge_type: u32,
     /// Version at which this edge was created.
     pub created_version: u64,
     /// Version at which this edge was deleted.
@@ -34,7 +34,8 @@ pub struct ShadowEdge {
 /// append-heavy, and never on the regular query hot path.
 pub struct ShadowCsr {
     /// `(edge_type, direction) -> vid -> Vec<ShadowEdge>`.
-    entries: DashMap<(u16, Direction), HashMap<Vid, Vec<ShadowEdge>>>,
+    /// Edge type is u32 with bit 31 = 0 for schema'd, 1 for schemaless.
+    entries: DashMap<(u32, Direction), HashMap<Vid, Vec<ShadowEdge>>>,
 }
 
 impl ShadowCsr {
@@ -62,7 +63,7 @@ impl ShadowCsr {
     pub fn get_entries_at_version(
         &self,
         vid: Vid,
-        edge_type: u16,
+        edge_type: u32,
         direction: Direction,
         version: u64,
     ) -> Vec<(Vid, Eid)> {
@@ -82,7 +83,7 @@ impl ShadowCsr {
     }
 
     /// Returns raw shadow entries for a vertex (all versions).
-    pub fn get_entries(&self, vid: Vid, edge_type: u16, direction: Direction) -> Vec<ShadowEdge> {
+    pub fn get_entries(&self, vid: Vid, edge_type: u32, direction: Direction) -> Vec<ShadowEdge> {
         if let Some(map) = self.entries.get(&(edge_type, direction))
             && let Some(edges) = map.get(&vid)
         {

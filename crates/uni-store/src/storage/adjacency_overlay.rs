@@ -21,14 +21,15 @@ pub struct OverlayTombstone {
     pub src_vid: Vid,
     /// Destination vertex of the deleted edge.
     pub dst_vid: Vid,
-    /// Edge type ID.
-    pub edge_type: u16,
+    /// Edge type ID (bit 31 = 0 for schema'd, 1 for schemaless).
+    pub edge_type: u32,
     /// Version at which deletion occurred.
     pub version: u64,
 }
 
 /// Key for overlay adjacency lookups: `(edge_type_id, direction)`.
-type OverlayKey = (u16, Direction);
+/// Edge type is u32 with bit 31 = 0 for schema'd, 1 for schemaless.
+type OverlayKey = (u32, Direction);
 
 /// Per-vertex neighbor list: `vid -> [(neighbor_vid, eid, version)]`.
 type NeighborMap = HashMap<Vid, Vec<(Vid, Eid, u64)>>;
@@ -60,7 +61,7 @@ impl L0CsrSegment {
         src: Vid,
         dst: Vid,
         eid: Eid,
-        edge_type: u16,
+        edge_type: u32,
         version: u64,
         direction: Direction,
     ) {
@@ -73,7 +74,7 @@ impl L0CsrSegment {
     }
 
     /// Records a tombstone for a deleted edge.
-    pub fn add_tombstone(&self, eid: Eid, src: Vid, dst: Vid, edge_type: u16, version: u64) {
+    pub fn add_tombstone(&self, eid: Eid, src: Vid, dst: Vid, edge_type: u32, version: u64) {
         self.tombstones.insert(
             eid,
             OverlayTombstone {
@@ -87,7 +88,7 @@ impl L0CsrSegment {
     }
 
     /// Returns neighbors for a vertex, applying tombstones.
-    pub fn get_neighbors(&self, vid: Vid, edge_type: u16, direction: Direction) -> Vec<(Vid, Eid)> {
+    pub fn get_neighbors(&self, vid: Vid, edge_type: u32, direction: Direction) -> Vec<(Vid, Eid)> {
         let mut result = Vec::new();
 
         if let Some(adj) = self.inserts.get(&(edge_type, direction))
@@ -107,7 +108,7 @@ impl L0CsrSegment {
     pub fn get_neighbors_at_version(
         &self,
         vid: Vid,
-        edge_type: u16,
+        edge_type: u32,
         direction: Direction,
         version: u64,
     ) -> Vec<(Vid, Eid)> {
@@ -131,7 +132,7 @@ impl L0CsrSegment {
     }
 
     /// Checks whether this segment has any insert entries for the given type and direction.
-    pub fn has_entries_for(&self, edge_type: u16, direction: Direction) -> bool {
+    pub fn has_entries_for(&self, edge_type: u32, direction: Direction) -> bool {
         self.inserts.contains_key(&(edge_type, direction))
     }
 
@@ -176,7 +177,7 @@ pub struct FrozenCsrSegment {
 
 impl FrozenCsrSegment {
     /// Returns neighbors for a vertex, applying tombstones.
-    pub fn get_neighbors(&self, vid: Vid, edge_type: u16, direction: Direction) -> Vec<(Vid, Eid)> {
+    pub fn get_neighbors(&self, vid: Vid, edge_type: u32, direction: Direction) -> Vec<(Vid, Eid)> {
         let mut result = Vec::new();
 
         if let Some(adj) = self.inserts.get(&(edge_type, direction))

@@ -60,7 +60,7 @@ fn small_eid_strategy() -> impl Strategy<Value = Eid> {
 #[derive(Debug, Clone)]
 enum GraphOp {
     AddVertex(Vid),
-    AddEdge(Vid, Vid, Eid, u16),
+    AddEdge(Vid, Vid, Eid, u32),
     RemoveVertex(Vid),
     RemoveEdge(Eid),
 }
@@ -72,7 +72,7 @@ fn graph_op_strategy() -> impl Strategy<Value = GraphOp> {
             small_vid_strategy(),
             small_vid_strategy(),
             small_eid_strategy(),
-            0u16..5
+            0u32..5
         )
             .prop_map(|(src, dst, eid, etype)| GraphOp::AddEdge(src, dst, eid, etype)),
         small_vid_strategy().prop_map(GraphOp::RemoveVertex),
@@ -120,7 +120,7 @@ proptest! {
         src in small_vid_strategy(),
         dst in small_vid_strategy(),
         eid in small_eid_strategy(),
-        etype in 0u16..5
+        etype in 0u32..5
     ) {
         let mut graph = SimpleGraph::new();
         graph.add_vertex(src);
@@ -146,7 +146,7 @@ proptest! {
         src in small_vid_strategy(),
         dst in small_vid_strategy(),
         eid in small_eid_strategy(),
-        etype in 0u16..5
+        etype in 0u32..5
     ) {
         let mut graph = SimpleGraph::new();
         graph.add_vertex(src);
@@ -166,7 +166,7 @@ proptest! {
         src in small_vid_strategy(),
         dst in small_vid_strategy(),
         eid in small_eid_strategy(),
-        etype in 0u16..5
+        etype in 0u32..5
     ) {
         let mut graph = SimpleGraph::new();
         graph.add_vertex(src);
@@ -216,7 +216,7 @@ fn mutation_strategy() -> impl Strategy<Value = Mutation> {
         (
             small_vid_strategy(),
             small_vid_strategy(),
-            0u16..5,
+            0u32..5,
             small_eid_strategy(),
             0u64..1000,
             prop::collection::hash_map(
@@ -238,7 +238,7 @@ fn mutation_strategy() -> impl Strategy<Value = Mutation> {
             small_eid_strategy(),
             small_vid_strategy(),
             small_vid_strategy(),
-            0u16..5,
+            0u32..5,
             0u64..1000
         )
             .prop_map(|(eid, src, dst, etype, ver)| Mutation::DeleteEdge {

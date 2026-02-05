@@ -167,7 +167,7 @@ impl StorageManager {
         }
     }
 
-    pub fn get_edge_version_by_id(&self, edge_type_id: u16) -> Option<u64> {
+    pub fn get_edge_version_by_id(&self, edge_type_id: u32) -> Option<u64> {
         let schema = self.schema_manager.schema();
         let name = schema.edge_type_name_by_id(edge_type_id)?;
         self.pinned_snapshot
@@ -435,7 +435,7 @@ impl StorageManager {
     /// Called lazily on first access per edge type or at startup.
     pub async fn warm_adjacency(
         &self,
-        edge_type_id: u16,
+        edge_type_id: u32,
         direction: crate::storage::direction::Direction,
         version: Option<u64>,
     ) -> anyhow::Result<()> {
@@ -447,7 +447,7 @@ impl StorageManager {
     /// Check whether the adjacency manager has a CSR for the given edge type and direction.
     pub fn has_adjacency_csr(
         &self,
-        edge_type_id: u16,
+        edge_type_id: u32,
         direction: crate::storage::direction::Direction,
     ) -> bool {
         self.adjacency_manager.has_csr(edge_type_id, direction)
@@ -457,7 +457,7 @@ impl StorageManager {
     pub fn get_neighbors_at_version(
         &self,
         vid: uni_common::core::id::Vid,
-        edge_type: u16,
+        edge_type: u32,
         direction: crate::storage::direction::Direction,
         version: u64,
     ) -> Vec<(uni_common::core::id::Vid, uni_common::core::id::Eid)> {
@@ -478,7 +478,7 @@ impl StorageManager {
     pub async fn load_subgraph_cached(
         &self,
         start_vids: &[Vid],
-        edge_types: &[u16],
+        edge_types: &[u32],
         max_hops: usize,
         direction: GraphDirection,
         _l0: Option<Arc<RwLock<L0Buffer>>>,
@@ -742,7 +742,7 @@ impl StorageManager {
     pub async fn load_subgraph(
         &self,
         start_vids: &[Vid],
-        edge_types: &[u16],
+        edge_types: &[u32],
         max_hops: usize,
         direction: GraphDirection,
         l0: Option<&L0Buffer>,
@@ -762,7 +762,7 @@ impl StorageManager {
             })
             .collect();
 
-        let edge_type_map: HashMap<u16, String> = schema
+        let edge_type_map: HashMap<u32, String> = schema
             .edge_types
             .values()
             .map(|meta| {
@@ -773,7 +773,7 @@ impl StorageManager {
             })
             .collect();
 
-        let target_edge_types: HashSet<u16> = edge_types.iter().cloned().collect();
+        let target_edge_types: HashSet<u32> = edge_types.iter().cloned().collect();
 
         // Initialize frontier
         let mut frontier: Vec<Vid> = start_vids.to_vec();
@@ -916,7 +916,7 @@ impl StorageManager {
         edges: &mut HashMap<Eid, EdgeState>,
         l0: &L0Buffer,
         vid: Vid,
-        etype_id: u16,
+        etype_id: u32,
         direction: GraphDirection,
     ) {
         let l0_neighbors = l0.get_neighbors(vid, etype_id, direction);
@@ -947,7 +947,7 @@ impl StorageManager {
         graph: &mut WorkingGraph,
         edges: HashMap<Eid, EdgeState>,
         vid: Vid,
-        etype_id: u16,
+        etype_id: u32,
         neighbor_is_dst: bool,
         visited: &HashSet<Vid>,
         next_frontier: &mut HashSet<Vid>,

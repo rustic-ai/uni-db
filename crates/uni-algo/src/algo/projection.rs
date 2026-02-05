@@ -250,7 +250,7 @@ impl ProjectionBuilder {
     fn resolve_ids(
         &self,
         schema: &uni_common::core::schema::Schema,
-    ) -> Result<(Vec<u16>, Vec<u16>)> {
+    ) -> Result<(Vec<u16>, Vec<u32>)> {
         let mut label_ids = Vec::new();
         for label_name in &self.config.node_labels {
             let meta = schema
@@ -281,7 +281,7 @@ impl ProjectionBuilder {
     }
 
     /// Warm adjacency manager for all requested edge types.
-    async fn warm_caches(&self, _label_ids: &[u16], edge_type_ids: &[u16]) -> Result<()> {
+    async fn warm_caches(&self, _label_ids: &[u16], edge_type_ids: &[u32]) -> Result<()> {
         for &type_id in edge_type_ids {
             let edge_ver = self.storage.get_edge_version_by_id(type_id);
             self.storage
@@ -367,7 +367,7 @@ impl ProjectionBuilder {
     async fn collect_edges(
         &self,
         id_map: &IdMap,
-        edge_type_ids: &[u16],
+        edge_type_ids: &[u32],
     ) -> Result<(WeightedEdgeList, WeightedEdgeList)> {
         // Phase 1: Collect topology from AdjacencyManager
         let mut raw_out_edges = Vec::new(); // (src_slot, dst_vid, eid)

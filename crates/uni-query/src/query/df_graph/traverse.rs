@@ -119,7 +119,7 @@ pub struct GraphTraverseExec {
     source_column: String,
 
     /// Edge type IDs to traverse.
-    edge_type_ids: Vec<u16>,
+    edge_type_ids: Vec<u32>,
 
     /// Traversal direction.
     direction: Direction,
@@ -188,7 +188,7 @@ impl GraphTraverseExec {
     pub fn new(
         input: Arc<dyn ExecutionPlan>,
         source_column: impl Into<String>,
-        edge_type_ids: Vec<u16>,
+        edge_type_ids: Vec<u32>,
         direction: Direction,
         target_variable: impl Into<String>,
         edge_variable: Option<String>,
@@ -423,7 +423,7 @@ struct GraphTraverseStream {
     source_column: String,
 
     /// Edge type IDs to traverse.
-    edge_type_ids: Vec<u16>,
+    edge_type_ids: Vec<u32>,
 
     /// Traversal direction.
     direction: Direction,
@@ -538,7 +538,7 @@ async fn build_traverse_output_batch(
     schema: SchemaRef,
     edge_variable: Option<String>,
     edge_properties: Vec<String>,
-    edge_type_ids: Vec<u16>,
+    edge_type_ids: Vec<u32>,
     target_properties: Vec<String>,
     target_label_name: Option<String>,
     graph_ctx: Arc<GraphExecutionContext>,
@@ -1239,9 +1239,8 @@ impl GraphTraverseMainStream {
         // Start by loading the adjacency map from the main edges table
         let loading_ctx = graph_ctx.clone();
         let loading_type = type_name.clone();
-        let fut = async move {
-            build_edge_adjacency_map(&loading_ctx, &loading_type, direction).await
-        };
+        let fut =
+            async move { build_edge_adjacency_map(&loading_ctx, &loading_type, direction).await };
 
         Self {
             source_column,
@@ -1601,7 +1600,7 @@ pub struct GraphVariableLengthTraverseExec {
     source_column: String,
 
     /// Edge type ID to traverse.
-    edge_type_id: u16,
+    edge_type_id: u32,
 
     /// Traversal direction.
     direction: Direction,
@@ -1646,7 +1645,7 @@ impl GraphVariableLengthTraverseExec {
     pub fn new(
         input: Arc<dyn ExecutionPlan>,
         source_column: impl Into<String>,
-        edge_type_id: u16,
+        edge_type_id: u32,
         direction: Direction,
         min_hops: usize,
         max_hops: usize,
@@ -1819,7 +1818,7 @@ impl GraphVariableLengthTraverseExec {
 /// Data needed by the stream (without ExecutionPlan overhead).
 struct GraphVariableLengthTraverseExecData {
     source_column: String,
-    edge_type_id: u16,
+    edge_type_id: u32,
     direction: Direction,
     min_hops: usize,
     max_hops: usize,

@@ -790,7 +790,7 @@ impl HybridPhysicalPlanner {
     fn plan_traverse(
         &self,
         input: &LogicalPlan,
-        edge_type_ids: &[u16],
+        edge_type_ids: &[u32],
         direction: AstDirection,
         source_variable: &str,
         target_variable: &str,
@@ -990,7 +990,7 @@ impl HybridPhysicalPlanner {
     fn plan_shortest_path(
         &self,
         input: &LogicalPlan,
-        edge_type_ids: &[u16],
+        edge_type_ids: &[u32],
         direction: AstDirection,
         source_variable: &str,
         target_variable: &str,

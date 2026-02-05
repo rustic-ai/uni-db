@@ -141,7 +141,7 @@ pub async fn create_edge_type_core(
     name: &str,
     from_labels: Vec<String>,
     to_labels: Vec<String>,
-) -> Result<u16, String> {
+) -> Result<u32, String> {
     let sm = db.schema_manager();
     let id = sm
         .add_edge_type(name, from_labels, to_labels)

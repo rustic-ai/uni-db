@@ -581,7 +581,7 @@ pub enum LogicalPlan {
     },
     Traverse {
         input: Box<LogicalPlan>,
-        edge_type_ids: Vec<u16>,
+        edge_type_ids: Vec<u32>,
         direction: Direction,
         source_variable: String,
         target_variable: String,
@@ -715,7 +715,7 @@ pub enum LogicalPlan {
     },
     ShortestPath {
         input: Box<LogicalPlan>,
-        edge_type_ids: Vec<u16>,
+        edge_type_ids: Vec<u32>,
         direction: Direction,
         source_variable: String,
         target_variable: String,
@@ -729,7 +729,7 @@ pub enum LogicalPlan {
     /// allShortestPaths() - Returns all paths with minimum length
     AllShortestPaths {
         input: Box<LogicalPlan>,
-        edge_type_ids: Vec<u16>,
+        edge_type_ids: Vec<u32>,
         direction: Direction,
         source_variable: String,
         target_variable: String,

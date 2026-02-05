@@ -1035,7 +1035,7 @@ impl Executor {
         for path in &pattern.paths {
             let mut prev_vid: Option<Vid> = None;
             // (rel_var, type_id, type_name, props_expr, direction)
-            type PendingRel = (String, u16, String, Option<Expr>, Direction);
+            type PendingRel = (String, u32, String, Option<Expr>, Direction);
             let mut rel_pending: Option<PendingRel> = None;
 
             for element in &path.elements {
@@ -1135,10 +1135,8 @@ impl Executor {
                                     .insert_edge(edge_src, edge_dst, type_id, eid, rel_props)
                                     .await?;
 
-                                // Schemaless edges (sentinel u16::MAX) need an explicit type name for traversal/flush
-                                if type_id == u16::MAX {
-                                    writer.set_edge_type(eid, type_name.clone());
-                                }
+                                // Store edge type name for all edges
+                                writer.set_edge_type(eid, type_name.clone());
 
                                 if !rel_var.is_empty() {
                                     let edge_obj = json!({
@@ -1160,14 +1158,11 @@ impl Executor {
                             ));
                         }
                         let type_name = &r.types[0];
-                        let schema = self.storage.schema_manager().schema();
-
-                        // Support schemaless edge types: use sentinel u16::MAX for unknown types
-                        let type_id = schema
-                            .edge_types
-                            .get(type_name)
-                            .map(|meta| meta.id)
-                            .unwrap_or(u16::MAX);
+                        // Get or assign edge type ID (schemaless types get bit 31 = 1)
+                        let type_id = self
+                            .storage
+                            .schema_manager()
+                            .get_or_assign_edge_type_id(type_name);
 
                         rel_pending = Some((
                             r.variable.clone().unwrap_or_default(),
@@ -1241,7 +1236,7 @@ impl Executor {
                             );
                             let src = Vid::from(src_v.as_u64().ok_or(anyhow!("Invalid _src"))?);
                             let dst = Vid::from(dst_v.as_u64().ok_or(anyhow!("Invalid _dst"))?);
-                            let etype = type_v.as_u64().ok_or(anyhow!("Invalid _type"))? as u16;
+                            let etype = type_v.as_u64().ok_or(anyhow!("Invalid _type"))? as u32;
 
                             let mut props = prop_manager
                                 .get_all_edge_props_with_ctx(eid, ctx)
@@ -1393,7 +1388,7 @@ impl Executor {
                 uni_common::core::id::Eid::from(eid_v.as_u64().ok_or(anyhow!("Invalid _eid"))?);
             let src = Vid::from(src_v.as_u64().ok_or(anyhow!("Invalid _src"))?);
             let dst = Vid::from(dst_v.as_u64().ok_or(anyhow!("Invalid _dst"))?);
-            let etype = type_v.as_u64().ok_or(anyhow!("Invalid _type"))? as u16;
+            let etype = type_v.as_u64().ok_or(anyhow!("Invalid _type"))? as u32;
 
             let mut props = prop_manager
                 .get_all_edge_props_with_ctx(eid, ctx)
@@ -1485,7 +1480,7 @@ impl Executor {
     /// Check that a vertex has no edges (required for non-DETACH DELETE).
     pub(crate) async fn check_vertex_has_no_edges(&self, vid: Vid, writer: &Writer) -> Result<()> {
         let schema = self.storage.schema_manager().schema();
-        let edge_type_ids: Vec<u16> = schema.edge_types.values().map(|m| m.id).collect();
+        let edge_type_ids: Vec<u32> = schema.edge_types.values().map(|m| m.id).collect();
 
         let out_graph = self
             .storage
@@ -1536,7 +1531,7 @@ impl Executor {
                 uni_common::core::id::Eid::from(eid_v.as_u64().ok_or(anyhow!("Invalid _eid"))?);
             let src = Vid::from(src_v.as_u64().ok_or(anyhow!("Invalid _src"))?);
             let dst = Vid::from(dst_v.as_u64().ok_or(anyhow!("Invalid _dst"))?);
-            let etype = type_v.as_u64().ok_or(anyhow!("Invalid _type"))? as u16;
+            let etype = type_v.as_u64().ok_or(anyhow!("Invalid _type"))? as u32;
             writer.delete_edge(eid, src, dst, etype).await?;
         }
         Ok(())

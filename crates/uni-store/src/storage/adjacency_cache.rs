@@ -23,7 +23,8 @@ pub struct AdjacencyCache {
     ///
     /// In the current design, adjacency is not partitioned by label.
     /// VIDs are used directly as offsets into the CSR.
-    csr_maps: DashMap<(u16, Direction), Arc<CompressedSparseRow>>,
+    /// Edge type is u32 with bit 31 = 0 for schema'd, 1 for schemaless.
+    csr_maps: DashMap<(u32, Direction), Arc<CompressedSparseRow>>,
 
     /// Current memory usage
     current_bytes: AtomicUsize,
@@ -51,7 +52,7 @@ impl AdjacencyCache {
     pub async fn warm(
         &self,
         storage: &StorageManager,
-        edge_type_id: u16,
+        edge_type_id: u32,
         direction: Direction,
         version: Option<u64>,
     ) -> anyhow::Result<()> {

@@ -294,7 +294,7 @@ impl GraphExecutionContext {
     /// active overlay) for the edge type, avoiding duplicate entries.
     pub async fn ensure_adjacency_warmed(
         &self,
-        edge_type_ids: &[u16],
+        edge_type_ids: &[u32],
         direction: Direction,
     ) -> anyhow::Result<()> {
         let am = self.adjacency_manager();
@@ -318,7 +318,7 @@ impl GraphExecutionContext {
     /// suitable for polling in stream `poll_next` implementations.
     pub fn warming_future(
         self: &Arc<Self>,
-        edge_type_ids: Vec<u16>,
+        edge_type_ids: Vec<u32>,
         direction: Direction,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = datafusion::common::Result<()>> + Send>>
     {
@@ -348,7 +348,7 @@ impl GraphExecutionContext {
     /// # Returns
     ///
     /// Vector of (neighbor VID, edge ID) pairs.
-    pub fn get_neighbors(&self, vid: Vid, edge_type: u16, direction: Direction) -> Vec<(Vid, Eid)> {
+    pub fn get_neighbors(&self, vid: Vid, edge_type: u32, direction: Direction) -> Vec<(Vid, Eid)> {
         let am = self.adjacency_manager();
         let version_hwm = self.storage.version_high_water_mark();
 
@@ -396,7 +396,7 @@ impl GraphExecutionContext {
     pub fn get_neighbors_batch(
         &self,
         vids: &[Vid],
-        edge_type: u16,
+        edge_type: u32,
         direction: Direction,
     ) -> Vec<(Vid, Vid, Eid)> {
         let am = self.adjacency_manager();
@@ -443,7 +443,7 @@ impl GraphExecutionContext {
 /// Filters by version if a snapshot boundary is provided.
 fn overlay_l0_neighbors(
     vid: Vid,
-    edge_type: u16,
+    edge_type: u32,
     direction: Direction,
     l0: &L0Buffer,
     neighbors: &mut Vec<(Vid, Eid)>,

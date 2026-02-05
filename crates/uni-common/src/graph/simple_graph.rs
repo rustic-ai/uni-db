@@ -14,12 +14,14 @@ use fxhash::FxBuildHasher;
 use std::collections::HashMap;
 
 /// Edge entry stored in adjacency lists.
+///
+/// The `edge_type` field uses the [`EdgeTypeId`](crate::core::edge_type::EdgeTypeId) encoding.
 #[derive(Clone, Copy, Debug)]
 pub struct EdgeEntry {
     pub eid: Eid,
     pub src_vid: Vid,
     pub dst_vid: Vid,
-    pub edge_type: u16,
+    pub edge_type: u32,
 }
 
 /// Type alias for FxHashMap (faster hashing for integer keys)
@@ -122,7 +124,7 @@ impl SimpleGraph {
     }
 
     /// Adds an edge to the graph. Vertices are implicitly created if they don't exist.
-    pub fn add_edge(&mut self, src_vid: Vid, dst_vid: Vid, eid: Eid, edge_type: u16) {
+    pub fn add_edge(&mut self, src_vid: Vid, dst_vid: Vid, eid: Eid, edge_type: u32) {
         // Ensure vertices exist
         self.add_vertex(src_vid);
         self.add_vertex(dst_vid);
@@ -132,7 +134,7 @@ impl SimpleGraph {
 
     /// Adds an edge without checking if vertices exist. Use when vertices are pre-added.
     #[inline]
-    pub fn add_edge_unchecked(&mut self, src_vid: Vid, dst_vid: Vid, eid: Eid, edge_type: u16) {
+    pub fn add_edge_unchecked(&mut self, src_vid: Vid, dst_vid: Vid, eid: Eid, edge_type: u32) {
         let entry = EdgeEntry {
             eid,
             src_vid,

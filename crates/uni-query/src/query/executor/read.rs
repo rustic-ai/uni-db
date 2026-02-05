@@ -1557,11 +1557,16 @@ impl Executor {
                         if let Value::Object(map) = &val
                             && let Some(type_val) = map.get("_type")
                         {
-                            // Numeric _type is a schema ID; string _type is already a name
-                            if let Some(type_id) = type_val.as_u64() {
-                                let schema = this.storage.schema_manager().schema();
-                                if let Some(name) = schema.edge_type_name_by_id(type_id as u16) {
-                                    return Ok(Value::String(name.to_string()));
+                            // Numeric _type is an edge type ID; string _type is already a name
+                            if let Some(type_id) =
+                                type_val.as_u64().and_then(|v| u32::try_from(v).ok())
+                            {
+                                if let Some(name) = this
+                                    .storage
+                                    .schema_manager()
+                                    .edge_type_name_by_id_unified(type_id)
+                                {
+                                    return Ok(Value::String(name));
                                 }
                             } else if let Some(name) = type_val.as_str() {
                                 return Ok(Value::String(name.to_string()));
@@ -3228,7 +3233,7 @@ impl Executor {
     pub(crate) async fn execute_traverse(
         &self,
         input_matches: Vec<HashMap<String, Value>>,
-        edge_type_ids: Vec<u16>,
+        edge_type_ids: Vec<u32>,
         direction: &Direction,
         source_variable: &str,
         target_variable: &str,
@@ -3465,7 +3470,7 @@ impl Executor {
         &self,
         source: Vid,
         target: Vid,
-        edge_type_ids: &[u16],
+        edge_type_ids: &[u32],
         direction: &Direction,
         max_hops: u32,
         ctx: Option<&QueryContext>,
@@ -3622,7 +3627,7 @@ impl Executor {
     pub(crate) async fn traverse_from_row(
         &self,
         row: &HashMap<String, Value>,
-        edge_type_ids: &[u16],
+        edge_type_ids: &[u32],
         direction: &Direction,
         source_variable: &str,
         target_variable: &str,
@@ -3710,7 +3715,7 @@ impl Executor {
         row: &HashMap<String, Value>,
         graph: &uni_store::runtime::WorkingGraph,
         source_vid: Vid,
-        edge_type_ids: &[u16],
+        edge_type_ids: &[u32],
         direction: &Direction,
         target_variable: &str,
         target_label_id: u16,
@@ -3852,7 +3857,7 @@ impl Executor {
         &self,
         graph: &uni_store::runtime::WorkingGraph,
         curr: Vid,
-        edge_type_ids: &[u16],
+        edge_type_ids: &[u32],
         direction: &Direction,
     ) -> Vec<(Vid, uni_common::graph::simple_graph::EdgeEntry)> {
         let directions = match direction {
@@ -5800,7 +5805,7 @@ impl Executor {
     pub(crate) fn scan_single_l0(
         &self,
         l0: &uni_store::runtime::L0Buffer,
-        type_id: u16,
+        type_id: u32,
         edges: &mut HashMap<uni_common::core::id::Eid, (Vid, Vid)>,
     ) {
         for edge_entry in l0.graph.edges() {
@@ -6617,7 +6622,7 @@ impl Executor {
 
     pub(crate) async fn detach_delete_vertex(&self, vid: Vid, writer: &mut Writer) -> Result<()> {
         let schema = self.storage.schema_manager().schema();
-        let edge_type_ids: Vec<u16> = schema.edge_types.values().map(|m| m.id).collect();
+        let edge_type_ids: Vec<u32> = schema.edge_types.values().map(|m| m.id).collect();
 
         // 1. Find and delete all outgoing edges
         let out_graph = self
@@ -6666,7 +6671,7 @@ impl Executor {
         writer: &mut Writer,
     ) -> Result<()> {
         let schema = self.storage.schema_manager().schema();
-        let edge_type_ids: Vec<u16> = schema.edge_types.values().map(|m| m.id).collect();
+        let edge_type_ids: Vec<u32> = schema.edge_types.values().map(|m| m.id).collect();
 
         // Load outgoing subgraph for all VIDs in one call.
         let out_graph = self

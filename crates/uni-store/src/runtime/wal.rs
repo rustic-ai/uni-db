@@ -21,7 +21,7 @@ pub enum Mutation {
     InsertEdge {
         src_vid: Vid,
         dst_vid: Vid,
-        edge_type: u16,
+        edge_type: u32,
         eid: Eid,
         version: u64,
         properties: Properties,
@@ -30,7 +30,7 @@ pub enum Mutation {
         eid: Eid,
         src_vid: Vid,
         dst_vid: Vid,
-        edge_type: u16,
+        edge_type: u32,
         version: u64,
     },
     InsertVertex {

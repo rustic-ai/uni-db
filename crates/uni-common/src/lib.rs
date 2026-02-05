@@ -9,6 +9,7 @@ pub mod config;
 pub mod sync;
 
 pub mod core {
+    pub mod edge_type;
     pub mod id;
     pub mod schema;
     pub mod snapshot;
@@ -21,6 +22,7 @@ pub mod graph {
 // Re-exports for convenience
 pub use api::error::{Result, UniError};
 pub use config::{CloudStorageConfig, UniConfig};
+pub use core::edge_type::EdgeTypeId;
 pub use core::id::{Eid, UniId, Vid};
 pub use core::schema::{CrdtType, DataType, Schema};
 pub use graph::simple_graph::SimpleGraph;
