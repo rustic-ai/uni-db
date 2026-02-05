@@ -1546,7 +1546,7 @@ impl Executor {
                         return Ok(Value::Null);
                     }
 
-                    // Special case: type() returns the relationship type
+                    // Special case: type() returns the relationship type name
                     if name.eq_ignore_ascii_case("TYPE") {
                         if args.len() != 1 {
                             return Err(anyhow!("type() requires exactly 1 argument"));
@@ -1557,7 +1557,15 @@ impl Executor {
                         if let Value::Object(map) = &val
                             && let Some(type_val) = map.get("_type")
                         {
-                            return Ok(type_val.clone());
+                            // Numeric _type is a schema ID; string _type is already a name
+                            if let Some(type_id) = type_val.as_u64() {
+                                let schema = this.storage.schema_manager().schema();
+                                if let Some(name) = schema.edge_type_name_by_id(type_id as u16) {
+                                    return Ok(Value::String(name.to_string()));
+                                }
+                            } else if let Some(name) = type_val.as_str() {
+                                return Ok(Value::String(name.to_string()));
+                            }
                         }
                         return Ok(Value::Null);
                     }
@@ -1641,6 +1649,40 @@ impl Executor {
                             }
                         }
                         return Ok(Value::Null);
+                    }
+
+                    // Special case: hasLabel() checks if a node has a specific label
+                    // Used for WHERE n:Label predicates
+                    if name.eq_ignore_ascii_case("HASLABEL") {
+                        if args.len() != 2 {
+                            return Err(anyhow!("hasLabel() requires exactly 2 arguments"));
+                        }
+                        let node_val = this
+                            .evaluate_expr(&args[0], row, prop_manager, params, ctx)
+                            .await?;
+                        let label_val = this
+                            .evaluate_expr(&args[1], row, prop_manager, params, ctx)
+                            .await?;
+
+                        let label_to_check = label_val
+                            .as_str()
+                            .ok_or_else(|| anyhow!("Second argument to hasLabel must be a string"))?;
+
+                        let has_label = match &node_val {
+                            Value::Object(map) => {
+                                if let Some(Value::Array(labels_arr)) = map.get("_labels") {
+                                    labels_arr
+                                        .iter()
+                                        .any(|l| l.as_str() == Some(label_to_check))
+                                } else if let Some(Value::String(label_str)) = map.get("_label") {
+                                    label_str == label_to_check
+                                } else {
+                                    false
+                                }
+                            }
+                            _ => false,
+                        };
+                        return Ok(Value::Bool(has_label));
                     }
 
                     // Quantifier functions (ANY/ALL/NONE/SINGLE) as function calls are not supported.
@@ -2243,25 +2285,25 @@ impl Executor {
                         let props_opt =
                             prop_manager.get_all_vertex_props_with_ctx(vid, ctx).await?;
 
-                        // Get labels from main table
-                        let labels =
+                        // Get labels: check L0 first, then main table
+                        let labels = if let Some(ctx) = ctx
+                            && let Some(l0_labels) = ctx.l0.read().get_vertex_labels(vid)
+                        {
+                            l0_labels.to_vec()
+                        } else {
                             uni_store::storage::main_vertex::MainVertexDataset::find_labels_by_vid(
                                 lancedb, vid,
                             )
                             .await?
-                            .unwrap_or_default();
+                            .unwrap_or_default()
+                        };
 
                         let mut props_json: serde_json::Map<String, Value> = props_opt
                             .map(|p| p.into_iter().collect())
                             .unwrap_or_default();
 
                         props_json.insert("_vid".to_string(), json!(vid.as_u64()));
-                        let label_str = if labels.is_empty() {
-                            String::new()
-                        } else {
-                            labels.join(":")
-                        };
-                        props_json.insert("_label".to_string(), json!(label_str));
+                        props_json.insert("_label".to_string(), json!(labels.join(":")));
 
                         let mut map = HashMap::new();
                         map.insert(variable.clone(), Value::Object(props_json));
@@ -3744,6 +3786,7 @@ impl Executor {
                             path_variable,
                             source_vid,
                             graph,
+                            target_label_name,
                         );
                         new_matches.push(new_m);
                     }
@@ -3881,6 +3924,7 @@ impl Executor {
         path_variable: &Option<String>,
         source_vid: Vid,
         graph: &uni_store::runtime::WorkingGraph,
+        _target_label_name: Option<&str>,
     ) -> HashMap<String, Value> {
         let mut new_m = row.clone();
         new_m.insert(

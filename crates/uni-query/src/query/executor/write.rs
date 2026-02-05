@@ -1107,7 +1107,7 @@ impl Executor {
 
                         let current_vid = vid.unwrap();
 
-                        if let Some((rel_var, type_id, type_name, rel_props_expr, _dir)) =
+                        if let Some((rel_var, type_id, type_name, rel_props_expr, dir)) =
                             rel_pending.take()
                             && let Some(src) = prev_vid
                         {
@@ -1120,18 +1120,22 @@ impl Executor {
                                         .evaluate_expr(&expr, row, prop_manager, params, ctx)
                                         .await?;
                                     if let Value::Object(map) = val {
-                                        for (k, v) in map {
-                                            rel_props.insert(k, v);
-                                        }
+                                        rel_props.extend(map);
                                     }
                                 }
                                 let eid = writer.next_eid(type_id).await?;
+
+                                // For incoming edges like (a)<-[:R]-(b), swap so the edge points b -> a
+                                let (edge_src, edge_dst) = match dir {
+                                    Direction::Incoming => (current_vid, src),
+                                    _ => (src, current_vid),
+                                };
+
                                 writer
-                                    .insert_edge(src, current_vid, type_id, eid, rel_props)
+                                    .insert_edge(edge_src, edge_dst, type_id, eid, rel_props)
                                     .await?;
 
-                                // Store type name for schemaless edges (sentinel u16::MAX)
-                                // This is needed for traversal and flush
+                                // Schemaless edges (sentinel u16::MAX) need an explicit type name for traversal/flush
                                 if type_id == u16::MAX {
                                     writer.set_edge_type(eid, type_name.clone());
                                 }
@@ -1139,8 +1143,8 @@ impl Executor {
                                 if !rel_var.is_empty() {
                                     let edge_obj = json!({
                                         "_eid": eid.as_u64(),
-                                        "_src": src.as_u64(),
-                                        "_dst": current_vid.as_u64(),
+                                        "_src": edge_src.as_u64(),
+                                        "_dst": edge_dst.as_u64(),
                                         "_type": type_id
                                     });
                                     row.insert(rel_var, edge_obj);
@@ -1165,9 +1169,6 @@ impl Executor {
                             .map(|meta| meta.id)
                             .unwrap_or(u16::MAX);
 
-                        if r.direction == Direction::Incoming {
-                            return Err(anyhow!("CREATE only supports outgoing relationships"));
-                        }
                         rel_pending = Some((
                             r.variable.clone().unwrap_or_default(),
                             type_id,
