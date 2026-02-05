@@ -261,6 +261,17 @@ pub fn parse_datetime_utc(s: &str) -> Result<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(s)
         .map(|dt: DateTime<FixedOffset>| dt.with_timezone(&Utc))
         .or_else(|_| {
+            // Handle formats without seconds (e.g., "2023-01-01T00:00Z")
+            if let Some(base) = s.strip_suffix('Z') {
+                NaiveDateTime::parse_from_str(base, "%Y-%m-%dT%H:%M")
+                    .map(|ndt| DateTime::<Utc>::from_naive_utc_and_offset(ndt, Utc))
+            } else {
+                // Handle formats without seconds with offset (e.g., "2023-01-01T00:00+05:00")
+                DateTime::parse_from_str(s, "%Y-%m-%dT%H:%M%:z")
+                    .map(|dt: DateTime<FixedOffset>| dt.with_timezone(&Utc))
+            }
+        })
+        .or_else(|_| {
             DateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S %z")
                 .map(|dt: DateTime<FixedOffset>| dt.with_timezone(&Utc))
         })
@@ -621,27 +632,17 @@ pub fn is_temporal_accessor(property: &str) -> bool {
 
 /// Check if a string looks like a temporal value (date, time, datetime).
 pub fn is_temporal_string(s: &str) -> bool {
-    // Quick checks for common patterns
-    if s.len() < 8 {
+    let bytes = s.as_bytes();
+    if bytes.len() < 8 {
         return false;
     }
 
     // Date pattern: YYYY-MM-DD
-    if s.len() >= 10 && s.chars().nth(4) == Some('-') && s.chars().nth(7) == Some('-') {
-        return true;
-    }
-
+    (bytes.len() >= 10 && bytes[4] == b'-' && bytes[7] == b'-')
     // Time pattern: HH:MM:SS
-    if s.len() >= 8 && s.chars().nth(2) == Some(':') && s.chars().nth(5) == Some(':') {
-        return true;
-    }
-
+    || (bytes[2] == b':' && bytes[5] == b':')
     // Duration pattern: starts with P
-    if s.starts_with('P') || s.starts_with('p') {
-        return true;
-    }
-
-    false
+    || bytes[0] == b'P' || bytes[0] == b'p'
 }
 
 /// Check if a string looks like a duration value.
@@ -651,64 +652,59 @@ pub fn is_duration_string(s: &str) -> bool {
 
 // Individual component extractors
 
-fn extract_year(s: &str) -> Result<Value> {
+fn extract_date_component(s: &str, f: impl FnOnce(NaiveDate) -> i64) -> Result<Value> {
     let (date, _, _) = parse_datetime_with_tz(s)?;
-    Ok(json!(date.year()))
+    Ok(json!(f(date)))
+}
+
+fn extract_time_component(s: &str, f: impl FnOnce(NaiveTime) -> i64) -> Result<Value> {
+    let (_, time, _) = parse_datetime_with_tz(s)?;
+    Ok(json!(f(time)))
+}
+
+fn extract_year(s: &str) -> Result<Value> {
+    extract_date_component(s, |d| d.year() as i64)
 }
 
 fn extract_month(s: &str) -> Result<Value> {
-    let (date, _, _) = parse_datetime_with_tz(s)?;
-    Ok(json!(date.month() as i64))
+    extract_date_component(s, |d| d.month() as i64)
 }
 
 fn extract_day(s: &str) -> Result<Value> {
-    let (date, _, _) = parse_datetime_with_tz(s)?;
-    Ok(json!(date.day() as i64))
+    extract_date_component(s, |d| d.day() as i64)
 }
 
 fn extract_hour(s: &str) -> Result<Value> {
-    let (_, time, _) = parse_datetime_with_tz(s)?;
-    Ok(json!(time.hour() as i64))
+    extract_time_component(s, |t| t.hour() as i64)
 }
 
 fn extract_minute(s: &str) -> Result<Value> {
-    let (_, time, _) = parse_datetime_with_tz(s)?;
-    Ok(json!(time.minute() as i64))
+    extract_time_component(s, |t| t.minute() as i64)
 }
 
 fn extract_second(s: &str) -> Result<Value> {
-    let (_, time, _) = parse_datetime_with_tz(s)?;
-    Ok(json!(time.second() as i64))
+    extract_time_component(s, |t| t.second() as i64)
 }
 
 fn extract_quarter(s: &str) -> Result<Value> {
-    let (date, _, _) = parse_datetime_with_tz(s)?;
-    let quarter = (date.month() - 1) / 3 + 1;
-    Ok(json!(quarter as i64))
+    extract_date_component(s, |d| ((d.month() - 1) / 3 + 1) as i64)
 }
 
 fn extract_week(s: &str) -> Result<Value> {
-    let (date, _, _) = parse_datetime_with_tz(s)?;
-    let week = date.iso_week().week();
-    Ok(json!(week as i64))
+    extract_date_component(s, |d| d.iso_week().week() as i64)
 }
 
 fn extract_week_year(s: &str) -> Result<Value> {
-    let (date, _, _) = parse_datetime_with_tz(s)?;
-    let week_year = date.iso_week().year();
-    Ok(json!(week_year))
+    extract_date_component(s, |d| d.iso_week().year() as i64)
 }
 
 fn extract_ordinal_day(s: &str) -> Result<Value> {
-    let (date, _, _) = parse_datetime_with_tz(s)?;
-    Ok(json!(date.ordinal() as i64))
+    extract_date_component(s, |d| d.ordinal() as i64)
 }
 
 fn extract_day_of_week(s: &str) -> Result<Value> {
-    let (date, _, _) = parse_datetime_with_tz(s)?;
     // ISO weekday: Monday = 1, Sunday = 7
-    let dow = date.weekday().num_days_from_monday() + 1;
-    Ok(json!(dow as i64))
+    extract_date_component(s, |d| (d.weekday().num_days_from_monday() + 1) as i64)
 }
 
 fn extract_day_of_quarter(s: &str) -> Result<Value> {
@@ -728,20 +724,15 @@ fn extract_day_of_quarter(s: &str) -> Result<Value> {
 }
 
 fn extract_millisecond(s: &str) -> Result<Value> {
-    let (_, time, _) = parse_datetime_with_tz(s)?;
-    let millis = time.nanosecond() / 1_000_000;
-    Ok(json!(millis as i64))
+    extract_time_component(s, |t| (t.nanosecond() / 1_000_000) as i64)
 }
 
 fn extract_microsecond(s: &str) -> Result<Value> {
-    let (_, time, _) = parse_datetime_with_tz(s)?;
-    let micros = time.nanosecond() / 1_000;
-    Ok(json!(micros as i64))
+    extract_time_component(s, |t| (t.nanosecond() / 1_000) as i64)
 }
 
 fn extract_nanosecond(s: &str) -> Result<Value> {
-    let (_, time, _) = parse_datetime_with_tz(s)?;
-    Ok(json!(time.nanosecond() as i64))
+    extract_time_component(s, |t| t.nanosecond() as i64)
 }
 
 fn extract_timezone_name_from_str(s: &str) -> Result<Value> {
@@ -758,64 +749,57 @@ fn extract_timezone_name_from_str(s: &str) -> Result<Value> {
 }
 
 fn extract_offset_string(s: &str) -> Result<Value> {
-    let (_, _, tz_info) = parse_datetime_with_tz(s)?;
+    let (date, time, tz_info) = parse_datetime_with_tz(s)?;
     match tz_info {
         Some(ref tz) => {
-            // Need to get offset for the actual datetime
-            let (date, time, _) = parse_datetime_with_tz(s)?;
             let ndt = NaiveDateTime::new(date, time);
             let offset = tz.offset_for_local(&ndt)?;
-            let secs = offset.local_minus_utc();
-            Ok(Value::String(format_timezone_offset(secs)))
+            Ok(Value::String(format_timezone_offset(
+                offset.local_minus_utc(),
+            )))
         }
         None => Ok(Value::Null),
     }
 }
 
-fn extract_offset_minutes(s: &str) -> Result<Value> {
+fn extract_offset_total_seconds(s: &str) -> Result<i32> {
     let (date, time, tz_info) = parse_datetime_with_tz(s)?;
     match tz_info {
         Some(ref tz) => {
             let ndt = NaiveDateTime::new(date, time);
             let offset = tz.offset_for_local(&ndt)?;
-            let secs = offset.local_minus_utc();
-            Ok(json!(secs / 60))
+            Ok(offset.local_minus_utc())
         }
-        None => Ok(json!(0)),
+        None => Ok(0),
     }
+}
+
+fn extract_offset_minutes(s: &str) -> Result<Value> {
+    Ok(json!(extract_offset_total_seconds(s)? / 60))
 }
 
 fn extract_offset_seconds(s: &str) -> Result<Value> {
-    let (date, time, tz_info) = parse_datetime_with_tz(s)?;
-    match tz_info {
-        Some(ref tz) => {
-            let ndt = NaiveDateTime::new(date, time);
-            let offset = tz.offset_for_local(&ndt)?;
-            Ok(json!(offset.local_minus_utc()))
-        }
-        None => Ok(json!(0)),
-    }
+    Ok(json!(extract_offset_total_seconds(s)?))
+}
+
+fn parse_as_utc(s: &str) -> Result<DateTime<Utc>> {
+    let (date, time, _) = parse_datetime_with_tz(s)?;
+    let ndt = NaiveDateTime::new(date, time);
+    Ok(DateTime::<Utc>::from_naive_utc_and_offset(ndt, Utc))
 }
 
 fn extract_epoch_seconds(s: &str) -> Result<Value> {
-    let (date, time, _) = parse_datetime_with_tz(s)?;
-    let ndt = NaiveDateTime::new(date, time);
-    let dt = DateTime::<Utc>::from_naive_utc_and_offset(ndt, Utc);
-    Ok(json!(dt.timestamp()))
+    Ok(json!(parse_as_utc(s)?.timestamp()))
 }
 
 fn extract_epoch_millis(s: &str) -> Result<Value> {
-    let (date, time, _) = parse_datetime_with_tz(s)?;
-    let ndt = NaiveDateTime::new(date, time);
-    let dt = DateTime::<Utc>::from_naive_utc_and_offset(ndt, Utc);
-    Ok(json!(dt.timestamp_millis()))
+    Ok(json!(parse_as_utc(s)?.timestamp_millis()))
 }
 
 // ============================================================================
 // Duration Component Accessors
 // ============================================================================
 
-/// Evaluate a duration component accessor.
 /// Evaluate a duration component accessor using Euclidean division.
 ///
 /// Uses `div_euclid()` / `rem_euclid()` so remainders are always non-negative,
@@ -1537,6 +1521,20 @@ fn eval_datetime_from_projection(
     }
 }
 
+/// Try parsing a string as a NaiveTime using common formats (%H:%M:%S%.f, %H:%M:%S, %H:%M).
+fn try_parse_naive_time(s: &str) -> Result<NaiveTime, chrono::ParseError> {
+    NaiveTime::parse_from_str(s, "%H:%M:%S%.f")
+        .or_else(|_| NaiveTime::parse_from_str(s, "%H:%M:%S"))
+        .or_else(|_| NaiveTime::parse_from_str(s, "%H:%M"))
+}
+
+/// Try parsing a string as a NaiveDateTime using common ISO formats.
+fn try_parse_naive_datetime(s: &str) -> Result<NaiveDateTime, chrono::ParseError> {
+    NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S")
+        .or_else(|_| NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S%.f"))
+        .or_else(|_| NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M"))
+}
+
 /// Parse a datetime string and extract date, time, and timezone info.
 pub fn parse_datetime_with_tz(s: &str) -> Result<(NaiveDate, NaiveTime, Option<TimezoneInfo>)> {
     let midnight = NaiveTime::from_hms_opt(0, 0, 0).unwrap();
@@ -1561,17 +1559,7 @@ pub fn parse_datetime_with_tz(s: &str) -> Result<(NaiveDate, NaiveTime, Option<T
     }
 
     // Try various datetime formats
-    if let Ok(ndt) = NaiveDateTime::parse_from_str(datetime_part, "%Y-%m-%dT%H:%M:%S") {
-        let tz_info = tz_name.map(|n| parse_timezone(&n)).transpose()?;
-        return Ok((ndt.date(), ndt.time(), tz_info));
-    }
-
-    if let Ok(ndt) = NaiveDateTime::parse_from_str(datetime_part, "%Y-%m-%dT%H:%M:%S%.f") {
-        let tz_info = tz_name.map(|n| parse_timezone(&n)).transpose()?;
-        return Ok((ndt.date(), ndt.time(), tz_info));
-    }
-
-    if let Ok(ndt) = NaiveDateTime::parse_from_str(datetime_part, "%Y-%m-%dT%H:%M") {
+    if let Ok(ndt) = try_parse_naive_datetime(datetime_part) {
         let tz_info = tz_name.map(|n| parse_timezone(&n)).transpose()?;
         return Ok((ndt.date(), ndt.time(), tz_info));
     }
@@ -1603,54 +1591,40 @@ pub fn parse_datetime_with_tz(s: &str) -> Result<(NaiveDate, NaiveTime, Option<T
         let left_part = &datetime_part[..tz_pos];
         let tz_part = &datetime_part[tz_pos..];
 
-        // Try parsing the left part as a full datetime first
-        if let Ok(ndt) = NaiveDateTime::parse_from_str(left_part, "%Y-%m-%dT%H:%M:%S%.f")
-            .or_else(|_| NaiveDateTime::parse_from_str(left_part, "%Y-%m-%dT%H:%M:%S"))
-            .or_else(|_| NaiveDateTime::parse_from_str(left_part, "%Y-%m-%dT%H:%M"))
-        {
-            let tz_info = if let Some(name) = tz_name {
-                Some(parse_timezone(&name)?)
+        let resolve_tz = |tz_name: Option<String>, tz_part: &str| -> Result<Option<TimezoneInfo>> {
+            if let Some(name) = tz_name {
+                Ok(Some(parse_timezone(&name)?))
             } else {
                 let offset = parse_timezone_offset(tz_part)?;
                 let fo = FixedOffset::east_opt(offset)
                     .ok_or_else(|| anyhow!("Invalid timezone offset"))?;
-                Some(TimezoneInfo::FixedOffset(fo))
-            };
+                Ok(Some(TimezoneInfo::FixedOffset(fo)))
+            }
+        };
+
+        // Try parsing the left part as a full datetime first
+        if let Ok(ndt) = try_parse_naive_datetime(left_part) {
+            let tz_info = resolve_tz(tz_name, tz_part)?;
             return Ok((ndt.date(), ndt.time(), tz_info));
         }
 
         // Try parsing the left part as time only
-        if let Ok(time) = NaiveTime::parse_from_str(left_part, "%H:%M:%S%.f")
-            .or_else(|_| NaiveTime::parse_from_str(left_part, "%H:%M:%S"))
-            .or_else(|_| NaiveTime::parse_from_str(left_part, "%H:%M"))
-        {
-            let tz_info = if let Some(name) = tz_name {
-                Some(parse_timezone(&name)?)
-            } else {
-                let offset = parse_timezone_offset(tz_part)?;
-                let fo = FixedOffset::east_opt(offset)
-                    .ok_or_else(|| anyhow!("Invalid timezone offset"))?;
-                Some(TimezoneInfo::FixedOffset(fo))
-            };
+        if let Ok(time) = try_parse_naive_time(left_part) {
+            let tz_info = resolve_tz(tz_name, tz_part)?;
             return Ok((today, time, tz_info));
         }
     }
 
     // Try parsing time with Z suffix
     if let Some(time_part) = datetime_part.strip_suffix('Z')
-        && let Ok(time) = NaiveTime::parse_from_str(time_part, "%H:%M:%S%.f")
-            .or_else(|_| NaiveTime::parse_from_str(time_part, "%H:%M:%S"))
-            .or_else(|_| NaiveTime::parse_from_str(time_part, "%H:%M"))
+        && let Ok(time) = try_parse_naive_time(time_part)
     {
         let tz_info = Some(TimezoneInfo::FixedOffset(FixedOffset::east_opt(0).unwrap()));
         return Ok((today, time, tz_info));
     }
 
     // Try parsing as plain time (no timezone offset, e.g., "14:30" or "12:31:14.645876123")
-    if let Ok(time) = NaiveTime::parse_from_str(datetime_part, "%H:%M:%S%.f")
-        .or_else(|_| NaiveTime::parse_from_str(datetime_part, "%H:%M:%S"))
-        .or_else(|_| NaiveTime::parse_from_str(datetime_part, "%H:%M"))
-    {
+    if let Ok(time) = try_parse_naive_time(datetime_part) {
         let tz_info = tz_name.map(|n| parse_timezone(&n)).transpose()?;
         return Ok((today, time, tz_info));
     }
@@ -1658,32 +1632,31 @@ pub fn parse_datetime_with_tz(s: &str) -> Result<(NaiveDate, NaiveTime, Option<T
     Err(anyhow!("Cannot parse datetime: {}", s))
 }
 
-fn format_datetime_with_nanos(dt: &DateTime<Utc>) -> String {
-    let nanos = dt.nanosecond();
-    if nanos == 0 {
-        dt.format("%Y-%m-%dT%H:%M:%SZ").to_string()
+/// Select the chrono format string for the time portion based on nanosecond precision.
+fn nanos_precision_format(nanos: u32, seconds: u32) -> &'static str {
+    if nanos == 0 && seconds == 0 {
+        "%Y-%m-%dT%H:%M"
+    } else if nanos == 0 {
+        "%Y-%m-%dT%H:%M:%S"
     } else if nanos.is_multiple_of(1_000_000) {
-        dt.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string()
+        "%Y-%m-%dT%H:%M:%S%.3f"
     } else if nanos.is_multiple_of(1_000) {
-        dt.format("%Y-%m-%dT%H:%M:%S%.6fZ").to_string()
+        "%Y-%m-%dT%H:%M:%S%.6f"
     } else {
-        dt.format("%Y-%m-%dT%H:%M:%S%.9fZ").to_string()
+        "%Y-%m-%dT%H:%M:%S%.9f"
     }
 }
 
-fn format_datetime_with_offset_and_tz(dt: &DateTime<FixedOffset>, tz_name: Option<&str>) -> String {
-    let nanos = dt.nanosecond();
-    let base = if nanos == 0 {
-        dt.format("%Y-%m-%dT%H:%M:%S%:z").to_string()
-    } else if nanos.is_multiple_of(1_000_000) {
-        dt.format("%Y-%m-%dT%H:%M:%S%.3f%:z").to_string()
-    } else if nanos.is_multiple_of(1_000) {
-        dt.format("%Y-%m-%dT%H:%M:%S%.6f%:z").to_string()
-    } else {
-        dt.format("%Y-%m-%dT%H:%M:%S%.9f%:z").to_string()
-    };
+fn format_datetime_with_nanos(dt: &DateTime<Utc>) -> String {
+    let fmt = nanos_precision_format(dt.nanosecond(), dt.second());
+    format!("{}Z", dt.format(fmt))
+}
 
-    // Append timezone name if present (e.g., [Europe/Stockholm])
+fn format_datetime_with_offset_and_tz(dt: &DateTime<FixedOffset>, tz_name: Option<&str>) -> String {
+    let fmt = nanos_precision_format(dt.nanosecond(), dt.second());
+    let tz_suffix = format_timezone_offset(dt.offset().local_minus_utc());
+    let base = format!("{}{}", dt.format(fmt), tz_suffix);
+
     if let Some(name) = tz_name {
         format!("{}[{}]", base, name)
     } else {
@@ -1692,34 +1665,14 @@ fn format_datetime_with_offset_and_tz(dt: &DateTime<FixedOffset>, tz_name: Optio
 }
 
 fn format_datetime_local(dt: &DateTime<chrono::Local>) -> String {
-    let nanos = dt.nanosecond();
-    if nanos == 0 {
-        dt.format("%Y-%m-%dT%H:%M:%S%:z").to_string()
-    } else if nanos.is_multiple_of(1_000_000) {
-        dt.format("%Y-%m-%dT%H:%M:%S%.3f%:z").to_string()
-    } else if nanos.is_multiple_of(1_000) {
-        dt.format("%Y-%m-%dT%H:%M:%S%.6f%:z").to_string()
-    } else {
-        dt.format("%Y-%m-%dT%H:%M:%S%.9f%:z").to_string()
-    }
+    let fmt = nanos_precision_format(dt.nanosecond(), dt.second());
+    let tz_suffix = format_timezone_offset(dt.offset().local_minus_utc());
+    format!("{}{}", dt.format(fmt), tz_suffix)
 }
 
 fn format_naive_datetime(ndt: &NaiveDateTime) -> String {
-    let nanos = ndt.nanosecond();
-    let seconds = ndt.second();
-
-    if nanos == 0 && seconds == 0 {
-        // Omit seconds when zero
-        ndt.format("%Y-%m-%dT%H:%M").to_string()
-    } else if nanos == 0 {
-        ndt.format("%Y-%m-%dT%H:%M:%S").to_string()
-    } else if nanos.is_multiple_of(1_000_000) {
-        ndt.format("%Y-%m-%dT%H:%M:%S%.3f").to_string()
-    } else if nanos.is_multiple_of(1_000) {
-        ndt.format("%Y-%m-%dT%H:%M:%S%.6f").to_string()
-    } else {
-        ndt.format("%Y-%m-%dT%H:%M:%S%.9f").to_string()
-    }
+    let fmt = nanos_precision_format(ndt.nanosecond(), ndt.second());
+    ndt.format(fmt).to_string()
 }
 
 // ============================================================================
@@ -2252,14 +2205,7 @@ fn eval_datetime_fromepochmillis(args: &[Value]) -> Result<Value> {
     let dt = DateTime::from_timestamp_millis(millis)
         .ok_or_else(|| anyhow!("Invalid epoch millis: {}", millis))?;
 
-    // Format with millisecond precision
-    let nanos = dt.nanosecond();
-    let result = if nanos == 0 {
-        dt.format("%Y-%m-%dT%H:%M:%SZ").to_string()
-    } else {
-        dt.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string()
-    };
-    Ok(Value::String(result))
+    Ok(Value::String(format_datetime_with_nanos(&dt)))
 }
 
 // ============================================================================
@@ -3204,7 +3150,7 @@ mod tests {
     fn test_datetime_from_map() {
         let result =
             eval_datetime(&[json!({"year": 1984, "month": 10, "day": 11, "hour": 12})]).unwrap();
-        assert!(result.as_str().unwrap().contains("1984-10-11T12:00:00"));
+        assert!(result.as_str().unwrap().contains("1984-10-11T12:00"));
     }
 
     #[test]
@@ -3235,13 +3181,13 @@ mod tests {
     #[test]
     fn test_datetime_fromepoch() {
         let result = eval_datetime_fromepoch(&[json!(0)]).unwrap();
-        assert_eq!(result, Value::String("1970-01-01T00:00:00Z".to_string()));
+        assert_eq!(result, Value::String("1970-01-01T00:00Z".to_string()));
     }
 
     #[test]
     fn test_datetime_fromepochmillis() {
         let result = eval_datetime_fromepochmillis(&[json!(0)]).unwrap();
-        assert_eq!(result, Value::String("1970-01-01T00:00:00Z".to_string()));
+        assert_eq!(result, Value::String("1970-01-01T00:00Z".to_string()));
     }
 
     #[test]
@@ -3260,7 +3206,7 @@ mod tests {
     fn test_truncate_datetime_hour() {
         let result =
             eval_truncate("datetime", &[json!("hour"), json!("1984-10-11T12:31:14Z")]).unwrap();
-        assert!(result.as_str().unwrap().contains("1984-10-11T12:00:00"));
+        assert!(result.as_str().unwrap().contains("1984-10-11T12:00"));
     }
 
     #[test]

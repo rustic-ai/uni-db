@@ -1,8 +1,8 @@
 # Uni OpenCypher TCK Compatibility Report
 
-**Generated:** 2026-02-04
+**Generated:** 2026-02-05
 **TCK Version:** M23 (openCypher)
-**Uni Version:** Current main branch (commit `500d271` + temporal fixes)
+**Uni Version:** Current main branch (post `57e4295`, uncommitted temporal/ORDER BY fixes)
 
 ---
 
@@ -11,11 +11,11 @@
 | Metric | Count | Pass Rate |
 |--------|-------|-----------|
 | **Features** | 191 | - |
-| **Scenarios** | 3,868 | **50.2%** (1,941 passed, 1,927 failed) |
-| **Steps** | 13,945 | **86.2%** (12,018 passed, 1,927 failed) |
+| **Scenarios** | 3,867 | **55.0%** (2,126 passed, 1,741 failed) |
+| **Steps** | 14,342 | **87.9%** (12,601 passed, 1,741 failed) |
 | **Parsing Errors** | 1 | Match5.feature |
 
-The high step pass rate (86.2%) vs lower scenario pass rate (50.2%) indicates that most basic operations work, but many scenarios fail at specific assertion points.
+The high step pass rate (87.9%) vs lower scenario pass rate (55.0%) indicates that most basic operations work, but many scenarios fail at specific assertion points.
 
 ---
 
@@ -25,23 +25,25 @@ The high step pass rate (86.2%) vs lower scenario pass rate (50.2%) indicates th
 |----------|--------|--------|-------|------|
 | Conditional | 12 | 1 | 13 | 92.3% |
 | Quantifier | 489 | 115 | 604 | 81.0% |
+| **Call** | **42** | **10** | **52** | **80.8%** |
+| **Temporal** | **749** | **255** | **1,004** | **74.6%** |
 | Null | 31 | 13 | 44 | 70.5% |
 | Boolean | 104 | 46 | 150 | 69.3% |
 | Match | 238 | 114 | 352 | 67.6% |
 | Literals | 85 | 46 | 131 | 64.9% |
-| **Temporal** | **610** | **394** | **1,004** | **60.8%** |
 | Unwind | 8 | 6 | 14 | 57.1% |
 | Union | 6 | 6 | 12 | 50.0% |
 | Mathematical | 3 | 3 | 6 | 50.0% |
 | Precedence | 60 | 61 | 121 | 49.6% |
 | Comparison | 32 | 40 | 72 | 44.4% |
-| List | 74 | 111 | 185 | 40.0% |
+| List | 75 | 110 | 185 | 40.5% |
 | ReturnSkipLimit | 12 | 19 | 31 | 38.7% |
 | TypeConversion | 17 | 30 | 47 | 36.2% |
 | Map | 15 | 29 | 44 | 34.1% |
-| WithOrderBy | 86 | 206 | 292 | 29.5% |
-| ReturnOrderBy | 9 | 26 | 35 | 25.7% |
-| Graph | 13 | 48 | 61 | 21.3% |
+| **WithOrderBy** | **86** | **206** | **292** | **29.5%** |
+| ReturnOrderBy | 10 | 25 | 35 | 28.6% |
+| Graph | 13 | 47 | 60 | 21.7% |
+| ExistentialSubquery | 2 | 8 | 10 | 20.0% |
 | Create | 13 | 65 | 78 | 16.7% |
 | With | 4 | 25 | 29 | 13.8% |
 | Delete | 5 | 36 | 41 | 12.2% |
@@ -51,9 +53,7 @@ The high step pass rate (86.2%) vs lower scenario pass rate (50.2%) indicates th
 | Pattern | 2 | 48 | 50 | 4.0% |
 | Set | 2 | 51 | 53 | 3.8% |
 | Aggregation | 0 | 35 | 35 | 0.0% |
-| Call | 0 | 52 | 52 | 0.0% |
 | CountingSubgraphMatches | 0 | 11 | 11 | 0.0% |
-| ExistentialSubquery | 0 | 10 | 10 | 0.0% |
 | Merge | 0 | 75 | 75 | 0.0% |
 | Path | 0 | 7 | 7 | 0.0% |
 | String | 0 | 32 | 32 | 0.0% |
@@ -69,6 +69,8 @@ The high step pass rate (86.2%) vs lower scenario pass rate (50.2%) indicates th
 
 | Feature | Passed | Total |
 |---------|--------|-------|
+| Call3 - Assignable-type arguments | 6 | 6 |
+| Call4 - Null Arguments | 2 | 2 |
 | Conditional2 - Case Expression | 12 | 12 |
 | Literals1 - Boolean and Null | 6 | 6 |
 | Mathematical11 - Signed numbers functions | 1 | 1 |
@@ -84,6 +86,7 @@ The high step pass rate (86.2%) vs lower scenario pass rate (50.2%) indicates th
 
 | Feature | Passed | Total | Rate |
 |---------|--------|-------|------|
+| Temporal1 - Create Temporal Values from a Map | 199 | 207 | 96.1% |
 | Literals5 - Float | 26 | 27 | 96.3% |
 | Temporal10 - Compute Durations Between two Temporal Values | 125 | 131 | 95.4% |
 | Temporal7 - Compare Temporal Values | 17 | 18 | 94.4% |
@@ -94,6 +97,7 @@ The high step pass rate (86.2%) vs lower scenario pass rate (50.2%) indicates th
 | Quantifier7 - Any quantifier interop | 31 | 36 | 86.1% |
 | Match1 - Match nodes | 73 | 86 | 84.9% |
 | Literals6 - String | 11 | 13 | 84.6% |
+| Call5 - Results projection | 16 | 19 | 84.2% |
 | Match2 - Match relationships | 71 | 86 | 82.6% |
 | Null1 - IS NULL validation | 14 | 17 | 82.4% |
 | Null2 - IS NOT NULL validation | 14 | 17 | 82.4% |
@@ -102,7 +106,9 @@ The high step pass rate (86.2%) vs lower scenario pass rate (50.2%) indicates th
 | Boolean2 - OR logical operations | 24 | 30 | 80.0% |
 | Boolean3 - XOR logical operations | 24 | 30 | 80.0% |
 | Literals4 - Octal integer | 8 | 10 | 80.0% |
+| Temporal9 - Truncate Temporal Values | 255 | 322 | 79.2% |
 | Precedence2 - On numeric values | 20 | 26 | 76.9% |
+| Call1 - Basic procedure calling | 12 | 16 | 75.0% |
 
 ### Medium Pass Rate (25-75%)
 
@@ -110,10 +116,12 @@ The high step pass rate (86.2%) vs lower scenario pass rate (50.2%) indicates th
 |---------|--------|-------|------|
 | Graph9 - Retrieve all properties as a property map | 5 | 7 | 71.4% |
 | Temporal5 - Access Components of Temporal Values | 5 | 7 | 71.4% |
-| Temporal1 - Create Temporal Values from a Map | 144 | 207 | 69.6% |
 | Literals3 - Hexadecimal integer | 11 | 16 | 68.8% |
-| Precedence4 - On null value | 8 | 12 | 66.7% |
+| Call2 - Procedure arguments | 4 | 6 | 66.7% |
+| Call6 - Call clause interoperation with other clauses | 2 | 3 | 66.7% |
 | Literals2 - Decimal integer | 8 | 12 | 66.7% |
+| Precedence4 - On null value | 8 | 12 | 66.7% |
+| Comparison1 - Equality | 28 | 43 | 65.1% |
 | Map1 - Static value access | 12 | 19 | 63.2% |
 | Boolean5 - Interop of logical operations | 5 | 8 | 62.5% |
 | List5 - List Membership Validation - IN Operator | 28 | 46 | 60.9% |
@@ -121,9 +129,9 @@ The high step pass rate (86.2%) vs lower scenario pass rate (50.2%) indicates th
 | Union2 - Union All | 3 | 5 | 60.0% |
 | Unwind1 | 8 | 14 | 57.1% |
 | Temporal4 - Store Temporal Values | 21 | 39 | 53.8% |
-| Temporal9 - Truncate Temporal Values | 172 | 322 | 53.4% |
 | Boolean4 - NOT logical operations | 27 | 52 | 51.9% |
 | List11 - Create a list from a range | 34 | 67 | 50.7% |
+| ExistentialSubquery1 - Simple existential subquery | 2 | 4 | 50.0% |
 | ReturnOrderBy1 - Order by a single variable | 6 | 12 | 50.0% |
 | Return1 - Return single variable | 1 | 2 | 50.0% |
 | With2 - Forward single expression | 1 | 2 | 50.0% |
@@ -135,18 +143,19 @@ The high step pass rate (86.2%) vs lower scenario pass rate (50.2%) indicates th
 | Literals7 - List | 9 | 20 | 45.0% |
 | Precedence1 - On boolean values | 32 | 72 | 44.4% |
 | List3 - List Equality | 3 | 7 | 42.9% |
+| ReturnOrderBy6 - Aggregation expressions in order by | 2 | 5 | 40.0% |
 | TypeConversion1 - To Boolean | 4 | 10 | 40.0% |
-| ReturnSkipLimit1 - Skip | 4 | 11 | 36.4% |
 | Temporal3 - Project Temporal Values from other Temporal Values | 67 | 183 | 36.6% |
+| ReturnSkipLimit1 - Skip | 4 | 11 | 36.4% |
 | Match7 - Optional match | 11 | 31 | 35.5% |
 | Create1 - Creating nodes | 7 | 20 | 35.0% |
 | WithOrderBy3 - Order by multiple expressions | 32 | 93 | 34.4% |
-| List2 - List Slicing | 5 | 15 | 33.3% |
 | Delete4 - Delete clause interoperation with other clauses | 1 | 3 | 33.3% |
+| List2 - List Slicing | 5 | 15 | 33.3% |
+| Temporal2 - Create Temporal Values from a String | 16 | 53 | 30.2% |
 | WithOrderBy2 - Order by a single expression | 25 | 83 | 30.1% |
 | Null3 - Null evaluation | 3 | 10 | 30.0% |
 | WithOrderBy1 - Order by a single variable | 27 | 96 | 28.1% |
-| Temporal2 - Create Temporal Values from a String | 15 | 53 | 28.3% |
 | TypeConversion3 - To Float | 3 | 11 | 27.3% |
 | Create2 - Creating relationships | 6 | 24 | 25.0% |
 | Delete1 - Deleting nodes | 2 | 8 | 25.0% |
@@ -156,31 +165,30 @@ The high step pass rate (86.2%) vs lower scenario pass rate (50.2%) indicates th
 
 | Feature | Passed | Total | Rate |
 |---------|--------|-------|------|
-| With6 - Implicit grouping with aggregates | 2 | 9 | 22.2% |
 | Literals8 - Maps | 6 | 27 | 22.2% |
-| Map3 - Keys function | 2 | 11 | 18.2% |
+| With6 - Implicit grouping with aggregates | 2 | 9 | 22.2% |
 | MatchWhere1 - Filter single variable | 3 | 15 | 20.0% |
-| ReturnOrderBy6 - Aggregation expressions in order by | 1 | 5 | 20.0% |
 | Remove2 - Remove a Label | 1 | 5 | 20.0% |
 | Return6 - Implicit grouping with aggregates | 4 | 21 | 19.0% |
+| Map3 - Keys function | 2 | 11 | 18.2% |
+| List6 - List size | 3 | 17 | 17.6% |
 | Match3 - Match fixed length patterns | 5 | 30 | 16.7% |
 | With1 - Forward single variable | 1 | 6 | 16.7% |
-| Graph4 - Edge relationship type | 1 | 11 | 9.1% |
 | Comparison2 - Half-bounded Range | 3 | 19 | 15.8% |
 | Graph6 - Static property access | 2 | 14 | 14.3% |
 | Remove1 - Remove a Property | 1 | 7 | 14.3% |
-| Map2 - Dynamic Value Access | 1 | 14 | 7.1% |
 | Quantifier10 - Single quantifier invariants | 1 | 8 | 12.5% |
 | Set3 - Set a Label | 1 | 8 | 12.5% |
-| List6 - List size | 2 | 17 | 11.8% |
-| List1 - Dynamic Element Access | 2 | 23 | 8.7% |
 | Comparison3 - Full-Bound Range | 1 | 9 | 11.1% |
 | Delete5 - Delete clause interoperation with built-in data types | 1 | 9 | 11.1% |
 | Graph3 - Node labels | 1 | 9 | 11.1% |
 | WithOrderBy4 - Order by in combination with projection and aliasing | 2 | 20 | 10.0% |
-| Set1 - Set a Property | 1 | 11 | 9.1% |
+| Graph4 - Edge relationship type | 1 | 11 | 9.1% |
 | Pattern2 - Pattern Comprehension | 1 | 11 | 9.1% |
 | Return4 - Column renaming | 1 | 11 | 9.1% |
+| Set1 - Set a Property | 1 | 11 | 9.1% |
+| List1 - Dynamic Element Access | 2 | 23 | 8.7% |
+| Map2 - Dynamic Value Access | 1 | 14 | 7.1% |
 | Pattern1 - Pattern predicate | 1 | 39 | 2.6% |
 
 ### 0% Pass Rate (Fully Failing)
@@ -193,12 +201,6 @@ The high step pass rate (86.2%) vs lower scenario pass rate (50.2%) indicates th
 | Aggregation5 - Collect | 2 |
 | Aggregation6 - Percentiles | 13 |
 | Aggregation8 - DISTINCT | 4 |
-| Call1 - Basic procedure calling | 16 |
-| Call2 - Procedure arguments | 6 |
-| Call3 - Assignable-type arguments | 6 |
-| Call4 - Null Arguments | 2 |
-| Call5 - Results projection | 19 |
-| Call6 - Call clause interoperation with other clauses | 3 |
 | Comparison4 - Combination of Comparisons | 1 |
 | Conditional1 - Coalesce expression | 1 |
 | CountingSubgraphMatches1 | 11 |
@@ -208,10 +210,9 @@ The high step pass rate (86.2%) vs lower scenario pass rate (50.2%) indicates th
 | Create6 - Persistence of create clause side effects | 14 |
 | Delete2 - Deleting relationships | 5 |
 | Delete6 - Persistence of delete clause side effects | 14 |
-| ExistentialSubquery1 - Simple existential subquery | 4 |
 | ExistentialSubquery2 - Full existential subquery | 3 |
 | ExistentialSubquery3 - Nested existential subquery | 3 |
-| Graph5 - Node and edge label expressions | 9 |
+| Graph5 - Node and edge label expressions | 8 |
 | Graph7 - Dynamic property access | 3 |
 | List12 - List Comprehension | 7 |
 | List4 - List Concatenation | 2 |
@@ -286,61 +287,71 @@ The high step pass rate (86.2%) vs lower scenario pass rate (50.2%) indicates th
 
 | Failure Type | Steps | % of Failed |
 |-------------|-------|-------------|
-| Result mismatch (wrong values, missing/extra rows) | ~1,022 | 53.0% |
-| No result found (query returns empty) | ~416 | 21.6% |
-| Error detail mismatch (wrong error keyword) | ~141 | 7.3% |
-| Step not implemented (procedure CALL infrastructure) | ~141 | 7.3% |
-| No error found (Uni too permissive) | ~107 | 5.6% |
-| Side effects not verified (harness gap) | ~100 | 5.2% |
+| Result mismatch (wrong values, missing/extra rows) | ~981 | 51.6% |
+| No match found for actual row (extra rows) | ~647 | 34.0% |
+| No result found (query returns empty) | ~409 | 21.5% |
+| Error detail mismatch (wrong error keyword) | ~136 | 7.2% |
+| No error found (Uni too permissive) | ~117 | 6.2% |
+
+Note: A single scenario failure may involve multiple step-level failure types.
 
 ---
 
 ## Remaining Validation Gaps (Expected Errors Not Raised)
 
-### Errors Not Raised (~75 scenarios)
+### Errors Not Raised (~117 scenarios)
 
 Uni accepts queries that openCypher rejects:
 
 | Count | Expected Error | Description |
 |-------|---------------|-------------|
-| 20 | UndefinedVariable | Variables used before definition |
-| 12 | InvalidArgumentType | Wrong type for operations |
-| 11 | UnexpectedSyntax | Syntax that should be rejected |
-| 6 | IntegerOverflow | Integer literal overflow |
-| 5 | VariableTypeConflict | Variable used as conflicting types |
-| 5 | AmbiguousAggregationExpression | Aggregation scope ambiguity |
+| 27 | InvalidArgumentValue | Invalid argument values |
+| 22 | UndefinedVariable | Variables used before definition |
+| 15 | InvalidArgumentType | Wrong type for operations |
+| 9 | UnexpectedSyntax | Syntax that should be rejected |
+| 7 | NumberOutOfRange | Number out of valid range |
+| 5 | IntegerOverflow | Integer literal overflow |
+| 4 | DeletedEntityAccess | Access to deleted entity |
+| 4 | AmbiguousAggregationExpression | Aggregation scope ambiguity |
 | 3 | VariableAlreadyBound | Variable illegally rebound |
-| 2 | InvalidDelete | Invalid delete target |
-| 2 | InvalidAggregation | Aggregation in wrong context |
-| 2 | ColumnNameConflict | Duplicate column names |
+| 3 | VariableTypeConflict | Variable used as conflicting types |
+| 3 | ColumnNameConflict | Duplicate column names |
+| 2 | DeleteConnectedNode | Delete node with relationships |
+| 2 | MapElementAccessByNonString | Non-string map key access |
+| 1 | ProcedureNotFound | Missing procedure |
+| 1 | InvalidDelete | Invalid delete target |
+| 1 | InvalidParameterUse | Parameter validation |
+| 1 | RelationshipUniquenessViolation | Relationship uniqueness |
 | 1 | NoSingleRelationshipType | Relationship type required |
-| 1 | UnknownFunction | Missing function |
 | 1 | NestedAggregation | Nested aggregation |
 | 1 | NoVariablesInScope | Empty scope |
-| 1 | NegativeIntegerArgument | Negative SKIP/LIMIT |
-| 1 | NoExpressionAlias | Missing alias |
+| 1 | InvalidClauseComposition | Clause ordering error |
+| 1 | InvalidAggregation | Aggregation in wrong context |
+| 1 | InvalidNumberLiteral | Invalid number literal |
 | 1 | FloatingPointOverflow | Float overflow |
 
-### Error Detail Mismatches (~113 scenarios)
+### Error Detail Mismatches (~136 scenarios)
 
 An error is raised but the message doesn't contain the expected keyword:
 
 | Count | Expected Keyword | Description |
 |-------|-----------------|-------------|
 | 58 | InvalidArgumentType | Wrong error classification for type errors |
+| 25 | InvalidAggregation | Aggregation error classification |
 | 14 | VariableTypeConflict | Wrong error for type conflicts |
-| 12 | UnexpectedSyntax | Parser error doesn't include expected keyword |
-| 5 | UndefinedVariable | Scope error missing keyword |
+| 13 | UnexpectedSyntax | Parser error doesn't include expected keyword |
 | 4 | InvalidNumberLiteral | Number parsing error |
 | 3 | InvalidParameterUse | Parameter validation |
 | 3 | NonConstantExpression | Constant-folding error |
-| 2 | ProcedureNotFound | Missing procedure |
 | 2 | VariableAlreadyBound | Variable rebinding error |
 | 2 | InvalidRelationshipPattern | Malformed relationship pattern |
+| 2 | UndefinedVariable | Scope error missing keyword |
 | 2 | NoSingleRelationshipType | Missing relationship type |
 | 2 | InvalidClauseComposition | Clause ordering error |
-| 1 | AmbiguousAggregationExpression | Aggregation scope |
+| 1 | MissingParameter | Missing parameter |
+| 1 | InvalidArgumentPassingMode | Wrong argument passing mode |
 | 1 | CreatingVarLength | Variable-length in CREATE |
+| 1 | AmbiguousAggregationExpression | Aggregation scope |
 | 1 | InvalidUnicodeLiteral | Unicode literal error |
 | 1 | InvalidUnicodeCharacter | Unicode character error |
 
@@ -348,16 +359,16 @@ An error is raised but the message doesn't contain the expected keyword:
 
 ## Failure Root Causes
 
-1. **Result Mismatch (~1,022 step failures)**
+1. **Result Mismatch (~981 step failures)**
    - Most common failure type
    - Root causes: missing functions (aggregation, string, list), incorrect query execution, edge counting bugs
    - Includes: wrong values, empty results, extra/missing rows
 
-2. **No Result Found (~416 step failures)**
+2. **No Result Found (~409 step failures)**
    - Query returns empty when data is expected
    - Root causes: graph fixture loading failures, missing query plan steps, complex multi-clause queries
 
-3. **Over-Permissive Behavior (~75 remaining "no error" failures)**
+3. **Over-Permissive Behavior (~117 remaining "no error" failures)**
    - Uni accepts queries that openCypher rejects
    - **Addressed in previous work:** Added semantic validation for:
      - UndefinedVariable (variables used before definition)
@@ -366,12 +377,12 @@ An error is raised but the message doesn't contain the expected keyword:
      - InvalidArgumentType (wrong type for DELETE, SKIP/LIMIT, WITH ORDER BY)
      - InvalidAggregation (aggregation in WITH ORDER BY)
      - NegativeIntegerArgument (negative SKIP/LIMIT)
-   - Still needs: more comprehensive validation coverage
+   - Still needs: InvalidArgumentValue (27), more UndefinedVariable (22), NumberOutOfRange (7)
 
-4. **Unimplemented Features (~216 failures)**
-   - Procedure CALL infrastructure incomplete (52 scenarios, 141 step failures)
+4. **Unimplemented Features (~166 failures)**
    - MERGE not implemented (75 scenarios)
-   - Existential subqueries not supported (10 scenarios)
+   - Existential subqueries partially supported (8 remaining failures)
+   - Procedure CALL now mostly working (10 remaining failures)
 
 5. **TCK Harness Gaps (~100 step failures)**
    - Side effect verification not fully implemented
@@ -398,10 +409,10 @@ An error is raised but the message doesn't contain the expected keyword:
 | REMOVE | Limited | 6.1% | Basic functionality present |
 | MERGE | None | 0.0% | Not implemented |
 | WITH | Partial | 13.8% | Piping works, WHERE/aliasing issues |
-| WITH ORDER BY | Partial | 29.5% | Basic ordering works, complex expressions fail |
+| WITH ORDER BY | Partial | 29.5% | Basic ordering works, single-expression regression fixed |
 | UNWIND | Good | 57.1% | List unwinding mostly works |
 | UNION | Good | 50.0% | Basic union works |
-| CALL | None | 0.0% | Procedure infrastructure incomplete |
+| **CALL** | **Strong** | **80.8%** | **Procedure infrastructure now working** |
 
 ### Expressions
 
@@ -412,18 +423,18 @@ An error is raised but the message doesn't contain the expected keyword:
 | Null handling | Good | 70.5% | Three-valued logic correct |
 | Boolean | Good | 69.3% | AND, OR, NOT, XOR work |
 | Literals | Good | 64.9% | Booleans, integers, floats, strings work |
-| **Temporal** | **Good** | **60.8%** | **Creation, truncation, arithmetic, comparison, duration-between all work** |
+| **Temporal** | **Strong** | **74.6%** | **Creation, truncation, arithmetic, comparison, duration-between, formatting all work** |
 | Precedence | Moderate | 49.6% | Numeric precedence good, boolean/list issues |
 | Comparison | Moderate | 44.4% | Equality good, ranges need work |
-| List | Moderate | 40.0% | IN operator and ranges work, comprehension/dynamic access weak |
+| List | Moderate | 40.5% | IN operator and ranges work, comprehension/dynamic access weak |
 | Type Conversion | Moderate | 36.2% | toString partially works |
 | Map | Moderate | 34.1% | Static access good, dynamic/keys weak |
-| Graph | Limited | 21.3% | Property access works, labels/types weak |
+| Graph | Limited | 21.7% | Property access works, labels/types weak |
+| Existential Subquery | Limited | 20.0% | Simple EXISTS partially working |
 | Pattern | Limited | 4.0% | Pattern predicates incomplete |
 | Aggregation | None | 0.0% | COUNT, SUM, etc. not returning correct results |
 | String | None | 0.0% | String functions not implemented |
 | Path | None | 0.0% | Path functions not implemented |
-| Existential Subquery | None | 0.0% | EXISTS {} not supported |
 
 ---
 
@@ -437,23 +448,29 @@ An error is raised but the message doesn't contain the expected keyword:
 | 2026-02-04 | 1,355 | 35.0% | CREATE returns entities for RETURN, edge dedup, pattern comprehension |
 | 2026-02-04 | 1,423 | 36.8% | Semantic validation + error classification fix |
 | 2026-02-04 | 1,764 | 45.6% | Path variable binding, WITH ORDER BY/SKIP/LIMIT, aggregation validation, error type leniency |
-| 2026-02-04 | **1,941** | **50.2%** | Temporal7 (comparison), Temporal8 (arithmetic), Temporal10 (duration between), DST-aware computation, null propagation |
+| 2026-02-04 | 1,941 | 50.2% | Temporal7 (comparison), Temporal8 (arithmetic), Temporal10 (duration between), DST-aware computation, null propagation |
+| 2026-02-05 | 1,966 | 50.8% | Procedure CALL support (+42), planner validation bugfixes, time storage fixes |
+| 2026-02-05 | **2,126** | **55.0%** | Temporal formatting fixes (+139), WithOrderBy2 regression fix (+21) |
 
 ### Cumulative Improvement
 
 | From | To | Scenarios Gained | Improvement |
 |------|-----|------------------|-------------|
-| Baseline (1,279) | Current (1,941) | **+662** | **+51.8%** |
+| Baseline (1,279) | Current (2,126) | **+847** | **+66.2%** |
 
-### Recent Temporal Gains (1,764 → 1,941)
+### Recent Gains (1,966 → 2,126)
 
-| Feature | Before | After | Gained |
-|---------|--------|-------|--------|
-| Temporal7 (compare temporal values) | 0/18 | 17/18 | +17 |
-| Temporal8 (duration arithmetic) | 0/27 | 27/27 | +27 |
-| Temporal10 (duration between) | 0/131 | 125/131 | +125 |
-| Other temporal improvements | — | — | +8 |
-| **Total** | | | **+177** |
+| Category | Before | After | Delta |
+|----------|--------|-------|-------|
+| Temporal (formatting fixes) | 610/1,004 | 749/1,004 | +139 |
+| WithOrderBy (regression fix) | 65/292 | 86/292 | +21 |
+| **Net** | | | **+160** |
+
+**Key fixes:**
+- Omit redundant `:00` seconds when seconds are zero (matches Neo4j formatting)
+- Normalize `+00:00` to `Z` for UTC offsets
+- Fix WITH ORDER BY validation to allow references to both projected aliases and original variables
+- WithOrderBy2 recovered from 1/83 to 25/83 (regression from planner validation changes fixed)
 
 ---
 
@@ -473,35 +490,38 @@ An error is raised but the message doesn't contain the expected keyword:
    - Upsert semantics not implemented
    - ON CREATE / ON MATCH clauses
 
-4. **Result Mismatch Investigation** (~1,022 failures)
+4. ~~**WithOrderBy2 Regression** (24 lost scenarios)~~ **FIXED** — recovered from 1/83 to 25/83
+
+5. **Result Mismatch Investigation** (~981 failures)
    - Wrong query output is most common failure
    - Need to audit specific failing queries
    - Likely causes: missing functions, incorrect aggregation, path handling
 
 ### Medium Priority
 
-5. **WITH/WHERE Integration** (19 failures)
+6. **WITH/WHERE Integration** (19 failures)
    - WHERE clause after WITH not working
    - Variable aliasing issues
 
-6. **Variable-Length Paths** (10 failures)
+7. **Variable-Length Paths** (10 failures)
    - `(a)-[*1..3]->(b)` patterns
    - Requires iterative path expansion
-
-7. **Procedure CALL** (52 failures)
-   - Test procedure stubs
-   - CALL/YIELD infrastructure
 
 8. **Pattern Predicates** (50 failures)
    - WHERE (a)-->(b) patterns
    - EXISTS patterns
 
+9. **Over-Permissive Validation** (~117 failures)
+   - InvalidArgumentValue (27 scenarios)
+   - UndefinedVariable (22 scenarios)
+   - InvalidArgumentType (15 scenarios)
+
 ### Low Priority
 
-9. **Named Graph Fixtures** (19 failures)
-   - Implement binary-tree-1/2 fixtures
+10. **Named Graph Fixtures** (19 failures)
+    - Implement binary-tree-1/2 fixtures
 
-10. **Side Effect Verification** (~100 failures)
+11. **Side Effect Verification** (~100 failures)
     - TCK harness needs side effect checking
 
 ---
@@ -509,15 +529,16 @@ An error is raised but the message doesn't contain the expected keyword:
 ## Recommendations
 
 ### Short-term Wins
-1. Implement basic aggregation (COUNT, SUM, AVG, MIN, MAX) — could unlock ~35 scenarios
-2. Add string functions (STARTS WITH, ENDS WITH, CONTAINS) — could unlock ~32 scenarios
-3. Fix WITH WHERE integration — could unlock ~19 scenarios
+1. ~~**Fix WithOrderBy2 regression**~~ **DONE** — recovered +24 scenarios
+2. ~~**Fix temporal formatting**~~ **DONE** — recovered +139 scenarios (omit `:00` seconds, normalize `+00:00` → `Z`)
+3. Implement basic aggregation (COUNT, SUM, AVG, MIN, MAX) — could unlock ~35 scenarios
+4. Add string functions (STARTS WITH, ENDS WITH, CONTAINS) — could unlock ~32 scenarios
+5. Fix WITH WHERE integration — could unlock ~19 scenarios
 
 ### Medium-term Goals
 1. Implement MERGE clause (~75 scenarios)
 2. Add variable-length path patterns (~10+ scenarios)
-3. Complete procedure CALL infrastructure (~52 scenarios)
-4. Extend semantic validation coverage (~75 remaining "no error" scenarios)
+3. Extend semantic validation coverage (~117 remaining "no error" scenarios)
 
 ### Long-term Goals
 1. Achieve 60%+ scenario pass rate
@@ -528,15 +549,17 @@ An error is raised but the message doesn't contain the expected keyword:
 
 | Target | Scenarios | Pass Rate | Gap |
 |--------|-----------|-----------|-----|
-| 55% | 2,127 | 55.0% | +186 scenarios |
-| 60% | 2,321 | 60.0% | +380 scenarios |
+| ~~55%~~ | ~~2,127~~ | ~~55.0%~~ | **ACHIEVED** (2,126 ≈ 55.0%) |
+| 60% | 2,320 | 60.0% | +194 scenarios |
+| 65% | 2,514 | 65.0% | +388 scenarios |
 
-Achieving 55% likely requires:
-- String functions (+32)
+Achieving 60% likely requires:
 - Aggregation functions (+35)
+- String functions (+32)
 - WITH WHERE integration (+19)
 - Partial MERGE implementation (+30)
-- Additional validation coverage (+70)
+- Additional validation coverage (+21)
+- Remaining temporal formatting gaps (+57)
 
 ---
 
@@ -610,4 +633,4 @@ grep -c "No match found for actual row" /tmp/tck_output.txt
 | `useCases/countingSubgraphMatches` | 1 | Pattern counting |
 | `useCases/triadicSelection` | 1 | Friend-of-friend |
 
-**Total:** 191 feature files, 3,868 expanded scenarios
+**Total:** 191 feature files, 3,867 expanded scenarios

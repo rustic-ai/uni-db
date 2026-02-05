@@ -3423,11 +3423,21 @@ impl QueryPlanner {
         }
 
         // Validate and apply ORDER BY for WITH clause
-        // Use new_vars (which includes WITH aliases) instead of vars_in_scope
+        // Build an extended scope that includes both WITH aliases and original variables
+        // so ORDER BY can reference either (mirrors RETURN ORDER BY handling).
         if let Some(order_by) = &with_clause.order_by {
+            let order_by_scope: Vec<VariableInfo> = {
+                let mut scope = new_vars.clone();
+                for v in vars_in_scope {
+                    if !is_var_in_scope(&scope, &v.name) {
+                        scope.push(v.clone());
+                    }
+                }
+                scope
+            };
             for item in order_by {
-                validate_expression_variables(&item.expr, &new_vars)?;
-                validate_expression(&item.expr, &new_vars)?;
+                validate_expression_variables(&item.expr, &order_by_scope)?;
+                validate_expression(&item.expr, &order_by_scope)?;
                 // Aggregation functions not allowed in ORDER BY of WITH
                 if contains_aggregate_recursive(&item.expr) {
                     return Err(anyhow!(

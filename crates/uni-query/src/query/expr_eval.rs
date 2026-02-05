@@ -57,32 +57,12 @@ pub fn eval_binary_op(left: &Value, op: &BinaryOp, right: &Value) -> Result<Valu
         BinaryOp::Lt => eval_comparison(left, right, |ordering| ordering.is_lt()),
         BinaryOp::GtEq => eval_comparison(left, right, |ordering| ordering.is_ge()),
         BinaryOp::LtEq => eval_comparison(left, right, |ordering| ordering.is_le()),
-        BinaryOp::Contains => {
-            let l = left
-                .as_str()
-                .ok_or_else(|| anyhow!("Left side of CONTAINS must be a string"))?;
-            let r = right
-                .as_str()
-                .ok_or_else(|| anyhow!("Right side of CONTAINS must be a string"))?;
-            Ok(Value::Bool(l.contains(r)))
-        }
+        BinaryOp::Contains => eval_string_predicate(left, right, "CONTAINS", |l, r| l.contains(r)),
         BinaryOp::StartsWith => {
-            let l = left
-                .as_str()
-                .ok_or_else(|| anyhow!("Left side of STARTS WITH must be a string"))?;
-            let r = right
-                .as_str()
-                .ok_or_else(|| anyhow!("Right side of STARTS WITH must be a string"))?;
-            Ok(Value::Bool(l.starts_with(r)))
+            eval_string_predicate(left, right, "STARTS WITH", |l, r| l.starts_with(r))
         }
         BinaryOp::EndsWith => {
-            let l = left
-                .as_str()
-                .ok_or_else(|| anyhow!("Left side of ENDS WITH must be a string"))?;
-            let r = right
-                .as_str()
-                .ok_or_else(|| anyhow!("Right side of ENDS WITH must be a string"))?;
-            Ok(Value::Bool(l.ends_with(r)))
+            eval_string_predicate(left, right, "ENDS WITH", |l, r| l.ends_with(r))
         }
         BinaryOp::Add => eval_add(left, right),
         BinaryOp::Sub => eval_sub(left, right),
@@ -152,6 +132,21 @@ pub fn eval_in_op(left: &Value, right: &Value) -> Result<Value> {
     } else {
         Err(anyhow!("Right side of IN must be a list"))
     }
+}
+
+fn eval_string_predicate(
+    left: &Value,
+    right: &Value,
+    op_name: &str,
+    check: fn(&str, &str) -> bool,
+) -> Result<Value> {
+    let l = left
+        .as_str()
+        .ok_or_else(|| anyhow!("Left side of {} must be a string", op_name))?;
+    let r = right
+        .as_str()
+        .ok_or_else(|| anyhow!("Right side of {} must be a string", op_name))?;
+    Ok(Value::Bool(check(l, r)))
 }
 
 fn eval_numeric_op<F>(left: &Value, right: &Value, op: F) -> Result<Value>
@@ -635,27 +630,15 @@ fn eval_abs(arg: &Value) -> Result<Value> {
 }
 
 fn eval_ceil(arg: &Value) -> Result<Value> {
-    match arg {
-        Value::Number(n) => Ok(n.as_f64().map(|f| json!(f.ceil())).unwrap_or(arg.clone())),
-        Value::Null => Ok(Value::Null),
-        _ => Err(anyhow!("ceil() expects a number")),
-    }
+    eval_unary_numeric_op(arg, "ceil", f64::ceil)
 }
 
 fn eval_floor(arg: &Value) -> Result<Value> {
-    match arg {
-        Value::Number(n) => Ok(n.as_f64().map(|f| json!(f.floor())).unwrap_or(arg.clone())),
-        Value::Null => Ok(Value::Null),
-        _ => Err(anyhow!("floor() expects a number")),
-    }
+    eval_unary_numeric_op(arg, "floor", f64::floor)
 }
 
 fn eval_round(arg: &Value) -> Result<Value> {
-    match arg {
-        Value::Number(n) => Ok(n.as_f64().map(|f| json!(f.round())).unwrap_or(arg.clone())),
-        Value::Null => Ok(Value::Null),
-        _ => Err(anyhow!("round() expects a number")),
-    }
+    eval_unary_numeric_op(arg, "round", f64::round)
 }
 
 fn eval_sqrt(arg: &Value) -> Result<Value> {
@@ -798,7 +781,7 @@ fn eval_haversin(arg: &Value) -> Result<Value> {
 }
 
 /// Helper to require exactly one argument for a function.
-fn require_one_math_arg<'a>(name: &str, args: &'a [Value]) -> Result<&'a Value> {
+fn require_one_arg<'a>(name: &str, args: &'a [Value]) -> Result<&'a Value> {
     if args.len() != 1 {
         return Err(anyhow!("{} requires 1 argument", name));
     }
@@ -809,24 +792,24 @@ fn require_one_math_arg<'a>(name: &str, args: &'a [Value]) -> Result<&'a Value> 
 fn eval_math_function(name: &str, args: &[Value]) -> Result<Value> {
     match name {
         // Single-argument functions
-        "ABS" => eval_abs(require_one_math_arg(name, args)?),
-        "CEIL" => eval_ceil(require_one_math_arg(name, args)?),
-        "FLOOR" => eval_floor(require_one_math_arg(name, args)?),
-        "ROUND" => eval_round(require_one_math_arg(name, args)?),
-        "SQRT" => eval_sqrt(require_one_math_arg(name, args)?),
-        "SIGN" => eval_sign(require_one_math_arg(name, args)?),
-        "LOG" => eval_log(require_one_math_arg(name, args)?),
-        "LOG10" => eval_log10(require_one_math_arg(name, args)?),
-        "EXP" => eval_exp(require_one_math_arg(name, args)?),
-        "SIN" => eval_sin(require_one_math_arg(name, args)?),
-        "COS" => eval_cos(require_one_math_arg(name, args)?),
-        "TAN" => eval_tan(require_one_math_arg(name, args)?),
-        "ASIN" => eval_asin(require_one_math_arg(name, args)?),
-        "ACOS" => eval_acos(require_one_math_arg(name, args)?),
-        "ATAN" => eval_atan(require_one_math_arg(name, args)?),
-        "DEGREES" => eval_degrees(require_one_math_arg(name, args)?),
-        "RADIANS" => eval_radians(require_one_math_arg(name, args)?),
-        "HAVERSIN" => eval_haversin(require_one_math_arg(name, args)?),
+        "ABS" => eval_abs(require_one_arg(name, args)?),
+        "CEIL" => eval_ceil(require_one_arg(name, args)?),
+        "FLOOR" => eval_floor(require_one_arg(name, args)?),
+        "ROUND" => eval_round(require_one_arg(name, args)?),
+        "SQRT" => eval_sqrt(require_one_arg(name, args)?),
+        "SIGN" => eval_sign(require_one_arg(name, args)?),
+        "LOG" => eval_log(require_one_arg(name, args)?),
+        "LOG10" => eval_log10(require_one_arg(name, args)?),
+        "EXP" => eval_exp(require_one_arg(name, args)?),
+        "SIN" => eval_sin(require_one_arg(name, args)?),
+        "COS" => eval_cos(require_one_arg(name, args)?),
+        "TAN" => eval_tan(require_one_arg(name, args)?),
+        "ASIN" => eval_asin(require_one_arg(name, args)?),
+        "ACOS" => eval_acos(require_one_arg(name, args)?),
+        "ATAN" => eval_atan(require_one_arg(name, args)?),
+        "DEGREES" => eval_degrees(require_one_arg(name, args)?),
+        "RADIANS" => eval_radians(require_one_arg(name, args)?),
+        "HAVERSIN" => eval_haversin(require_one_arg(name, args)?),
         // Two-argument functions
         "POWER" | "POW" => eval_power(args),
         "ATAN2" => eval_atan2(args),
@@ -858,13 +841,6 @@ fn eval_math_function(name: &str, args: &[Value]) -> Result<Value> {
 // ============================================================================
 // String function helpers
 // ============================================================================
-
-fn require_one_arg<'a>(name: &str, args: &'a [Value]) -> Result<&'a Value> {
-    if args.len() != 1 {
-        return Err(anyhow!("{}() requires 1 argument", name));
-    }
-    Ok(&args[0])
-}
 
 /// Apply a unary string operation, handling null and type checking.
 fn eval_unary_string_op<F>(arg: &Value, func_name: &str, op: F) -> Result<Value>
@@ -1634,86 +1610,32 @@ pub fn is_scalar_function(name: &str) -> bool {
 
 /// Evaluate bitwise functions (uni_bitwise_*)
 fn eval_bitwise_function(name: &str, args: &[Value]) -> Result<Value> {
+    let require_int = |v: &Value, fname: &str| -> Result<i64> {
+        v.as_i64()
+            .ok_or_else(|| anyhow!("{} requires integer arguments", fname))
+    };
+
+    let bitwise_binary = |fname: &str, op: fn(i64, i64) -> i64| -> Result<Value> {
+        if args.len() != 2 {
+            return Err(anyhow!("{} requires exactly 2 arguments", fname));
+        }
+        let l = require_int(&args[0], fname)?;
+        let r = require_int(&args[1], fname)?;
+        Ok(json!(op(l, r)))
+    };
+
     match name {
-        "UNI_BITWISE_OR" => {
-            if args.len() != 2 {
-                return Err(anyhow!("uni_bitwise_or requires exactly 2 arguments"));
-            }
-            let l = args[0]
-                .as_i64()
-                .ok_or_else(|| anyhow!("uni_bitwise_or requires integer arguments"))?;
-            let r = args[1]
-                .as_i64()
-                .ok_or_else(|| anyhow!("uni_bitwise_or requires integer arguments"))?;
-            Ok(json!(l | r))
-        }
-
-        "UNI_BITWISE_AND" => {
-            if args.len() != 2 {
-                return Err(anyhow!("uni_bitwise_and requires exactly 2 arguments"));
-            }
-            let l = args[0]
-                .as_i64()
-                .ok_or_else(|| anyhow!("uni_bitwise_and requires integer arguments"))?;
-            let r = args[1]
-                .as_i64()
-                .ok_or_else(|| anyhow!("uni_bitwise_and requires integer arguments"))?;
-            Ok(json!(l & r))
-        }
-
-        "UNI_BITWISE_XOR" => {
-            if args.len() != 2 {
-                return Err(anyhow!("uni_bitwise_xor requires exactly 2 arguments"));
-            }
-            let l = args[0]
-                .as_i64()
-                .ok_or_else(|| anyhow!("uni_bitwise_xor requires integer arguments"))?;
-            let r = args[1]
-                .as_i64()
-                .ok_or_else(|| anyhow!("uni_bitwise_xor requires integer arguments"))?;
-            Ok(json!(l ^ r))
-        }
-
+        "UNI_BITWISE_OR" => bitwise_binary("uni_bitwise_or", |l, r| l | r),
+        "UNI_BITWISE_AND" => bitwise_binary("uni_bitwise_and", |l, r| l & r),
+        "UNI_BITWISE_XOR" => bitwise_binary("uni_bitwise_xor", |l, r| l ^ r),
+        "UNI_BITWISE_SHIFTLEFT" => bitwise_binary("uni_bitwise_shiftLeft", |l, r| l << r),
+        "UNI_BITWISE_SHIFTRIGHT" => bitwise_binary("uni_bitwise_shiftRight", |l, r| l >> r),
         "UNI_BITWISE_NOT" => {
             if args.len() != 1 {
                 return Err(anyhow!("uni_bitwise_not requires exactly 1 argument"));
             }
-            let val = args[0]
-                .as_i64()
-                .ok_or_else(|| anyhow!("uni_bitwise_not requires integer argument"))?;
-            Ok(json!(!val))
+            Ok(json!(!require_int(&args[0], "uni_bitwise_not")?))
         }
-
-        "UNI_BITWISE_SHIFTLEFT" => {
-            if args.len() != 2 {
-                return Err(anyhow!(
-                    "uni_bitwise_shiftLeft requires exactly 2 arguments"
-                ));
-            }
-            let val = args[0]
-                .as_i64()
-                .ok_or_else(|| anyhow!("uni_bitwise_shiftLeft requires integer arguments"))?;
-            let n = args[1]
-                .as_i64()
-                .ok_or_else(|| anyhow!("uni_bitwise_shiftLeft requires integer arguments"))?;
-            Ok(json!(val << n))
-        }
-
-        "UNI_BITWISE_SHIFTRIGHT" => {
-            if args.len() != 2 {
-                return Err(anyhow!(
-                    "uni_bitwise_shiftRight requires exactly 2 arguments"
-                ));
-            }
-            let val = args[0]
-                .as_i64()
-                .ok_or_else(|| anyhow!("uni_bitwise_shiftRight requires integer arguments"))?;
-            let n = args[1]
-                .as_i64()
-                .ok_or_else(|| anyhow!("uni_bitwise_shiftRight requires integer arguments"))?;
-            Ok(json!(val >> n))
-        }
-
         _ => Err(anyhow!("Unknown bitwise function: {}", name)),
     }
 }
@@ -1936,7 +1858,7 @@ mod tests {
         let dt = json!("2024-01-15T10:00:00Z");
         let dur = json!(3_600_000_000_i64);
         let result = eval_binary_op(&dt, &BinaryOp::Add, &dur).unwrap();
-        assert!(result.as_str().unwrap().contains("11:00:00"));
+        assert!(result.as_str().unwrap().contains("11:00"));
 
         // date + duration (1 day)
         let d = json!("2024-01-01");
@@ -1963,7 +1885,7 @@ mod tests {
         let dt = json!("2024-01-15T10:00:00Z");
         let neg_dur = json!(-3_600_000_000_i64); // -1 hour
         let result = eval_binary_op(&dt, &BinaryOp::Add, &neg_dur).unwrap();
-        assert!(result.as_str().unwrap().contains("09:00:00"));
+        assert!(result.as_str().unwrap().contains("09:00"));
 
         // Duration subtraction resulting in negative duration
         let dur1 = json!("PT1H"); // 1 hour as ISO 8601
@@ -1978,7 +1900,7 @@ mod tests {
         let dt = json!("2024-01-15T10:00:00Z");
         let zero_dur = json!(0_i64);
         let result = eval_binary_op(&dt, &BinaryOp::Add, &zero_dur).unwrap();
-        assert!(result.as_str().unwrap().contains("10:00:00"));
+        assert!(result.as_str().unwrap().contains("10:00"));
 
         // Date crossing year boundary
         let d = json!("2023-12-31");

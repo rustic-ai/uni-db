@@ -12,7 +12,7 @@ use arrow_array::builder::{
     BinaryBuilder, BooleanBuilder, Date32Builder, DurationMicrosecondBuilder,
     FixedSizeBinaryBuilder, FixedSizeListBuilder, Float32Builder, Float64Builder, Int32Builder,
     Int64Builder, ListBuilder, StringBuilder, StructBuilder, Time64MicrosecondBuilder,
-    UInt64Builder,
+    TimestampMicrosecondBuilder, UInt64Builder,
 };
 use arrow_array::{
     Array, ArrayRef, BinaryArray, BooleanArray, Date32Array, DurationMicrosecondArray,
@@ -30,14 +30,31 @@ use uni_crdt::Crdt;
 // Timestamp Column Builders
 // ============================================================================
 
-use arrow_array::builder::TimestampMicrosecondBuilder;
 use std::collections::HashMap;
 use uni_common::core::id::{Eid, Vid};
 
 /// Build a timestamp column from a map of ID -> timestamp (microseconds).
 ///
 /// This is a shared utility for building `_created_at` and `_updated_at` columns
-/// in vertex and edge tables.
+/// in vertex and edge tables. Works with any hashable ID type (Vid, Eid, etc.).
+fn build_timestamp_column_from_id_map<K, I>(
+    ids: I,
+    timestamps: Option<&HashMap<K, i64>>,
+) -> ArrayRef
+where
+    K: Eq + std::hash::Hash,
+    I: IntoIterator<Item = K>,
+{
+    let mut builder = TimestampMicrosecondBuilder::new().with_timezone("UTC");
+    for id in ids {
+        match timestamps.and_then(|m| m.get(&id)) {
+            Some(&ts) => builder.append_value(ts),
+            None => builder.append_null(),
+        }
+    }
+    Arc::new(builder.finish())
+}
+
 pub fn build_timestamp_column_from_vid_map<I>(
     ids: I,
     timestamps: Option<&HashMap<Vid, i64>>,
@@ -45,23 +62,9 @@ pub fn build_timestamp_column_from_vid_map<I>(
 where
     I: IntoIterator<Item = Vid>,
 {
-    let ids: Vec<Vid> = ids.into_iter().collect();
-    let mut builder = TimestampMicrosecondBuilder::new().with_timezone("UTC");
-
-    for id in &ids {
-        if let Some(ts_map) = timestamps
-            && let Some(&ts) = ts_map.get(id)
-        {
-            builder.append_value(ts);
-        } else {
-            builder.append_null();
-        }
-    }
-
-    Arc::new(builder.finish())
+    build_timestamp_column_from_id_map(ids, timestamps)
 }
 
-/// Build a timestamp column from a map of Eid -> timestamp (microseconds).
 pub fn build_timestamp_column_from_eid_map<I>(
     ids: I,
     timestamps: Option<&HashMap<Eid, i64>>,
@@ -69,20 +72,7 @@ pub fn build_timestamp_column_from_eid_map<I>(
 where
     I: IntoIterator<Item = Eid>,
 {
-    let ids: Vec<Eid> = ids.into_iter().collect();
-    let mut builder = TimestampMicrosecondBuilder::new().with_timezone("UTC");
-
-    for id in &ids {
-        if let Some(ts_map) = timestamps
-            && let Some(&ts) = ts_map.get(id)
-        {
-            builder.append_value(ts);
-        } else {
-            builder.append_null();
-        }
-    }
-
-    Arc::new(builder.finish())
+    build_timestamp_column_from_id_map(ids, timestamps)
 }
 
 /// Build a timestamp column from an iterator of optional timestamps.
@@ -93,16 +83,37 @@ where
     I: IntoIterator<Item = Option<i64>>,
 {
     let mut builder = TimestampMicrosecondBuilder::new().with_timezone("UTC");
-
     for ts in timestamps {
-        if let Some(val) = ts {
-            builder.append_value(val);
-        } else {
-            builder.append_null();
-        }
+        builder.append_option(ts);
     }
-
     Arc::new(builder.finish())
+}
+
+/// Parse a datetime string into microseconds since Unix epoch.
+///
+/// Tries RFC3339, "%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%dT%H:%M%:z",
+/// and "%Y-%m-%dT%H:%MZ" formats.
+fn parse_datetime_to_micros(s: &str) -> Option<i64> {
+    chrono::DateTime::parse_from_rfc3339(s)
+        .map(|dt| dt.with_timezone(&chrono::Utc).timestamp_micros())
+        .or_else(|_| {
+            chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S")
+                .map(|ndt| ndt.and_utc().timestamp_micros())
+        })
+        .or_else(|_| {
+            chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%SZ")
+                .map(|ndt| ndt.and_utc().timestamp_micros())
+        })
+        .or_else(|_| {
+            chrono::DateTime::parse_from_str(s, "%Y-%m-%dT%H:%M%:z")
+                .map(|dt| dt.with_timezone(&chrono::Utc).timestamp_micros())
+        })
+        .ok()
+        .or_else(|| {
+            s.strip_suffix('Z')
+                .and_then(|base| chrono::NaiveDateTime::parse_from_str(base, "%Y-%m-%dT%H:%M").ok())
+                .map(|ndt| ndt.and_utc().timestamp_micros())
+        })
 }
 
 /// Detect the Arrow Map-as-List(Struct(key, value)) pattern and reconstruct a JSON object.
@@ -403,8 +414,6 @@ fn values_to_fixed_size_list_f32_array(values: &[Value], size: i32) -> ArrayRef 
 }
 
 fn values_to_timestamp_array(values: &[Value], tz: Option<&Arc<str>>) -> ArrayRef {
-    use arrow_array::builder::TimestampMicrosecondBuilder;
-
     let mut builder = TimestampMicrosecondBuilder::with_capacity(values.len());
     for v in values {
         if v.is_null() {
@@ -412,21 +421,9 @@ fn values_to_timestamp_array(values: &[Value], tz: Option<&Arc<str>>) -> ArrayRe
         } else if let Some(n) = v.as_i64() {
             builder.append_value(n);
         } else if let Some(s) = v.as_str() {
-            // Try parsing string to timestamp
-            let ts = chrono::DateTime::parse_from_rfc3339(s)
-                .map(|dt| dt.with_timezone(&chrono::Utc).timestamp_micros())
-                .or_else(|_| {
-                    chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S")
-                        .map(|ndt| ndt.and_utc().timestamp_micros())
-                })
-                .or_else(|_| {
-                    chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%SZ")
-                        .map(|ndt| ndt.and_utc().timestamp_micros())
-                });
-
-            match ts {
-                Ok(micros) => builder.append_value(micros),
-                Err(_) => builder.append_null(),
+            match parse_datetime_to_micros(s) {
+                Some(micros) => builder.append_value(micros),
+                None => builder.append_null(),
             }
         } else {
             builder.append_null();
@@ -434,11 +431,8 @@ fn values_to_timestamp_array(values: &[Value], tz: Option<&Arc<str>>) -> ArrayRe
     }
 
     let arr = builder.finish();
-    if let Some(tz_str) = tz {
-        Arc::new(arr.with_timezone(tz_str.as_ref()))
-    } else {
-        Arc::new(arr.with_timezone("UTC"))
-    }
+    let tz_str = tz.map(|t| t.as_ref()).unwrap_or("UTC");
+    Arc::new(arr.with_timezone(tz_str))
 }
 
 /// Convert a slice of JSON Values to an Arrow array based on the target Arrow DataType.
@@ -578,17 +572,7 @@ impl<'a> PropertyExtractor<'a> {
             } else if let Some(v) = val.and_then(|v| v.as_i64()) {
                 Some(v)
             } else if let Some(s) = val.and_then(|v| v.as_str()) {
-                // Try parsing string to timestamp
-                match chrono::DateTime::parse_from_rfc3339(s) {
-                    Ok(dt) => Some(dt.with_timezone(&chrono::Utc).timestamp_micros()),
-                    Err(_) => {
-                        // Try naive
-                        match chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S") {
-                            Ok(ndt) => Some(ndt.and_utc().timestamp_micros()),
-                            Err(_) => None, // Invalid format
-                        }
-                    }
-                }
+                parse_datetime_to_micros(s)
             } else {
                 None
             };
@@ -599,7 +583,6 @@ impl<'a> PropertyExtractor<'a> {
                 values.push(ts);
             }
         }
-        // Create TimestampMicrosecondArray with UTC timezone
         let arr = TimestampMicrosecondArray::from(values).with_timezone("UTC");
         Ok(Arc::new(arr))
     }
