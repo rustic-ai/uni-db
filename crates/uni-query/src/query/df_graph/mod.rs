@@ -57,7 +57,7 @@ use uni_store::storage::manager::StorageManager;
 pub use ext_id_lookup::GraphExtIdLookupExec;
 pub use scan::GraphScanExec;
 pub use shortest_path::GraphShortestPathExec;
-pub use traverse::GraphTraverseExec;
+pub use traverse::{GraphTraverseExec, GraphTraverseMainExec};
 pub use unwind::GraphUnwindExec;
 pub use vector_knn::GraphVectorKnnExec;
 

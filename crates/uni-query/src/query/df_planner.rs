@@ -37,7 +37,7 @@ use crate::query::df_expr::{TranslationContext, VariableKind, cypher_expr_to_df}
 use crate::query::df_graph::traverse::GraphVariableLengthTraverseExec;
 use crate::query::df_graph::{
     GraphExecutionContext, GraphExtIdLookupExec, GraphScanExec, GraphShortestPathExec,
-    GraphTraverseExec, GraphUnwindExec, GraphVectorKnnExec, L0Context,
+    GraphTraverseExec, GraphTraverseMainExec, GraphUnwindExec, GraphVectorKnnExec, L0Context,
 };
 use crate::query::planner::{
     LogicalPlan, aggregate_column_name, classify_window_expressions, collect_properties_from_plan,
@@ -262,11 +262,45 @@ impl HybridPhysicalPlanner {
                 optional: _,
             } => self.plan_schemaless_scan(label_name, variable, filter.as_ref(), all_properties),
 
-            // ScanAll and TraverseMainByType are not yet supported in vectorized execution
-            // Fall back to row-based execution
-            LogicalPlan::ScanAll { .. } | LogicalPlan::TraverseMainByType { .. } => Err(anyhow!(
-                "ScanAll/TraverseMainByType require fallback execution"
-            )),
+            // ScanAll is now supported via schemaless scan with empty label
+            LogicalPlan::ScanAll {
+                variable,
+                filter,
+                optional: _,
+            } => self.plan_scan_all(variable, filter.as_ref(), all_properties),
+
+            // TraverseMainByType is now supported via schemaless traversal
+            LogicalPlan::TraverseMainByType {
+                type_name,
+                input,
+                direction,
+                source_variable,
+                target_variable,
+                step_variable,
+                min_hops,
+                max_hops,
+                optional,
+                target_filter: _, // Applied as FilterExec later
+                path_variable: _, // Not supported yet
+            } => {
+                // Restrict to single-hop (same as current row-based implementation)
+                if *min_hops != 1 || *max_hops != 1 {
+                    return Err(anyhow!(
+                        "TraverseMainByType variable-length paths not yet supported"
+                    ));
+                }
+
+                self.plan_traverse_main_by_type(
+                    input,
+                    type_name,
+                    direction.clone(),
+                    source_variable,
+                    target_variable,
+                    step_variable.as_deref(),
+                    *optional,
+                    all_properties,
+                )
+            }
 
             LogicalPlan::Traverse {
                 input,
@@ -559,6 +593,37 @@ impl HybridPhysicalPlanner {
         }
     }
 
+    /// Apply a node-level filter to a scan or lookup plan.
+    ///
+    /// Wraps the input plan with a `FilterExec` if `filter` is `Some`.
+    /// Builds a `TranslationContext` marking `variable` as `VariableKind::Node`
+    /// for correct expression translation.
+    fn apply_scan_filter(
+        &self,
+        plan: Arc<dyn ExecutionPlan>,
+        variable: &str,
+        filter: Option<&Expr>,
+    ) -> Result<Arc<dyn ExecutionPlan>> {
+        let Some(filter_expr) = filter else {
+            return Ok(plan);
+        };
+
+        let mut variable_kinds = HashMap::new();
+        variable_kinds.insert(variable.to_string(), VariableKind::Node);
+        let ctx = TranslationContext {
+            parameters: self.params.clone(),
+            variable_labels: HashMap::new(),
+            variable_kinds,
+        };
+        let df_filter = cypher_expr_to_df(filter_expr, Some(&ctx))?;
+        let schema = plan.schema();
+
+        let session = self.session_ctx.read();
+        let physical_filter = self.create_physical_filter_expr(&df_filter, &schema, &session)?;
+
+        Ok(Arc::new(FilterExec::try_new(physical_filter, plan)?))
+    }
+
     /// Plan an external ID lookup.
     fn plan_ext_id_lookup(
         &self,
@@ -578,38 +643,15 @@ impl HybridPhysicalPlanner {
             vec![]
         };
 
-        // Create the ext_id lookup
-        let lookup = GraphExtIdLookupExec::new(
+        let lookup_plan: Arc<dyn ExecutionPlan> = Arc::new(GraphExtIdLookupExec::new(
             self.graph_ctx.clone(),
             variable.to_string(),
             ext_id.to_string(),
             properties,
             optional,
-        );
+        ));
 
-        let lookup_plan: Arc<dyn ExecutionPlan> = Arc::new(lookup);
-
-        // Apply filter if present
-        if let Some(filter_expr) = filter {
-            // Build context with the node variable kind for this ext_id lookup
-            let mut variable_kinds = HashMap::new();
-            variable_kinds.insert(variable.to_string(), VariableKind::Node);
-            let ctx = TranslationContext {
-                parameters: self.params.clone(),
-                variable_labels: HashMap::new(),
-                variable_kinds,
-            };
-            let df_filter = cypher_expr_to_df(filter_expr, Some(&ctx))?;
-            let schema = lookup_plan.schema();
-
-            let session = self.session_ctx.read();
-            let physical_filter =
-                self.create_physical_filter_expr(&df_filter, &schema, &session)?;
-
-            Ok(Arc::new(FilterExec::try_new(physical_filter, lookup_plan)?))
-        } else {
-            Ok(lookup_plan)
-        }
+        self.apply_scan_filter(lookup_plan, variable, filter)
     }
 
     /// Plan an UNWIND operation.
@@ -676,38 +718,15 @@ impl HybridPhysicalPlanner {
         // Resolve properties collected from the entire plan tree, expanding "*" wildcards
         let properties = self.resolve_properties(variable, label_name, all_properties);
 
-        // Create the scan (filter pushdown will be done later)
-        let scan = GraphScanExec::new_vertex_scan(
+        let scan_plan: Arc<dyn ExecutionPlan> = Arc::new(GraphScanExec::new_vertex_scan(
             self.graph_ctx.clone(),
             label_name.to_string(),
             variable.to_string(),
             properties,
             None, // Filter will be applied as FilterExec on top
-        );
+        ));
 
-        let scan_plan: Arc<dyn ExecutionPlan> = Arc::new(scan);
-
-        // Apply filter if present
-        if let Some(filter_expr) = filter {
-            // Build context with the node variable kind for this scan
-            let mut variable_kinds = HashMap::new();
-            variable_kinds.insert(variable.to_string(), VariableKind::Node);
-            let ctx = TranslationContext {
-                parameters: self.params.clone(),
-                variable_labels: HashMap::new(),
-                variable_kinds,
-            };
-            let df_filter = cypher_expr_to_df(filter_expr, Some(&ctx))?;
-            let schema = scan_plan.schema();
-
-            let session = self.session_ctx.read();
-            let physical_filter =
-                self.create_physical_filter_expr(&df_filter, &schema, &session)?;
-
-            Ok(Arc::new(FilterExec::try_new(physical_filter, scan_plan)?))
-        } else {
-            Ok(scan_plan)
-        }
+        self.apply_scan_filter(scan_plan, variable, filter)
     }
 
     /// Plan a schemaless vertex scan using the main vertices table.
@@ -721,43 +740,46 @@ impl HybridPhysicalPlanner {
         filter: Option<&Expr>,
         all_properties: &HashMap<String, HashSet<String>>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
-        // Get properties for this variable (default to empty if not found)
         let properties: Vec<String> = all_properties
             .get(variable)
             .map(|s| s.iter().cloned().collect())
             .unwrap_or_default();
 
-        // Create the schemaless scan
-        let scan = GraphScanExec::new_schemaless_vertex_scan(
+        let scan_plan: Arc<dyn ExecutionPlan> =
+            Arc::new(GraphScanExec::new_schemaless_vertex_scan(
+                self.graph_ctx.clone(),
+                label_name.to_string(),
+                variable.to_string(),
+                properties,
+                None, // Filter will be applied as FilterExec on top
+            ));
+
+        self.apply_scan_filter(scan_plan, variable, filter)
+    }
+
+    /// Plan a scan of all vertices regardless of label.
+    ///
+    /// This is used for `MATCH (n)` without a label filter.
+    /// Uses the schemaless scan with an empty label to signal "scan all".
+    fn plan_scan_all(
+        &self,
+        variable: &str,
+        filter: Option<&Expr>,
+        all_properties: &HashMap<String, HashSet<String>>,
+    ) -> Result<Arc<dyn ExecutionPlan>> {
+        let properties: Vec<String> = all_properties
+            .get(variable)
+            .map(|s| s.iter().cloned().collect())
+            .unwrap_or_default();
+
+        let scan_plan: Arc<dyn ExecutionPlan> = Arc::new(GraphScanExec::new_schemaless_all_scan(
             self.graph_ctx.clone(),
-            label_name.to_string(),
             variable.to_string(),
             properties,
             None, // Filter will be applied as FilterExec on top
-        );
+        ));
 
-        let scan_plan: Arc<dyn ExecutionPlan> = Arc::new(scan);
-
-        // Apply filter if present
-        if let Some(filter_expr) = filter {
-            let mut variable_kinds = HashMap::new();
-            variable_kinds.insert(variable.to_string(), VariableKind::Node);
-            let ctx = TranslationContext {
-                parameters: self.params.clone(),
-                variable_labels: HashMap::new(),
-                variable_kinds,
-            };
-            let df_filter = cypher_expr_to_df(filter_expr, Some(&ctx))?;
-            let schema = scan_plan.schema();
-
-            let session = self.session_ctx.read();
-            let physical_filter =
-                self.create_physical_filter_expr(&df_filter, &schema, &session)?;
-
-            Ok(Arc::new(FilterExec::try_new(physical_filter, scan_plan)?))
-        } else {
-            Ok(scan_plan)
-        }
+        self.apply_scan_filter(scan_plan, variable, filter)
     }
 
     /// Plan a graph traversal.
@@ -908,6 +930,59 @@ impl HybridPhysicalPlanner {
         } else {
             Ok(traverse_plan)
         }
+    }
+
+    /// Plan a schemaless edge traversal (TraverseMainByType).
+    ///
+    /// This is used for edges without a schema-defined type that must query the main edges table.
+    #[expect(clippy::too_many_arguments)]
+    fn plan_traverse_main_by_type(
+        &self,
+        input: &LogicalPlan,
+        type_name: &str,
+        direction: AstDirection,
+        source_variable: &str,
+        target_variable: &str,
+        step_variable: Option<&str>,
+        optional: bool,
+        all_properties: &HashMap<String, HashSet<String>>,
+    ) -> Result<Arc<dyn ExecutionPlan>> {
+        let input_plan = self.plan_internal(input, all_properties)?;
+
+        let adj_direction = convert_direction(direction);
+        let source_col = format!("{}._vid", source_variable);
+
+        // Extract edge properties for schemaless edges (all treated as Utf8/JSON)
+        let edge_properties: Vec<String> = if let Some(edge_var) = step_variable {
+            all_properties
+                .get(edge_var)
+                .map(|props| props.iter().filter(|p| *p != "*").cloned().collect())
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+
+        // Extract target vertex properties
+        let target_properties: Vec<String> = all_properties
+            .get(target_variable)
+            .map(|props| props.iter().filter(|p| *p != "*").cloned().collect())
+            .unwrap_or_default();
+
+        // Create the schemaless traversal execution plan
+        let traverse_plan = Arc::new(GraphTraverseMainExec::new(
+            input_plan,
+            source_col,
+            type_name.to_string(),
+            adj_direction,
+            target_variable.to_string(),
+            step_variable.map(|s| s.to_string()),
+            edge_properties,
+            target_properties,
+            self.graph_ctx.clone(),
+            optional,
+        ));
+
+        Ok(traverse_plan)
     }
 
     /// Plan a shortest path computation.

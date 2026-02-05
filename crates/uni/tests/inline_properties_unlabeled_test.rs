@@ -33,7 +33,11 @@ async fn test_inline_property_unlabeled() -> Result<()> {
     let result = db.query("MATCH (n {name: 'bar'}) RETURN n").await?;
     println!("With inline property: {}", result.len());
 
-    assert_eq!(result.len(), 1, "Should match exactly one node with name='bar'");
+    assert_eq!(
+        result.len(),
+        1,
+        "Should match exactly one node with name='bar'"
+    );
 
     Ok(())
 }

@@ -42,7 +42,7 @@ use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSe
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties};
 use futures::{Stream, StreamExt};
 use std::any::Any;
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -76,6 +76,16 @@ fn resolve_edge_property_type(
 
 /// Expansion tuple for variable-length traversal: (input_row_idx, target_vid, hop_count, node_path, edge_path)
 type VarLengthExpansion = (usize, Vid, usize, Vec<Vid>, Vec<Eid>);
+
+/// Compute standard plan properties for a graph traversal operator.
+fn compute_plan_properties(schema: SchemaRef) -> PlanProperties {
+    PlanProperties::new(
+        EquivalenceProperties::new(schema),
+        Partitioning::UnknownPartitioning(1),
+        datafusion::physical_plan::execution_plan::EmissionType::Incremental,
+        datafusion::physical_plan::execution_plan::Boundedness::Bounded,
+    )
+}
 
 /// Single-hop graph traversal execution plan.
 ///
@@ -215,7 +225,7 @@ impl GraphTraverseExec {
             optional,
         );
 
-        let properties = Self::compute_properties(schema.clone());
+        let properties = compute_plan_properties(schema.clone());
 
         Self {
             input,
@@ -286,16 +296,6 @@ impl GraphTraverseExec {
         }
 
         Arc::new(Schema::new(fields))
-    }
-
-    /// Compute plan properties.
-    fn compute_properties(schema: SchemaRef) -> PlanProperties {
-        PlanProperties::new(
-            EquivalenceProperties::new(schema),
-            Partitioning::UnknownPartitioning(1),
-            datafusion::physical_plan::execution_plan::EmissionType::Incremental,
-            datafusion::physical_plan::execution_plan::Boundedness::Bounded,
-        )
     }
 }
 
@@ -892,6 +892,687 @@ impl RecordBatchStream for GraphTraverseStream {
     }
 }
 
+/// Adjacency map type: maps source VID to list of (target_vid, eid, properties).
+type EdgeAdjacencyMap = HashMap<Vid, Vec<(Vid, Eid, uni_common::Properties)>>;
+
+/// Graph traversal execution plan for schemaless edge types (TraverseMainByType).
+///
+/// Unlike GraphTraverseExec which uses CSR adjacency for known types, this operator
+/// queries the main edges table for schemaless types and builds an in-memory adjacency map.
+///
+/// # Example
+///
+/// ```ignore
+/// // Traverse schemaless "CUSTOM" edges
+/// let traverse = GraphTraverseMainExec::new(
+///     input_plan,
+///     "_vid",
+///     "CUSTOM",
+///     Direction::Outgoing,
+///     "m",           // target variable
+///     Some("r"),     // edge variable
+///     vec![],        // edge properties
+///     vec![],        // target properties
+///     graph_ctx,
+///     false,         // not optional
+/// );
+/// ```
+pub struct GraphTraverseMainExec {
+    /// Input execution plan.
+    input: Arc<dyn ExecutionPlan>,
+
+    /// Column name containing source VIDs.
+    source_column: String,
+
+    /// Edge type name (not ID, since schemaless types may not have IDs).
+    type_name: String,
+
+    /// Traversal direction.
+    direction: Direction,
+
+    /// Variable name for target vertex columns.
+    target_variable: String,
+
+    /// Variable name for edge columns (if edge is bound).
+    edge_variable: Option<String>,
+
+    /// Edge properties to materialize.
+    edge_properties: Vec<String>,
+
+    /// Target vertex properties to materialize.
+    target_properties: Vec<String>,
+
+    /// Graph execution context.
+    graph_ctx: Arc<GraphExecutionContext>,
+
+    /// Whether this is an OPTIONAL MATCH (preserve unmatched source rows with NULLs).
+    optional: bool,
+
+    /// Output schema.
+    schema: SchemaRef,
+
+    /// Cached plan properties.
+    properties: PlanProperties,
+
+    /// Execution metrics.
+    metrics: ExecutionPlanMetricsSet,
+}
+
+impl fmt::Debug for GraphTraverseMainExec {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("GraphTraverseMainExec")
+            .field("type_name", &self.type_name)
+            .field("direction", &self.direction)
+            .field("target_variable", &self.target_variable)
+            .field("edge_variable", &self.edge_variable)
+            .finish()
+    }
+}
+
+impl GraphTraverseMainExec {
+    /// Create a new schemaless traversal executor.
+    #[expect(clippy::too_many_arguments)]
+    pub fn new(
+        input: Arc<dyn ExecutionPlan>,
+        source_column: impl Into<String>,
+        type_name: impl Into<String>,
+        direction: Direction,
+        target_variable: impl Into<String>,
+        edge_variable: Option<String>,
+        edge_properties: Vec<String>,
+        target_properties: Vec<String>,
+        graph_ctx: Arc<GraphExecutionContext>,
+        optional: bool,
+    ) -> Self {
+        let source_column = source_column.into();
+        let type_name = type_name.into();
+        let target_variable = target_variable.into();
+
+        // Build output schema
+        let schema = Self::build_schema(
+            &input.schema(),
+            &target_variable,
+            &edge_variable,
+            &edge_properties,
+            &target_properties,
+        );
+
+        let properties = compute_plan_properties(schema.clone());
+
+        Self {
+            input,
+            source_column,
+            type_name,
+            direction,
+            target_variable,
+            edge_variable,
+            edge_properties,
+            target_properties,
+            graph_ctx,
+            optional,
+            schema,
+            properties,
+            metrics: ExecutionPlanMetricsSet::new(),
+        }
+    }
+
+    /// Build output schema for traversal.
+    fn build_schema(
+        input_schema: &SchemaRef,
+        target_variable: &str,
+        edge_variable: &Option<String>,
+        edge_properties: &[String],
+        target_properties: &[String],
+    ) -> SchemaRef {
+        let mut fields: Vec<Field> = input_schema
+            .fields()
+            .iter()
+            .map(|f| f.as_ref().clone())
+            .collect();
+
+        // Add target ._vid column
+        fields.push(Field::new(
+            format!("{}._vid", target_variable),
+            DataType::UInt64,
+            false,
+        ));
+
+        // Add edge columns if edge variable is bound
+        if let Some(edge_var) = edge_variable {
+            fields.push(Field::new(
+                format!("{}._eid", edge_var),
+                DataType::UInt64,
+                false,
+            ));
+
+            // Edge properties: all as Utf8 (JSON strings from main table)
+            for prop in edge_properties {
+                fields.push(Field::new(
+                    format!("{}.{}", edge_var, prop),
+                    DataType::Utf8,
+                    true,
+                ));
+            }
+        }
+
+        // Target properties: all as LargeBinary (deferred to PropertyManager)
+        for prop in target_properties {
+            fields.push(Field::new(
+                format!("{}.{}", target_variable, prop),
+                DataType::LargeBinary,
+                true,
+            ));
+        }
+
+        Arc::new(Schema::new(fields))
+    }
+}
+
+impl DisplayAs for GraphTraverseMainExec {
+    fn fmt_as(&self, t: DisplayFormatType, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match t {
+            DisplayFormatType::Default
+            | DisplayFormatType::Verbose
+            | DisplayFormatType::TreeRender => {
+                write!(
+                    f,
+                    "GraphTraverseMainExec: type={}, direction={:?}",
+                    self.type_name, self.direction
+                )
+            }
+        }
+    }
+}
+
+impl ExecutionPlan for GraphTraverseMainExec {
+    fn name(&self) -> &str {
+        "GraphTraverseMainExec"
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn schema(&self) -> SchemaRef {
+        self.schema.clone()
+    }
+
+    fn properties(&self) -> &PlanProperties {
+        &self.properties
+    }
+
+    fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
+        vec![&self.input]
+    }
+
+    fn with_new_children(
+        self: Arc<Self>,
+        children: Vec<Arc<dyn ExecutionPlan>>,
+    ) -> DFResult<Arc<dyn ExecutionPlan>> {
+        if children.len() != 1 {
+            return Err(datafusion::error::DataFusionError::Plan(
+                "GraphTraverseMainExec expects exactly one child".to_string(),
+            ));
+        }
+
+        Ok(Arc::new(Self {
+            input: children[0].clone(),
+            source_column: self.source_column.clone(),
+            type_name: self.type_name.clone(),
+            direction: self.direction,
+            target_variable: self.target_variable.clone(),
+            edge_variable: self.edge_variable.clone(),
+            edge_properties: self.edge_properties.clone(),
+            target_properties: self.target_properties.clone(),
+            graph_ctx: self.graph_ctx.clone(),
+            optional: self.optional,
+            schema: self.schema.clone(),
+            properties: self.properties.clone(),
+            metrics: self.metrics.clone(),
+        }))
+    }
+
+    fn execute(
+        &self,
+        partition: usize,
+        context: Arc<TaskContext>,
+    ) -> DFResult<SendableRecordBatchStream> {
+        let input_stream = self.input.execute(partition, context)?;
+        let metrics = BaselineMetrics::new(&self.metrics, partition);
+
+        Ok(Box::pin(GraphTraverseMainStream::new(
+            input_stream,
+            self.source_column.clone(),
+            self.type_name.clone(),
+            self.direction,
+            self.target_variable.clone(),
+            self.edge_variable.clone(),
+            self.edge_properties.clone(),
+            self.target_properties.clone(),
+            self.graph_ctx.clone(),
+            self.optional,
+            self.schema.clone(),
+            metrics,
+        )))
+    }
+
+    fn metrics(&self) -> Option<MetricsSet> {
+        Some(self.metrics.clone_inner())
+    }
+}
+
+/// State machine for GraphTraverseMainStream.
+enum GraphTraverseMainState {
+    /// Loading adjacency map from main edges table.
+    LoadingEdges {
+        future: Pin<Box<dyn std::future::Future<Output = DFResult<EdgeAdjacencyMap>> + Send>>,
+        input_stream: SendableRecordBatchStream,
+    },
+    /// Processing input stream with loaded adjacency.
+    Processing {
+        adjacency: EdgeAdjacencyMap,
+        input_stream: SendableRecordBatchStream,
+    },
+    /// Stream is done.
+    Done,
+}
+
+/// Stream that executes schemaless edge traversal.
+struct GraphTraverseMainStream {
+    /// Source column name.
+    source_column: String,
+
+    /// Edge type name (kept for debugging/future use).
+    #[allow(dead_code)]
+    type_name: String,
+
+    /// Traversal direction (kept for debugging/future use).
+    #[allow(dead_code)]
+    direction: Direction,
+
+    /// Target variable name (kept for debugging/future use).
+    #[allow(dead_code)]
+    target_variable: String,
+
+    /// Edge variable name.
+    edge_variable: Option<String>,
+
+    /// Edge properties to materialize.
+    edge_properties: Vec<String>,
+
+    /// Target properties to materialize.
+    target_properties: Vec<String>,
+
+    /// Graph execution context.
+    graph_ctx: Arc<GraphExecutionContext>,
+
+    /// Whether this is optional (preserve unmatched rows).
+    optional: bool,
+
+    /// Output schema.
+    schema: SchemaRef,
+
+    /// Stream state.
+    state: GraphTraverseMainState,
+
+    /// Metrics.
+    metrics: BaselineMetrics,
+}
+
+impl GraphTraverseMainStream {
+    /// Create a new traverse main stream.
+    #[expect(clippy::too_many_arguments)]
+    fn new(
+        input_stream: SendableRecordBatchStream,
+        source_column: String,
+        type_name: String,
+        direction: Direction,
+        target_variable: String,
+        edge_variable: Option<String>,
+        edge_properties: Vec<String>,
+        target_properties: Vec<String>,
+        graph_ctx: Arc<GraphExecutionContext>,
+        optional: bool,
+        schema: SchemaRef,
+        metrics: BaselineMetrics,
+    ) -> Self {
+        // Start by loading the adjacency map from the main edges table
+        let loading_ctx = graph_ctx.clone();
+        let loading_type = type_name.clone();
+        let fut = async move {
+            build_edge_adjacency_map(&loading_ctx, &loading_type, direction).await
+        };
+
+        Self {
+            source_column,
+            type_name,
+            direction,
+            target_variable,
+            edge_variable,
+            edge_properties,
+            target_properties,
+            graph_ctx,
+            optional,
+            schema,
+            state: GraphTraverseMainState::LoadingEdges {
+                future: Box::pin(fut),
+                input_stream,
+            },
+            metrics,
+        }
+    }
+
+    /// Expand input batch using adjacency map (synchronous version).
+    fn expand_batch(
+        &self,
+        input: &RecordBatch,
+        adjacency: &EdgeAdjacencyMap,
+    ) -> DFResult<RecordBatch> {
+        // Extract source VIDs from source column
+        let source_col = input.column_by_name(&self.source_column).ok_or_else(|| {
+            datafusion::error::DataFusionError::Execution(format!(
+                "Source column {} not found",
+                self.source_column
+            ))
+        })?;
+
+        let source_vids = source_col
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .ok_or_else(|| {
+                datafusion::error::DataFusionError::Execution(
+                    "Source column is not UInt64".to_string(),
+                )
+            })?;
+
+        // Build expansions: (input_row_idx, target_vid, eid, edge_props)
+        type Expansion = (usize, Vid, Eid, uni_common::Properties);
+        let mut expansions: Vec<Expansion> = Vec::new();
+
+        for (row_idx, src_u64) in source_vids.iter().enumerate() {
+            if let Some(src_u64) = src_u64 {
+                let src_vid = Vid::from(src_u64);
+
+                if let Some(neighbors) = adjacency.get(&src_vid) {
+                    for (target_vid, eid, props) in neighbors {
+                        expansions.push((row_idx, *target_vid, *eid, props.clone()));
+                    }
+                }
+            }
+        }
+
+        // Handle OPTIONAL: preserve unmatched rows
+        if expansions.is_empty() && self.optional {
+            // No matches - return input with NULL columns appended
+            let all_indices: Vec<usize> = (0..input.num_rows()).collect();
+            return build_optional_null_batch_for_rows(input, &all_indices, &self.schema);
+        }
+
+        if expansions.is_empty() {
+            // No matches, not optional - return empty batch
+            return Ok(RecordBatch::new_empty(self.schema.clone()));
+        }
+
+        // Track matched rows for OPTIONAL handling
+        let matched_rows: HashSet<usize> = if self.optional {
+            expansions.iter().map(|(idx, _, _, _)| *idx).collect()
+        } else {
+            HashSet::new()
+        };
+
+        // Expand input columns using Arrow take()
+        let mut columns: Vec<ArrayRef> = Vec::new();
+        let indices: Vec<u64> = expansions
+            .iter()
+            .map(|(idx, _, _, _)| *idx as u64)
+            .collect();
+        let indices_array = UInt64Array::from(indices);
+
+        for col in input.columns() {
+            let expanded = take(col.as_ref(), &indices_array, None)?;
+            columns.push(expanded);
+        }
+
+        // Add target ._vid column
+        let target_vids: Vec<u64> = expansions
+            .iter()
+            .map(|(_, vid, _, _)| vid.as_u64())
+            .collect();
+        columns.push(Arc::new(UInt64Array::from(target_vids)));
+
+        // Add edge columns if edge variable is bound
+        if self.edge_variable.is_some() {
+            // Add edge ._eid column
+            let eids: Vec<u64> = expansions
+                .iter()
+                .map(|(_, _, eid, _)| eid.as_u64())
+                .collect();
+            columns.push(Arc::new(UInt64Array::from(eids)));
+
+            // Add edge property columns (all as Utf8 from JSON)
+            for prop_name in &self.edge_properties {
+                let mut builder = arrow_array::builder::StringBuilder::new();
+                for (_, _, _, props) in &expansions {
+                    match props.get(prop_name) {
+                        Some(serde_json::Value::String(s)) => builder.append_value(s),
+                        Some(serde_json::Value::Null) | None => builder.append_null(),
+                        Some(other) => builder.append_value(other.to_string()),
+                    }
+                }
+                columns.push(Arc::new(builder.finish()));
+            }
+        }
+
+        // Add target property columns (stub as NULL for now - need async hydration)
+        // TODO: Implement async property hydration via PropertyManager
+        for _prop_name in &self.target_properties {
+            columns.push(arrow_array::new_null_array(
+                &DataType::LargeBinary,
+                expansions.len(),
+            ));
+        }
+
+        let matched_batch = RecordBatch::try_new(self.schema.clone(), columns)
+            .map_err(|e| datafusion::error::DataFusionError::ArrowError(Box::new(e), None))?;
+
+        // Handle OPTIONAL: append unmatched rows with NULLs
+        if self.optional {
+            let unmatched: Vec<usize> = (0..input.num_rows())
+                .filter(|idx| !matched_rows.contains(idx))
+                .collect();
+
+            if unmatched.is_empty() {
+                return Ok(matched_batch);
+            }
+
+            let unmatched_batch =
+                build_optional_null_batch_for_rows(input, &unmatched, &self.schema)?;
+
+            // Concatenate matched and unmatched batches
+            use arrow::compute::concat_batches;
+            concat_batches(&self.schema, &[matched_batch, unmatched_batch])
+                .map_err(|e| datafusion::error::DataFusionError::ArrowError(Box::new(e), None))
+        } else {
+            Ok(matched_batch)
+        }
+    }
+}
+
+/// Build adjacency map from main edges table for a given type name and direction.
+///
+/// Returns a HashMap mapping source VID -> Vec<(target_vid, eid, properties)>
+/// Direction determines the key: Outgoing uses src_vid, Incoming uses dst_vid, Both adds entries for both.
+async fn build_edge_adjacency_map(
+    graph_ctx: &GraphExecutionContext,
+    type_name: &str,
+    direction: Direction,
+) -> DFResult<EdgeAdjacencyMap> {
+    use uni_store::storage::main_edge::MainEdgeDataset;
+
+    let storage = graph_ctx.storage();
+    let l0_ctx = graph_ctx.l0_context();
+    let lancedb_store = storage.lancedb_store();
+
+    // Step 1: Query main edges table
+    let mut edges = MainEdgeDataset::find_edges_by_type_name(lancedb_store, type_name)
+        .await
+        .map_err(|e| datafusion::error::DataFusionError::Execution(e.to_string()))?;
+
+    // Step 2: Overlay L0 buffers
+    for l0 in l0_ctx.iter_l0_buffers() {
+        let l0_guard = l0.read();
+        let l0_eids = l0_guard.eids_for_type(type_name);
+
+        // For each L0 edge, extract its information
+        for &eid in &l0_eids {
+            if let Some(edge_ref) = l0_guard.graph.edge(eid) {
+                let src_vid = edge_ref.src_vid;
+                let dst_vid = edge_ref.dst_vid;
+
+                // Get properties for this edge from L0
+                let props = l0_guard
+                    .edge_properties
+                    .get(&eid)
+                    .cloned()
+                    .unwrap_or_default();
+
+                edges.push((eid, src_vid, dst_vid, props));
+            }
+        }
+    }
+
+    // Step 3: Deduplicate by EID (L0 takes precedence)
+    let mut seen_eids = HashSet::new();
+    let mut unique_edges = Vec::new();
+    for edge in edges.into_iter().rev() {
+        if seen_eids.insert(edge.0) {
+            unique_edges.push(edge);
+        }
+    }
+    unique_edges.reverse();
+
+    // Step 4: Build adjacency map based on direction
+    let mut adjacency: EdgeAdjacencyMap = HashMap::new();
+
+    for (eid, src_vid, dst_vid, props) in unique_edges {
+        match direction {
+            Direction::Outgoing => {
+                adjacency
+                    .entry(src_vid)
+                    .or_default()
+                    .push((dst_vid, eid, props));
+            }
+            Direction::Incoming => {
+                adjacency
+                    .entry(dst_vid)
+                    .or_default()
+                    .push((src_vid, eid, props));
+            }
+            Direction::Both => {
+                adjacency
+                    .entry(src_vid)
+                    .or_default()
+                    .push((dst_vid, eid, props.clone()));
+                adjacency
+                    .entry(dst_vid)
+                    .or_default()
+                    .push((src_vid, eid, props));
+            }
+        }
+    }
+
+    Ok(adjacency)
+}
+
+impl Stream for GraphTraverseMainStream {
+    type Item = DFResult<RecordBatch>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        loop {
+            let state = std::mem::replace(&mut self.state, GraphTraverseMainState::Done);
+
+            match state {
+                GraphTraverseMainState::LoadingEdges {
+                    mut future,
+                    input_stream,
+                } => match future.as_mut().poll(cx) {
+                    Poll::Ready(Ok(adjacency)) => {
+                        // Move to processing state with loaded adjacency
+                        self.state = GraphTraverseMainState::Processing {
+                            adjacency,
+                            input_stream,
+                        };
+                        // Continue loop to start processing
+                    }
+                    Poll::Ready(Err(e)) => {
+                        self.state = GraphTraverseMainState::Done;
+                        return Poll::Ready(Some(Err(e)));
+                    }
+                    Poll::Pending => {
+                        self.state = GraphTraverseMainState::LoadingEdges {
+                            future,
+                            input_stream,
+                        };
+                        return Poll::Pending;
+                    }
+                },
+                GraphTraverseMainState::Processing {
+                    adjacency,
+                    mut input_stream,
+                } => {
+                    // Check timeout
+                    if let Err(e) = self.graph_ctx.check_timeout() {
+                        return Poll::Ready(Some(Err(
+                            datafusion::error::DataFusionError::Execution(e.to_string()),
+                        )));
+                    }
+
+                    match input_stream.poll_next_unpin(cx) {
+                        Poll::Ready(Some(Ok(batch))) => {
+                            // Expand batch using adjacency map
+                            let result = self.expand_batch(&batch, &adjacency);
+
+                            self.state = GraphTraverseMainState::Processing {
+                                adjacency,
+                                input_stream,
+                            };
+
+                            if let Ok(ref r) = result {
+                                self.metrics.record_output(r.num_rows());
+                            }
+                            return Poll::Ready(Some(result));
+                        }
+                        Poll::Ready(Some(Err(e))) => {
+                            self.state = GraphTraverseMainState::Done;
+                            return Poll::Ready(Some(Err(e)));
+                        }
+                        Poll::Ready(None) => {
+                            self.state = GraphTraverseMainState::Done;
+                            return Poll::Ready(None);
+                        }
+                        Poll::Pending => {
+                            self.state = GraphTraverseMainState::Processing {
+                                adjacency,
+                                input_stream,
+                            };
+                            return Poll::Pending;
+                        }
+                    }
+                }
+                GraphTraverseMainState::Done => {
+                    return Poll::Ready(None);
+                }
+            }
+        }
+    }
+}
+
+impl RecordBatchStream for GraphTraverseMainStream {
+    fn schema(&self) -> SchemaRef {
+        self.schema.clone()
+    }
+}
+
 /// Variable-length graph traversal execution plan.
 ///
 /// Performs BFS traversal from source vertices with configurable min/max hops.
@@ -976,13 +1657,7 @@ impl GraphVariableLengthTraverseExec {
 
         // Build output schema
         let schema = Self::build_schema(input.schema(), path_variable.as_deref());
-
-        let properties = PlanProperties::new(
-            EquivalenceProperties::new(schema.clone()),
-            Partitioning::UnknownPartitioning(1),
-            datafusion::physical_plan::execution_plan::EmissionType::Incremental,
-            datafusion::physical_plan::execution_plan::Boundedness::Bounded,
-        );
+        let properties = compute_plan_properties(schema.clone());
 
         Self {
             input,
@@ -1534,5 +2209,99 @@ mod tests {
         assert_eq!(output_schema.field(1).name(), "_target_vid");
         assert_eq!(output_schema.field(2).name(), "_hop_count");
         assert_eq!(output_schema.field(3).name(), "p");
+    }
+
+    #[test]
+    fn test_traverse_main_schema_without_edge() {
+        let input_schema = Arc::new(Schema::new(vec![Field::new(
+            "a._vid",
+            DataType::UInt64,
+            false,
+        )]));
+
+        let output_schema =
+            GraphTraverseMainExec::build_schema(&input_schema, "m", &None, &[], &[]);
+
+        assert_eq!(output_schema.fields().len(), 2);
+        assert_eq!(output_schema.field(0).name(), "a._vid");
+        assert_eq!(output_schema.field(1).name(), "m._vid");
+    }
+
+    #[test]
+    fn test_traverse_main_schema_with_edge() {
+        let input_schema = Arc::new(Schema::new(vec![Field::new(
+            "a._vid",
+            DataType::UInt64,
+            false,
+        )]));
+
+        let output_schema = GraphTraverseMainExec::build_schema(
+            &input_schema,
+            "m",
+            &Some("r".to_string()),
+            &[],
+            &[],
+        );
+
+        assert_eq!(output_schema.fields().len(), 3);
+        assert_eq!(output_schema.field(0).name(), "a._vid");
+        assert_eq!(output_schema.field(1).name(), "m._vid");
+        assert_eq!(output_schema.field(2).name(), "r._eid");
+    }
+
+    #[test]
+    fn test_traverse_main_schema_with_edge_properties() {
+        let input_schema = Arc::new(Schema::new(vec![Field::new(
+            "a._vid",
+            DataType::UInt64,
+            false,
+        )]));
+
+        let edge_props = vec!["weight".to_string(), "since".to_string()];
+        let output_schema = GraphTraverseMainExec::build_schema(
+            &input_schema,
+            "m",
+            &Some("r".to_string()),
+            &edge_props,
+            &[],
+        );
+
+        // a._vid, m._vid, r._eid, r.weight, r.since
+        assert_eq!(output_schema.fields().len(), 5);
+        assert_eq!(output_schema.field(0).name(), "a._vid");
+        assert_eq!(output_schema.field(1).name(), "m._vid");
+        assert_eq!(output_schema.field(2).name(), "r._eid");
+        assert_eq!(output_schema.field(3).name(), "r.weight");
+        assert_eq!(output_schema.field(3).data_type(), &DataType::Utf8); // Schemaless properties are Utf8
+        assert_eq!(output_schema.field(4).name(), "r.since");
+        assert_eq!(output_schema.field(4).data_type(), &DataType::Utf8);
+    }
+
+    #[test]
+    fn test_traverse_main_schema_with_target_properties() {
+        let input_schema = Arc::new(Schema::new(vec![Field::new(
+            "a._vid",
+            DataType::UInt64,
+            false,
+        )]));
+
+        let target_props = vec!["name".to_string(), "age".to_string()];
+        let output_schema = GraphTraverseMainExec::build_schema(
+            &input_schema,
+            "m",
+            &Some("r".to_string()),
+            &[],
+            &target_props,
+        );
+
+        // a._vid, m._vid, r._eid, m.name, m.age
+        assert_eq!(output_schema.fields().len(), 5);
+        assert_eq!(output_schema.field(0).name(), "a._vid");
+        assert_eq!(output_schema.field(1).name(), "m._vid");
+        assert_eq!(output_schema.field(2).name(), "r._eid");
+        assert_eq!(output_schema.field(3).name(), "m.name");
+        assert_eq!(output_schema.field(3).data_type(), &DataType::LargeBinary); // Target properties are LargeBinary
+        assert_eq!(output_schema.field(4).name(), "m.age");
+        assert_eq!(output_schema.field(4).data_type(), &DataType::LargeBinary);
     }
 }

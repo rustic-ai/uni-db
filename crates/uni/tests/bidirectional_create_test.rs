@@ -11,14 +11,13 @@ async fn test_incoming_relationship_create() -> Result<()> {
     // Create schema
     db.execute("CREATE LABEL A (name STRING)").await?;
     db.execute("CREATE LABEL B (name STRING)").await?;
-    db.execute("CREATE EDGE TYPE KNOWS (since INT) FROM B TO A").await?;
+    db.execute("CREATE EDGE TYPE KNOWS (since INT) FROM B TO A")
+        .await?;
 
     // Create pattern with incoming relationship: (a)<-[:KNOWS]-(b)
     // This should create edge from b -> a
-    db.execute(
-        "CREATE (a:A {name: 'Alice'})<-[:KNOWS {since: 2020}]-(b:B {name: 'Bob'})",
-    )
-    .await?;
+    db.execute("CREATE (a:A {name: 'Alice'})<-[:KNOWS {since: 2020}]-(b:B {name: 'Bob'})")
+        .await?;
 
     // Query in outgoing direction: Bob -> Alice
     let result = db
@@ -43,7 +42,8 @@ async fn test_mixed_directions() -> Result<()> {
 
     // Create pattern with mixed directions: (a)<-[:ADMIN]-(b)-[:ADMIN]->(c)
     // Should create: b -> a and b -> c
-    db.execute("CREATE (a:A {id: 0})<-[:ADMIN]-(b:B {id: 1})-[:ADMIN]->(c:C {id: 2})").await?;
+    db.execute("CREATE (a:A {id: 0})<-[:ADMIN]-(b:B {id: 1})-[:ADMIN]->(c:C {id: 2})")
+        .await?;
 
     // Verify both edges exist
     let result = db
@@ -70,10 +70,14 @@ async fn test_incoming_with_properties() -> Result<()> {
 
     // Create schema
     db.execute("CREATE LABEL Person (name STRING)").await?;
-    db.execute("CREATE EDGE TYPE FOLLOWS (since INT) FROM Person TO Person").await?;
+    db.execute("CREATE EDGE TYPE FOLLOWS (since INT) FROM Person TO Person")
+        .await?;
 
     // Create incoming relationship with properties
-    db.execute("CREATE (:Person {name: 'Alice'})<-[:FOLLOWS {since: 2021}]-(:Person {name: 'Bob'})").await?;
+    db.execute(
+        "CREATE (:Person {name: 'Alice'})<-[:FOLLOWS {since: 2021}]-(:Person {name: 'Bob'})",
+    )
+    .await?;
 
     // Query to verify edge direction and properties
     let result = db

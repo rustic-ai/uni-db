@@ -1664,9 +1664,9 @@ impl Executor {
                             .evaluate_expr(&args[1], row, prop_manager, params, ctx)
                             .await?;
 
-                        let label_to_check = label_val
-                            .as_str()
-                            .ok_or_else(|| anyhow!("Second argument to hasLabel must be a string"))?;
+                        let label_to_check = label_val.as_str().ok_or_else(|| {
+                            anyhow!("Second argument to hasLabel must be a string")
+                        })?;
 
                         let has_label = match &node_val {
                             Value::Object(map) => {
