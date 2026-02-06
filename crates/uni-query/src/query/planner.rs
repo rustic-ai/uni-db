@@ -496,7 +496,19 @@ fn validate_expression(expr: &Expr, vars_in_scope: &[VariableInfo]) -> Result<()
         | Expr::IsUnique(e) => {
             validate_expression(e, vars_in_scope)?;
         }
-        Expr::Property(base, _) => {
+        Expr::Property(base, prop) => {
+            // Check if the base is a path variable - paths don't have properties
+            if let Expr::Variable(var_name) = base.as_ref() {
+                if let Some(var_info) = find_var_in_scope(vars_in_scope, var_name) {
+                    if var_info.var_type == VariableType::Path {
+                        return Err(anyhow!(
+                            "SyntaxError: InvalidArgumentType - Type mismatch: expected Node or Relationship but was Path for property access '{}.{}'",
+                            var_name,
+                            prop
+                        ));
+                    }
+                }
+            }
             validate_expression(base, vars_in_scope)?;
         }
         Expr::List(items) => {
@@ -593,6 +605,10 @@ pub enum LogicalPlan {
         target_filter: Option<Expr>,
         path_variable: Option<String>,
         edge_properties: std::collections::HashSet<String>,
+        /// All variables from this OPTIONAL MATCH pattern.
+        /// When any hop in the pattern fails, ALL these variables should be set to NULL.
+        /// This ensures proper multi-hop OPTIONAL MATCH semantics.
+        optional_pattern_vars: std::collections::HashSet<String>,
     },
     /// Traverse main edges table filtering by type name (MATCH (a)-[:Unknown]->(b)).
     /// Used for edge types not defined in schema (schemaless support).
@@ -608,10 +624,17 @@ pub enum LogicalPlan {
         optional: bool,
         target_filter: Option<Expr>,
         path_variable: Option<String>,
+        /// All variables from this OPTIONAL MATCH pattern.
+        /// When any hop in the pattern fails, ALL these variables should be set to NULL.
+        optional_pattern_vars: std::collections::HashSet<String>,
     },
     Filter {
         input: Box<LogicalPlan>,
         predicate: Expr,
+        /// Variables from OPTIONAL MATCH that should preserve NULL rows.
+        /// When evaluating the filter, if any of these variables are NULL,
+        /// the row is preserved regardless of the predicate result.
+        optional_variables: std::collections::HashSet<String>,
     },
     Create {
         input: Box<LogicalPlan>,
@@ -1051,6 +1074,9 @@ struct TraverseParams<'a> {
     _source_part: &'a PatternElement,
     optional: bool,
     path_variable: Option<String>,
+    /// All variables from this OPTIONAL MATCH pattern.
+    /// Used to ensure multi-hop patterns correctly NULL all vars when any hop fails.
+    optional_pattern_vars: std::collections::HashSet<String>,
 }
 
 impl QueryPlanner {
@@ -2078,6 +2104,9 @@ impl QueryPlanner {
             return Err(anyhow!("Empty pattern"));
         }
 
+        // Track variables introduced by this OPTIONAL MATCH
+        let vars_before_pattern = vars_in_scope.len();
+
         for path in &match_clause.pattern.paths {
             if let Some(mode) = &path.shortest_path_mode {
                 plan = self.plan_shortest_path(path, plan, vars_in_scope, mode)?;
@@ -2086,9 +2115,19 @@ impl QueryPlanner {
             }
         }
 
+        // Collect variables introduced by this OPTIONAL MATCH pattern
+        let optional_vars: std::collections::HashSet<String> = if match_clause.optional {
+            vars_in_scope[vars_before_pattern..]
+                .iter()
+                .map(|v| v.name.clone())
+                .collect()
+        } else {
+            std::collections::HashSet::new()
+        };
+
         // Handle WHERE clause with vector_similarity and predicate pushdown
         if let Some(predicate) = &match_clause.where_clause {
-            plan = self.plan_where_clause(predicate, plan, vars_in_scope)?;
+            plan = self.plan_where_clause(predicate, plan, vars_in_scope, optional_vars)?;
         }
 
         Ok(plan)
@@ -2154,6 +2193,7 @@ impl QueryPlanner {
             plan = LogicalPlan::Filter {
                 input: Box::new(plan),
                 predicate: prop_filter,
+                optional_variables: std::collections::HashSet::new(),
             };
         }
 
@@ -2192,28 +2232,28 @@ impl QueryPlanner {
                 plan = LogicalPlan::Filter {
                     input: Box::new(plan),
                     predicate: prop_filter,
+                    optional_variables: std::collections::HashSet::new(),
                 };
             }
             0 // Wildcard for already-bound target
         };
 
         // Add ShortestPath operator
-        let mut edge_type_ids = Vec::new();
-        if rel.types.is_empty() {
-            // If no type specified, fetch all edge types
-            for meta in self.schema.edge_types.values() {
-                edge_type_ids.push(meta.id);
-            }
+        let edge_type_ids = if rel.types.is_empty() {
+            // If no type specified, fetch all edge types (both schema and schemaless)
+            self.schema.all_edge_type_ids()
         } else {
+            let mut ids = Vec::new();
             for type_name in &rel.types {
                 let edge_meta = self
                     .schema
                     .edge_types
                     .get(type_name)
                     .ok_or_else(|| anyhow!("Edge type {} not found", type_name))?;
-                edge_type_ids.push(edge_meta.id);
+                ids.push(edge_meta.id);
             }
-        }
+            ids
+        };
 
         // Extract hop constraints from relationship pattern
         let min_hops = rel.range.as_ref().and_then(|r| r.min).unwrap_or(1);
@@ -2270,13 +2310,7 @@ impl QueryPlanner {
         let elements = &path.elements;
         let mut i = 0;
 
-        // Count relationships to validate path variable usage
-        let rel_count = elements
-            .iter()
-            .filter(|p| matches!(p, PatternElement::Relationship(_)))
-            .count();
-
-        let mut path_variable = path.variable.clone();
+        let path_variable = path.variable.clone();
 
         // Check for VariableAlreadyBound: path variable already in scope
         if let Some(pv) = &path_variable
@@ -2320,12 +2354,62 @@ impl QueryPlanner {
             }
         }
 
-        if path_variable.is_some() && rel_count > 1 {
-            return Err(anyhow!(
-                "Named path variables not yet supported for multi-hop patterns (e.g. (a)-[]->(b)-[]->(c))"
-            ));
-        }
+        // For OPTIONAL MATCH, extract all variables from this pattern upfront.
+        // When any hop fails in a multi-hop pattern, ALL these variables should be NULL.
+        let optional_pattern_vars: std::collections::HashSet<String> = if optional {
+            let mut vars = std::collections::HashSet::new();
+            for element in elements {
+                match element {
+                    PatternElement::Node(n) => {
+                        if let Some(v) = &n.variable {
+                            if !v.is_empty() && !is_var_in_scope(vars_in_scope, v) {
+                                vars.insert(v.clone());
+                            }
+                        }
+                    }
+                    PatternElement::Relationship(r) => {
+                        if let Some(v) = &r.variable {
+                            if !v.is_empty() {
+                                vars.insert(v.clone());
+                            }
+                        }
+                    }
+                    PatternElement::Parenthesized { pattern, .. } => {
+                        // Also check nested patterns
+                        for nested_elem in &pattern.elements {
+                            match nested_elem {
+                                PatternElement::Node(n) => {
+                                    if let Some(v) = &n.variable {
+                                        if !v.is_empty() && !is_var_in_scope(vars_in_scope, v) {
+                                            vars.insert(v.clone());
+                                        }
+                                    }
+                                }
+                                PatternElement::Relationship(r) => {
+                                    if let Some(v) = &r.variable {
+                                        if !v.is_empty() {
+                                            vars.insert(v.clone());
+                                        }
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+            }
+            // Include path variable if present
+            if let Some(pv) = &path_variable {
+                if !pv.is_empty() {
+                    vars.insert(pv.clone());
+                }
+            }
+            vars
+        } else {
+            std::collections::HashSet::new()
+        };
 
+        // Multi-hop path variables are now supported - path is accumulated across hops
         while i < elements.len() {
             let element = &elements[i];
             match element {
@@ -2353,6 +2437,7 @@ impl QueryPlanner {
                             plan = LogicalPlan::Filter {
                                 input: Box::new(plan),
                                 predicate: prop_filter,
+                                optional_variables: std::collections::HashSet::new(),
                             };
                         }
                     } else {
@@ -2379,7 +2464,8 @@ impl QueryPlanner {
                                             target_node: n_target,
                                             _source_part: element,
                                             optional,
-                                            path_variable: path_variable.take(),
+                                            path_variable: path_variable.clone(),
+                                            optional_pattern_vars: optional_pattern_vars.clone(),
                                         },
                                         &current_source_var,
                                     )?;
@@ -2451,6 +2537,7 @@ impl QueryPlanner {
                             plan = LogicalPlan::Filter {
                                 input: Box::new(plan),
                                 predicate: prop_filter,
+                                optional_variables: std::collections::HashSet::new(),
                             };
                         }
                     } else {
@@ -2469,7 +2556,8 @@ impl QueryPlanner {
                             target_node,
                             _source_part: element,
                             optional,
-                            path_variable: path_variable.take(),
+                            path_variable: path_variable.clone(),
+                            optional_pattern_vars: optional_pattern_vars.clone(),
                         },
                         &source_variable,
                     )?;
@@ -2496,9 +2584,10 @@ impl QueryPlanner {
         let mut unknown_types = Vec::new();
 
         if params.rel.types.is_empty() {
-            // All types - use known schema types
+            // All types - include both schema and schemaless edge types
+            // This ensures MATCH (a)-[r]->(b) finds edges even when no schema is defined
+            edge_type_ids = self.schema.all_edge_type_ids();
             for meta in self.schema.edge_types.values() {
-                edge_type_ids.push(meta.id);
                 dst_labels.extend(meta.dst_labels.iter().cloned());
             }
         } else {
@@ -2585,7 +2674,7 @@ impl QueryPlanner {
                 (params.rel.variable.clone(), params.path_variable.clone())
             };
 
-            let plan = LogicalPlan::TraverseMainByType {
+            let mut plan = LogicalPlan::TraverseMainByType {
                 type_name: unknown_types.into_iter().next().unwrap(),
                 input: Box::new(plan),
                 direction: params.rel.direction.clone(),
@@ -2595,10 +2684,24 @@ impl QueryPlanner {
                 min_hops,
                 max_hops,
                 optional: params.optional,
-                target_filter: self
-                    .properties_to_expr(&target_variable, &params.target_node.properties),
+                target_filter: self.node_filter_expr(
+                    &target_variable,
+                    &params.target_node.labels,
+                    &params.target_node.properties,
+                ),
                 path_variable: path_var.clone(),
+                optional_pattern_vars: params.optional_pattern_vars.clone(),
             };
+
+            // Only apply bound target filter for Imported variables (from outer scope/subquery).
+            // For regular cycle patterns like (a)-[:T]->(b)-[:T]->(a), the bound check
+            // uses Parameter which requires the value to be in params (subquery context).
+            if _target_is_bound
+                && let Some(info) = find_var_in_scope(vars_in_scope, &target_variable)
+                && info.var_type == VariableType::Imported
+            {
+                plan = Self::wrap_with_bound_target_filter(plan, &target_variable);
+            }
 
             // Add the bound variables to scope
             if let Some(sv) = &step_var {
@@ -2639,13 +2742,11 @@ impl QueryPlanner {
             if unique_dsts.len() == 1 {
                 let label_name = &unique_dsts[0];
                 self.schema.get_label_case_insensitive(label_name)
-            } else if unique_dsts.is_empty() {
-                // No destination labels inferred - allow any target
-                None
             } else {
-                return Err(anyhow!(
-                    "Target node must have label (inference ambiguous or not supported for multiple dst labels)"
-                ));
+                // Multiple or no destination labels inferred - allow any target
+                // This supports patterns like MATCH (a)-[:EDGE_TYPE]-(b) WHERE b:Label
+                // where the edge type can connect to multiple labels
+                None
             }
         } else {
             None
@@ -2668,7 +2769,7 @@ impl QueryPlanner {
             (params.rel.variable.clone(), params.path_variable.clone())
         };
 
-        let plan = LogicalPlan::Traverse {
+        let mut plan = LogicalPlan::Traverse {
             input: Box::new(plan),
             edge_type_ids,
             direction: params.rel.direction.clone(),
@@ -2683,7 +2784,18 @@ impl QueryPlanner {
                 .properties_to_expr(&target_variable, &params.target_node.properties),
             path_variable: path_var.clone(),
             edge_properties: std::collections::HashSet::new(),
+            optional_pattern_vars: params.optional_pattern_vars.clone(),
         };
+
+        // Only apply bound target filter for Imported variables (from outer scope/subquery).
+        // For regular cycle patterns like (a)-[:T]->(b)-[:T]->(a), the bound check
+        // uses Parameter which requires the value to be in params (subquery context).
+        if _target_is_bound
+            && let Some(info) = find_var_in_scope(vars_in_scope, &target_variable)
+            && info.var_type == VariableType::Imported
+        {
+            plan = Self::wrap_with_bound_target_filter(plan, &target_variable);
+        }
 
         // Add the bound variables to scope
         if let Some(sv) = &step_var {
@@ -2839,11 +2951,15 @@ impl QueryPlanner {
     }
 
     /// Plan a WHERE clause with vector_similarity extraction and predicate pushdown.
+    ///
+    /// When `optional_vars` is non-empty, the Filter will preserve rows where
+    /// any of those variables are NULL (for OPTIONAL MATCH semantics).
     fn plan_where_clause(
         &self,
         predicate: &Expr,
         plan: LogicalPlan,
         vars_in_scope: &[VariableInfo],
+        optional_vars: std::collections::HashSet<String>,
     ) -> Result<LogicalPlan> {
         // Validate no aggregation functions in WHERE clause
         validate_no_aggregation_in_where(predicate)?;
@@ -2917,7 +3033,15 @@ impl QueryPlanner {
         }
 
         // 3. Push eligible predicates to Scan OR Traverse filters
+        // Note: Do NOT push predicates on optional variables (from OPTIONAL MATCH) to
+        // Traverse's target_filter, because target_filter filtering doesn't preserve NULL
+        // rows. Let them stay in the Filter operator which handles NULL preservation.
         for var in vars_in_scope {
+            // Skip pushdown for optional variables - they need NULL preservation in Filter
+            if optional_vars.contains(&var.name) {
+                continue;
+            }
+
             // Check if var is produced by a Scan
             if Self::find_scan_label_id(&plan, &var.name).is_some() {
                 let (pushable, residual) =
@@ -2958,6 +3082,7 @@ impl QueryPlanner {
             plan = LogicalPlan::Filter {
                 input: Box::new(plan),
                 predicate: current_predicate,
+                optional_variables: optional_vars,
             };
         }
 
@@ -3252,6 +3377,7 @@ impl QueryPlanner {
                 target_filter,
                 path_variable,
                 edge_properties,
+                optional_pattern_vars,
             } => {
                 if target_variable == variable {
                     // Found the traverse producing this variable
@@ -3277,6 +3403,7 @@ impl QueryPlanner {
                         target_filter: new_filter,
                         path_variable,
                         edge_properties,
+                        optional_pattern_vars,
                     }
                 } else {
                     // Recurse into input
@@ -3296,17 +3423,20 @@ impl QueryPlanner {
                         target_filter,
                         path_variable,
                         edge_properties,
+                        optional_pattern_vars,
                     }
                 }
             }
             LogicalPlan::Filter {
                 input,
                 predicate: p,
+                optional_variables: opt_vars,
             } => LogicalPlan::Filter {
                 input: Box::new(Self::push_predicate_to_traverse(
                     *input, variable, predicate,
                 )),
                 predicate: p,
+                optional_variables: opt_vars,
             },
             LogicalPlan::Project { input, projections } => LogicalPlan::Project {
                 input: Box::new(Self::push_predicate_to_traverse(
@@ -3477,6 +3607,7 @@ impl QueryPlanner {
             plan = LogicalPlan::Filter {
                 input: Box::new(plan),
                 predicate: predicate.clone(),
+                optional_variables: std::collections::HashSet::new(),
             };
         }
 
@@ -3556,6 +3687,78 @@ impl QueryPlanner {
         final_expr
     }
 
+    /// Build a filter expression from node properties and labels.
+    ///
+    /// This is used for TraverseMainByType where we need to filter target nodes
+    /// by both labels and properties. Label checks use hasLabel(variable, 'label').
+    pub fn node_filter_expr(
+        &self,
+        variable: &str,
+        labels: &[String],
+        properties: &Option<Expr>,
+    ) -> Option<Expr> {
+        let mut final_expr = None;
+
+        // Add label checks using hasLabel(variable, 'label')
+        for label in labels {
+            let label_check = Expr::FunctionCall {
+                name: "hasLabel".to_string(),
+                args: vec![
+                    Expr::Variable(variable.to_string()),
+                    Expr::Literal(CypherLiteral::String(label.clone())),
+                ],
+                distinct: false,
+                window_spec: None,
+            };
+
+            final_expr = match final_expr {
+                Some(e) => Some(Expr::BinaryOp {
+                    left: Box::new(e),
+                    op: BinaryOp::And,
+                    right: Box::new(label_check),
+                }),
+                None => Some(label_check),
+            };
+        }
+
+        // Add property checks
+        if let Some(prop_expr) = self.properties_to_expr(variable, properties) {
+            final_expr = match final_expr {
+                Some(e) => Some(Expr::BinaryOp {
+                    left: Box::new(e),
+                    op: BinaryOp::And,
+                    right: Box::new(prop_expr),
+                }),
+                None => Some(prop_expr),
+            };
+        }
+
+        final_expr
+    }
+
+    /// Create a filter plan that ensures traversed target matches a bound variable.
+    ///
+    /// Used in EXISTS subquery patterns where the target is already bound.
+    /// Compares the target's VID against the parameter value.
+    fn wrap_with_bound_target_filter(plan: LogicalPlan, target_variable: &str) -> LogicalPlan {
+        let bound_check = Expr::BinaryOp {
+            left: Box::new(Expr::Property(
+                Box::new(Expr::Variable(target_variable.to_string())),
+                "_vid".to_string(),
+            )),
+            op: BinaryOp::Eq,
+            right: Box::new(Expr::Property(
+                Box::new(Expr::Parameter(target_variable.to_string())),
+                "_vid".to_string(),
+            )),
+        };
+        LogicalPlan::Filter {
+            input: Box::new(plan),
+            predicate: bound_check,
+            optional_variables: std::collections::HashSet::new(),
+        }
+    }
+
     /// Replace a Scan node matching the variable with a VectorKnn node
     fn replace_scan_with_knn(
         plan: LogicalPlan,
@@ -3593,6 +3796,7 @@ impl QueryPlanner {
                         LogicalPlan::Filter {
                             input: Box::new(knn),
                             predicate: f,
+                            optional_variables: std::collections::HashSet::new(),
                         }
                     } else {
                         knn
@@ -3607,11 +3811,16 @@ impl QueryPlanner {
                     }
                 }
             }
-            LogicalPlan::Filter { input, predicate } => LogicalPlan::Filter {
+            LogicalPlan::Filter {
+                input,
+                predicate,
+                optional_variables,
+            } => LogicalPlan::Filter {
                 input: Box::new(Self::replace_scan_with_knn(
                     *input, variable, property, query, threshold,
                 )),
                 predicate,
+                optional_variables,
             },
             LogicalPlan::Project { input, projections } => LogicalPlan::Project {
                 input: Box::new(Self::replace_scan_with_knn(
@@ -3691,11 +3900,16 @@ impl QueryPlanner {
                 )),
                 projections,
             },
-            LogicalPlan::Filter { input, predicate } => LogicalPlan::Filter {
+            LogicalPlan::Filter {
+                input,
+                predicate,
+                optional_variables,
+            } => LogicalPlan::Filter {
                 input: Box::new(Self::replace_scan_with_inverted_lookup(
                     *input, variable, label_id, property, terms,
                 )),
                 predicate,
+                optional_variables,
             },
             LogicalPlan::CrossJoin { left, right } => LogicalPlan::CrossJoin {
                 left: Box::new(Self::replace_scan_with_inverted_lookup(
@@ -3743,9 +3957,11 @@ impl QueryPlanner {
             LogicalPlan::Filter {
                 input,
                 predicate: p,
+                optional_variables: opt_vars,
             } => LogicalPlan::Filter {
                 input: Box::new(Self::push_predicate_to_scan(*input, variable, predicate)),
                 predicate: p,
+                optional_variables: opt_vars,
             },
             LogicalPlan::Project { input, projections } => LogicalPlan::Project {
                 input: Box::new(Self::push_predicate_to_scan(*input, variable, predicate)),
@@ -3779,6 +3995,7 @@ impl QueryPlanner {
                 target_filter,
                 path_variable,
                 edge_properties,
+                optional_pattern_vars,
             } => LogicalPlan::Traverse {
                 input: Box::new(Self::push_predicate_to_scan(*input, variable, predicate)),
                 edge_type_ids,
@@ -3793,6 +4010,7 @@ impl QueryPlanner {
                 target_filter,
                 path_variable,
                 edge_properties,
+                optional_pattern_vars,
             },
             other => other,
         }
@@ -4104,9 +4322,14 @@ impl QueryPlanner {
                 }
             }
             // Recurse into other plan nodes
-            LogicalPlan::Filter { input, predicate } => LogicalPlan::Filter {
+            LogicalPlan::Filter {
+                input,
+                predicate,
+                optional_variables,
+            } => LogicalPlan::Filter {
                 input: Box::new(Self::push_predicates_to_apply(*input, current_predicate)),
                 predicate,
+                optional_variables,
             },
             LogicalPlan::Project { input, projections } => LogicalPlan::Project {
                 input: Box::new(Self::push_predicates_to_apply(*input, current_predicate)),
@@ -4148,6 +4371,7 @@ impl QueryPlanner {
                 target_filter,
                 path_variable,
                 edge_properties,
+                optional_pattern_vars,
             } => LogicalPlan::Traverse {
                 input: Box::new(Self::push_predicates_to_apply(*input, current_predicate)),
                 edge_type_ids,
@@ -4162,6 +4386,7 @@ impl QueryPlanner {
                 target_filter,
                 path_variable,
                 edge_properties,
+                optional_pattern_vars,
             },
             other => other,
         }
@@ -4327,7 +4552,9 @@ impl QueryPlanner {
         suggestions: &mut Vec<IndexSuggestion>,
     ) {
         match plan {
-            LogicalPlan::Filter { input, predicate } => {
+            LogicalPlan::Filter {
+                input, predicate, ..
+            } => {
                 // Check for temporal patterns in the predicate
                 self.detect_temporal_pattern(predicate, suggestions);
                 // Recurse into input
@@ -4766,7 +4993,9 @@ fn collect_properties_recursive(
             }
             collect_properties_recursive(input, properties);
         }
-        LogicalPlan::Filter { input, predicate } => {
+        LogicalPlan::Filter {
+            input, predicate, ..
+        } => {
             collect_properties_from_expr_into(predicate, properties);
             collect_properties_recursive(input, properties);
         }

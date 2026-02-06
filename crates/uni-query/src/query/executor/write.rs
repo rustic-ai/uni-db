@@ -1770,6 +1770,7 @@ impl Executor {
                                         target_filter: None,
                                         path_variable: None,
                                         edge_properties: std::collections::HashSet::new(),
+                                        optional_pattern_vars: std::collections::HashSet::new(),
                                     };
 
                                     // Apply property filters for relationship
@@ -1781,6 +1782,7 @@ impl Executor {
                                         plan = LogicalPlan::Filter {
                                             input: Box::new(plan),
                                             predicate: prop_filter,
+                                            optional_variables: std::collections::HashSet::new(),
                                         };
                                     }
 
@@ -1793,6 +1795,8 @@ impl Executor {
                                             plan = LogicalPlan::Filter {
                                                 input: Box::new(plan),
                                                 predicate: prop_filter,
+                                                optional_variables: std::collections::HashSet::new(
+                                                ),
                                             };
                                         }
                                         vars_in_scope.push(target_variable.clone());

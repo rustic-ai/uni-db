@@ -357,13 +357,14 @@ impl AdjacencyManager {
     ) -> anyhow::Result<()> {
         let schema = storage.schema_manager().schema();
 
+        // Use unified lookup to support both schema'd and schemaless edge types
         let edge_type_name = schema
-            .edge_type_name_by_id(edge_type_id)
+            .edge_type_name_by_id_unified(edge_type_id)
             .ok_or_else(|| anyhow::anyhow!("Edge type {} not found", edge_type_id))?;
 
         // Determine which labels to load adjacency for based on edge type metadata
         let labels_to_load: Vec<String> = {
-            let edge_meta = schema.edge_types.get(edge_type_name);
+            let edge_meta = schema.edge_types.get(&edge_type_name);
             match (direction, edge_meta) {
                 (Direction::Outgoing, Some(meta)) => meta.src_labels.clone(),
                 (Direction::Incoming, Some(meta)) => meta.dst_labels.clone(),
@@ -389,7 +390,7 @@ impl AdjacencyManager {
             let dir_str = read_dir.as_str();
             for label_name in &labels_to_load {
                 // 1. Read L2 (Adjacency Dataset)
-                let adj_ds = storage.adjacency_dataset(edge_type_name, label_name, dir_str);
+                let adj_ds = storage.adjacency_dataset(&edge_type_name, label_name, dir_str);
                 let lancedb_store = storage.lancedb_store();
 
                 if let Ok(adj_ds) = adj_ds
@@ -453,7 +454,7 @@ impl AdjacencyManager {
             }
 
             // 2. Read L1 (Delta)
-            let delta_ds = storage.delta_dataset(edge_type_name, dir_str)?;
+            let delta_ds = storage.delta_dataset(&edge_type_name, dir_str)?;
             let lancedb_store = storage.lancedb_store();
 
             if let Ok(table) = delta_ds.open_lancedb(lancedb_store).await {

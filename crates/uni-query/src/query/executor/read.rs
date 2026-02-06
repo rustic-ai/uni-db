@@ -50,7 +50,7 @@ use super::core::*;
 /// (indicating pushdown didn't load properties), we load all properties here.
 ///
 /// System field counts:
-/// - Edge: 4 fields (_eid, _src, _dst, _type)
+/// - Edge: 5 fields (_eid, _src, _dst, _type, _type_name)
 /// - Vertex: 3 fields (_vid, _label, _uid)
 async fn hydrate_entity_if_needed(
     map: &mut serde_json::Map<String, Value>,
@@ -59,7 +59,8 @@ async fn hydrate_entity_if_needed(
 ) {
     // Check for edge entity
     if let Some(eid_u64) = map.get("_eid").and_then(|v| v.as_u64()) {
-        if map.len() <= 4 {
+        // Edge system fields: _eid, _src, _dst, _type, _type_name (5 fields)
+        if map.len() <= 5 {
             tracing::debug!(
                 "Pushdown fallback: hydrating edge {} at execution time",
                 eid_u64
@@ -76,7 +77,7 @@ async fn hydrate_entity_if_needed(
             tracing::trace!(
                 "Pushdown success: edge {} already has {} properties",
                 eid_u64,
-                map.len() - 4
+                map.len() - 5
             );
         }
         return;
@@ -1209,25 +1210,28 @@ impl Executor {
                     Ok(Value::Object(map))
                 }
                 Expr::Exists(query) => {
-                    // Create planner and plan the subquery with current scope
+                    // Plan and execute subquery; failures return false (pattern doesn't match)
                     let planner =
                         QueryPlanner::new(Arc::new(this.storage.schema_manager().schema().clone()));
-
                     let vars_in_scope: Vec<String> = row.keys().cloned().collect();
 
-                    // We need to handle any error from planning/execution and turn into Result<Value>
                     match planner.plan_with_scope(*query.clone(), vars_in_scope) {
                         Ok(plan) => {
-                            // Merge row into params
                             let mut sub_params = params.clone();
                             sub_params.extend(row.clone());
 
                             match this.execute(plan, prop_manager, &sub_params).await {
                                 Ok(results) => Ok(Value::Bool(!results.is_empty())),
-                                Err(e) => Err(anyhow!("Subquery execution failed: {}", e)),
+                                Err(e) => {
+                                    log::debug!("EXISTS subquery execution failed: {}", e);
+                                    Ok(Value::Bool(false))
+                                }
                             }
                         }
-                        Err(e) => Err(anyhow!("Subquery planning failed: {}", e)),
+                        Err(e) => {
+                            log::debug!("EXISTS subquery planning failed: {}", e);
+                            Ok(Value::Bool(false))
+                        }
                     }
                 }
                 Expr::CountSubquery(query) => {
@@ -1674,6 +1678,19 @@ impl Executor {
                         })?;
 
                         let has_label = match &node_val {
+                            // Handle proper Value::Node type (from result normalization)
+                            Value::Object(map) if map.contains_key("_vid") => {
+                                if let Some(Value::String(label_str)) = map.get("_label") {
+                                    label_str == label_to_check
+                                } else if let Some(Value::Array(labels_arr)) = map.get("_labels") {
+                                    labels_arr
+                                        .iter()
+                                        .any(|l| l.as_str() == Some(label_to_check))
+                                } else {
+                                    false
+                                }
+                            }
+                            // Also handle legacy Object format
                             Value::Object(map) => {
                                 if let Some(Value::Array(labels_arr)) = map.get("_labels") {
                                     labels_arr
@@ -1930,7 +1947,12 @@ impl Executor {
                                 }
                             }
                             MapProjectionItem::AllProperties => {
-                                result_map.extend(properties.clone());
+                                // Include all properties except internal fields (those starting with _)
+                                for (key, value) in properties.iter() {
+                                    if !key.starts_with('_') {
+                                        result_map.insert(key.clone(), value.clone());
+                                    }
+                                }
                             }
                             MapProjectionItem::LiteralEntry(key, expr) => {
                                 let value = this
@@ -2373,6 +2395,7 @@ impl Executor {
                     optional,
                     target_filter,
                     path_variable,
+                    optional_pattern_vars,
                     ..
                 } => {
                     let input_matches = self
@@ -2391,20 +2414,33 @@ impl Executor {
                             max_hops,
                             optional,
                             &path_variable,
+                            &optional_pattern_vars,
                             prop_manager,
                             ctx,
                         )
                         .await?;
 
                     // Apply target_filter if present
+                    // For OPTIONAL MATCH, preserve rows where target is NULL (no match found)
                     if let Some(filter) = target_filter {
                         let mut filtered = Vec::new();
                         for row in traverse_results {
-                            let res = self
-                                .evaluate_expr(&filter, &row, prop_manager, params, ctx)
-                                .await?;
-                            if res.as_bool().unwrap_or(false) {
+                            // If this is optional and target is NULL, preserve the row
+                            // (indicates OPTIONAL MATCH didn't find any edges)
+                            let target_is_null = row
+                                .get(&target_variable)
+                                .map(|v| matches!(v, Value::Null))
+                                .unwrap_or(false);
+
+                            if optional && target_is_null {
                                 filtered.push(row);
+                            } else {
+                                let res = self
+                                    .evaluate_expr(&filter, &row, prop_manager, params, ctx)
+                                    .await?;
+                                if res.as_bool().unwrap_or(false) {
+                                    filtered.push(row);
+                                }
                             }
                         }
                         Ok(filtered)
@@ -2424,6 +2460,7 @@ impl Executor {
                     optional,
                     target_filter,
                     path_variable,
+                    optional_pattern_vars,
                 } => {
                     let input_matches = self
                         .execute_subplan(*input, prop_manager, params, ctx)
@@ -2440,20 +2477,33 @@ impl Executor {
                             max_hops,
                             optional,
                             &path_variable,
+                            &optional_pattern_vars,
                             prop_manager,
                             ctx,
                         )
                         .await?;
 
                     // Apply target_filter if present
+                    // For OPTIONAL MATCH, preserve rows where target is NULL (no match found)
                     if let Some(filter) = target_filter {
                         let mut filtered = Vec::new();
                         for row in traverse_results {
-                            let res = self
-                                .evaluate_expr(&filter, &row, prop_manager, params, ctx)
-                                .await?;
-                            if res.as_bool().unwrap_or(false) {
+                            // If this is optional and target is NULL, preserve the row
+                            // (indicates OPTIONAL MATCH didn't find any edges)
+                            let target_is_null = row
+                                .get(&target_variable)
+                                .map(|v| matches!(v, Value::Null))
+                                .unwrap_or(false);
+
+                            if optional && target_is_null {
                                 filtered.push(row);
+                            } else {
+                                let res = self
+                                    .evaluate_expr(&filter, &row, prop_manager, params, ctx)
+                                    .await?;
+                                if res.as_bool().unwrap_or(false) {
+                                    filtered.push(row);
+                                }
                             }
                         }
                         Ok(filtered)
@@ -2461,19 +2511,139 @@ impl Executor {
                         Ok(traverse_results)
                     }
                 }
-                LogicalPlan::Filter { input, predicate } => {
+                LogicalPlan::Filter {
+                    input,
+                    predicate,
+                    optional_variables,
+                } => {
                     let input_matches = self
                         .execute_subplan(*input, prop_manager, params, ctx)
                         .await?;
+
+                    tracing::debug!(
+                        "Filter: Evaluating predicate {:?} on {} input rows, optional_vars={:?}",
+                        predicate,
+                        input_matches.len(),
+                        optional_variables
+                    );
+
+                    // For OPTIONAL MATCH with WHERE: we need LEFT OUTER JOIN semantics.
+                    // Group rows by non-optional variables, apply filter, and ensure
+                    // at least one row per group (with NULLs if filter removes all).
+                    if !optional_variables.is_empty() {
+                        // Compute the key (non-optional variables) for grouping
+                        let non_optional_vars: Vec<String> = input_matches
+                            .first()
+                            .map(|row| {
+                                row.keys()
+                                    .filter(|k| !optional_variables.contains(*k))
+                                    .cloned()
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+
+                        // Group rows by their non-optional variable values
+                        let mut groups: std::collections::HashMap<
+                            Vec<u8>,
+                            Vec<HashMap<String, Value>>,
+                        > = std::collections::HashMap::new();
+
+                        for row in &input_matches {
+                            // Create a key from non-optional variable values
+                            let key: Vec<u8> = non_optional_vars
+                                .iter()
+                                .map(|var| {
+                                    row.get(var).map(|v| format!("{:?}", v)).unwrap_or_default()
+                                })
+                                .collect::<Vec<_>>()
+                                .join("|")
+                                .into_bytes();
+
+                            groups.entry(key).or_default().push(row.clone());
+                        }
+
+                        let mut filtered = Vec::new();
+                        for (_key, group_rows) in groups {
+                            let mut group_passed = Vec::new();
+
+                            for row in &group_rows {
+                                // If optional variables are already NULL, preserve the row
+                                let has_null_optional = optional_variables
+                                    .iter()
+                                    .any(|var| matches!(row.get(var), Some(Value::Null) | None));
+
+                                if has_null_optional {
+                                    group_passed.push(row.clone());
+                                    continue;
+                                }
+
+                                let res = self
+                                    .evaluate_expr(&predicate, row, prop_manager, params, ctx)
+                                    .await?;
+
+                                if res.as_bool().unwrap_or(false) {
+                                    group_passed.push(row.clone());
+                                }
+                            }
+
+                            if group_passed.is_empty() {
+                                // No rows passed - emit one row with NULLs for optional variables
+                                // Use the first row's non-optional values as a template
+                                if let Some(template) = group_rows.first() {
+                                    let mut null_row = HashMap::new();
+                                    for (k, v) in template {
+                                        if optional_variables.contains(k) {
+                                            null_row.insert(k.clone(), Value::Null);
+                                        } else {
+                                            null_row.insert(k.clone(), v.clone());
+                                        }
+                                    }
+                                    filtered.push(null_row);
+                                }
+                            } else {
+                                filtered.extend(group_passed);
+                            }
+                        }
+
+                        tracing::debug!(
+                            "Filter (OPTIONAL): {} input rows -> {} output rows",
+                            input_matches.len(),
+                            filtered.len()
+                        );
+
+                        return Ok(filtered);
+                    }
+
+                    // Standard filter for non-OPTIONAL MATCH
                     let mut filtered = Vec::new();
-                    for row in input_matches {
+                    for (idx, row) in input_matches.iter().enumerate() {
                         let res = self
-                            .evaluate_expr(&predicate, &row, prop_manager, params, ctx)
+                            .evaluate_expr(&predicate, row, prop_manager, params, ctx)
                             .await?;
-                        if res.as_bool().unwrap_or(false) {
-                            filtered.push(row);
+
+                        let passes = res.as_bool().unwrap_or(false);
+
+                        // Debug first few rows
+                        if idx < 3 {
+                            tracing::debug!(
+                                "Filter row {}: predicate result={:?} passes={}",
+                                idx,
+                                res,
+                                passes
+                            );
+                        }
+
+                        if passes {
+                            filtered.push(row.clone());
                         }
                     }
+
+                    tracing::debug!(
+                        "Filter: {} input rows -> {} output rows",
+                        input_matches.len(),
+                        filtered.len()
+                    );
+
                     Ok(filtered)
                 }
                 LogicalPlan::ProcedureCall {
@@ -3243,6 +3413,7 @@ impl Executor {
         max_hops: usize,
         optional: bool,
         path_variable: &Option<String>,
+        optional_pattern_vars: &std::collections::HashSet<String>,
         prop_manager: &PropertyManager,
         ctx: Option<&QueryContext>,
     ) -> Result<Vec<HashMap<String, Value>>> {
@@ -3273,12 +3444,23 @@ impl Executor {
 
             if !found && optional {
                 let mut new_m = m.clone();
-                new_m.insert(target_variable.to_string(), Value::Null);
-                if let Some(sv) = step_variable {
-                    new_m.insert(sv.clone(), Value::Null);
-                }
-                if let Some(pv) = path_variable {
-                    new_m.insert(pv.clone(), Value::Null);
+                // For multi-hop OPTIONAL MATCH, set ALL pattern variables to NULL
+                // when any hop fails to match. This ensures proper semantics where
+                // the entire pattern either matches completely or returns NULL for all vars.
+                if optional_pattern_vars.is_empty() {
+                    // Fallback for single-hop patterns without optional_pattern_vars
+                    new_m.insert(target_variable.to_string(), Value::Null);
+                    if let Some(sv) = step_variable {
+                        new_m.insert(sv.clone(), Value::Null);
+                    }
+                    if let Some(pv) = path_variable {
+                        new_m.insert(pv.clone(), Value::Null);
+                    }
+                } else {
+                    // Multi-hop: set ALL optional pattern variables to NULL
+                    for var in optional_pattern_vars {
+                        new_m.insert(var.clone(), Value::Null);
+                    }
                 }
                 new_matches.push(new_m);
             }
@@ -3310,6 +3492,7 @@ impl Executor {
         max_hops: usize,
         optional: bool,
         path_variable: &Option<String>,
+        optional_pattern_vars: &std::collections::HashSet<String>,
         prop_manager: &PropertyManager,
         ctx: Option<&QueryContext>,
     ) -> Result<Vec<HashMap<String, Value>>> {
@@ -3360,26 +3543,36 @@ impl Executor {
 
         let mut new_matches = Vec::new();
 
-        for input_row in input_matches {
+        for input_row in &input_matches {
             // Check timeout between rows
             if let Some(ctx) = ctx {
                 ctx.check_timeout()?;
             }
 
-            let source_vid = match input_row
-                .get(source_variable)
-                .and_then(|v| Self::vid_from_value(v).ok())
-            {
+            let source_vid = match input_row.get(source_variable).and_then(|v| {
+                let result = Self::vid_from_value(v);
+                if result.is_err() {
+                    tracing::debug!("  vid_from_value failed: {:?}", result);
+                }
+                result.ok()
+            }) {
                 Some(v) => v,
                 None => {
                     if optional {
                         let mut new_m = input_row.clone();
-                        new_m.insert(target_variable.to_string(), Value::Null);
-                        if let Some(sv) = step_variable {
-                            new_m.insert(sv.clone(), Value::Null);
-                        }
-                        if let Some(pv) = path_variable {
-                            new_m.insert(pv.clone(), Value::Null);
+                        // For multi-hop OPTIONAL MATCH, set ALL pattern variables to NULL
+                        if optional_pattern_vars.is_empty() {
+                            new_m.insert(target_variable.to_string(), Value::Null);
+                            if let Some(sv) = step_variable {
+                                new_m.insert(sv.clone(), Value::Null);
+                            }
+                            if let Some(pv) = path_variable {
+                                new_m.insert(pv.clone(), Value::Null);
+                            }
+                        } else {
+                            for var in optional_pattern_vars {
+                                new_m.insert(var.clone(), Value::Null);
+                            }
                         }
                         new_matches.push(new_m);
                     }
@@ -3412,7 +3605,7 @@ impl Executor {
                 found = true;
                 let mut new_row = input_row.clone();
 
-                // Build target node value
+                // Build target node value with label
                 let target_props = prop_manager
                     .get_all_vertex_props_with_ctx(target_vid, ctx)
                     .await?
@@ -3420,6 +3613,46 @@ impl Executor {
                 let mut target_json: serde_json::Map<String, Value> =
                     target_props.into_iter().collect();
                 target_json.insert("_vid".to_string(), json!(target_vid.as_u64()));
+
+                // Look up target label - first from L0 (for recently created nodes),
+                // then fall back to storage
+                let target_labels = if let Some(ctx) = ctx {
+                    let l0_labels =
+                        uni_store::runtime::l0_visibility::get_vertex_labels(target_vid, ctx);
+                    eprintln!(
+                        "DEBUG TraverseMainByType: L0 labels for target_vid {:?}: {:?}",
+                        target_vid, l0_labels
+                    );
+                    if !l0_labels.is_empty() {
+                        l0_labels
+                    } else {
+                        let storage_labels =
+                            uni_store::storage::main_vertex::MainVertexDataset::find_labels_by_vid(
+                                self.storage.lancedb_store(),
+                                target_vid,
+                            )
+                            .await?
+                            .unwrap_or_default();
+                        eprintln!(
+                            "DEBUG TraverseMainByType: Storage labels for target_vid {:?}: {:?}",
+                            target_vid, storage_labels
+                        );
+                        storage_labels
+                    }
+                } else {
+                    eprintln!(
+                        "DEBUG TraverseMainByType: No ctx provided for target_vid {:?}",
+                        target_vid
+                    );
+                    uni_store::storage::main_vertex::MainVertexDataset::find_labels_by_vid(
+                        self.storage.lancedb_store(),
+                        target_vid,
+                    )
+                    .await?
+                    .unwrap_or_default()
+                };
+                target_json.insert("_label".to_string(), json!(target_labels.join(":")));
+
                 new_row.insert(target_variable.to_string(), Value::Object(target_json));
 
                 // Build step (relationship) variable if present
@@ -3448,12 +3681,19 @@ impl Executor {
 
             if !found && optional {
                 let mut new_m = input_row.clone();
-                new_m.insert(target_variable.to_string(), Value::Null);
-                if let Some(sv) = step_variable {
-                    new_m.insert(sv.clone(), Value::Null);
-                }
-                if let Some(pv) = path_variable {
-                    new_m.insert(pv.clone(), Value::Null);
+                // For multi-hop OPTIONAL MATCH, set ALL pattern variables to NULL
+                if optional_pattern_vars.is_empty() {
+                    new_m.insert(target_variable.to_string(), Value::Null);
+                    if let Some(sv) = step_variable {
+                        new_m.insert(sv.clone(), Value::Null);
+                    }
+                    if let Some(pv) = path_variable {
+                        new_m.insert(pv.clone(), Value::Null);
+                    }
+                } else {
+                    for var in optional_pattern_vars {
+                        new_m.insert(var.clone(), Value::Null);
+                    }
                 }
                 new_matches.push(new_m);
             }
@@ -3648,19 +3888,56 @@ impl Executor {
             None => return Ok(false),
         };
 
-        let graph_dir = Self::map_to_store_direction(direction);
         let l0_arc_opt = self.get_l0_arc().await;
 
-        let graph = self
-            .storage
-            .load_subgraph_cached(
-                &[source_vid],
-                edge_type_ids,
-                max_hops,
-                graph_dir,
-                l0_arc_opt,
-            )
-            .await?;
+        // For Direction::Both, we need to load both outgoing and incoming subgraphs
+        // and merge them, since load_subgraph_cached only supports one direction at a time
+        let graph = if matches!(direction, Direction::Both) {
+            // Load outgoing edges
+            let outgoing_graph = self
+                .storage
+                .load_subgraph_cached(
+                    &[source_vid],
+                    edge_type_ids,
+                    max_hops,
+                    uni_store::runtime::Direction::Outgoing,
+                    l0_arc_opt.clone(),
+                )
+                .await?;
+
+            // Load incoming edges
+            let incoming_graph = self
+                .storage
+                .load_subgraph_cached(
+                    &[source_vid],
+                    edge_type_ids,
+                    max_hops,
+                    uni_store::runtime::Direction::Incoming,
+                    l0_arc_opt,
+                )
+                .await?;
+
+            // Merge the two graphs by copying vertices and edges from incoming to outgoing
+            let mut merged = outgoing_graph;
+            for vid in incoming_graph.vertices() {
+                merged.add_vertex(vid);
+            }
+            for edge in incoming_graph.edges() {
+                merged.add_edge(edge.src_vid, edge.dst_vid, edge.eid, edge.edge_type);
+            }
+            merged
+        } else {
+            let graph_dir = Self::map_to_store_direction(direction);
+            self.storage
+                .load_subgraph_cached(
+                    &[source_vid],
+                    edge_type_ids,
+                    max_hops,
+                    graph_dir,
+                    l0_arc_opt,
+                )
+                .await?
+        };
 
         if !graph.contains_vertex(source_vid) {
             return Ok(false);
@@ -3681,6 +3958,23 @@ impl Executor {
             new_matches,
             ctx,
         )?;
+
+        // Hydrate target node and edge properties for single-hop traversals
+        // (Variable-length paths return path objects instead, handled below)
+        if max_hops == 1 && !new_matches.is_empty() {
+            for m in new_matches.iter_mut() {
+                // Hydrate target node properties
+                if let Some(Value::Object(target_obj)) = m.get_mut(target_variable) {
+                    hydrate_entity_if_needed(target_obj, prop_manager, ctx).await;
+                }
+                // Hydrate edge properties if step variable is present
+                if let Some(sv) = step_variable {
+                    if let Some(Value::Object(edge_obj)) = m.get_mut(sv) {
+                        hydrate_entity_if_needed(edge_obj, prop_manager, ctx).await;
+                    }
+                }
+            }
+        }
 
         // Populate path properties if path variable is present and we found matches
         if let Some(pv) = path_variable
@@ -3779,6 +4073,28 @@ impl Executor {
                         ctx,
                     ) {
                         found_neighbor = true;
+                        // Look up edge type name from schema
+                        let edge_type_name =
+                            schema.edge_type_name_by_id_unified(edge_entry.edge_type);
+
+                        // For schemaless labels (target_label_id == 0), look up actual label from L0
+                        // since schema.label_name_by_id(0) returns None
+                        let actual_target_label: Option<String> = if target_label_id == 0 {
+                            if let Some(query_ctx) = ctx {
+                                let vertex_labels =
+                                    l0_visibility::get_vertex_labels(next, query_ctx);
+                                if !vertex_labels.is_empty() {
+                                    Some(vertex_labels.join(":"))
+                                } else {
+                                    None // Will be looked up from storage if needed
+                                }
+                            } else {
+                                None
+                            }
+                        } else {
+                            target_label_name.map(|s| s.to_string())
+                        };
+
                         let new_m = Self::build_traverse_match(
                             row,
                             target_variable,
@@ -3791,7 +4107,8 @@ impl Executor {
                             path_variable,
                             source_vid,
                             graph,
-                            target_label_name,
+                            actual_target_label.as_deref(),
+                            edge_type_name.as_deref(),
                         );
                         new_matches.push(new_m);
                     }
@@ -3895,6 +4212,8 @@ impl Executor {
     }
 
     /// Map query direction to storage direction.
+    /// Note: Direction::Both is handled specially in traverse_from_row by loading both
+    /// directions separately, so here we map it to Outgoing as a fallback.
     pub(crate) fn map_to_store_direction(direction: &Direction) -> uni_store::runtime::Direction {
         match direction {
             Direction::Outgoing => uni_store::runtime::Direction::Outgoing,
@@ -3929,51 +4248,157 @@ impl Executor {
         path_variable: &Option<String>,
         source_vid: Vid,
         graph: &uni_store::runtime::WorkingGraph,
-        _target_label_name: Option<&str>,
+        target_label_name: Option<&str>,
+        edge_type_name: Option<&str>,
     ) -> HashMap<String, Value> {
         let mut new_m = row.clone();
-        new_m.insert(
-            target_variable.to_string(),
-            Value::String(target_vid.to_string()),
-        );
+
+        // Build proper node object for target variable (instead of just VID string)
+        let target_obj = json!({
+            "_vid": target_vid.as_u64(),
+            "_label": target_label_name.unwrap_or("")
+        });
+        new_m.insert(target_variable.to_string(), target_obj);
 
         if let Some(sv) = step_variable {
             if max_hops > 1 {
                 let eids: Vec<Value> = path.iter().map(|e| json!(e.as_u64())).collect();
                 new_m.insert(sv.clone(), Value::Array(eids));
             } else {
+                // Build edge object with numeric _type (for internal operations)
+                // and _type_name (for user-facing output after normalization)
                 let edge_obj = json!({
                     "_eid": edge_entry.eid.as_u64(),
                     "_src": curr_vid.as_u64(),
                     "_dst": target_vid.as_u64(),
-                    "_type": edge_entry.edge_type
+                    "_type": edge_entry.edge_type,
+                    "_type_name": edge_type_name.unwrap_or("")
                 });
                 new_m.insert(sv.clone(), edge_obj);
             }
         }
 
         if let Some(pv) = path_variable {
-            // Reconstruct path object (Nodes and Edges)
-            let mut path_nodes = Vec::new();
-            let mut path_edges = Vec::new();
-
-            // Start node
-            // Note: We don't have properties here, just VIDs.
-            // Executor typically returns IDs and properties are fetched on demand or projected.
-            // But Path object structure in types.rs expects Node { vid, label, properties }.
-            // We can return minimal Node/Edge objects.
-
-            // To get full nodes/edges, we'd need to fetch them.
-            // For now, let's construct minimal objects with IDs.
-            // Properties will be empty map.
-
-            path_nodes.push(crate::types::Node {
-                vid: source_vid,
-                label: String::new(), // We don't know label easily without lookup
-                properties: HashMap::new(),
-            });
-
-            let mut current = source_vid;
+            // Check if there's an existing path in the row (from previous hop in multi-hop pattern)
+            // Paths are stored as serde_json::Value with "nodes" and "relationships" arrays
+            let (mut path_nodes, mut path_edges, mut current) =
+                if let Some(Value::Object(existing_obj)) = row.get(pv) {
+                    // Try to parse existing path from JSON structure
+                    // Path object uses "nodes" and "relationships" (or "edges") keys
+                    let edges_key = if existing_obj.contains_key("relationships") {
+                        "relationships"
+                    } else {
+                        "edges"
+                    };
+                    if let (Some(Value::Array(nodes_arr)), Some(Value::Array(edges_arr))) =
+                        (existing_obj.get("nodes"), existing_obj.get(edges_key))
+                    {
+                        // Convert JSON nodes back to types::Node
+                        // Note: JSON may use "_id"/"_label" or "vid"/"label" depending on serialization source
+                        let mut nodes: Vec<crate::types::Node> = Vec::new();
+                        for node_val in nodes_arr {
+                            if let Value::Object(node_obj) = node_val {
+                                let vid = node_obj
+                                    .get("vid")
+                                    .or_else(|| node_obj.get("_id"))
+                                    .and_then(|v| {
+                                        v.as_u64()
+                                            .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+                                    })
+                                    .map(Vid::from)
+                                    .unwrap_or_else(|| Vid::from(0u64));
+                                let label = node_obj
+                                    .get("label")
+                                    .or_else(|| node_obj.get("_label"))
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("")
+                                    .to_string();
+                                // Properties are already in the node object
+                                let mut properties = HashMap::new();
+                                if let Some(Value::Object(props)) = node_obj.get("properties") {
+                                    for (k, v) in props {
+                                        if let Ok(pv) =
+                                            serde_json::from_value::<crate::types::Value>(v.clone())
+                                        {
+                                            properties.insert(k.clone(), pv);
+                                        }
+                                    }
+                                }
+                                nodes.push(crate::types::Node {
+                                    vid,
+                                    label,
+                                    properties,
+                                });
+                            }
+                        }
+                        // Convert JSON edges back to types::Edge
+                        // Note: JSON may use "_id"/"_type" or "eid"/"edge_type" depending on serialization source
+                        let mut edges: Vec<crate::types::Edge> = Vec::new();
+                        for edge_val in edges_arr {
+                            if let Value::Object(edge_obj) = edge_val {
+                                let eid = edge_obj
+                                    .get("eid")
+                                    .or_else(|| edge_obj.get("_id"))
+                                    .and_then(|v| {
+                                        v.as_u64()
+                                            .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+                                    })
+                                    .map(Eid::from)
+                                    .unwrap_or_else(|| Eid::from(0u64));
+                                let edge_type = edge_obj
+                                    .get("edge_type")
+                                    .or_else(|| edge_obj.get("_type"))
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("")
+                                    .to_string();
+                                let src = edge_obj
+                                    .get("src")
+                                    .or_else(|| edge_obj.get("_src"))
+                                    .and_then(|v| {
+                                        v.as_u64()
+                                            .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+                                    })
+                                    .map(Vid::from)
+                                    .unwrap_or_else(|| Vid::from(0u64));
+                                let dst = edge_obj
+                                    .get("dst")
+                                    .or_else(|| edge_obj.get("_dst"))
+                                    .and_then(|v| {
+                                        v.as_u64()
+                                            .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+                                    })
+                                    .map(Vid::from)
+                                    .unwrap_or_else(|| Vid::from(0u64));
+                                edges.push(crate::types::Edge {
+                                    eid,
+                                    edge_type,
+                                    src,
+                                    dst,
+                                    properties: HashMap::new(),
+                                });
+                            }
+                        }
+                        // Current position is the last node in the existing path
+                        let current = nodes.last().map(|n| n.vid).unwrap_or(source_vid);
+                        (nodes, edges, current)
+                    } else {
+                        // Existing value is not a valid path structure, start fresh
+                        let path_nodes = vec![crate::types::Node {
+                            vid: source_vid,
+                            label: String::new(),
+                            properties: HashMap::new(),
+                        }];
+                        (path_nodes, Vec::new(), source_vid)
+                    }
+                } else {
+                    // No existing path - start from source_vid
+                    let path_nodes = vec![crate::types::Node {
+                        vid: source_vid,
+                        label: String::new(),
+                        properties: HashMap::new(),
+                    }];
+                    (path_nodes, Vec::new(), source_vid)
+                };
             for eid in path {
                 // Find edge in graph to get dst
                 // WorkingGraph is optimized for out/in edges.

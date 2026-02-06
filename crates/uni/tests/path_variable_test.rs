@@ -74,3 +74,56 @@ async fn test_path_variable() -> Result<()> {
 
     Ok(())
 }
+
+/// Test path variable with chained multi-hop patterns (not variable-length)
+/// This tests: p = (a)-[r1]->(b)-[r2]->(c)
+#[tokio::test]
+async fn test_multihop_chained_path_variable() -> Result<()> {
+    let db = Uni::in_memory().build().await?;
+
+    db.schema()
+        .label("Person")
+        .property("name", DataType::String)
+        .edge_type("KNOWS", &["Person"], &["Person"])
+        .apply()
+        .await?;
+
+    db.execute("CREATE (a:Person {name: 'Alice'})").await?;
+    db.execute("CREATE (b:Person {name: 'Bob'})").await?;
+    db.execute("CREATE (c:Person {name: 'Charlie'})").await?;
+    db.execute(
+        "MATCH (a:Person {name: 'Alice'}), (b:Person {name: 'Bob'}) CREATE (a)-[:KNOWS]->(b)",
+    )
+    .await?;
+    db.execute(
+        "MATCH (b:Person {name: 'Bob'}), (c:Person {name: 'Charlie'}) CREATE (b)-[:KNOWS]->(c)",
+    )
+    .await?;
+
+    // Test chained multi-hop pattern with path variable
+    // This pattern was previously blocked with "Named path variables not yet supported for multi-hop patterns"
+    let result = db.query(
+        "MATCH p = (a:Person {name: 'Alice'})-[r1:KNOWS]->(b:Person)-[r2:KNOWS]->(c:Person) RETURN p, a.name AS a_name, c.name AS c_name"
+    ).await?;
+
+    assert_eq!(result.len(), 1, "Should return 1 path: Alice->Bob->Charlie");
+
+    let row = &result.rows()[0];
+
+    // Verify node names
+    let a_name: String = row.get("a_name")?;
+    let c_name: String = row.get("c_name")?;
+    assert_eq!(a_name, "Alice");
+    assert_eq!(c_name, "Charlie");
+
+    // Verify path structure
+    let path: uni_db::Path = row.get("p")?;
+    assert_eq!(
+        path.nodes.len(),
+        3,
+        "Path should have 3 nodes: Alice, Bob, Charlie"
+    );
+    assert_eq!(path.edges.len(), 2, "Path should have 2 edges: r1, r2");
+
+    Ok(())
+}

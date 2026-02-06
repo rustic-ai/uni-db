@@ -316,19 +316,37 @@ fn eval_div(left: &Value, right: &Value) -> Result<Value> {
 }
 
 /// Helper for comparisons between two values with temporal awareness.
+///
+/// Per Cypher semantics:
+/// - NULL compared with anything returns NULL
+/// - Incompatible types (e.g., string vs int) return NULL, not an error
 fn eval_comparison<F>(left: &Value, right: &Value, check: F) -> Result<Value>
 where
     F: Fn(Ordering) -> bool,
 {
+    // Handle NULL inputs - any comparison with NULL returns NULL
+    if left.is_null() || right.is_null() {
+        return Ok(Value::Null);
+    }
+
+    // Integer comparison (both must be i64)
     if let (Some(l), Some(r)) = (left.as_i64(), right.as_i64()) {
         return Ok(Value::Bool(check(l.cmp(&r))));
     }
-    if let (Some(l), Some(r)) = (left.as_f64(), right.as_f64()) {
-        let ord = l
-            .partial_cmp(&r)
-            .ok_or_else(|| anyhow!("Cannot compare NaN"))?;
-        return Ok(Value::Bool(check(ord)));
+
+    // Float comparison (handles int-float coercion via as_f64)
+    // Note: as_f64() returns Some for both Int and Float types
+    if left.is_number() && right.is_number() {
+        if let (Some(l), Some(r)) = (left.as_f64(), right.as_f64()) {
+            let ord = l.partial_cmp(&r);
+            return match ord {
+                Some(o) => Ok(Value::Bool(check(o))),
+                None => Ok(Value::Null), // NaN comparisons return NULL
+            };
+        }
     }
+
+    // String comparison
     if let (Some(l), Some(r)) = (left.as_str(), right.as_str()) {
         // Temporal-aware comparison
         if let (Some(lt), Some(rt)) = (classify_temporal(l), classify_temporal(r))
@@ -339,7 +357,9 @@ where
         // Fall through to lexicographic comparison
         return Ok(Value::Bool(check(l.cmp(r))));
     }
-    Err(anyhow!("Comparison only supported for numbers and strings"))
+
+    // Incompatible types (e.g., string vs number) - return NULL per Cypher semantics
+    Ok(Value::Null)
 }
 
 /// Compare two temporal values of the same type.

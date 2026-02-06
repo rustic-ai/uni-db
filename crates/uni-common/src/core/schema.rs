@@ -247,6 +247,16 @@ impl SchemalessEdgeTypeRegistry {
     pub fn contains(&self, type_name: &str) -> bool {
         self.name_to_id.contains_key(type_name)
     }
+
+    /// Returns all registered schemaless type IDs.
+    pub fn all_type_ids(&self) -> Vec<u32> {
+        self.id_to_name.keys().copied().collect()
+    }
+
+    /// Returns true if the registry has any schemaless types.
+    pub fn is_empty(&self) -> bool {
+        self.name_to_id.is_empty()
+    }
 }
 
 impl Default for SchemalessEdgeTypeRegistry {
@@ -394,6 +404,14 @@ impl Schema {
         } else {
             self.edge_type_name_by_id(type_id).map(str::to_owned)
         }
+    }
+
+    /// Returns all edge type IDs, including both schema-defined and schemaless types.
+    /// Used when MATCH queries don't specify an edge type and need to scan all edges.
+    pub fn all_edge_type_ids(&self) -> Vec<u32> {
+        let mut ids: Vec<u32> = self.edge_types.values().map(|m| m.id).collect();
+        ids.extend(self.schemaless_registry.all_type_ids());
+        ids
     }
 }
 

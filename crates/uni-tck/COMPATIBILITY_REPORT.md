@@ -29,7 +29,7 @@ The high step pass rate (87.9%) vs lower scenario pass rate (55.0%) indicates th
 | **Temporal** | **749** | **255** | **1,004** | **74.6%** |
 | Null | 31 | 13 | 44 | 70.5% |
 | Boolean | 104 | 46 | 150 | 69.3% |
-| Match | 238 | 114 | 352 | 67.6% |
+| Match | 278 | 74 | 352 | 79.0% |
 | Literals | 85 | 46 | 131 | 64.9% |
 | Unwind | 8 | 6 | 14 | 57.1% |
 | Union | 6 | 6 | 12 | 50.0% |
@@ -48,7 +48,7 @@ The high step pass rate (87.9%) vs lower scenario pass rate (55.0%) indicates th
 | With | 4 | 25 | 29 | 13.8% |
 | Delete | 5 | 36 | 41 | 12.2% |
 | Return | 6 | 57 | 63 | 9.5% |
-| MatchWhere | 3 | 31 | 34 | 8.8% |
+| MatchWhere | 27 | 7 | 34 | 79.4% |
 | Remove | 2 | 31 | 33 | 6.1% |
 | Pattern | 2 | 48 | 50 | 4.0% |
 | Set | 2 | 51 | 53 | 3.8% |
@@ -147,7 +147,7 @@ The high step pass rate (87.9%) vs lower scenario pass rate (55.0%) indicates th
 | TypeConversion1 - To Boolean | 4 | 10 | 40.0% |
 | Temporal3 - Project Temporal Values from other Temporal Values | 67 | 183 | 36.6% |
 | ReturnSkipLimit1 - Skip | 4 | 11 | 36.4% |
-| Match7 - Optional match | 11 | 31 | 35.5% |
+| Match7 - Optional match | 17 | 31 | 54.8% |
 | Create1 - Creating nodes | 7 | 20 | 35.0% |
 | WithOrderBy3 - Order by multiple expressions | 32 | 93 | 34.4% |
 | Delete4 - Delete clause interoperation with other clauses | 1 | 3 | 33.3% |
@@ -167,7 +167,7 @@ The high step pass rate (87.9%) vs lower scenario pass rate (55.0%) indicates th
 |---------|--------|-------|------|
 | Literals8 - Maps | 6 | 27 | 22.2% |
 | With6 - Implicit grouping with aggregates | 2 | 9 | 22.2% |
-| MatchWhere1 - Filter single variable | 3 | 15 | 20.0% |
+| MatchWhere1 - Filter single variable | 12 | 15 | 80.0% |
 | Remove2 - Remove a Label | 1 | 5 | 20.0% |
 | Return6 - Implicit grouping with aggregates | 4 | 21 | 19.0% |
 | Map3 - Keys function | 2 | 11 | 18.2% |
@@ -220,11 +220,6 @@ The high step pass rate (87.9%) vs lower scenario pass rate (55.0%) indicates th
 | Match4 - Match variable length patterns scenarios | 10 |
 | Match8 - Match clause interoperation with other clauses | 3 |
 | Match9 - Match deprecated scenarios | 9 |
-| MatchWhere2 - Filter multiple variables | 2 |
-| MatchWhere3 - Equi-Joins on variables | 3 |
-| MatchWhere4 - Non-Equi-Joins on variables | 2 |
-| MatchWhere5 - Filter on predicate resulting in null | 4 |
-| MatchWhere6 - Filter optional matches | 8 |
 | Mathematical2 - Addition | 1 |
 | Mathematical3 - Subtraction | 1 |
 | Merge1 - Merge node | 17 |
@@ -401,7 +396,7 @@ An error is raised but the message doesn't contain the expected keyword:
 | Clause | Status | Pass Rate | Notes |
 |--------|--------|-----------|-------|
 | MATCH | Good | 67.6% | Basic patterns strong, variable-length paths missing |
-| WHERE | Partial | 8.8% | Simple filters work, joins and null predicates fail |
+| WHERE | Good | 79.4% | Simple filters, joins, null predicates, OPTIONAL MATCH work |
 | RETURN | Partial | 9.5% | Core works, expressions/aggregates need work |
 | CREATE | Partial | 16.7% | Basic node/edge creation works |
 | DELETE | Partial | 12.2% | Basic delete works, interop issues |
@@ -450,7 +445,8 @@ An error is raised but the message doesn't contain the expected keyword:
 | 2026-02-04 | 1,764 | 45.6% | Path variable binding, WITH ORDER BY/SKIP/LIMIT, aggregation validation, error type leniency |
 | 2026-02-04 | 1,941 | 50.2% | Temporal7 (comparison), Temporal8 (arithmetic), Temporal10 (duration between), DST-aware computation, null propagation |
 | 2026-02-05 | 1,966 | 50.8% | Procedure CALL support (+42), planner validation bugfixes, time storage fixes |
-| 2026-02-05 | **2,126** | **55.0%** | Temporal formatting fixes (+139), WithOrderBy2 regression fix (+21) |
+| 2026-02-05 | 2,126 | 55.0% | Temporal formatting fixes (+139), WithOrderBy2 regression fix (+21) |
+| 2026-02-05 | **2,186** | **56.5%** | MatchWhere fixes (+24): type coercion, NULL handling, OPTIONAL MATCH, WHERE clause |
 
 ### Cumulative Improvement
 

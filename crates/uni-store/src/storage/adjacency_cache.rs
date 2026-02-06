@@ -58,13 +58,14 @@ impl AdjacencyCache {
     ) -> anyhow::Result<()> {
         let schema = storage.schema_manager().schema();
 
+        // Use unified lookup to support both schema'd and schemaless edge types
         let edge_type_name = schema
-            .edge_type_name_by_id(edge_type_id)
+            .edge_type_name_by_id_unified(edge_type_id)
             .ok_or_else(|| anyhow::anyhow!("Edge type {} not found", edge_type_id))?;
 
         // Determine which labels to load adjacency for based on edge type metadata.
         let labels_to_load: Vec<String> = {
-            let edge_meta = schema.edge_types.get(edge_type_name);
+            let edge_meta = schema.edge_types.get(&edge_type_name);
             match (direction, edge_meta) {
                 (Direction::Outgoing, Some(meta)) => meta.src_labels.clone(),
                 (Direction::Incoming, Some(meta)) => meta.dst_labels.clone(),

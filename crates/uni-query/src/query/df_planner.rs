@@ -282,6 +282,7 @@ impl HybridPhysicalPlanner {
                 optional,
                 target_filter: _, // Applied as FilterExec later
                 path_variable: _, // Not supported yet
+                ..
             } => {
                 // Restrict to single-hop (same as current row-based implementation)
                 if *min_hops != 1 || *max_hops != 1 {
@@ -353,9 +354,9 @@ impl HybridPhysicalPlanner {
             ),
 
             // === Relational Operations ===
-            LogicalPlan::Filter { input, predicate } => {
-                self.plan_filter(input, predicate, all_properties)
-            }
+            LogicalPlan::Filter {
+                input, predicate, ..
+            } => self.plan_filter(input, predicate, all_properties),
 
             LogicalPlan::Project { input, projections } => {
                 // Build alias map for ORDER BY alias resolution
@@ -1075,42 +1076,23 @@ impl HybridPhysicalPlanner {
 
         for (expr, alias) in projections {
             // Handle whole-node/relationship projection: RETURN n
-            // Expand bare variable to all matching columns from input schema
+            // Always trigger fallback for bare variable projections.
+            // The execute_subplan path properly materializes full Node/Edge objects,
+            // while DataFusion expansion returns individual columns which breaks
+            // the type system (user expects Value::Node, not individual properties).
             if let Expr::Variable(var_name) = expr {
                 let prefix = format!("{}.", var_name);
                 let matching_fields: Vec<_> = schema
                     .fields()
                     .iter()
-                    .enumerate()
-                    .filter(|(_, f)| f.name().starts_with(&prefix))
+                    .filter(|f| f.name().starts_with(&prefix))
                     .collect();
 
-                // Only expand if there are property columns (not just internal _vid/_eid).
-                // If only internal columns exist, fall through to error → legacy fallback,
-                // since the DataFusion scan may not have full label filtering.
-                let has_property_cols = matching_fields.iter().any(|(_, f)| {
-                    let prop = f.name().strip_prefix(&prefix).unwrap_or("");
-                    !prop.starts_with('_')
-                });
-
-                if has_property_cols && !matching_fields.is_empty() {
-                    for (col_idx, field) in &matching_fields {
-                        let col_expr: Arc<dyn datafusion::physical_expr::PhysicalExpr> =
-                            Arc::new(datafusion::physical_expr::expressions::Column::new(
-                                field.name(),
-                                *col_idx,
-                            ));
-                        exprs.push((col_expr, field.name().clone()));
-                    }
-                    continue;
-                }
-
-                // If we have matching columns but no property columns (just _vid/_eid),
-                // explicitly error to trigger fallback which will materialize the node.
-                // This prevents bare variable translation to identity from succeeding here.
+                // If there are any matching columns, fallback to execute_subplan
+                // which materializes full Node/Edge objects.
                 if !matching_fields.is_empty() {
                     return Err(anyhow::anyhow!(
-                        "No property columns for variable '{}' - fallback required",
+                        "Bare variable '{}' requires fallback to materialize full node/edge object",
                         var_name
                     ));
                 }

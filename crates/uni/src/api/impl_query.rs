@@ -8,8 +8,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use uni_common::{Result, UniConfig, UniError};
 use uni_query::{
-    ExecuteResult, ExplainOutput, LogicalPlan, ProfileOutput, QueryCursor, QueryResult, Row,
-    Value as ApiValue,
+    ExecuteResult, ExplainOutput, LogicalPlan, ProfileOutput, QueryCursor, QueryResult,
+    ResultNormalizer, Row, Value as ApiValue,
 };
 
 /// Convert a parse error into `UniError::Parse`.
@@ -124,7 +124,11 @@ impl Uni {
                 let mut values = Vec::with_capacity(columns.len());
                 for col in columns.iter() {
                     let json_val = map.get(col).cloned().unwrap_or(serde_json::Value::Null);
-                    values.push(ApiValue::from(json_val));
+                    let value = ApiValue::from(json_val);
+                    // Normalize to ensure proper Node/Edge/Path types
+                    let normalized =
+                        ResultNormalizer::normalize_value(value).unwrap_or(ApiValue::Null);
+                    values.push(normalized);
                 }
                 Row {
                     columns: columns.clone(),
@@ -355,7 +359,11 @@ impl Uni {
                 let mut values = Vec::with_capacity(columns.len());
                 for col in columns.iter() {
                     let json_val = map.get(col).cloned().unwrap_or(serde_json::Value::Null);
-                    values.push(ApiValue::from(json_val));
+                    let value = ApiValue::from(json_val);
+                    // Normalize to ensure proper Node/Edge/Path types
+                    let normalized =
+                        ResultNormalizer::normalize_value(value).unwrap_or(ApiValue::Null);
+                    values.push(normalized);
                 }
                 Row {
                     columns: columns.clone(),

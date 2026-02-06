@@ -11,7 +11,13 @@ async fn executing_query(world: &mut UniWorld, step: &cucumber::gherkin::Step) {
         panic!("Failed to capture state before: {}", e);
     }
 
-    match world.db().query(query).await {
+    // Build query with parameters if any are set
+    let mut query_builder = world.db().query_with(query);
+    for (key, value) in world.params() {
+        query_builder = query_builder.param(key, value.clone());
+    }
+
+    match query_builder.fetch_all().await {
         Ok(result) => {
             world.set_result(result);
             if let Err(e) = world.capture_state_after().await {
@@ -32,8 +38,13 @@ async fn executing_query_with_params(world: &mut UniWorld, step: &cucumber::gher
         panic!("Failed to capture state before: {}", e);
     }
 
-    // TODO: pass params via .param() calls on the query builder
-    match world.db().query_with(query).fetch_all().await {
+    // Build query with parameters
+    let mut query_builder = world.db().query_with(query);
+    for (key, value) in world.params() {
+        query_builder = query_builder.param(key, value.clone());
+    }
+
+    match query_builder.fetch_all().await {
         Ok(result) => {
             world.set_result(result);
             if let Err(e) = world.capture_state_after().await {

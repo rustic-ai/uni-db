@@ -4,11 +4,11 @@
 pub mod query;
 pub mod types;
 
-pub use query::executor::Executor;
 pub use query::executor::core::{OperatorStats, ProfileOutput};
 pub use query::executor::procedure::{
     ProcedureOutput, ProcedureParam, ProcedureRegistry, ProcedureValueType, RegisteredProcedure,
 };
+pub use query::executor::{Executor, ResultNormalizer};
 pub use query::planner::{CostEstimates, ExplainOutput, IndexUsage, LogicalPlan, QueryPlanner};
 pub use types::{Edge, ExecuteResult, FromValue, Node, Path, QueryCursor, QueryResult, Row, Value};
 pub use uni_cypher::ast::{Query as CypherQuery, TimeTravelSpec};

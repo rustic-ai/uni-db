@@ -1161,6 +1161,29 @@ fn translate_function_call(
             },
         )),
 
+        // Label predicate: hasLabel(n, 'Label') translates to n._label = 'Label'
+        "HASLABEL" => {
+            require_args(&df_args, 2, "hasLabel")?;
+            // First arg should be a variable, second should be the label string
+            if let Some(Expr::Variable(var)) = args.first() {
+                if let Some(Expr::Literal(CypherLiteral::String(label))) = args.get(1) {
+                    // Translate to: {var}._label = '{label}'
+                    let label_col = DfExpr::Column(Column::from_name(format!("{}._label", var)));
+                    Ok(label_col.eq(lit(label.clone())))
+                } else {
+                    // Can't translate with non-string label - force fallback
+                    Err(anyhow::anyhow!(
+                        "hasLabel requires string literal as second argument for DataFusion translation"
+                    ))
+                }
+            } else {
+                // Can't translate without variable - force fallback
+                Err(anyhow::anyhow!(
+                    "hasLabel requires variable as first argument for DataFusion translation"
+                ))
+            }
+        }
+
         // Unknown function - try as a UDF
         _ => Ok(DfExpr::ScalarFunction(
             datafusion::logical_expr::expr::ScalarFunction {

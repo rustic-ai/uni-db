@@ -3,8 +3,12 @@
 
 pub mod core;
 pub mod ddl_procedures;
+pub mod path_builder;
 pub mod procedure;
 pub mod read;
+pub mod result_normalizer;
 pub mod write;
 
 pub use self::core::Executor;
+pub use path_builder::PathBuilder;
+pub use result_normalizer::ResultNormalizer;
