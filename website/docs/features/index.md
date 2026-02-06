@@ -11,8 +11,9 @@ Uni is an embedded, multi-model graph database that unifies graph, vector, docum
 | [OpenCypher Querying](cypher-querying.md) | Familiar graph query language with extensions | Graph traversal and pattern matching |
 | [Columnar Analytics](columnar-analytics.md) | Vectorized scans, filters, aggregates | Fast analytics without a separate warehouse |
 | [Window Functions](window-functions.md) | OVER clauses for ranking and running totals | Partitioned analytics in a single query |
-| [Vector Search](vector-search.md) | ANN search with HNSW/IVF_PQ/Flat | Semantic search, RAG, similarity |
-| [Full-Text + JSON Search](full-text-json-search.md) | Text search over properties and JSON paths | Documents, metadata search |
+| [Vector Search](vector-search.md) | ANN search with HNSW/IVF_PQ/Flat, auto-embedding | Semantic search, RAG, similarity |
+| [Full-Text + JSON Search](full-text-json-search.md) | BM25 text search over properties and JSON paths | Documents, metadata search |
+| [Hybrid Search](hybrid-search.md) | Combined vector + FTS with rank fusion | Best of both worlds |
 | [Schema & Indexing](schema-indexing.md) | Typed properties, constraints, and indexes | Performance, governance, stability |
 | [Graph Algorithms](graph-algorithms.md) | Built-in centrality, clustering, pathing | Insights, scoring, routing |
 | [Transactions & Consistency](transactions-consistency.md) | Snapshot isolation, single writer | Predictable reads, safe writes |

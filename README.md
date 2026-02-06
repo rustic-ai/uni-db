@@ -14,6 +14,7 @@ Part of [The Rustic Initiative](https://www.rustic.ai) by [Dragonscale Industrie
 - **Multimodal:** Supports Graph, Vector, Document, and Columnar workloads.
 - **Storage:** Persists data using LanceDB format on local disk or object storage.
 - **Query Language:** OpenCypher (subset) with vector search extensions.
+- **Search:** Vector similarity, full-text (BM25), and hybrid search with rank fusion.
 - **Algorithms:** Built-in graph algorithms (PageRank, Louvain, ShortestPath, etc.).
 - **Connectivity:** Rust crate and Python bindings.
 
@@ -67,6 +68,45 @@ db.query("CREATE (n:Person {name: 'Bob', age: 25})")
 results = db.query("MATCH (n:Person) RETURN n")
 print(results)
 ```
+
+## Search Capabilities
+
+Uni provides three powerful search methods that can be combined with graph traversals:
+
+### Vector Search
+
+```cypher
+-- Search by semantic similarity (auto-embeds text if embedding config exists)
+CALL uni.vector.query('Document', 'embedding', 'machine learning tutorial', 10)
+YIELD node, score
+RETURN node.title, score
+```
+
+### Full-Text Search (BM25)
+
+```cypher
+-- Traditional keyword search with relevance scoring
+CALL uni.fts.query('Article', 'content', 'database optimization', 20)
+YIELD node, score
+RETURN node.title, score
+```
+
+### Hybrid Search (Vector + FTS Fusion)
+
+```cypher
+-- Combine semantic and keyword search with Reciprocal Rank Fusion
+CALL uni.search(
+    'Document',
+    {vector: 'embedding', fts: 'content'},
+    'neural network architectures',
+    null,  -- auto-embed the query
+    10
+)
+YIELD node, score, vector_score, fts_score
+RETURN node.title, score
+```
+
+See [Language Extensions](docs/LANGUAGE_EXTENSIONS.md) for full procedure documentation.
 
 ## Documentation
 

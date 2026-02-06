@@ -9,7 +9,9 @@ use serde_json::Value;
 use serde_json::json;
 use std::collections::HashMap;
 use uni_algo::algo::procedures::AlgoContext;
-use uni_common::core::schema::{DistanceMetric, SchemaManager};
+use uni_common::core::id::Vid;
+use uni_common::core::schema::{DistanceMetric, EmbeddingModel, SchemaManager};
+use uni_store::embedding::{EmbeddingService, FastEmbedService};
 use uni_cypher::ast::Expr;
 use uni_store::QueryContext;
 use uni_store::runtime::property_manager::PropertyManager;
@@ -149,6 +151,103 @@ fn filter_yield_items(
         .collect()
 }
 
+/// Reciprocal Rank Fusion (RRF) for combining search results.
+/// RRF score = sum(1 / (k + rank)) for each result list.
+fn fuse_rrf(
+    vec_results: &[(uni_common::core::id::Vid, f32)],
+    fts_results: &[(uni_common::core::id::Vid, f32)],
+    k: usize,
+) -> Vec<(uni_common::core::id::Vid, f32)> {
+    use std::collections::HashMap;
+    use uni_common::core::id::Vid;
+
+    let mut scores: HashMap<Vid, f32> = HashMap::new();
+
+    // Add RRF scores from vector results
+    for (rank, (vid, _)) in vec_results.iter().enumerate() {
+        let rrf_score = 1.0 / (k as f32 + rank as f32 + 1.0);
+        *scores.entry(*vid).or_default() += rrf_score;
+    }
+
+    // Add RRF scores from FTS results
+    for (rank, (vid, _)) in fts_results.iter().enumerate() {
+        let rrf_score = 1.0 / (k as f32 + rank as f32 + 1.0);
+        *scores.entry(*vid).or_default() += rrf_score;
+    }
+
+    // Sort by fused score descending
+    let mut results: Vec<_> = scores.into_iter().collect();
+    results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+    results
+}
+
+/// Weighted fusion: alpha * vec_score + (1 - alpha) * fts_score
+/// Both score sets should be normalized to [0, 1] range.
+fn fuse_weighted(
+    vec_results: &[(uni_common::core::id::Vid, f32)],
+    fts_results: &[(uni_common::core::id::Vid, f32)],
+    alpha: f32,
+) -> Vec<(uni_common::core::id::Vid, f32)> {
+    use std::collections::HashMap;
+    use uni_common::core::id::Vid;
+
+    // Normalize vector scores (distance -> similarity)
+    let vec_max = vec_results.iter().map(|(_, s)| *s).fold(f32::MIN, f32::max);
+    let vec_min = vec_results.iter().map(|(_, s)| *s).fold(f32::MAX, f32::min);
+    let vec_range = if vec_max > vec_min {
+        vec_max - vec_min
+    } else {
+        1.0
+    };
+
+    // Normalize FTS scores
+    let fts_max = fts_results.iter().map(|(_, s)| *s).fold(0.0f32, f32::max);
+
+    let vec_scores: HashMap<Vid, f32> = vec_results
+        .iter()
+        .map(|(vid, dist)| {
+            // Convert distance to similarity (1 - normalized distance)
+            let norm = 1.0 - (dist - vec_min) / vec_range;
+            (*vid, norm)
+        })
+        .collect();
+
+    let fts_scores: HashMap<Vid, f32> = fts_results
+        .iter()
+        .map(|(vid, score)| {
+            let norm = if fts_max > 0.0 {
+                score / fts_max
+            } else {
+                0.0
+            };
+            (*vid, norm)
+        })
+        .collect();
+
+    // Combine all VIDs
+    let all_vids: std::collections::HashSet<Vid> = vec_scores
+        .keys()
+        .chain(fts_scores.keys())
+        .cloned()
+        .collect();
+
+    // Compute weighted scores
+    let mut results: Vec<(Vid, f32)> = all_vids
+        .into_iter()
+        .map(|vid| {
+            let vec_score = *vec_scores.get(&vid).unwrap_or(&0.0);
+            let fts_score = *fts_scores.get(&vid).unwrap_or(&0.0);
+            let fused = alpha * vec_score + (1.0 - alpha) * fts_score;
+            (vid, fused)
+        })
+        .collect();
+
+    results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+    results
+}
+
 impl Executor {
     /// Maps a user-provided yield name to a canonical name.
     ///
@@ -232,6 +331,7 @@ impl Executor {
 
         match name {
             // NEW: uni.vector.query (primary namespace)
+            // Supports both pre-computed vectors and auto-embedding from text
             "uni.vector.query" => {
                 let empty_row = HashMap::new();
                 let label = self
@@ -254,7 +354,62 @@ impl Executor {
                     .await?
                     .as_u64()
                     .ok_or(anyhow!("k must be integer"))? as usize;
-                let query_vector: Vec<f32> = serde_json::from_value(query_val)?;
+
+                // Detect if query is text (string) or pre-computed vector (array)
+                let query_vector: Vec<f32> = if let Some(query_text) = query_val.as_str() {
+                    // Auto-embed: lookup index's embedding_config and embed the text
+                    let schema = self.storage.schema_manager().schema();
+                    let index_config = schema.vector_index_for_property(&label, &property);
+
+                    let embedding_config = index_config
+                        .and_then(|cfg| cfg.embedding_config.as_ref())
+                        .ok_or_else(|| {
+                            anyhow!(
+                                "Cannot auto-embed: vector index for {}.{} has no embedding_config. \
+                                 Either provide a pre-computed vector or create the index with embedding options.",
+                                label,
+                                property
+                            )
+                        })?;
+
+                    // Create embedding service based on model type
+                    match &embedding_config.model {
+                        EmbeddingModel::FastEmbed {
+                            model_name,
+                            cache_dir,
+                            ..
+                        } => {
+                            let service =
+                                FastEmbedService::new(model_name, cache_dir.as_deref())?;
+                            let embeddings = service.embed(&[query_text]).await?;
+                            embeddings
+                                .into_iter()
+                                .next()
+                                .ok_or_else(|| anyhow!("Embedding service returned no results"))?
+                        }
+                        EmbeddingModel::OpenAI { .. } => {
+                            return Err(anyhow!(
+                                "OpenAI embedding provider not yet implemented for auto-embed queries. \
+                                 Please provide a pre-computed vector."
+                            ));
+                        }
+                        EmbeddingModel::Ollama { .. } => {
+                            return Err(anyhow!(
+                                "Ollama embedding provider not yet implemented for auto-embed queries. \
+                                 Please provide a pre-computed vector."
+                            ));
+                        }
+                        _ => {
+                            return Err(anyhow!(
+                                "Unknown embedding provider for auto-embed queries. \
+                                 Please provide a pre-computed vector."
+                            ));
+                        }
+                    }
+                } else {
+                    // Pre-computed vector (array of floats)
+                    serde_json::from_value(query_val)?
+                };
 
                 // Extract optional filter (arg 4)
                 let filter = if args.len() > 4 {
@@ -360,6 +515,425 @@ impl Executor {
                             result.insert(yield_name.to_lowercase(), node_obj_opt.clone().unwrap());
                         } else if let Some(val) = canonical_yields.get(&canonical_name) {
                             // Standard yields (vid, distance, score)
+                            result.insert(yield_name.to_lowercase(), val.clone());
+                        }
+                    }
+
+                    matches.push(result);
+                }
+
+                Ok(matches)
+            }
+
+            // Full-text search with BM25 scoring
+            // Signature: uni.fts.query(label, property, search_term, k, filter?, threshold?)
+            // YIELD vid, score, node
+            "uni.fts.query" => {
+                let empty_row = HashMap::new();
+                let label = self
+                    .evaluate_expr(&args[0], &empty_row, prop_manager, params, ctx)
+                    .await?
+                    .as_str()
+                    .ok_or(anyhow!("Label must be string"))?
+                    .to_string();
+                let property = self
+                    .evaluate_expr(&args[1], &empty_row, prop_manager, params, ctx)
+                    .await?
+                    .as_str()
+                    .ok_or(anyhow!("Property must be string"))?
+                    .to_string();
+                let search_term = self
+                    .evaluate_expr(&args[2], &empty_row, prop_manager, params, ctx)
+                    .await?
+                    .as_str()
+                    .ok_or(anyhow!("Search term must be string"))?
+                    .to_string();
+                let k = self
+                    .evaluate_expr(&args[3], &empty_row, prop_manager, params, ctx)
+                    .await?
+                    .as_u64()
+                    .ok_or(anyhow!("k must be integer"))? as usize;
+
+                // Extract optional filter (arg 4)
+                let filter = if args.len() > 4 {
+                    let filter_val = self
+                        .evaluate_expr(&args[4], &empty_row, prop_manager, params, ctx)
+                        .await?;
+                    if filter_val.is_null() {
+                        None
+                    } else {
+                        let filter_str = filter_val
+                            .as_str()
+                            .ok_or_else(|| anyhow!("Filter must be a string"))?
+                            .to_string();
+                        if filter_str.trim().is_empty() {
+                            return Err(anyhow!("Filter cannot be empty string"));
+                        }
+                        Some(filter_str)
+                    }
+                } else {
+                    None
+                };
+
+                // Extract optional threshold (arg 5)
+                let threshold = if args.len() > 5 {
+                    let threshold_val = self
+                        .evaluate_expr(&args[5], &empty_row, prop_manager, params, ctx)
+                        .await?;
+                    if threshold_val.is_null() {
+                        None
+                    } else {
+                        let thresh = threshold_val
+                            .as_f64()
+                            .ok_or_else(|| anyhow!("Threshold must be a number"))?;
+                        if thresh < 0.0 {
+                            return Err(anyhow!(
+                                "Threshold must be non-negative, got {}",
+                                thresh
+                            ));
+                        }
+                        Some(thresh)
+                    }
+                } else {
+                    None
+                };
+
+                // Call storage FTS search
+                let mut results = self
+                    .storage
+                    .fts_search(&label, &property, &search_term, k, filter.as_deref(), ctx)
+                    .await?;
+
+                // Apply threshold post-filter (on BM25 score)
+                if let Some(min_score) = threshold {
+                    results.retain(|(_, score)| *score as f64 >= min_score);
+                }
+
+                // Normalize scores to [0, 1] range relative to the best match
+                let max_score = results.iter().map(|(_, s)| *s).fold(0.0f32, f32::max);
+
+                let mut matches = Vec::new();
+
+                for (vid, raw_score) in results {
+                    let mut canonical_yields: IndexMap<String, Value> = IndexMap::new();
+
+                    // Normalize score (0-1 range, relative to best match)
+                    let normalized_score = if max_score > 0.0 {
+                        raw_score / max_score
+                    } else {
+                        0.0
+                    };
+
+                    // Standard yields
+                    canonical_yields.insert("vid".to_string(), json!(vid.as_u64()));
+                    canonical_yields.insert("score".to_string(), json!(normalized_score as f64));
+                    canonical_yields.insert("raw_score".to_string(), json!(raw_score as f64));
+
+                    // Node object for node-like yields
+                    let mut node_obj_opt = None;
+
+                    let mut result = HashMap::new();
+                    for yield_name in yield_items {
+                        let canonical_name = Self::map_yield_to_canonical(yield_name);
+
+                        if canonical_name == "node" {
+                            // Lazy-load node properties
+                            if node_obj_opt.is_none() {
+                                let props_opt =
+                                    prop_manager.get_all_vertex_props_with_ctx(vid, ctx).await?;
+
+                                let Some(properties) = props_opt else {
+                                    continue;
+                                };
+
+                                let mut node_obj = serde_json::Map::new();
+                                node_obj.insert("_vid".to_string(), json!(vid.as_u64()));
+                                node_obj.insert("_label".to_string(), json!(label.clone()));
+
+                                for (key, val) in properties {
+                                    node_obj.insert(key, val);
+                                }
+
+                                node_obj_opt = Some(Value::Object(node_obj));
+                            }
+
+                            result.insert(yield_name.to_lowercase(), node_obj_opt.clone().unwrap());
+                        } else if yield_name.to_lowercase() == "raw_score" {
+                            result.insert("raw_score".to_string(), json!(raw_score as f64));
+                        } else if let Some(val) = canonical_yields.get(&canonical_name) {
+                            result.insert(yield_name.to_lowercase(), val.clone());
+                        }
+                    }
+
+                    matches.push(result);
+                }
+
+                Ok(matches)
+            }
+
+            // Hybrid search combining vector + FTS with fusion
+            // Signature: uni.search(label, properties, query_text, query_vector?, k, filter?, options?)
+            // properties format: {vector: 'embedding', fts: 'content'} or just 'embedding' for vector-only
+            // options: {method: 'rrf', alpha: 0.5, over_fetch: 2.0}
+            // YIELD vid, score, vector_score, fts_score, node
+            "uni.search" => {
+                let empty_row = HashMap::new();
+
+                // Arg 0: label
+                let label = self
+                    .evaluate_expr(&args[0], &empty_row, prop_manager, params, ctx)
+                    .await?
+                    .as_str()
+                    .ok_or(anyhow!("Label must be string"))?
+                    .to_string();
+
+                // Arg 1: properties (object or string)
+                let properties_val = self
+                    .evaluate_expr(&args[1], &empty_row, prop_manager, params, ctx)
+                    .await?;
+
+                let (vector_prop, fts_prop) = if let Some(obj) = properties_val.as_object() {
+                    let vec_prop = obj
+                        .get("vector")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string());
+                    let fts_prop = obj
+                        .get("fts")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string());
+                    (vec_prop, fts_prop)
+                } else if let Some(prop) = properties_val.as_str() {
+                    // Shorthand: just property name means both vector and FTS
+                    (Some(prop.to_string()), Some(prop.to_string()))
+                } else {
+                    return Err(anyhow!(
+                        "Properties must be an object {{vector: '...', fts: '...'}} or a string"
+                    ));
+                };
+
+                // Arg 2: query text
+                let query_text = self
+                    .evaluate_expr(&args[2], &empty_row, prop_manager, params, ctx)
+                    .await?
+                    .as_str()
+                    .ok_or(anyhow!("Query text must be string"))?
+                    .to_string();
+
+                // Arg 3: query vector (optional, can be null)
+                let query_vector: Option<Vec<f32>> = if args.len() > 3 {
+                    let vec_val = self
+                        .evaluate_expr(&args[3], &empty_row, prop_manager, params, ctx)
+                        .await?;
+                    if vec_val.is_null() {
+                        None
+                    } else if let Some(arr) = vec_val.as_array() {
+                        Some(
+                            arr.iter()
+                                .filter_map(|v| v.as_f64().map(|f| f as f32))
+                                .collect(),
+                        )
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+
+                // Arg 4: k
+                let k = self
+                    .evaluate_expr(&args[4], &empty_row, prop_manager, params, ctx)
+                    .await?
+                    .as_u64()
+                    .ok_or(anyhow!("k must be integer"))? as usize;
+
+                // Arg 5: filter (optional)
+                let filter = if args.len() > 5 {
+                    let filter_val = self
+                        .evaluate_expr(&args[5], &empty_row, prop_manager, params, ctx)
+                        .await?;
+                    if filter_val.is_null() {
+                        None
+                    } else {
+                        filter_val.as_str().map(|s| s.to_string())
+                    }
+                } else {
+                    None
+                };
+
+                // Arg 6: options (optional)
+                let options_val = if args.len() > 6 {
+                    self.evaluate_expr(&args[6], &empty_row, prop_manager, params, ctx)
+                        .await?
+                } else {
+                    Value::Null
+                };
+
+                let fusion_method = options_val
+                    .get("method")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("rrf")
+                    .to_string();
+                let alpha = options_val
+                    .get("alpha")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(0.5) as f32;
+                let over_fetch_factor = options_val
+                    .get("over_fetch")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(2.0) as f32;
+                let rrf_k = options_val
+                    .get("rrf_k")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(60) as usize;
+
+                let over_fetch_k = (k as f32 * over_fetch_factor).ceil() as usize;
+
+                // Execute vector search if configured
+                let mut vector_results: Vec<(Vid, f32)> = Vec::new();
+                if let Some(ref vec_prop) = vector_prop {
+                    // Get or generate query vector
+                    let qvec = if let Some(ref v) = query_vector {
+                        v.clone()
+                    } else {
+                        // Auto-embed the query text
+                        let schema = self.storage.schema_manager().schema();
+                        let index_config = schema.vector_index_for_property(&label, vec_prop);
+
+                        if let Some(cfg) = index_config
+                            && let Some(emb_cfg) = &cfg.embedding_config
+                        {
+                            match &emb_cfg.model {
+                                EmbeddingModel::FastEmbed {
+                                    model_name,
+                                    cache_dir,
+                                    ..
+                                } => {
+                                    let service =
+                                        FastEmbedService::new(model_name, cache_dir.as_deref())?;
+                                    let embeddings = service.embed(&[&query_text]).await?;
+                                    embeddings.into_iter().next().unwrap_or_default()
+                                }
+                                _ => {
+                                    // Skip vector search if embedding not supported
+                                    Vec::new()
+                                }
+                            }
+                        } else {
+                            Vec::new()
+                        }
+                    };
+
+                    if !qvec.is_empty() {
+                        vector_results = self
+                            .storage
+                            .vector_search(
+                                &label,
+                                vec_prop,
+                                &qvec,
+                                over_fetch_k,
+                                filter.as_deref(),
+                                ctx,
+                            )
+                            .await?;
+                    }
+                }
+
+                // Execute FTS search if configured
+                let mut fts_results: Vec<(Vid, f32)> = Vec::new();
+                if let Some(ref fts_prop) = fts_prop {
+                    fts_results = self
+                        .storage
+                        .fts_search(&label, fts_prop, &query_text, over_fetch_k, filter.as_deref(), ctx)
+                        .await?;
+                }
+
+                // Fuse results based on method
+                let fused_results = match fusion_method.as_str() {
+                    "weighted" => {
+                        // Weighted fusion: alpha * vec_score + (1 - alpha) * fts_score
+                        fuse_weighted(&vector_results, &fts_results, alpha)
+                    }
+                    _ => {
+                        // Default: RRF (Reciprocal Rank Fusion)
+                        fuse_rrf(&vector_results, &fts_results, rrf_k)
+                    }
+                };
+
+                // Limit to k results
+                let final_results: Vec<_> = fused_results.into_iter().take(k).collect();
+
+                // Build result maps
+                let mut matches = Vec::new();
+                let schema_manager = self.storage.schema_manager();
+
+                // Build lookup maps for original scores
+                let vec_score_map: HashMap<Vid, f32> =
+                    vector_results.iter().cloned().collect();
+                let fts_score_map: HashMap<Vid, f32> = fts_results.iter().cloned().collect();
+
+                // Normalize FTS scores
+                let fts_max = fts_results.iter().map(|(_, s)| *s).fold(0.0f32, f32::max);
+
+                for (vid, fused_score) in final_results {
+                    let mut canonical_yields: IndexMap<String, Value> = IndexMap::new();
+
+                    canonical_yields.insert("vid".to_string(), json!(vid.as_u64()));
+                    canonical_yields.insert("score".to_string(), json!(fused_score as f64));
+
+                    // Vector score (normalized 0-1 via calculate_score)
+                    if let Some(&dist) = vec_score_map.get(&vid) {
+                        if let Some(ref vec_prop) = vector_prop {
+                            let vec_score =
+                                calculate_score(dist, schema_manager, &label, vec_prop)
+                                    .unwrap_or(0.0);
+                            canonical_yields.insert("vector_score".to_string(), json!(vec_score));
+                        }
+                    } else {
+                        canonical_yields.insert("vector_score".to_string(), Value::Null);
+                    }
+
+                    // FTS score (normalized 0-1)
+                    if let Some(&raw_score) = fts_score_map.get(&vid) {
+                        let norm_score = if fts_max > 0.0 {
+                            raw_score / fts_max
+                        } else {
+                            0.0
+                        };
+                        canonical_yields.insert("fts_score".to_string(), json!(norm_score as f64));
+                    } else {
+                        canonical_yields.insert("fts_score".to_string(), Value::Null);
+                    }
+
+                    let mut node_obj_opt = None;
+                    let mut result = HashMap::new();
+
+                    for yield_name in yield_items {
+                        let canonical_name = Self::map_yield_to_canonical(yield_name);
+
+                        if canonical_name == "node" {
+                            if node_obj_opt.is_none() {
+                                let props_opt =
+                                    prop_manager.get_all_vertex_props_with_ctx(vid, ctx).await?;
+
+                                let Some(properties) = props_opt else {
+                                    continue;
+                                };
+
+                                let mut node_obj = serde_json::Map::new();
+                                node_obj.insert("_vid".to_string(), json!(vid.as_u64()));
+                                node_obj.insert("_label".to_string(), json!(label.clone()));
+
+                                for (key, val) in properties {
+                                    node_obj.insert(key, val);
+                                }
+
+                                node_obj_opt = Some(Value::Object(node_obj));
+                            }
+
+                            result.insert(yield_name.to_lowercase(), node_obj_opt.clone().unwrap());
+                        } else if let Some(val) = canonical_yields.get(&yield_name.to_lowercase()) {
+                            result.insert(yield_name.to_lowercase(), val.clone());
+                        } else if let Some(val) = canonical_yields.get(&canonical_name) {
                             result.insert(yield_name.to_lowercase(), val.clone());
                         }
                     }

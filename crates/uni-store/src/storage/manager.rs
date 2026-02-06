@@ -729,6 +729,101 @@ impl StorageManager {
         Ok(results)
     }
 
+    /// Perform a full-text search with BM25 scoring.
+    ///
+    /// Returns vertices matching the search query along with their BM25 scores.
+    /// Results are sorted by score descending (most relevant first).
+    ///
+    /// # Arguments
+    /// * `label` - The label to search within
+    /// * `property` - The property column to search (must have FTS index)
+    /// * `query` - The search query text
+    /// * `k` - Maximum number of results to return
+    /// * `filter` - Optional Lance filter expression
+    /// * `ctx` - Optional query context for visibility checks
+    ///
+    /// # Returns
+    /// Vector of (Vid, score) tuples, where score is the BM25 relevance score.
+    pub async fn fts_search(
+        &self,
+        label: &str,
+        property: &str,
+        query: &str,
+        k: usize,
+        filter: Option<&str>,
+        ctx: Option<&QueryContext>,
+    ) -> Result<Vec<(Vid, f32)>> {
+        use lance_index::scalar::inverted::query::MatchQuery;
+        use lance_index::scalar::FullTextSearchQuery;
+
+        // Try to open the cached table; if the label has no data yet the Lance
+        // table won't exist. In that case return empty results.
+        let table = match self.get_cached_table(label).await {
+            Ok(t) => t,
+            Err(_) => return Ok(Vec::new()),
+        };
+
+        // Build the FTS query with specific column
+        let match_query = MatchQuery::new(query.to_string()).with_column(Some(property.to_string()));
+        let fts_query = FullTextSearchQuery {
+            query: match_query.into(),
+            limit: Some(k as i64),
+            wand_factor: None,
+        };
+
+        let mut query_builder = table.query().full_text_search(fts_query).limit(k);
+
+        // Apply user-provided filter
+        if let Some(filter_expr) = filter {
+            query_builder = query_builder.only_if(filter_expr);
+        }
+
+        // Apply version filtering if context provided
+        if let Some(_qctx) = ctx
+            && let Some(hwm) = self.version_high_water_mark()
+        {
+            let version_filter = format!("_version <= {}", hwm);
+            query_builder = query_builder.only_if(&version_filter);
+        }
+
+        let batches = query_builder
+            .execute()
+            .await
+            .map_err(|e| anyhow!("FTS search execution failed: {}", e))?
+            .try_collect::<Vec<_>>()
+            .await
+            .map_err(|e| anyhow!("Failed to collect FTS search results: {}", e))?;
+
+        let mut results = Vec::new();
+
+        for batch in batches {
+            let vid_col = batch
+                .column_by_name("_vid")
+                .ok_or(anyhow!("Missing _vid column"))?
+                .as_any()
+                .downcast_ref::<UInt64Array>()
+                .ok_or(anyhow!("Invalid _vid column type"))?;
+
+            let score_col = batch
+                .column_by_name("_score")
+                .ok_or(anyhow!("Missing _score column"))?
+                .as_any()
+                .downcast_ref::<Float32Array>()
+                .ok_or(anyhow!("Invalid _score column type"))?;
+
+            for i in 0..batch.num_rows() {
+                let vid = Vid::from(vid_col.value(i));
+                let score = score_col.value(i);
+                results.push((vid, score));
+            }
+        }
+
+        // Results should already be sorted by score from Lance, but ensure descending order
+        results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+        Ok(results)
+    }
+
     pub async fn get_vertex_by_uid(&self, uid: &UniId, label: &str) -> Result<Option<Vid>> {
         let index = self.uid_index(label)?;
         index.get_vid(uid).await

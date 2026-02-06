@@ -10,6 +10,8 @@ All Uni functions and procedures use a clean, hierarchical namespace structure u
 ## Table of Contents
 
 - [Vector Search](#vector-search-univector)
+- [Full-Text Search](#full-text-search-unifts)
+- [Hybrid Search](#hybrid-search-unisearch)
 - [Database Administration](#database-administration-uniadmin)
 - [Schema Management](#schema-management-unischema)
 - [Temporal Queries](#temporal-queries-unitemporal)
@@ -22,27 +24,251 @@ All Uni functions and procedures use a clean, hierarchical namespace structure u
 
 Vector similarity search and nearest neighbor queries.
 
-### `uni.vector.query(label, property, vector, k)`
+### `uni.vector.query(label, property, query_input, k [, filter] [, threshold])`
 
-Search for k-nearest neighbors using vector similarity.
+Search for k-nearest neighbors using vector similarity. Supports both pre-computed vectors and automatic text embedding.
 
 **Parameters:**
 - `label` (String): Node label to search
 - `property` (String): Property containing embeddings
-- `vector` (List<Float>): Query vector
+- `query_input` (List<Float> or String): Either:
+  - Pre-computed query vector as list of floats
+  - Text string to auto-embed using the index's embedding configuration
 - `k` (Integer): Number of results to return
+- `filter` (String, optional): WHERE clause for pre-filtering (e.g., `'category = "tech"'`)
+- `threshold` (Float, optional): Minimum similarity score to include (0-1)
 
 **Yields:**
-- `node` (String): Node VID
-- `distance` (Float): Distance from query vector
+- `vid` (Integer): Vertex ID of matching node
+- `score` (Float): Similarity score (normalized 0-1)
+- `node` (Map): Full node with properties (lazy-loaded)
 
-**Example:**
+**Examples:**
+
 ```cypher
-CALL uni.vector.query('Person', 'embedding', [0.1, 0.2, 0.3], 10)
-  YIELD node, distance
-RETURN node, distance
-ORDER BY distance ASC
+-- Basic vector search with pre-computed embedding
+CALL uni.vector.query('Document', 'embedding', [0.1, 0.2, 0.3, ...], 10)
+YIELD node, score
+RETURN node.title, score
+ORDER BY score DESC
+
+-- Auto-embed text query (requires embedding config on index)
+CALL uni.vector.query('Document', 'embedding', 'machine learning tutorial', 10)
+YIELD node, score
+RETURN node.title, score
+
+-- With pre-filter
+CALL uni.vector.query('Document', 'embedding', $query_vec, 10, 'status = "published"')
+YIELD node, score
+RETURN node.title, score
+
+-- With threshold
+CALL uni.vector.query('Document', 'embedding', $query_vec, 10, null, 0.7)
+YIELD node, score
+WHERE score > 0.7
+RETURN node.title, score
 ```
+
+**Auto-Embedding Requirements:**
+
+To use text input for auto-embedding, create the vector index with an embedding configuration:
+
+```cypher
+CREATE VECTOR INDEX doc_embed FOR (d:Document) ON (d.embedding)
+OPTIONS {
+    metric: 'cosine',
+    embedding: {
+        provider: 'fastembed',
+        model: 'AllMiniLML6V2',
+        source: ['content']
+    }
+}
+```
+
+Supported providers:
+- `fastembed` - Local embeddings via FastEmbed (AllMiniLML6V2, BGESmallEN, etc.)
+- `ollama` - Local embeddings via Ollama (planned)
+- `openai` - OpenAI embeddings API (planned)
+
+---
+
+## Full-Text Search (`uni.fts.*`)
+
+BM25-based full-text search with relevance scoring.
+
+### `uni.fts.query(label, property, search_term, k [, threshold])`
+
+Perform full-text search using BM25 scoring algorithm.
+
+**Parameters:**
+- `label` (String): Node label to search
+- `property` (String): Text property with inverted index
+- `search_term` (String): Search query string
+- `k` (Integer): Number of results to return
+- `threshold` (Float, optional): Minimum normalized BM25 score (0-1)
+
+**Yields:**
+- `vid` (Integer): Vertex ID of matching node
+- `score` (Float): Normalized BM25 score (0-1, relative to top match)
+- `node` (Map): Full node with properties (lazy-loaded)
+
+**Examples:**
+
+```cypher
+-- Basic full-text search
+CALL uni.fts.query('Article', 'content', 'database optimization', 20)
+YIELD node, score
+RETURN node.title, score
+ORDER BY score DESC
+
+-- With threshold filtering
+CALL uni.fts.query('Article', 'content', 'graph algorithms', 10, 0.5)
+YIELD node, score
+RETURN node.title, score
+
+-- Combine with graph traversal
+CALL uni.fts.query('Document', 'content', 'machine learning', 10)
+YIELD node, score
+MATCH (node)-[:AUTHORED_BY]->(author:Person)
+RETURN node.title, score, author.name
+```
+
+**Score Normalization:**
+
+BM25 scores are normalized to the 0-1 range relative to the best match in the result set:
+- `normalized_score = raw_score / max_score`
+- Score of 1.0 indicates the best match
+- Scores are comparable within a single query but not across queries
+
+**Prerequisites:**
+
+Requires a full-text index on the property:
+
+```cypher
+CREATE FULLTEXT INDEX article_content FOR (a:Article) ON (a.content)
+```
+
+---
+
+## Hybrid Search (`uni.search.*`)
+
+Combined vector and full-text search with rank fusion.
+
+### `uni.search(label, properties, query_text [, query_vector] [, k] [, filter] [, options])`
+
+Perform hybrid search combining vector similarity and full-text search using rank fusion.
+
+**Parameters:**
+- `label` (String): Node label to search
+- `properties` (Map): Property mapping specifying which properties to search:
+  - `vector` - Property containing embeddings
+  - `fts` - Property containing text for full-text search
+- `query_text` (String): Text query (used for FTS; auto-embedded for vector if no vector provided)
+- `query_vector` (List<Float>, optional): Pre-computed query vector; if null, auto-embeds `query_text`
+- `k` (Integer, optional): Number of results (default: 10)
+- `filter` (String, optional): WHERE clause applied to both search branches
+- `options` (Map, optional): Fusion configuration options
+
+**Fusion Options:**
+- `method` (String): Fusion algorithm
+  - `'rrf'` - Reciprocal Rank Fusion (default, no tuning required)
+  - `'weighted'` - Weighted linear combination
+- `alpha` (Float): Vector weight for weighted fusion (default: 0.5)
+  - `0.0` = FTS only
+  - `0.5` = Equal weight
+  - `1.0` = Vector only
+- `over_fetch` (Float): Over-fetch factor for pagination (default: 2.0)
+
+**Yields:**
+- `vid` (Integer): Vertex ID of matching node
+- `score` (Float): Fused relevance score
+- `node` (Map): Full node with properties (lazy-loaded)
+- `vector_score` (Float, optional): Individual vector similarity score
+- `fts_score` (Float, optional): Individual BM25 score
+
+**Examples:**
+
+```cypher
+-- Basic hybrid search with auto-embedding
+CALL uni.search(
+    'Document',
+    {vector: 'embedding', fts: 'content'},
+    'machine learning optimization',
+    null,  -- auto-embed the query text
+    20
+)
+YIELD node, score
+RETURN node.title, score
+
+-- Hybrid search with pre-computed vector
+CALL uni.search(
+    'Document',
+    {vector: 'embedding', fts: 'content'},
+    'machine learning',
+    [0.1, 0.2, 0.3, ...],  -- pre-computed embedding
+    10
+)
+YIELD node, score
+RETURN node.title, score
+
+-- With detailed score breakdown
+CALL uni.search(
+    'Document',
+    {vector: 'embedding', fts: 'content'},
+    'neural networks',
+    null,
+    10
+)
+YIELD node, score, vector_score, fts_score
+RETURN node.title, score, vector_score, fts_score
+
+-- With pre-filter
+CALL uni.search(
+    'Document',
+    {vector: 'embedding', fts: 'content'},
+    'graph databases',
+    null,
+    10,
+    'category = "technology"'
+)
+YIELD node, score
+RETURN node.title, score
+
+-- With weighted fusion (favor semantic similarity)
+CALL uni.search(
+    'Document',
+    {vector: 'embedding', fts: 'content'},
+    'deep learning',
+    null,
+    10,
+    null,
+    {method: 'weighted', alpha: 0.7}
+)
+YIELD node, score
+RETURN node.title, score
+```
+
+**Fusion Algorithms:**
+
+| Method | Formula | Best For |
+|--------|---------|----------|
+| `rrf` | `Σ 1/(k + rank)` where k=60 | General use, no tuning needed |
+| `weighted` | `α × vec_score + (1-α) × fts_score` | When you need to bias toward semantic or keyword match |
+
+**RRF (Reciprocal Rank Fusion):**
+- Robust, rank-based fusion that works well without tuning
+- Each result gets a score based on its rank in each list
+- Results appearing in both lists get boosted
+
+**Weighted Fusion:**
+- Linear combination of normalized scores
+- Use `alpha > 0.5` to favor semantic/vector similarity
+- Use `alpha < 0.5` to favor keyword/FTS matching
+
+**Performance Notes:**
+- Both branches execute in parallel
+- Pre-filters are applied before search (not post-filter)
+- Over-fetching ensures good fusion quality with pagination
 
 ---
 
@@ -904,8 +1130,10 @@ RETURN uni.bitwise.shiftRight(20, 2) AS result
 - **Add constraint**: `uni.schema.createConstraint(label, type, props)`
 - **Drop label**: `uni.schema.dropLabel(name)`
 
-### Vector Search
-- **Find similar nodes**: `uni.vector.query(label, prop, vec, k)`
+### Search
+- **Vector similarity**: `uni.vector.query(label, prop, vec_or_text, k)`
+- **Full-text search**: `uni.fts.query(label, prop, search_term, k)`
+- **Hybrid search**: `uni.search(label, {vector: prop1, fts: prop2}, query, null, k)`
 
 ### Graph Analytics
 - **Most influential nodes**: `uni.algo.pageRank(...)`

@@ -76,6 +76,7 @@ mod test_helpers {
                 IndexType::Vector(VectorIndexCfg {
                     algorithm: VectorAlgo::Flat,
                     metric: VectorMetric::L2,
+                    embedding: None,
                 }),
             )
             // Counter - For numeric operations

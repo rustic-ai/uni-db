@@ -22,6 +22,7 @@ nav:
       - Window Functions: features/window-functions.md
       - Vector Search: features/vector-search.md
       - Full-Text + JSON Search: features/full-text-json-search.md
+      - Hybrid Search: features/hybrid-search.md
       - Schema & Indexing: features/schema-indexing.md
       - Graph Algorithms: features/graph-algorithms.md
       - Transactions & Consistency: features/transactions-consistency.md

@@ -119,22 +119,49 @@ Find the K nearest neighbors to a query vector:
 
 ```cypher
 CALL uni.vector.query('Paper', 'embedding', $query_vector, 10)
-YIELD node, distance
-RETURN node.title, distance
-ORDER BY distance
+YIELD node, score
+RETURN node.title, score
+ORDER BY score DESC
 ```
 
 **Parameters:**
 - `'Paper'`: Label to search
 - `'embedding'`: Vector property name
-- `$query_vector`: Query vector (list of floats)
+- `$query_vector`: Query vector (list of floats) OR text string for auto-embedding
 - `10`: Number of results (K)
+- (optional) `filter`: Pre-filter clause
+- (optional) `threshold`: Minimum score
 
 **Yields:**
 - `node`: Full node object with all properties
 - `vid`: Vertex ID (for efficient joins)
-- `distance`: Raw distance value (lower is better)
 - `score`: Normalized similarity score (higher is better, range 0-1)
+
+### Auto-Embed Text Queries
+
+When your vector index has an embedding configuration, you can pass text directly:
+
+```cypher
+-- The index auto-embeds the text query
+CALL uni.vector.query('Paper', 'embedding', 'attention mechanisms in transformers', 10)
+YIELD node, score
+RETURN node.title, score
+ORDER BY score DESC
+```
+
+This requires an embedding configuration on the index:
+
+```cypher
+CREATE VECTOR INDEX paper_embed FOR (p:Paper) ON (p.embedding)
+OPTIONS {
+    metric: 'cosine',
+    embedding: {
+        provider: 'fastembed',
+        model: 'AllMiniLML6V2',
+        source: ['abstract']
+    }
+}
+```
 
 ### Operator Form (`~=`) with Scores
 
@@ -603,8 +630,40 @@ RETURN seed.title AS cluster_center, COLLECT(similar.title) AS cluster_members
 
 ---
 
+## Hybrid Search
+
+For queries that benefit from both semantic similarity and keyword matching, use `uni.search`:
+
+```cypher
+CALL uni.search(
+    'Paper',
+    {vector: 'embedding', fts: 'abstract'},
+    'transformer attention mechanisms',
+    null,  -- auto-embed the text
+    10
+)
+YIELD node, score, vector_score, fts_score
+RETURN node.title, score, vector_score, fts_score
+```
+
+Hybrid search combines vector and full-text results using Reciprocal Rank Fusion (RRF) or weighted fusion. See the [Hybrid Search feature page](../features/hybrid-search.md) for details.
+
+### Full-Text Search Procedure
+
+For keyword-only search with BM25 scoring:
+
+```cypher
+CALL uni.fts.query('Paper', 'abstract', 'neural networks', 20)
+YIELD node, score
+RETURN node.title, score
+ORDER BY score DESC
+```
+
+---
+
 ## Next Steps
 
 - [Indexing](../concepts/indexing.md) — All index types and configuration
+- [Hybrid Search](../features/hybrid-search.md) — Combined vector + FTS search
 - [Performance Tuning](performance-tuning.md) — Optimization strategies
 - [Data Ingestion](data-ingestion.md) — Import data with embeddings

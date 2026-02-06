@@ -4,8 +4,9 @@
 use crate::api::Uni;
 use std::path::Path;
 use uni_common::core::schema::{
-    DataType, DistanceMetric, FullTextIndexConfig, IndexDefinition, ScalarIndexConfig,
-    ScalarIndexType, TokenizerConfig, VectorIndexConfig, VectorIndexType,
+    DataType, DistanceMetric, EmbeddingConfig, EmbeddingModel, FullTextIndexConfig,
+    IndexDefinition, ScalarIndexConfig, ScalarIndexType, TokenizerConfig, VectorIndexConfig,
+    VectorIndexType,
 };
 use uni_common::{Result, UniError};
 
@@ -230,7 +231,7 @@ impl<'a> LabelBuilder<'a> {
                 property: property.to_string(),
                 index_type: cfg.algorithm.into_internal(),
                 metric: cfg.metric.into_internal(),
-                embedding_config: None, // Explicitly set via SchemaBuilder or future API
+                embedding_config: cfg.embedding.map(|e| e.into_internal()),
             }),
             IndexType::FullText => IndexDefinition::FullText(FullTextIndexConfig {
                 name: format!("fts_{}_{}", self.name, property),
@@ -385,6 +386,49 @@ pub enum IndexType {
 pub struct VectorIndexCfg {
     pub algorithm: VectorAlgo,
     pub metric: VectorMetric,
+    pub embedding: Option<EmbeddingCfg>,
+}
+
+/// Embedding configuration for auto-embedding during index writes.
+pub struct EmbeddingCfg {
+    pub provider: EmbeddingProvider,
+    pub model: String,
+    pub source_properties: Vec<String>,
+    pub batch_size: usize,
+}
+
+/// Supported embedding providers.
+#[non_exhaustive]
+pub enum EmbeddingProvider {
+    FastEmbed,
+    OpenAI { api_key_env: String },
+    Ollama { host: String },
+}
+
+impl EmbeddingCfg {
+    fn into_internal(self) -> EmbeddingConfig {
+        let model = match self.provider {
+            EmbeddingProvider::FastEmbed => EmbeddingModel::FastEmbed {
+                model_name: self.model,
+                cache_dir: None,
+                max_length: None,
+            },
+            EmbeddingProvider::OpenAI { api_key_env } => EmbeddingModel::OpenAI {
+                model: self.model,
+                api_key_env,
+                dimensions: None,
+            },
+            EmbeddingProvider::Ollama { host } => EmbeddingModel::Ollama {
+                model: self.model,
+                host,
+            },
+        };
+        EmbeddingConfig {
+            model,
+            source_properties: self.source_properties,
+            batch_size: self.batch_size,
+        }
+    }
 }
 
 #[non_exhaustive]

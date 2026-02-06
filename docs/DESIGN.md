@@ -4130,10 +4130,32 @@ await writer.create_vertex("Document", "doc1", {
     "content": "Graph databases are powerful..."
 })  # embedding computed and stored
 
-# Vector search
+# Vector search (with auto-embedding from text)
 results = await db.query("""
-    CALL db.idx.vector.query('Document', 'content', $query, 10)
+    CALL uni.vector.query('Document', 'embedding', $query, 10)
+    YIELD node, score
+    RETURN node.title, score
 """, params={"query": "database performance"})
+
+# Full-text search with BM25 scoring
+fts_results = await db.query("""
+    CALL uni.fts.query('Document', 'content', 'graph algorithms', 20)
+    YIELD node, score
+    RETURN node.title, score
+""")
+
+# Hybrid search combining vector + FTS with RRF fusion
+hybrid_results = await db.query("""
+    CALL uni.search(
+        'Document',
+        {vector: 'embedding', fts: 'content'},
+        'machine learning optimization',
+        null,
+        10
+    )
+    YIELD node, score, vector_score, fts_score
+    RETURN node.title, score
+""")
 ```
 
 ---
@@ -4319,23 +4341,27 @@ proptest! {
 
 - [x] Vector indexes (IvfPq, Hnsw, Flat)
 - [x] Multiple distance metrics (Cosine, L2, Dot)
-- [x] VectorSearch via CALL db.idx.vector.query()
+- [x] VectorSearch via CALL uni.vector.query()
+- [x] Auto-embed text queries using index embedding config
 - [x] Embedding services (FastEmbed, OpenAI, Ollama)
 
 **Testing milestone:**
 - [x] Test k-NN returns correct neighbors
 - [x] Test hybrid query: vector search + graph filter
 
-### Phase 8: Document Storage 🚧 PARTIAL
+### Phase 8: Document Storage & Hybrid Search ✅ COMPLETE
 
 - [x] JSON property storage
 - [x] Full-text search indexes (Lance FTS)
 - [x] Inverted indexes
+- [x] FTS query procedure: CALL uni.fts.query() with BM25 scoring
+- [x] Hybrid search: CALL uni.search() with RRF/weighted fusion
 - [ ] Document collection API (planned)
 
 **Testing milestone:**
 - [x] Test JSON property read/write
 - [x] Test full-text search queries
+- [x] Test hybrid search with rank fusion
 
 ---
 

@@ -129,6 +129,7 @@ async fn test_recommendation() -> anyhow::Result<()> {
             IndexType::Vector(VectorIndexCfg {
                 algorithm: VectorAlgo::Flat,
                 metric: VectorMetric::Cosine,
+                embedding: None,
             }),
         )
         .edge_type("VIEWED", &["User"], &["Product"])
@@ -228,6 +229,7 @@ async fn test_rag() -> anyhow::Result<()> {
             IndexType::Vector(VectorIndexCfg {
                 algorithm: VectorAlgo::Flat,
                 metric: VectorMetric::Cosine,
+                embedding: None,
             }),
         )
         .label("Entity")

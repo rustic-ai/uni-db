@@ -20,6 +20,7 @@ async fn test_vector_match_operator_coverage() -> Result<()> {
             IndexType::Vector(uni_db::api::schema::VectorIndexCfg {
                 algorithm: uni_db::api::schema::VectorAlgo::Flat,
                 metric: uni_db::api::schema::VectorMetric::L2,
+                embedding: None,
             }),
         )
         .apply()
