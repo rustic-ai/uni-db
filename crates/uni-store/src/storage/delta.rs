@@ -145,8 +145,13 @@ impl DeltaDataset {
         columns.push(build_timestamp_column(entries.iter().map(|e| e.created_at)));
         columns.push(build_timestamp_column(entries.iter().map(|e| e.updated_at)));
 
+        // Derive deleted flags from Op for property column building
+        // Tombstones (Op::Delete) are logically deleted and should use default values
+        let deleted_flags: Vec<bool> = entries.iter().map(|e| e.op == Op::Delete).collect();
+
         // Build property columns using shared builder
         let prop_columns = PropertyColumnBuilder::new(schema, &self.edge_type, entries.len())
+            .with_deleted(&deleted_flags)
             .build(|i| &entries[i].properties)?;
 
         columns.extend(prop_columns);
