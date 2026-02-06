@@ -147,21 +147,41 @@ fn identifier(input: &str) -> IResult<&str, &str> {
     take_while1(|c: char| c.is_alphanumeric() || c == '_')(input)
 }
 
+/// Parse multiple labels like `:A:B:C` and return as a vector
+fn labels(input: &str) -> IResult<&str, Vec<String>> {
+    let (input, first_label) = preceded(char(':'), identifier)(input)?;
+    let mut label_list = vec![first_label.to_string()];
+
+    let mut remaining = input;
+    while let Ok((rest, label)) = preceded(multispace0, preceded(char(':'), identifier))(remaining)
+    {
+        label_list.push(label.to_string());
+        remaining = rest;
+    }
+
+    Ok((remaining, label_list))
+}
+
 fn node(input: &str) -> IResult<&str, Node> {
     let (input, _) = multispace0(input)?;
     let (input, _) = char('(')(input)?;
     let (input, _) = multispace0(input)?;
-    let (input, label) = opt(preceded(char(':'), identifier))(input)?;
+    let (input, label_list) = opt(labels)(input)?;
     let (input, _) = multispace0(input)?;
     let (input, properties) = opt(map_parser)(input)?;
     let (input, _) = multispace0(input)?;
     let (input, _) = char(')')(input)?;
 
+    // Concatenate labels with ':' separator
+    let label = label_list
+        .map(|labels| labels.join(":"))
+        .unwrap_or_default();
+
     Ok((
         input,
         Node {
             vid: Vid::from(0),
-            label: label.unwrap_or_default().to_string(),
+            label,
             properties: properties.unwrap_or_default(),
         },
     ))
@@ -189,21 +209,52 @@ fn edge(input: &str) -> IResult<&str, Edge> {
     ))
 }
 
-/// Parse a path `<n0-[r1]->n1>`. Currently only handles empty paths.
+/// Parse a path `<node-edge-node-edge-node>` with proper direction handling
 fn path(input: &str) -> IResult<&str, Path> {
     let (input, _) = multispace0(input)?;
     let (input, _) = char('<')(input)?;
-    // TODO: parse node-edge-node sequences
     let (input, _) = multispace0(input)?;
+
+    // Parse first node
+    let (input, first_node) = node(input)?;
+    let mut nodes = vec![first_node];
+    let mut edges = vec![];
+
+    // Parse edge-node pairs
+    let mut remaining = input;
+    loop {
+        let (input, _) = multispace0(remaining)?;
+
+        // Try to parse edge: <-[edge]- or -[edge]->
+        match tuple((opt(char('<')), char('-'), edge, char('-'), opt(char('>'))))(input) {
+            Ok((input, (left_arrow, _, mut edge_val, _, right_arrow))) => {
+                // Determine direction: -> is outgoing, <- is incoming
+                let outgoing = left_arrow.is_none() && right_arrow.is_some();
+
+                // Parse next node
+                let (input, next_node) = node(input)?;
+
+                // Set edge source/destination based on direction
+                if outgoing {
+                    edge_val.src = nodes.last().unwrap().vid;
+                    edge_val.dst = next_node.vid;
+                } else {
+                    edge_val.src = next_node.vid;
+                    edge_val.dst = nodes.last().unwrap().vid;
+                }
+
+                edges.push(edge_val);
+                nodes.push(next_node);
+                remaining = input;
+            }
+            Err(_) => break,
+        }
+    }
+
+    let (input, _) = multispace0(remaining)?;
     let (input, _) = char('>')(input)?;
 
-    Ok((
-        input,
-        Path {
-            nodes: vec![],
-            edges: vec![],
-        },
-    ))
+    Ok((input, Path { nodes, edges }))
 }
 
 #[cfg(test)]
@@ -265,6 +316,120 @@ mod tests {
             assert_eq!(map.get("age"), Some(&Value::Int(30)));
         } else {
             panic!("Expected map");
+        }
+    }
+
+    #[test]
+    fn test_parse_multi_label_node() {
+        if let Value::Node(node) = parse_value("(:A:B:C)").unwrap() {
+            assert_eq!(node.label, "A:B:C");
+            assert!(node.properties.is_empty());
+        } else {
+            panic!("Expected node");
+        }
+    }
+
+    #[test]
+    fn test_parse_multi_label_with_props() {
+        if let Value::Node(node) = parse_value("(:A:B {name: 'test'})").unwrap() {
+            assert_eq!(node.label, "A:B");
+            assert_eq!(node.properties.len(), 1);
+        } else {
+            panic!("Expected node");
+        }
+    }
+
+    #[test]
+    fn test_parse_single_label() {
+        if let Value::Node(node) = parse_value("(:Person)").unwrap() {
+            assert_eq!(node.label, "Person");
+        } else {
+            panic!("Expected node");
+        }
+    }
+
+    #[test]
+    fn test_parse_unlabeled_node() {
+        if let Value::Node(node) = parse_value("()").unwrap() {
+            assert_eq!(node.label, "");
+        } else {
+            panic!("Expected node");
+        }
+    }
+
+    #[test]
+    fn test_parse_empty_path_single_node() {
+        if let Value::Path(path) = parse_value("<()>").unwrap() {
+            assert_eq!(path.nodes.len(), 1);
+            assert_eq!(path.edges.len(), 0);
+        } else {
+            panic!("Expected path");
+        }
+    }
+
+    #[test]
+    fn test_parse_simple_path() {
+        if let Value::Path(path) = parse_value("<(:A)-[:KNOWS]->(:B)>").unwrap() {
+            assert_eq!(path.nodes.len(), 2);
+            assert_eq!(path.edges.len(), 1);
+            assert_eq!(path.nodes[0].label, "A");
+            assert_eq!(path.nodes[1].label, "B");
+            assert_eq!(path.edges[0].edge_type, "KNOWS");
+        } else {
+            panic!("Expected path");
+        }
+    }
+
+    #[test]
+    fn test_parse_path_with_properties() {
+        let path_str = "<(:A {name: 'Alice'})-[:KNOWS]->(:B {name: 'Bob'})>";
+        if let Value::Path(path) = parse_value(path_str).unwrap() {
+            assert_eq!(path.nodes.len(), 2);
+            assert_eq!(
+                path.nodes[0].properties.get("name"),
+                Some(&Value::String("Alice".to_string()))
+            );
+            assert_eq!(
+                path.nodes[1].properties.get("name"),
+                Some(&Value::String("Bob".to_string()))
+            );
+        } else {
+            panic!("Expected path");
+        }
+    }
+
+    #[test]
+    fn test_parse_multi_hop_path() {
+        if let Value::Path(path) = parse_value("<(:A)-[:T1]->(:B)-[:T2]->(:C)>").unwrap() {
+            assert_eq!(path.nodes.len(), 3);
+            assert_eq!(path.edges.len(), 2);
+            assert_eq!(path.edges[0].edge_type, "T1");
+            assert_eq!(path.edges[1].edge_type, "T2");
+        } else {
+            panic!("Expected path");
+        }
+    }
+
+    #[test]
+    fn test_parse_incoming_edge_path() {
+        if let Value::Path(path) = parse_value("<(:B)<-[:KNOWS]-(:A)>").unwrap() {
+            assert_eq!(path.nodes.len(), 2);
+            assert_eq!(path.edges.len(), 1);
+            assert_eq!(path.nodes[0].label, "B");
+            assert_eq!(path.nodes[1].label, "A");
+        } else {
+            panic!("Expected path");
+        }
+    }
+
+    #[test]
+    fn test_parse_path_with_multi_label_nodes() {
+        if let Value::Path(path) = parse_value("<(:A:B)-[:R]->(:C:D)>").unwrap() {
+            assert_eq!(path.nodes.len(), 2);
+            assert_eq!(path.nodes[0].label, "A:B");
+            assert_eq!(path.nodes[1].label, "C:D");
+        } else {
+            panic!("Expected path");
         }
     }
 }

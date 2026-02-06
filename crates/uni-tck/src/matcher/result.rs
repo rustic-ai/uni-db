@@ -186,7 +186,18 @@ fn maps_equal(a: &HashMap<String, Value>, b: &HashMap<String, Value>) -> bool {
 }
 
 fn nodes_equal(a: &Node, b: &Node) -> bool {
-    a.label == b.label && maps_equal(&a.properties, &b.properties)
+    // Split labels on ':' and compare as sets for multi-label nodes
+    let a_labels: Vec<&str> = a.label.split(':').filter(|s| !s.is_empty()).collect();
+    let b_labels: Vec<&str> = b.label.split(':').filter(|s| !s.is_empty()).collect();
+
+    // Labels must match exactly (same set, order doesn't matter)
+    let labels_match = if a_labels.is_empty() && b_labels.is_empty() {
+        true
+    } else {
+        a_labels.len() == b_labels.len() && a_labels.iter().all(|l| b_labels.contains(l))
+    };
+
+    labels_match && maps_equal(&a.properties, &b.properties)
 }
 
 fn edges_equal(a: &Edge, b: &Edge) -> bool {
@@ -238,5 +249,85 @@ mod tests {
             &Value::List(vec![Value::Int(1), Value::Int(2)]),
             &Value::List(vec![Value::Int(2), Value::Int(1)])
         ));
+    }
+
+    #[test]
+    fn test_nodes_equal_single_label() {
+        use uni_common::core::id::Vid;
+        let node1 = Node {
+            vid: Vid::from(1),
+            label: "Person".to_string(),
+            properties: HashMap::new(),
+        };
+        let node2 = Node {
+            vid: Vid::from(2),
+            label: "Person".to_string(),
+            properties: HashMap::new(),
+        };
+        assert!(nodes_equal(&node1, &node2));
+    }
+
+    #[test]
+    fn test_nodes_equal_multi_label_same_order() {
+        use uni_common::core::id::Vid;
+        let node1 = Node {
+            vid: Vid::from(1),
+            label: "A:B:C".to_string(),
+            properties: HashMap::new(),
+        };
+        let node2 = Node {
+            vid: Vid::from(2),
+            label: "A:B:C".to_string(),
+            properties: HashMap::new(),
+        };
+        assert!(nodes_equal(&node1, &node2));
+    }
+
+    #[test]
+    fn test_nodes_equal_multi_label_different_order() {
+        use uni_common::core::id::Vid;
+        let node1 = Node {
+            vid: Vid::from(1),
+            label: "A:B:C".to_string(),
+            properties: HashMap::new(),
+        };
+        let node2 = Node {
+            vid: Vid::from(2),
+            label: "C:B:A".to_string(),
+            properties: HashMap::new(),
+        };
+        assert!(nodes_equal(&node1, &node2));
+    }
+
+    #[test]
+    fn test_nodes_not_equal_different_labels() {
+        use uni_common::core::id::Vid;
+        let node1 = Node {
+            vid: Vid::from(1),
+            label: "A:B".to_string(),
+            properties: HashMap::new(),
+        };
+        let node2 = Node {
+            vid: Vid::from(2),
+            label: "A:C".to_string(),
+            properties: HashMap::new(),
+        };
+        assert!(!nodes_equal(&node1, &node2));
+    }
+
+    #[test]
+    fn test_nodes_equal_empty_labels() {
+        use uni_common::core::id::Vid;
+        let node1 = Node {
+            vid: Vid::from(1),
+            label: "".to_string(),
+            properties: HashMap::new(),
+        };
+        let node2 = Node {
+            vid: Vid::from(2),
+            label: "".to_string(),
+            properties: HashMap::new(),
+        };
+        assert!(nodes_equal(&node1, &node2));
     }
 }

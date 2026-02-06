@@ -11,9 +11,9 @@ use std::collections::HashMap;
 use uni_algo::algo::procedures::AlgoContext;
 use uni_common::core::id::Vid;
 use uni_common::core::schema::{DistanceMetric, EmbeddingModel, SchemaManager};
-use uni_store::embedding::{EmbeddingService, FastEmbedService};
 use uni_cypher::ast::Expr;
 use uni_store::QueryContext;
+use uni_store::embedding::{EmbeddingService, FastEmbedService};
 use uni_store::runtime::property_manager::PropertyManager;
 
 /// Value type for procedure parameters and outputs.
@@ -216,11 +216,7 @@ fn fuse_weighted(
     let fts_scores: HashMap<Vid, f32> = fts_results
         .iter()
         .map(|(vid, score)| {
-            let norm = if fts_max > 0.0 {
-                score / fts_max
-            } else {
-                0.0
-            };
+            let norm = if fts_max > 0.0 { score / fts_max } else { 0.0 };
             (*vid, norm)
         })
         .collect();
@@ -379,8 +375,7 @@ impl Executor {
                             cache_dir,
                             ..
                         } => {
-                            let service =
-                                FastEmbedService::new(model_name, cache_dir.as_deref())?;
+                            let service = FastEmbedService::new(model_name, cache_dir.as_deref())?;
                             let embeddings = service.embed(&[query_text]).await?;
                             embeddings
                                 .into_iter()
@@ -587,10 +582,7 @@ impl Executor {
                             .as_f64()
                             .ok_or_else(|| anyhow!("Threshold must be a number"))?;
                         if thresh < 0.0 {
-                            return Err(anyhow!(
-                                "Threshold must be non-negative, got {}",
-                                thresh
-                            ));
+                            return Err(anyhow!("Threshold must be non-negative, got {}", thresh));
                         }
                         Some(thresh)
                     }
@@ -843,7 +835,14 @@ impl Executor {
                 if let Some(ref fts_prop) = fts_prop {
                     fts_results = self
                         .storage
-                        .fts_search(&label, fts_prop, &query_text, over_fetch_k, filter.as_deref(), ctx)
+                        .fts_search(
+                            &label,
+                            fts_prop,
+                            &query_text,
+                            over_fetch_k,
+                            filter.as_deref(),
+                            ctx,
+                        )
                         .await?;
                 }
 
@@ -867,8 +866,7 @@ impl Executor {
                 let schema_manager = self.storage.schema_manager();
 
                 // Build lookup maps for original scores
-                let vec_score_map: HashMap<Vid, f32> =
-                    vector_results.iter().cloned().collect();
+                let vec_score_map: HashMap<Vid, f32> = vector_results.iter().cloned().collect();
                 let fts_score_map: HashMap<Vid, f32> = fts_results.iter().cloned().collect();
 
                 // Normalize FTS scores
@@ -883,9 +881,8 @@ impl Executor {
                     // Vector score (normalized 0-1 via calculate_score)
                     if let Some(&dist) = vec_score_map.get(&vid) {
                         if let Some(ref vec_prop) = vector_prop {
-                            let vec_score =
-                                calculate_score(dist, schema_manager, &label, vec_prop)
-                                    .unwrap_or(0.0);
+                            let vec_score = calculate_score(dist, schema_manager, &label, vec_prop)
+                                .unwrap_or(0.0);
                             canonical_yields.insert("vector_score".to_string(), json!(vec_score));
                         }
                     } else {

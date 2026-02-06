@@ -753,8 +753,8 @@ impl StorageManager {
         filter: Option<&str>,
         ctx: Option<&QueryContext>,
     ) -> Result<Vec<(Vid, f32)>> {
-        use lance_index::scalar::inverted::query::MatchQuery;
         use lance_index::scalar::FullTextSearchQuery;
+        use lance_index::scalar::inverted::query::MatchQuery;
 
         // Try to open the cached table; if the label has no data yet the Lance
         // table won't exist. In that case return empty results.
@@ -764,7 +764,8 @@ impl StorageManager {
         };
 
         // Build the FTS query with specific column
-        let match_query = MatchQuery::new(query.to_string()).with_column(Some(property.to_string()));
+        let match_query =
+            MatchQuery::new(query.to_string()).with_column(Some(property.to_string()));
         let fts_query = FullTextSearchQuery {
             query: match_query.into(),
             limit: Some(k as i64),

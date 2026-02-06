@@ -612,6 +612,7 @@ impl Edge {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Path {
     pub nodes: Vec<Node>,
+    #[serde(rename = "relationships")]
     pub edges: Vec<Edge>,
 }
 

@@ -9,7 +9,7 @@
 //! - All paths must be Value::Path
 //! - No internal fields exposed in user-facing results
 
-use crate::types::{Edge, Node, Value};
+use crate::types::{Edge, Node, Path, Value};
 use anyhow::{Result, anyhow};
 use std::collections::HashMap;
 use uni_common::core::id::{Eid, Vid};
@@ -27,22 +27,21 @@ impl ResultNormalizer {
     /// Recursively normalize a single value.
     pub fn normalize_value(value: Value) -> Result<Value> {
         match value {
-            // Recursively normalize lists
             Value::List(items) => {
                 let normalized: Result<Vec<_>> =
                     items.into_iter().map(Self::normalize_value).collect();
                 Ok(Value::List(normalized?))
             }
 
-            // Recursively normalize maps
             Value::Map(map) => {
-                // Check if this map represents a node or edge
-                if Self::is_node_map(&map) {
+                // Check if this map represents a path, node, or edge (order matters: path first)
+                if Self::is_path_map(&map) {
+                    Self::map_to_path(map)
+                } else if Self::is_node_map(&map) {
                     Self::map_to_node(map)
                 } else if Self::is_edge_map(&map) {
                     Self::map_to_edge(map)
                 } else {
-                    // Regular map - normalize values recursively
                     let normalized: Result<HashMap<_, _>> = map
                         .into_iter()
                         .map(|(k, v)| Ok((k, Self::normalize_value(v)?)))
@@ -51,57 +50,100 @@ impl ResultNormalizer {
                 }
             }
 
-            // Already proper types - pass through
-            Value::Node(_) | Value::Edge(_) | Value::Path(_) => Ok(value),
-
-            // Primitives - pass through
+            // Already proper graph types or primitives - pass through unchanged
             _ => Ok(value),
         }
     }
 
-    /// Check if Map represents a node (has _vid and _label or properties suggesting node).
-    fn is_node_map(map: &HashMap<String, Value>) -> bool {
-        // A map is a node if it has _vid or both _id and label fields
-        map.contains_key("_vid")
-            || (map.contains_key("_id") && map.contains_key("label"))
-            || (map.contains_key("_vid") && map.contains_key("_label"))
+    /// Normalize a property value without structural conversion.
+    ///
+    /// Recursively processes nested lists and maps but does NOT convert maps to
+    /// Node/Edge/Path structures. This prevents user data containing keys like
+    /// `_vid` or `_eid` from being incorrectly converted.
+    fn normalize_property_value(value: Value) -> Value {
+        match value {
+            Value::List(items) => Value::List(
+                items
+                    .into_iter()
+                    .map(Self::normalize_property_value)
+                    .collect(),
+            ),
+            Value::Map(map) => Value::Map(
+                map.into_iter()
+                    .map(|(k, v)| (k, Self::normalize_property_value(v)))
+                    .collect(),
+            ),
+            other => other,
+        }
     }
 
-    /// Check if Map represents an edge (has _eid, _type, _src, _dst).
+    /// Check if map represents a node.
+    ///
+    /// Detection is intentionally lenient for top-level result values. Property values
+    /// inside nodes/edges use `normalize_property_value` instead, which skips this check.
+    fn is_node_map(map: &HashMap<String, Value>) -> bool {
+        map.contains_key("_vid") || (map.contains_key("_id") && map.contains_key("label"))
+    }
+
+    /// Check if map represents an edge.
+    ///
+    /// Detection is intentionally lenient for top-level result values. Property values
+    /// inside nodes/edges use `normalize_property_value` instead, which skips this check.
     fn is_edge_map(map: &HashMap<String, Value>) -> bool {
         map.contains_key("_eid")
             || (map.contains_key("_id") && map.contains_key("_src") && map.contains_key("_dst"))
-            || (map.contains_key("_eid") && map.contains_key("_type"))
     }
 
-    /// Convert Map to Node, extracting properties and stripping internal fields.
+    /// Check if map represents a path (has "nodes" and "relationships" or "edges").
+    fn is_path_map(map: &HashMap<String, Value>) -> bool {
+        map.contains_key("nodes")
+            && (map.contains_key("relationships") || map.contains_key("edges"))
+    }
+
+    /// Extract a u64 ID from a Value (Int or parseable String).
+    fn value_to_u64(value: &Value) -> Option<u64> {
+        match value {
+            Value::Int(i) => Some(*i as u64),
+            Value::String(s) => s.parse().ok(),
+            _ => None,
+        }
+    }
+
+    /// Extract a string from a Value.
+    fn value_to_string(value: &Value) -> Option<String> {
+        match value {
+            Value::String(s) => Some(s.clone()),
+            _ => None,
+        }
+    }
+
+    /// Extract properties from a map, filtering out internal fields.
+    fn extract_properties(
+        map: HashMap<String, Value>,
+        extra_excluded: &[&str],
+    ) -> HashMap<String, Value> {
+        map.into_iter()
+            .filter(|(k, _)| !k.starts_with('_') && !extra_excluded.contains(&k.as_str()))
+            .map(|(k, v)| (k, Self::normalize_property_value(v)))
+            .collect()
+    }
+
+    /// Convert map to Node, extracting properties and stripping internal fields.
     fn map_to_node(map: HashMap<String, Value>) -> Result<Value> {
-        // Extract VID
         let vid = map
             .get("_vid")
             .or_else(|| map.get("_id"))
-            .and_then(|v| match v {
-                Value::Int(i) => Some(Vid::new(*i as u64)),
-                Value::String(s) => s.parse::<u64>().ok().map(Vid::new),
-                _ => None,
-            })
+            .and_then(Self::value_to_u64)
+            .map(Vid::new)
             .ok_or_else(|| anyhow!("Missing or invalid _vid in node map"))?;
 
-        // Extract label
         let label = map
             .get("_label")
             .or_else(|| map.get("label"))
-            .and_then(|v| match v {
-                Value::String(s) => Some(s.clone()),
-                _ => None,
-            })
+            .and_then(Self::value_to_string)
             .unwrap_or_default();
 
-        // Extract properties, filtering out internal fields
-        let properties: HashMap<String, Value> = map
-            .into_iter()
-            .filter(|(k, _)| !k.starts_with('_') && k != "properties" && k != "label")
-            .collect();
+        let properties = Self::extract_properties(map, &["properties", "label"]);
 
         Ok(Value::Node(Node {
             vid,
@@ -110,16 +152,13 @@ impl ResultNormalizer {
         }))
     }
 
-    /// Convert Map to Edge, extracting properties and stripping internal fields.
+    /// Convert map to Edge, extracting properties and stripping internal fields.
     fn map_to_edge(map: HashMap<String, Value>) -> Result<Value> {
         let eid = map
             .get("_eid")
             .or_else(|| map.get("_id"))
-            .and_then(|v| match v {
-                Value::Int(i) => Some(Eid::new(*i as u64)),
-                Value::String(s) => s.parse::<u64>().ok().map(Eid::new),
-                _ => None,
-            })
+            .and_then(Self::value_to_u64)
+            .map(Eid::new)
             .ok_or_else(|| anyhow!("Missing or invalid _eid in edge map"))?;
 
         // Prefer _type_name (string) over _type (numeric ID) for user-facing output
@@ -130,38 +169,25 @@ impl ResultNormalizer {
                 _ => None,
             })
             .or_else(|| {
-                // Fall back to _type if it's already a string
                 map.get("_type")
                     .or_else(|| map.get("type"))
-                    .and_then(|v| match v {
-                        Value::String(s) => Some(s.clone()),
-                        _ => None,
-                    })
+                    .and_then(Self::value_to_string)
             })
             .unwrap_or_default();
 
         let src = map
             .get("_src")
-            .and_then(|v| match v {
-                Value::Int(i) => Some(Vid::new(*i as u64)),
-                Value::String(s) => s.parse::<u64>().ok().map(Vid::new),
-                _ => None,
-            })
+            .and_then(Self::value_to_u64)
+            .map(Vid::new)
             .ok_or_else(|| anyhow!("Missing _src in edge map"))?;
 
         let dst = map
             .get("_dst")
-            .and_then(|v| match v {
-                Value::Int(i) => Some(Vid::new(*i as u64)),
-                Value::String(s) => s.parse::<u64>().ok().map(Vid::new),
-                _ => None,
-            })
+            .and_then(Self::value_to_u64)
+            .map(Vid::new)
             .ok_or_else(|| anyhow!("Missing _dst in edge map"))?;
 
-        let properties: HashMap<String, Value> = map
-            .into_iter()
-            .filter(|(k, _)| !k.starts_with('_') && k != "properties" && k != "type")
-            .collect();
+        let properties = Self::extract_properties(map, &["properties", "type"]);
 
         Ok(Value::Edge(Edge {
             eid,
@@ -170,6 +196,60 @@ impl ResultNormalizer {
             dst,
             properties,
         }))
+    }
+
+    /// Convert map to Path, handling both "relationships" and "edges" keys.
+    fn map_to_path(mut map: HashMap<String, Value>) -> Result<Value> {
+        let nodes = Self::extract_path_nodes(
+            map.remove("nodes")
+                .ok_or_else(|| anyhow!("Missing nodes in path map"))?,
+        )?;
+
+        let edges = Self::extract_path_edges(
+            map.remove("relationships")
+                .or_else(|| map.remove("edges"))
+                .ok_or_else(|| anyhow!("Missing relationships/edges in path map"))?,
+        )?;
+
+        Ok(Value::Path(Path { nodes, edges }))
+    }
+
+    /// Extract nodes from a path's nodes list.
+    fn extract_path_nodes(value: Value) -> Result<Vec<Node>> {
+        let Value::List(items) = value else {
+            return Err(anyhow!("Path nodes must be a list"));
+        };
+
+        items
+            .into_iter()
+            .map(|item| match item {
+                Value::Node(n) => Ok(n),
+                Value::Map(m) => match Self::map_to_node(m)? {
+                    Value::Node(n) => Ok(n),
+                    _ => Err(anyhow!("Failed to convert map to node in path")),
+                },
+                _ => Err(anyhow!("Invalid node type in path nodes list")),
+            })
+            .collect()
+    }
+
+    /// Extract edges from a path's relationships/edges list.
+    fn extract_path_edges(value: Value) -> Result<Vec<Edge>> {
+        let Value::List(items) = value else {
+            return Err(anyhow!("Path relationships/edges must be a list"));
+        };
+
+        items
+            .into_iter()
+            .map(|item| match item {
+                Value::Edge(e) => Ok(e),
+                Value::Map(m) => match Self::map_to_edge(m)? {
+                    Value::Edge(e) => Ok(e),
+                    _ => Err(anyhow!("Failed to convert map to edge in path")),
+                },
+                _ => Err(anyhow!("Invalid edge type in path edges list")),
+            })
+            .collect()
     }
 }
 
@@ -282,5 +362,91 @@ mod tests {
 
         assert!(matches!(result.get("n"), Some(Value::Node(_))));
         assert_eq!(result.get("count"), Some(&Value::Int(5)));
+    }
+
+    #[test]
+    fn test_map_with_vid_at_top_level_becomes_node() {
+        // At top level, a map with _vid is detected as a node
+        // (even without _label - label defaults to empty string)
+        let mut map = HashMap::new();
+        map.insert("_vid".to_string(), Value::Int(123));
+        map.insert("name".to_string(), Value::String("test".to_string()));
+
+        let result = ResultNormalizer::normalize_value(Value::Map(map)).unwrap();
+
+        match result {
+            Value::Node(node) => {
+                assert_eq!(node.vid.as_u64(), 123);
+                assert_eq!(node.label, ""); // Default empty label
+                assert_eq!(
+                    node.properties.get("name"),
+                    Some(&Value::String("test".to_string()))
+                );
+            }
+            _ => panic!("Expected Node variant, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_normalize_node_with_nested_map_containing_vid_key() {
+        // Regression test: user property containing _vid key should NOT be
+        // converted to a Node
+        let mut nested = HashMap::new();
+        nested.insert("_vid".to_string(), Value::String("user-data".to_string()));
+        nested.insert("other".to_string(), Value::Int(42));
+
+        let mut node_map = HashMap::new();
+        node_map.insert("_vid".to_string(), Value::Int(123));
+        node_map.insert("_label".to_string(), Value::String("Person".to_string()));
+        node_map.insert("metadata".to_string(), Value::Map(nested));
+
+        let result = ResultNormalizer::normalize_value(Value::Map(node_map)).unwrap();
+
+        match result {
+            Value::Node(node) => {
+                assert_eq!(node.vid.as_u64(), 123);
+                assert_eq!(node.label, "Person");
+                // The nested map should remain a Map, NOT become a Node
+                match node.properties.get("metadata") {
+                    Some(Value::Map(m)) => {
+                        assert_eq!(m.get("_vid"), Some(&Value::String("user-data".to_string())));
+                        assert_eq!(m.get("other"), Some(&Value::Int(42)));
+                    }
+                    other => panic!("Expected metadata to be Map, got {:?}", other),
+                }
+            }
+            _ => panic!("Expected Node variant"),
+        }
+    }
+
+    #[test]
+    fn test_normalize_edge_with_nested_map_containing_eid_key() {
+        // Regression test: user property containing _eid key should NOT be
+        // converted to an Edge
+        let mut nested = HashMap::new();
+        nested.insert("_eid".to_string(), Value::String("ref-123".to_string()));
+
+        let mut edge_map = HashMap::new();
+        edge_map.insert("_eid".to_string(), Value::Int(456));
+        edge_map.insert("_type".to_string(), Value::String("KNOWS".to_string()));
+        edge_map.insert("_src".to_string(), Value::Int(123));
+        edge_map.insert("_dst".to_string(), Value::Int(789));
+        edge_map.insert("reference".to_string(), Value::Map(nested));
+
+        let result = ResultNormalizer::normalize_value(Value::Map(edge_map)).unwrap();
+
+        match result {
+            Value::Edge(edge) => {
+                assert_eq!(edge.eid.as_u64(), 456);
+                // The nested map should remain a Map, NOT become an Edge
+                match edge.properties.get("reference") {
+                    Some(Value::Map(m)) => {
+                        assert_eq!(m.get("_eid"), Some(&Value::String("ref-123".to_string())));
+                    }
+                    other => panic!("Expected reference to be Map, got {:?}", other),
+                }
+            }
+            _ => panic!("Expected Edge variant"),
+        }
     }
 }

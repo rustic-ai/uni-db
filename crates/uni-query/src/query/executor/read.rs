@@ -3919,11 +3919,21 @@ impl Executor {
 
             // Merge the two graphs by copying vertices and edges from incoming to outgoing
             let mut merged = outgoing_graph;
+
+            // Track edges already in the outgoing graph to avoid duplicates from bidirectional patterns
+            let mut seen_edges = std::collections::HashSet::new();
+            for edge in merged.edges() {
+                seen_edges.insert(edge.eid);
+            }
+
             for vid in incoming_graph.vertices() {
                 merged.add_vertex(vid);
             }
             for edge in incoming_graph.edges() {
-                merged.add_edge(edge.src_vid, edge.dst_vid, edge.eid, edge.edge_type);
+                // Only add edge if not already present in merged graph
+                if seen_edges.insert(edge.eid) {
+                    merged.add_edge(edge.src_vid, edge.dst_vid, edge.eid, edge.edge_type);
+                }
             }
             merged
         } else {
@@ -3968,10 +3978,10 @@ impl Executor {
                     hydrate_entity_if_needed(target_obj, prop_manager, ctx).await;
                 }
                 // Hydrate edge properties if step variable is present
-                if let Some(sv) = step_variable {
-                    if let Some(Value::Object(edge_obj)) = m.get_mut(sv) {
-                        hydrate_entity_if_needed(edge_obj, prop_manager, ctx).await;
-                    }
+                if let Some(sv) = step_variable
+                    && let Some(Value::Object(edge_obj)) = m.get_mut(sv)
+                {
+                    hydrate_entity_if_needed(edge_obj, prop_manager, ctx).await;
                 }
             }
         }

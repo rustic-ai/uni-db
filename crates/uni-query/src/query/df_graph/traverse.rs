@@ -1614,6 +1614,9 @@ pub struct GraphVariableLengthTraverseExec {
     /// Variable name for path (if path is bound).
     path_variable: Option<String>,
 
+    /// Whether this is an optional match (LEFT JOIN semantics).
+    is_optional: bool,
+
     /// Graph execution context.
     graph_ctx: Arc<GraphExecutionContext>,
 
@@ -1651,6 +1654,7 @@ impl GraphVariableLengthTraverseExec {
         max_hops: usize,
         path_variable: Option<String>,
         graph_ctx: Arc<GraphExecutionContext>,
+        is_optional: bool,
     ) -> Self {
         let source_column = source_column.into();
 
@@ -1666,6 +1670,7 @@ impl GraphVariableLengthTraverseExec {
             min_hops,
             max_hops,
             path_variable,
+            is_optional,
             graph_ctx,
             schema,
             properties,
@@ -1770,6 +1775,7 @@ impl ExecutionPlan for GraphVariableLengthTraverseExec {
             self.max_hops,
             self.path_variable.clone(),
             self.graph_ctx.clone(),
+            self.is_optional,
         )))
     }
 
@@ -1810,6 +1816,7 @@ impl GraphVariableLengthTraverseExec {
             min_hops: self.min_hops,
             max_hops: self.max_hops,
             path_variable: self.path_variable.clone(),
+            is_optional: self.is_optional,
             graph_ctx: self.graph_ctx.clone(),
         }
     }
@@ -1823,6 +1830,7 @@ struct GraphVariableLengthTraverseExecData {
     min_hops: usize,
     max_hops: usize,
     path_variable: Option<String>,
+    is_optional: bool,
     graph_ctx: Arc<GraphExecutionContext>,
 }
 
@@ -1839,9 +1847,14 @@ impl GraphVariableLengthTraverseExecData {
         let is_undirected = matches!(self.direction, Direction::Both);
 
         while let Some((current, depth, node_path, edge_path)) = queue.pop_front() {
-            // Emit result if within hop range
-            if depth >= self.min_hops && depth <= self.max_hops && depth > 0 {
+            // Emit result if within hop range (including zero-length patterns)
+            if depth >= self.min_hops && depth <= self.max_hops {
                 results.push((current, depth, node_path.clone(), edge_path.clone()));
+
+                // For OPTIONAL MATCH, stop after first match to avoid Cartesian product
+                if self.is_optional && !results.is_empty() {
+                    return results;
+                }
             }
 
             // Stop if at max depth

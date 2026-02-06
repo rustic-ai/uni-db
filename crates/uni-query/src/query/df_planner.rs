@@ -885,6 +885,7 @@ impl HybridPhysicalPlanner {
                 max_hops,
                 path_variable.map(|s| s.to_string()),
                 self.graph_ctx.clone(),
+                optional,
             ))
         };
 
