@@ -75,6 +75,7 @@ pub fn register_cypher_udfs(ctx: &SessionContext) -> DFResult<()> {
     ctx.register_udf(create_type_udf());
     ctx.register_udf(create_keys_udf());
     ctx.register_udf(create_range_udf());
+    ctx.register_udf(create_index_udf());
 
     // Type conversion UDFs
     ctx.register_udf(create_to_integer_udf());
@@ -310,85 +311,136 @@ impl ScalarUDFImpl for KeysUdf {
     }
 
     fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DFResult<ColumnarValue> {
-        if args.args.is_empty() {
+        let json_args = columnar_args_to_json(&args.args)?;
+        if json_args.is_empty() {
             return Err(datafusion::error::DataFusionError::Execution(
                 "keys() requires 1 argument".to_string(),
             ));
         }
 
-        // For JSON string input, parse and extract keys
-        match &args.args[0] {
-            ColumnarValue::Array(arr) => {
-                if let Some(string_arr) = arr.as_any().downcast_ref::<StringArray>() {
-                    let mut list_builder = arrow_array::builder::ListBuilder::new(
-                        arrow_array::builder::StringBuilder::new(),
-                    );
-
-                    for i in 0..string_arr.len() {
-                        if string_arr.is_null(i) {
-                            list_builder.append_null();
-                            continue;
-                        }
-
-                        let json_str = string_arr.value(i);
-                        if let Ok(serde_json::Value::Object(map)) =
-                            serde_json::from_str::<serde_json::Value>(json_str)
-                        {
-                            let values = list_builder.values();
-                            for key in map.keys() {
-                                values.append_value(key);
-                            }
-                            list_builder.append(true);
-                        } else {
-                            // Not a JSON object, return empty list
-                            list_builder.append(true);
-                        }
-                    }
-
-                    let result: ArrayRef = Arc::new(list_builder.finish());
-                    Ok(ColumnarValue::Array(result))
-                } else {
-                    Err(datafusion::error::DataFusionError::Execution(
-                        "keys() expects a string (JSON) argument".to_string(),
-                    ))
-                }
+        let arg = &json_args[0];
+        let keys = match arg {
+            serde_json::Value::Object(map) => map
+                .iter()
+                .filter(|(k, v)| !v.is_null() && !k.starts_with('_'))
+                .map(|(k, _)| ScalarValue::Utf8(Some(k.clone())))
+                .collect::<Vec<_>>(),
+            serde_json::Value::Null => {
+                return Ok(ColumnarValue::Scalar(ScalarValue::List(
+                    ScalarValue::new_list_nullable(&[], &DataType::Utf8),
+                )));
             }
-            ColumnarValue::Scalar(s) => {
-                // Handle scalar case
-                if let datafusion::common::ScalarValue::Utf8(Some(json_str)) = s {
-                    if let Ok(serde_json::Value::Object(map)) =
-                        serde_json::from_str::<serde_json::Value>(json_str)
-                    {
-                        // Build list of keys as ScalarValues
-                        let key_scalars: Vec<datafusion::common::ScalarValue> = map
-                            .keys()
-                            .map(|k| datafusion::common::ScalarValue::Utf8(Some(k.clone())))
-                            .collect();
-                        let list = datafusion::common::ScalarValue::List(
-                            datafusion::common::ScalarValue::new_list(
-                                &key_scalars,
-                                &DataType::Utf8,
-                                true,
-                            ),
-                        );
-                        Ok(ColumnarValue::Scalar(list))
-                    } else {
-                        // Not a JSON object, return empty list
-                        let empty_list = datafusion::common::ScalarValue::List(
-                            datafusion::common::ScalarValue::new_list_nullable(
-                                &[],
-                                &DataType::Utf8,
-                            ),
-                        );
-                        Ok(ColumnarValue::Scalar(empty_list))
-                    }
-                } else {
-                    Err(datafusion::error::DataFusionError::Execution(
-                        "keys() expects a string (JSON) argument".to_string(),
-                    ))
-                }
+            _ => {
+                // Not a map/object, return empty list or error?
+                // Cypher: keys(non-map) returns empty list or errors depending on type.
+                vec![]
             }
+        };
+
+        let list = ScalarValue::List(ScalarValue::new_list(&keys, &DataType::Utf8, true));
+        Ok(ColumnarValue::Scalar(list))
+    }
+}
+
+// ============================================================================
+// index(container, index) -> Any (JSONB)
+// ============================================================================
+
+pub fn create_index_udf() -> ScalarUDF {
+    ScalarUDF::new_from_impl(IndexUdf::new())
+}
+
+#[derive(Debug)]
+struct IndexUdf {
+    signature: Signature,
+}
+
+impl IndexUdf {
+    fn new() -> Self {
+        Self {
+            signature: Signature::any(2, Volatility::Immutable),
         }
+    }
+}
+
+impl_udf_eq_hash!(IndexUdf);
+
+impl ScalarUDFImpl for IndexUdf {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn name(&self) -> &str {
+        "index"
+    }
+
+    fn signature(&self) -> &Signature {
+        &self.signature
+    }
+
+    fn return_type(&self, _arg_types: &[DataType]) -> DFResult<DataType> {
+        // Return LargeBinary (JSONB) so downstream result conversion can decode it.
+        Ok(DataType::LargeBinary)
+    }
+
+    fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DFResult<ColumnarValue> {
+        let json_args = columnar_args_to_json(&args.args)?;
+        if json_args.len() != 2 {
+            return Err(datafusion::error::DataFusionError::Execution(
+                "index() requires 2 arguments".to_string(),
+            ));
+        }
+
+        let container = &json_args[0];
+        let index = &json_args[1];
+        
+        // Debugging dynamic map access failure
+        if let serde_json::Value::Object(map) = container {
+             // Only log if it looks like a person node
+             if map.contains_key("name") {
+                 eprintln!("IndexUdf: container keys={:?}, index={:?}", map.keys().collect::<Vec<_>>(), index);
+             }
+        }
+
+        let result = match container {
+            serde_json::Value::Array(arr) => {
+                if let Some(i) = index.as_i64() {
+                    let idx = if i < 0 {
+                        let pos = arr.len() as i64 + i;
+                        if pos < 0 { -1 } else { pos }
+                    } else {
+                        i
+                    };
+                    if idx >= 0 && (idx as usize) < arr.len() {
+                        arr[idx as usize].clone()
+                    } else {
+                        serde_json::Value::Null
+                    }
+                } else {
+                    serde_json::Value::Null
+                }
+            }
+            serde_json::Value::Object(map) => {
+                if let Some(key) = index.as_str() {
+                    map.get(key).cloned().unwrap_or(serde_json::Value::Null)
+                } else if !index.is_null() {
+                    return Err(datafusion::error::DataFusionError::Execution(
+                        "InvalidArgumentValue: Map index must be a string".to_string(),
+                    ));
+                } else {
+                    serde_json::Value::Null
+                }
+            }
+            serde_json::Value::Null => serde_json::Value::Null,
+            _ => serde_json::Value::Null,
+        };
+
+        // Serialize to JSONB (LargeBinary) so result conversion can decode it.
+        // We use standard JSON string here, record_batches_to_rows handles it.
+        let json_str = serde_json::to_string(&result).unwrap_or_else(|_| "null".to_string());
+        Ok(ColumnarValue::Scalar(ScalarValue::LargeBinary(Some(
+            json_str.into_bytes(),
+        ))))
     }
 }
 

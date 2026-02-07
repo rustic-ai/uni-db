@@ -1193,6 +1193,16 @@ impl Executor {
                             return Ok(Value::Null);
                         }
                     }
+                    if let Value::Object(map) = &arr_val {
+                        if let Some(key) = idx_val.as_str() {
+                            return Ok(map.get(key).cloned().unwrap_or(Value::Null));
+                        } else if !idx_val.is_null() {
+                            return Err(anyhow::anyhow!(
+                                "TypeError: InvalidArgumentValue - Map index must be a string, got: {:?}",
+                                idx_val
+                            ));
+                        }
+                    }
                     if arr_val.is_null() {
                         return Ok(Value::Null);
                     }

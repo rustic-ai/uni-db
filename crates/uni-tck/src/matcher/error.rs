@@ -97,6 +97,8 @@ fn classify_error(error: &UniError) -> TckErrorType {
             // Planner errors prefixed with "SyntaxError:" are compile-time syntax errors
             if message.starts_with("SyntaxError:") {
                 TckErrorType::SyntaxError
+            } else if message.starts_with("TypeError:") {
+                TckErrorType::TypeError
             } else {
                 TckErrorType::SemanticError
             }

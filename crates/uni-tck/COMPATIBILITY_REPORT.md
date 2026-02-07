@@ -11,7 +11,7 @@
 | Metric | Count | Pass Rate |
 |--------|-------|-----------|
 | **Features** | 192 | - |
-| **Scenarios** | 3,897 | **66.7%** (2,599 passed, 1,260 failed) |
+| **Scenarios** | 3,897 | **66.7%** (2,601 passed, 1,258 failed) |
 | **Skipped** | 38 | - |
 | **Parsing Errors** | 0 | None (harness fixed) |
 
@@ -87,7 +87,7 @@ This separation ensures:
 | String | 26 | 6 | 32 | 81.3% |
 | Call | 42 | 10 | 52 | 80.8% |
 | Match | 300 | 80 | 381 | 78.7% |
-| **WithOrderBy** | **226** | **66** | **292** | **77.4%** |
+| **WithOrderBy** | **228** | **64** | **292** | **78.1%** |
 | Temporal (overall) | 749 | 255 | 1,004 | 74.6% |
 | **WithWhere** | **14** | **5** | **19** | **73.7%** |
 | Union | 8 | 4 | 12 | 66.7% |
@@ -186,7 +186,7 @@ This separation ensures:
 | Graph9 - Retrieve all properties as a property map | 6 | 7 | 85.7% |
 | Call5 - Results projection | 16 | 19 | 84.2% |
 | With1 - Forward single variable | 5 | 6 | 83.3% |
-| WithOrderBy2 - Order by a single expression | 67 | 83 | 80.7% |
+| WithOrderBy2 - Order by a single expression | 69 | 83 | 83.1% |
 | Literals3 - Hexadecimal integer | 13 | 16 | 81.2% |
 | Return5 - Implicit grouping with distinct | 4 | 5 | 80.0% |
 | Union1 - Union | 4 | 5 | 80.0% |
@@ -422,7 +422,7 @@ An error is raised but the message doesn't contain the expected keyword.
 | REMOVE | Limited | 12.1% | Basic functionality present |
 | MERGE | None | 0.0% | Not implemented |
 | WITH | Moderate | 48.3% | Piping works, some aliasing issues |
-| WITH ORDER BY | Strong | 77.4% | Comprehensive ordering support |
+| WITH ORDER BY | Strong | 78.1% | Comprehensive ordering support |
 | WITH WHERE | Good | 73.7% | Filter after WITH working |
 | WITH SKIP/LIMIT | Good | 66.7% | Pagination working |
 | UNWIND | Good | 57.1% | List unwinding mostly works |
@@ -473,13 +473,14 @@ An error is raised but the message doesn't contain the expected keyword.
 | 2026-02-06 (PM) | 2,469 | 63.8% | Path normalization, property normalization fix (`normalize_property_value()`) |
 | 2026-02-06 (evening) | 2,467 | 63.3% | Minor regression from path changes |
 | 2026-02-07 (AM) | 2,507 | 64.3% | Map/List literal fixes, Match pattern improvements |
-| 2026-02-07 (PM) | **2,599** | **66.7%** | Boolean NOT/XOR, String search, Precedence, Quantifier improvements (+92) |
+| 2026-02-07 (PM) | 2,599 | 66.7% | Boolean NOT/XOR, String search, Precedence, Quantifier improvements (+92) |
+| 2026-02-07 (evening) | **2,601** | **66.7%** | Minor improvements (+2) |
 
 ### Cumulative Improvement
 
 | From | To | Scenarios Gained | Improvement |
 |------|-----|------------------|-------------|
-| Baseline (1,279) | Current (2,599) | **+1,320** | **+103.2%** |
+| Baseline (1,279) | Current (2,601) | **+1,322** | **+103.4%** |
 
 ---
 
@@ -550,8 +551,8 @@ An error is raised but the message doesn't contain the expected keyword.
 | ~~55%~~ | ~~2,127~~ | ~~55.0%~~ | **ACHIEVED** |
 | ~~60%~~ | ~~2,321~~ | ~~60.0%~~ | **ACHIEVED** |
 | ~~65%~~ | ~~2,533~~ | ~~65.0%~~ | **ACHIEVED** |
-| 70% | 2,727 | 70.0% | +128 scenarios |
-| 75% | 2,922 | 75.0% | +323 scenarios |
+| 70% | 2,727 | 70.0% | +126 scenarios |
+| 75% | 2,922 | 75.0% | +321 scenarios |
 
 Achieving 70% likely requires:
 - Aggregation functions (+35)

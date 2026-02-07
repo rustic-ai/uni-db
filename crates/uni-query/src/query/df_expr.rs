@@ -115,11 +115,10 @@ pub fn cypher_expr_to_df(expr: &Expr, context: Option<&TranslationContext>) -> R
                 && let Some(kind) = ctx.variable_kinds.get(name)
             {
                 return match kind {
-                    VariableKind::Node => {
-                        Ok(DfExpr::Column(Column::from_name(format!("{}._vid", name))))
-                    }
-                    VariableKind::Edge => {
-                        Ok(DfExpr::Column(Column::from_name(format!("{}._eid", name))))
+                    VariableKind::Node | VariableKind::Edge => {
+                        // Return the Struct column representing the whole entity.
+                        // This column is added by the hybrid planner when structural access is needed.
+                        Ok(DfExpr::Column(Column::from_name(name)))
                     }
                     VariableKind::Path => Ok(DfExpr::Column(Column::from_name(name))),
                 };
@@ -173,26 +172,17 @@ pub fn cypher_expr_to_df(expr: &Expr, context: Option<&TranslationContext>) -> R
         }
 
         Expr::ArrayIndex { array, index } => {
-            // Cypher uses 0-based indexing and supports negative indices
-            // Convert to 1-based for DataFusion, handle negatives specially
             let array_expr = cypher_expr_to_df(array, context)?;
             let index_expr = cypher_expr_to_df(index, context)?;
 
-            // For Cypher:
-            // - Positive indices are 0-based: [0, 1, 2, ...]
-            // - Negative indices count from end: [-1 is last, -2 is second-to-last]
-            // DataFusion array_element uses 1-based indexing and supports negatives
-            // So Cypher index N -> DataFusion index N+1 (for non-negative)
-            // And Cypher index -N -> DataFusion index -N (same semantics)
-
-            // Check if index is negative by comparing with 0
-            let adjusted_index = datafusion::logical_expr::case(index_expr.clone())
-                .when(index_expr.clone().lt(lit(0i64)), index_expr.clone())
-                .otherwise(index_expr + lit(1i64))?;
-
-            Ok(datafusion::functions_nested::expr_fn::array_element(
-                array_expr,
-                adjusted_index,
+            // Use custom index UDF to support dynamic Map and List access
+            Ok(DfExpr::ScalarFunction(
+                datafusion::logical_expr::expr::ScalarFunction {
+                    func: Arc::new(datafusion::logical_expr::ScalarUDF::new_from_impl(
+                        DummyUdf::new("index".to_string()),
+                    )),
+                    args: vec![array_expr, index_expr],
+                },
             ))
         }
 

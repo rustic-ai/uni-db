@@ -170,13 +170,19 @@ impl HybridPhysicalPlanner {
             .get(variable)
             .map(|props| {
                 if props.contains("*") {
-                    self.schema
+                    let mut schema_props: Vec<String> = self
+                        .schema
                         .properties
                         .get(schema_name)
                         .map(|p| p.keys().cloned().collect())
-                        .unwrap_or_default()
+                        .unwrap_or_default();
+                    schema_props.sort();
+                    schema_props
                 } else {
-                    props.iter().filter(|p| *p != "*").cloned().collect()
+                    let mut explicit_props: Vec<String> =
+                        props.iter().filter(|p| *p != "*").cloned().collect();
+                    explicit_props.sort();
+                    explicit_props
                 }
             })
             .unwrap_or_default()
@@ -761,13 +767,21 @@ impl HybridPhysicalPlanner {
         // Resolve properties collected from the entire plan tree, expanding "*" wildcards
         let properties = self.resolve_properties(variable, label_name, all_properties);
 
-        let scan_plan: Arc<dyn ExecutionPlan> = Arc::new(GraphScanExec::new_vertex_scan(
+        let mut scan_plan: Arc<dyn ExecutionPlan> = Arc::new(GraphScanExec::new_vertex_scan(
             self.graph_ctx.clone(),
             label_name.to_string(),
             variable.to_string(),
-            properties,
+            properties.clone(),
             None, // Filter will be applied as FilterExec on top
         ));
+
+        // If we need the full object (structural access), add a Struct projection
+        if all_properties
+            .get(variable)
+            .map_or(false, |p| p.contains("*"))
+        {
+            scan_plan = self.add_structural_projection(scan_plan, variable, &properties)?;
+        }
 
         self.apply_scan_filter(scan_plan, variable, filter)
     }
@@ -788,14 +802,22 @@ impl HybridPhysicalPlanner {
             .map(|s| s.iter().cloned().collect())
             .unwrap_or_default();
 
-        let scan_plan: Arc<dyn ExecutionPlan> =
+        let mut scan_plan: Arc<dyn ExecutionPlan> =
             Arc::new(GraphScanExec::new_schemaless_vertex_scan(
                 self.graph_ctx.clone(),
                 label_name.to_string(),
                 variable.to_string(),
-                properties,
+                properties.clone(),
                 None, // Filter will be applied as FilterExec on top
             ));
+
+        // If we need the full object (structural access), add a Struct projection
+        if all_properties
+            .get(variable)
+            .map_or(false, |p| p.contains("*"))
+        {
+            scan_plan = self.add_structural_projection(scan_plan, variable, &properties)?;
+        }
 
         self.apply_scan_filter(scan_plan, variable, filter)
     }
@@ -815,14 +837,22 @@ impl HybridPhysicalPlanner {
             .map(|s| s.iter().cloned().collect())
             .unwrap_or_default();
 
-        let scan_plan: Arc<dyn ExecutionPlan> =
+        let mut scan_plan: Arc<dyn ExecutionPlan> =
             Arc::new(GraphScanExec::new_multi_label_vertex_scan(
                 self.graph_ctx.clone(),
                 labels.to_vec(),
                 variable.to_string(),
-                properties,
+                properties.clone(),
                 None,
             ));
+
+        // If we need the full object (structural access), add a Struct projection
+        if all_properties
+            .get(variable)
+            .map_or(false, |p| p.contains("*"))
+        {
+            scan_plan = self.add_structural_projection(scan_plan, variable, &properties)?;
+        }
 
         self.apply_scan_filter(scan_plan, variable, filter)
     }
@@ -842,12 +872,21 @@ impl HybridPhysicalPlanner {
             .map(|s| s.iter().cloned().collect())
             .unwrap_or_default();
 
-        let scan_plan: Arc<dyn ExecutionPlan> = Arc::new(GraphScanExec::new_schemaless_all_scan(
-            self.graph_ctx.clone(),
-            variable.to_string(),
-            properties,
-            None, // Filter will be applied as FilterExec on top
-        ));
+        let mut scan_plan: Arc<dyn ExecutionPlan> =
+            Arc::new(GraphScanExec::new_schemaless_all_scan(
+                self.graph_ctx.clone(),
+                variable.to_string(),
+                properties.clone(),
+                None, // Filter will be applied as FilterExec on top
+            ));
+
+        // If we need the full object (structural access), add a Struct projection
+        if all_properties
+            .get(variable)
+            .map_or(false, |p| p.contains("*"))
+        {
+            scan_plan = self.add_structural_projection(scan_plan, variable, &properties)?;
+        }
 
         self.apply_scan_filter(scan_plan, variable, filter)
     }
@@ -1940,6 +1979,59 @@ impl HybridPhysicalPlanner {
             // For other expression types, return as-is
             _ => Ok(expr.clone()),
         }
+    }
+
+    /// Add a structural projection on top of an execution plan to create a Struct column
+    /// for a Node or Edge variable.
+    fn add_structural_projection(
+        &self,
+        input: Arc<dyn ExecutionPlan>,
+        variable: &str,
+        properties: &[String],
+    ) -> Result<Arc<dyn ExecutionPlan>> {
+        use datafusion::functions::expr_fn::named_struct;
+        use datafusion::logical_expr::lit;
+        use datafusion::physical_plan::projection::ProjectionExec;
+
+        let input_schema = input.schema();
+        let mut proj_exprs: Vec<(Arc<dyn datafusion::physical_expr::PhysicalExpr>, String)> =
+            Vec::new();
+
+        // 1. Keep all existing columns
+        for (i, field) in input_schema.fields().iter().enumerate() {
+            let col_expr =
+                Arc::new(datafusion::physical_expr::expressions::Column::new(field.name(), i));
+            proj_exprs.push((col_expr, field.name().clone()));
+        }
+
+        // 2. Add the named_struct AS variable
+        let mut struct_args = Vec::with_capacity(properties.len() * 2);
+        for prop in properties {
+            struct_args.push(lit(prop.clone()));
+            struct_args.push(DfExpr::Column(datafusion::common::Column::from_name(format!(
+                "{}.{}",
+                variable, prop
+            ))));
+        }
+
+        // If no properties, still create an empty struct to represent the entity
+        let struct_expr = named_struct(struct_args);
+
+        let df_schema = datafusion::common::DFSchema::try_from(input_schema.as_ref().clone())?;
+        let session = self.session_ctx.read();
+        let state = session.state();
+
+        // Resolve DummyUdf placeholders
+        let resolved_expr = Self::resolve_udfs(&struct_expr, &state)?;
+
+        use datafusion::physical_planner::PhysicalPlanner;
+        let planner = datafusion::physical_planner::DefaultPhysicalPlanner::default();
+        let physical_struct_expr =
+            planner.create_physical_expr(&resolved_expr, &df_schema, &state)?;
+
+        proj_exprs.push((physical_struct_expr, variable.to_string()));
+
+        Ok(Arc::new(ProjectionExec::try_new(proj_exprs, input)?))
     }
 
     /// Create a physical aggregate expression.
