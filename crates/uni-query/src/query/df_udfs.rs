@@ -930,7 +930,10 @@ fn scalar_to_json(scalar: &ScalarValue) -> DFResult<serde_json::Value> {
             if arr.len() == 0 || arr.is_null(0) {
                 Ok(serde_json::Value::Null)
             } else {
-                Ok(uni_store::storage::arrow_convert::arrow_to_value(arr.as_ref(), 0))
+                Ok(uni_store::storage::arrow_convert::arrow_to_value(
+                    arr.as_ref(),
+                    0,
+                ))
             }
         }
         ScalarValue::Null

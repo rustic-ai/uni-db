@@ -920,7 +920,9 @@ fn build_unary_expression(pair: Pair<Rule>) -> Result<Expr, ParseError> {
         // it means we parsed a magnitude of i64::MAX + 1 (9223372036854775808).
         // Since it wasn't negated, this is a positive overflow.
         if let Expr::Literal(CypherLiteral::Integer(i64::MIN)) = expr {
-            return Err(ParseError::new("IntegerOverflow: value too large".to_string()));
+            return Err(ParseError::new(
+                "IntegerOverflow: value too large".to_string(),
+            ));
         }
     }
     Ok(expr)
@@ -1263,29 +1265,39 @@ fn unescape_string(s: &str, quote_char: char) -> Result<String, ParseError> {
                     // 4-digit unicode: \uXXXX
                     let hex: String = chars.by_ref().take(4).collect();
                     if hex.len() != 4 {
-                        return Err(ParseError::new(format!("InvalidUnicodeLiteral: Invalid \\u escape: \\u{}", hex)));
+                        return Err(ParseError::new(format!(
+                            "InvalidUnicodeLiteral: Invalid \\u escape: \\u{}",
+                            hex
+                        )));
                     }
-                    let code = u32::from_str_radix(&hex, 16)
-                        .map_err(|_| ParseError::new(format!("InvalidUnicodeLiteral: Invalid hex in \\u{}", hex)))?;
-                    result.push(
-                        char::from_u32(code).ok_or_else(|| {
-                            ParseError::new(format!("InvalidUnicodeLiteral: Invalid unicode \\u{}", hex))
-                        })?,
-                    );
+                    let code = u32::from_str_radix(&hex, 16).map_err(|_| {
+                        ParseError::new(format!("InvalidUnicodeLiteral: Invalid hex in \\u{}", hex))
+                    })?;
+                    result.push(char::from_u32(code).ok_or_else(|| {
+                        ParseError::new(format!(
+                            "InvalidUnicodeLiteral: Invalid unicode \\u{}",
+                            hex
+                        ))
+                    })?);
                 }
                 Some('U') => {
                     // 6-digit unicode: \UXXXXXX
                     let hex: String = chars.by_ref().take(6).collect();
                     if hex.len() != 6 {
-                        return Err(ParseError::new(format!("InvalidUnicodeLiteral: Invalid \\U escape: \\U{}", hex)));
+                        return Err(ParseError::new(format!(
+                            "InvalidUnicodeLiteral: Invalid \\U escape: \\U{}",
+                            hex
+                        )));
                     }
-                    let code = u32::from_str_radix(&hex, 16)
-                        .map_err(|_| ParseError::new(format!("InvalidUnicodeLiteral: Invalid hex in \\U{}", hex)))?;
-                    result.push(
-                        char::from_u32(code).ok_or_else(|| {
-                            ParseError::new(format!("InvalidUnicodeLiteral: Invalid unicode \\U{}", hex))
-                        })?,
-                    );
+                    let code = u32::from_str_radix(&hex, 16).map_err(|_| {
+                        ParseError::new(format!("InvalidUnicodeLiteral: Invalid hex in \\U{}", hex))
+                    })?;
+                    result.push(char::from_u32(code).ok_or_else(|| {
+                        ParseError::new(format!(
+                            "InvalidUnicodeLiteral: Invalid unicode \\U{}",
+                            hex
+                        ))
+                    })?);
                 }
                 Some(other) => {
                     // For regex compatibility, preserve backslash + character literally
@@ -1341,7 +1353,9 @@ fn parse_integer_safe(s: &str, radix: u32) -> Result<IntegerParseResult, ParseEr
     } else if magnitude == (i64::MAX as u64 + 1) {
         Ok(IntegerParseResult::Integer(i64::MIN))
     } else {
-        Err(ParseError::new("IntegerOverflow: value too large".to_string()))
+        Err(ParseError::new(
+            "IntegerOverflow: value too large".to_string(),
+        ))
     }
 }
 

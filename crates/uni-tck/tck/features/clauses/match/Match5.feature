@@ -463,7 +463,7 @@ Feature: Match5 - Match variable length patterns over given graphs scenarios
     And no side effects
 
   Scenario: [25] Handling a variable length relationship and a standard relationship in chain, longer 3
-    And having executed:
+    Given having executed:
       """
       MATCH (d:D)
       CREATE (e1:E {name: d.name + '0'}),
@@ -498,7 +498,7 @@ Feature: Match5 - Match variable length patterns over given graphs scenarios
     And no side effects
 
   Scenario: [26] Handling mixed relationship patterns and directions 1
-    And having executed:
+    Given having executed:
       """
       MATCH (a:A)-[r]->(b)
       DELETE r
@@ -540,7 +540,7 @@ Feature: Match5 - Match variable length patterns over given graphs scenarios
 
   Scenario: [27] Handling mixed relationship patterns and directions 2
     # This gets hard to follow for a human mind. The answer is named graphs, but it's not crucial to fix.
-    And having executed:
+    Given having executed:
       """
       MATCH (a)-[r]->(b)
       WHERE NOT a:A
@@ -582,7 +582,7 @@ Feature: Match5 - Match variable length patterns over given graphs scenarios
     And no side effects
 
   Scenario: [28] Handling mixed relationship patterns 1
-    And having executed:
+    Given having executed:
       """
       MATCH (d:D)
       CREATE (e1:E {name: d.name + '0'}),
@@ -617,7 +617,7 @@ Feature: Match5 - Match variable length patterns over given graphs scenarios
     And no side effects
 
   Scenario: [29] Handling mixed relationship patterns 2
-    And having executed:
+    Given having executed:
       """
       MATCH (d:D)
       CREATE (e1:E {name: d.name + '0'}),

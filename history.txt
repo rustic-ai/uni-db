@@ -1,0 +1,11 @@
+#V2
+CREATE (a:A {name: 'A'})-[:KNOWS {num: 1}]->(b:B {name: 'B'})-[:KNOWS {num: 2}]->(c:C {name: 'C'});
+MATCH p = (n {name: 'A'})-[:KNOWS*1..2]->(x) RETURN p;
+CREATE (a:A {name: 'A'})-[:KNOWS {num: 1}]->(b:B {name: 'B'})-[:KNOWS {num: 2}]->(c:C {name: 'C'})
+MATCH p = (n {name: 'A'})-[:KNOWS*1..2]->(x) RETURN p
+CREATE (a:A {name: 'A'})-[:KNOWS {num: 1}]->(b:B {name: 'B'})-[:KNOWS {num: 2}]->(c:C {name: 'C'})
+MATCH p = (n {name: 'A'})-[:KNOWS*1..2]->(x) RETURN p
+CREATE (a:A {name: 'A'})-[:KNOWS {num: 1}]->(b:B {name: 'B'})-[:KNOWS {num: 2}]->(c:C {name: 'C'})
+MATCH p = (n {name: 'A'})-[:KNOWS*1..2]->(x) RETURN p
+CREATE (a:A {name: 'A'})-[:KNOWS {num: 1}]->(b:B {name: 'B'})-[:KNOWS {num: 2}]->(c:C {name: 'C'})
+MATCH p = (n {name: 'A'})-[:KNOWS*1..2]->(x) RETURN p
