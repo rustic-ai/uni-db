@@ -34,7 +34,9 @@
 //! [`cypher_expr_to_df`] from the `df_expr` module.
 
 use crate::query::df_expr::{TranslationContext, VariableKind, cypher_expr_to_df};
-use crate::query::df_graph::traverse::GraphVariableLengthTraverseExec;
+use crate::query::df_graph::traverse::{
+    GraphVariableLengthTraverseExec, GraphVariableLengthTraverseMainExec,
+};
 use crate::query::df_graph::{
     GraphExecutionContext, GraphExtIdLookupExec, GraphScanExec, GraphShortestPathExec,
     GraphTraverseExec, GraphTraverseMainExec, GraphUnwindExec, GraphVectorKnnExec, L0Context,
@@ -281,26 +283,38 @@ impl HybridPhysicalPlanner {
                 max_hops,
                 optional,
                 target_filter: _, // Applied as FilterExec later
-                path_variable: _, // Not supported yet
+                path_variable,
                 ..
             } => {
-                // Restrict to single-hop (same as current row-based implementation)
-                if *min_hops != 1 || *max_hops != 1 {
-                    return Err(anyhow!(
-                        "TraverseMainByType variable-length paths not yet supported"
-                    ));
-                }
+                // Determine if this is a VLP pattern (same logic as plan_traverse)
+                let is_variable_length =
+                    path_variable.is_some() || *min_hops != 1 || *max_hops != 1;
 
-                self.plan_traverse_main_by_type(
-                    input,
-                    type_name,
-                    direction.clone(),
-                    source_variable,
-                    target_variable,
-                    step_variable.as_deref(),
-                    *optional,
-                    all_properties,
-                )
+                if is_variable_length {
+                    self.plan_traverse_main_by_type_vlp(
+                        input,
+                        type_name,
+                        direction.clone(),
+                        source_variable,
+                        target_variable,
+                        *min_hops,
+                        *max_hops,
+                        path_variable.as_deref(),
+                        *optional,
+                        all_properties,
+                    )
+                } else {
+                    self.plan_traverse_main_by_type(
+                        input,
+                        type_name,
+                        direction.clone(),
+                        source_variable,
+                        target_variable,
+                        step_variable.as_deref(),
+                        *optional,
+                        all_properties,
+                    )
+                }
             }
 
             LogicalPlan::Traverse {
@@ -809,7 +823,11 @@ impl HybridPhysicalPlanner {
         let adj_direction = convert_direction(direction);
         let source_col = format!("{}._vid", source_variable);
 
-        let traverse_plan: Arc<dyn ExecutionPlan> = if min_hops == 1 && max_hops == 1 {
+        // Determine if this is a VLP pattern: either hops differ from 1..1, or path_variable is set.
+        // The planner sets path_variable when range is present (e.g., *1..1 is VLP even though min=max=1).
+        let is_variable_length = path_variable.is_some() || min_hops != 1 || max_hops != 1;
+
+        let traverse_plan: Arc<dyn ExecutionPlan> = if !is_variable_length {
             // Extract edge properties for pushdown hydration, expanding "*" wildcards
             let edge_properties: Vec<String> = if let Some(edge_var) = step_variable {
                 let has_wildcard = all_properties
@@ -883,6 +901,7 @@ impl HybridPhysicalPlanner {
                 adj_direction,
                 min_hops,
                 max_hops,
+                target_variable.to_string(),
                 path_variable.map(|s| s.to_string()),
                 self.graph_ctx.clone(),
                 optional,
@@ -979,6 +998,51 @@ impl HybridPhysicalPlanner {
             target_variable.to_string(),
             step_variable.map(|s| s.to_string()),
             edge_properties,
+            target_properties,
+            self.graph_ctx.clone(),
+            optional,
+        ));
+
+        Ok(traverse_plan)
+    }
+
+    /// Plan a schemaless edge traversal with variable-length paths (TraverseMainByType VLP).
+    ///
+    /// This is used for VLP patterns on edges without a schema-defined type that must query the main edges table.
+    #[expect(clippy::too_many_arguments)]
+    fn plan_traverse_main_by_type_vlp(
+        &self,
+        input: &LogicalPlan,
+        type_name: &str,
+        direction: AstDirection,
+        source_variable: &str,
+        target_variable: &str,
+        min_hops: usize,
+        max_hops: usize,
+        path_variable: Option<&str>,
+        optional: bool,
+        all_properties: &HashMap<String, HashSet<String>>,
+    ) -> Result<Arc<dyn ExecutionPlan>> {
+        let input_plan = self.plan_internal(input, all_properties)?;
+
+        let adj_direction = convert_direction(direction);
+        let source_col = format!("{}._vid", source_variable);
+
+        // Extract target vertex properties
+        let target_properties: Vec<String> = all_properties
+            .get(target_variable)
+            .map(|props| props.iter().filter(|p| *p != "*").cloned().collect())
+            .unwrap_or_default();
+
+        let traverse_plan = Arc::new(GraphVariableLengthTraverseMainExec::new(
+            input_plan,
+            source_col,
+            type_name.to_string(),
+            adj_direction,
+            min_hops,
+            max_hops,
+            target_variable.to_string(),
+            path_variable.map(|s| s.to_string()),
             target_properties,
             self.graph_ctx.clone(),
             optional,

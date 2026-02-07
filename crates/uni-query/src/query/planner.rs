@@ -2662,9 +2662,19 @@ impl QueryPlanner {
                 ));
             }
 
-            let min_hops = params.rel.range.as_ref().and_then(|r| r.min).unwrap_or(1) as usize;
-            let max_hops = params.rel.range.as_ref().and_then(|r| r.max).unwrap_or(1) as usize;
-            let is_variable_length = min_hops > 1 || max_hops > 1 || min_hops != max_hops;
+            // Check if this is a variable-length pattern (has range specifier like *1..3)
+            let is_variable_length = params.rel.range.is_some();
+
+            // For VLP patterns, default min to 1 and max to a reasonable limit.
+            // For single-hop patterns (no range), both are 1.
+            const DEFAULT_MAX_HOPS: usize = 100;
+            let (min_hops, max_hops) = if let Some(range) = &params.rel.range {
+                let min = range.min.unwrap_or(1) as usize;
+                let max = range.max.map(|m| m as usize).unwrap_or(DEFAULT_MAX_HOPS);
+                (min, max)
+            } else {
+                (1, 1)
+            };
 
             let (step_var, path_var) = if is_variable_length {
                 (
@@ -2753,9 +2763,19 @@ impl QueryPlanner {
             None
         };
 
-        let min_hops = params.rel.range.as_ref().and_then(|r| r.min).unwrap_or(1) as usize;
-        let max_hops = params.rel.range.as_ref().and_then(|r| r.max).unwrap_or(1) as usize;
-        let is_variable_length = min_hops > 1 || max_hops > 1 || min_hops != max_hops;
+        // Check if this is a variable-length pattern (has range specifier like *1..3)
+        let is_variable_length = params.rel.range.is_some();
+
+        // For VLP patterns, default min to 1 and max to a reasonable limit.
+        // For single-hop patterns (no range), both are 1.
+        const DEFAULT_MAX_HOPS: usize = 100;
+        let (min_hops, max_hops) = if let Some(range) = &params.rel.range {
+            let min = range.min.unwrap_or(1) as usize;
+            let max = range.max.map(|m| m as usize).unwrap_or(DEFAULT_MAX_HOPS);
+            (min, max)
+        } else {
+            (1, 1)
+        };
 
         // For variable-length paths, bind the relationship variable as path_variable
         // For single-hop paths, bind it as step_variable

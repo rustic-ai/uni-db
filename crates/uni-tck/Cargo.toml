@@ -23,3 +23,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 [[test]]
 name = "cucumber"
 harness = false
+
+[dev-dependencies]
+# gherkin = "0.14.0"  # only needed for parse testing

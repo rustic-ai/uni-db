@@ -1611,6 +1611,9 @@ pub struct GraphVariableLengthTraverseExec {
     /// Maximum number of hops.
     max_hops: usize,
 
+    /// Variable name for target vertex columns.
+    target_variable: String,
+
     /// Variable name for path (if path is bound).
     path_variable: Option<String>,
 
@@ -1638,6 +1641,7 @@ impl fmt::Debug for GraphVariableLengthTraverseExec {
             .field("direction", &self.direction)
             .field("min_hops", &self.min_hops)
             .field("max_hops", &self.max_hops)
+            .field("target_variable", &self.target_variable)
             .finish()
     }
 }
@@ -1652,14 +1656,16 @@ impl GraphVariableLengthTraverseExec {
         direction: Direction,
         min_hops: usize,
         max_hops: usize,
+        target_variable: impl Into<String>,
         path_variable: Option<String>,
         graph_ctx: Arc<GraphExecutionContext>,
         is_optional: bool,
     ) -> Self {
         let source_column = source_column.into();
+        let target_variable = target_variable.into();
 
         // Build output schema
-        let schema = Self::build_schema(input.schema(), path_variable.as_deref());
+        let schema = Self::build_schema(input.schema(), &target_variable, path_variable.as_deref());
         let properties = compute_plan_properties(schema.clone());
 
         Self {
@@ -1669,6 +1675,7 @@ impl GraphVariableLengthTraverseExec {
             direction,
             min_hops,
             max_hops,
+            target_variable,
             path_variable,
             is_optional,
             graph_ctx,
@@ -1679,38 +1686,47 @@ impl GraphVariableLengthTraverseExec {
     }
 
     /// Build output schema.
-    fn build_schema(input_schema: SchemaRef, path_variable: Option<&str>) -> SchemaRef {
+    fn build_schema(
+        input_schema: SchemaRef,
+        target_variable: &str,
+        path_variable: Option<&str>,
+    ) -> SchemaRef {
         let mut fields: Vec<Field> = input_schema
             .fields()
             .iter()
             .map(|f| f.as_ref().clone())
             .collect();
 
-        // Add target VID column
-        fields.push(Field::new("_target_vid", DataType::UInt64, false));
+        // Add target VID column (named after target variable for downstream filter compatibility)
+        fields.push(Field::new(
+            format!("{}._vid", target_variable),
+            DataType::UInt64,
+            false,
+        ));
 
         // Add hop count
         fields.push(Field::new("_hop_count", DataType::UInt64, false));
 
-        // Add path column if path variable is bound
+        // Add relationship variable column if bound (VLP relationship variable is a List of edges)
+        // In Cypher, MATCH (a)-[r*]->(b) binds r to a List<Edge>, not a Path.
         if let Some(path_var) = path_variable {
-            // Path nodes/rels stored as List<Struct<{_id: Utf8}>> for downstream hydration
-            let node_item = Field::new(
-                "item",
-                DataType::Struct(vec![Field::new("_id", DataType::Utf8, false)].into()),
-                true,
-            );
+            // Store full edge info for proper normalization to Edge objects
+            // The result normalizer requires _eid, _type/_type_name, _src, _dst
+            let edge_struct_fields = vec![
+                Field::new("_eid", DataType::UInt64, false),
+                Field::new("_type_name", DataType::Utf8, false),
+                Field::new("_src", DataType::UInt64, false),
+                Field::new("_dst", DataType::UInt64, false),
+            ];
             let rel_item = Field::new(
                 "item",
-                DataType::Struct(vec![Field::new("_id", DataType::Utf8, false)].into()),
+                DataType::Struct(edge_struct_fields.into()),
                 true,
             );
-            let nodes_field = Field::new("nodes", DataType::List(Arc::new(node_item)), false);
-            let rels_field = Field::new("relationships", DataType::List(Arc::new(rel_item)), false);
-            // Use the path variable name as the column name
+            // Use the relationship variable name as the column name, storing List of edges
             fields.push(Field::new(
                 path_var,
-                DataType::Struct(vec![nodes_field, rels_field].into()),
+                DataType::List(Arc::new(rel_item)),
                 false,
             ));
         }
@@ -1773,6 +1789,7 @@ impl ExecutionPlan for GraphVariableLengthTraverseExec {
             self.direction,
             self.min_hops,
             self.max_hops,
+            self.target_variable.clone(),
             self.path_variable.clone(),
             self.graph_ctx.clone(),
             self.is_optional,
@@ -2047,76 +2064,72 @@ impl GraphVariableLengthTraverseStream {
             .collect();
         columns.push(Arc::new(UInt64Array::from(hop_counts)));
 
-        // Add path column if bound
+        // Add relationship variable column if bound (VLP relationship variable is a List of edges)
+        // In Cypher, MATCH (a)-[r*]->(b) binds r to a List<Edge>, not a Path.
         if self.exec.path_variable.is_some() {
-            use arrow_array::builder::{ListBuilder, StringBuilder, StructBuilder};
+            use arrow_array::builder::{ListBuilder, StringBuilder, StructBuilder, UInt64Builder};
 
-            let id_field = Arc::new(Field::new("_id", DataType::Utf8, false));
-            let node_item_field = Arc::new(Field::new(
-                "item",
-                DataType::Struct(vec![id_field.clone()].into()),
-                true,
-            ));
-            let rel_item_field = Arc::new(Field::new(
-                "item",
-                DataType::Struct(vec![id_field.clone()].into()),
-                true,
-            ));
+            // Get edge type name from schema (use unified lookup to include schemaless types)
+            let edge_type_name = self
+                .exec
+                .graph_ctx
+                .storage()
+                .schema_manager()
+                .schema()
+                .edge_type_name_by_id_unified(self.exec.edge_type_id)
+                .unwrap_or_default();
 
-            let nodes_list_field = Arc::new(Field::new(
-                "nodes",
-                DataType::List(node_item_field.clone()),
-                false,
-            ));
-            let rels_list_field = Arc::new(Field::new(
-                "relationships",
-                DataType::List(rel_item_field.clone()),
-                false,
-            ));
+            // Build edge struct fields matching the schema: _eid, _type_name, _src, _dst
+            let struct_fields = vec![
+                Arc::new(Field::new("_eid", DataType::UInt64, false)),
+                Arc::new(Field::new("_type_name", DataType::Utf8, false)),
+                Arc::new(Field::new("_src", DataType::UInt64, false)),
+                Arc::new(Field::new("_dst", DataType::UInt64, false)),
+            ];
 
-            // Build ListBuilder<StructBuilder> for nodes and rels
-            let make_list_struct_builder = || {
-                ListBuilder::new(StructBuilder::new(
-                    vec![id_field.clone()],
-                    vec![Box::new(StringBuilder::new())],
-                ))
-            };
-
-            let mut nodes_builder = make_list_struct_builder();
-            let mut rels_builder = make_list_struct_builder();
+            // Build ListBuilder<StructBuilder> for relationships
+            let mut rels_builder = ListBuilder::new(StructBuilder::new(
+                struct_fields,
+                vec![
+                    Box::new(UInt64Builder::new()),
+                    Box::new(StringBuilder::new()),
+                    Box::new(UInt64Builder::new()),
+                    Box::new(UInt64Builder::new()),
+                ],
+            ));
 
             for (_, _, _, node_path, edge_path) in expansions {
-                // Append nodes list
-                let node_struct = nodes_builder.values();
-                for vid in node_path {
-                    node_struct
-                        .field_builder::<StringBuilder>(0)
-                        .unwrap()
-                        .append_value(vid.as_u64().to_string());
-                    node_struct.append(true);
-                }
-                nodes_builder.append(true);
-
-                // Append relationships list
+                // Append relationships list with full edge info
+                // node_path[i] is src of edge[i], node_path[i+1] is dst of edge[i]
                 let rel_struct = rels_builder.values();
-                for eid in edge_path {
+                for (i, eid) in edge_path.iter().enumerate() {
+                    // EID
                     rel_struct
-                        .field_builder::<StringBuilder>(0)
+                        .field_builder::<UInt64Builder>(0)
                         .unwrap()
-                        .append_value(eid.as_u64().to_string());
+                        .append_value(eid.as_u64());
+                    // Edge type name
+                    rel_struct
+                        .field_builder::<StringBuilder>(1)
+                        .unwrap()
+                        .append_value(&edge_type_name);
+                    // Src VID (node_path[i])
+                    rel_struct
+                        .field_builder::<UInt64Builder>(2)
+                        .unwrap()
+                        .append_value(node_path[i].as_u64());
+                    // Dst VID (node_path[i+1])
+                    rel_struct
+                        .field_builder::<UInt64Builder>(3)
+                        .unwrap()
+                        .append_value(node_path[i + 1].as_u64());
                     rel_struct.append(true);
                 }
                 rels_builder.append(true);
             }
 
-            let nodes_arr = nodes_builder.finish();
             let rels_arr = rels_builder.finish();
-
-            let path_struct = arrow_array::StructArray::from(vec![
-                (nodes_list_field, Arc::new(nodes_arr) as ArrayRef),
-                (rels_list_field, Arc::new(rels_arr) as ArrayRef),
-            ]);
-            columns.push(Arc::new(path_struct));
+            columns.push(Arc::new(rels_arr));
         }
 
         self.metrics.record_output(num_rows);
@@ -2127,6 +2140,547 @@ impl GraphVariableLengthTraverseStream {
 }
 
 impl RecordBatchStream for GraphVariableLengthTraverseStream {
+    fn schema(&self) -> SchemaRef {
+        self.schema.clone()
+    }
+}
+
+// ============================================================================
+// GraphVariableLengthTraverseMainExec - VLP for schemaless edge types
+// ============================================================================
+
+/// Execution plan for variable-length path traversal on schemaless edge types.
+///
+/// This is similar to `GraphVariableLengthTraverseExec` but works with edge types
+/// that don't have schema-defined IDs. It queries the main edges table by type name.
+pub struct GraphVariableLengthTraverseMainExec {
+    /// Input execution plan.
+    input: Arc<dyn ExecutionPlan>,
+
+    /// Column name containing source VIDs.
+    source_column: String,
+
+    /// Edge type name (not ID, since schemaless types may not have IDs).
+    type_name: String,
+
+    /// Traversal direction.
+    direction: Direction,
+
+    /// Minimum number of hops.
+    min_hops: usize,
+
+    /// Maximum number of hops.
+    max_hops: usize,
+
+    /// Variable name for target vertex columns.
+    target_variable: String,
+
+    /// Variable name for relationship list (if relationship is bound in VLP).
+    path_variable: Option<String>,
+
+    /// Target vertex properties to materialize.
+    target_properties: Vec<String>,
+
+    /// Whether this is an optional match (LEFT JOIN semantics).
+    is_optional: bool,
+
+    /// Graph execution context.
+    graph_ctx: Arc<GraphExecutionContext>,
+
+    /// Output schema.
+    schema: SchemaRef,
+
+    /// Cached plan properties.
+    properties: PlanProperties,
+
+    /// Execution metrics.
+    metrics: ExecutionPlanMetricsSet,
+}
+
+impl fmt::Debug for GraphVariableLengthTraverseMainExec {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("GraphVariableLengthTraverseMainExec")
+            .field("source_column", &self.source_column)
+            .field("type_name", &self.type_name)
+            .field("direction", &self.direction)
+            .field("min_hops", &self.min_hops)
+            .field("max_hops", &self.max_hops)
+            .field("target_variable", &self.target_variable)
+            .finish()
+    }
+}
+
+impl GraphVariableLengthTraverseMainExec {
+    /// Create a new variable-length traversal plan for schemaless edges.
+    #[expect(clippy::too_many_arguments)]
+    pub fn new(
+        input: Arc<dyn ExecutionPlan>,
+        source_column: impl Into<String>,
+        type_name: impl Into<String>,
+        direction: Direction,
+        min_hops: usize,
+        max_hops: usize,
+        target_variable: impl Into<String>,
+        path_variable: Option<String>,
+        target_properties: Vec<String>,
+        graph_ctx: Arc<GraphExecutionContext>,
+        is_optional: bool,
+    ) -> Self {
+        let source_column = source_column.into();
+        let type_name = type_name.into();
+        let target_variable = target_variable.into();
+
+        // Build output schema
+        let schema = Self::build_schema(
+            input.schema(),
+            &target_variable,
+            path_variable.as_deref(),
+            &target_properties,
+        );
+        let properties = compute_plan_properties(schema.clone());
+
+        Self {
+            input,
+            source_column,
+            type_name,
+            direction,
+            min_hops,
+            max_hops,
+            target_variable,
+            path_variable,
+            target_properties,
+            is_optional,
+            graph_ctx,
+            schema,
+            properties,
+            metrics: ExecutionPlanMetricsSet::new(),
+        }
+    }
+
+    /// Build output schema.
+    fn build_schema(
+        input_schema: SchemaRef,
+        target_variable: &str,
+        path_variable: Option<&str>,
+        target_properties: &[String],
+    ) -> SchemaRef {
+        let mut fields: Vec<Field> = input_schema
+            .fields()
+            .iter()
+            .map(|f| f.as_ref().clone())
+            .collect();
+
+        // Add target VID column
+        fields.push(Field::new(
+            format!("{}._vid", target_variable),
+            DataType::UInt64,
+            false,
+        ));
+
+        // Add hop count
+        fields.push(Field::new("_hop_count", DataType::UInt64, false));
+
+        // Add relationship variable column if bound (VLP relationship variable is a List of edges)
+        if let Some(path_var) = path_variable {
+            let edge_struct_fields = vec![
+                Field::new("_eid", DataType::UInt64, false),
+                Field::new("_type_name", DataType::Utf8, false),
+                Field::new("_src", DataType::UInt64, false),
+                Field::new("_dst", DataType::UInt64, false),
+            ];
+            let rel_item = Field::new(
+                "item",
+                DataType::Struct(edge_struct_fields.into()),
+                true,
+            );
+            fields.push(Field::new(
+                path_var,
+                DataType::List(Arc::new(rel_item)),
+                false,
+            ));
+        }
+
+        // Add target property columns (as LargeBinary for lazy hydration via PropertyManager)
+        for prop in target_properties {
+            fields.push(Field::new(
+                format!("{}.{}", target_variable, prop),
+                DataType::LargeBinary,
+                true,
+            ));
+        }
+
+        Arc::new(Schema::new(fields))
+    }
+}
+
+impl DisplayAs for GraphVariableLengthTraverseMainExec {
+    fn fmt_as(&self, t: DisplayFormatType, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match t {
+            DisplayFormatType::Default
+            | DisplayFormatType::Verbose
+            | DisplayFormatType::TreeRender => {
+                write!(
+                    f,
+                    "GraphVariableLengthTraverseMainExec: {} --[{}*{}..{}]--> target",
+                    self.source_column, self.type_name, self.min_hops, self.max_hops
+                )
+            }
+        }
+    }
+}
+
+impl ExecutionPlan for GraphVariableLengthTraverseMainExec {
+    fn name(&self) -> &str {
+        "GraphVariableLengthTraverseMainExec"
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn schema(&self) -> SchemaRef {
+        self.schema.clone()
+    }
+
+    fn properties(&self) -> &PlanProperties {
+        &self.properties
+    }
+
+    fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
+        vec![&self.input]
+    }
+
+    fn with_new_children(
+        self: Arc<Self>,
+        children: Vec<Arc<dyn ExecutionPlan>>,
+    ) -> DFResult<Arc<dyn ExecutionPlan>> {
+        if children.len() != 1 {
+            return Err(datafusion::error::DataFusionError::Plan(
+                "GraphVariableLengthTraverseMainExec requires exactly one child".to_string(),
+            ));
+        }
+
+        Ok(Arc::new(Self::new(
+            children[0].clone(),
+            self.source_column.clone(),
+            self.type_name.clone(),
+            self.direction,
+            self.min_hops,
+            self.max_hops,
+            self.target_variable.clone(),
+            self.path_variable.clone(),
+            self.target_properties.clone(),
+            self.graph_ctx.clone(),
+            self.is_optional,
+        )))
+    }
+
+    fn execute(
+        &self,
+        partition: usize,
+        context: Arc<TaskContext>,
+    ) -> DFResult<SendableRecordBatchStream> {
+        let input_stream = self.input.execute(partition, context)?;
+        let metrics = BaselineMetrics::new(&self.metrics, partition);
+
+        // Build adjacency map from main edges table (async)
+        let graph_ctx = self.graph_ctx.clone();
+        let type_name = self.type_name.clone();
+        let direction = self.direction;
+        let load_fut = async move { build_edge_adjacency_map(&graph_ctx, &type_name, direction).await };
+
+        Ok(Box::pin(GraphVariableLengthTraverseMainStream {
+            input: input_stream,
+            source_column: self.source_column.clone(),
+            type_name: self.type_name.clone(),
+            direction: self.direction,
+            min_hops: self.min_hops,
+            max_hops: self.max_hops,
+            target_variable: self.target_variable.clone(),
+            path_variable: self.path_variable.clone(),
+            target_properties: self.target_properties.clone(),
+            graph_ctx: self.graph_ctx.clone(),
+            is_optional: self.is_optional,
+            schema: self.schema.clone(),
+            state: VarLengthMainStreamState::Loading(Box::pin(load_fut)),
+            metrics,
+        }))
+    }
+
+    fn metrics(&self) -> Option<MetricsSet> {
+        Some(self.metrics.clone_inner())
+    }
+}
+
+/// State machine for VLP schemaless stream.
+enum VarLengthMainStreamState {
+    /// Loading adjacency map from main edges table.
+    Loading(Pin<Box<dyn std::future::Future<Output = DFResult<EdgeAdjacencyMap>> + Send>>),
+    /// Processing input batches with loaded adjacency.
+    Processing(EdgeAdjacencyMap),
+    /// Stream is done.
+    Done,
+}
+
+/// Stream for variable-length traversal on schemaless edges.
+struct GraphVariableLengthTraverseMainStream {
+    input: SendableRecordBatchStream,
+    source_column: String,
+    type_name: String,
+    direction: Direction,
+    min_hops: usize,
+    max_hops: usize,
+    target_variable: String,
+    path_variable: Option<String>,
+    target_properties: Vec<String>,
+    graph_ctx: Arc<GraphExecutionContext>,
+    is_optional: bool,
+    schema: SchemaRef,
+    state: VarLengthMainStreamState,
+    metrics: BaselineMetrics,
+}
+
+/// BFS result type: (target_vid, hop_count, node_path, edge_path)
+type MainBfsResult = (Vid, usize, Vec<Vid>, Vec<Eid>);
+
+impl GraphVariableLengthTraverseMainStream {
+    /// Perform BFS from a source vertex using the adjacency map.
+    fn bfs(&self, source: Vid, adjacency: &EdgeAdjacencyMap) -> Vec<MainBfsResult> {
+        let mut results = Vec::new();
+        let mut visited: HashSet<Vid> = HashSet::new();
+        let mut queue: VecDeque<MainBfsResult> = VecDeque::new();
+
+        visited.insert(source);
+        queue.push_back((source, 0, vec![source], vec![]));
+
+        while let Some((current, depth, node_path, edge_path)) = queue.pop_front() {
+            // Emit result if within hop range (including zero-length patterns)
+            if depth >= self.min_hops && depth <= self.max_hops {
+                results.push((current, depth, node_path.clone(), edge_path.clone()));
+
+                // For OPTIONAL MATCH, stop after first match to avoid Cartesian product
+                if self.is_optional && !results.is_empty() {
+                    return results;
+                }
+            }
+
+            // Stop if at max depth
+            if depth >= self.max_hops {
+                continue;
+            }
+
+            // Get neighbors from adjacency map
+            if let Some(neighbors) = adjacency.get(&current) {
+                let is_undirected = matches!(self.direction, Direction::Both);
+                let mut seen_edges_at_hop: HashSet<u64> = HashSet::new();
+
+                for (neighbor, eid, _props) in neighbors {
+                    // Deduplicate edges for undirected patterns
+                    if is_undirected && !seen_edges_at_hop.insert(eid.as_u64()) {
+                        continue;
+                    }
+
+                    if !visited.contains(neighbor) {
+                        visited.insert(*neighbor);
+                        let mut new_node_path = node_path.clone();
+                        new_node_path.push(*neighbor);
+                        let mut new_edge_path = edge_path.clone();
+                        new_edge_path.push(*eid);
+                        queue.push_back((*neighbor, depth + 1, new_node_path, new_edge_path));
+                    }
+                }
+            }
+        }
+
+        results
+    }
+
+    /// Process a batch using the adjacency map.
+    fn process_batch(
+        &self,
+        batch: RecordBatch,
+        adjacency: &EdgeAdjacencyMap,
+    ) -> DFResult<RecordBatch> {
+        let source_col = batch
+            .column_by_name(&self.source_column)
+            .ok_or_else(|| {
+                datafusion::error::DataFusionError::Execution(format!(
+                    "Source column '{}' not found in input batch",
+                    self.source_column
+                ))
+            })?;
+
+        let source_vids = source_col
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .ok_or_else(|| {
+                datafusion::error::DataFusionError::Execution(
+                    "Source column is not UInt64".to_string(),
+                )
+            })?;
+
+        // Collect BFS results: (original_row_idx, target_vid, hop_count, node_path, edge_path)
+        let mut expansions: Vec<(usize, Vid, usize, Vec<Vid>, Vec<Eid>)> = Vec::new();
+
+        for row_idx in 0..source_vids.len() {
+            let source = Vid::from(source_vids.value(row_idx));
+            let bfs_results = self.bfs(source, adjacency);
+
+            if bfs_results.is_empty() && self.is_optional {
+                // Preserve row with NULL target for OPTIONAL MATCH
+                expansions.push((row_idx, Vid::from(0u64), 0, vec![], vec![]));
+            } else {
+                for (target, hops, node_path, edge_path) in bfs_results {
+                    expansions.push((row_idx, target, hops, node_path, edge_path));
+                }
+            }
+        }
+
+        let num_rows = expansions.len();
+        self.metrics.record_output(num_rows);
+
+        // Build output columns
+        let mut columns: Vec<ArrayRef> = Vec::with_capacity(self.schema.fields().len());
+
+        // Expand input columns
+        for col_idx in 0..batch.num_columns() {
+            let array = batch.column(col_idx);
+            let indices: Vec<u64> = expansions.iter().map(|(idx, _, _, _, _)| *idx as u64).collect();
+            let take_indices = UInt64Array::from(indices);
+            let expanded = arrow::compute::take(array, &take_indices, None)?;
+            columns.push(expanded);
+        }
+
+        // Add target VID column
+        let target_vids: Vec<u64> = expansions
+            .iter()
+            .map(|(_, vid, _, _, _)| vid.as_u64())
+            .collect();
+        columns.push(Arc::new(UInt64Array::from(target_vids)));
+
+        // Add hop count column
+        let hop_counts: Vec<u64> = expansions
+            .iter()
+            .map(|(_, _, hops, _, _)| *hops as u64)
+            .collect();
+        columns.push(Arc::new(UInt64Array::from(hop_counts)));
+
+        // Add relationship variable column if bound
+        if self.path_variable.is_some() {
+            use arrow_array::builder::{ListBuilder, StringBuilder, StructBuilder, UInt64Builder};
+
+            let struct_fields = vec![
+                Arc::new(Field::new("_eid", DataType::UInt64, false)),
+                Arc::new(Field::new("_type_name", DataType::Utf8, false)),
+                Arc::new(Field::new("_src", DataType::UInt64, false)),
+                Arc::new(Field::new("_dst", DataType::UInt64, false)),
+            ];
+
+            let mut rels_builder = ListBuilder::new(StructBuilder::new(
+                struct_fields,
+                vec![
+                    Box::new(UInt64Builder::new()),
+                    Box::new(StringBuilder::new()),
+                    Box::new(UInt64Builder::new()),
+                    Box::new(UInt64Builder::new()),
+                ],
+            ));
+
+            for (_, _, _, node_path, edge_path) in &expansions {
+                let rel_struct = rels_builder.values();
+                for (i, eid) in edge_path.iter().enumerate() {
+                    // EID
+                    rel_struct
+                        .field_builder::<UInt64Builder>(0)
+                        .unwrap()
+                        .append_value(eid.as_u64());
+                    // Edge type name
+                    rel_struct
+                        .field_builder::<StringBuilder>(1)
+                        .unwrap()
+                        .append_value(&self.type_name);
+                    // Src VID
+                    rel_struct
+                        .field_builder::<UInt64Builder>(2)
+                        .unwrap()
+                        .append_value(node_path[i].as_u64());
+                    // Dst VID
+                    rel_struct
+                        .field_builder::<UInt64Builder>(3)
+                        .unwrap()
+                        .append_value(node_path[i + 1].as_u64());
+                    rel_struct.append(true);
+                }
+                rels_builder.append(true);
+            }
+
+            let rels_arr = rels_builder.finish();
+            columns.push(Arc::new(rels_arr));
+        }
+
+        // Add target property columns as NULL for now.
+        // Property hydration happens via PropertyManager in the query execution pipeline.
+        for _prop_name in &self.target_properties {
+            columns.push(arrow_array::new_null_array(&DataType::LargeBinary, num_rows));
+        }
+
+        RecordBatch::try_new(self.schema.clone(), columns)
+            .map_err(|e| datafusion::error::DataFusionError::ArrowError(Box::new(e), None))
+    }
+}
+
+impl Stream for GraphVariableLengthTraverseMainStream {
+    type Item = DFResult<RecordBatch>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        loop {
+            let state = std::mem::replace(&mut self.state, VarLengthMainStreamState::Done);
+
+            match state {
+                VarLengthMainStreamState::Loading(mut fut) => match fut.as_mut().poll(cx) {
+                    Poll::Ready(Ok(adjacency)) => {
+                        self.state = VarLengthMainStreamState::Processing(adjacency);
+                        // Continue loop to start processing
+                    }
+                    Poll::Ready(Err(e)) => {
+                        self.state = VarLengthMainStreamState::Done;
+                        return Poll::Ready(Some(Err(e)));
+                    }
+                    Poll::Pending => {
+                        self.state = VarLengthMainStreamState::Loading(fut);
+                        return Poll::Pending;
+                    }
+                },
+                VarLengthMainStreamState::Processing(adjacency) => {
+                    match self.input.poll_next_unpin(cx) {
+                        Poll::Ready(Some(Ok(batch))) => {
+                            let result = self.process_batch(batch, &adjacency);
+                            self.state = VarLengthMainStreamState::Processing(adjacency);
+                            return Poll::Ready(Some(result));
+                        }
+                        Poll::Ready(Some(Err(e))) => {
+                            self.state = VarLengthMainStreamState::Done;
+                            return Poll::Ready(Some(Err(e)));
+                        }
+                        Poll::Ready(None) => {
+                            self.state = VarLengthMainStreamState::Done;
+                            return Poll::Ready(None);
+                        }
+                        Poll::Pending => {
+                            self.state = VarLengthMainStreamState::Processing(adjacency);
+                            return Poll::Pending;
+                        }
+                    }
+                }
+                VarLengthMainStreamState::Done => {
+                    return Poll::Ready(None);
+                }
+            }
+        }
+    }
+}
+
+impl RecordBatchStream for GraphVariableLengthTraverseMainStream {
     fn schema(&self) -> SchemaRef {
         self.schema.clone()
     }
@@ -2214,11 +2768,12 @@ mod tests {
             false,
         )]));
 
-        let output_schema = GraphVariableLengthTraverseExec::build_schema(input_schema, Some("p"));
+        let output_schema =
+            GraphVariableLengthTraverseExec::build_schema(input_schema, "b", Some("p"));
 
         assert_eq!(output_schema.fields().len(), 4);
         assert_eq!(output_schema.field(0).name(), "a._vid");
-        assert_eq!(output_schema.field(1).name(), "_target_vid");
+        assert_eq!(output_schema.field(1).name(), "b._vid");
         assert_eq!(output_schema.field(2).name(), "_hop_count");
         assert_eq!(output_schema.field(3).name(), "p");
     }
