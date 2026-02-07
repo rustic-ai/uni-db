@@ -94,3 +94,26 @@ RETURN {k: {k: {}} AS literal
 // Expected error: InvalidUnicodeCharacter
 RETURN 42 — 41
 
+// ../../cypher-tck/tck-M23/tck/features/expressions/literals/Literals2.feature
+// Expected error: Integer overflow
+RETURN 9223372036854775808 AS literal
+
+// ../../cypher-tck/tck-M23/tck/features/expressions/literals/Literals2.feature
+// Expected error: Integer overflow
+RETURN -9223372036854775809 AS literal
+
+// ../../cypher-tck/tck-M23/tck/features/expressions/literals/Literals3.feature
+// Expected error: Integer overflow
+RETURN 0x8000000000000000 AS literal
+
+// ../../cypher-tck/tck-M23/tck/features/expressions/literals/Literals3.feature
+// Expected error: Integer overflow
+RETURN -0x8000000000000001 AS literal
+
+// ../../cypher-tck/tck-M23/tck/features/expressions/literals/Literals4.feature
+// Expected error: Integer overflow
+RETURN 0o1000000000000000000000 AS literal
+
+// ../../cypher-tck/tck-M23/tck/features/expressions/literals/Literals4.feature
+// Expected error: Integer overflow
+RETURN -0o1000000000000000000001 AS literal

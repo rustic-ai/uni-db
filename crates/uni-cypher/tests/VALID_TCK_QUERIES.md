@@ -10303,11 +10303,7 @@ RETURN -372036854 AS literal
 // ../../cypher-tck/tck-M23/tck/features/expressions/literals/Literals2.feature
 RETURN -9223372036854775808 AS literal
 
-// ../../cypher-tck/tck-M23/tck/features/expressions/literals/Literals2.feature
-RETURN 9223372036854775808 AS literal
 
-// ../../cypher-tck/tck-M23/tck/features/expressions/literals/Literals2.feature
-RETURN -9223372036854775809 AS literal
 
 // ../../cypher-tck/tck-M23/tck/features/expressions/literals/Literals3.feature
 RETURN 0x1 AS literal
@@ -10342,11 +10338,7 @@ RETURN 0x1A2B3C4D5E6F7 AS literal
 // ../../cypher-tck/tck-M23/tck/features/expressions/literals/Literals3.feature
 RETURN 0x1A2b3c4D5E6f7 AS literal
 
-// ../../cypher-tck/tck-M23/tck/features/expressions/literals/Literals3.feature
-RETURN 0x8000000000000000 AS literal
 
-// ../../cypher-tck/tck-M23/tck/features/expressions/literals/Literals3.feature
-RETURN -0x8000000000000001 AS literal
 
 // ../../cypher-tck/tck-M23/tck/features/expressions/literals/Literals4.feature
 RETURN 0o1 AS literal
@@ -10372,11 +10364,7 @@ RETURN -0o2613152366 AS literal
 // ../../cypher-tck/tck-M23/tck/features/expressions/literals/Literals4.feature
 RETURN -0o1000000000000000000000 AS literal
 
-// ../../cypher-tck/tck-M23/tck/features/expressions/literals/Literals4.feature
-RETURN 0o1000000000000000000000 AS literal
 
-// ../../cypher-tck/tck-M23/tck/features/expressions/literals/Literals4.feature
-RETURN -0o1000000000000000000001 AS literal
 
 // ../../cypher-tck/tck-M23/tck/features/expressions/literals/Literals5.feature
 RETURN 1.0 AS literal

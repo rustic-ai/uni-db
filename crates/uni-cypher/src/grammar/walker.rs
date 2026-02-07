@@ -915,6 +915,13 @@ fn build_unary_expression(pair: Pair<Rule>) -> Result<Expr, ParseError> {
     let mut expr = build_expression(inner.next().unwrap())?;
     if neg {
         expr = negate_expression(expr);
+    } else {
+        // Validation: If we have a positive integer literal that equals i64::MIN,
+        // it means we parsed a magnitude of i64::MAX + 1 (9223372036854775808).
+        // Since it wasn't negated, this is a positive overflow.
+        if let Expr::Literal(CypherLiteral::Integer(i64::MIN)) = expr {
+            return Err(ParseError::new("Integer overflow".to_string()));
+        }
     }
     Ok(expr)
 }
@@ -1311,10 +1318,8 @@ fn unescape_string(s: &str, quote_char: char) -> Result<String, ParseError> {
 
 /// Outcome of parsing an integer literal that may overflow `i64`.
 enum IntegerParseResult {
-    /// Value fits in a signed 64-bit integer.
+    /// Value fits in a signed 64-bit integer (or is the sentinel `i64::MIN` for `MAX + 1`).
     Integer(i64),
-    /// Value exceeds `i64` range; promoted to `f64` per OpenCypher semantics.
-    Overflow(f64),
 }
 
 /// Parse an unsigned integer string in the given radix with overflow handling.
@@ -1322,7 +1327,7 @@ enum IntegerParseResult {
 /// Values that fit in `i64` are returned directly. The boundary value
 /// `i64::MAX + 1` is stored as `i64::MIN` so that [`negate_expression`]
 /// can produce the correct result for `-9223372036854775808`. Larger
-/// values are promoted to `f64`.
+/// values result in an error.
 fn parse_integer_safe(s: &str, radix: u32) -> Result<IntegerParseResult, ParseError> {
     if let Ok(val) = i64::from_str_radix(s, radix) {
         return Ok(IntegerParseResult::Integer(val));
@@ -1336,7 +1341,7 @@ fn parse_integer_safe(s: &str, radix: u32) -> Result<IntegerParseResult, ParseEr
     } else if magnitude == (i64::MAX as u64 + 1) {
         Ok(IntegerParseResult::Integer(i64::MIN))
     } else {
-        Ok(IntegerParseResult::Overflow(magnitude as f64))
+        Err(ParseError::new("Integer overflow".to_string()))
     }
 }
 
@@ -1359,9 +1364,6 @@ fn build_literal(pair: Pair<Rule>) -> Result<Expr, ParseError> {
             match result {
                 IntegerParseResult::Integer(value) => {
                     Ok(Expr::Literal(CypherLiteral::Integer(value)))
-                }
-                IntegerParseResult::Overflow(float_value) => {
-                    Ok(Expr::Literal(CypherLiteral::Float(float_value)))
                 }
             }
         }
