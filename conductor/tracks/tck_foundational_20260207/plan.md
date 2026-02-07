@@ -1,16 +1,16 @@
 # Implementation Plan - TCK Foundational Compatibility
 
-## Phase 1: Literals & Type System
+## Phase 1: Literals & Type System [checkpoint: f10a8a1]
 - [x] Task: Fix Decimal, Hex, and Octal integer literal overflow and parsing edge cases. 84feece
-    - [ ] Write Tests
-    - [ ] Implement Fix
+    - [x] Write Tests
+    - [x] Implement Fix
 - [x] Task: Fix String literal escaping and Unicode support. 0747675
-    - [ ] Write Tests
-    - [ ] Implement Fix
+    - [x] Write Tests
+    - [x] Implement Fix
 - [x] Task: Resolve nested List and Map literal evaluation failures in the vectorized engine. 6448d33
-    - [ ] Write Tests
-    - [ ] Implement Fix
-- [ ] Task: Conductor - User Manual Verification 'Phase 1: Literals & Type System' (Protocol in workflow.md)
+    - [x] Write Tests
+    - [x] Implement Fix
+- [x] Task: Conductor - User Manual Verification 'Phase 1: Literals & Type System' (Protocol in workflow.md) f10a8a1
 
 ## Phase 2: Type Conversions & Comparisons
 - [ ] Task: Standardize `toInteger()`, `toFloat()`, and `toBoolean()` behavior according to TCK.
