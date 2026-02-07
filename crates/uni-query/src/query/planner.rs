@@ -841,6 +841,13 @@ pub enum LogicalPlan {
     Begin,
     Commit,
     Rollback,
+    /// Bind a zero-length path (single node pattern with path variable).
+    /// E.g., `p = (a)` creates a Path with one node and zero edges.
+    BindZeroLengthPath {
+        input: Box<LogicalPlan>,
+        node_variable: String,
+        path_variable: String,
+    },
 }
 
 /// Result of extracting ANY IN predicate
@@ -2410,6 +2417,11 @@ impl QueryPlanner {
             std::collections::HashSet::new()
         };
 
+        // Track if any traverses were added (for zero-length path detection)
+        let mut had_traverses = false;
+        // Track the node variable for zero-length path binding
+        let mut single_node_variable: Option<String> = None;
+
         // Multi-hop path variables are now supported - path is accumulated across hops
         while i < elements.len() {
             let element = &elements[i];
@@ -2418,6 +2430,10 @@ impl QueryPlanner {
                     let mut variable = n.variable.clone().unwrap_or_default();
                     if variable.is_empty() {
                         variable = self.next_anon_var();
+                    }
+                    // Track first node variable for zero-length path
+                    if single_node_variable.is_none() {
+                        single_node_variable = Some(variable.clone());
                     }
                     let is_bound =
                         !variable.is_empty() && is_var_in_scope(vars_in_scope, &variable);
@@ -2472,6 +2488,7 @@ impl QueryPlanner {
                                     )?;
                                     plan = new_plan;
                                     current_source_var = target_var;
+                                    had_traverses = true;
                                     i += 2;
                                 } else {
                                     return Err(anyhow!("Relationship must be followed by a node"));
@@ -2563,10 +2580,26 @@ impl QueryPlanner {
                         &source_variable,
                     )?;
                     plan = new_plan;
+                    had_traverses = true;
 
                     i += 1;
                 }
             }
+        }
+
+        // If this is a single-node pattern with a path variable, bind the zero-length path
+        // E.g., `p = (a)` should create a Path with one node and zero edges
+        if let Some(path_var) = path_variable
+            && !path_var.is_empty()
+            && !had_traverses
+            && let Some(node_var) = single_node_variable
+        {
+            plan = LogicalPlan::BindZeroLengthPath {
+                input: Box::new(plan),
+                node_variable: node_var,
+                path_variable: path_var.clone(),
+            };
+            add_var_to_scope(vars_in_scope, &path_var, VariableType::Path)?;
         }
 
         Ok(plan)
@@ -2676,10 +2709,15 @@ impl QueryPlanner {
                 (1, 1)
             };
 
+            // For variable-length paths:
+            // - path_var is the named path variable (p in `p = (a)-[r*]->(b)`)
+            // For single-hop paths:
+            // - step_var is the relationship variable (r in `()-[r]->()`)
+            // - path_var is the named path variable (p in `p = ...`)
             let (step_var, path_var) = if is_variable_length {
                 (
                     None,
-                    params.rel.variable.clone().or(params.path_variable.clone()),
+                    params.path_variable.clone().or(params.rel.variable.clone()),
                 )
             } else {
                 (params.rel.variable.clone(), params.path_variable.clone())
@@ -2777,16 +2815,24 @@ impl QueryPlanner {
             (1, 1)
         };
 
-        // For variable-length paths, bind the relationship variable as path_variable
-        // For single-hop paths, bind it as step_variable
+        // For variable-length paths:
+        // - path_var is the named path variable (p in `p = (a)-[r*]->(b)`)
+        // - step_var (relationship variable) is not used for VLP in the current implementation
+        //   (relationship variable binding would require additional output column)
+        //
+        // For single-hop paths:
+        // - step_var is the relationship variable (r in `()-[r]->()`)
+        // - path_var is the named path variable (p in `p = ...`)
         let (step_var, path_var) = if is_variable_length {
-            // Variable-length: bind as path_variable for Path object
+            // Variable-length: path_var is the named path variable
+            // If no explicit path variable but relationship variable exists, use it as the path var
+            // to support `MATCH (a)-[r*]->(b) RETURN r` which expects a List<Edge>
             (
                 None,
-                params.rel.variable.clone().or(params.path_variable.clone()),
+                params.path_variable.clone().or(params.rel.variable.clone()),
             )
         } else {
-            // Single-hop: bind as step_variable for relationship object
+            // Single-hop: bind relationship as step_variable, path as path_variable
             (params.rel.variable.clone(), params.path_variable.clone())
         };
 
@@ -5045,6 +5091,28 @@ fn collect_properties_recursive(
             collect_properties_from_expr_into(expr, properties);
         }
         LogicalPlan::ExtIdLookup { filter: None, .. } => {}
+        LogicalPlan::ScanAll {
+            filter: Some(expr), ..
+        } => {
+            collect_properties_from_expr_into(expr, properties);
+        }
+        LogicalPlan::ScanAll { filter: None, .. } => {}
+        LogicalPlan::ScanMainByLabel {
+            filter: Some(expr), ..
+        } => {
+            collect_properties_from_expr_into(expr, properties);
+        }
+        LogicalPlan::ScanMainByLabel { filter: None, .. } => {}
+        LogicalPlan::TraverseMainByType {
+            input,
+            target_filter,
+            ..
+        } => {
+            if let Some(expr) = target_filter {
+                collect_properties_from_expr_into(expr, properties);
+            }
+            collect_properties_recursive(input, properties);
+        }
         LogicalPlan::Traverse {
             input,
             target_filter,

@@ -34,6 +34,7 @@
 //! [`cypher_expr_to_df`] from the `df_expr` module.
 
 use crate::query::df_expr::{TranslationContext, VariableKind, cypher_expr_to_df};
+use crate::query::df_graph::bind_zero_length_path::BindZeroLengthPathExec;
 use crate::query::df_graph::traverse::{
     GraphVariableLengthTraverseExec, GraphVariableLengthTraverseMainExec,
 };
@@ -434,6 +435,14 @@ impl HybridPhysicalPlanner {
             }
 
             LogicalPlan::Empty => self.plan_empty(),
+
+            LogicalPlan::BindZeroLengthPath {
+                input,
+                node_variable,
+                path_variable,
+            } => {
+                self.plan_bind_zero_length_path(input, node_variable, path_variable, all_properties)
+            }
 
             // === Unsupported (for now) ===
             LogicalPlan::Create { .. }
@@ -872,6 +881,36 @@ impl HybridPhysicalPlanner {
             // Note: target_label_id is not passed here because VIDs no longer embed label info.
             // Label filtering for traversals is handled via the fallback executor when DataFusion
             // cannot handle the query, or via explicit filter predicates.
+
+            // Check if target variable is already bound (for cycle patterns like n-->k<--n)
+            let target_vid_col = format!("{}._vid", target_variable);
+            let bound_target_column = if input_plan
+                .schema()
+                .column_with_name(&target_vid_col)
+                .is_some()
+            {
+                Some(target_vid_col)
+            } else {
+                None
+            };
+
+            // Collect edge ID columns from previous hops for relationship uniqueness.
+            // Look for both explicit edge variables (ending in "._eid") and
+            // internal tracking columns (starting with "__eid_to_").
+            let used_edge_columns: Vec<String> = input_plan
+                .schema()
+                .fields()
+                .iter()
+                .filter_map(|f| {
+                    let name = f.name();
+                    if name.ends_with("._eid") || name.starts_with("__eid_to_") {
+                        Some(name.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+
             Arc::new(GraphTraverseExec::new(
                 input_plan,
                 source_col,
@@ -885,9 +924,32 @@ impl HybridPhysicalPlanner {
                 None, // VIDs don't embed label - use VidLabelsIndex instead
                 self.graph_ctx.clone(),
                 optional,
+                bound_target_column,
+                used_edge_columns,
             ))
         } else {
             // Variable-length traversal
+            if edge_type_ids.is_empty() {
+                // No edge types - for min_hops=0, we can still emit zero-length paths
+                // Use BindZeroLengthPath to create path with just the source node
+                if let (0, Some(path_var)) = (min_hops, path_variable) {
+                    return Ok(Arc::new(BindZeroLengthPathExec::new(
+                        input_plan,
+                        source_variable.to_string(),
+                        path_var.to_string(),
+                        self.graph_ctx.clone(),
+                    )));
+                } else if min_hops == 0 {
+                    // min_hops=0 but no path variable - just return input as-is
+                    // (the target is the same as source for zero-length)
+                    return Ok(input_plan);
+                } else {
+                    // No edges to traverse and min_hops > 0 means no results
+                    return Ok(Arc::new(datafusion::physical_plan::empty::EmptyExec::new(
+                        input_plan.schema(),
+                    )));
+                }
+            }
             if edge_type_ids.len() != 1 {
                 return Err(anyhow!(
                     "Variable-length traversal only supports single edge type"
@@ -1735,6 +1797,24 @@ impl HybridPhysicalPlanner {
         Ok(Arc::new(PlaceholderRowExec::new(schema)))
     }
 
+    /// Plan a zero-length path binding.
+    /// Converts a single node pattern `p = (a)` into a Path with one node and zero edges.
+    fn plan_bind_zero_length_path(
+        &self,
+        input: &LogicalPlan,
+        node_variable: &str,
+        path_variable: &str,
+        all_properties: &HashMap<String, HashSet<String>>,
+    ) -> Result<Arc<dyn ExecutionPlan>> {
+        let input_plan = self.plan_internal(input, all_properties)?;
+        Ok(Arc::new(BindZeroLengthPathExec::new(
+            input_plan,
+            node_variable.to_string(),
+            path_variable.to_string(),
+            self.graph_ctx.clone(),
+        )))
+    }
+
     /// Create a physical filter expression.
     ///
     /// Applies type coercion to resolve mismatches like Int32 vs Int64
@@ -2040,6 +2120,15 @@ fn collect_variable_kinds(plan: &LogicalPlan, kinds: &mut HashMap<String, Variab
             if let Some(pv) = path_variable {
                 kinds.insert(pv.clone(), VariableKind::Path);
             }
+        }
+        LogicalPlan::BindZeroLengthPath {
+            input,
+            node_variable,
+            path_variable,
+        } => {
+            collect_variable_kinds(input, kinds);
+            kinds.insert(node_variable.clone(), VariableKind::Node);
+            kinds.insert(path_variable.clone(), VariableKind::Path);
         }
         // Wrapper nodes: recurse into input(s)
         LogicalPlan::Filter { input, .. }

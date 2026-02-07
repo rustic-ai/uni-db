@@ -579,6 +579,8 @@ impl Executor {
     ///
     /// Handles special metadata on fields:
     /// - `json_encoded=true`: Parse the string value as JSON to restore original type
+    ///
+    /// Also normalizes path structures to user-facing format (converts _vid to _id).
     fn record_batches_to_rows(
         &self,
         batches: Vec<RecordBatch>,
@@ -605,6 +607,9 @@ impl Executor {
                         value = parsed;
                     }
 
+                    // Normalize path structures to user-facing format
+                    value = Self::normalize_path_if_needed(value);
+
                     row.insert(field.name().clone(), value);
                 }
 
@@ -613,6 +618,134 @@ impl Executor {
         }
 
         Ok(rows)
+    }
+
+    /// Normalize a value if it's a path structure, converting internal format to user-facing format.
+    ///
+    /// This only normalizes path structures (objects with "nodes" and "relationships" arrays).
+    /// Other values are returned unchanged to avoid interfering with query execution.
+    fn normalize_path_if_needed(value: Value) -> Value {
+        // Only normalize if this looks like a path (has nodes and relationships/edges)
+        if let Value::Object(map) = value {
+            if map.contains_key("nodes")
+                && (map.contains_key("relationships") || map.contains_key("edges"))
+            {
+                return Self::normalize_path_json(map);
+            }
+            return Value::Object(map);
+        }
+        value
+    }
+
+    /// Normalize a path JSON object.
+    fn normalize_path_json(mut map: serde_json::Map<String, Value>) -> Value {
+        // Normalize nodes array
+        if let Some(Value::Array(nodes)) = map.remove("nodes") {
+            let normalized_nodes: Vec<Value> = nodes
+                .into_iter()
+                .map(|n| {
+                    if let Value::Object(node_map) = n {
+                        Self::normalize_path_node_json(node_map)
+                    } else {
+                        n
+                    }
+                })
+                .collect();
+            map.insert("nodes".to_string(), Value::Array(normalized_nodes));
+        }
+
+        // Normalize relationships array (may be called "relationships" or "edges")
+        let rels_key = if map.contains_key("relationships") {
+            "relationships"
+        } else {
+            "edges"
+        };
+        if let Some(Value::Array(rels)) = map.remove(rels_key) {
+            let normalized_rels: Vec<Value> = rels
+                .into_iter()
+                .map(|r| {
+                    if let Value::Object(rel_map) = r {
+                        Self::normalize_path_edge_json(rel_map)
+                    } else {
+                        r
+                    }
+                })
+                .collect();
+            map.insert("relationships".to_string(), Value::Array(normalized_rels));
+        }
+
+        Value::Object(map)
+    }
+
+    /// Normalize a node within a path to user-facing format.
+    fn normalize_path_node_json(mut map: serde_json::Map<String, Value>) -> Value {
+        // Convert _vid to _id as string
+        if let Some(vid) = map.remove("_vid") {
+            let id_str = match vid {
+                Value::Number(n) => n.to_string(),
+                Value::String(s) => s,
+                _ => vid.to_string(),
+            };
+            map.insert("_id".to_string(), Value::String(id_str));
+        }
+
+        // Normalize properties if present
+        if let Some(props) = map.get("properties") {
+            if props.is_null() {
+                map.insert("properties".to_string(), json!({}));
+            }
+        } else {
+            map.insert("properties".to_string(), json!({}));
+        }
+
+        Value::Object(map)
+    }
+
+    /// Normalize an edge within a path to user-facing format.
+    fn normalize_path_edge_json(mut map: serde_json::Map<String, Value>) -> Value {
+        // Convert _eid to _id as string
+        if let Some(eid) = map.remove("_eid") {
+            let id_str = match eid {
+                Value::Number(n) => n.to_string(),
+                Value::String(s) => s,
+                _ => eid.to_string(),
+            };
+            map.insert("_id".to_string(), Value::String(id_str));
+        }
+
+        // Convert _src and _dst to strings
+        if let Some(src) = map.remove("_src") {
+            let src_str = match src {
+                Value::Number(n) => n.to_string(),
+                Value::String(s) => s,
+                _ => src.to_string(),
+            };
+            map.insert("_src".to_string(), Value::String(src_str));
+        }
+        if let Some(dst) = map.remove("_dst") {
+            let dst_str = match dst {
+                Value::Number(n) => n.to_string(),
+                Value::String(s) => s,
+                _ => dst.to_string(),
+            };
+            map.insert("_dst".to_string(), Value::String(dst_str));
+        }
+
+        // Rename _type_name to _type if present
+        if let Some(type_name) = map.remove("_type_name") {
+            map.insert("_type".to_string(), type_name);
+        }
+
+        // Normalize properties if present
+        if let Some(props) = map.get("properties") {
+            if props.is_null() {
+                map.insert("properties".to_string(), json!({}));
+            }
+        } else {
+            map.insert("properties".to_string(), json!({}));
+        }
+
+        Value::Object(map)
     }
 
     #[instrument(
@@ -2531,12 +2664,25 @@ impl Executor {
                     // Group rows by non-optional variables, apply filter, and ensure
                     // at least one row per group (with NULLs if filter removes all).
                     if !optional_variables.is_empty() {
-                        // Compute the key (non-optional variables) for grouping
+                        // Helper to check if a key belongs to an optional variable.
+                        // Keys can be "var" or "var.field" (e.g., "m" or "m._vid").
+                        let is_optional_key = |k: &str| -> bool {
+                            optional_variables.contains(k)
+                                || optional_variables
+                                    .iter()
+                                    .any(|var| k.starts_with(&format!("{}.", var)))
+                        };
+
+                        // Helper to check if a key is internal (should not affect grouping)
+                        let is_internal_key =
+                            |k: &str| -> bool { k.starts_with("__") || k.starts_with("_") };
+
+                        // Compute the key (non-optional, non-internal variables) for grouping
                         let non_optional_vars: Vec<String> = input_matches
                             .first()
                             .map(|row| {
                                 row.keys()
-                                    .filter(|k| !optional_variables.contains(*k))
+                                    .filter(|k| !is_optional_key(k) && !is_internal_key(k))
                                     .cloned()
                                     .collect()
                             })
@@ -2568,9 +2714,16 @@ impl Executor {
 
                             for row in &group_rows {
                                 // If optional variables are already NULL, preserve the row
-                                let has_null_optional = optional_variables
-                                    .iter()
-                                    .any(|var| matches!(row.get(var), Some(Value::Null) | None));
+                                let has_null_optional = optional_variables.iter().any(|var| {
+                                    // Check both "var" and "var._vid" style keys
+                                    let direct_null =
+                                        matches!(row.get(var), Some(Value::Null) | None);
+                                    let prefixed_null = row
+                                        .keys()
+                                        .filter(|k| k.starts_with(&format!("{}.", var)))
+                                        .any(|k| matches!(row.get(k), Some(Value::Null)));
+                                    direct_null || prefixed_null
+                                });
 
                                 if has_null_optional {
                                     group_passed.push(row.clone());
@@ -2592,7 +2745,7 @@ impl Executor {
                                 if let Some(template) = group_rows.first() {
                                     let mut null_row = HashMap::new();
                                     for (k, v) in template {
-                                        if optional_variables.contains(k) {
+                                        if is_optional_key(k) {
                                             null_row.insert(k.clone(), Value::Null);
                                         } else {
                                             null_row.insert(k.clone(), v.clone());
@@ -3213,6 +3366,44 @@ impl Executor {
                     Ok(rows)
                 }
                 LogicalPlan::Empty => Ok(vec![HashMap::new()]),
+                LogicalPlan::BindZeroLengthPath {
+                    input,
+                    node_variable,
+                    path_variable,
+                } => {
+                    // Execute input first
+                    let rows = self
+                        .execute_subplan(*input, prop_manager, params, ctx)
+                        .await?;
+
+                    // For each row, create a zero-length path
+                    let mut result = Vec::with_capacity(rows.len());
+                    for mut row in rows {
+                        // Get node VID
+                        let vid_key = format!("{}._vid", node_variable);
+                        let label_key = format!("{}._label", node_variable);
+
+                        let vid = row.get(&vid_key).cloned().unwrap_or(Value::Null);
+                        let label = row.get(&label_key).cloned().unwrap_or(Value::Null);
+
+                        // Build node for path
+                        let node = json!({
+                            "_vid": vid,
+                            "_label": label,
+                            "properties": {}
+                        });
+
+                        // Create path with one node and zero edges
+                        let path = Value::Object(serde_json::Map::from_iter([
+                            ("nodes".to_string(), Value::Array(vec![node])),
+                            ("relationships".to_string(), Value::Array(vec![])),
+                        ]));
+
+                        row.insert(path_variable.clone(), path);
+                        result.push(row);
+                    }
+                    Ok(result)
+                }
                 LogicalPlan::QuantifiedPattern { .. } => Err(anyhow!(
                     "Quantified patterns are not supported in the fallback executor"
                 )),
@@ -4038,6 +4229,14 @@ impl Executor {
         let schema = self.storage.schema_manager().schema();
         let target_label_name = schema.label_name_by_id(target_label_id);
 
+        // Get previously used edges from the row for relationship uniqueness across hops
+        let used_edges_from_previous_hops: std::collections::HashSet<u64> =
+            if let Some(Value::Array(arr)) = row.get("__used_edges") {
+                arr.iter().filter_map(|v| v.as_u64()).collect()
+            } else {
+                std::collections::HashSet::new()
+            };
+
         let mut found_neighbor = false;
         let mut visited = HashMap::new();
         let mut queue = std::collections::VecDeque::new();
@@ -4062,6 +4261,11 @@ impl Executor {
             for (next, edge_entry) in
                 self.collect_incident_edges(graph, curr, edge_type_ids, direction)
             {
+                // Skip edges already used in previous hops (relationship uniqueness)
+                if used_edges_from_previous_hops.contains(&edge_entry.eid.as_u64()) {
+                    continue;
+                }
+
                 if path.contains(&edge_entry.eid) {
                     continue;
                 }
@@ -4269,6 +4473,19 @@ impl Executor {
             "_label": target_label_name.unwrap_or("")
         });
         new_m.insert(target_variable.to_string(), target_obj);
+
+        // Track used edges for relationship uniqueness across hops.
+        // Add current edge to __used_edges internal tracking.
+        let mut used_edges: Vec<u64> = if let Some(Value::Array(arr)) = row.get("__used_edges") {
+            arr.iter().filter_map(|v| v.as_u64()).collect()
+        } else {
+            Vec::new()
+        };
+        used_edges.push(edge_entry.eid.as_u64());
+        new_m.insert(
+            "__used_edges".to_string(),
+            Value::Array(used_edges.into_iter().map(|e| json!(e)).collect()),
+        );
 
         if let Some(sv) = step_variable {
             if max_hops > 1 {

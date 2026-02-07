@@ -54,6 +54,9 @@ use uni_store::storage::direction::Direction;
 /// BFS result: (target_vid, hop_count, node_path, edge_path)
 type BfsResult = (Vid, usize, Vec<Vid>, Vec<Eid>);
 
+/// Expansion record: (original_row_idx, target_vid, hop_count, node_path, edge_path)
+type ExpansionRecord = (usize, Vid, usize, Vec<Vid>, Vec<Eid>);
+
 /// Resolve edge property Arrow type, falling back to `LargeBinary` (JSONB) for
 /// schemaless properties. Unlike vertex properties, schemaless edge properties must
 /// preserve original JSON value types (int, float, etc.) since edge types commonly
@@ -148,6 +151,14 @@ pub struct GraphTraverseExec {
     /// Whether this is an OPTIONAL MATCH (preserve unmatched source rows with NULLs).
     optional: bool,
 
+    /// Column name of an already-bound target VID (for cycle patterns like n-->k<--n).
+    /// When set, only traversals that reach this VID are included.
+    bound_target_column: Option<String>,
+
+    /// Columns containing edge IDs from previous hops (for relationship uniqueness).
+    /// Edges matching any of these IDs are excluded from traversal results.
+    used_edge_columns: Vec<String>,
+
     /// Output schema.
     schema: SchemaRef,
 
@@ -184,6 +195,8 @@ impl GraphTraverseExec {
     /// * `edge_properties` - Edge properties to materialize
     /// * `target_label_id` - Optional target label filter
     /// * `graph_ctx` - Graph execution context
+    /// * `bound_target_column` - Column with already-bound target VID (for cycle patterns)
+    /// * `used_edge_columns` - Columns with edge IDs to exclude (relationship uniqueness)
     #[expect(clippy::too_many_arguments)]
     pub fn new(
         input: Arc<dyn ExecutionPlan>,
@@ -198,6 +211,8 @@ impl GraphTraverseExec {
         target_label_id: Option<u16>,
         graph_ctx: Arc<GraphExecutionContext>,
         optional: bool,
+        bound_target_column: Option<String>,
+        used_edge_columns: Vec<String>,
     ) -> Self {
         let source_column = source_column.into();
         let target_variable = target_variable.into();
@@ -240,6 +255,8 @@ impl GraphTraverseExec {
             target_label_id,
             graph_ctx,
             optional,
+            bound_target_column,
+            used_edge_columns,
             schema,
             properties,
             metrics: ExecutionPlanMetricsSet::new(),
@@ -293,6 +310,11 @@ impl GraphTraverseExec {
                 let arrow_type = resolve_edge_property_type(prop_name, edge_props);
                 fields.push(Field::new(&prop_col_name, arrow_type, true));
             }
+        } else {
+            // Add internal edge ID column for relationship uniqueness tracking
+            // even when edge variable is not explicitly bound.
+            let internal_eid_name = format!("__eid_to_{}", target_variable);
+            fields.push(Field::new(&internal_eid_name, DataType::UInt64, optional));
         }
 
         Arc::new(Schema::new(fields))
@@ -363,6 +385,8 @@ impl ExecutionPlan for GraphTraverseExec {
             self.target_label_id,
             self.graph_ctx.clone(),
             self.optional,
+            self.bound_target_column.clone(),
+            self.used_edge_columns.clone(),
         )))
     }
 
@@ -391,6 +415,8 @@ impl ExecutionPlan for GraphTraverseExec {
             target_label_name: self.target_label_name.clone(),
             graph_ctx: self.graph_ctx.clone(),
             optional: self.optional,
+            bound_target_column: self.bound_target_column.clone(),
+            used_edge_columns: self.used_edge_columns.clone(),
             schema: self.schema.clone(),
             state: TraverseStreamState::Warming(warm_fut),
             metrics,
@@ -450,6 +476,12 @@ struct GraphTraverseStream {
     /// Whether this is an OPTIONAL MATCH.
     optional: bool,
 
+    /// Column name of an already-bound target VID (for cycle patterns like n-->k<--n).
+    bound_target_column: Option<String>,
+
+    /// Columns containing edge IDs from previous hops (for relationship uniqueness).
+    used_edge_columns: Vec<String>,
+
     /// Output schema.
     schema: SchemaRef,
 
@@ -479,6 +511,26 @@ impl GraphTraverseStream {
                 )
             })?;
 
+        // If bound_target_column is set, get the expected target VIDs for each row.
+        // This is used for cycle patterns like n-->k<--n where the target must match.
+        let bound_target_vids: Option<&UInt64Array> =
+            self.bound_target_column.as_ref().and_then(|col| {
+                batch
+                    .column_by_name(col)
+                    .and_then(|c| c.as_any().downcast_ref::<UInt64Array>())
+            });
+
+        // Collect edge ID arrays from previous hops for relationship uniqueness filtering.
+        let used_edge_arrays: Vec<&UInt64Array> = self
+            .used_edge_columns
+            .iter()
+            .filter_map(|col| {
+                batch
+                    .column_by_name(col)
+                    .and_then(|c| c.as_any().downcast_ref::<UInt64Array>())
+            })
+            .collect();
+
         let mut expanded_rows: Vec<(usize, Vid, u64)> = Vec::new();
         let is_undirected = matches!(self.direction, Direction::Both);
 
@@ -486,6 +538,21 @@ impl GraphTraverseStream {
             let Some(src) = source_vid else {
                 continue;
             };
+
+            // Get expected target VID if this is a bound target pattern
+            let expected_target = bound_target_vids.and_then(|arr| arr.value(row_idx).into());
+
+            // Collect used edge IDs for this row from all previous hops
+            let used_eids: HashSet<u64> = used_edge_arrays
+                .iter()
+                .filter_map(|arr| {
+                    if arr.is_null(row_idx) {
+                        None
+                    } else {
+                        Some(arr.value(row_idx))
+                    }
+                })
+                .collect();
 
             let vid = Vid::from(src);
             // For Direction::Both, deduplicate edges by eid within each source.
@@ -496,8 +563,23 @@ impl GraphTraverseStream {
                 let neighbors = self.graph_ctx.get_neighbors(vid, edge_type, self.direction);
 
                 for (target_vid, eid) in neighbors {
+                    let eid_u64 = eid.as_u64();
+
+                    // Skip edges already used in previous hops (relationship uniqueness)
+                    if used_eids.contains(&eid_u64) {
+                        continue;
+                    }
+
                     // Deduplicate edges for undirected patterns
-                    if is_undirected && !seen_edges.insert(eid.as_u64()) {
+                    if is_undirected && !seen_edges.insert(eid_u64) {
+                        continue;
+                    }
+
+                    // Filter by bound target VID if set (for cycle patterns).
+                    // Only include expansions where the target matches the expected VID.
+                    if let Some(expected) = expected_target
+                        && target_vid.as_u64() != expected
+                    {
                         continue;
                     }
 
@@ -515,7 +597,7 @@ impl GraphTraverseStream {
                         }
                     }
 
-                    expanded_rows.push((row_idx, target_vid, eid.as_u64()));
+                    expanded_rows.push((row_idx, target_vid, eid_u64));
                 }
             }
         }
@@ -644,6 +726,11 @@ async fn build_traverse_output_batch(
                 columns.push(column);
             }
         }
+    } else {
+        // Add internal edge ID column for relationship uniqueness tracking
+        // even when edge variable is not explicitly bound.
+        let eid_u64s: Vec<u64> = expansions.iter().map(|(_, _, eid)| *eid).collect();
+        columns.push(Arc::new(UInt64Array::from(eid_u64s)));
     }
 
     let expanded_batch = RecordBatch::try_new(schema.clone(), columns)
@@ -1707,26 +1794,40 @@ impl GraphVariableLengthTraverseExec {
         // Add hop count
         fields.push(Field::new("_hop_count", DataType::UInt64, false));
 
-        // Add relationship variable column if bound (VLP relationship variable is a List of edges)
-        // In Cypher, MATCH (a)-[r*]->(b) binds r to a List<Edge>, not a Path.
+        // Add path variable column if bound.
+        // For named paths like `p = (a)-[*]->(b)`, we need to output a Path structure
+        // that the result normalizer can convert to a proper Path object.
+        //
+        // The Path structure is a Map with:
+        // - "nodes": List of node structs with _vid, _label, properties
+        // - "relationships": List of edge structs with _eid, _type_name, _src, _dst, properties
         if let Some(path_var) = path_variable {
-            // Store full edge info for proper normalization to Edge objects
-            // The result normalizer requires _eid, _type/_type_name, _src, _dst
+            // Node struct fields: _vid, _label, properties (as LargeBinary/JSON)
+            let node_struct_fields = vec![
+                Field::new("_vid", DataType::UInt64, false),
+                Field::new("_label", DataType::Utf8, true),
+                Field::new("properties", DataType::LargeBinary, true),
+            ];
+            let node_item = Field::new("item", DataType::Struct(node_struct_fields.into()), true);
+            let nodes_field = Field::new("nodes", DataType::List(Arc::new(node_item)), false);
+
+            // Edge struct fields: _eid, _type_name, _src, _dst, properties (as LargeBinary/JSON)
             let edge_struct_fields = vec![
                 Field::new("_eid", DataType::UInt64, false),
                 Field::new("_type_name", DataType::Utf8, false),
                 Field::new("_src", DataType::UInt64, false),
                 Field::new("_dst", DataType::UInt64, false),
+                Field::new("properties", DataType::LargeBinary, true),
             ];
-            let rel_item = Field::new(
-                "item",
-                DataType::Struct(edge_struct_fields.into()),
-                true,
-            );
-            // Use the relationship variable name as the column name, storing List of edges
+            let edge_item = Field::new("item", DataType::Struct(edge_struct_fields.into()), true);
+            let relationships_field =
+                Field::new("relationships", DataType::List(Arc::new(edge_item)), false);
+
+            // Path struct with nodes and relationships
+            let path_struct_fields = vec![nodes_field, relationships_field];
             fields.push(Field::new(
                 path_var,
-                DataType::List(Arc::new(rel_item)),
+                DataType::Struct(path_struct_fields.into()),
                 false,
             ));
         }
@@ -2064,8 +2165,8 @@ impl GraphVariableLengthTraverseStream {
             .collect();
         columns.push(Arc::new(UInt64Array::from(hop_counts)));
 
-        // Add relationship variable column if bound (VLP relationship variable is a List of edges)
-        // In Cypher, MATCH (a)-[r*]->(b) binds r to a List<Edge>, not a Path.
+        // Add path variable column if bound.
+        // For named paths, we output a Path struct with nodes and relationships arrays.
         if self.exec.path_variable.is_some() {
             use arrow_array::builder::{ListBuilder, StringBuilder, StructBuilder, UInt64Builder};
 
@@ -2079,57 +2180,137 @@ impl GraphVariableLengthTraverseStream {
                 .edge_type_name_by_id_unified(self.exec.edge_type_id)
                 .unwrap_or_default();
 
-            // Build edge struct fields matching the schema: _eid, _type_name, _src, _dst
-            let struct_fields = vec![
+            use arrow_array::builder::LargeBinaryBuilder;
+
+            // Build node struct fields: _vid, _label, properties
+            let node_struct_fields = vec![
+                Arc::new(Field::new("_vid", DataType::UInt64, false)),
+                Arc::new(Field::new("_label", DataType::Utf8, true)),
+                Arc::new(Field::new("properties", DataType::LargeBinary, true)),
+            ];
+
+            // Build edge struct fields: _eid, _type_name, _src, _dst, properties
+            let edge_struct_fields = vec![
                 Arc::new(Field::new("_eid", DataType::UInt64, false)),
                 Arc::new(Field::new("_type_name", DataType::Utf8, false)),
                 Arc::new(Field::new("_src", DataType::UInt64, false)),
                 Arc::new(Field::new("_dst", DataType::UInt64, false)),
+                Arc::new(Field::new("properties", DataType::LargeBinary, true)),
             ];
 
-            // Build ListBuilder<StructBuilder> for relationships
+            // Single list builder for all nodes (one list per row)
+            let mut nodes_builder = ListBuilder::new(StructBuilder::new(
+                node_struct_fields,
+                vec![
+                    Box::new(UInt64Builder::new()),
+                    Box::new(StringBuilder::new()),
+                    Box::new(LargeBinaryBuilder::new()),
+                ],
+            ));
+
+            // Single list builder for all relationships (one list per row)
             let mut rels_builder = ListBuilder::new(StructBuilder::new(
-                struct_fields,
+                edge_struct_fields,
                 vec![
                     Box::new(UInt64Builder::new()),
                     Box::new(StringBuilder::new()),
                     Box::new(UInt64Builder::new()),
                     Box::new(UInt64Builder::new()),
+                    Box::new(LargeBinaryBuilder::new()),
                 ],
             ));
 
+            // Get query context for label and property lookup
+            let query_ctx = self.exec.graph_ctx.query_context();
+
             for (_, _, _, node_path, edge_path) in expansions {
-                // Append relationships list with full edge info
-                // node_path[i] is src of edge[i], node_path[i+1] is dst of edge[i]
-                let rel_struct = rels_builder.values();
+                // Build nodes list for this row
+                let nodes_struct = nodes_builder.values();
+                for vid in node_path {
+                    nodes_struct
+                        .field_builder::<UInt64Builder>(0)
+                        .unwrap()
+                        .append_value(vid.as_u64());
+                    // Look up label from L0 chain
+                    let labels = l0_visibility::get_vertex_labels(*vid, &query_ctx);
+                    let label_builder = nodes_struct.field_builder::<StringBuilder>(1).unwrap();
+                    if let Some(label) = labels.first() {
+                        label_builder.append_value(label);
+                    } else {
+                        label_builder.append_null();
+                    }
+                    // Look up properties from L0 chain and serialize to JSON
+                    let props_builder =
+                        nodes_struct.field_builder::<LargeBinaryBuilder>(2).unwrap();
+                    if let Some(props) = l0_visibility::get_vertex_properties(*vid, &query_ctx) {
+                        if let Ok(json) = serde_json::to_vec(&props) {
+                            props_builder.append_value(&json);
+                        } else {
+                            props_builder.append_null();
+                        }
+                    } else {
+                        props_builder.append_null();
+                    }
+                    nodes_struct.append(true);
+                }
+                nodes_builder.append(true);
+
+                // Build relationships list for this row
+                let rels_struct = rels_builder.values();
                 for (i, eid) in edge_path.iter().enumerate() {
-                    // EID
-                    rel_struct
+                    rels_struct
                         .field_builder::<UInt64Builder>(0)
                         .unwrap()
                         .append_value(eid.as_u64());
-                    // Edge type name
-                    rel_struct
+                    rels_struct
                         .field_builder::<StringBuilder>(1)
                         .unwrap()
                         .append_value(&edge_type_name);
-                    // Src VID (node_path[i])
-                    rel_struct
+                    rels_struct
                         .field_builder::<UInt64Builder>(2)
                         .unwrap()
                         .append_value(node_path[i].as_u64());
-                    // Dst VID (node_path[i+1])
-                    rel_struct
+                    rels_struct
                         .field_builder::<UInt64Builder>(3)
                         .unwrap()
                         .append_value(node_path[i + 1].as_u64());
-                    rel_struct.append(true);
+                    // Look up edge properties from L0 chain and serialize to JSON
+                    let props_builder = rels_struct.field_builder::<LargeBinaryBuilder>(4).unwrap();
+                    if let Some(props) = l0_visibility::get_edge_properties(*eid, &query_ctx) {
+                        if let Ok(json) = serde_json::to_vec(&props) {
+                            props_builder.append_value(&json);
+                        } else {
+                            props_builder.append_null();
+                        }
+                    } else {
+                        props_builder.append_null();
+                    }
+                    rels_struct.append(true);
                 }
                 rels_builder.append(true);
             }
 
-            let rels_arr = rels_builder.finish();
-            columns.push(Arc::new(rels_arr));
+            // Finish builders and get ListArrays
+            let nodes_array = Arc::new(nodes_builder.finish()) as ArrayRef;
+            let rels_array = Arc::new(rels_builder.finish()) as ArrayRef;
+
+            // Build the path struct fields
+            let nodes_field = Arc::new(Field::new("nodes", nodes_array.data_type().clone(), false));
+            let rels_field = Arc::new(Field::new(
+                "relationships",
+                rels_array.data_type().clone(),
+                false,
+            ));
+
+            // Create the path struct array
+            let path_struct = arrow_array::StructArray::try_new(
+                vec![nodes_field, rels_field].into(),
+                vec![nodes_array, rels_array],
+                None,
+            )
+            .map_err(|e| datafusion::error::DataFusionError::ArrowError(Box::new(e), None))?;
+
+            columns.push(Arc::new(path_struct));
         }
 
         self.metrics.record_output(num_rows);
@@ -2280,22 +2461,35 @@ impl GraphVariableLengthTraverseMainExec {
         // Add hop count
         fields.push(Field::new("_hop_count", DataType::UInt64, false));
 
-        // Add relationship variable column if bound (VLP relationship variable is a List of edges)
+        // Add path variable column if bound.
+        // For named paths, we output a Path struct with nodes and relationships arrays.
         if let Some(path_var) = path_variable {
+            // Node struct fields: _vid, _label, properties (as LargeBinary/JSON)
+            let node_struct_fields = vec![
+                Field::new("_vid", DataType::UInt64, false),
+                Field::new("_label", DataType::Utf8, true),
+                Field::new("properties", DataType::LargeBinary, true),
+            ];
+            let node_item = Field::new("item", DataType::Struct(node_struct_fields.into()), true);
+            let nodes_field = Field::new("nodes", DataType::List(Arc::new(node_item)), false);
+
+            // Edge struct fields: _eid, _type_name, _src, _dst, properties (as LargeBinary/JSON)
             let edge_struct_fields = vec![
                 Field::new("_eid", DataType::UInt64, false),
                 Field::new("_type_name", DataType::Utf8, false),
                 Field::new("_src", DataType::UInt64, false),
                 Field::new("_dst", DataType::UInt64, false),
+                Field::new("properties", DataType::LargeBinary, true),
             ];
-            let rel_item = Field::new(
-                "item",
-                DataType::Struct(edge_struct_fields.into()),
-                true,
-            );
+            let edge_item = Field::new("item", DataType::Struct(edge_struct_fields.into()), true);
+            let relationships_field =
+                Field::new("relationships", DataType::List(Arc::new(edge_item)), false);
+
+            // Path struct with nodes and relationships
+            let path_struct_fields = vec![nodes_field, relationships_field];
             fields.push(Field::new(
                 path_var,
-                DataType::List(Arc::new(rel_item)),
+                DataType::Struct(path_struct_fields.into()),
                 false,
             ));
         }
@@ -2387,7 +2581,8 @@ impl ExecutionPlan for GraphVariableLengthTraverseMainExec {
         let graph_ctx = self.graph_ctx.clone();
         let type_name = self.type_name.clone();
         let direction = self.direction;
-        let load_fut = async move { build_edge_adjacency_map(&graph_ctx, &type_name, direction).await };
+        let load_fut =
+            async move { build_edge_adjacency_map(&graph_ctx, &type_name, direction).await };
 
         Ok(Box::pin(GraphVariableLengthTraverseMainStream {
             input: input_stream,
@@ -2430,6 +2625,7 @@ struct GraphVariableLengthTraverseMainStream {
     direction: Direction,
     min_hops: usize,
     max_hops: usize,
+    #[allow(dead_code)]
     target_variable: String,
     path_variable: Option<String>,
     target_properties: Vec<String>,
@@ -2501,14 +2697,12 @@ impl GraphVariableLengthTraverseMainStream {
         batch: RecordBatch,
         adjacency: &EdgeAdjacencyMap,
     ) -> DFResult<RecordBatch> {
-        let source_col = batch
-            .column_by_name(&self.source_column)
-            .ok_or_else(|| {
-                datafusion::error::DataFusionError::Execution(format!(
-                    "Source column '{}' not found in input batch",
-                    self.source_column
-                ))
-            })?;
+        let source_col = batch.column_by_name(&self.source_column).ok_or_else(|| {
+            datafusion::error::DataFusionError::Execution(format!(
+                "Source column '{}' not found in input batch",
+                self.source_column
+            ))
+        })?;
 
         let source_vids = source_col
             .as_any()
@@ -2520,7 +2714,7 @@ impl GraphVariableLengthTraverseMainStream {
             })?;
 
         // Collect BFS results: (original_row_idx, target_vid, hop_count, node_path, edge_path)
-        let mut expansions: Vec<(usize, Vid, usize, Vec<Vid>, Vec<Eid>)> = Vec::new();
+        let mut expansions: Vec<ExpansionRecord> = Vec::new();
 
         for row_idx in 0..source_vids.len() {
             let source = Vid::from(source_vids.value(row_idx));
@@ -2545,7 +2739,10 @@ impl GraphVariableLengthTraverseMainStream {
         // Expand input columns
         for col_idx in 0..batch.num_columns() {
             let array = batch.column(col_idx);
-            let indices: Vec<u64> = expansions.iter().map(|(idx, _, _, _, _)| *idx as u64).collect();
+            let indices: Vec<u64> = expansions
+                .iter()
+                .map(|(idx, _, _, _, _)| *idx as u64)
+                .collect();
             let take_indices = UInt64Array::from(indices);
             let expanded = arrow::compute::take(array, &take_indices, None)?;
             columns.push(expanded);
@@ -2565,63 +2762,149 @@ impl GraphVariableLengthTraverseMainStream {
             .collect();
         columns.push(Arc::new(UInt64Array::from(hop_counts)));
 
-        // Add relationship variable column if bound
+        // Add path variable column if bound.
+        // For named paths, we output a Path struct with nodes and relationships arrays.
         if self.path_variable.is_some() {
-            use arrow_array::builder::{ListBuilder, StringBuilder, StructBuilder, UInt64Builder};
+            use arrow_array::builder::{
+                LargeBinaryBuilder, ListBuilder, StringBuilder, StructBuilder, UInt64Builder,
+            };
 
-            let struct_fields = vec![
+            // Build node struct fields: _vid, _label, properties
+            let node_struct_fields = vec![
+                Arc::new(Field::new("_vid", DataType::UInt64, false)),
+                Arc::new(Field::new("_label", DataType::Utf8, true)),
+                Arc::new(Field::new("properties", DataType::LargeBinary, true)),
+            ];
+
+            // Build edge struct fields: _eid, _type_name, _src, _dst, properties
+            let edge_struct_fields = vec![
                 Arc::new(Field::new("_eid", DataType::UInt64, false)),
                 Arc::new(Field::new("_type_name", DataType::Utf8, false)),
                 Arc::new(Field::new("_src", DataType::UInt64, false)),
                 Arc::new(Field::new("_dst", DataType::UInt64, false)),
+                Arc::new(Field::new("properties", DataType::LargeBinary, true)),
             ];
 
+            // Use single ListBuilders for all rows (not per-row builders)
+            let mut nodes_builder = ListBuilder::new(StructBuilder::new(
+                node_struct_fields.clone(),
+                vec![
+                    Box::new(UInt64Builder::new()),
+                    Box::new(StringBuilder::new()),
+                    Box::new(LargeBinaryBuilder::new()),
+                ],
+            ));
             let mut rels_builder = ListBuilder::new(StructBuilder::new(
-                struct_fields,
+                edge_struct_fields.clone(),
                 vec![
                     Box::new(UInt64Builder::new()),
                     Box::new(StringBuilder::new()),
                     Box::new(UInt64Builder::new()),
                     Box::new(UInt64Builder::new()),
+                    Box::new(LargeBinaryBuilder::new()),
                 ],
             ));
 
-            for (_, _, _, node_path, edge_path) in &expansions {
-                let rel_struct = rels_builder.values();
+            // Get query context for label and property lookup
+            let query_ctx = self.graph_ctx.query_context();
+
+            for (_, _, _, node_path, edge_path) in expansions.iter() {
+                // Build nodes list for this row
+                let nodes_struct = nodes_builder.values();
+                for vid in node_path {
+                    nodes_struct
+                        .field_builder::<UInt64Builder>(0)
+                        .unwrap()
+                        .append_value(vid.as_u64());
+                    // Look up label from L0 chain
+                    let labels = l0_visibility::get_vertex_labels(*vid, &query_ctx);
+                    let label_builder = nodes_struct.field_builder::<StringBuilder>(1).unwrap();
+                    if let Some(label) = labels.first() {
+                        label_builder.append_value(label);
+                    } else {
+                        label_builder.append_null();
+                    }
+                    // Look up properties from L0 chain and serialize to JSON
+                    let props_builder =
+                        nodes_struct.field_builder::<LargeBinaryBuilder>(2).unwrap();
+                    if let Some(props) = l0_visibility::get_vertex_properties(*vid, &query_ctx) {
+                        if let Ok(json) = serde_json::to_vec(&props) {
+                            props_builder.append_value(&json);
+                        } else {
+                            props_builder.append_null();
+                        }
+                    } else {
+                        props_builder.append_null();
+                    }
+                    nodes_struct.append(true);
+                }
+                nodes_builder.append(true);
+
+                // Build relationships list for this row
+                let rels_struct = rels_builder.values();
                 for (i, eid) in edge_path.iter().enumerate() {
-                    // EID
-                    rel_struct
+                    rels_struct
                         .field_builder::<UInt64Builder>(0)
                         .unwrap()
                         .append_value(eid.as_u64());
-                    // Edge type name
-                    rel_struct
+                    rels_struct
                         .field_builder::<StringBuilder>(1)
                         .unwrap()
                         .append_value(&self.type_name);
-                    // Src VID
-                    rel_struct
+                    rels_struct
                         .field_builder::<UInt64Builder>(2)
                         .unwrap()
                         .append_value(node_path[i].as_u64());
-                    // Dst VID
-                    rel_struct
+                    rels_struct
                         .field_builder::<UInt64Builder>(3)
                         .unwrap()
                         .append_value(node_path[i + 1].as_u64());
-                    rel_struct.append(true);
+                    // Look up edge properties from L0 chain and serialize to JSON
+                    let props_builder = rels_struct.field_builder::<LargeBinaryBuilder>(4).unwrap();
+                    if let Some(props) = l0_visibility::get_edge_properties(*eid, &query_ctx) {
+                        if let Ok(json) = serde_json::to_vec(&props) {
+                            props_builder.append_value(&json);
+                        } else {
+                            props_builder.append_null();
+                        }
+                    } else {
+                        props_builder.append_null();
+                    }
+                    rels_struct.append(true);
                 }
                 rels_builder.append(true);
             }
 
-            let rels_arr = rels_builder.finish();
-            columns.push(Arc::new(rels_arr));
+            // Finish the builders to get the arrays
+            let nodes_array = Arc::new(nodes_builder.finish()) as ArrayRef;
+            let rels_array = Arc::new(rels_builder.finish()) as ArrayRef;
+
+            // Build the path struct with nodes and relationships fields
+            let nodes_field = Arc::new(Field::new("nodes", nodes_array.data_type().clone(), false));
+            let rels_field = Arc::new(Field::new(
+                "relationships",
+                rels_array.data_type().clone(),
+                false,
+            ));
+
+            // Create the path struct array
+            let path_struct = arrow_array::StructArray::try_new(
+                vec![nodes_field, rels_field].into(),
+                vec![nodes_array, rels_array],
+                None,
+            )
+            .map_err(|e| datafusion::error::DataFusionError::ArrowError(Box::new(e), None))?;
+
+            columns.push(Arc::new(path_struct));
         }
 
         // Add target property columns as NULL for now.
         // Property hydration happens via PropertyManager in the query execution pipeline.
         for _prop_name in &self.target_properties {
-            columns.push(arrow_array::new_null_array(&DataType::LargeBinary, num_rows));
+            columns.push(arrow_array::new_null_array(
+                &DataType::LargeBinary,
+                num_rows,
+            ));
         }
 
         RecordBatch::try_new(self.schema.clone(), columns)
@@ -2701,9 +2984,11 @@ mod tests {
         let output_schema =
             GraphTraverseExec::build_schema(input_schema, "m", None, &[], &[], None, None, false);
 
-        assert_eq!(output_schema.fields().len(), 2);
+        // Schema includes: input columns + target VID + internal edge ID for uniqueness
+        assert_eq!(output_schema.fields().len(), 3);
         assert_eq!(output_schema.field(0).name(), "a._vid");
         assert_eq!(output_schema.field(1).name(), "m._vid");
+        assert_eq!(output_schema.field(2).name(), "__eid_to_m");
     }
 
     #[test]

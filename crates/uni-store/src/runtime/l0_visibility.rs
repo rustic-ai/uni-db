@@ -489,6 +489,68 @@ pub fn get_edge_type(eid: Eid, ctx: &QueryContext) -> Option<String> {
     None
 }
 
+/// Get the properties for a vertex from the L0 chain.
+/// Returns properties from the most recent L0 buffer that has the vertex.
+/// Returns None if the vertex is not in any L0 buffer.
+pub fn get_vertex_properties(vid: Vid, ctx: &QueryContext) -> Option<uni_common::Properties> {
+    // Check transaction L0 first (newest)
+    if let Some(tx_l0_arc) = &ctx.transaction_l0 {
+        let tx_l0 = tx_l0_arc.read();
+        if let Some(props) = tx_l0.vertex_properties.get(&vid) {
+            return Some(props.clone());
+        }
+    }
+
+    // Check main L0
+    {
+        let l0 = ctx.l0.read();
+        if let Some(props) = l0.vertex_properties.get(&vid) {
+            return Some(props.clone());
+        }
+    }
+
+    // Check pending flush L0s (newest first)
+    for pending_l0_arc in ctx.pending_flush_l0s.iter().rev() {
+        let pending_l0 = pending_l0_arc.read();
+        if let Some(props) = pending_l0.vertex_properties.get(&vid) {
+            return Some(props.clone());
+        }
+    }
+
+    None
+}
+
+/// Get the properties for an edge from the L0 chain.
+/// Returns properties from the most recent L0 buffer that has the edge.
+/// Returns None if the edge is not in any L0 buffer.
+pub fn get_edge_properties(eid: Eid, ctx: &QueryContext) -> Option<uni_common::Properties> {
+    // Check transaction L0 first (newest)
+    if let Some(tx_l0_arc) = &ctx.transaction_l0 {
+        let tx_l0 = tx_l0_arc.read();
+        if let Some(props) = tx_l0.edge_properties.get(&eid) {
+            return Some(props.clone());
+        }
+    }
+
+    // Check main L0
+    {
+        let l0 = ctx.l0.read();
+        if let Some(props) = l0.edge_properties.get(&eid) {
+            return Some(props.clone());
+        }
+    }
+
+    // Check pending flush L0s (newest first)
+    for pending_l0_arc in ctx.pending_flush_l0s.iter().rev() {
+        let pending_l0 = pending_l0_arc.read();
+        if let Some(props) = pending_l0.edge_properties.get(&eid) {
+            return Some(props.clone());
+        }
+    }
+
+    None
+}
+
 /// Check if an edge exists in any L0 buffer (has topology entry in edge_endpoints).
 /// This is used to distinguish between "edge doesn't exist" and "edge exists but has no properties".
 pub fn edge_exists_in_l0(eid: Eid, ctx: Option<&QueryContext>) -> bool {

@@ -27,17 +27,23 @@ impl GraphLoader {
 
         // Read JSON metadata
         let metadata_path = graph_dir.join(format!("{}.json", name));
-        let metadata: GraphMetadata = serde_json::from_str(
-            &std::fs::read_to_string(&metadata_path)
-                .with_context(|| format!("Failed to read graph metadata: {}", metadata_path.display()))?,
-        )
-        .with_context(|| format!("Failed to parse graph metadata: {}", metadata_path.display()))?;
+        let metadata: GraphMetadata =
+            serde_json::from_str(&std::fs::read_to_string(&metadata_path).with_context(|| {
+                format!("Failed to read graph metadata: {}", metadata_path.display())
+            })?)
+            .with_context(|| {
+                format!(
+                    "Failed to parse graph metadata: {}",
+                    metadata_path.display()
+                )
+            })?;
 
         // Execute each Cypher script
         for script_name in &metadata.scripts {
             let cypher_path = graph_dir.join(format!("{}.cypher", script_name));
-            let content = std::fs::read_to_string(&cypher_path)
-                .with_context(|| format!("Failed to read Cypher script: {}", cypher_path.display()))?;
+            let content = std::fs::read_to_string(&cypher_path).with_context(|| {
+                format!("Failed to read Cypher script: {}", cypher_path.display())
+            })?;
 
             // Split on semicolons, execute each statement
             for stmt in content.split(';').map(str::trim).filter(|s| !s.is_empty()) {

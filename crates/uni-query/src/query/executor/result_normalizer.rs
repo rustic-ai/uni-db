@@ -117,15 +117,75 @@ impl ResultNormalizer {
         }
     }
 
-    /// Extract properties from a map, filtering out internal fields.
-    fn extract_properties(
-        map: HashMap<String, Value>,
-        extra_excluded: &[&str],
+    /// Extract properties from a dedicated "properties" field (if present) or from inline fields.
+    ///
+    /// This handles two property storage formats:
+    /// 1. A "properties" field containing LargeBinary (JSON) or a Map
+    /// 2. Inline fields in the map (non-underscore fields)
+    fn extract_properties_from_field_or_inline(
+        map: &HashMap<String, Value>,
     ) -> HashMap<String, Value> {
-        map.into_iter()
-            .filter(|(k, _)| !k.starts_with('_') && !extra_excluded.contains(&k.as_str()))
-            .map(|(k, v)| (k, Self::normalize_property_value(v)))
+        // First try to extract from a dedicated "properties" field
+        if let Some(props_value) = map.get("properties") {
+            match props_value {
+                // Properties stored as a Map
+                Value::Map(m) => {
+                    return m
+                        .iter()
+                        .map(|(k, v)| (k.clone(), Self::normalize_property_value(v.clone())))
+                        .collect();
+                }
+                // Properties stored as Bytes (JSON serialized)
+                Value::Bytes(bytes) => {
+                    if let Ok(props) =
+                        serde_json::from_slice::<HashMap<String, serde_json::Value>>(bytes)
+                    {
+                        return props
+                            .into_iter()
+                            .map(|(k, v)| (k, Self::json_value_to_value(v)))
+                            .collect();
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // Fall back to extracting inline properties (excluding _ prefixed and special fields)
+        map.iter()
+            .filter(|(k, _)| {
+                !k.starts_with('_')
+                    && k.as_str() != "properties"
+                    && k.as_str() != "label"
+                    && k.as_str() != "type"
+            })
+            .map(|(k, v)| (k.clone(), Self::normalize_property_value(v.clone())))
             .collect()
+    }
+
+    /// Convert a serde_json::Value to our Value type.
+    fn json_value_to_value(json: serde_json::Value) -> Value {
+        match json {
+            serde_json::Value::Null => Value::Null,
+            serde_json::Value::Bool(b) => Value::Bool(b),
+            serde_json::Value::Number(n) => {
+                if let Some(i) = n.as_i64() {
+                    Value::Int(i)
+                } else if let Some(f) = n.as_f64() {
+                    Value::Float(f)
+                } else {
+                    Value::String(n.to_string())
+                }
+            }
+            serde_json::Value::String(s) => Value::String(s),
+            serde_json::Value::Array(arr) => {
+                Value::List(arr.into_iter().map(Self::json_value_to_value).collect())
+            }
+            serde_json::Value::Object(obj) => Value::Map(
+                obj.into_iter()
+                    .map(|(k, v)| (k, Self::json_value_to_value(v)))
+                    .collect(),
+            ),
+        }
     }
 
     /// Convert map to Node, extracting properties and stripping internal fields.
@@ -143,7 +203,9 @@ impl ResultNormalizer {
             .and_then(Self::value_to_string)
             .unwrap_or_default();
 
-        let properties = Self::extract_properties(map, &["properties", "label"]);
+        // Try to extract properties from a dedicated "properties" field (LargeBinary/JSON)
+        // If not present or not parseable, fall back to extracting from inline fields
+        let properties = Self::extract_properties_from_field_or_inline(&map);
 
         Ok(Value::Node(Node {
             vid,
@@ -187,7 +249,9 @@ impl ResultNormalizer {
             .map(Vid::new)
             .ok_or_else(|| anyhow!("Missing _dst in edge map"))?;
 
-        let properties = Self::extract_properties(map, &["properties", "type"]);
+        // Try to extract properties from a dedicated "properties" field (LargeBinary/JSON)
+        // If not present or not parseable, fall back to extracting from inline fields
+        let properties = Self::extract_properties_from_field_or_inline(&map);
 
         Ok(Value::Edge(Edge {
             eid,
