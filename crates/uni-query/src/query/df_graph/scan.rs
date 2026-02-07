@@ -936,12 +936,22 @@ fn build_edge_property_column_static(
 }
 
 /// Get the property value for a VID, returning None if not found.
-pub(crate) fn get_property_value<'a>(
+pub(crate) fn get_property_value(
     vid: &Vid,
-    props_map: &'a HashMap<Vid, Properties>,
+    props_map: &HashMap<Vid, Properties>,
     prop_name: &str,
-) -> Option<&'a Value> {
-    props_map.get(vid).and_then(|props| props.get(prop_name))
+) -> Option<Value> {
+    if prop_name == "_all_props" {
+        return props_map.get(vid).map(|p| {
+            let map: serde_json::Map<String, Value> =
+                p.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+            Value::Object(map)
+        });
+    }
+    props_map
+        .get(vid)
+        .and_then(|props| props.get(prop_name))
+        .cloned()
 }
 
 /// Build a numeric column from property values using the specified builder and extractor.
@@ -951,7 +961,7 @@ macro_rules! build_numeric_column {
         for vid in $vids {
             match get_property_value(vid, $props_map, $prop_name) {
                 Some(Value::Number(n)) => {
-                    if let Some(val) = $extractor(n) {
+                    if let Some(val) = $extractor(&n) {
                         builder.append_value($cast(val));
                     } else {
                         builder.append_null();
@@ -990,7 +1000,7 @@ pub(crate) fn build_property_column_static(
                     }
                     Some(val) => {
                         // JSON value from PropertyManager — re-encode to JSONB binary
-                        match jsonb::to_owned_jsonb(val) {
+                        match jsonb::to_owned_jsonb(&val) {
                             Ok(jsonb_bytes) => builder.append_value(jsonb_bytes.to_vec()),
                             Err(_) => builder.append_null(),
                         }
@@ -1069,7 +1079,7 @@ pub(crate) fn build_property_column_static(
             let mut builder = BooleanBuilder::new();
             for vid in vids {
                 match get_property_value(vid, props_map, prop_name) {
-                    Some(Value::Bool(b)) => builder.append_value(*b),
+                    Some(Value::Bool(b)) => builder.append_value(b),
                     _ => builder.append_null(),
                 }
             }
@@ -1115,7 +1125,7 @@ pub(crate) fn build_property_column_static(
             let mut builder = TimestampMicrosecondBuilder::new().with_timezone("UTC");
             for vid in vids {
                 match get_property_value(vid, props_map, prop_name) {
-                    Some(Value::String(s)) => match parse_datetime_utc(s) {
+                    Some(Value::String(s)) => match parse_datetime_utc(&s) {
                         Ok(dt) => builder.append_value(dt.timestamp_micros()),
                         Err(_) => builder.append_null(),
                     },
@@ -1132,7 +1142,7 @@ pub(crate) fn build_property_column_static(
             let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
             for vid in vids {
                 match get_property_value(vid, props_map, prop_name) {
-                    Some(Value::String(s)) => match NaiveDate::parse_from_str(s, "%Y-%m-%d") {
+                    Some(Value::String(s)) => match NaiveDate::parse_from_str(&s, "%Y-%m-%d") {
                         Ok(d) => builder.append_value((d - epoch).num_days() as i32),
                         Err(_) => builder.append_null(),
                     },
@@ -1149,8 +1159,8 @@ pub(crate) fn build_property_column_static(
             for vid in vids {
                 match get_property_value(vid, props_map, prop_name) {
                     Some(Value::String(s)) => {
-                        match NaiveTime::parse_from_str(s, "%H:%M:%S%.f")
-                            .or_else(|_| NaiveTime::parse_from_str(s, "%H:%M:%S"))
+                        match NaiveTime::parse_from_str(&s, "%H:%M:%S%.f")
+                            .or_else(|_| NaiveTime::parse_from_str(&s, "%H:%M:%S"))
                         {
                             Ok(t) => {
                                 let micros = t.num_seconds_from_midnight() as i64 * 1_000_000
@@ -1177,7 +1187,7 @@ pub(crate) fn build_property_column_static(
                     }
                     Some(Value::String(s)) => {
                         // Try to parse ISO 8601 duration or simple duration format
-                        match crate::query::datetime::parse_duration_to_micros(s) {
+                        match crate::query::datetime::parse_duration_to_micros(&s) {
                             Ok(us) => builder.append_value(us),
                             Err(_) => builder.append_null(),
                         }
@@ -1327,7 +1337,7 @@ fn build_list_of_structs_column(
 ) -> DFResult<ArrayRef> {
     use arrow_array::StructArray;
 
-    let values: Vec<Option<&Value>> = vids
+    let values: Vec<Option<Value>> = vids
         .iter()
         .map(|vid| get_property_value(vid, props_map, prop_name))
         .collect();
@@ -1461,7 +1471,7 @@ fn build_struct_property_column(
 ) -> DFResult<ArrayRef> {
     use arrow_array::StructArray;
 
-    let values: Vec<Option<&Value>> = vids
+    let values: Vec<Option<Value>> = vids
         .iter()
         .map(|vid| get_property_value(vid, props_map, prop_name))
         .collect();

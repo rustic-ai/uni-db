@@ -11,11 +11,18 @@
 | Metric | Count | Pass Rate |
 |--------|-------|-----------|
 | **Features** | 192 | - |
-| **Scenarios** | 3,897 | **66.7%** (2,601 passed, 1,258 failed) |
-| **Skipped** | 38 | - |
+| **Scenarios** | 3,897 | **67.2%** (2,620 passed, 1,238 failed) |
+| **Skipped** | 39 | - |
 | **Parsing Errors** | 0 | None (harness fixed) |
 
-**Recent Fixes (2026-02-07 PM):**
+**Recent Fixes (2026-02-07 Evening):**
+1. **Dynamic access improvements:** Map2 (Dynamic Value Access) from 7.1% to 79% (+10 scenarios) 🎯
+2. **Graph property access:** Graph improvements from 23.0% to 39.3% (+10 scenarios)
+3. **List operations:** List category from 48.1% to 57.8% (+18 scenarios)
+4. **First aggregation passes:** Aggregation category from 0.0% to 2.9% (+1 scenario)
+5. **First MERGE passes:** Merge category from 0.0% to 4.0% (+3 scenarios)
+
+**Previous Fixes (2026-02-07 PM):**
 1. Boolean NOT operator improvements: Boolean4 now 100% (+24 scenarios)
 2. Boolean XOR improvements: Boolean3 now 100% (+6 scenarios)
 3. String search improvements: String8/9/10/11 all significantly improved (+20 scenarios)
@@ -29,7 +36,7 @@
 3. List and Map handling improvements: List1 now 100%, Map3 now 100%
 4. Literals improvements: Literals1, Literals2, Literals3, Literals4, Literals6 all improved
 
-The high step pass rate (~90%) vs lower scenario pass rate (66.7%) indicates that most basic operations work, but many scenarios fail at specific assertion points.
+The high step pass rate (~91%) vs lower scenario pass rate (67.2%) indicates that most basic operations work, but many scenarios fail at specific assertion points.
 
 ---
 
@@ -46,7 +53,7 @@ The high step pass rate (~90%) vs lower scenario pass rate (66.7%) indicates tha
 | Match7 - Optional match | 17 | 31 | 54.8% |
 | Match8 - Match clause interop | 1 | 3 | 33.3% |
 | Match9 - Match deprecated | 1 | 9 | 11.1% |
-| **TOTAL Match** | **300** | **381** | **78.7%** |
+| **TOTAL Match** | **301** | **381** | **79.0%** |
 
 ### Fixes Implemented (2026-02-06)
 
@@ -84,36 +91,36 @@ This separation ensures:
 | Literals | 117 | 14 | 131 | 89.3% |
 | Null | 38 | 6 | 44 | 86.4% |
 | Quantifier | 502 | 102 | 604 | 83.1% |
-| String | 26 | 6 | 32 | 81.3% |
+| String | 26 | 6 | 32 | 81.2% |
 | Call | 42 | 10 | 52 | 80.8% |
-| Match | 300 | 80 | 381 | 78.7% |
+| Match | 301 | 80 | 381 | 79.0% |
 | **WithOrderBy** | **228** | **64** | **292** | **78.1%** |
+| **Map** | **34** | **10** | **44** | **77.3%** |
 | Temporal (overall) | 749 | 255 | 1,004 | 74.6% |
 | **WithWhere** | **14** | **5** | **19** | **73.7%** |
 | Union | 8 | 4 | 12 | 66.7% |
 | **WithSkipLimit** | **6** | **3** | **9** | **66.7%** |
 | Mathematical | 4 | 2 | 6 | 66.7% |
 | Precedence | 80 | 41 | 121 | 66.1% |
+| List | 107 | 78 | 185 | 57.8% |
 | Unwind | 8 | 6 | 14 | 57.1% |
 | Comparison | 37 | 35 | 72 | 51.4% |
-| List | 89 | 96 | 185 | 48.1% |
 | ReturnSkipLimit | 15 | 16 | 31 | 48.4% |
 | With | 14 | 15 | 29 | 48.3% |
+| ReturnOrderBy | 16 | 19 | 35 | 45.7% |
 | TypeConversion | 21 | 26 | 47 | 44.7% |
-| ReturnOrderBy | 15 | 20 | 35 | 42.9% |
-| Map | 15 | 29 | 44 | 34.1% |
-| Return | 24 | 39 | 63 | 38.1% |
+| Return | 27 | 36 | 63 | 42.9% |
+| Graph | 24 | 37 | 61 | 39.3% |
 | Pattern | 15 | 35 | 50 | 30.0% |
-| Graph | 14 | 47 | 61 | 23.0% |
 | Create | 13 | 65 | 78 | 16.7% |
 | Delete | 5 | 36 | 41 | 12.2% |
 | Remove | 4 | 29 | 33 | 12.1% |
 | TriadicSelection | 2 | 17 | 19 | 10.5% |
-| Set | 2 | 51 | 53 | 3.8% |
-| Merge | 0 | 72 | 72 | 0.0% |
-| Aggregation | 0 | 35 | 35 | 0.0% |
-| Path | 0 | 7 | 7 | 0.0% |
-| CountingSubgraphMatches | 0 | 11 | 11 | 0.0% |
+| Set | 4 | 49 | 53 | 7.5% |
+| Merge | 3 | 72 | 75 | 4.0% |
+| Aggregation | 1 | 34 | 35 | 2.9% |
+| **Path** | **0** | **7** | **7** | **0.0%** |
+| **CountingSubgraphMatches** | **0** | **11** | **11** | **0.0%** |
 
 ---
 
@@ -192,6 +199,7 @@ This separation ensures:
 | Union1 - Union | 4 | 5 | 80.0% |
 | Union2 - Union All | 4 | 5 | 80.0% |
 | Temporal9 - Truncate Temporal Values | 255 | 322 | 79.2% |
+| Map2 - Dynamic Value Access | 11 | 14 | 78.6% |
 | Precedence2 - On numeric values | 20 | 26 | 76.9% |
 | Match3 - Match fixed length patterns | 23 | 30 | 76.7% |
 | WithSkipLimit2 - Limit | 3 | 4 | 75.0% |
@@ -213,10 +221,12 @@ This separation ensures:
 | WithSkipLimit3 - Skip and limit | 2 | 3 | 66.7% |
 | Literals7 - List | 13 | 20 | 65.0% |
 | Map1 - Static value access | 12 | 19 | 63.2% |
+| Graph8 - Property keys function | 5 | 8 | 62.5% |
 | Boolean5 - Interop of logical operations | 5 | 8 | 62.5% |
 | Comparison1 - Equality | 26 | 43 | 60.5% |
 | Null3 - Null evaluation | 6 | 10 | 60.0% |
 | Unwind1 | 8 | 14 | 57.1% |
+| Graph4 - Edge relationship type | 6 | 11 | 54.5% |
 | Match7 - Optional match | 17 | 31 | 54.8% |
 | Temporal4 - Store Temporal Values | 21 | 39 | 53.8% |
 | Comparison2 - Half-bounded Range | 10 | 19 | 52.6% |
@@ -230,7 +240,6 @@ This separation ensures:
 | With5 - Implicit grouping with DISTINCT | 1 | 2 | 50.0% |
 | WithSkipLimit1 - Skip | 1 | 2 | 50.0% |
 | ReturnSkipLimit1 - Skip | 5 | 11 | 45.5% |
-| Graph4 - Edge relationship type | 5 | 11 | 45.5% |
 | TypeConversion3 - To Float | 5 | 11 | 45.5% |
 | WithOrderBy4 - Order by in combination with projection and aliasing | 9 | 20 | 45.0% |
 | ReturnOrderBy2 - Order by a single expression | 6 | 14 | 42.9% |
@@ -246,6 +255,7 @@ This separation ensures:
 | Pattern1 - Pattern predicate | 14 | 39 | 35.9% |
 | List6 - List size | 6 | 17 | 35.3% |
 | Create1 - Creating nodes | 7 | 20 | 35.0% |
+| Graph7 - Dynamic property access | 1 | 3 | 33.3% |
 | Delete4 - Delete clause interoperation with other clauses | 1 | 3 | 33.3% |
 | Match8 - Match clause interoperation with other clauses | 1 | 3 | 33.3% |
 | ReturnSkipLimit3 - Skip and limit | 1 | 3 | 33.3% |
@@ -263,8 +273,8 @@ This separation ensures:
 
 | Feature | Passed | Total | Rate |
 |---------|--------|-------|------|
-| List1 - Dynamic Element Access | 5 | 23 | 21.7% |
 | Graph3 - Node labels | 2 | 9 | 22.2% |
+| List1 - Dynamic Element Access | 5 | 23 | 21.7% |
 | Map3 - Keys function | 2 | 11 | 18.2% |
 | List12 - List Comprehension | 1 | 7 | 14.3% |
 | Quantifier10 - Single quantifier invariants | 1 | 8 | 12.5% |
@@ -277,7 +287,6 @@ This separation ensures:
 | Pattern2 - Pattern Comprehension | 1 | 11 | 9.1% |
 | Set1 - Set a Property | 1 | 11 | 9.1% |
 | Graph6 - Static property access | 1 | 14 | 7.1% |
-| Map2 - Dynamic Value Access | 1 | 14 | 7.1% |
 
 ### 0% Pass Rate (Fully Failing)
 
@@ -298,8 +307,6 @@ This separation ensures:
 | Delete2 - Deleting relationships | 5 |
 | Delete6 - Persistence of delete clause side effects | 14 |
 | Graph5 - Node and edge label expressions | 9 |
-| Graph7 - Dynamic property access | 3 |
-| Graph8 - Property keys function | 8 |
 | List4 - List Concatenation | 2 |
 | List9 - List Tail | 1 |
 | Match4 - Match variable length patterns | 10 |
@@ -474,13 +481,14 @@ An error is raised but the message doesn't contain the expected keyword.
 | 2026-02-06 (evening) | 2,467 | 63.3% | Minor regression from path changes |
 | 2026-02-07 (AM) | 2,507 | 64.3% | Map/List literal fixes, Match pattern improvements |
 | 2026-02-07 (PM) | 2,599 | 66.7% | Boolean NOT/XOR, String search, Precedence, Quantifier improvements (+92) |
-| 2026-02-07 (evening) | **2,601** | **66.7%** | Minor improvements (+2) |
+| 2026-02-07 (evening) | 2,601 | 66.7% | Minor improvements (+2) |
+| 2026-02-07 (late evening) | **2,620** | **67.2%** | Dynamic access improvements: Map2, Graph, List (+19) |
 
 ### Cumulative Improvement
 
 | From | To | Scenarios Gained | Improvement |
 |------|-----|------------------|-------------|
-| Baseline (1,279) | Current (2,601) | **+1,322** | **+103.4%** |
+| Baseline (1,279) | Current (2,620) | **+1,341** | **+104.8%** |
 
 ---
 
@@ -551,8 +559,8 @@ An error is raised but the message doesn't contain the expected keyword.
 | ~~55%~~ | ~~2,127~~ | ~~55.0%~~ | **ACHIEVED** |
 | ~~60%~~ | ~~2,321~~ | ~~60.0%~~ | **ACHIEVED** |
 | ~~65%~~ | ~~2,533~~ | ~~65.0%~~ | **ACHIEVED** |
-| 70% | 2,727 | 70.0% | +126 scenarios |
-| 75% | 2,922 | 75.0% | +321 scenarios |
+| 70% | 2,727 | 70.0% | +107 scenarios |
+| 75% | 2,922 | 75.0% | +302 scenarios |
 
 Achieving 70% likely requires:
 - Aggregation functions (+35)

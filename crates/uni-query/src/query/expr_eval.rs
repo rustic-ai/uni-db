@@ -511,10 +511,11 @@ fn eval_size(arg: &Value) -> Result<Value> {
 
 fn eval_keys(arg: &Value) -> Result<Value> {
     match arg {
-        Value::Object(map) => Ok(json!(map
-            .keys()
-            .filter(|k| !k.starts_with('_'))
-            .collect::<Vec<_>>())),
+        Value::Object(map) => Ok(json!(
+            map.keys()
+                .filter(|k| !k.starts_with('_'))
+                .collect::<Vec<_>>()
+        )),
         Value::Null => Ok(Value::Null),
         _ => Err(anyhow!("keys() expects a Map")),
     }

@@ -25,7 +25,7 @@
 //! ```
 
 use arrow::datatypes::DataType;
-use arrow_array::{Array, ArrayRef, StringArray};
+use arrow_array::Array;
 use datafusion::error::Result as DFResult;
 use datafusion::logical_expr::{
     ColumnarValue, ScalarFunctionArgs, ScalarUDF, ScalarUDFImpl, Signature, TypeSignature,
@@ -393,14 +393,6 @@ impl ScalarUDFImpl for IndexUdf {
 
         let container = &json_args[0];
         let index = &json_args[1];
-        
-        // Debugging dynamic map access failure
-        if let serde_json::Value::Object(map) = container {
-             // Only log if it looks like a person node
-             if map.contains_key("name") {
-                 eprintln!("IndexUdf: container keys={:?}, index={:?}", map.keys().collect::<Vec<_>>(), index);
-             }
-        }
 
         let result = match container {
             serde_json::Value::Array(arr) => {

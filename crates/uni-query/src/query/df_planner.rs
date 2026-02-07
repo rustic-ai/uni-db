@@ -176,6 +176,13 @@ impl HybridPhysicalPlanner {
                         .get(schema_name)
                         .map(|p| p.keys().cloned().collect())
                         .unwrap_or_default();
+                    if schema_props.is_empty() {
+                        println!(
+                            "WARNING: No properties found in schema for {}, falling back to *",
+                            schema_name
+                        );
+                        return vec!["*".to_string()];
+                    }
                     schema_props.sort();
                     schema_props
                 } else {
@@ -778,7 +785,7 @@ impl HybridPhysicalPlanner {
         // If we need the full object (structural access), add a Struct projection
         if all_properties
             .get(variable)
-            .map_or(false, |p| p.contains("*"))
+            .is_some_and(|p| p.contains("*"))
         {
             scan_plan = self.add_structural_projection(scan_plan, variable, &properties)?;
         }
@@ -797,10 +804,18 @@ impl HybridPhysicalPlanner {
         filter: Option<&Expr>,
         all_properties: &HashMap<String, HashSet<String>>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
-        let properties: Vec<String> = all_properties
+        let mut properties: Vec<String> = all_properties
             .get(variable)
             .map(|s| s.iter().cloned().collect())
             .unwrap_or_default();
+
+        let need_full = all_properties
+            .get(variable)
+            .is_some_and(|p| p.contains("*"));
+
+        if need_full && !properties.iter().any(|p| p == "_all_props") {
+            properties.push("_all_props".to_string());
+        }
 
         let mut scan_plan: Arc<dyn ExecutionPlan> =
             Arc::new(GraphScanExec::new_schemaless_vertex_scan(
@@ -811,12 +826,10 @@ impl HybridPhysicalPlanner {
                 None, // Filter will be applied as FilterExec on top
             ));
 
-        // If we need the full object (structural access), add a Struct projection
-        if all_properties
-            .get(variable)
-            .map_or(false, |p| p.contains("*"))
-        {
-            scan_plan = self.add_structural_projection(scan_plan, variable, &properties)?;
+        // If we need the full object (structural access), project _all_props (JSONB) as the variable
+        if need_full {
+            let col_name = format!("{}.{}", variable, "_all_props");
+            scan_plan = self.add_alias_projection(scan_plan, variable, &col_name)?;
         }
 
         self.apply_scan_filter(scan_plan, variable, filter)
@@ -832,10 +845,18 @@ impl HybridPhysicalPlanner {
         filter: Option<&Expr>,
         all_properties: &HashMap<String, HashSet<String>>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
-        let properties: Vec<String> = all_properties
+        let mut properties: Vec<String> = all_properties
             .get(variable)
             .map(|s| s.iter().cloned().collect())
             .unwrap_or_default();
+
+        let need_full = all_properties
+            .get(variable)
+            .is_some_and(|p| p.contains("*"));
+
+        if need_full && !properties.iter().any(|p| p == "_all_props") {
+            properties.push("_all_props".to_string());
+        }
 
         let mut scan_plan: Arc<dyn ExecutionPlan> =
             Arc::new(GraphScanExec::new_multi_label_vertex_scan(
@@ -846,12 +867,10 @@ impl HybridPhysicalPlanner {
                 None,
             ));
 
-        // If we need the full object (structural access), add a Struct projection
-        if all_properties
-            .get(variable)
-            .map_or(false, |p| p.contains("*"))
-        {
-            scan_plan = self.add_structural_projection(scan_plan, variable, &properties)?;
+        // If we need the full object (structural access), project _all_props (JSONB) as the variable
+        if need_full {
+            let col_name = format!("{}.{}", variable, "_all_props");
+            scan_plan = self.add_alias_projection(scan_plan, variable, &col_name)?;
         }
 
         self.apply_scan_filter(scan_plan, variable, filter)
@@ -867,10 +886,18 @@ impl HybridPhysicalPlanner {
         filter: Option<&Expr>,
         all_properties: &HashMap<String, HashSet<String>>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
-        let properties: Vec<String> = all_properties
+        let mut properties: Vec<String> = all_properties
             .get(variable)
             .map(|s| s.iter().cloned().collect())
             .unwrap_or_default();
+
+        let need_full = all_properties
+            .get(variable)
+            .is_some_and(|p| p.contains("*"));
+
+        if need_full && !properties.iter().any(|p| p == "_all_props") {
+            properties.push("_all_props".to_string());
+        }
 
         let mut scan_plan: Arc<dyn ExecutionPlan> =
             Arc::new(GraphScanExec::new_schemaless_all_scan(
@@ -880,12 +907,10 @@ impl HybridPhysicalPlanner {
                 None, // Filter will be applied as FilterExec on top
             ));
 
-        // If we need the full object (structural access), add a Struct projection
-        if all_properties
-            .get(variable)
-            .map_or(false, |p| p.contains("*"))
-        {
-            scan_plan = self.add_structural_projection(scan_plan, variable, &properties)?;
+        // If we need the full object (structural access), project _all_props (JSONB) as the variable
+        if need_full {
+            let col_name = format!("{}.{}", variable, "_all_props");
+            scan_plan = self.add_alias_projection(scan_plan, variable, &col_name)?;
         }
 
         self.apply_scan_filter(scan_plan, variable, filter)
@@ -1999,8 +2024,10 @@ impl HybridPhysicalPlanner {
 
         // 1. Keep all existing columns
         for (i, field) in input_schema.fields().iter().enumerate() {
-            let col_expr =
-                Arc::new(datafusion::physical_expr::expressions::Column::new(field.name(), i));
+            let col_expr = Arc::new(datafusion::physical_expr::expressions::Column::new(
+                field.name(),
+                i,
+            ));
             proj_exprs.push((col_expr, field.name().clone()));
         }
 
@@ -2008,10 +2035,9 @@ impl HybridPhysicalPlanner {
         let mut struct_args = Vec::with_capacity(properties.len() * 2);
         for prop in properties {
             struct_args.push(lit(prop.clone()));
-            struct_args.push(DfExpr::Column(datafusion::common::Column::from_name(format!(
-                "{}.{}",
-                variable, prop
-            ))));
+            struct_args.push(DfExpr::Column(datafusion::common::Column::from_name(
+                format!("{}.{}", variable, prop),
+            )));
         }
 
         // If no properties, still create an empty struct to represent the entity
@@ -2030,6 +2056,46 @@ impl HybridPhysicalPlanner {
             planner.create_physical_expr(&resolved_expr, &df_schema, &state)?;
 
         proj_exprs.push((physical_struct_expr, variable.to_string()));
+
+        Ok(Arc::new(ProjectionExec::try_new(proj_exprs, input)?))
+    }
+
+    /// Add an alias projection: existing columns + col_name AS alias.
+    fn add_alias_projection(
+        &self,
+        input: Arc<dyn ExecutionPlan>,
+        alias: &str,
+        col_name: &str,
+    ) -> Result<Arc<dyn ExecutionPlan>> {
+        use datafusion::physical_plan::projection::ProjectionExec;
+
+        let input_schema = input.schema();
+        let mut proj_exprs: Vec<(Arc<dyn datafusion::physical_expr::PhysicalExpr>, String)> =
+            Vec::new();
+
+        // 1. Keep all existing columns
+        for (i, field) in input_schema.fields().iter().enumerate() {
+            let col_expr = Arc::new(datafusion::physical_expr::expressions::Column::new(
+                field.name(),
+                i,
+            ));
+            proj_exprs.push((col_expr, field.name().clone()));
+        }
+
+        // 2. Add alias
+        if let Some((i, f)) = input_schema.column_with_name(col_name) {
+            let col_expr = Arc::new(datafusion::physical_expr::expressions::Column::new(
+                f.name(),
+                i,
+            ));
+            proj_exprs.push((col_expr, alias.to_string()));
+        } else {
+            return Err(anyhow!(
+                "Column {} not found for aliasing to {}",
+                col_name,
+                alias
+            ));
+        }
 
         Ok(Arc::new(ProjectionExec::try_new(proj_exprs, input)?))
     }
