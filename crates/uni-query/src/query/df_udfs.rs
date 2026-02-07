@@ -926,6 +926,13 @@ fn scalar_to_json(scalar: &ScalarValue) -> DFResult<serde_json::Value> {
         ScalarValue::Int32(Some(i)) => Ok(serde_json::json!(*i as i64)),
         ScalarValue::Float64(Some(f)) => Ok(serde_json::json!(*f)),
         ScalarValue::Boolean(Some(b)) => Ok(serde_json::json!(*b)),
+        ScalarValue::Struct(arr) => {
+            if arr.len() == 0 || arr.is_null(0) {
+                Ok(serde_json::Value::Null)
+            } else {
+                Ok(uni_store::storage::arrow_convert::arrow_to_value(arr.as_ref(), 0))
+            }
+        }
         ScalarValue::Null
         | ScalarValue::Utf8(None)
         | ScalarValue::Int64(None)

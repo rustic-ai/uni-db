@@ -271,16 +271,14 @@ pub fn cypher_expr_to_df(expr: &Expr, context: Option<&TranslationContext>) -> R
         }
 
         Expr::Map(entries) => {
-            // Serialize map literals to a JSON string.  Temporal constructors
-            // like date({year:1984, month:10, day:11}) receive the JSON string
-            // and parse it back into a serde_json::Value::Object inside the UDF.
-            let mut json_map = serde_json::Map::new();
+            // Use named_struct to create a Struct type in DataFusion.
+            // This supports dynamic values and correct Map return types (instead of JSON strings).
+            let mut args = Vec::with_capacity(entries.len() * 2);
             for (key, val_expr) in entries {
-                let json_val = try_cypher_expr_to_json_literal(val_expr)?;
-                json_map.insert(key.clone(), json_val);
+                args.push(lit(key.clone()));
+                args.push(cypher_expr_to_df(val_expr, context)?);
             }
-            let json_str = serde_json::Value::Object(json_map).to_string();
-            Ok(lit(json_str))
+            Ok(datafusion::functions::expr_fn::named_struct(args))
         }
 
         Expr::IsNull(inner) => {
@@ -499,44 +497,6 @@ fn extract_variable_name(expr: &Expr) -> Result<String> {
             "Cannot extract variable name from expression: {:?}",
             expr
         )),
-    }
-}
-
-/// Try to evaluate a Cypher expression as a JSON literal value.
-///
-/// Used for serializing map entries to JSON when the map is passed
-/// to a temporal constructor UDF.  Only handles expressions that can
-/// be resolved at translation time (literals, negation of literals).
-///
-/// # Errors
-///
-/// Returns an error if the expression is not a compile-time literal.
-fn try_cypher_expr_to_json_literal(expr: &Expr) -> Result<serde_json::Value> {
-    match expr {
-        Expr::Literal(CypherLiteral::Integer(i)) => Ok(serde_json::json!(*i)),
-        Expr::Literal(CypherLiteral::Float(f)) => Ok(serde_json::json!(*f)),
-        Expr::Literal(CypherLiteral::String(s)) => Ok(serde_json::json!(s)),
-        Expr::Literal(CypherLiteral::Bool(b)) => Ok(serde_json::json!(*b)),
-        Expr::Literal(CypherLiteral::Null) => Ok(serde_json::Value::Null),
-        Expr::UnaryOp {
-            op: UnaryOp::Neg,
-            expr: inner,
-        } => {
-            let val = try_cypher_expr_to_json_literal(inner)?;
-            match val {
-                serde_json::Value::Number(n) => {
-                    if let Some(i) = n.as_i64() {
-                        Ok(serde_json::json!(-i))
-                    } else if let Some(f) = n.as_f64() {
-                        Ok(serde_json::json!(-f))
-                    } else {
-                        Err(anyhow!("Cannot negate number: {n}"))
-                    }
-                }
-                _ => Err(anyhow!("Cannot negate non-number in map literal")),
-            }
-        }
-        _ => Err(anyhow!("Map entry is not a compile-time literal: {expr:?}")),
     }
 }
 
