@@ -74,6 +74,9 @@ pub fn register_cypher_udfs(ctx: &SessionContext) -> DFResult<()> {
     ctx.register_udf(create_id_udf());
     ctx.register_udf(create_type_udf());
     ctx.register_udf(create_keys_udf());
+    ctx.register_udf(create_labels_udf());
+    ctx.register_udf(create_nodes_udf());
+    ctx.register_udf(create_relationships_udf());
     ctx.register_udf(create_range_udf());
     ctx.register_udf(create_index_udf());
 
@@ -320,11 +323,18 @@ impl ScalarUDFImpl for KeysUdf {
 
         let arg = &json_args[0];
         let keys = match arg {
-            serde_json::Value::Object(map) => map
-                .iter()
-                .filter(|(k, v)| !v.is_null() && !k.starts_with('_'))
-                .map(|(k, _)| ScalarValue::Utf8(Some(k.clone())))
-                .collect::<Vec<_>>(),
+            serde_json::Value::Object(map) => {
+                let mut key_strings: Vec<String> = map
+                    .iter()
+                    .filter(|(k, v)| !v.is_null() && !k.starts_with('_'))
+                    .map(|(k, _)| k.clone())
+                    .collect();
+                key_strings.sort();
+                key_strings
+                    .into_iter()
+                    .map(|k| ScalarValue::Utf8(Some(k)))
+                    .collect::<Vec<_>>()
+            }
             serde_json::Value::Null => {
                 return Ok(ColumnarValue::Scalar(ScalarValue::List(
                     ScalarValue::new_list_nullable(&[], &DataType::Utf8),
@@ -430,6 +440,203 @@ impl ScalarUDFImpl for IndexUdf {
         // Serialize to JSONB (LargeBinary) so result conversion can decode it.
         // We use standard JSON string here, record_batches_to_rows handles it.
         let json_str = serde_json::to_string(&result).unwrap_or_else(|_| "null".to_string());
+        Ok(ColumnarValue::Scalar(ScalarValue::LargeBinary(Some(
+            json_str.into_bytes(),
+        ))))
+    }
+}
+
+// ============================================================================
+// labels(node) -> List<String>
+// ============================================================================
+
+pub fn create_labels_udf() -> ScalarUDF {
+    ScalarUDF::new_from_impl(LabelsUdf::new())
+}
+
+#[derive(Debug)]
+struct LabelsUdf {
+    signature: Signature,
+}
+
+impl LabelsUdf {
+    fn new() -> Self {
+        Self {
+            signature: Signature::any(1, Volatility::Immutable),
+        }
+    }
+}
+
+impl_udf_eq_hash!(LabelsUdf);
+
+impl ScalarUDFImpl for LabelsUdf {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn name(&self) -> &str {
+        "labels"
+    }
+
+    fn signature(&self) -> &Signature {
+        &self.signature
+    }
+
+    fn return_type(&self, _arg_types: &[DataType]) -> DFResult<DataType> {
+        Ok(DataType::List(Arc::new(
+            arrow::datatypes::Field::new_list_field(DataType::Utf8, true),
+        )))
+    }
+
+    fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DFResult<ColumnarValue> {
+        let json_args = columnar_args_to_json(&args.args)?;
+        if json_args.is_empty() {
+            return Err(datafusion::error::DataFusionError::Execution(
+                "labels() requires 1 argument".to_string(),
+            ));
+        }
+
+        let node = &json_args[0];
+        if let serde_json::Value::Object(map) = node {
+            if let Some(labels) = map.get("_labels") {
+                if let serde_json::Value::Array(arr) = labels {
+                    let scalars: Vec<ScalarValue> = arr
+                        .iter()
+                        .map(|v| ScalarValue::Utf8(v.as_str().map(|s| s.to_string())))
+                        .collect();
+                    let list =
+                        ScalarValue::List(ScalarValue::new_list(&scalars, &DataType::Utf8, true));
+                    return Ok(ColumnarValue::Scalar(list));
+                }
+            }
+        }
+
+        let empty_list = ScalarValue::List(ScalarValue::new_list_nullable(&[], &DataType::Utf8));
+        Ok(ColumnarValue::Scalar(empty_list))
+    }
+}
+
+// ============================================================================
+// nodes(path) -> List<Node>
+// ============================================================================
+
+pub fn create_nodes_udf() -> ScalarUDF {
+    ScalarUDF::new_from_impl(NodesUdf::new())
+}
+
+#[derive(Debug)]
+struct NodesUdf {
+    signature: Signature,
+}
+
+impl NodesUdf {
+    fn new() -> Self {
+        Self {
+            signature: Signature::any(1, Volatility::Immutable),
+        }
+    }
+}
+
+impl_udf_eq_hash!(NodesUdf);
+
+impl ScalarUDFImpl for NodesUdf {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn name(&self) -> &str {
+        "nodes"
+    }
+
+    fn signature(&self) -> &Signature {
+        &self.signature
+    }
+
+    fn return_type(&self, _arg_types: &[DataType]) -> DFResult<DataType> {
+        Ok(DataType::LargeBinary)
+    }
+
+    fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DFResult<ColumnarValue> {
+        let json_args = columnar_args_to_json(&args.args)?;
+        if json_args.is_empty() {
+            return Err(datafusion::error::DataFusionError::Execution(
+                "nodes() requires 1 argument".to_string(),
+            ));
+        }
+
+        let path = &json_args[0];
+        let nodes = match path {
+            serde_json::Value::Object(map) => {
+                map.get("nodes").cloned().unwrap_or(serde_json::Value::Null)
+            }
+            _ => serde_json::Value::Null,
+        };
+
+        let json_str = serde_json::to_string(&nodes).unwrap_or_else(|_| "null".to_string());
+        Ok(ColumnarValue::Scalar(ScalarValue::LargeBinary(Some(
+            json_str.into_bytes(),
+        ))))
+    }
+}
+
+// ============================================================================
+// relationships(path) -> List<Relationship>
+// ============================================================================
+
+pub fn create_relationships_udf() -> ScalarUDF {
+    ScalarUDF::new_from_impl(RelationshipsUdf::new())
+}
+
+#[derive(Debug)]
+struct RelationshipsUdf {
+    signature: Signature,
+}
+
+impl RelationshipsUdf {
+    fn new() -> Self {
+        Self {
+            signature: Signature::any(1, Volatility::Immutable),
+        }
+    }
+}
+
+impl_udf_eq_hash!(RelationshipsUdf);
+
+impl ScalarUDFImpl for RelationshipsUdf {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn name(&self) -> &str {
+        "relationships"
+    }
+
+    fn signature(&self) -> &Signature {
+        &self.signature
+    }
+
+    fn return_type(&self, _arg_types: &[DataType]) -> DFResult<DataType> {
+        Ok(DataType::LargeBinary)
+    }
+
+    fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DFResult<ColumnarValue> {
+        let json_args = columnar_args_to_json(&args.args)?;
+        if json_args.is_empty() {
+            return Err(datafusion::error::DataFusionError::Execution(
+                "relationships() requires 1 argument".to_string(),
+            ));
+        }
+
+        let path = &json_args[0];
+        let rels = match path {
+            serde_json::Value::Object(map) => map
+                .get("relationships")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null),
+            _ => serde_json::Value::Null,
+        };
+
+        let json_str = serde_json::to_string(&rels).unwrap_or_else(|_| "null".to_string());
         Ok(ColumnarValue::Scalar(ScalarValue::LargeBinary(Some(
             json_str.into_bytes(),
         ))))

@@ -2289,6 +2289,10 @@ impl Executor {
                     let batch_props = prop_manager
                         .get_batch_vertex_props_for_label(&vids, &label_name, ctx)
                         .await?;
+
+                    // Fetch all labels for multi-label support in labels() function
+                    let labels_map = prop_manager.get_batch_labels(&vids, ctx).await?;
+
                     let mut matches = Vec::new();
                     for vid in vids {
                         if let Some(props) = batch_props.get(&vid) {
@@ -2296,6 +2300,15 @@ impl Executor {
                                 props.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
                             props_json.insert("_vid".to_string(), json!(vid.as_u64()));
                             props_json.insert("_label".to_string(), json!(label_name.clone()));
+
+                            // Add full list of labels
+                            if let Some(labels) = labels_map.get(&vid) {
+                                props_json.insert("_labels".to_string(), json!(labels));
+                            } else {
+                                // Fallback to the scan label
+                                props_json.insert("_labels".to_string(), json!([label_name]));
+                            }
+
                             let mut map = HashMap::new();
                             map.insert(variable.clone(), Value::Object(props_json));
                             matches.push(map);
@@ -2395,6 +2408,7 @@ impl Executor {
 
                         props_json.insert("_vid".to_string(), json!(vid.as_u64()));
                         props_json.insert("_label".to_string(), json!(labels.join(":")));
+                        props_json.insert("_labels".to_string(), json!(labels));
 
                         let mut map = HashMap::new();
                         map.insert(variable.clone(), Value::Object(props_json));
@@ -2475,6 +2489,7 @@ impl Executor {
 
                         props_json.insert("_vid".to_string(), json!(vid.as_u64()));
                         props_json.insert("_label".to_string(), json!(actual_labels.join(":")));
+                        props_json.insert("_labels".to_string(), json!(actual_labels));
 
                         let mut map = HashMap::new();
                         map.insert(variable.clone(), Value::Object(props_json));

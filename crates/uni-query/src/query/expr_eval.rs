@@ -118,8 +118,13 @@ fn cypher_eq(left: &Value, right: &Value) -> bool {
         return l.iter().zip(r.iter()).all(|(lv, rv)| cypher_eq(lv, rv));
     }
 
-    // Structural equality for Maps
+    // Structural equality for Maps (Nodes)
     if let (Value::Object(l), Value::Object(r)) = (left, right) {
+        // If both are nodes (have _vid), compare by _vid ONLY
+        if let (Some(vid_l), Some(vid_r)) = (l.get("_vid"), r.get("_vid")) {
+            return vid_l == vid_r;
+        }
+
         if l.len() != r.len() {
             return false;
         }
@@ -142,9 +147,11 @@ fn cypher_eq(left: &Value, right: &Value) -> bool {
 /// Evaluate IN operator.
 pub fn eval_in_op(left: &Value, right: &Value) -> Result<Value> {
     if let Value::Array(arr) = right {
-        // Check exact match first
-        if arr.contains(left) {
-            return Ok(Value::Bool(true));
+        // Check exact match using cypher_eq (handles numeric coercion and node identity)
+        for item in arr {
+            if cypher_eq(left, item) {
+                return Ok(Value::Bool(true));
+            }
         }
 
         // Fallback: Check for Node Object vs VID mismatch

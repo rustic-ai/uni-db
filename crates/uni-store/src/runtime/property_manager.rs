@@ -774,6 +774,80 @@ impl PropertyManager {
         ))
     }
 
+    /// Batch load labels for multiple vertices.
+    pub async fn get_batch_labels(
+        &self,
+        vids: &[Vid],
+        ctx: Option<&QueryContext>,
+    ) -> Result<HashMap<Vid, Vec<String>>> {
+        let mut result = HashMap::new();
+        if vids.is_empty() {
+            return Ok(result);
+        }
+
+        // Phase 1: Get from L0 layers
+        if let Some(ctx) = ctx {
+            // 1. Pending flush L0s (oldest to newest)
+            for l0_arc in &ctx.pending_flush_l0s {
+                let guard = l0_arc.read();
+                for &vid in vids {
+                    if let Some(labels) = guard.get_vertex_labels(vid) {
+                        result
+                            .entry(vid)
+                            .or_insert_with(Vec::new)
+                            .extend(labels.iter().cloned());
+                    }
+                }
+            }
+            // 2. Current L0
+            {
+                let guard = ctx.l0.read();
+                for &vid in vids {
+                    if let Some(labels) = guard.get_vertex_labels(vid) {
+                        result
+                            .entry(vid)
+                            .or_insert_with(Vec::new)
+                            .extend(labels.iter().cloned());
+                    }
+                }
+            }
+            // 3. Transaction L0 (newest)
+            if let Some(tx_l0_arc) = &ctx.transaction_l0 {
+                let guard = tx_l0_arc.read();
+                for &vid in vids {
+                    if let Some(labels) = guard.get_vertex_labels(vid) {
+                        result
+                            .entry(vid)
+                            .or_insert_with(Vec::new)
+                            .extend(labels.iter().cloned());
+                    }
+                }
+            }
+        }
+
+        // Phase 2: Get from storage (VidLabelsIndex)
+        let lancedb_store = self.storage.lancedb_store();
+        let storage_labels =
+            MainVertexDataset::find_batch_labels_by_vids(lancedb_store, vids).await?;
+
+        for (vid, labels) in storage_labels {
+            let entry = result.entry(vid).or_insert_with(Vec::new);
+            for l in labels {
+                if !entry.contains(&l) {
+                    entry.push(l);
+                }
+            }
+        }
+
+        // Deduplicate and sort labels
+        for labels in result.values_mut() {
+            labels.sort();
+            labels.dedup();
+        }
+
+        Ok(result)
+    }
+
     pub async fn get_all_vertex_props(&self, vid: Vid) -> Result<Properties> {
         Ok(self
             .get_all_vertex_props_with_ctx(vid, None)

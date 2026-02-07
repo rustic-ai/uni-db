@@ -2032,7 +2032,14 @@ impl HybridPhysicalPlanner {
         }
 
         // 2. Add the named_struct AS variable
-        let mut struct_args = Vec::with_capacity(properties.len() * 2);
+        let mut struct_args = Vec::with_capacity(properties.len() * 2 + 2);
+
+        // Add _labels field for labels() function support
+        struct_args.push(lit("_labels"));
+        struct_args.push(DfExpr::Column(datafusion::common::Column::from_name(
+            format!("{}._labels", variable),
+        )));
+
         for prop in properties {
             struct_args.push(lit(prop.clone()));
             struct_args.push(DfExpr::Column(datafusion::common::Column::from_name(

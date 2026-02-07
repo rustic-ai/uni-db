@@ -28,7 +28,7 @@ pub struct FunctionPropertySpec {
 
 /// Static registry of function property specifications.
 /// Function names are uppercase for case-insensitive lookup.
-static FUNCTION_SPECS: LazyLock<[(&'static str, FunctionPropertySpec); 10]> = LazyLock::new(|| {
+static FUNCTION_SPECS: LazyLock<[(&'static str, FunctionPropertySpec); 13]> = LazyLock::new(|| {
     [
         // uni.temporal.validAt(entity, start_prop, end_prop, timestamp)
         (
@@ -51,6 +51,33 @@ static FUNCTION_SPECS: LazyLock<[(&'static str, FunctionPropertySpec); 10]> = La
         // properties(entity) - returns property map
         (
             "PROPERTIES",
+            FunctionPropertySpec {
+                entity_args: &[0],
+                property_name_args: &[],
+                needs_full_entity: true,
+            },
+        ),
+        // labels(entity) - returns all label names
+        (
+            "LABELS",
+            FunctionPropertySpec {
+                entity_args: &[0],
+                property_name_args: &[],
+                needs_full_entity: true,
+            },
+        ),
+        // nodes(path) - returns all nodes in a path
+        (
+            "NODES",
+            FunctionPropertySpec {
+                entity_args: &[0],
+                property_name_args: &[],
+                needs_full_entity: true,
+            },
+        ),
+        // relationships(path) - returns all relationships in a path
+        (
+            "RELATIONSHIPS",
             FunctionPropertySpec {
                 entity_args: &[0],
                 property_name_args: &[],

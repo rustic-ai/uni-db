@@ -249,11 +249,14 @@ impl GraphScanExec {
 
     /// Build schema for schemaless vertex scan (all properties as Utf8).
     fn build_schemaless_vertex_schema(variable: &str, properties: &[String]) -> SchemaRef {
-        let mut fields = vec![Field::new(
-            format!("{}._vid", variable),
-            DataType::UInt64,
-            false,
-        )];
+        let mut fields = vec![
+            Field::new(format!("{}._vid", variable), DataType::UInt64, false),
+            Field::new(
+                format!("{}._labels", variable),
+                DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
+                true,
+            ),
+        ];
 
         for prop in properties {
             let col_name = format!("{}.{}", variable, prop);
@@ -305,11 +308,14 @@ impl GraphScanExec {
         properties: &[String],
         uni_schema: &UniSchema,
     ) -> SchemaRef {
-        let mut fields = vec![Field::new(
-            format!("{}._vid", variable),
-            DataType::UInt64,
-            false,
-        )];
+        let mut fields = vec![
+            Field::new(format!("{}._vid", variable), DataType::UInt64, false),
+            Field::new(
+                format!("{}._labels", variable),
+                DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
+                true,
+            ),
+        ];
         let label_props = uni_schema.properties.get(label);
         for prop in properties {
             let col_name = format!("{}.{}", variable, prop);
@@ -671,6 +677,11 @@ pub(crate) async fn materialize_schemaless_vertex_batch_static(
         .await
         .map_err(|e| datafusion::error::DataFusionError::Execution(e.to_string()))?;
 
+    // Fetch labels from main table
+    let labels_map = MainVertexDataset::find_batch_labels_by_vids(lancedb_store, &vids)
+        .await
+        .map_err(|e| datafusion::error::DataFusionError::Execution(e.to_string()))?;
+
     // Overlay L0 buffer properties (L0 takes precedence)
     for &vid in &vids {
         // Check all L0 layers for this VID's properties
@@ -690,7 +701,7 @@ pub(crate) async fn materialize_schemaless_vertex_batch_static(
         .filter(|vid| props_map.contains_key(vid))
         .collect();
 
-    build_schemaless_vertex_record_batch(schema, &valid_vids, &props_map)
+    build_schemaless_vertex_record_batch(schema, &valid_vids, &props_map, &labels_map)
 }
 
 /// Accumulate properties for a vertex from all L0 layers.
@@ -721,6 +732,7 @@ fn build_schemaless_vertex_record_batch(
     schema: &SchemaRef,
     vids: &[Vid],
     props_map: &HashMap<Vid, Properties>,
+    labels_map: &HashMap<Vid, Vec<String>>,
 ) -> DFResult<RecordBatch> {
     if vids.is_empty() {
         return Ok(RecordBatch::new_empty(schema.clone()));
@@ -728,12 +740,27 @@ fn build_schemaless_vertex_record_batch(
 
     let mut columns: Vec<ArrayRef> = Vec::with_capacity(schema.fields().len());
 
-    // Build _vid column
+    // 1. Build _vid column
     let vid_values: Vec<u64> = vids.iter().map(|v| v.as_u64()).collect();
     columns.push(Arc::new(UInt64Array::from(vid_values)));
 
-    // Build property columns (all as Utf8)
-    for field in schema.fields().iter().skip(1) {
+    // 2. Build _labels column
+    let mut labels_builder = ListBuilder::new(StringBuilder::new());
+    for vid in vids {
+        if let Some(labels) = labels_map.get(vid) {
+            let values = labels_builder.values();
+            for label in labels {
+                values.append_value(label);
+            }
+            labels_builder.append(true);
+        } else {
+            labels_builder.append_null();
+        }
+    }
+    columns.push(Arc::new(labels_builder.finish()));
+
+    // 3. Build property columns (all as Utf8)
+    for field in schema.fields().iter().skip(2) {
         // Extract property name from field name (e.g., "n.name" -> "name")
         let prop_name = field.name().split('.').nth(1).unwrap_or(field.name());
 
@@ -816,13 +843,19 @@ pub(crate) async fn materialize_vertex_batch_static(
         .await
         .map_err(|e| datafusion::error::DataFusionError::Execution(e.to_string()))?;
 
+    // Fetch labels for all vertices in the batch
+    let labels_map = property_manager
+        .get_batch_labels(&vids, Some(&query_ctx))
+        .await
+        .map_err(|e| datafusion::error::DataFusionError::Execution(e.to_string()))?;
+
     // Filter out deleted vertices (those not in props_map)
     let valid_vids: Vec<Vid> = vids
         .into_iter()
         .filter(|vid| props_map.contains_key(vid))
         .collect();
 
-    build_vertex_record_batch_static(schema, &valid_vids, &props_map)
+    build_vertex_record_batch_static(schema, &valid_vids, &props_map, &labels_map)
 }
 
 /// Build a RecordBatch from VIDs and their properties (static version).
@@ -830,6 +863,7 @@ pub(crate) fn build_vertex_record_batch_static(
     schema: &SchemaRef,
     vids: &[Vid],
     props_map: &HashMap<Vid, Properties>,
+    labels_map: &HashMap<Vid, Vec<String>>,
 ) -> DFResult<RecordBatch> {
     if vids.is_empty() {
         return Ok(RecordBatch::new_empty(schema.clone()));
@@ -837,12 +871,27 @@ pub(crate) fn build_vertex_record_batch_static(
 
     let mut columns: Vec<ArrayRef> = Vec::with_capacity(schema.fields().len());
 
-    // Build _vid column
+    // 1. Build _vid column
     let vid_values: Vec<u64> = vids.iter().map(|v| v.as_u64()).collect();
     columns.push(Arc::new(UInt64Array::from(vid_values)));
 
-    // Build property columns
-    for field in schema.fields().iter().skip(1) {
+    // 2. Build _labels column
+    let mut labels_builder = ListBuilder::new(StringBuilder::new());
+    for vid in vids {
+        if let Some(labels) = labels_map.get(vid) {
+            let values = labels_builder.values();
+            for label in labels {
+                values.append_value(label);
+            }
+            labels_builder.append(true);
+        } else {
+            labels_builder.append_null();
+        }
+    }
+    columns.push(Arc::new(labels_builder.finish()));
+
+    // 3. Build property columns
+    for field in schema.fields().iter().skip(2) {
         // Extract property name from field name (e.g., "n.name" -> "name")
         let prop_name = field.name().split('.').nth(1).unwrap_or(field.name());
 
@@ -1672,10 +1721,11 @@ mod tests {
             &uni_schema,
         );
 
-        assert_eq!(schema.fields().len(), 3);
+        assert_eq!(schema.fields().len(), 4);
         assert_eq!(schema.field(0).name(), "n._vid");
-        assert_eq!(schema.field(1).name(), "n.name");
-        assert_eq!(schema.field(2).name(), "n.age");
+        assert_eq!(schema.field(1).name(), "n._labels");
+        assert_eq!(schema.field(2).name(), "n.name");
+        assert_eq!(schema.field(3).name(), "n.age");
     }
 
     #[test]
@@ -1698,13 +1748,14 @@ mod tests {
             &["name".to_string(), "age".to_string()],
         );
 
-        assert_eq!(schema.fields().len(), 3);
+        assert_eq!(schema.fields().len(), 4);
         assert_eq!(schema.field(0).name(), "n._vid");
         assert_eq!(schema.field(0).data_type(), &DataType::UInt64);
-        assert_eq!(schema.field(1).name(), "n.name");
-        assert_eq!(schema.field(1).data_type(), &DataType::Utf8);
-        assert_eq!(schema.field(2).name(), "n.age");
+        assert_eq!(schema.field(1).name(), "n._labels");
+        assert_eq!(schema.field(2).name(), "n.name");
         assert_eq!(schema.field(2).data_type(), &DataType::Utf8);
+        assert_eq!(schema.field(3).name(), "n.age");
+        assert_eq!(schema.field(3).data_type(), &DataType::Utf8);
     }
 
     #[test]
@@ -1715,8 +1766,9 @@ mod tests {
         // This is a structural test to ensure the "empty label signals scan all" pattern works
         let schema = GraphScanExec::build_schemaless_vertex_schema("n", &[]);
 
-        // Verify the schema has just the _vid column for a scan with no properties
-        assert_eq!(schema.fields().len(), 1);
+        // Verify the schema has _vid and _labels columns for a scan with no properties
+        assert_eq!(schema.fields().len(), 2);
         assert_eq!(schema.field(0).name(), "n._vid");
+        assert_eq!(schema.field(1).name(), "n._labels");
     }
 }

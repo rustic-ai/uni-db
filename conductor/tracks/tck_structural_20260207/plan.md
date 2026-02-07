@@ -13,9 +13,9 @@
 - [x] Task: Standardize `keys()` for all structural types (Node, Relationship, Map).
     - [x] Write tests for structural `keys()`.
     - [x] Update `KeysUdf` in `df_udfs.rs`.
-- [ ] Task: Implement/Standardize `labels()`, `nodes()`, and `relationships()` functions.
-    - [ ] Write tests.
-    - [ ] Implement UDFs or planner translations.
+- [x] Task: Implement/Standardize `labels()`, `nodes()`, and `relationships()` functions.
+    - [x] Write tests.
+    - [x] Implement UDFs or planner translations.
 - [x] Task: Conductor - User Manual Verification 'Phase 2: Collection Functions' (Protocol in workflow.md) d51cb46
 
 ## Phase 3: List Comprehensions & Advanced Collections

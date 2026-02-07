@@ -648,6 +648,75 @@ impl MainVertexDataset {
 
         Ok(best_props)
     }
+
+    /// Batch-fetch labels for multiple VIDs from the main vertices table.
+    pub async fn find_batch_labels_by_vids(
+        store: &LanceDbStore,
+        vids: &[Vid],
+    ) -> Result<HashMap<Vid, Vec<String>>> {
+        let table_name = Self::table_name();
+
+        if vids.is_empty() || !store.table_exists(table_name).await? {
+            return Ok(HashMap::new());
+        }
+
+        let table = store.open_table(table_name).await?;
+
+        // Build IN clause for VIDs
+        let vid_list: Vec<String> = vids.iter().map(|v| v.as_u64().to_string()).collect();
+        let query = format!("_vid IN ({}) AND _deleted = false", vid_list.join(", "));
+
+        let batches = table
+            .query()
+            .only_if(query)
+            .select(lancedb::query::Select::Columns(vec![
+                "_vid".to_string(),
+                "labels".to_string(),
+            ]))
+            .execute()
+            .await
+            .map_err(|e| anyhow!("Query failed: {}", e))?;
+
+        use futures::TryStreamExt;
+        let results: Vec<RecordBatch> = batches.try_collect().await?;
+
+        let mut label_map = HashMap::new();
+
+        for batch in results {
+            let vid_col = batch.column_by_name("_vid");
+            let labels_col = batch.column_by_name("labels");
+
+            if let (Some(vid_arr), Some(labels_arr)) = (
+                vid_col.and_then(|c| c.as_any().downcast_ref::<UInt64Array>()),
+                labels_col.and_then(|c| c.as_any().downcast_ref::<arrow_array::ListArray>()),
+            ) {
+                for i in 0..batch.num_rows() {
+                    if vid_arr.is_null(i) {
+                        continue;
+                    }
+                    let vid = Vid::new(vid_arr.value(i));
+
+                    let values = labels_arr.value(i);
+                    if let Some(str_arr) =
+                        values.as_any().downcast_ref::<arrow_array::StringArray>()
+                    {
+                        let labels: Vec<String> = (0..str_arr.len())
+                            .filter_map(|j| {
+                                if str_arr.is_null(j) {
+                                    None
+                                } else {
+                                    Some(str_arr.value(j).to_string())
+                                }
+                            })
+                            .collect();
+                        label_map.insert(vid, labels);
+                    }
+                }
+            }
+        }
+
+        Ok(label_map)
+    }
 }
 
 #[cfg(test)]
