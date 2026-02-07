@@ -1,7 +1,7 @@
 # Implementation Plan - TCK Foundational Compatibility
 
 ## Phase 1: Literals & Type System
-- [ ] Task: Fix Decimal, Hex, and Octal integer literal overflow and parsing edge cases.
+- [x] Task: Fix Decimal, Hex, and Octal integer literal overflow and parsing edge cases. 84feece
     - [ ] Write Tests
     - [ ] Implement Fix
 - [ ] Task: Fix String literal escaping and Unicode support.
