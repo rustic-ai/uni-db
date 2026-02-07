@@ -44,7 +44,16 @@ jsonb = "0.5.3"
 datafusion = { workspace = true }
 
 [features]
-default = []
+default = ["candle-text"]
+
+# Text embeddings using Candle (default)
+candle-text = ["uni-store/candle-text"]
+
+# GPU acceleration via CUDA (optional)
+candle-cuda = ["uni-store/candle-cuda"]
+
+# Legacy ONNX-based embeddings (optional)
+fastembed = ["uni-store/fastembed"]
 
 [dev-dependencies]
 tempfile = { workspace = true }

@@ -156,8 +156,8 @@ CREATE VECTOR INDEX paper_embed FOR (p:Paper) ON (p.embedding)
 OPTIONS {
     metric: 'cosine',
     embedding: {
-        provider: 'fastembed',
-        model: 'AllMiniLML6V2',
+        provider: 'Candle',
+        model: 'all-MiniLM-L6-v2',
         source: ['abstract']
     }
 }
@@ -324,14 +324,28 @@ FOR (d:Document) ON d.embedding
 OPTIONS {
   type: "hnsw",
   embedding: {
-    provider: "fastembed",
-    model: "AllMiniLML6V2",
+    provider: "Candle",
+    model: "all-MiniLM-L6-v2",
     source: ["content"]
   }
 }
 ```
 
-Supported providers in schema include `fastembed`, `openai`, and `ollama`, but **only `fastembed` is implemented today**. `openai`/`ollama` configs will parse but return an error at runtime. There is no direct embedding API in `uni_db` yet; use auto-embedding or your own embedding pipeline.
+**Supported Providers:**
+
+| Provider | Status | Description |
+|----------|--------|-------------|
+| `Candle` | ✅ Default | Native Rust (HuggingFace Candle), no FFI overhead |
+| `FastEmbed` | Optional | ONNX-based, requires `fastembed` feature flag |
+| `OpenAI` | Planned | Cloud embedding API |
+| `Ollama` | Planned | Local LLM embeddings |
+
+**Candle Models:**
+- `all-MiniLM-L6-v2` (384 dims, default)
+- `bge-small-en-v1.5` (384 dims)
+- `bge-base-en-v1.5` (768 dims)
+
+Models are automatically downloaded from HuggingFace Hub and cached in `~/.uni/models/`.
 
 ### Using External APIs
 

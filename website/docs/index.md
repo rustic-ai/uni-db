@@ -244,7 +244,7 @@ Uni leverages best-in-class Rust ecosystem crates:
 | Graph Runtime | SimpleGraph (custom) | In-memory graph algorithms |
 | Object Store | [object_store](https://docs.rs/object_store) | S3/GCS/Azure abstraction |
 | Parsing | [sqlparser](https://github.com/sqlparser-rs/sqlparser-rs) | SQL/Cypher tokenization |
-| Embeddings | [FastEmbed](https://github.com/qdrant/fastembed) | Local embedding models |
+| Embeddings | [Candle](https://github.com/huggingface/candle) | Native Rust embedding models |
 
 ---
 

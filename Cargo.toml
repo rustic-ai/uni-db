@@ -73,6 +73,12 @@ fxhash = "0.2"
 smallvec = "1.11"
 bytes = "1.6"
 parking_lot = "0.12"
+# Embedding providers - Candle (default) or FastEmbed (optional, ONNX-based)
+candle-core = "0.8"
+candle-nn = "0.8"
+candle-transformers = "0.8"
+tokenizers = { version = "0.21", default-features = false, features = ["onig", "http"] }
+hf-hub = { version = "0.4", features = ["tokio"] }
 fastembed = { version = "5.6.0", default-features = false, features = ["ort-download-binaries", "hf-hub-native-tls"] }
 # ort = { version = "=2.0.0-rc.9" }
 rand = "0.8"

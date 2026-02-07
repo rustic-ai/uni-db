@@ -25,3 +25,15 @@ anyhow = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 serde_json = { workspace = true }
+
+[features]
+default = ["candle-text"]
+
+# Text embeddings using Candle (default)
+candle-text = ["uni-db/candle-text"]
+
+# GPU acceleration via CUDA (optional)
+candle-cuda = ["uni-db/candle-cuda"]
+
+# Legacy ONNX-based embeddings (optional)
+fastembed = ["uni-db/fastembed"]

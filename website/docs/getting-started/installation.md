@@ -259,7 +259,8 @@ Uni supports optional features that can be enabled during compilation:
 
 | Feature | Description | Default |
 |---------|-------------|---------|
-| `fastembed` | Local embedding model support | Enabled |
+| `candle-text` | Native Rust embedding models (Candle) | Enabled |
+| `fastembed` | ONNX-based embedding models (legacy) | Disabled |
 | `s3` | Amazon S3 object store | Enabled |
 | `gcs` | Google Cloud Storage | Disabled |
 | `azure` | Azure Blob Storage | Disabled |

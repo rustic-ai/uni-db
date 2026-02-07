@@ -490,20 +490,28 @@ pub struct EmbeddingConfig {
 #[serde(tag = "provider")]
 #[non_exhaustive]
 pub enum EmbeddingModel {
+    /// Candle-based text embeddings (default, native Rust).
+    /// Uses sentence-transformer models like all-MiniLM-L6-v2.
+    Candle {
+        /// Model name (e.g., "all-MiniLM-L6-v2", "bge-small-en-v1.5")
+        model_name: String,
+        /// Optional HuggingFace model revision/tag
+        revision: Option<String>,
+    },
+    /// Legacy ONNX-based FastEmbed (requires `fastembed` feature).
     FastEmbed {
         model_name: String,
         cache_dir: Option<String>,
         max_length: Option<usize>,
     },
+    /// OpenAI embedding API (future).
     OpenAI {
         model: String,
         api_key_env: String,
         dimensions: Option<u32>,
     },
-    Ollama {
-        model: String,
-        host: String,
-    },
+    /// Ollama local embedding service (future).
+    Ollama { model: String, host: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

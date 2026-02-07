@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2024-2026 Dragonscale Team
 
-use crate::embedding::{EmbeddingService, FastEmbedService};
+use crate::embedding::{EmbeddingService, create_embedding_service, embedding_service_key};
 use crate::runtime::id_allocator::IdAllocator;
 use crate::runtime::l0::L0Buffer;
 use crate::runtime::l0_manager::L0Manager;
@@ -1749,17 +1749,14 @@ impl Writer {
         Ok(())
     }
 
+    /// Gets or creates a cached embedding service for the given model.
     async fn get_embedding_service(
         &self,
         model: &EmbeddingModel,
     ) -> Result<Arc<dyn EmbeddingService>> {
-        let key = match model {
-            EmbeddingModel::FastEmbed { model_name, .. } => format!("fastembed:{}", model_name),
-            EmbeddingModel::OpenAI { model, .. } => format!("openai:{}", model),
-            EmbeddingModel::Ollama { model, .. } => format!("ollama:{}", model),
-            _ => return Err(anyhow!("Unsupported embedding model")),
-        };
+        let key = embedding_service_key(model)?;
 
+        // Check cache first
         {
             let services = acquire_mutex(&self.embedding_services, "embedding_services")?;
             if let Some(service) = services.get(&key) {
@@ -1767,21 +1764,8 @@ impl Writer {
             }
         }
 
-        let service: Arc<dyn EmbeddingService> = match model {
-            EmbeddingModel::FastEmbed {
-                model_name,
-                cache_dir,
-                ..
-            } => Arc::new(FastEmbedService::new(model_name, cache_dir.as_deref())?),
-            EmbeddingModel::OpenAI { .. } => {
-                return Err(anyhow!("OpenAI embedding provider not yet implemented"));
-            }
-            EmbeddingModel::Ollama { .. } => {
-                return Err(anyhow!("Ollama embedding provider not yet implemented"));
-            }
-            _ => return Err(anyhow!("Unsupported embedding model")),
-        };
-
+        // Create and cache new service
+        let service = create_embedding_service(model)?;
         let mut services = acquire_mutex(&self.embedding_services, "embedding_services")?;
         services.insert(key, service.clone());
         Ok(service)

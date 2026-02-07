@@ -13,7 +13,11 @@ pub mod snapshot {
 }
 
 pub use compaction::{CompactionStats, CompactionStatus};
-pub use embedding::service::{EmbeddingService, FastEmbedService};
+pub use embedding::EmbeddingService;
+#[cfg(feature = "fastembed")]
+pub use embedding::FastEmbedService;
+#[cfg(feature = "candle-text")]
+pub use embedding::{CandleTextEmbedding, CandleTextModel};
 pub use lancedb::LanceDbStore;
 pub use runtime::context::QueryContext;
 pub use runtime::property_manager::PropertyManager;

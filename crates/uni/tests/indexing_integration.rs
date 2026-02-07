@@ -16,6 +16,7 @@ use uni_db::runtime::writer::Writer;
 use uni_db::storage::manager::StorageManager;
 
 #[tokio::test]
+#[ignore] // Requires model download from HuggingFace Hub
 async fn test_auto_embedding_and_vector_search() -> Result<()> {
     let _ = env_logger::builder().is_test(true).try_init();
     // 1. Setup
@@ -52,14 +53,15 @@ async fn test_auto_embedding_and_vector_search() -> Result<()> {
 
     // 2. Create Vector Index with Embedding Config via DDL
     // We use Planner and Executor to run DDL
+    // Using Candle as the default embedding provider
     let ddl = r#"
         CREATE VECTOR INDEX doc_embed_idx
         FOR (d:Document) ON d.embedding
         OPTIONS {
             type: 'hnsw',
             embedding: {
-                provider: 'fastembed',
-                model: 'AllMiniLML6V2',
+                provider: 'Candle',
+                model: 'all-MiniLM-L6-v2',
                 source: ['content']
             }
         }

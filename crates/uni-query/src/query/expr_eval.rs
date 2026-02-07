@@ -336,14 +336,15 @@ where
 
     // Float comparison (handles int-float coercion via as_f64)
     // Note: as_f64() returns Some for both Int and Float types
-    if left.is_number() && right.is_number() {
-        if let (Some(l), Some(r)) = (left.as_f64(), right.as_f64()) {
-            let ord = l.partial_cmp(&r);
-            return match ord {
-                Some(o) => Ok(Value::Bool(check(o))),
-                None => Ok(Value::Null), // NaN comparisons return NULL
-            };
-        }
+    if left.is_number()
+        && right.is_number()
+        && let (Some(l), Some(r)) = (left.as_f64(), right.as_f64())
+    {
+        let ord = l.partial_cmp(&r);
+        return match ord {
+            Some(o) => Ok(Value::Bool(check(o))),
+            None => Ok(Value::Null), // NaN comparisons return NULL
+        };
     }
 
     // String comparison

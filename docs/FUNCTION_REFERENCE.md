@@ -78,15 +78,16 @@ CREATE VECTOR INDEX doc_embed FOR (d:Document) ON (d.embedding)
 OPTIONS {
     metric: 'cosine',
     embedding: {
-        provider: 'fastembed',
-        model: 'AllMiniLML6V2',
+        provider: 'Candle',
+        model: 'all-MiniLM-L6-v2',
         source: ['content']
     }
 }
 ```
 
 Supported providers:
-- `fastembed` - Local embeddings via FastEmbed (AllMiniLML6V2, BGESmallEN, etc.)
+- `Candle` - Native Rust embeddings via HuggingFace Candle (default: all-MiniLM-L6-v2, bge-small-en-v1.5, bge-base-en-v1.5)
+- `FastEmbed` - ONNX-based embeddings (optional, requires `fastembed` feature flag)
 - `ollama` - Local embeddings via Ollama (planned)
 - `openai` - OpenAI embeddings API (planned)
 

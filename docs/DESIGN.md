@@ -106,7 +106,7 @@ Uni is organized as a Rust workspace with specialized crates:
 | `roaring` | Bitmap indexes for vertex/edge sets |
 | `serde_json` | Document storage (dynamic JSON properties) |
 | `pyo3` | Python bindings |
-| `fastembed` | Local embedding generation |
+| `candle` | Native Rust embedding generation (HuggingFace Candle) |
 
 ---
 
@@ -4096,23 +4096,25 @@ Uni supports automatic embedding generation for vector search via multiple backe
 
 | Backend | Type | Notes |
 |---------|------|-------|
-| FastEmbed | Local | Default, no API key needed |
-| OpenAI | Cloud | Requires `OPENAI_API_KEY` |
-| Ollama | Local | Self-hosted, requires Ollama server |
+| Candle | Local | Default, native Rust (HuggingFace Candle) |
+| FastEmbed | Local | Optional, ONNX-based (requires `fastembed` feature) |
+| OpenAI | Cloud | Planned, requires `OPENAI_API_KEY` |
+| Ollama | Local | Planned, self-hosted |
 
 **Configuration**:
 ```rust
-// Rust API
+// Rust API - Candle (default)
 let config = UniConfig::builder()
-    .embedding_service(EmbeddingService::FastEmbed {
-        model: "BAAI/bge-small-en-v1.5".to_string(),
+    .embedding_service(EmbeddingService::Candle {
+        model: "all-MiniLM-L6-v2".to_string(),
+        revision: None,
     })
     .build();
 
 // Python API
 config = UniConfig(
-    embedding_service="fastembed",
-    embedding_model="BAAI/bge-small-en-v1.5"
+    embedding_service="candle",
+    embedding_model="all-MiniLM-L6-v2"
 )
 ```
 

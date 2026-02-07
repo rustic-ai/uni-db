@@ -498,16 +498,15 @@ fn validate_expression(expr: &Expr, vars_in_scope: &[VariableInfo]) -> Result<()
         }
         Expr::Property(base, prop) => {
             // Check if the base is a path variable - paths don't have properties
-            if let Expr::Variable(var_name) = base.as_ref() {
-                if let Some(var_info) = find_var_in_scope(vars_in_scope, var_name) {
-                    if var_info.var_type == VariableType::Path {
-                        return Err(anyhow!(
-                            "SyntaxError: InvalidArgumentType - Type mismatch: expected Node or Relationship but was Path for property access '{}.{}'",
-                            var_name,
-                            prop
-                        ));
-                    }
-                }
+            if let Expr::Variable(var_name) = base.as_ref()
+                && let Some(var_info) = find_var_in_scope(vars_in_scope, var_name)
+                && var_info.var_type == VariableType::Path
+            {
+                return Err(anyhow!(
+                    "SyntaxError: InvalidArgumentType - Type mismatch: expected Node or Relationship but was Path for property access '{}.{}'",
+                    var_name,
+                    prop
+                ));
             }
             validate_expression(base, vars_in_scope)?;
         }
@@ -2361,17 +2360,18 @@ impl QueryPlanner {
             for element in elements {
                 match element {
                     PatternElement::Node(n) => {
-                        if let Some(v) = &n.variable {
-                            if !v.is_empty() && !is_var_in_scope(vars_in_scope, v) {
-                                vars.insert(v.clone());
-                            }
+                        if let Some(v) = &n.variable
+                            && !v.is_empty()
+                            && !is_var_in_scope(vars_in_scope, v)
+                        {
+                            vars.insert(v.clone());
                         }
                     }
                     PatternElement::Relationship(r) => {
-                        if let Some(v) = &r.variable {
-                            if !v.is_empty() {
-                                vars.insert(v.clone());
-                            }
+                        if let Some(v) = &r.variable
+                            && !v.is_empty()
+                        {
+                            vars.insert(v.clone());
                         }
                     }
                     PatternElement::Parenthesized { pattern, .. } => {
@@ -2379,17 +2379,18 @@ impl QueryPlanner {
                         for nested_elem in &pattern.elements {
                             match nested_elem {
                                 PatternElement::Node(n) => {
-                                    if let Some(v) = &n.variable {
-                                        if !v.is_empty() && !is_var_in_scope(vars_in_scope, v) {
-                                            vars.insert(v.clone());
-                                        }
+                                    if let Some(v) = &n.variable
+                                        && !v.is_empty()
+                                        && !is_var_in_scope(vars_in_scope, v)
+                                    {
+                                        vars.insert(v.clone());
                                     }
                                 }
                                 PatternElement::Relationship(r) => {
-                                    if let Some(v) = &r.variable {
-                                        if !v.is_empty() {
-                                            vars.insert(v.clone());
-                                        }
+                                    if let Some(v) = &r.variable
+                                        && !v.is_empty()
+                                    {
+                                        vars.insert(v.clone());
                                     }
                                 }
                                 _ => {}
@@ -2399,10 +2400,10 @@ impl QueryPlanner {
                 }
             }
             // Include path variable if present
-            if let Some(pv) = &path_variable {
-                if !pv.is_empty() {
-                    vars.insert(pv.clone());
-                }
+            if let Some(pv) = &path_variable
+                && !pv.is_empty()
+            {
+                vars.insert(pv.clone());
             }
             vars
         } else {

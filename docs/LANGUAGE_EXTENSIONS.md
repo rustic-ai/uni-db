@@ -67,8 +67,8 @@ CREATE VECTOR INDEX doc_embed FOR (d:Document) ON (d.embedding)
 OPTIONS {
     metric: 'cosine',
     embedding: {
-        provider: 'fastembed',
-        model: 'AllMiniLML6V2',
+        provider: 'Candle',
+        model: 'all-MiniLM-L6-v2',
         source: ['content']
     }
 }

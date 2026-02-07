@@ -299,7 +299,7 @@ Error: Query execution failed: Out of memory
 **Causes and Solutions:**
 
 1. **Embedding model mismatch:** Ensure the same embedding model is used for indexing and querying.
-   - If you use auto-embedding, only `fastembed` is currently implemented; `openai`/`ollama` configs will error at runtime.
+   - Auto-embedding uses `Candle` (default) or `FastEmbed` (optional feature). `openai`/`ollama` configs are planned but not yet implemented.
 
 2. **Dimension mismatch:**
    ```bash

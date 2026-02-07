@@ -58,5 +58,15 @@ name = "micro_benchmarks"
 harness = false
 
 [features]
+default = ["candle-text"]
 snapshot-internals = []
 storage-internals = []
+
+# Text embeddings using Candle (default)
+candle-text = ["uni-store/candle-text", "uni-query/candle-text"]
+
+# GPU acceleration via CUDA (optional)
+candle-cuda = ["uni-store/candle-cuda", "uni-query/candle-cuda"]
+
+# Legacy ONNX-based embeddings (optional)
+fastembed = ["uni-store/fastembed", "uni-query/fastembed"]

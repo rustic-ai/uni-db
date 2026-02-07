@@ -10,10 +10,10 @@ use serde_json::json;
 use std::collections::HashMap;
 use uni_algo::algo::procedures::AlgoContext;
 use uni_common::core::id::Vid;
-use uni_common::core::schema::{DistanceMetric, EmbeddingModel, SchemaManager};
+use uni_common::core::schema::{DistanceMetric, SchemaManager};
 use uni_cypher::ast::Expr;
 use uni_store::QueryContext;
-use uni_store::embedding::{EmbeddingService, FastEmbedService};
+use uni_store::embedding::create_embedding_service;
 use uni_store::runtime::property_manager::PropertyManager;
 
 /// Value type for procedure parameters and outputs.
@@ -368,39 +368,12 @@ impl Executor {
                             )
                         })?;
 
-                    // Create embedding service based on model type
-                    match &embedding_config.model {
-                        EmbeddingModel::FastEmbed {
-                            model_name,
-                            cache_dir,
-                            ..
-                        } => {
-                            let service = FastEmbedService::new(model_name, cache_dir.as_deref())?;
-                            let embeddings = service.embed(&[query_text]).await?;
-                            embeddings
-                                .into_iter()
-                                .next()
-                                .ok_or_else(|| anyhow!("Embedding service returned no results"))?
-                        }
-                        EmbeddingModel::OpenAI { .. } => {
-                            return Err(anyhow!(
-                                "OpenAI embedding provider not yet implemented for auto-embed queries. \
-                                 Please provide a pre-computed vector."
-                            ));
-                        }
-                        EmbeddingModel::Ollama { .. } => {
-                            return Err(anyhow!(
-                                "Ollama embedding provider not yet implemented for auto-embed queries. \
-                                 Please provide a pre-computed vector."
-                            ));
-                        }
-                        _ => {
-                            return Err(anyhow!(
-                                "Unknown embedding provider for auto-embed queries. \
-                                 Please provide a pre-computed vector."
-                            ));
-                        }
-                    }
+                    let service = create_embedding_service(&embedding_config.model)?;
+                    let embeddings = service.embed(&[query_text]).await?;
+                    embeddings
+                        .into_iter()
+                        .next()
+                        .ok_or_else(|| anyhow!("Embedding service returned no results"))?
                 } else {
                     // Pre-computed vector (array of floats)
                     serde_json::from_value(query_val)?
@@ -716,17 +689,11 @@ impl Executor {
                     let vec_val = self
                         .evaluate_expr(&args[3], &empty_row, prop_manager, params, ctx)
                         .await?;
-                    if vec_val.is_null() {
-                        None
-                    } else if let Some(arr) = vec_val.as_array() {
-                        Some(
-                            arr.iter()
-                                .filter_map(|v| v.as_f64().map(|f| f as f32))
-                                .collect(),
-                        )
-                    } else {
-                        None
-                    }
+                    vec_val.as_array().map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_f64().map(|f| f as f32))
+                            .collect()
+                    })
                 } else {
                     None
                 };
@@ -787,29 +754,16 @@ impl Executor {
                     let qvec = if let Some(ref v) = query_vector {
                         v.clone()
                     } else {
-                        // Auto-embed the query text
+                        // Auto-embed the query text if embedding config exists
                         let schema = self.storage.schema_manager().schema();
                         let index_config = schema.vector_index_for_property(&label, vec_prop);
 
                         if let Some(cfg) = index_config
                             && let Some(emb_cfg) = &cfg.embedding_config
+                            && let Ok(service) = create_embedding_service(&emb_cfg.model)
                         {
-                            match &emb_cfg.model {
-                                EmbeddingModel::FastEmbed {
-                                    model_name,
-                                    cache_dir,
-                                    ..
-                                } => {
-                                    let service =
-                                        FastEmbedService::new(model_name, cache_dir.as_deref())?;
-                                    let embeddings = service.embed(&[&query_text]).await?;
-                                    embeddings.into_iter().next().unwrap_or_default()
-                                }
-                                _ => {
-                                    // Skip vector search if embedding not supported
-                                    Vec::new()
-                                }
-                            }
+                            let embeddings = service.embed(&[&query_text]).await?;
+                            embeddings.into_iter().next().unwrap_or_default()
                         } else {
                             Vec::new()
                         }

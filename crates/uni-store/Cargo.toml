@@ -8,6 +8,18 @@ license.workspace = true
 repository.workspace = true
 publish = false
 
+[features]
+default = ["candle-text"]
+
+# Text embeddings using Candle (default)
+candle-text = ["dep:candle-core", "dep:candle-nn", "dep:candle-transformers", "dep:tokenizers", "dep:hf-hub", "dep:dirs"]
+
+# GPU acceleration via CUDA (optional)
+candle-cuda = ["candle-core/cuda", "candle-nn/cuda", "candle-transformers/cuda"]
+
+# Legacy ONNX-based embeddings (optional)
+fastembed = ["dep:fastembed"]
+
 [dependencies]
 uni-common = { workspace = true }
 uni-crdt = { workspace = true }
@@ -35,7 +47,15 @@ lance = { workspace = true }
 lance-index = { version = "1.0.1" }
 lance-linalg = { version = "1.0.1" }
 lancedb = { workspace = true }
-fastembed = { workspace = true }
+# Embedding providers
+candle-core = { workspace = true, optional = true }
+candle-nn = { workspace = true, optional = true }
+candle-transformers = { workspace = true, optional = true }
+tokenizers = { workspace = true, optional = true }
+hf-hub = { workspace = true, optional = true }
+dirs = { version = "6.0", optional = true }
+fastembed = { workspace = true, optional = true }
+
 object_store = { workspace = true }
 url = { workspace = true }
 sha3 = "0.10.8"
