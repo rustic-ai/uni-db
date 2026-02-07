@@ -603,7 +603,7 @@ async fn test_schemaless_edge_basic() -> Result<()> {
     }
 
     // Verify at least some edges exist
-    assert!(edges.len() > 0, "Expected at least 1 edge, got 0");
+    assert!(!edges.is_empty(), "Expected at least 1 edge, got 0");
 
     Ok(())
 }

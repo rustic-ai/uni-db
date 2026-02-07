@@ -113,7 +113,7 @@ impl std::fmt::Debug for GraphExecutionContext {
 /// - Pending flush L0s: Buffers being flushed to disk (still visible to reads)
 ///
 /// The visibility order is: pending flush L0s (oldest first) → current L0 → transaction L0.
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct L0Context {
     /// Current active L0 buffer.
     pub current_l0: Option<Arc<RwLock<L0Buffer>>>,
@@ -139,19 +139,14 @@ impl std::fmt::Debug for L0Context {
 impl L0Context {
     /// Create an empty L0 context with no buffers.
     pub fn empty() -> Self {
-        Self {
-            current_l0: None,
-            transaction_l0: None,
-            pending_flush_l0s: Vec::new(),
-        }
+        Self::default()
     }
 
     /// Create L0 context with just a current buffer.
     pub fn with_current(l0: Arc<RwLock<L0Buffer>>) -> Self {
         Self {
             current_l0: Some(l0),
-            transaction_l0: None,
-            pending_flush_l0s: Vec::new(),
+            ..Self::default()
         }
     }
 
@@ -451,27 +446,19 @@ fn overlay_l0_neighbors(
     version_hwm: Option<u64>,
 ) {
     use std::collections::HashMap;
-    use uni_common::graph::simple_graph::Direction as SimpleDirection;
 
     // Convert to map for efficient updates
     let mut neighbor_map: HashMap<Eid, Vid> = neighbors.drain(..).map(|(v, e)| (e, v)).collect();
 
-    // Determine which directions to query from L0
-    let directions: &[SimpleDirection] = match direction {
-        Direction::Outgoing => &[SimpleDirection::Outgoing],
-        Direction::Incoming => &[SimpleDirection::Incoming],
-        Direction::Both => &[SimpleDirection::Outgoing, SimpleDirection::Incoming],
-    };
-
-    // Get L0 neighbors for each direction
-    for &simple_dir in directions {
+    // Query L0 for each direction
+    for simple_dir in direction.to_simple_directions() {
         for (neighbor, eid, version) in l0.get_neighbors(vid, edge_type, simple_dir) {
             // Skip edges beyond snapshot boundary
             if version_hwm.is_some_and(|hwm| version > hwm) {
                 continue;
             }
 
-            // Apply insert or check tombstone
+            // Apply insert or remove tombstone
             if l0.is_tombstoned(eid) {
                 neighbor_map.remove(&eid);
             } else {
@@ -482,6 +469,22 @@ fn overlay_l0_neighbors(
 
     // Convert back to vec
     *neighbors = neighbor_map.into_iter().map(|(e, v)| (v, e)).collect();
+}
+
+/// Extension trait to convert storage Direction to SimpleGraph directions.
+trait DirectionExt {
+    fn to_simple_directions(&self) -> Vec<uni_common::graph::simple_graph::Direction>;
+}
+
+impl DirectionExt for Direction {
+    fn to_simple_directions(&self) -> Vec<uni_common::graph::simple_graph::Direction> {
+        use uni_common::graph::simple_graph::Direction as SimpleDirection;
+        match self {
+            Direction::Outgoing => vec![SimpleDirection::Outgoing],
+            Direction::Incoming => vec![SimpleDirection::Incoming],
+            Direction::Both => vec![SimpleDirection::Outgoing, SimpleDirection::Incoming],
+        }
+    }
 }
 
 #[cfg(test)]

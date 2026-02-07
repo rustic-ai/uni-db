@@ -26,7 +26,7 @@ async fn test_where_property_equals() -> Result<()> {
         .await?;
 
     println!("Result length: {}", result.len());
-    if result.len() > 0 {
+    if !result.is_empty() {
         println!(
             "Found: name={}, age={}",
             result.rows()[0].get::<String>("n.name")?,
@@ -158,7 +158,7 @@ async fn test_where_equi_join() -> Result<()> {
 
     // Should match pairs with same id but different names
     assert!(
-        result.len() >= 1,
+        !result.is_empty(),
         "Should match at least one pair with same id"
     );
 

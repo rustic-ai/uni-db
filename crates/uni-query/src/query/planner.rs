@@ -65,7 +65,7 @@ fn find_var_in_scope<'a>(vars: &'a [VariableInfo], name: &str) -> Option<&'a Var
 
 /// Check if a variable is in scope.
 fn is_var_in_scope(vars: &[VariableInfo], name: &str) -> bool {
-    vars.iter().any(|v| v.name == name)
+    find_var_in_scope(vars, name).is_some()
 }
 
 /// Add a variable to scope with type conflict validation.
@@ -112,15 +112,23 @@ fn collect_expr_variables(expr: &Expr) -> Vec<String> {
 }
 
 fn collect_expr_variables_inner(expr: &Expr, vars: &mut Vec<String>) {
+    // Helper to add a variable if not already present
+    let mut add_var = |name: &String| {
+        if !vars.contains(name) {
+            vars.push(name.clone());
+        }
+    };
+
+    // Helper to recurse into multiple expressions
+    let recurse_all = |exprs: &[Expr], vars: &mut Vec<String>| {
+        for e in exprs {
+            collect_expr_variables_inner(e, vars);
+        }
+    };
+
     match expr {
-        Expr::Variable(name) => {
-            if !vars.contains(name) {
-                vars.push(name.clone());
-            }
-        }
-        Expr::Property(base, _) => {
-            collect_expr_variables_inner(base, vars);
-        }
+        Expr::Variable(name) => add_var(name),
+        Expr::Property(base, _) => collect_expr_variables_inner(base, vars),
         Expr::BinaryOp { left, right, .. } => {
             collect_expr_variables_inner(left, vars);
             collect_expr_variables_inner(right, vars);
@@ -128,18 +136,12 @@ fn collect_expr_variables_inner(expr: &Expr, vars: &mut Vec<String>) {
         Expr::UnaryOp { expr: e, .. }
         | Expr::IsNull(e)
         | Expr::IsNotNull(e)
-        | Expr::IsUnique(e) => {
+        | Expr::IsUnique(e) => collect_expr_variables_inner(e, vars),
+        Expr::FunctionCall { args, .. } => recurse_all(args, vars),
+        Expr::List(items) => recurse_all(items, vars),
+        Expr::In { expr: e, list } => {
             collect_expr_variables_inner(e, vars);
-        }
-        Expr::FunctionCall { args, .. } => {
-            for arg in args {
-                collect_expr_variables_inner(arg, vars);
-            }
-        }
-        Expr::List(items) => {
-            for item in items {
-                collect_expr_variables_inner(item, vars);
-            }
+            collect_expr_variables_inner(list, vars);
         }
         Expr::Case {
             expr: case_expr,
@@ -162,8 +164,7 @@ fn collect_expr_variables_inner(expr: &Expr, vars: &mut Vec<String>) {
                 collect_expr_variables_inner(v, vars);
             }
         }
-        // Literals and other non-variable expressions
-        _ => {}
+        _ => {} // Literals and other non-variable expressions
     }
 }
 
@@ -469,35 +470,33 @@ fn check_not_already_bound(
 
 /// Recursively validate an expression for type errors, undefined variables, etc.
 fn validate_expression(expr: &Expr, vars_in_scope: &[VariableInfo]) -> Result<()> {
-    // Validate function calls
-    if let Expr::FunctionCall { name, args, .. } = expr {
-        validate_function_call(name, args, vars_in_scope)?;
-        // Recurse into arguments
-        for arg in args {
-            validate_expression(arg, vars_in_scope)?;
-        }
-    }
-
-    // Validate boolean operators
+    // Validate boolean operators and nested aggregation first
     validate_boolean_expression(expr)?;
-
-    // Validate no nested aggregation
     validate_no_nested_aggregation(expr)?;
 
-    // Recurse into sub-expressions
+    // Helper to validate multiple expressions
+    fn validate_all(exprs: &[Expr], vars: &[VariableInfo]) -> Result<()> {
+        for e in exprs {
+            validate_expression(e, vars)?;
+        }
+        Ok(())
+    }
+
     match expr {
+        Expr::FunctionCall { name, args, .. } => {
+            validate_function_call(name, args, vars_in_scope)?;
+            validate_all(args, vars_in_scope)
+        }
         Expr::BinaryOp { left, right, .. } => {
             validate_expression(left, vars_in_scope)?;
-            validate_expression(right, vars_in_scope)?;
+            validate_expression(right, vars_in_scope)
         }
         Expr::UnaryOp { expr: e, .. }
         | Expr::IsNull(e)
         | Expr::IsNotNull(e)
-        | Expr::IsUnique(e) => {
-            validate_expression(e, vars_in_scope)?;
-        }
+        | Expr::IsUnique(e) => validate_expression(e, vars_in_scope),
         Expr::Property(base, prop) => {
-            // Check if the base is a path variable - paths don't have properties
+            // Paths don't have properties
             if let Expr::Variable(var_name) = base.as_ref()
                 && let Some(var_info) = find_var_in_scope(vars_in_scope, var_name)
                 && var_info.var_type == VariableType::Path
@@ -508,13 +507,9 @@ fn validate_expression(expr: &Expr, vars_in_scope: &[VariableInfo]) -> Result<()
                     prop
                 ));
             }
-            validate_expression(base, vars_in_scope)?;
+            validate_expression(base, vars_in_scope)
         }
-        Expr::List(items) => {
-            for item in items {
-                validate_expression(item, vars_in_scope)?;
-            }
-        }
+        Expr::List(items) => validate_all(items, vars_in_scope),
         Expr::Case {
             expr: case_expr,
             when_then,
@@ -530,15 +525,14 @@ fn validate_expression(expr: &Expr, vars_in_scope: &[VariableInfo]) -> Result<()
             if let Some(e) = else_expr {
                 validate_expression(e, vars_in_scope)?;
             }
+            Ok(())
         }
-        Expr::In { expr, list } => {
-            validate_expression(expr, vars_in_scope)?;
-            validate_expression(list, vars_in_scope)?;
+        Expr::In { expr: e, list } => {
+            validate_expression(e, vars_in_scope)?;
+            validate_expression(list, vars_in_scope)
         }
-        _ => {}
+        _ => Ok(()),
     }
-
-    Ok(())
 }
 
 #[derive(Debug, Clone)]

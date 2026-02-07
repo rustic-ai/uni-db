@@ -26,7 +26,7 @@ async fn test_inline_property_simple() -> Result<()> {
         .await?;
 
     println!("Result length: {}", result.len());
-    if result.len() > 0 {
+    if !result.is_empty() {
         println!(
             "First row: name={}, age={}",
             result.rows()[0].get::<String>("n.name")?,

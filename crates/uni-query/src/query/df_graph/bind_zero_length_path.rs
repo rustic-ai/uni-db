@@ -250,41 +250,38 @@ struct BindZeroLengthPathStream {
     metrics: BaselineMetrics,
 }
 
+/// Extract a typed value from a column at a given row index.
+fn extract_column_value<T: arrow_array::Array + 'static, R>(
+    batch: &RecordBatch,
+    col_name: &str,
+    row_idx: usize,
+    extract_fn: impl FnOnce(&T, usize) -> R,
+) -> Option<R> {
+    let (idx, _) = batch.schema().column_with_name(col_name)?;
+    let col = batch.column(idx);
+    let arr = col.as_any().downcast_ref::<T>()?;
+    if arr.is_valid(row_idx) {
+        Some(extract_fn(arr, row_idx))
+    } else {
+        None
+    }
+}
+
 impl BindZeroLengthPathStream {
     /// Process a single input batch.
     fn process_batch(&self, batch: RecordBatch) -> DFResult<RecordBatch> {
         let num_rows = batch.num_rows();
-
-        // Get the VID column from input
-        let vid_col_name = format!("{}._vid", self.node_variable);
-        let vid_col_idx = batch
-            .schema()
-            .column_with_name(&vid_col_name)
-            .map(|(idx, _)| idx);
-
-        // Get label column if available
-        let label_col_name = format!("{}._label", self.node_variable);
-        let label_col_idx = batch
-            .schema()
-            .column_with_name(&label_col_name)
-            .map(|(idx, _)| idx);
-
-        // Build path column for each row
         let query_ctx = self.graph_ctx.query_context();
 
-        // Create builders for the node list
+        let vid_col_name = format!("{}._vid", self.node_variable);
+        let label_col_name = format!("{}._label", self.node_variable);
+
+        // Create builders for nodes and empty edges
         let node_struct_fields = Fields::from(vec![
             Field::new("_vid", DataType::UInt64, false),
             Field::new("_label", DataType::Utf8, true),
             Field::new("properties", DataType::LargeBinary, true),
         ]);
-
-        let mut nodes_builder = ListBuilder::new(StructBuilder::from_fields(
-            node_struct_fields.clone(),
-            num_rows,
-        ));
-
-        // Create builders for the empty edge list
         let edge_struct_fields = Fields::from(vec![
             Field::new("_eid", DataType::UInt64, false),
             Field::new("_type_name", DataType::Utf8, false),
@@ -293,127 +290,94 @@ impl BindZeroLengthPathStream {
             Field::new("properties", DataType::LargeBinary, true),
         ]);
 
-        let mut rels_builder = ListBuilder::new(StructBuilder::from_fields(
-            edge_struct_fields.clone(),
-            0, // No edges for zero-length paths
-        ));
+        let mut nodes_builder =
+            ListBuilder::new(StructBuilder::from_fields(node_struct_fields, num_rows));
+        let mut rels_builder = ListBuilder::new(StructBuilder::from_fields(edge_struct_fields, 0));
 
-        // Process each row
         for row_idx in 0..num_rows {
-            // Get VID for this row
-            let vid = if let Some(idx) = vid_col_idx {
-                let col = batch.column(idx);
-                if let Some(arr) = col.as_any().downcast_ref::<arrow_array::UInt64Array>() {
-                    if arr.is_valid(row_idx) {
-                        Some(uni_common::core::id::Vid::from(arr.value(row_idx)))
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
+            let vid: Option<uni_common::core::id::Vid> = extract_column_value(
+                &batch,
+                &vid_col_name,
+                row_idx,
+                |arr: &arrow_array::UInt64Array, i| uni_common::core::id::Vid::from(arr.value(i)),
+            );
 
-            // Get label for this row
-            let label = if let Some(idx) = label_col_idx {
-                let col = batch.column(idx);
-                if let Some(arr) = col.as_any().downcast_ref::<arrow_array::StringArray>() {
-                    if arr.is_valid(row_idx) {
-                        Some(arr.value(row_idx).to_string())
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
+            let label: Option<String> = extract_column_value(
+                &batch,
+                &label_col_name,
+                row_idx,
+                |arr: &arrow_array::StringArray, i| arr.value(i).to_string(),
+            );
 
-            // Add one node to the nodes list
-            let nodes_struct = nodes_builder.values();
-
-            if let Some(v) = vid {
-                // VID
-                nodes_struct
-                    .field_builder::<UInt64Builder>(0)
-                    .unwrap()
-                    .append_value(v.as_u64());
-
-                // Label - use from column or lookup from L0
-                let label_to_use = label.or_else(|| {
-                    l0_visibility::get_vertex_labels(v, &query_ctx)
-                        .first()
-                        .cloned()
-                });
-                let label_builder = nodes_struct.field_builder::<StringBuilder>(1).unwrap();
-                if let Some(l) = label_to_use {
-                    label_builder.append_value(&l);
-                } else {
-                    label_builder.append_null();
-                }
-
-                // Properties - lookup from L0
-                let props_builder = nodes_struct.field_builder::<LargeBinaryBuilder>(2).unwrap();
-                if let Some(props) = l0_visibility::get_vertex_properties(v, &query_ctx) {
-                    if let Ok(json) = serde_json::to_vec(&props) {
-                        props_builder.append_value(&json);
-                    } else {
-                        props_builder.append_null();
-                    }
-                } else {
-                    props_builder.append_null();
-                }
-
-                nodes_struct.append(true);
-            } else {
-                // Null VID - still need to append something
-                nodes_struct
-                    .field_builder::<UInt64Builder>(0)
-                    .unwrap()
-                    .append_value(0);
-                nodes_struct
-                    .field_builder::<StringBuilder>(1)
-                    .unwrap()
-                    .append_null();
-                nodes_struct
-                    .field_builder::<LargeBinaryBuilder>(2)
-                    .unwrap()
-                    .append_null();
-                nodes_struct.append(true);
-            }
-
-            nodes_builder.append(true);
-
-            // Empty relationships list
+            self.append_node_to_builder(&mut nodes_builder, vid, label, &query_ctx);
             rels_builder.append(true);
         }
 
-        // Finish building arrays
         let nodes_array = Arc::new(nodes_builder.finish()) as ArrayRef;
         let rels_array = Arc::new(rels_builder.finish()) as ArrayRef;
 
-        // Build the path struct
-        let nodes_field = Arc::new(Field::new("nodes", nodes_array.data_type().clone(), false));
-        let rels_field = Arc::new(Field::new(
-            "relationships",
-            rels_array.data_type().clone(),
-            false,
-        ));
-
         let path_array = StructArray::try_new(
-            Fields::from(vec![nodes_field, rels_field]),
+            Fields::from(vec![
+                Arc::new(Field::new("nodes", nodes_array.data_type().clone(), false)),
+                Arc::new(Field::new(
+                    "relationships",
+                    rels_array.data_type().clone(),
+                    false,
+                )),
+            ]),
             vec![nodes_array, rels_array],
             None,
         )?;
 
-        // Build output batch: input columns + path column
         let mut columns: Vec<ArrayRef> = batch.columns().to_vec();
         columns.push(Arc::new(path_array));
 
         Ok(RecordBatch::try_new(self.schema.clone(), columns)?)
+    }
+
+    /// Append a node entry to the nodes list builder.
+    fn append_node_to_builder(
+        &self,
+        nodes_builder: &mut ListBuilder<StructBuilder>,
+        vid: Option<uni_common::core::id::Vid>,
+        label: Option<String>,
+        query_ctx: &uni_store::QueryContext,
+    ) {
+        let nodes_struct = nodes_builder.values();
+
+        let (vid_value, label_value, props_json) = match vid {
+            Some(v) => {
+                let resolved_label = label.or_else(|| {
+                    l0_visibility::get_vertex_labels(v, query_ctx)
+                        .first()
+                        .cloned()
+                });
+                let props = l0_visibility::get_vertex_properties(v, query_ctx)
+                    .and_then(|p| serde_json::to_vec(&p).ok());
+                (v.as_u64(), resolved_label, props)
+            }
+            None => (0, None, None),
+        };
+
+        nodes_struct
+            .field_builder::<UInt64Builder>(0)
+            .unwrap()
+            .append_value(vid_value);
+
+        let label_builder = nodes_struct.field_builder::<StringBuilder>(1).unwrap();
+        match label_value {
+            Some(l) => label_builder.append_value(&l),
+            None => label_builder.append_null(),
+        }
+
+        let props_builder = nodes_struct.field_builder::<LargeBinaryBuilder>(2).unwrap();
+        match props_json {
+            Some(json) => props_builder.append_value(&json),
+            None => props_builder.append_null(),
+        }
+
+        nodes_struct.append(true);
+        nodes_builder.append(true);
     }
 }
 

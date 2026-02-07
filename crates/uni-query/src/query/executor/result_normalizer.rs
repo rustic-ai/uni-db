@@ -103,7 +103,7 @@ impl ResultNormalizer {
     /// Extract a u64 ID from a Value (Int or parseable String).
     fn value_to_u64(value: &Value) -> Option<u64> {
         match value {
-            Value::Int(i) => Some(*i as u64),
+            Value::Int(i) => u64::try_from(*i).ok(),
             Value::String(s) => s.parse().ok(),
             _ => None,
         }
@@ -111,9 +111,10 @@ impl ResultNormalizer {
 
     /// Extract a string from a Value.
     fn value_to_string(value: &Value) -> Option<String> {
-        match value {
-            Value::String(s) => Some(s.clone()),
-            _ => None,
+        if let Value::String(s) = value {
+            Some(s.clone())
+        } else {
+            None
         }
     }
 
@@ -167,15 +168,11 @@ impl ResultNormalizer {
         match json {
             serde_json::Value::Null => Value::Null,
             serde_json::Value::Bool(b) => Value::Bool(b),
-            serde_json::Value::Number(n) => {
-                if let Some(i) = n.as_i64() {
-                    Value::Int(i)
-                } else if let Some(f) = n.as_f64() {
-                    Value::Float(f)
-                } else {
-                    Value::String(n.to_string())
-                }
-            }
+            serde_json::Value::Number(n) => n
+                .as_i64()
+                .map(Value::Int)
+                .or_else(|| n.as_f64().map(Value::Float))
+                .unwrap_or_else(|| Value::String(n.to_string())),
             serde_json::Value::String(s) => Value::String(s),
             serde_json::Value::Array(arr) => {
                 Value::List(arr.into_iter().map(Self::json_value_to_value).collect())
@@ -224,17 +221,10 @@ impl ResultNormalizer {
             .ok_or_else(|| anyhow!("Missing or invalid _eid in edge map"))?;
 
         // Prefer _type_name (string) over _type (numeric ID) for user-facing output
-        let edge_type = map
-            .get("_type_name")
-            .and_then(|v| match v {
-                Value::String(s) if !s.is_empty() => Some(s.clone()),
-                _ => None,
-            })
-            .or_else(|| {
-                map.get("_type")
-                    .or_else(|| map.get("type"))
-                    .and_then(Self::value_to_string)
-            })
+        let edge_type = ["_type_name", "_type", "type"]
+            .iter()
+            .find_map(|key| map.get(*key).and_then(Self::value_to_string))
+            .filter(|s| !s.is_empty())
             .unwrap_or_default();
 
         let src = map

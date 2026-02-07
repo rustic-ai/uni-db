@@ -109,6 +109,49 @@ async fn hydrate_entity_if_needed(
 }
 
 impl Executor {
+    /// Helper to verify and filter candidates against an optional predicate.
+    ///
+    /// Deduplicates candidates, loads properties, and evaluates the filter expression.
+    /// Returns only VIDs that pass the filter (or are not deleted).
+    async fn verify_and_filter_candidates(
+        &self,
+        mut candidates: Vec<Vid>,
+        variable: &str,
+        filter: Option<&Expr>,
+        ctx: Option<&QueryContext>,
+        prop_manager: &PropertyManager,
+        params: &HashMap<String, Value>,
+    ) -> Result<Vec<Vid>> {
+        candidates.sort_unstable();
+        candidates.dedup();
+
+        let mut verified_vids = Vec::new();
+        for vid in candidates {
+            let Some(props) = prop_manager.get_all_vertex_props_with_ctx(vid, ctx).await? else {
+                continue; // Deleted
+            };
+
+            if let Some(expr) = filter {
+                let mut props_json: serde_json::Map<String, Value> = props.into_iter().collect();
+                props_json.insert("_vid".to_string(), json!(vid.as_u64()));
+
+                let mut row = HashMap::new();
+                row.insert(variable.to_string(), Value::Object(props_json));
+
+                let res = self
+                    .evaluate_expr(expr, &row, prop_manager, params, ctx)
+                    .await?;
+                if res.as_bool().unwrap_or(false) {
+                    verified_vids.push(vid);
+                }
+            } else {
+                verified_vids.push(vid);
+            }
+        }
+
+        Ok(verified_vids)
+    }
+
     pub(crate) async fn scan_storage_candidates(
         &self,
         label_id: u16,
@@ -208,35 +251,8 @@ impl Executor {
             }
         }
 
-        candidates.sort_unstable();
-        candidates.dedup();
-
-        let mut verified_vids = Vec::new();
-        for vid in candidates {
-            let Some(props) = prop_manager.get_all_vertex_props_with_ctx(vid, ctx).await? else {
-                continue; // Deleted
-            };
-
-            if let Some(expr) = filter {
-                let mut props_json: serde_json::Map<String, Value> = props.into_iter().collect();
-                // Inject _vid for filtering
-                props_json.insert("_vid".to_string(), json!(vid.as_u64()));
-
-                let mut row = HashMap::new();
-                row.insert(variable.to_string(), Value::Object(props_json));
-
-                let res = self
-                    .evaluate_expr(expr, &row, prop_manager, params, ctx)
-                    .await?;
-                if res.as_bool().unwrap_or(false) {
-                    verified_vids.push(vid);
-                }
-            } else {
-                verified_vids.push(vid);
-            }
-        }
-
-        Ok(verified_vids)
+        self.verify_and_filter_candidates(candidates, variable, filter, ctx, prop_manager, params)
+            .await
     }
 
     /// Scan all vertices from main table (schemaless MATCH (n)).
@@ -272,35 +288,8 @@ impl Executor {
             }
         }
 
-        candidates.sort_unstable();
-        candidates.dedup();
-
-        // Verify and filter
-        let mut verified_vids = Vec::new();
-        for vid in candidates {
-            let Some(props) = prop_manager.get_all_vertex_props_with_ctx(vid, ctx).await? else {
-                continue; // Deleted
-            };
-
-            if let Some(expr) = filter {
-                let mut props_json: serde_json::Map<String, Value> = props.into_iter().collect();
-                props_json.insert("_vid".to_string(), json!(vid.as_u64()));
-
-                let mut row = HashMap::new();
-                row.insert(variable.to_string(), Value::Object(props_json));
-
-                let res = self
-                    .evaluate_expr(expr, &row, prop_manager, params, ctx)
-                    .await?;
-                if res.as_bool().unwrap_or(false) {
-                    verified_vids.push(vid);
-                }
-            } else {
-                verified_vids.push(vid);
-            }
-        }
-
-        Ok(verified_vids)
+        self.verify_and_filter_candidates(candidates, variable, filter, ctx, prop_manager, params)
+            .await
     }
 
     /// Scan main table for vertices with a specific label (schemaless unknown label).
@@ -338,35 +327,8 @@ impl Executor {
             }
         }
 
-        candidates.sort_unstable();
-        candidates.dedup();
-
-        // Verify and filter
-        let mut verified_vids = Vec::new();
-        for vid in candidates {
-            let Some(props) = prop_manager.get_all_vertex_props_with_ctx(vid, ctx).await? else {
-                continue; // Deleted
-            };
-
-            if let Some(expr) = filter {
-                let mut props_json: serde_json::Map<String, Value> = props.into_iter().collect();
-                props_json.insert("_vid".to_string(), json!(vid.as_u64()));
-
-                let mut row = HashMap::new();
-                row.insert(variable.to_string(), Value::Object(props_json));
-
-                let res = self
-                    .evaluate_expr(expr, &row, prop_manager, params, ctx)
-                    .await?;
-                if res.as_bool().unwrap_or(false) {
-                    verified_vids.push(vid);
-                }
-            } else {
-                verified_vids.push(vid);
-            }
-        }
-
-        Ok(verified_vids)
+        self.verify_and_filter_candidates(candidates, variable, filter, ctx, prop_manager, params)
+            .await
     }
 
     /// Scan vertices that have ALL the specified labels (intersection semantics).
@@ -459,36 +421,8 @@ impl Executor {
             }
         }
 
-        candidates.sort_unstable();
-        candidates.dedup();
-
-        // Verify candidates with property filter
-        let mut verified_vids = Vec::new();
-        for vid in candidates {
-            let Some(props) = prop_manager.get_all_vertex_props_with_ctx(vid, ctx).await? else {
-                continue; // Deleted
-            };
-
-            if let Some(expr) = filter {
-                let mut props_json: serde_json::Map<String, Value> = props.into_iter().collect();
-                // Inject _vid for filtering
-                props_json.insert("_vid".to_string(), json!(vid.as_u64()));
-
-                let mut row = HashMap::new();
-                row.insert(variable.to_string(), Value::Object(props_json));
-
-                let res = self
-                    .evaluate_expr(expr, &row, prop_manager, params, ctx)
-                    .await?;
-                if res.as_bool().unwrap_or(false) {
-                    verified_vids.push(vid);
-                }
-            } else {
-                verified_vids.push(vid);
-            }
-        }
-
-        Ok(verified_vids)
+        self.verify_and_filter_candidates(candidates, variable, filter, ctx, prop_manager, params)
+            .await
     }
 
     pub(crate) fn vid_from_value(val: &Value) -> Result<Vid> {
@@ -805,14 +739,7 @@ impl Executor {
                     {
                         Ok(batches) => self.record_batches_to_rows(batches),
                         Err(e) => {
-                            eprintln!(
-                                "DEBUG: DataFusion execution failed (falling back to execute_subplan): {}",
-                                e
-                            );
-                            log::debug!(
-                                "DataFusion execution failed (falling back to execute_subplan): {}",
-                                e
-                            );
+                            log::debug!("DataFusion execution failed (falling back): {}", e);
                             if e.to_string().contains("Query timed out")
                                 || e.to_string().contains("Query exceeded memory limit")
                             {
@@ -824,27 +751,19 @@ impl Executor {
                     }
                 }
             } else {
-                // Execute using DataFusion engine, falling back to execute_subplan execute_subplan
+                // Execute using DataFusion engine with fallback
                 match self
                     .execute_datafusion(plan.clone(), prop_manager, params)
                     .await
                 {
                     Ok(batches) => self.record_batches_to_rows(batches),
                     Err(e) => {
-                        eprintln!(
-                            "DEBUG 2: DataFusion execution failed (falling back to execute_subplan): {}",
-                            e
-                        );
-                        log::debug!(
-                            "DataFusion execution failed (falling back to execute_subplan): {}",
-                            e
-                        );
+                        log::debug!("DataFusion execution failed (falling back): {}", e);
                         if e.to_string().contains("Query timed out")
                             || e.to_string().contains("Query exceeded memory limit")
                         {
                             return Err(e);
                         }
-                        // Fall back to execute_subplan
                         self.execute_subplan(plan, prop_manager, params, ctx.as_ref())
                             .await
                     }
@@ -3806,35 +3725,21 @@ impl Executor {
                 target_json.insert("_vid".to_string(), json!(target_vid.as_u64()));
 
                 // Look up target label - first from L0 (for recently created nodes),
-                // then fall back to storage
+                // Check L0 first, then fall back to storage
                 let target_labels = if let Some(ctx) = ctx {
                     let l0_labels =
                         uni_store::runtime::l0_visibility::get_vertex_labels(target_vid, ctx);
-                    eprintln!(
-                        "DEBUG TraverseMainByType: L0 labels for target_vid {:?}: {:?}",
-                        target_vid, l0_labels
-                    );
                     if !l0_labels.is_empty() {
                         l0_labels
                     } else {
-                        let storage_labels =
-                            uni_store::storage::main_vertex::MainVertexDataset::find_labels_by_vid(
-                                self.storage.lancedb_store(),
-                                target_vid,
-                            )
-                            .await?
-                            .unwrap_or_default();
-                        eprintln!(
-                            "DEBUG TraverseMainByType: Storage labels for target_vid {:?}: {:?}",
-                            target_vid, storage_labels
-                        );
-                        storage_labels
+                        uni_store::storage::main_vertex::MainVertexDataset::find_labels_by_vid(
+                            self.storage.lancedb_store(),
+                            target_vid,
+                        )
+                        .await?
+                        .unwrap_or_default()
                     }
                 } else {
-                    eprintln!(
-                        "DEBUG TraverseMainByType: No ctx provided for target_vid {:?}",
-                        target_vid
-                    );
                     uni_store::storage::main_vertex::MainVertexDataset::find_labels_by_vid(
                         self.storage.lancedb_store(),
                         target_vid,

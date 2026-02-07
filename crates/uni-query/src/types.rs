@@ -51,6 +51,45 @@ where
     }
 }
 
+/// Macro to implement TryFrom<Value> that delegates to TryFrom<&Value>.
+///
+/// This eliminates the boilerplate of writing:
+/// ```ignore
+/// impl TryFrom<Value> for T {
+///     type Error = UniError;
+///     fn try_from(value: Value) -> std::result::Result<Self, Self::Error> {
+///         Self::try_from(&value)
+///     }
+/// }
+/// ```
+macro_rules! impl_try_from_value_owned {
+    ($($t:ty),+ $(,)?) => {
+        $(
+            impl TryFrom<Value> for $t {
+                type Error = UniError;
+                fn try_from(value: Value) -> std::result::Result<Self, Self::Error> {
+                    Self::try_from(&value)
+                }
+            }
+        )+
+    };
+}
+
+// Implement TryFrom<Value> for standard types using the macro
+impl_try_from_value_owned!(
+    String,
+    i64,
+    i32,
+    f64,
+    bool,
+    Vid,
+    Eid,
+    Vec<f32>,
+    Path,
+    Node,
+    Edge
+);
+
 // Implement TryFrom<&Value> for standard types
 
 impl TryFrom<&Value> for String {
@@ -70,13 +109,6 @@ impl TryFrom<&Value> for String {
     }
 }
 
-impl TryFrom<Value> for String {
-    type Error = UniError;
-    fn try_from(value: Value) -> std::result::Result<Self, Self::Error> {
-        Self::try_from(&value)
-    }
-}
-
 impl TryFrom<&Value> for i64 {
     type Error = UniError;
 
@@ -89,13 +121,6 @@ impl TryFrom<&Value> for i64 {
                 actual: format!("{:?}", value),
             }),
         }
-    }
-}
-
-impl TryFrom<Value> for i64 {
-    type Error = UniError;
-    fn try_from(value: Value) -> std::result::Result<Self, Self::Error> {
-        Self::try_from(&value)
     }
 }
 
@@ -131,13 +156,6 @@ impl TryFrom<&Value> for i32 {
     }
 }
 
-impl TryFrom<Value> for i32 {
-    type Error = UniError;
-    fn try_from(value: Value) -> std::result::Result<Self, Self::Error> {
-        Self::try_from(&value)
-    }
-}
-
 impl TryFrom<&Value> for f64 {
     type Error = UniError;
 
@@ -153,13 +171,6 @@ impl TryFrom<&Value> for f64 {
     }
 }
 
-impl TryFrom<Value> for f64 {
-    type Error = UniError;
-    fn try_from(value: Value) -> std::result::Result<Self, Self::Error> {
-        Self::try_from(&value)
-    }
-}
-
 impl TryFrom<&Value> for bool {
     type Error = UniError;
 
@@ -171,13 +182,6 @@ impl TryFrom<&Value> for bool {
                 actual: format!("{:?}", value),
             }),
         }
-    }
-}
-
-impl TryFrom<Value> for bool {
-    type Error = UniError;
-    fn try_from(value: Value) -> std::result::Result<Self, Self::Error> {
-        Self::try_from(&value)
     }
 }
 
@@ -205,13 +209,6 @@ impl TryFrom<&Value> for Vid {
     }
 }
 
-impl TryFrom<Value> for Vid {
-    type Error = UniError;
-    fn try_from(value: Value) -> std::result::Result<Self, Self::Error> {
-        Self::try_from(&value)
-    }
-}
-
 impl TryFrom<&Value> for Eid {
     type Error = UniError;
 
@@ -233,13 +230,6 @@ impl TryFrom<&Value> for Eid {
                 actual: format!("{:?}", value),
             }),
         }
-    }
-}
-
-impl TryFrom<Value> for Eid {
-    type Error = UniError;
-    fn try_from(value: Value) -> std::result::Result<Self, Self::Error> {
-        Self::try_from(&value)
     }
 }
 
@@ -270,13 +260,6 @@ impl TryFrom<&Value> for Vec<f32> {
                 actual: format!("{:?}", value),
             }),
         }
-    }
-}
-
-impl TryFrom<Value> for Vec<f32> {
-    type Error = UniError;
-    fn try_from(value: Value) -> std::result::Result<Self, Self::Error> {
-        Self::try_from(&value)
     }
 }
 
@@ -451,13 +434,6 @@ impl TryFrom<&Value> for Path {
     }
 }
 
-impl TryFrom<Value> for Path {
-    type Error = UniError;
-    fn try_from(value: Value) -> std::result::Result<Self, Self::Error> {
-        Self::try_from(&value)
-    }
-}
-
 /// Node returned from query
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Node {
@@ -524,13 +500,6 @@ impl TryFrom<&Value> for Node {
     }
 }
 
-impl TryFrom<Value> for Node {
-    type Error = UniError;
-    fn try_from(value: Value) -> std::result::Result<Self, Self::Error> {
-        Self::try_from(&value)
-    }
-}
-
 /// Edge returned from query
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Edge {
@@ -585,13 +554,6 @@ impl TryFrom<&Value> for Edge {
                 actual: format!("{:?}", value),
             }),
         }
-    }
-}
-
-impl TryFrom<Value> for Edge {
-    type Error = UniError;
-    fn try_from(value: Value) -> std::result::Result<Self, Self::Error> {
-        Self::try_from(&value)
     }
 }
 

@@ -57,6 +57,45 @@ type BfsResult = (Vid, usize, Vec<Vid>, Vec<Eid>);
 /// Expansion record: (original_row_idx, target_vid, hop_count, node_path, edge_path)
 type ExpansionRecord = (usize, Vid, usize, Vec<Vid>, Vec<Eid>);
 
+/// Build the standard node struct fields for path structures.
+fn node_struct_fields() -> arrow_schema::Fields {
+    arrow_schema::Fields::from(vec![
+        Field::new("_vid", DataType::UInt64, false),
+        Field::new("_label", DataType::Utf8, true),
+        Field::new("properties", DataType::LargeBinary, true),
+    ])
+}
+
+/// Build the standard edge struct fields for path structures.
+fn edge_struct_fields() -> arrow_schema::Fields {
+    arrow_schema::Fields::from(vec![
+        Field::new("_eid", DataType::UInt64, false),
+        Field::new("_type_name", DataType::Utf8, false),
+        Field::new("_src", DataType::UInt64, false),
+        Field::new("_dst", DataType::UInt64, false),
+        Field::new("properties", DataType::LargeBinary, true),
+    ])
+}
+
+/// Build path struct field for schema with given path variable name.
+fn build_path_struct_field(path_var: &str) -> Field {
+    let node_item = Field::new("item", DataType::Struct(node_struct_fields()), true);
+    let nodes_field = Field::new("nodes", DataType::List(Arc::new(node_item)), false);
+
+    let edge_item = Field::new("item", DataType::Struct(edge_struct_fields()), true);
+    let relationships_field =
+        Field::new("relationships", DataType::List(Arc::new(edge_item)), false);
+
+    Field::new(
+        path_var,
+        DataType::Struct(arrow_schema::Fields::from(vec![
+            nodes_field,
+            relationships_field,
+        ])),
+        false,
+    )
+}
+
 /// Resolve edge property Arrow type, falling back to `LargeBinary` (JSONB) for
 /// schemaless properties. Unlike vertex properties, schemaless edge properties must
 /// preserve original JSON value types (int, float, etc.) since edge types commonly
@@ -1784,7 +1823,7 @@ impl GraphVariableLengthTraverseExec {
             .map(|f| f.as_ref().clone())
             .collect();
 
-        // Add target VID column (named after target variable for downstream filter compatibility)
+        // Add target VID column
         fields.push(Field::new(
             format!("{}._vid", target_variable),
             DataType::UInt64,
@@ -1794,42 +1833,9 @@ impl GraphVariableLengthTraverseExec {
         // Add hop count
         fields.push(Field::new("_hop_count", DataType::UInt64, false));
 
-        // Add path variable column if bound.
-        // For named paths like `p = (a)-[*]->(b)`, we need to output a Path structure
-        // that the result normalizer can convert to a proper Path object.
-        //
-        // The Path structure is a Map with:
-        // - "nodes": List of node structs with _vid, _label, properties
-        // - "relationships": List of edge structs with _eid, _type_name, _src, _dst, properties
+        // Add path struct if bound
         if let Some(path_var) = path_variable {
-            // Node struct fields: _vid, _label, properties (as LargeBinary/JSON)
-            let node_struct_fields = vec![
-                Field::new("_vid", DataType::UInt64, false),
-                Field::new("_label", DataType::Utf8, true),
-                Field::new("properties", DataType::LargeBinary, true),
-            ];
-            let node_item = Field::new("item", DataType::Struct(node_struct_fields.into()), true);
-            let nodes_field = Field::new("nodes", DataType::List(Arc::new(node_item)), false);
-
-            // Edge struct fields: _eid, _type_name, _src, _dst, properties (as LargeBinary/JSON)
-            let edge_struct_fields = vec![
-                Field::new("_eid", DataType::UInt64, false),
-                Field::new("_type_name", DataType::Utf8, false),
-                Field::new("_src", DataType::UInt64, false),
-                Field::new("_dst", DataType::UInt64, false),
-                Field::new("properties", DataType::LargeBinary, true),
-            ];
-            let edge_item = Field::new("item", DataType::Struct(edge_struct_fields.into()), true);
-            let relationships_field =
-                Field::new("relationships", DataType::List(Arc::new(edge_item)), false);
-
-            // Path struct with nodes and relationships
-            let path_struct_fields = vec![nodes_field, relationships_field];
-            fields.push(Field::new(
-                path_var,
-                DataType::Struct(path_struct_fields.into()),
-                false,
-            ));
+            fields.push(build_path_struct_field(path_var));
         }
 
         Arc::new(Schema::new(fields))
@@ -2461,37 +2467,9 @@ impl GraphVariableLengthTraverseMainExec {
         // Add hop count
         fields.push(Field::new("_hop_count", DataType::UInt64, false));
 
-        // Add path variable column if bound.
-        // For named paths, we output a Path struct with nodes and relationships arrays.
+        // Add path struct if bound
         if let Some(path_var) = path_variable {
-            // Node struct fields: _vid, _label, properties (as LargeBinary/JSON)
-            let node_struct_fields = vec![
-                Field::new("_vid", DataType::UInt64, false),
-                Field::new("_label", DataType::Utf8, true),
-                Field::new("properties", DataType::LargeBinary, true),
-            ];
-            let node_item = Field::new("item", DataType::Struct(node_struct_fields.into()), true);
-            let nodes_field = Field::new("nodes", DataType::List(Arc::new(node_item)), false);
-
-            // Edge struct fields: _eid, _type_name, _src, _dst, properties (as LargeBinary/JSON)
-            let edge_struct_fields = vec![
-                Field::new("_eid", DataType::UInt64, false),
-                Field::new("_type_name", DataType::Utf8, false),
-                Field::new("_src", DataType::UInt64, false),
-                Field::new("_dst", DataType::UInt64, false),
-                Field::new("properties", DataType::LargeBinary, true),
-            ];
-            let edge_item = Field::new("item", DataType::Struct(edge_struct_fields.into()), true);
-            let relationships_field =
-                Field::new("relationships", DataType::List(Arc::new(edge_item)), false);
-
-            // Path struct with nodes and relationships
-            let path_struct_fields = vec![nodes_field, relationships_field];
-            fields.push(Field::new(
-                path_var,
-                DataType::Struct(path_struct_fields.into()),
-                false,
-            ));
+            fields.push(build_path_struct_field(path_var));
         }
 
         // Add target property columns (as LargeBinary for lazy hydration via PropertyManager)
