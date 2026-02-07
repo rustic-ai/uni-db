@@ -4,7 +4,7 @@
 - [x] Task: Fix Decimal, Hex, and Octal integer literal overflow and parsing edge cases. 84feece
     - [ ] Write Tests
     - [ ] Implement Fix
-- [ ] Task: Fix String literal escaping and Unicode support.
+- [x] Task: Fix String literal escaping and Unicode support. 0747675
     - [ ] Write Tests
     - [ ] Implement Fix
 - [ ] Task: Resolve nested List and Map literal evaluation failures in the vectorized engine.
