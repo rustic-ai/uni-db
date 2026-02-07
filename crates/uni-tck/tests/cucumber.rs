@@ -32,6 +32,6 @@ async fn main() {
             )
             .normalized(),
         )
-        .run("features/")
+        .run("tck/features/")
         .await;
 }

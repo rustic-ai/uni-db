@@ -1,13 +1,13 @@
 use anyhow::Result;
+use std::sync::OnceLock;
 use uni_db::Uni;
 
-mod binary_tree;
+mod graph_loader;
+use graph_loader::GraphLoader;
+
+static LOADER: OnceLock<GraphLoader> = OnceLock::new();
 
 /// Load a named graph fixture into the database
 pub async fn load_graph(db: &Uni, name: &str) -> Result<()> {
-    match name {
-        "binary-tree-1" => binary_tree::load_binary_tree_1(db).await,
-        "binary-tree-2" => binary_tree::load_binary_tree_2(db).await,
-        _ => Err(anyhow::anyhow!("Unknown graph fixture: {}", name)),
-    }
+    LOADER.get_or_init(GraphLoader::new).load(db, name).await
 }

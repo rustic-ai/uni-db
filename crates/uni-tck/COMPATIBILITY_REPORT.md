@@ -1,6 +1,6 @@
 # Uni OpenCypher TCK Compatibility Report
 
-**Generated:** 2026-02-06 (After Property Normalization Fix)
+**Generated:** 2026-02-06 (Latest TCK Run)
 **TCK Version:** M23 (openCypher)
 **Uni Version:** Current main branch
 
@@ -11,8 +11,8 @@
 | Metric | Count | Pass Rate |
 |--------|-------|-----------|
 | **Features** | 192 | - |
-| **Scenarios** | 3,869 | **63.8%** (2,469 passed, 1,361 failed) |
-| **Steps** | ~14,700 | ~90% |
+| **Scenarios** | 3,897 | **63.3%** (2,467 passed, 1,391 failed) |
+| **Skipped** | 39 | - |
 | **Parsing Errors** | 0 | None (harness fixed) |
 
 **Recent Fixes (2026-02-06):**
@@ -20,7 +20,7 @@
 2. Added Path type detection and conversion in result normalizer (`is_path_map()` and `map_to_path()`)
 3. **Property Normalization Fix:** Added `normalize_property_value()` to safely normalize nested property values without false structural detection. This prevents user data containing `_vid`/`_eid` keys from being incorrectly converted to Node/Edge types.
 
-The high step pass rate (~90%) vs lower scenario pass rate (63.8%) indicates that most basic operations work, but many scenarios fail at specific assertion points.
+The high step pass rate (~90%) vs lower scenario pass rate (63.3%) indicates that most basic operations work, but many scenarios fail at specific assertion points.
 
 ---
 
@@ -32,11 +32,12 @@ The high step pass rate (~90%) vs lower scenario pass rate (63.8%) indicates tha
 | Match2 - Match relationships | 79 | 86 | 91.9% |
 | Match3 - Match fixed length patterns | 20 | 30 | 66.7% |
 | Match4 - Match variable length patterns | 0 | 10 | 0.0% |
+| Match5 - Match variable length patterns over given graphs | 0 | 29 | 0.0% |
 | Match6 - Match named paths | 81 | 97 | 83.5% |
 | Match7 - Optional match | 19 | 31 | 61.3% |
 | Match8 - Match clause interop | 1 | 3 | 33.3% |
 | Match9 - Match deprecated | 1 | 9 | 11.1% |
-| **TOTAL Match** | **285** | **352** | **81.0%** |
+| **TOTAL Match** | **284** | **381** | **74.5%** |
 
 ### Fixes Implemented (2026-02-06)
 
@@ -69,38 +70,47 @@ This separation ensures:
 |----------|--------|--------|-------|------|
 | **Conditional** | **13** | **0** | **13** | **100.0%** |
 | **MatchWhere** | **33** | **1** | **34** | **97.1%** |
-| **ExistentialSubquery** | **9** | **1** | **10** | **90.0%** |
+| **Temporal8** | **27** | **0** | **27** | **100.0%** |
+| **Temporal6** | **17** | **0** | **17** | **100.0%** |
+| Temporal1 | 199 | 8 | 207 | 96.1% |
+| Temporal10 | 125 | 6 | 131 | 95.4% |
+| Temporal7 | 17 | 1 | 18 | 94.4% |
 | Null | 38 | 6 | 44 | 86.4% |
+| **ExistentialSubquery** | **9** | **1** | **10** | **90.0%** |
 | Quantifier | 497 | 107 | 604 | 82.3% |
 | Call | 42 | 10 | 52 | 80.8% |
-| Match | 282 | 71 | 353 | 79.9% |
-| **WithOrderBy** | **227** | **65** | **292** | **77.7%** |
-| Temporal | 749 | 255 | 1,004 | 74.6% |
+| Temporal9 | 255 | 67 | 322 | 79.2% |
+| **WithOrderBy** | **226** | **66** | **292** | **77.4%** |
+| Temporal (overall) | 749 | 255 | 1,004 | 74.6% |
 | **WithWhere** | **14** | **5** | **19** | **73.7%** |
+| Match | 284 | 97 | 381 | 74.5% |
 | Boolean | 105 | 45 | 150 | 70.0% |
 | Union | 8 | 4 | 12 | 66.7% |
 | **WithSkipLimit** | **6** | **3** | **9** | **66.7%** |
 | Mathematical | 4 | 2 | 6 | 66.7% |
 | Literals | 85 | 46 | 131 | 64.9% |
 | Unwind | 9 | 5 | 14 | 64.3% |
-| Map | 24 | 20 | 44 | 54.5% |
 | Precedence | 66 | 55 | 121 | 54.5% |
-| List | 100 | 85 | 185 | 54.1% |
+| Temporal4 | 21 | 18 | 39 | 53.8% |
 | Comparison | 37 | 35 | 72 | 51.4% |
-| ReturnOrderBy | 17 | 18 | 35 | 48.6% |
 | ReturnSkipLimit | 15 | 16 | 31 | 48.4% |
+| ReturnOrderBy | 16 | 18 | 35 | 45.7% |
+| List | 82 | 103 | 185 | 44.3% |
 | With | 13 | 16 | 29 | 44.8% |
 | Return | 25 | 38 | 63 | 39.7% |
 | TypeConversion | 18 | 29 | 47 | 38.3% |
-| Graph | 17 | 43 | 60 | 28.3% |
+| Temporal3 | 67 | 116 | 183 | 36.6% |
+| Map | 15 | 29 | 44 | 34.1% |
+| Temporal2 | 16 | 37 | 53 | 30.2% |
 | Pattern | 14 | 36 | 50 | 28.0% |
+| Graph | 14 | 47 | 61 | 23.0% |
 | String | 6 | 26 | 32 | 18.8% |
 | Create | 13 | 65 | 78 | 16.7% |
 | Delete | 5 | 36 | 41 | 12.2% |
 | Remove | 4 | 29 | 33 | 12.1% |
-| Set | 4 | 49 | 53 | 7.5% |
-| Merge | 3 | 72 | 75 | 4.0% |
-| Aggregation | 1 | 34 | 35 | 2.9% |
+| Set | 2 | 51 | 53 | 3.8% |
+| Merge | 0 | 72 | 75 | 0.0% |
+| Aggregation | 0 | 34 | 35 | 0.0% |
 | Path | 0 | 7 | 7 | 0.0% |
 | CountingSubgraphMatches | 0 | 11 | 11 | 0.0% |
 | TriadicSelection | 0 | 19 | 19 | 0.0% |
@@ -119,9 +129,6 @@ This separation ensures:
 | Conditional2 - Case Expression | 12 | 12 |
 | ExistentialSubquery1 - Simple existential subquery | 4 | 4 |
 | ExistentialSubquery3 - Nested existential subquery | 3 | 3 |
-| List1 - Dynamic Element Access | 23 | 23 |
-| Literals1 - Boolean and Null | 6 | 6 |
-| Map3 - Keys function | 11 | 11 |
 | MatchWhere1 - Filter single variable | 15 | 15 |
 | MatchWhere2 - Filter multiple variables | 2 | 2 |
 | MatchWhere3 - Equi-Joins on variables | 3 | 3 |
@@ -166,8 +173,8 @@ This separation ensures:
 | Graph9 - Retrieve all properties as a property map | 6 | 7 | 85.7% |
 | Literals6 - String | 11 | 13 | 84.6% |
 | Call5 - Results projection | 16 | 19 | 84.2% |
-| WithOrderBy2 - Order by a single expression | 69 | 83 | 83.1% |
-| Match6 - Match named paths scenarios | 79 | 99 | 79.8% |
+| Match6 - Match named paths scenarios | 81 | 97 | 83.5% |
+| WithOrderBy2 - Order by a single expression | 68 | 83 | 81.9% |
 | Boolean1 - And logical operations | 24 | 30 | 80.0% |
 | Boolean2 - OR logical operations | 24 | 30 | 80.0% |
 | Boolean3 - XOR logical operations | 24 | 30 | 80.0% |
@@ -200,27 +207,25 @@ This separation ensures:
 | Unwind1 | 9 | 14 | 64.3% |
 | Map1 - Static value access | 12 | 19 | 63.2% |
 | Boolean5 - Interop of logical operations | 5 | 8 | 62.5% |
+| Match7 - Optional match | 19 | 31 | 61.3% |
 | List5 - List Membership Validation - IN Operator | 28 | 46 | 60.9% |
 | Null3 - Null evaluation | 6 | 10 | 60.0% |
-| Match7 - Optional match | 18 | 31 | 58.1% |
 | Graph4 - Edge relationship type | 6 | 11 | 54.5% |
 | Boolean4 - NOT logical operations | 28 | 52 | 53.8% |
 | Temporal4 - Store Temporal Values | 21 | 39 | 53.8% |
 | ReturnSkipLimit2 - Limit | 9 | 17 | 52.9% |
 | Precedence1 - On boolean values | 38 | 72 | 52.8% |
 | List11 - Create a list from a range | 34 | 67 | 50.7% |
-| Aggregation5 - Collect | 1 | 2 | 50.0% |
 | Delete3 - Deleting named paths | 1 | 2 | 50.0% |
 | Mathematical8 - Arithmetic precedence | 1 | 2 | 50.0% |
 | ReturnOrderBy1 - Order by a single variable | 6 | 12 | 50.0% |
-| ReturnOrderBy2 - Order by a single expression | 7 | 14 | 50.0% |
 | TypeConversion4 - To String | 7 | 14 | 50.0% |
 | With5 - Implicit grouping with DISTINCT | 1 | 2 | 50.0% |
 | WithSkipLimit1 - Skip | 1 | 2 | 50.0% |
-| ReturnSkipLimit1 - Skip | 5 | 11 | 45.5% |
 | Literals7 - List | 9 | 20 | 45.0% |
 | WithOrderBy4 - Order by in combination with projection and aliasing | 9 | 20 | 45.0% |
-| Graph3 - Node labels | 4 | 9 | 44.4% |
+| ReturnSkipLimit1 - Skip | 5 | 11 | 45.5% |
+| ReturnOrderBy2 - Order by a single expression | 6 | 14 | 42.9% |
 | List3 - List Equality | 3 | 7 | 42.9% |
 | With4 - Variable aliasing | 3 | 7 | 42.9% |
 | Comparison2 - Half-bounded Range | 8 | 19 | 42.1% |
@@ -228,7 +233,6 @@ This separation ensures:
 | Remove2 - Remove a Label | 2 | 5 | 40.0% |
 | ReturnOrderBy6 - Aggregation expressions in order by | 2 | 5 | 40.0% |
 | TypeConversion1 - To Boolean | 4 | 10 | 40.0% |
-| Set3 - Set a Label | 3 | 8 | 37.5% |
 | Temporal3 - Project Temporal Values from other Temporal Values | 67 | 183 | 36.6% |
 | Return4 - Column renaming | 4 | 11 | 36.4% |
 | Create1 - Creating nodes | 7 | 20 | 35.0% |
@@ -236,13 +240,13 @@ This separation ensures:
 | Match8 - Match clause interoperation with other clauses | 1 | 3 | 33.3% |
 | Pattern1 - Pattern predicate | 13 | 39 | 33.3% |
 | Return2 - Return single expression | 6 | 18 | 33.3% |
-| Return6 - Implicit grouping with aggregates | 7 | 21 | 33.3% |
-| ReturnSkipLimit3 - Skip and limit | 1 | 3 | 33.3% |
 | TypeConversion2 - To Integer | 4 | 12 | 33.3% |
 | With6 - Implicit grouping with aggregates | 3 | 9 | 33.3% |
 | WithWhere7 - Variable visibility under aliasing | 1 | 3 | 33.3% |
+| ReturnSkipLimit3 - Skip and limit | 1 | 3 | 33.3% |
 | Temporal2 - Create Temporal Values from a String | 16 | 53 | 30.2% |
 | List6 - List size | 5 | 17 | 29.4% |
+| Return6 - Implicit grouping with aggregates | 6 | 21 | 28.6% |
 | Remove1 - Remove a Property | 2 | 7 | 28.6% |
 | TypeConversion3 - To Float | 3 | 11 | 27.3% |
 | Create2 - Creating relationships | 6 | 24 | 25.0% |
@@ -253,23 +257,23 @@ This separation ensures:
 
 | Feature | Passed | Total | Rate |
 |---------|--------|-------|------|
+| List1 - Dynamic Element Access | 5 | 23 | 21.7% |
 | Literals8 - Maps | 6 | 27 | 22.2% |
 | String10 - Exact Substring Search | 2 | 9 | 22.2% |
 | String8 - Exact String Prefix Search | 2 | 9 | 22.2% |
 | String9 - Exact String Suffix Search | 2 | 9 | 22.2% |
-| Merge3 - Merge node - on match | 1 | 5 | 20.0% |
-| Merge2 - Merge node - on create | 1 | 6 | 16.7% |
+| Map3 - Keys function | 2 | 11 | 18.2% |
 | List12 - List Comprehension | 1 | 7 | 14.3% |
 | Quantifier10 - Single quantifier invariants | 1 | 8 | 12.5% |
+| Set3 - Set a Label | 1 | 8 | 12.5% |
 | Comparison3 - Full-Bound Range | 1 | 9 | 11.1% |
 | Delete5 - Delete clause interoperation with built-in data types | 1 | 9 | 11.1% |
+| Graph3 - Node labels | 1 | 9 | 11.1% |
 | Match9 - Match deprecated scenarios | 1 | 9 | 11.1% |
-| Match4 - Match variable length patterns scenarios | 1 | 10 | 10.0% |
 | Pattern2 - Pattern Comprehension | 1 | 11 | 9.1% |
 | Set1 - Set a Property | 1 | 11 | 9.1% |
 | Graph6 - Static property access | 1 | 14 | 7.1% |
 | Map2 - Dynamic Value Access | 1 | 14 | 7.1% |
-| Merge1 - Merge node | 1 | 17 | 5.9% |
 
 ### 0% Pass Rate (Fully Failing)
 
@@ -278,6 +282,7 @@ This separation ensures:
 | Aggregation1 - Count | 2 |
 | Aggregation2 - Min and Max | 12 |
 | Aggregation3 - Sum | 2 |
+| Aggregation5 - Collect | 2 |
 | Aggregation6 - Percentiles | 13 |
 | Aggregation8 - DISTINCT | 4 |
 | Comparison4 - Combination of Comparisons | 1 |
@@ -288,12 +293,17 @@ This separation ensures:
 | Create6 - Persistence of create clause side effects | 14 |
 | Delete2 - Deleting relationships | 5 |
 | Delete6 - Persistence of delete clause side effects | 14 |
-| Graph5 - Node and edge label expressions | 8 |
+| Graph5 - Node and edge label expressions | 9 |
 | Graph7 - Dynamic property access | 3 |
 | Graph8 - Property keys function | 8 |
 | List4 - List Concatenation | 2 |
 | List9 - List Tail | 1 |
+| Match4 - Match variable length patterns | 10 |
+| Match5 - Match variable length patterns over given graphs | 29 |
 | Mathematical3 - Subtraction | 1 |
+| Merge1 - Merge node | 17 |
+| Merge2 - Merge node - on create | 6 |
+| Merge3 - Merge node - on match | 5 |
 | Merge4 - Merge node - on match and on create | 2 |
 | Merge5 - Merge relationships | 29 |
 | Merge6 - Merge relationships - on create | 6 |
@@ -308,7 +318,6 @@ This separation ensures:
 | Quantifier11 - Any quantifier invariants | 22 |
 | Quantifier12 - All quantifier invariants | 17 |
 | Remove3 - Persistence of remove clause side effects | 21 |
-| Return7 - Return all variables | 2 |
 | Return8 - Return clause interoperation with other clauses | 1 |
 | ReturnOrderBy3 - Order by multiple expressions | 1 |
 | ReturnOrderBy5 - Order by in combination with column renaming | 1 |
@@ -381,9 +390,10 @@ An error is raised but the message doesn't contain the expected keyword.
    - Still needs: InvalidArgumentValue, more UndefinedVariable, NumberOutOfRange
 
 4. **Unimplemented Features (~130 failures)**
-   - MERGE mostly not implemented (72 scenarios)
-   - Aggregation functions returning incorrect results (34 scenarios)
+   - MERGE mostly not implemented (75 scenarios)
+   - Aggregation functions returning incorrect results (35 scenarios)
    - Path functions not implemented (7 scenarios)
+   - Variable-length paths not implemented (39 scenarios)
 
 5. **TCK Harness Gaps (~70 step failures)**
    - ✅ **FIXED (2026-02-06):** Parser now supports multi-label nodes and path literals
@@ -402,16 +412,16 @@ An error is raised but the message doesn't contain the expected keyword.
 
 | Clause | Status | Pass Rate | Notes |
 |--------|--------|-----------|-------|
-| MATCH | Strong | 79.9% | Node/edge patterns strong, variable-length paths weak. Parser fixed for multi-label nodes. |
+| MATCH | Strong | 74.5% | Node/edge patterns strong, variable-length paths weak. Parser fixed for multi-label nodes. |
 | MATCH WHERE | Excellent | 97.1% | Simple filters, joins, null predicates all work |
 | RETURN | Moderate | 39.7% | Core works, aggregates need work |
 | CREATE | Limited | 16.7% | Basic node/edge creation works |
 | DELETE | Limited | 12.2% | Basic delete works, interop issues |
-| SET | Limited | 7.5% | Basic property setting works |
+| SET | Limited | 3.8% | Basic property setting works |
 | REMOVE | Limited | 12.1% | Basic functionality present |
-| MERGE | Minimal | 4.0% | Mostly not implemented |
+| MERGE | None | 0.0% | Not implemented |
 | WITH | Moderate | 44.8% | Piping works, some aliasing issues |
-| WITH ORDER BY | Strong | 77.7% | Comprehensive ordering support |
+| WITH ORDER BY | Strong | 77.4% | Comprehensive ordering support |
 | WITH WHERE | Good | 73.7% | Filter after WITH working |
 | WITH SKIP/LIMIT | Good | 66.7% | Pagination working |
 | UNWIND | Good | 64.3% | List unwinding mostly works |
@@ -431,14 +441,14 @@ An error is raised but the message doesn't contain the expected keyword.
 | Boolean | Good | 70.0% | AND, OR, NOT, XOR work |
 | Literals | Good | 64.9% | Booleans, integers, floats, strings work |
 | Precedence | Moderate | 54.5% | Numeric precedence good, list issues |
-| Map | Moderate | 54.5% | Static access good, dynamic access weak |
-| List | Moderate | 54.1% | IN operator and ranges work, comprehension weak |
 | Comparison | Moderate | 51.4% | Equality good, ranges need work |
+| List | Moderate | 44.3% | IN operator and ranges work, comprehension weak |
+| Map | Limited | 34.1% | Static access good, dynamic access weak |
 | Type Conversion | Moderate | 38.3% | toString partially works |
 | Pattern | Limited | 28.0% | Pattern predicates improving |
-| Graph | Limited | 28.3% | Property access works, labels/types weak |
+| Graph | Limited | 23.0% | Property access works, labels/types weak |
 | String | Limited | 18.8% | STARTS WITH, ENDS WITH, CONTAINS partially working |
-| Aggregation | Minimal | 2.9% | COUNT, SUM, etc. not returning correct results |
+| Aggregation | None | 0.0% | COUNT, SUM, etc. not returning correct results |
 | Path | None | 0.0% | Path functions not implemented |
 
 ---
@@ -459,42 +469,14 @@ An error is raised but the message doesn't contain the expected keyword.
 | 2026-02-05 | 2,186 | 56.5% | MatchWhere fixes (+24): type coercion, NULL handling, OPTIONAL MATCH, WHERE clause |
 | 2026-02-06 (morning) | 2,502 | 64.7% | Major improvements: EXISTS (+7), WithOrderBy (+141), MatchWhere (+6), List (+21), Pattern (+12), String (+6) |
 | 2026-02-06 (evening) | 2,503 | 64.7% | TCK harness parser fixes: multi-label nodes, path literals (+1) |
-| 2026-02-06 (PM) | **2,469** | **63.8%** | Path normalization, property normalization fix (`normalize_property_value()`) |
+| 2026-02-06 (PM) | 2,469 | 63.8% | Path normalization, property normalization fix (`normalize_property_value()`) |
+| 2026-02-06 (latest) | **2,467** | **63.3%** | Latest TCK run |
 
 ### Cumulative Improvement
 
 | From | To | Scenarios Gained | Improvement |
 |------|-----|------------------|-------------|
-| Baseline (1,279) | Current (2,469) | **+1,190** | **+93.0%** |
-
-### Recent Gains (2,186 → 2,502)
-
-| Category | Before | After | Delta |
-|----------|--------|-------|-------|
-| WithOrderBy | 86/292 | 227/292 | +141 |
-| List | 75/185 | 100/185 | +25 |
-| Pattern | 2/50 | 14/50 | +12 |
-| MatchWhere | 27/34 | 33/34 | +6 |
-| ExistentialSubquery | 2/10 | 9/10 | +7 |
-| String | 0/32 | 6/32 | +6 |
-| Map | 15/44 | 24/44 | +9 |
-| Match | 278/353 | 281/353 | +3 |
-| Return | 6/63 | 25/63 | +19 |
-| With | 4/29 | 13/29 | +9 |
-| WithWhere | 0/19 | 14/19 | +14 |
-| WithSkipLimit | 0/9 | 6/9 | +6 |
-| Precedence | 60/121 | 66/121 | +6 |
-| **Net** | | | **+316** |
-
-**Key improvements:**
-- **Conditional**: Now 100% (COALESCE and CASE fully working)
-- **ExistentialSubquery**: 20% → 90% (EXISTS patterns working)
-- **WithOrderBy**: 29.5% → 77.7% (comprehensive ORDER BY support)
-- **MatchWhere**: 79.4% → 97.1% (near-complete WHERE clause support)
-- **WithWhere**: 0% → 73.7% (WITH WHERE filtering working)
-- **WithSkipLimit**: 0% → 66.7% (pagination after WITH working)
-- **List1**: Now 100% (dynamic element access fully supported)
-- **Map3**: Now 100% (keys() function fully supported)
+| Baseline (1,279) | Current (2,467) | **+1,188** | **+92.9%** |
 
 ---
 
@@ -502,19 +484,19 @@ An error is raised but the message doesn't contain the expected keyword.
 
 ### High Priority (blocking many tests)
 
-1. **Aggregation Functions** (34 failures)
+1. **Aggregation Functions** (35 failures)
    - COUNT, SUM, AVG, MIN, MAX, COLLECT, percentiles not returning correct results
    - Core feature needed for many query patterns
 
-2. **MERGE Implementation** (72 failures)
-   - Upsert semantics mostly not implemented
+2. **MERGE Implementation** (75 failures)
+   - Upsert semantics not implemented
    - ON CREATE / ON MATCH clauses
 
 3. **Path Functions** (7 failures)
    - nodes(), relationships(), length() not implemented
    - Required for path processing queries
 
-4. **Variable-Length Paths** (9 failures in Match4)
+4. **Variable-Length Paths** (39 failures in Match4/Match5)
    - `(a)-[*1..3]->(b)` patterns
    - Requires iterative path expansion
 
@@ -544,13 +526,13 @@ An error is raised but the message doesn't contain the expected keyword.
 ## Recommendations
 
 ### Short-term Wins
-1. Implement basic aggregation (COUNT, SUM, AVG, MIN, MAX) — could unlock ~34 scenarios
+1. Implement basic aggregation (COUNT, SUM, AVG, MIN, MAX) — could unlock ~35 scenarios
 2. Add path functions (nodes, relationships, length) — could unlock ~7 scenarios
 3. Complete string functions — could unlock ~26 scenarios
 
 ### Medium-term Goals
-1. Implement MERGE clause (~72 scenarios)
-2. Add variable-length path patterns (~9 scenarios)
+1. Implement MERGE clause (~75 scenarios)
+2. Add variable-length path patterns (~39 scenarios)
 3. Add TCK side effect verification (~70 scenarios)
 
 ### Long-term Goals
@@ -564,16 +546,16 @@ An error is raised but the message doesn't contain the expected keyword.
 |--------|-----------|-----------|-----|
 | ~~55%~~ | ~~2,127~~ | ~~55.0%~~ | **ACHIEVED** |
 | ~~60%~~ | ~~2,321~~ | ~~60.0%~~ | **ACHIEVED** |
-| ~~64%~~ | ~~2,476~~ | ~~64.0%~~ | **ACHIEVED** (current: 2,469 ≈ 63.8%) |
-| 70% | 2,708 | 70.0% | +239 scenarios |
-| 75% | 2,901 | 75.0% | +432 scenarios |
+| 65% | 2,533 | 65.0% | +66 scenarios |
+| 70% | 2,727 | 70.0% | +260 scenarios |
+| 75% | 2,922 | 75.0% | +455 scenarios |
 
 Achieving 70% likely requires:
-- Aggregation functions (+34)
+- Aggregation functions (+35)
 - Path functions (+7)
 - String functions (+26)
 - Partial MERGE implementation (+30)
-- Variable-length paths (+9)
+- Variable-length paths (+39)
 - TCK harness fixes (+70)
 - Additional validation coverage (+30)
 
@@ -595,6 +577,9 @@ cargo test -p uni-tck --test cucumber -- features/expressions/temporal/Temporal1
 
 # Run by scenario name regex
 cargo test -p uni-tck --test cucumber -- -n 'Should compare dates'
+
+# Run with report generation (recommended)
+scripts/run_tck_with_report.sh
 
 # Save output for analysis (recommended for bulk filtering)
 cargo test -p uni-tck --test cucumber 2>&1 > /tmp/tck_output.txt
@@ -649,4 +634,4 @@ grep -c "No match found for actual row" /tmp/tck_output.txt
 | `useCases/countingSubgraphMatches` | 1 | Pattern counting |
 | `useCases/triadicSelection` | 1 | Friend-of-friend |
 
-**Total:** 192 feature files, 3,869 expanded scenarios
+**Total:** 192 feature files, 3,897 expanded scenarios
