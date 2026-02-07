@@ -459,34 +459,103 @@ impl MainEdgeDataset {
         Ok(edges)
     }
 
-    /// Extract edge data from a record batch.
+    /// Find edge data (eid, src_vid, dst_vid, edge_type, props) by multiple type names in the main edges table.
+    ///
+    /// Returns all non-deleted edges with any of the given type names.
+    /// This is used for OR relationship type queries like `[:KNOWS|HATES]`.
+    pub async fn find_edges_by_type_names(
+        store: &LanceDbStore,
+        type_names: &[&str],
+    ) -> Result<Vec<(Eid, Vid, Vid, String, Properties)>> {
+        if type_names.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Build IN clause: type IN ('T1', 'T2', ...)
+        let escaped_types: Vec<String> = type_names
+            .iter()
+            .map(|t| format!("'{}'", t.replace('\'', "''")))
+            .collect();
+        let filter = format!(
+            "_deleted = false AND type IN ({})",
+            escaped_types.join(", ")
+        );
+
+        // Fetch all columns for edge data
+        let batches = Self::execute_query(store, &filter, None).await?;
+
+        let mut edges = Vec::new();
+        for batch in &batches {
+            Self::extract_edges_with_type_from_batch(batch, &mut edges)?;
+        }
+
+        Ok(edges)
+    }
+
+    /// Extract edge data from a record batch (without edge type).
     fn extract_edges_from_batch(
         batch: &RecordBatch,
         edges: &mut Vec<(Eid, Vid, Vid, Properties)>,
     ) -> Result<()> {
-        let eid_col = batch.column_by_name("_eid");
-        let src_col = batch.column_by_name("src_vid");
-        let dst_col = batch.column_by_name("dst_vid");
-        let props_col = batch.column_by_name("props_json");
+        // Reuse the with-type extraction and discard the edge type
+        let mut edges_with_type = Vec::new();
+        Self::extract_edges_with_type_from_batch(batch, &mut edges_with_type)?;
+        edges.extend(
+            edges_with_type
+                .into_iter()
+                .map(|(eid, src, dst, _type, props)| (eid, src, dst, props)),
+        );
+        Ok(())
+    }
 
-        if let (Some(eid_arr), Some(src_arr), Some(dst_arr), Some(props_arr)) = (
-            eid_col.and_then(|c| c.as_any().downcast_ref::<UInt64Array>()),
-            src_col.and_then(|c| c.as_any().downcast_ref::<UInt64Array>()),
-            dst_col.and_then(|c| c.as_any().downcast_ref::<UInt64Array>()),
-            props_col.and_then(|c| c.as_any().downcast_ref::<arrow_array::StringArray>()),
-        ) {
-            for i in 0..batch.num_rows() {
-                if eid_arr.is_null(i) || src_arr.is_null(i) || dst_arr.is_null(i) {
-                    continue;
-                }
+    /// Extract edge data with type from a record batch.
+    fn extract_edges_with_type_from_batch(
+        batch: &RecordBatch,
+        edges: &mut Vec<(Eid, Vid, Vid, String, Properties)>,
+    ) -> Result<()> {
+        let Some(eid_arr) = batch
+            .column_by_name("_eid")
+            .and_then(|c| c.as_any().downcast_ref::<UInt64Array>())
+        else {
+            return Ok(());
+        };
+        let Some(src_arr) = batch
+            .column_by_name("src_vid")
+            .and_then(|c| c.as_any().downcast_ref::<UInt64Array>())
+        else {
+            return Ok(());
+        };
+        let Some(dst_arr) = batch
+            .column_by_name("dst_vid")
+            .and_then(|c| c.as_any().downcast_ref::<UInt64Array>())
+        else {
+            return Ok(());
+        };
+        let type_arr = batch
+            .column_by_name("type")
+            .and_then(|c| c.as_any().downcast_ref::<arrow_array::StringArray>());
+        let props_arr = batch
+            .column_by_name("props_json")
+            .and_then(|c| c.as_any().downcast_ref::<arrow_array::StringArray>());
 
-                let eid = Eid::new(eid_arr.value(i));
-                let src_vid = Vid::new(src_arr.value(i));
-                let dst_vid = Vid::new(dst_arr.value(i));
-                let props = Self::parse_props_json(props_arr, i)?;
-
-                edges.push((eid, src_vid, dst_vid, props));
+        for i in 0..batch.num_rows() {
+            if eid_arr.is_null(i) || src_arr.is_null(i) || dst_arr.is_null(i) {
+                continue;
             }
+
+            let eid = Eid::new(eid_arr.value(i));
+            let src_vid = Vid::new(src_arr.value(i));
+            let dst_vid = Vid::new(dst_arr.value(i));
+            let edge_type = type_arr
+                .filter(|arr| !arr.is_null(i))
+                .map(|arr| arr.value(i).to_string())
+                .unwrap_or_default();
+            let props = props_arr
+                .map(|arr| Self::parse_props_json(arr, i))
+                .transpose()?
+                .unwrap_or_default();
+
+            edges.push((eid, src_vid, dst_vid, edge_type, props));
         }
 
         Ok(())

@@ -458,6 +458,57 @@ impl MainVertexDataset {
         Ok(vids)
     }
 
+    /// Find VIDs by multiple label names (intersection semantics).
+    ///
+    /// Returns vertices that have ALL the specified labels.
+    /// Uses `array_contains(labels, 'A') AND array_contains(labels, 'B')` filtering.
+    pub async fn find_vids_by_labels(store: &LanceDbStore, labels: &[&str]) -> Result<Vec<Vid>> {
+        let table_name = Self::table_name();
+
+        if labels.is_empty() || !store.table_exists(table_name).await? {
+            return Ok(Vec::new());
+        }
+
+        let table = store.open_table(table_name).await?;
+
+        // Build AND conditions for each label
+        let label_conditions: Vec<String> = labels
+            .iter()
+            .map(|label| {
+                let escaped = label.replace('\'', "''");
+                format!("array_contains(labels, '{}')", escaped)
+            })
+            .collect();
+
+        let query = format!("_deleted = false AND {}", label_conditions.join(" AND "));
+
+        let batches = table
+            .query()
+            .only_if(query)
+            .select(lancedb::query::Select::Columns(vec!["_vid".to_string()]))
+            .execute()
+            .await
+            .map_err(|e| anyhow!("Query failed: {}", e))?;
+
+        use futures::TryStreamExt;
+        let results: Vec<RecordBatch> = batches.try_collect().await?;
+
+        let mut vids = Vec::new();
+        for batch in results {
+            if let Some(vid_col) = batch.column_by_name("_vid")
+                && let Some(vid_arr) = vid_col.as_any().downcast_ref::<UInt64Array>()
+            {
+                for i in 0..vid_arr.len() {
+                    if !vid_arr.is_null(i) {
+                        vids.push(Vid::new(vid_arr.value(i)));
+                    }
+                }
+            }
+        }
+
+        Ok(vids)
+    }
+
     /// Batch-fetch properties for multiple VIDs from the main vertices table.
     ///
     /// Returns a HashMap mapping VIDs to their parsed properties.

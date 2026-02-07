@@ -251,19 +251,38 @@ impl HybridPhysicalPlanner {
             // === Graph Operations ===
             LogicalPlan::Scan {
                 label_id,
-                labels: _,
+                labels,
                 variable,
                 filter,
                 optional: _,
-            } => self.plan_scan(*label_id, variable, filter.as_ref(), all_properties),
+            } => {
+                if labels.len() > 1 {
+                    // Multi-label: use main table with intersection semantics
+                    self.plan_multi_label_scan(labels, variable, filter.as_ref(), all_properties)
+                } else {
+                    // Single-label: use per-label table
+                    self.plan_scan(*label_id, variable, filter.as_ref(), all_properties)
+                }
+            }
 
-            // ScanMainByLabel is now supported via schemaless scan
-            LogicalPlan::ScanMainByLabel {
-                label_name,
+            // ScanMainByLabels is now supported via schemaless scan
+            LogicalPlan::ScanMainByLabels {
+                labels,
                 variable,
                 filter,
                 optional: _,
-            } => self.plan_schemaless_scan(label_name, variable, filter.as_ref(), all_properties),
+            } => {
+                if labels.len() > 1 {
+                    // Multi-label schemaless scan
+                    self.plan_multi_label_scan(labels, variable, filter.as_ref(), all_properties)
+                } else if let Some(label_name) = labels.first() {
+                    // Single label schemaless scan
+                    self.plan_schemaless_scan(label_name, variable, filter.as_ref(), all_properties)
+                } else {
+                    // Empty labels - should not happen, fallback to scan all
+                    self.plan_scan_all(variable, filter.as_ref(), all_properties)
+                }
+            }
 
             // ScanAll is now supported via schemaless scan with empty label
             LogicalPlan::ScanAll {
@@ -274,7 +293,7 @@ impl HybridPhysicalPlanner {
 
             // TraverseMainByType is now supported via schemaless traversal
             LogicalPlan::TraverseMainByType {
-                type_name,
+                type_names,
                 input,
                 direction,
                 source_variable,
@@ -294,7 +313,7 @@ impl HybridPhysicalPlanner {
                 if is_variable_length {
                     self.plan_traverse_main_by_type_vlp(
                         input,
-                        type_name,
+                        type_names,
                         direction.clone(),
                         source_variable,
                         target_variable,
@@ -307,7 +326,7 @@ impl HybridPhysicalPlanner {
                 } else {
                     self.plan_traverse_main_by_type(
                         input,
-                        type_name,
+                        type_names,
                         direction.clone(),
                         source_variable,
                         target_variable,
@@ -781,6 +800,33 @@ impl HybridPhysicalPlanner {
         self.apply_scan_filter(scan_plan, variable, filter)
     }
 
+    /// Plan a multi-label vertex scan using the main vertices table.
+    ///
+    /// For patterns like `(n:A:B)`, scans vertices with ALL labels (intersection).
+    fn plan_multi_label_scan(
+        &self,
+        labels: &[String],
+        variable: &str,
+        filter: Option<&Expr>,
+        all_properties: &HashMap<String, HashSet<String>>,
+    ) -> Result<Arc<dyn ExecutionPlan>> {
+        let properties: Vec<String> = all_properties
+            .get(variable)
+            .map(|s| s.iter().cloned().collect())
+            .unwrap_or_default();
+
+        let scan_plan: Arc<dyn ExecutionPlan> =
+            Arc::new(GraphScanExec::new_multi_label_vertex_scan(
+                self.graph_ctx.clone(),
+                labels.to_vec(),
+                variable.to_string(),
+                properties,
+                None,
+            ));
+
+        self.apply_scan_filter(scan_plan, variable, filter)
+    }
+
     /// Plan a scan of all vertices regardless of label.
     ///
     /// This is used for `MATCH (n)` without a label filter.
@@ -1018,11 +1064,12 @@ impl HybridPhysicalPlanner {
     /// Plan a schemaless edge traversal (TraverseMainByType).
     ///
     /// This is used for edges without a schema-defined type that must query the main edges table.
+    /// Supports OR relationship types like `[:KNOWS|HATES]` via multiple type_names.
     #[expect(clippy::too_many_arguments)]
     fn plan_traverse_main_by_type(
         &self,
         input: &LogicalPlan,
-        type_name: &str,
+        type_names: &[String],
         direction: AstDirection,
         source_variable: &str,
         target_variable: &str,
@@ -1055,7 +1102,7 @@ impl HybridPhysicalPlanner {
         let traverse_plan = Arc::new(GraphTraverseMainExec::new(
             input_plan,
             source_col,
-            type_name.to_string(),
+            type_names.to_vec(),
             adj_direction,
             target_variable.to_string(),
             step_variable.map(|s| s.to_string()),
@@ -1071,11 +1118,12 @@ impl HybridPhysicalPlanner {
     /// Plan a schemaless edge traversal with variable-length paths (TraverseMainByType VLP).
     ///
     /// This is used for VLP patterns on edges without a schema-defined type that must query the main edges table.
+    /// Supports OR relationship types like `[:KNOWS|HATES]` via multiple type_names.
     #[expect(clippy::too_many_arguments)]
     fn plan_traverse_main_by_type_vlp(
         &self,
         input: &LogicalPlan,
-        type_name: &str,
+        type_names: &[String],
         direction: AstDirection,
         source_variable: &str,
         target_variable: &str,
@@ -1099,7 +1147,7 @@ impl HybridPhysicalPlanner {
         let traverse_plan = Arc::new(GraphVariableLengthTraverseMainExec::new(
             input_plan,
             source_col,
-            type_name.to_string(),
+            type_names.to_vec(),
             adj_direction,
             min_hops,
             max_hops,
@@ -2036,7 +2084,7 @@ fn collect_variable_kinds(plan: &LogicalPlan, kinds: &mut HashMap<String, Variab
         LogicalPlan::ScanAll { variable, .. } => {
             kinds.insert(variable.clone(), VariableKind::Node);
         }
-        LogicalPlan::ScanMainByLabel { variable, .. } => {
+        LogicalPlan::ScanMainByLabels { variable, .. } => {
             kinds.insert(variable.clone(), VariableKind::Node);
         }
         LogicalPlan::VectorKnn { variable, .. } => {

@@ -184,6 +184,38 @@ impl GraphScanExec {
         }
     }
 
+    /// Create a new multi-label vertex scan using the main vertices table.
+    ///
+    /// Scans for vertices that have ALL specified labels (intersection semantics).
+    /// Properties are extracted from props_json (schemaless).
+    pub fn new_multi_label_vertex_scan(
+        graph_ctx: Arc<GraphExecutionContext>,
+        labels: Vec<String>,
+        variable: impl Into<String>,
+        projected_properties: Vec<String>,
+        filter: Option<Arc<dyn PhysicalExpr>>,
+    ) -> Self {
+        let variable = variable.into();
+        let schema = Self::build_schemaless_vertex_schema(&variable, &projected_properties);
+        let properties = compute_plan_properties(schema.clone());
+
+        // Encode labels as colon-separated for the stream to parse
+        let encoded_labels = labels.join(":");
+
+        Self {
+            graph_ctx,
+            label: encoded_labels,
+            variable,
+            projected_properties,
+            filter,
+            is_edge_scan: false,
+            is_schemaless: true,
+            schema,
+            properties,
+            metrics: ExecutionPlanMetricsSet::new(),
+        }
+    }
+
     /// Create a new schemaless scan for all vertices.
     ///
     /// Scans the main vertices table for all vertices regardless of label.
@@ -548,6 +580,36 @@ async fn scan_vertex_vids_by_label_name_static(
     // Step 2: Overlay L0 buffers (pending flush, current, transaction)
     for l0 in l0_ctx.iter_l0_buffers() {
         vids.extend(l0.read().vids_for_label(label_name));
+    }
+
+    // Deduplicate
+    vids.sort_unstable();
+    vids.dedup();
+
+    Ok(vids)
+}
+
+/// Scan vertex VIDs from main table with multi-label intersection.
+///
+/// Returns vertices that have ALL the specified labels.
+async fn scan_vertex_vids_by_labels_static(
+    graph_ctx: &GraphExecutionContext,
+    label_names: &[&str],
+) -> DFResult<Vec<Vid>> {
+    use uni_store::storage::main_vertex::MainVertexDataset;
+
+    let storage = graph_ctx.storage();
+    let l0_ctx = graph_ctx.l0_context();
+    let lancedb_store = storage.lancedb_store();
+
+    // Step 1: Query main vertices table with label intersection
+    let mut vids = MainVertexDataset::find_vids_by_labels(lancedb_store, label_names)
+        .await
+        .map_err(|e| datafusion::error::DataFusionError::Execution(e.to_string()))?;
+
+    // Step 2: Overlay L0 buffers with label intersection
+    for l0 in l0_ctx.iter_l0_buffers() {
+        vids.extend(l0.read().vids_with_all_labels(label_names));
     }
 
     // Deduplicate
@@ -1528,6 +1590,10 @@ impl Stream for GraphScanStream {
                             let vids = if label.is_empty() {
                                 // ScanAll: scan all vertices regardless of label
                                 scan_all_vertex_vids_static(&graph_ctx).await?
+                            } else if label.contains(':') {
+                                // Multi-label: colon-separated label names with intersection semantics
+                                let label_names: Vec<&str> = label.split(':').collect();
+                                scan_vertex_vids_by_labels_static(&graph_ctx, &label_names).await?
                             } else {
                                 // ScanMainByLabel: filter by label name
                                 scan_vertex_vids_by_label_name_static(&graph_ctx, &label).await?

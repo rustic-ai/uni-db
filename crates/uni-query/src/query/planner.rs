@@ -566,8 +566,10 @@ pub enum LogicalPlan {
     },
     /// Scan main table filtering by label name (MATCH (n:Unknown)).
     /// Used for labels not defined in schema (schemaless support).
-    ScanMainByLabel {
-        label_name: String,
+    /// Scan main vertices table by label name(s) for schemaless support.
+    /// When labels has multiple entries, uses intersection semantics (must have ALL labels).
+    ScanMainByLabels {
+        labels: Vec<String>,
         variable: String,
         filter: Option<Expr>,
         optional: bool,
@@ -603,10 +605,11 @@ pub enum LogicalPlan {
         /// This ensures proper multi-hop OPTIONAL MATCH semantics.
         optional_pattern_vars: std::collections::HashSet<String>,
     },
-    /// Traverse main edges table filtering by type name (MATCH (a)-[:Unknown]->(b)).
+    /// Traverse main edges table filtering by type name(s) (MATCH (a)-[:Unknown]->(b)).
     /// Used for edge types not defined in schema (schemaless support).
+    /// Supports OR relationship types like `[:KNOWS|HATES]` via multiple type_names.
     TraverseMainByType {
-        type_name: String,
+        type_names: Vec<String>,
         input: Box<LogicalPlan>,
         direction: Direction,
         source_variable: String,
@@ -2679,15 +2682,9 @@ impl QueryPlanner {
 
         // If all requested types are unknown (schemaless), use TraverseMainByType
         // This allows queries like MATCH (a)-[:UnknownType]->(b) to work
+        // Also supports OR relationship types like MATCH (a)-[:KNOWS|HATES]->(b)
         if !unknown_types.is_empty() && edge_type_ids.is_empty() {
             // All types are unknown - use schemaless traversal
-            // For now, we only support single unknown type
-            if unknown_types.len() > 1 {
-                return Err(anyhow!(
-                    "Multiple unknown edge types in a single pattern not yet supported: {:?}",
-                    unknown_types
-                ));
-            }
 
             // Check if this is a variable-length pattern (has range specifier like *1..3)
             let is_variable_length = params.rel.range.is_some();
@@ -2718,7 +2715,7 @@ impl QueryPlanner {
             };
 
             let mut plan = LogicalPlan::TraverseMainByType {
-                type_name: unknown_types.into_iter().next().unwrap(),
+                type_names: unknown_types,
                 input: Box::new(plan),
                 direction: params.rel.direction.clone(),
                 source_variable: source_variable.to_string(),
@@ -2975,10 +2972,10 @@ impl QueryPlanner {
                 })
             }
         } else {
-            // Unknown label: use ScanMainByLabel for schemaless support
+            // Unknown label: use ScanMainByLabels for schemaless support
             let prop_filter = self.properties_to_expr(variable, &node.properties);
-            let scan_main = LogicalPlan::ScanMainByLabel {
-                label_name: label_name.clone(),
+            let scan_main = LogicalPlan::ScanMainByLabels {
+                labels: node.labels.clone(),
                 variable: variable.to_string(),
                 filter: prop_filter,
                 optional,
@@ -5091,12 +5088,12 @@ fn collect_properties_recursive(
             collect_properties_from_expr_into(expr, properties);
         }
         LogicalPlan::ScanAll { filter: None, .. } => {}
-        LogicalPlan::ScanMainByLabel {
+        LogicalPlan::ScanMainByLabels {
             filter: Some(expr), ..
         } => {
             collect_properties_from_expr_into(expr, properties);
         }
-        LogicalPlan::ScanMainByLabel { filter: None, .. } => {}
+        LogicalPlan::ScanMainByLabels { filter: None, .. } => {}
         LogicalPlan::TraverseMainByType {
             input,
             target_filter,

@@ -1001,8 +1001,9 @@ pub struct GraphTraverseMainExec {
     /// Column name containing source VIDs.
     source_column: String,
 
-    /// Edge type name (not ID, since schemaless types may not have IDs).
-    type_name: String,
+    /// Edge type names (not IDs, since schemaless types may not have IDs).
+    /// Supports OR relationship types like `[:KNOWS|HATES]`.
+    type_names: Vec<String>,
 
     /// Traversal direction.
     direction: Direction,
@@ -1038,7 +1039,7 @@ pub struct GraphTraverseMainExec {
 impl fmt::Debug for GraphTraverseMainExec {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("GraphTraverseMainExec")
-            .field("type_name", &self.type_name)
+            .field("type_names", &self.type_names)
             .field("direction", &self.direction)
             .field("target_variable", &self.target_variable)
             .field("edge_variable", &self.edge_variable)
@@ -1052,7 +1053,7 @@ impl GraphTraverseMainExec {
     pub fn new(
         input: Arc<dyn ExecutionPlan>,
         source_column: impl Into<String>,
-        type_name: impl Into<String>,
+        type_names: Vec<String>,
         direction: Direction,
         target_variable: impl Into<String>,
         edge_variable: Option<String>,
@@ -1062,7 +1063,6 @@ impl GraphTraverseMainExec {
         optional: bool,
     ) -> Self {
         let source_column = source_column.into();
-        let type_name = type_name.into();
         let target_variable = target_variable.into();
 
         // Build output schema
@@ -1079,7 +1079,7 @@ impl GraphTraverseMainExec {
         Self {
             input,
             source_column,
-            type_name,
+            type_names,
             direction,
             target_variable,
             edge_variable,
@@ -1153,8 +1153,8 @@ impl DisplayAs for GraphTraverseMainExec {
             | DisplayFormatType::TreeRender => {
                 write!(
                     f,
-                    "GraphTraverseMainExec: type={}, direction={:?}",
-                    self.type_name, self.direction
+                    "GraphTraverseMainExec: types={:?}, direction={:?}",
+                    self.type_names, self.direction
                 )
             }
         }
@@ -1195,7 +1195,7 @@ impl ExecutionPlan for GraphTraverseMainExec {
         Ok(Arc::new(Self {
             input: children[0].clone(),
             source_column: self.source_column.clone(),
-            type_name: self.type_name.clone(),
+            type_names: self.type_names.clone(),
             direction: self.direction,
             target_variable: self.target_variable.clone(),
             edge_variable: self.edge_variable.clone(),
@@ -1220,7 +1220,7 @@ impl ExecutionPlan for GraphTraverseMainExec {
         Ok(Box::pin(GraphTraverseMainStream::new(
             input_stream,
             self.source_column.clone(),
-            self.type_name.clone(),
+            self.type_names.clone(),
             self.direction,
             self.target_variable.clone(),
             self.edge_variable.clone(),
@@ -1259,9 +1259,9 @@ struct GraphTraverseMainStream {
     /// Source column name.
     source_column: String,
 
-    /// Edge type name (kept for debugging/future use).
+    /// Edge type names (kept for debugging/future use).
     #[allow(dead_code)]
-    type_name: String,
+    type_names: Vec<String>,
 
     /// Traversal direction (kept for debugging/future use).
     #[allow(dead_code)]
@@ -1302,7 +1302,7 @@ impl GraphTraverseMainStream {
     fn new(
         input_stream: SendableRecordBatchStream,
         source_column: String,
-        type_name: String,
+        type_names: Vec<String>,
         direction: Direction,
         target_variable: String,
         edge_variable: Option<String>,
@@ -1315,13 +1315,13 @@ impl GraphTraverseMainStream {
     ) -> Self {
         // Start by loading the adjacency map from the main edges table
         let loading_ctx = graph_ctx.clone();
-        let loading_type = type_name.clone();
+        let loading_types = type_names.clone();
         let fut =
-            async move { build_edge_adjacency_map(&loading_ctx, &loading_type, direction).await };
+            async move { build_edge_adjacency_map(&loading_ctx, &loading_types, direction).await };
 
         Self {
             source_column,
-            type_name,
+            type_names,
             direction,
             target_variable,
             edge_variable,
@@ -1474,13 +1474,14 @@ impl GraphTraverseMainStream {
     }
 }
 
-/// Build adjacency map from main edges table for a given type name and direction.
+/// Build adjacency map from main edges table for given type names and direction.
 ///
+/// Supports OR relationship types like `[:KNOWS|HATES]` via multiple type_names.
 /// Returns a HashMap mapping source VID -> Vec<(target_vid, eid, properties)>
 /// Direction determines the key: Outgoing uses src_vid, Incoming uses dst_vid, Both adds entries for both.
 async fn build_edge_adjacency_map(
     graph_ctx: &GraphExecutionContext,
-    type_name: &str,
+    type_names: &[String],
     direction: Direction,
 ) -> DFResult<EdgeAdjacencyMap> {
     use uni_store::storage::main_edge::MainEdgeDataset;
@@ -1489,30 +1490,45 @@ async fn build_edge_adjacency_map(
     let l0_ctx = graph_ctx.l0_context();
     let lancedb_store = storage.lancedb_store();
 
-    // Step 1: Query main edges table
-    let mut edges = MainEdgeDataset::find_edges_by_type_name(lancedb_store, type_name)
+    // Step 1: Query main edges table for all type names
+    let type_refs: Vec<&str> = type_names.iter().map(|s| s.as_str()).collect();
+    let edges_with_type = MainEdgeDataset::find_edges_by_type_names(lancedb_store, &type_refs)
         .await
         .map_err(|e| datafusion::error::DataFusionError::Execution(e.to_string()))?;
 
-    // Step 2: Overlay L0 buffers
+    // Convert to the format without edge type (we don't need it in the adjacency map)
+    let mut edges: Vec<(
+        uni_common::Eid,
+        uni_common::Vid,
+        uni_common::Vid,
+        uni_common::Properties,
+    )> = edges_with_type
+        .into_iter()
+        .map(|(eid, src, dst, _edge_type, props)| (eid, src, dst, props))
+        .collect();
+
+    // Step 2: Overlay L0 buffers for all type names
     for l0 in l0_ctx.iter_l0_buffers() {
         let l0_guard = l0.read();
-        let l0_eids = l0_guard.eids_for_type(type_name);
 
-        // For each L0 edge, extract its information
-        for &eid in &l0_eids {
-            if let Some(edge_ref) = l0_guard.graph.edge(eid) {
-                let src_vid = edge_ref.src_vid;
-                let dst_vid = edge_ref.dst_vid;
+        for type_name in type_names {
+            let l0_eids = l0_guard.eids_for_type(type_name);
 
-                // Get properties for this edge from L0
-                let props = l0_guard
-                    .edge_properties
-                    .get(&eid)
-                    .cloned()
-                    .unwrap_or_default();
+            // For each L0 edge, extract its information
+            for &eid in &l0_eids {
+                if let Some(edge_ref) = l0_guard.graph.edge(eid) {
+                    let src_vid = edge_ref.src_vid;
+                    let dst_vid = edge_ref.dst_vid;
 
-                edges.push((eid, src_vid, dst_vid, props));
+                    // Get properties for this edge from L0
+                    let props = l0_guard
+                        .edge_properties
+                        .get(&eid)
+                        .cloned()
+                        .unwrap_or_default();
+
+                    edges.push((eid, src_vid, dst_vid, props));
+                }
             }
         }
     }
@@ -2291,6 +2307,7 @@ impl RecordBatchStream for GraphVariableLengthTraverseStream {
 ///
 /// This is similar to `GraphVariableLengthTraverseExec` but works with edge types
 /// that don't have schema-defined IDs. It queries the main edges table by type name.
+/// Supports OR relationship types like `[:KNOWS|HATES]` via multiple type_names.
 pub struct GraphVariableLengthTraverseMainExec {
     /// Input execution plan.
     input: Arc<dyn ExecutionPlan>,
@@ -2298,8 +2315,8 @@ pub struct GraphVariableLengthTraverseMainExec {
     /// Column name containing source VIDs.
     source_column: String,
 
-    /// Edge type name (not ID, since schemaless types may not have IDs).
-    type_name: String,
+    /// Edge type names (not IDs, since schemaless types may not have IDs).
+    type_names: Vec<String>,
 
     /// Traversal direction.
     direction: Direction,
@@ -2339,7 +2356,7 @@ impl fmt::Debug for GraphVariableLengthTraverseMainExec {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("GraphVariableLengthTraverseMainExec")
             .field("source_column", &self.source_column)
-            .field("type_name", &self.type_name)
+            .field("type_names", &self.type_names)
             .field("direction", &self.direction)
             .field("min_hops", &self.min_hops)
             .field("max_hops", &self.max_hops)
@@ -2354,7 +2371,7 @@ impl GraphVariableLengthTraverseMainExec {
     pub fn new(
         input: Arc<dyn ExecutionPlan>,
         source_column: impl Into<String>,
-        type_name: impl Into<String>,
+        type_names: Vec<String>,
         direction: Direction,
         min_hops: usize,
         max_hops: usize,
@@ -2365,7 +2382,6 @@ impl GraphVariableLengthTraverseMainExec {
         is_optional: bool,
     ) -> Self {
         let source_column = source_column.into();
-        let type_name = type_name.into();
         let target_variable = target_variable.into();
 
         // Build output schema
@@ -2380,7 +2396,7 @@ impl GraphVariableLengthTraverseMainExec {
         Self {
             input,
             source_column,
-            type_name,
+            type_names,
             direction,
             min_hops,
             max_hops,
@@ -2444,8 +2460,8 @@ impl DisplayAs for GraphVariableLengthTraverseMainExec {
             | DisplayFormatType::TreeRender => {
                 write!(
                     f,
-                    "GraphVariableLengthTraverseMainExec: {} --[{}*{}..{}]--> target",
-                    self.source_column, self.type_name, self.min_hops, self.max_hops
+                    "GraphVariableLengthTraverseMainExec: {} --[{:?}*{}..{}]--> target",
+                    self.source_column, self.type_names, self.min_hops, self.max_hops
                 )
             }
         }
@@ -2486,7 +2502,7 @@ impl ExecutionPlan for GraphVariableLengthTraverseMainExec {
         Ok(Arc::new(Self::new(
             children[0].clone(),
             self.source_column.clone(),
-            self.type_name.clone(),
+            self.type_names.clone(),
             self.direction,
             self.min_hops,
             self.max_hops,
@@ -2508,15 +2524,15 @@ impl ExecutionPlan for GraphVariableLengthTraverseMainExec {
 
         // Build adjacency map from main edges table (async)
         let graph_ctx = self.graph_ctx.clone();
-        let type_name = self.type_name.clone();
+        let type_names = self.type_names.clone();
         let direction = self.direction;
         let load_fut =
-            async move { build_edge_adjacency_map(&graph_ctx, &type_name, direction).await };
+            async move { build_edge_adjacency_map(&graph_ctx, &type_names, direction).await };
 
         Ok(Box::pin(GraphVariableLengthTraverseMainStream {
             input: input_stream,
             source_column: self.source_column.clone(),
-            type_name: self.type_name.clone(),
+            type_names: self.type_names.clone(),
             direction: self.direction,
             min_hops: self.min_hops,
             max_hops: self.max_hops,
@@ -2550,7 +2566,7 @@ enum VarLengthMainStreamState {
 struct GraphVariableLengthTraverseMainStream {
     input: SendableRecordBatchStream,
     source_column: String,
-    type_name: String,
+    type_names: Vec<String>,
     direction: Direction,
     min_hops: usize,
     max_hops: usize,
@@ -2771,6 +2787,8 @@ impl GraphVariableLengthTraverseMainStream {
 
                 // Build relationships list for this row
                 let rels_struct = rels_builder.values();
+                // For VLP with multiple types, join type names as we don't track which type each edge has
+                let type_names_str = self.type_names.join("|");
                 for (i, eid) in edge_path.iter().enumerate() {
                     rels_struct
                         .field_builder::<UInt64Builder>(0)
@@ -2779,7 +2797,7 @@ impl GraphVariableLengthTraverseMainStream {
                     rels_struct
                         .field_builder::<StringBuilder>(1)
                         .unwrap()
-                        .append_value(&self.type_name);
+                        .append_value(&type_names_str);
                     rels_struct
                         .field_builder::<UInt64Builder>(2)
                         .unwrap()

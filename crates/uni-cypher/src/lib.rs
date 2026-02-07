@@ -168,4 +168,19 @@ mod tests {
         let q = parse("MATCH (n) RETURN n").unwrap();
         assert!(matches!(q, ast::Query::Single(_)));
     }
+
+    #[test]
+    fn test_parse_or_relationship_types() {
+        let q = parse("MATCH (n)-[r:KNOWS|HATES]->(x) RETURN r").unwrap();
+        if let ast::Query::Single(single) = q
+            && let ast::Clause::Match(match_clause) = &single.clauses[0]
+            && let ast::PatternElement::Relationship(rel) =
+                &match_clause.pattern.paths[0].elements[1]
+        {
+            assert_eq!(rel.types, vec!["KNOWS", "HATES"]);
+            println!("Parsed types: {:?}", rel.types);
+            return;
+        }
+        panic!("Could not find relationship pattern with OR types");
+    }
 }

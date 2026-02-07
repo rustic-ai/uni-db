@@ -804,7 +804,7 @@ impl Executor {
             LogicalPlan::Traverse { .. } => "read_traverse",
             LogicalPlan::TraverseMainByType { .. } => "read_traverse_main",
             LogicalPlan::ScanAll { .. } => "read_scan_all",
-            LogicalPlan::ScanMainByLabel { .. } => "read_scan_main",
+            LogicalPlan::ScanMainByLabels { .. } => "read_scan_main",
             LogicalPlan::VectorKnn { .. } => "read_vector",
             LogicalPlan::Create { .. } | LogicalPlan::CreateBatch { .. } => "write_create",
             LogicalPlan::Merge { .. } => "write_merge",
@@ -2390,23 +2390,45 @@ impl Executor {
                     }
                     Ok(matches)
                 }
-                LogicalPlan::ScanMainByLabel {
-                    label_name,
+                LogicalPlan::ScanMainByLabels {
+                    labels,
                     variable,
                     filter,
                     optional,
                 } => {
-                    // Scan main table for vertices with unknown label (schemaless)
-                    let vids = self
-                        .scan_main_by_label(
-                            &label_name,
+                    // Scan main table for vertices with schemaless labels
+                    // For multi-label, use intersection semantics (must have ALL labels)
+                    let vids = if labels.len() > 1 {
+                        self.scan_multi_labels_with_filter(
+                            &labels,
                             &variable,
                             filter.as_ref(),
                             ctx,
                             prop_manager,
                             params,
                         )
-                        .await?;
+                        .await?
+                    } else if let Some(label_name) = labels.first() {
+                        self.scan_main_by_label(
+                            label_name,
+                            &variable,
+                            filter.as_ref(),
+                            ctx,
+                            prop_manager,
+                            params,
+                        )
+                        .await?
+                    } else {
+                        // Empty labels - scan all vertices
+                        self.scan_all_vertices(
+                            &variable,
+                            filter.as_ref(),
+                            ctx,
+                            prop_manager,
+                            params,
+                        )
+                        .await?
+                    };
 
                     if vids.is_empty() && optional {
                         let mut map = HashMap::new();
@@ -2415,18 +2437,32 @@ impl Executor {
                     }
 
                     // Build result rows with properties from main table
+                    let lancedb = self.storage.lancedb_store();
                     let mut matches = Vec::new();
                     for vid in vids {
                         // Get properties from property manager (will fallback to main table)
                         let props_opt =
                             prop_manager.get_all_vertex_props_with_ctx(vid, ctx).await?;
 
+                        // Get actual labels: check L0 first, then main table
+                        let actual_labels = if let Some(ctx) = ctx
+                            && let Some(l0_labels) = ctx.l0.read().get_vertex_labels(vid)
+                        {
+                            l0_labels.to_vec()
+                        } else {
+                            uni_store::storage::main_vertex::MainVertexDataset::find_labels_by_vid(
+                                lancedb, vid,
+                            )
+                            .await?
+                            .unwrap_or_default()
+                        };
+
                         let mut props_json: serde_json::Map<String, Value> = props_opt
                             .map(|p| p.into_iter().collect())
                             .unwrap_or_default();
 
                         props_json.insert("_vid".to_string(), json!(vid.as_u64()));
-                        props_json.insert("_label".to_string(), json!(label_name.clone()));
+                        props_json.insert("_label".to_string(), json!(actual_labels.join(":")));
 
                         let mut map = HashMap::new();
                         map.insert(variable.clone(), Value::Object(props_json));
@@ -2501,7 +2537,7 @@ impl Executor {
                     }
                 }
                 LogicalPlan::TraverseMainByType {
-                    type_name,
+                    type_names,
                     input,
                     direction,
                     source_variable,
@@ -2520,7 +2556,7 @@ impl Executor {
                     let traverse_results = self
                         .execute_traverse_main_by_type(
                             input_matches,
-                            &type_name,
+                            &type_names,
                             &direction,
                             &source_variable,
                             &target_variable,
@@ -3578,10 +3614,11 @@ impl Executor {
         Ok(new_matches)
     }
 
-    /// Executes a schemaless graph traversal by type name using the main edges table.
+    /// Executes a schemaless graph traversal by type name(s) using the main edges table.
     ///
     /// This is used for edge types not defined in the schema (e.g., MATCH (a)-[:UnknownType]->(b)).
-    /// It scans the main edges table for edges with the given type name.
+    /// Supports OR relationship types like `[:KNOWS|HATES]` via multiple type_names.
+    /// It scans the main edges table for edges with any of the given type names.
     ///
     /// # Errors
     ///
@@ -3593,7 +3630,7 @@ impl Executor {
     pub(crate) async fn execute_traverse_main_by_type(
         &self,
         input_matches: Vec<HashMap<String, Value>>,
-        type_name: &str,
+        type_names: &[String],
         direction: &Direction,
         source_variable: &str,
         target_variable: &str,
@@ -3615,41 +3652,44 @@ impl Executor {
             ));
         }
 
-        // Get edges from main table
+        // Get edges from main table for all type names
         let lancedb = self.storage.lancedb_store();
+        let type_refs: Vec<&str> = type_names.iter().map(|s| s.as_str()).collect();
         let mut edges_by_type =
-            MainEdgeDataset::find_edges_by_type_name(lancedb, type_name).await?;
+            MainEdgeDataset::find_edges_by_type_names(lancedb, &type_refs).await?;
 
-        // Helper to collect edges from an L0 buffer
+        // Helper to collect edges from an L0 buffer for multiple types
         fn collect_l0_edges(
             l0: &uni_store::runtime::l0::L0Buffer,
-            type_name: &str,
-            edges: &mut Vec<(Eid, Vid, Vid, uni_common::Properties)>,
+            type_names: &[String],
+            edges: &mut Vec<(Eid, Vid, Vid, String, uni_common::Properties)>,
         ) {
-            for eid in l0.eids_for_type(type_name) {
-                if let Some((src, dst)) = l0.get_edge_endpoints(eid) {
-                    let props = l0.edge_properties.get(&eid).cloned().unwrap_or_default();
-                    edges.push((eid, src, dst, props));
+            for type_name in type_names {
+                for eid in l0.eids_for_type(type_name) {
+                    if let Some((src, dst)) = l0.get_edge_endpoints(eid) {
+                        let props = l0.edge_properties.get(&eid).cloned().unwrap_or_default();
+                        edges.push((eid, src, dst, type_name.clone(), props));
+                    }
                 }
             }
         }
 
         // Add edges from L0 buffers
         if let Some(ctx) = ctx {
-            collect_l0_edges(&ctx.l0.read(), type_name, &mut edges_by_type);
+            collect_l0_edges(&ctx.l0.read(), type_names, &mut edges_by_type);
 
             if let Some(tx_l0_arc) = &ctx.transaction_l0 {
-                collect_l0_edges(&tx_l0_arc.read(), type_name, &mut edges_by_type);
+                collect_l0_edges(&tx_l0_arc.read(), type_names, &mut edges_by_type);
             }
 
             for pending_l0_arc in &ctx.pending_flush_l0s {
-                collect_l0_edges(&pending_l0_arc.read(), type_name, &mut edges_by_type);
+                collect_l0_edges(&pending_l0_arc.read(), type_names, &mut edges_by_type);
             }
         }
 
         // Deduplicate by eid (in case edge appears in both storage and L0)
         let mut seen_eids = std::collections::HashSet::new();
-        edges_by_type.retain(|(eid, _, _, _)| seen_eids.insert(*eid));
+        edges_by_type.retain(|(eid, _, _, _, _)| seen_eids.insert(*eid));
 
         let mut new_matches = Vec::new();
 
@@ -3693,7 +3733,7 @@ impl Executor {
             let mut found = false;
 
             // Find edges matching source and direction
-            for (eid, src_vid, dst_vid, edge_props) in &edges_by_type {
+            for (eid, src_vid, dst_vid, edge_type, edge_props) in &edges_by_type {
                 let (matches, target_vid) = match direction {
                     Direction::Outgoing => (*src_vid == source_vid, *dst_vid),
                     Direction::Incoming => (*dst_vid == source_vid, *src_vid),
@@ -3756,7 +3796,7 @@ impl Executor {
                     let mut edge_json: serde_json::Map<String, Value> =
                         edge_props.clone().into_iter().collect();
                     edge_json.insert("_eid".to_string(), json!(eid.as_u64()));
-                    edge_json.insert("_type".to_string(), json!(type_name));
+                    edge_json.insert("_type".to_string(), json!(edge_type));
                     edge_json.insert("_src".to_string(), json!(src_vid.as_u64()));
                     edge_json.insert("_dst".to_string(), json!(dst_vid.as_u64()));
                     new_row.insert(sv.clone(), Value::Object(edge_json));
