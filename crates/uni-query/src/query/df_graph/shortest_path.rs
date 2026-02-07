@@ -17,12 +17,12 @@
 //! Falls back to single-direction BFS when bidirectional is not applicable.
 
 use crate::query::df_graph::GraphExecutionContext;
+use crate::query::df_graph::common::compute_plan_properties;
 use arrow_array::builder::{ListBuilder, UInt64Builder};
 use arrow_array::{Array, ArrayRef, RecordBatch, UInt64Array};
 use arrow_schema::{DataType, Field, Schema, SchemaRef};
 use datafusion::common::Result as DFResult;
 use datafusion::execution::{RecordBatchStream, SendableRecordBatchStream, TaskContext};
-use datafusion::physical_expr::{EquivalenceProperties, Partitioning};
 use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties};
 use futures::{Stream, StreamExt};
@@ -126,13 +126,7 @@ impl GraphShortestPathExec {
         let path_variable = path_variable.into();
 
         let schema = Self::build_schema(input.schema(), &path_variable);
-
-        let properties = PlanProperties::new(
-            EquivalenceProperties::new(schema.clone()),
-            Partitioning::UnknownPartitioning(1),
-            datafusion::physical_plan::execution_plan::EmissionType::Incremental,
-            datafusion::physical_plan::execution_plan::Boundedness::Bounded,
-        );
+        let properties = compute_plan_properties(schema.clone());
 
         Self {
             input,

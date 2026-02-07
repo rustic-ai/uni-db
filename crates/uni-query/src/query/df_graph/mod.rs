@@ -37,6 +37,7 @@
 //! - Property manager for lazy property loading
 
 pub mod bind_zero_length_path;
+pub mod common;
 pub mod ext_id_lookup;
 pub mod scan;
 pub mod shortest_path;

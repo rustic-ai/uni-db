@@ -31,13 +31,13 @@
 //! L0 buffers are automatically overlaid for MVCC visibility.
 
 use crate::query::df_graph::GraphExecutionContext;
+use crate::query::df_graph::common::{build_path_struct_field, compute_plan_properties};
 use crate::query::df_graph::scan::{build_property_column_static, resolve_property_type};
 use arrow::compute::take;
 use arrow_array::{Array, ArrayRef, RecordBatch, UInt64Array};
 use arrow_schema::{DataType, Field, Schema, SchemaRef};
 use datafusion::common::Result as DFResult;
 use datafusion::execution::{RecordBatchStream, SendableRecordBatchStream, TaskContext};
-use datafusion::physical_expr::{EquivalenceProperties, Partitioning};
 use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties};
 use futures::{Stream, StreamExt};
@@ -56,45 +56,6 @@ type BfsResult = (Vid, usize, Vec<Vid>, Vec<Eid>);
 
 /// Expansion record: (original_row_idx, target_vid, hop_count, node_path, edge_path)
 type ExpansionRecord = (usize, Vid, usize, Vec<Vid>, Vec<Eid>);
-
-/// Build the standard node struct fields for path structures.
-fn node_struct_fields() -> arrow_schema::Fields {
-    arrow_schema::Fields::from(vec![
-        Field::new("_vid", DataType::UInt64, false),
-        Field::new("_label", DataType::Utf8, true),
-        Field::new("properties", DataType::LargeBinary, true),
-    ])
-}
-
-/// Build the standard edge struct fields for path structures.
-fn edge_struct_fields() -> arrow_schema::Fields {
-    arrow_schema::Fields::from(vec![
-        Field::new("_eid", DataType::UInt64, false),
-        Field::new("_type_name", DataType::Utf8, false),
-        Field::new("_src", DataType::UInt64, false),
-        Field::new("_dst", DataType::UInt64, false),
-        Field::new("properties", DataType::LargeBinary, true),
-    ])
-}
-
-/// Build path struct field for schema with given path variable name.
-fn build_path_struct_field(path_var: &str) -> Field {
-    let node_item = Field::new("item", DataType::Struct(node_struct_fields()), true);
-    let nodes_field = Field::new("nodes", DataType::List(Arc::new(node_item)), false);
-
-    let edge_item = Field::new("item", DataType::Struct(edge_struct_fields()), true);
-    let relationships_field =
-        Field::new("relationships", DataType::List(Arc::new(edge_item)), false);
-
-    Field::new(
-        path_var,
-        DataType::Struct(arrow_schema::Fields::from(vec![
-            nodes_field,
-            relationships_field,
-        ])),
-        false,
-    )
-}
 
 /// Resolve edge property Arrow type, falling back to `LargeBinary` (JSONB) for
 /// schemaless properties. Unlike vertex properties, schemaless edge properties must
@@ -118,16 +79,6 @@ fn resolve_edge_property_type(
 
 /// Expansion tuple for variable-length traversal: (input_row_idx, target_vid, hop_count, node_path, edge_path)
 type VarLengthExpansion = (usize, Vid, usize, Vec<Vid>, Vec<Eid>);
-
-/// Compute standard plan properties for a graph traversal operator.
-fn compute_plan_properties(schema: SchemaRef) -> PlanProperties {
-    PlanProperties::new(
-        EquivalenceProperties::new(schema),
-        Partitioning::UnknownPartitioning(1),
-        datafusion::physical_plan::execution_plan::EmissionType::Incremental,
-        datafusion::physical_plan::execution_plan::Boundedness::Bounded,
-    )
-}
 
 /// Single-hop graph traversal execution plan.
 ///

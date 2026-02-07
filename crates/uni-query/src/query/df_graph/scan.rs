@@ -25,6 +25,7 @@
 
 use crate::query::datetime::parse_datetime_utc;
 use crate::query::df_graph::GraphExecutionContext;
+use crate::query::df_graph::common::compute_plan_properties;
 use arrow_array::builder::{
     BinaryBuilder, BooleanBuilder, Date32Builder, DurationMicrosecondBuilder, FixedSizeListBuilder,
     Float32Builder, Float64Builder, Int32Builder, Int64Builder, ListBuilder, StringBuilder,
@@ -35,7 +36,7 @@ use arrow_schema::{DataType, Field, Fields, Schema, SchemaRef, TimeUnit};
 use chrono::{NaiveDate, NaiveTime, Timelike};
 use datafusion::common::Result as DFResult;
 use datafusion::execution::{RecordBatchStream, SendableRecordBatchStream, TaskContext};
-use datafusion::physical_expr::{EquivalenceProperties, Partitioning, PhysicalExpr};
+use datafusion::physical_expr::PhysicalExpr;
 use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties};
 use futures::Stream;
@@ -134,7 +135,7 @@ impl GraphScanExec {
         let schema =
             Self::build_vertex_schema(&variable, &label, &projected_properties, &uni_schema);
 
-        let properties = Self::compute_properties(schema.clone());
+        let properties = compute_plan_properties(schema.clone());
 
         Self {
             graph_ctx,
@@ -167,7 +168,7 @@ impl GraphScanExec {
 
         // Build schema - all properties are Utf8 (from JSON) except _vid
         let schema = Self::build_schemaless_vertex_schema(&variable, &projected_properties);
-        let properties = Self::compute_properties(schema.clone());
+        let properties = compute_plan_properties(schema.clone());
 
         Self {
             graph_ctx,
@@ -198,7 +199,7 @@ impl GraphScanExec {
 
         // Build schema - all properties are Utf8 (from JSON) except _vid
         let schema = Self::build_schemaless_vertex_schema(&variable, &projected_properties);
-        let properties = Self::compute_properties(schema.clone());
+        let properties = compute_plan_properties(schema.clone());
 
         Self {
             graph_ctx,
@@ -249,7 +250,7 @@ impl GraphScanExec {
         let uni_schema = graph_ctx.storage().schema_manager().schema();
         let schema = Self::build_edge_schema(&variable, &label, &projected_properties, &uni_schema);
 
-        let properties = Self::compute_properties(schema.clone());
+        let properties = compute_plan_properties(schema.clone());
 
         Self {
             graph_ctx,
@@ -305,16 +306,6 @@ impl GraphScanExec {
             fields.push(Field::new(&col_name, arrow_type, true));
         }
         Arc::new(Schema::new(fields))
-    }
-
-    /// Compute plan properties.
-    fn compute_properties(schema: SchemaRef) -> PlanProperties {
-        PlanProperties::new(
-            EquivalenceProperties::new(schema),
-            Partitioning::UnknownPartitioning(1),
-            datafusion::physical_plan::execution_plan::EmissionType::Incremental,
-            datafusion::physical_plan::execution_plan::Boundedness::Bounded,
-        )
     }
 }
 

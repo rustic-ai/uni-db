@@ -24,13 +24,13 @@
 //!           {"list": [1,2,3], "item": 3}]
 //! ```
 
+use crate::query::df_graph::common::compute_plan_properties;
 use arrow::compute::take;
 use arrow_array::builder::StringBuilder;
 use arrow_array::{Array, ArrayRef, RecordBatch, UInt64Array};
 use arrow_schema::{DataType, Field, Schema, SchemaRef};
 use datafusion::common::Result as DFResult;
 use datafusion::execution::{RecordBatchStream, SendableRecordBatchStream, TaskContext};
-use datafusion::physical_expr::{EquivalenceProperties, Partitioning};
 use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties};
 use futures::{Stream, StreamExt};
@@ -100,7 +100,7 @@ impl GraphUnwindExec {
 
         // Build output schema: input schema + new variable column
         let schema = Self::build_schema(input.schema(), &variable);
-        let properties = Self::compute_properties(schema.clone());
+        let properties = compute_plan_properties(schema.clone());
 
         Self {
             input,
@@ -133,16 +133,6 @@ impl GraphUnwindExec {
         fields.push(field);
 
         Arc::new(Schema::new(fields))
-    }
-
-    /// Compute plan properties.
-    fn compute_properties(schema: SchemaRef) -> PlanProperties {
-        PlanProperties::new(
-            EquivalenceProperties::new(schema),
-            Partitioning::UnknownPartitioning(1),
-            datafusion::physical_plan::execution_plan::EmissionType::Incremental,
-            datafusion::physical_plan::execution_plan::Boundedness::Bounded,
-        )
     }
 }
 

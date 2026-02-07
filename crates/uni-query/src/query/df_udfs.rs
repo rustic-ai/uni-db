@@ -508,501 +508,237 @@ impl ScalarUDFImpl for RangeUdf {
 // Bitwise Functions (uni.bitwise.*)
 // ============================================================================
 
+/// Invoke a binary bitwise operation on two Int64 arguments.
+///
+/// Consolidates the matching logic for all binary bitwise UDFs.
+fn invoke_binary_bitwise_op<F>(
+    args: &ScalarFunctionArgs,
+    name: &str,
+    op: F,
+) -> DFResult<ColumnarValue>
+where
+    F: Fn(i64, i64) -> i64,
+{
+    use arrow_array::Int64Array;
+    use datafusion::common::ScalarValue;
+    use datafusion::error::DataFusionError;
+
+    if args.args.len() != 2 {
+        return Err(DataFusionError::Execution(format!(
+            "{} requires exactly 2 arguments",
+            name
+        )));
+    }
+
+    let left = &args.args[0];
+    let right = &args.args[1];
+
+    match (left, right) {
+        (
+            ColumnarValue::Scalar(ScalarValue::Int64(Some(l))),
+            ColumnarValue::Scalar(ScalarValue::Int64(Some(r))),
+        ) => Ok(ColumnarValue::Scalar(ScalarValue::Int64(Some(op(*l, *r))))),
+        (ColumnarValue::Array(l_arr), ColumnarValue::Array(r_arr)) => {
+            let l_arr = l_arr.as_any().downcast_ref::<Int64Array>().ok_or_else(|| {
+                DataFusionError::Execution("Left array must be Int64".to_string())
+            })?;
+            let r_arr = r_arr.as_any().downcast_ref::<Int64Array>().ok_or_else(|| {
+                DataFusionError::Execution("Right array must be Int64".to_string())
+            })?;
+
+            let result: Int64Array = l_arr
+                .iter()
+                .zip(r_arr.iter())
+                .map(|(l, r)| match (l, r) {
+                    (Some(l), Some(r)) => Some(op(l, r)),
+                    _ => None,
+                })
+                .collect();
+
+            Ok(ColumnarValue::Array(Arc::new(result)))
+        }
+        _ => Err(DataFusionError::Execution(format!(
+            "Mixed scalar/array not supported for {}",
+            name
+        ))),
+    }
+}
+
+/// Invoke a unary bitwise operation on a single Int64 argument.
+///
+/// Consolidates the matching logic for unary bitwise UDFs.
+fn invoke_unary_bitwise_op<F>(
+    args: &ScalarFunctionArgs,
+    name: &str,
+    op: F,
+) -> DFResult<ColumnarValue>
+where
+    F: Fn(i64) -> i64,
+{
+    use arrow_array::Int64Array;
+    use datafusion::common::ScalarValue;
+    use datafusion::error::DataFusionError;
+
+    if args.args.len() != 1 {
+        return Err(DataFusionError::Execution(format!(
+            "{} requires exactly 1 argument",
+            name
+        )));
+    }
+
+    let operand = &args.args[0];
+
+    match operand {
+        ColumnarValue::Scalar(ScalarValue::Int64(Some(v))) => {
+            Ok(ColumnarValue::Scalar(ScalarValue::Int64(Some(op(*v)))))
+        }
+        ColumnarValue::Array(arr) => {
+            let arr = arr
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .ok_or_else(|| DataFusionError::Execution("Array must be Int64".to_string()))?;
+
+            let result: Int64Array = arr.iter().map(|v| v.map(&op)).collect();
+
+            Ok(ColumnarValue::Array(Arc::new(result)))
+        }
+        _ => Err(DataFusionError::Execution(format!(
+            "Invalid argument type for {}",
+            name
+        ))),
+    }
+}
+
+/// Macro to define a binary bitwise UDF with minimal boilerplate.
+///
+/// Takes the struct name, UDF name string, and the bitwise operation as a closure.
+macro_rules! define_binary_bitwise_udf {
+    ($struct_name:ident, $udf_name:literal, $op:expr) => {
+        #[derive(Debug)]
+        struct $struct_name {
+            signature: Signature,
+        }
+
+        impl $struct_name {
+            fn new() -> Self {
+                Self {
+                    signature: Signature::exact(
+                        vec![DataType::Int64, DataType::Int64],
+                        Volatility::Immutable,
+                    ),
+                }
+            }
+        }
+
+        impl_udf_eq_hash!($struct_name);
+
+        impl ScalarUDFImpl for $struct_name {
+            fn as_any(&self) -> &dyn Any {
+                self
+            }
+
+            fn name(&self) -> &str {
+                $udf_name
+            }
+
+            fn signature(&self) -> &Signature {
+                &self.signature
+            }
+
+            fn return_type(&self, _arg_types: &[DataType]) -> DFResult<DataType> {
+                Ok(DataType::Int64)
+            }
+
+            fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DFResult<ColumnarValue> {
+                invoke_binary_bitwise_op(&args, $udf_name, $op)
+            }
+        }
+    };
+}
+
+/// Macro to define a unary bitwise UDF with minimal boilerplate.
+///
+/// Takes the struct name, UDF name string, and the bitwise operation as a closure.
+macro_rules! define_unary_bitwise_udf {
+    ($struct_name:ident, $udf_name:literal, $op:expr) => {
+        #[derive(Debug)]
+        struct $struct_name {
+            signature: Signature,
+        }
+
+        impl $struct_name {
+            fn new() -> Self {
+                Self {
+                    signature: Signature::exact(vec![DataType::Int64], Volatility::Immutable),
+                }
+            }
+        }
+
+        impl_udf_eq_hash!($struct_name);
+
+        impl ScalarUDFImpl for $struct_name {
+            fn as_any(&self) -> &dyn Any {
+                self
+            }
+
+            fn name(&self) -> &str {
+                $udf_name
+            }
+
+            fn signature(&self) -> &Signature {
+                &self.signature
+            }
+
+            fn return_type(&self, _arg_types: &[DataType]) -> DFResult<DataType> {
+                Ok(DataType::Int64)
+            }
+
+            fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DFResult<ColumnarValue> {
+                invoke_unary_bitwise_op(&args, $udf_name, $op)
+            }
+        }
+    };
+}
+
+// Define all binary bitwise UDFs using the macro
+define_binary_bitwise_udf!(BitwiseOrUdf, "uni.bitwise.or", |l, r| l | r);
+define_binary_bitwise_udf!(BitwiseAndUdf, "uni.bitwise.and", |l, r| l & r);
+define_binary_bitwise_udf!(BitwiseXorUdf, "uni.bitwise.xor", |l, r| l ^ r);
+define_binary_bitwise_udf!(ShiftLeftUdf, "uni.bitwise.shiftLeft", |l, r| l << r);
+define_binary_bitwise_udf!(ShiftRightUdf, "uni.bitwise.shiftRight", |l, r| l >> r);
+
+// Define the unary bitwise NOT UDF using the macro
+define_unary_bitwise_udf!(BitwiseNotUdf, "uni.bitwise.not", |v| !v);
+
 /// Create the `uni.bitwise.or` UDF for bitwise OR operations.
 pub fn create_bitwise_or_udf() -> ScalarUDF {
     ScalarUDF::new_from_impl(BitwiseOrUdf::new())
 }
-
-#[derive(Debug)]
-struct BitwiseOrUdf {
-    signature: Signature,
-}
-
-impl BitwiseOrUdf {
-    fn new() -> Self {
-        Self {
-            signature: Signature::exact(
-                vec![DataType::Int64, DataType::Int64],
-                Volatility::Immutable,
-            ),
-        }
-    }
-}
-
-impl ScalarUDFImpl for BitwiseOrUdf {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
-    fn name(&self) -> &str {
-        "uni.bitwise.or"
-    }
-
-    fn signature(&self) -> &Signature {
-        &self.signature
-    }
-
-    fn return_type(&self, _arg_types: &[DataType]) -> DFResult<DataType> {
-        Ok(DataType::Int64)
-    }
-
-    fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DFResult<ColumnarValue> {
-        use arrow_array::Int64Array;
-        use datafusion::common::ScalarValue;
-        use datafusion::error::DataFusionError;
-
-        if args.args.len() != 2 {
-            return Err(DataFusionError::Execution(
-                "uni.bitwise.or requires exactly 2 arguments".to_string(),
-            ));
-        }
-
-        let left = &args.args[0];
-        let right = &args.args[1];
-
-        match (left, right) {
-            (
-                ColumnarValue::Scalar(ScalarValue::Int64(Some(l))),
-                ColumnarValue::Scalar(ScalarValue::Int64(Some(r))),
-            ) => Ok(ColumnarValue::Scalar(ScalarValue::Int64(Some(l | r)))),
-            (ColumnarValue::Array(l_arr), ColumnarValue::Array(r_arr)) => {
-                let l_arr = l_arr.as_any().downcast_ref::<Int64Array>().ok_or_else(|| {
-                    DataFusionError::Execution("Left array must be Int64".to_string())
-                })?;
-                let r_arr = r_arr.as_any().downcast_ref::<Int64Array>().ok_or_else(|| {
-                    DataFusionError::Execution("Right array must be Int64".to_string())
-                })?;
-
-                let result: Int64Array = l_arr
-                    .iter()
-                    .zip(r_arr.iter())
-                    .map(|(l, r)| match (l, r) {
-                        (Some(l), Some(r)) => Some(l | r),
-                        _ => None,
-                    })
-                    .collect();
-
-                Ok(ColumnarValue::Array(Arc::new(result)))
-            }
-            _ => Err(DataFusionError::Execution(
-                "Mixed scalar/array not supported for uni.bitwise.or".to_string(),
-            )),
-        }
-    }
-}
-
-impl_udf_eq_hash!(BitwiseOrUdf);
 
 /// Create the `uni.bitwise.and` UDF for bitwise AND operations.
 pub fn create_bitwise_and_udf() -> ScalarUDF {
     ScalarUDF::new_from_impl(BitwiseAndUdf::new())
 }
 
-#[derive(Debug)]
-struct BitwiseAndUdf {
-    signature: Signature,
-}
-
-impl BitwiseAndUdf {
-    fn new() -> Self {
-        Self {
-            signature: Signature::exact(
-                vec![DataType::Int64, DataType::Int64],
-                Volatility::Immutable,
-            ),
-        }
-    }
-}
-
-impl ScalarUDFImpl for BitwiseAndUdf {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
-    fn name(&self) -> &str {
-        "uni.bitwise.and"
-    }
-
-    fn signature(&self) -> &Signature {
-        &self.signature
-    }
-
-    fn return_type(&self, _arg_types: &[DataType]) -> DFResult<DataType> {
-        Ok(DataType::Int64)
-    }
-
-    fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DFResult<ColumnarValue> {
-        use arrow_array::Int64Array;
-        use datafusion::common::ScalarValue;
-        use datafusion::error::DataFusionError;
-
-        if args.args.len() != 2 {
-            return Err(DataFusionError::Execution(
-                "uni.bitwise.and requires exactly 2 arguments".to_string(),
-            ));
-        }
-
-        let left = &args.args[0];
-        let right = &args.args[1];
-
-        match (left, right) {
-            (
-                ColumnarValue::Scalar(ScalarValue::Int64(Some(l))),
-                ColumnarValue::Scalar(ScalarValue::Int64(Some(r))),
-            ) => Ok(ColumnarValue::Scalar(ScalarValue::Int64(Some(l & r)))),
-            (ColumnarValue::Array(l_arr), ColumnarValue::Array(r_arr)) => {
-                let l_arr = l_arr.as_any().downcast_ref::<Int64Array>().ok_or_else(|| {
-                    DataFusionError::Execution("Left array must be Int64".to_string())
-                })?;
-                let r_arr = r_arr.as_any().downcast_ref::<Int64Array>().ok_or_else(|| {
-                    DataFusionError::Execution("Right array must be Int64".to_string())
-                })?;
-
-                let result: Int64Array = l_arr
-                    .iter()
-                    .zip(r_arr.iter())
-                    .map(|(l, r)| match (l, r) {
-                        (Some(l), Some(r)) => Some(l & r),
-                        _ => None,
-                    })
-                    .collect();
-
-                Ok(ColumnarValue::Array(Arc::new(result)))
-            }
-            _ => Err(DataFusionError::Execution(
-                "Mixed scalar/array not supported for uni.bitwise.and".to_string(),
-            )),
-        }
-    }
-}
-
-impl_udf_eq_hash!(BitwiseAndUdf);
-
 /// Create the `uni.bitwise.xor` UDF for bitwise XOR operations.
 pub fn create_bitwise_xor_udf() -> ScalarUDF {
     ScalarUDF::new_from_impl(BitwiseXorUdf::new())
 }
-
-#[derive(Debug)]
-struct BitwiseXorUdf {
-    signature: Signature,
-}
-
-impl BitwiseXorUdf {
-    fn new() -> Self {
-        Self {
-            signature: Signature::exact(
-                vec![DataType::Int64, DataType::Int64],
-                Volatility::Immutable,
-            ),
-        }
-    }
-}
-
-impl ScalarUDFImpl for BitwiseXorUdf {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
-    fn name(&self) -> &str {
-        "uni.bitwise.xor"
-    }
-
-    fn signature(&self) -> &Signature {
-        &self.signature
-    }
-
-    fn return_type(&self, _arg_types: &[DataType]) -> DFResult<DataType> {
-        Ok(DataType::Int64)
-    }
-
-    fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DFResult<ColumnarValue> {
-        use arrow_array::Int64Array;
-        use datafusion::common::ScalarValue;
-        use datafusion::error::DataFusionError;
-
-        if args.args.len() != 2 {
-            return Err(DataFusionError::Execution(
-                "uni.bitwise.xor requires exactly 2 arguments".to_string(),
-            ));
-        }
-
-        let left = &args.args[0];
-        let right = &args.args[1];
-
-        match (left, right) {
-            (
-                ColumnarValue::Scalar(ScalarValue::Int64(Some(l))),
-                ColumnarValue::Scalar(ScalarValue::Int64(Some(r))),
-            ) => Ok(ColumnarValue::Scalar(ScalarValue::Int64(Some(l ^ r)))),
-            (ColumnarValue::Array(l_arr), ColumnarValue::Array(r_arr)) => {
-                let l_arr = l_arr.as_any().downcast_ref::<Int64Array>().ok_or_else(|| {
-                    DataFusionError::Execution("Left array must be Int64".to_string())
-                })?;
-                let r_arr = r_arr.as_any().downcast_ref::<Int64Array>().ok_or_else(|| {
-                    DataFusionError::Execution("Right array must be Int64".to_string())
-                })?;
-
-                let result: Int64Array = l_arr
-                    .iter()
-                    .zip(r_arr.iter())
-                    .map(|(l, r)| match (l, r) {
-                        (Some(l), Some(r)) => Some(l ^ r),
-                        _ => None,
-                    })
-                    .collect();
-
-                Ok(ColumnarValue::Array(Arc::new(result)))
-            }
-            _ => Err(DataFusionError::Execution(
-                "Mixed scalar/array not supported for uni.bitwise.xor".to_string(),
-            )),
-        }
-    }
-}
-
-impl_udf_eq_hash!(BitwiseXorUdf);
 
 /// Create the `uni.bitwise.not` UDF for bitwise NOT operations.
 pub fn create_bitwise_not_udf() -> ScalarUDF {
     ScalarUDF::new_from_impl(BitwiseNotUdf::new())
 }
 
-#[derive(Debug)]
-struct BitwiseNotUdf {
-    signature: Signature,
-}
-
-impl BitwiseNotUdf {
-    fn new() -> Self {
-        Self {
-            signature: Signature::exact(vec![DataType::Int64], Volatility::Immutable),
-        }
-    }
-}
-
-impl ScalarUDFImpl for BitwiseNotUdf {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
-    fn name(&self) -> &str {
-        "uni.bitwise.not"
-    }
-
-    fn signature(&self) -> &Signature {
-        &self.signature
-    }
-
-    fn return_type(&self, _arg_types: &[DataType]) -> DFResult<DataType> {
-        Ok(DataType::Int64)
-    }
-
-    fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DFResult<ColumnarValue> {
-        use arrow_array::Int64Array;
-        use datafusion::common::ScalarValue;
-        use datafusion::error::DataFusionError;
-
-        if args.args.len() != 1 {
-            return Err(DataFusionError::Execution(
-                "uni.bitwise.not requires exactly 1 argument".to_string(),
-            ));
-        }
-
-        let operand = &args.args[0];
-
-        match operand {
-            ColumnarValue::Scalar(ScalarValue::Int64(Some(v))) => {
-                Ok(ColumnarValue::Scalar(ScalarValue::Int64(Some(!v))))
-            }
-            ColumnarValue::Array(arr) => {
-                let arr = arr
-                    .as_any()
-                    .downcast_ref::<Int64Array>()
-                    .ok_or_else(|| DataFusionError::Execution("Array must be Int64".to_string()))?;
-
-                let result: Int64Array = arr.iter().map(|v| v.map(|val| !val)).collect();
-
-                Ok(ColumnarValue::Array(Arc::new(result)))
-            }
-            _ => Err(DataFusionError::Execution(
-                "Invalid argument type for uni.bitwise.not".to_string(),
-            )),
-        }
-    }
-}
-
-impl_udf_eq_hash!(BitwiseNotUdf);
-
 /// Create the `uni.bitwise.shiftLeft` UDF for left shift operations.
 pub fn create_shift_left_udf() -> ScalarUDF {
     ScalarUDF::new_from_impl(ShiftLeftUdf::new())
 }
 
-#[derive(Debug)]
-struct ShiftLeftUdf {
-    signature: Signature,
-}
-
-impl ShiftLeftUdf {
-    fn new() -> Self {
-        Self {
-            signature: Signature::exact(
-                vec![DataType::Int64, DataType::Int64],
-                Volatility::Immutable,
-            ),
-        }
-    }
-}
-
-impl ScalarUDFImpl for ShiftLeftUdf {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
-    fn name(&self) -> &str {
-        "uni.bitwise.shiftLeft"
-    }
-
-    fn signature(&self) -> &Signature {
-        &self.signature
-    }
-
-    fn return_type(&self, _arg_types: &[DataType]) -> DFResult<DataType> {
-        Ok(DataType::Int64)
-    }
-
-    fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DFResult<ColumnarValue> {
-        use arrow_array::Int64Array;
-        use datafusion::common::ScalarValue;
-        use datafusion::error::DataFusionError;
-
-        if args.args.len() != 2 {
-            return Err(DataFusionError::Execution(
-                "uni.bitwise.shiftLeft requires exactly 2 arguments".to_string(),
-            ));
-        }
-
-        let value = &args.args[0];
-        let shift = &args.args[1];
-
-        match (value, shift) {
-            (
-                ColumnarValue::Scalar(ScalarValue::Int64(Some(v))),
-                ColumnarValue::Scalar(ScalarValue::Int64(Some(s))),
-            ) => Ok(ColumnarValue::Scalar(ScalarValue::Int64(Some(v << s)))),
-            (ColumnarValue::Array(v_arr), ColumnarValue::Array(s_arr)) => {
-                let v_arr = v_arr.as_any().downcast_ref::<Int64Array>().ok_or_else(|| {
-                    DataFusionError::Execution("Value array must be Int64".to_string())
-                })?;
-                let s_arr = s_arr.as_any().downcast_ref::<Int64Array>().ok_or_else(|| {
-                    DataFusionError::Execution("Shift array must be Int64".to_string())
-                })?;
-
-                let result: Int64Array = v_arr
-                    .iter()
-                    .zip(s_arr.iter())
-                    .map(|(v, s)| match (v, s) {
-                        (Some(v), Some(s)) => Some(v << s),
-                        _ => None,
-                    })
-                    .collect();
-
-                Ok(ColumnarValue::Array(Arc::new(result)))
-            }
-            _ => Err(DataFusionError::Execution(
-                "Mixed scalar/array not supported for uni.bitwise.shiftLeft".to_string(),
-            )),
-        }
-    }
-}
-
-impl_udf_eq_hash!(ShiftLeftUdf);
-
 /// Create the `uni.bitwise.shiftRight` UDF for right shift operations.
 pub fn create_shift_right_udf() -> ScalarUDF {
     ScalarUDF::new_from_impl(ShiftRightUdf::new())
 }
-
-#[derive(Debug)]
-struct ShiftRightUdf {
-    signature: Signature,
-}
-
-impl ShiftRightUdf {
-    fn new() -> Self {
-        Self {
-            signature: Signature::exact(
-                vec![DataType::Int64, DataType::Int64],
-                Volatility::Immutable,
-            ),
-        }
-    }
-}
-
-impl ScalarUDFImpl for ShiftRightUdf {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
-    fn name(&self) -> &str {
-        "uni.bitwise.shiftRight"
-    }
-
-    fn signature(&self) -> &Signature {
-        &self.signature
-    }
-
-    fn return_type(&self, _arg_types: &[DataType]) -> DFResult<DataType> {
-        Ok(DataType::Int64)
-    }
-
-    fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DFResult<ColumnarValue> {
-        use arrow_array::Int64Array;
-        use datafusion::common::ScalarValue;
-        use datafusion::error::DataFusionError;
-
-        if args.args.len() != 2 {
-            return Err(DataFusionError::Execution(
-                "uni.bitwise.shiftRight requires exactly 2 arguments".to_string(),
-            ));
-        }
-
-        let value = &args.args[0];
-        let shift = &args.args[1];
-
-        match (value, shift) {
-            (
-                ColumnarValue::Scalar(ScalarValue::Int64(Some(v))),
-                ColumnarValue::Scalar(ScalarValue::Int64(Some(s))),
-            ) => Ok(ColumnarValue::Scalar(ScalarValue::Int64(Some(v >> s)))),
-            (ColumnarValue::Array(v_arr), ColumnarValue::Array(s_arr)) => {
-                let v_arr = v_arr.as_any().downcast_ref::<Int64Array>().ok_or_else(|| {
-                    DataFusionError::Execution("Value array must be Int64".to_string())
-                })?;
-                let s_arr = s_arr.as_any().downcast_ref::<Int64Array>().ok_or_else(|| {
-                    DataFusionError::Execution("Shift array must be Int64".to_string())
-                })?;
-
-                let result: Int64Array = v_arr
-                    .iter()
-                    .zip(s_arr.iter())
-                    .map(|(v, s)| match (v, s) {
-                        (Some(v), Some(s)) => Some(v >> s),
-                        _ => None,
-                    })
-                    .collect();
-
-                Ok(ColumnarValue::Array(Arc::new(result)))
-            }
-            _ => Err(DataFusionError::Execution(
-                "Mixed scalar/array not supported for uni.bitwise.shiftRight".to_string(),
-            )),
-        }
-    }
-}
-
-impl_udf_eq_hash!(ShiftRightUdf);
 
 // ============================================================================
 // Temporal UDFs — delegate to eval_datetime_function in datetime.rs

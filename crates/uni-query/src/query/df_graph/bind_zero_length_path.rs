@@ -16,6 +16,7 @@
 //! ```
 
 use super::GraphExecutionContext;
+use super::common::compute_plan_properties;
 use arrow_array::builder::{
     LargeBinaryBuilder, ListBuilder, StringBuilder, StructBuilder, UInt64Builder,
 };
@@ -23,7 +24,6 @@ use arrow_array::{Array, ArrayRef, RecordBatch, StructArray};
 use arrow_schema::{DataType, Field, Fields, Schema, SchemaRef};
 use datafusion::common::Result as DFResult;
 use datafusion::execution::{RecordBatchStream, SendableRecordBatchStream, TaskContext};
-use datafusion::physical_expr::{EquivalenceProperties, Partitioning};
 use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties};
 use futures::{Stream, StreamExt};
@@ -87,7 +87,7 @@ impl BindZeroLengthPathExec {
     ) -> Self {
         // Build output schema: input schema + path variable column
         let schema = Self::build_schema(input.schema(), &path_variable);
-        let properties = Self::compute_properties(schema.clone());
+        let properties = compute_plan_properties(schema.clone());
 
         Self {
             input,
@@ -142,16 +142,6 @@ impl BindZeroLengthPathExec {
         ));
 
         Arc::new(Schema::new(fields))
-    }
-
-    /// Compute plan properties.
-    fn compute_properties(schema: SchemaRef) -> PlanProperties {
-        PlanProperties::new(
-            EquivalenceProperties::new(schema),
-            Partitioning::UnknownPartitioning(1),
-            datafusion::physical_plan::execution_plan::EmissionType::Incremental,
-            datafusion::physical_plan::execution_plan::Boundedness::Bounded,
-        )
     }
 }
 

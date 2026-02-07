@@ -16,12 +16,12 @@
 //! - `{variable}.{property}` - materialized properties
 
 use crate::query::df_graph::GraphExecutionContext;
+use crate::query::df_graph::common::compute_plan_properties;
 use arrow_array::builder::StringBuilder;
 use arrow_array::{ArrayRef, RecordBatch, UInt64Array};
 use arrow_schema::{DataType, Field, Schema, SchemaRef};
 use datafusion::common::Result as DFResult;
 use datafusion::execution::{RecordBatchStream, SendableRecordBatchStream, TaskContext};
-use datafusion::physical_expr::{EquivalenceProperties, Partitioning};
 use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties};
 use futures::Stream;
@@ -89,7 +89,7 @@ impl GraphExtIdLookupExec {
 
         // Build output schema
         let schema = Self::build_schema(&variable, &projected_properties);
-        let properties = Self::compute_properties(schema.clone());
+        let properties = compute_plan_properties(schema.clone());
 
         Self {
             graph_ctx,
@@ -118,16 +118,6 @@ impl GraphExtIdLookupExec {
         }
 
         Arc::new(Schema::new(fields))
-    }
-
-    /// Compute plan properties.
-    fn compute_properties(schema: SchemaRef) -> PlanProperties {
-        PlanProperties::new(
-            EquivalenceProperties::new(schema),
-            Partitioning::UnknownPartitioning(1),
-            datafusion::physical_plan::execution_plan::EmissionType::Incremental,
-            datafusion::physical_plan::execution_plan::Boundedness::Bounded,
-        )
     }
 }
 
