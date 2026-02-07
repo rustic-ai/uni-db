@@ -240,33 +240,40 @@ pub fn cypher_expr_to_df(expr: &Expr, context: Option<&TranslationContext>) -> R
         }
 
         Expr::List(items) => {
-            // Create a scalar list value
-            let values: Vec<ScalarValue> = items
-                .iter()
-                .map(|item| {
-                    if let Expr::Literal(v) = item {
-                        cypher_literal_to_scalar(v)
-                    } else {
-                        Err(anyhow!("Non-literal list elements not supported"))
-                    }
-                })
-                .collect::<Result<Vec<_>>>()?;
+            // Use make_array to create a List type in DataFusion.
+            // This supports dynamic values and performs type coercion for mixed numeric types.
+            let mut df_args = Vec::with_capacity(items.len());
+            let mut has_float = false;
+            let mut has_int = false;
+            let mut has_other = false;
 
-            if values.is_empty() {
+            for item in items {
+                match item {
+                    Expr::Literal(CypherLiteral::Float(_)) => has_float = true,
+                    Expr::Literal(CypherLiteral::Integer(_)) => has_int = true,
+                    _ => has_other = true,
+                }
+                df_args.push(cypher_expr_to_df(item, context)?);
+            }
+
+            if df_args.is_empty() {
                 // Empty list with null type
                 let empty_arr = ScalarValue::new_list_nullable(
                     &[],
                     &datafusion::arrow::datatypes::DataType::Null,
                 );
                 Ok(lit(ScalarValue::List(empty_arr)))
+            } else if has_float && has_int && !has_other {
+                // Promote all to Float64 for numeric consistency in Arrow
+                let promoted_args = df_args
+                    .into_iter()
+                    .map(|e| cast_expr(e, datafusion::arrow::datatypes::DataType::Float64))
+                    .collect();
+                Ok(datafusion::functions_nested::expr_fn::make_array(
+                    promoted_args,
+                ))
             } else {
-                // Infer type from first element (nullable = true)
-                let list_arr = ScalarValue::new_list(
-                    &values,
-                    &values[0].data_type(),
-                    true, // nullable
-                );
-                Ok(lit(ScalarValue::List(list_arr)))
+                Ok(datafusion::functions_nested::expr_fn::make_array(df_args))
             }
         }
 
@@ -712,23 +719,35 @@ fn translate_function_call(
         }
         "TOINTEGER" | "TOINT" => {
             require_arg(&df_args, "toInteger")?;
-            Ok(cast_expr(
-                first_arg(&df_args),
-                datafusion::arrow::datatypes::DataType::Int64,
+            Ok(DfExpr::ScalarFunction(
+                datafusion::logical_expr::expr::ScalarFunction {
+                    func: Arc::new(datafusion::logical_expr::ScalarUDF::new_from_impl(
+                        DummyUdf::new("toInteger".to_string()),
+                    )),
+                    args: df_args,
+                },
             ))
         }
         "TOFLOAT" => {
             require_arg(&df_args, "toFloat")?;
-            Ok(cast_expr(
-                first_arg(&df_args),
-                datafusion::arrow::datatypes::DataType::Float64,
+            Ok(DfExpr::ScalarFunction(
+                datafusion::logical_expr::expr::ScalarFunction {
+                    func: Arc::new(datafusion::logical_expr::ScalarUDF::new_from_impl(
+                        DummyUdf::new("toFloat".to_string()),
+                    )),
+                    args: df_args,
+                },
             ))
         }
         "TOBOOLEAN" | "TOBOOL" => {
             require_arg(&df_args, "toBoolean")?;
-            Ok(cast_expr(
-                first_arg(&df_args),
-                datafusion::arrow::datatypes::DataType::Boolean,
+            Ok(DfExpr::ScalarFunction(
+                datafusion::logical_expr::expr::ScalarFunction {
+                    func: Arc::new(datafusion::logical_expr::ScalarUDF::new_from_impl(
+                        DummyUdf::new("toBoolean".to_string()),
+                    )),
+                    args: df_args,
+                },
             ))
         }
 

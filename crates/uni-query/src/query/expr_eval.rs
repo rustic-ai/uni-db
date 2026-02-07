@@ -24,16 +24,23 @@ use uni_cypher::ast::BinaryOp;
 /// This function handles all binary operators (Eq, NotEq, And, Or, Gt, Lt, etc.)
 /// and returns the result of the operation.
 pub fn eval_binary_op(left: &Value, op: &BinaryOp, right: &Value) -> Result<Value> {
+    // Null propagation for most operators (except AND/OR which have three-valued logic)
+    if !matches!(op, BinaryOp::And | BinaryOp::Or) && (left.is_null() || right.is_null()) {
+        return Ok(Value::Null);
+    }
+
     match op {
-        BinaryOp::Eq => Ok(Value::Bool(left == right)),
-        BinaryOp::NotEq => Ok(Value::Bool(left != right)),
+        BinaryOp::Eq => Ok(Value::Bool(cypher_eq(left, right))),
+        BinaryOp::NotEq => Ok(Value::Bool(!cypher_eq(left, right))),
         BinaryOp::And => {
             // Three-valued logic: false dominates, null propagates with true
             match (left.as_bool(), right.as_bool()) {
                 (Some(false), _) | (_, Some(false)) => Ok(Value::Bool(false)),
                 (Some(true), Some(true)) => Ok(Value::Bool(true)),
                 _ if left.is_null() || right.is_null() => Ok(Value::Null),
-                _ => Err(anyhow!("Expected bool for AND operands")),
+                _ => Err(anyhow!(
+                    "InvalidArgumentType: Expected bool for AND operands"
+                )),
             }
         }
         BinaryOp::Or => {
@@ -42,7 +49,9 @@ pub fn eval_binary_op(left: &Value, op: &BinaryOp, right: &Value) -> Result<Valu
                 (Some(true), _) | (_, Some(true)) => Ok(Value::Bool(true)),
                 (Some(false), Some(false)) => Ok(Value::Bool(false)),
                 _ if left.is_null() || right.is_null() => Ok(Value::Null),
-                _ => Err(anyhow!("Expected bool for OR operands")),
+                _ => Err(anyhow!(
+                    "InvalidArgumentType: Expected bool for OR operands"
+                )),
             }
         }
         BinaryOp::Xor => {
@@ -50,7 +59,9 @@ pub fn eval_binary_op(left: &Value, op: &BinaryOp, right: &Value) -> Result<Valu
             match (left.as_bool(), right.as_bool()) {
                 (Some(l), Some(r)) => Ok(Value::Bool(l ^ r)),
                 _ if left.is_null() || right.is_null() => Ok(Value::Null),
-                _ => Err(anyhow!("Expected bool for XOR operands")),
+                _ => Err(anyhow!(
+                    "InvalidArgumentType: Expected bool for XOR operands"
+                )),
             }
         }
         BinaryOp::Gt => eval_comparison(left, right, |ordering| ordering.is_gt()),
@@ -90,6 +101,42 @@ pub fn eval_binary_op(left: &Value, op: &BinaryOp, right: &Value) -> Result<Valu
             eval_vector_similarity(left, right)
         }
     }
+}
+
+/// Deep equality comparison with Cypher-compliant numeric coercion.
+fn cypher_eq(left: &Value, right: &Value) -> bool {
+    // Mixed numeric equality (1 = 1.0)
+    if let (Some(l), Some(r)) = (left.as_f64(), right.as_f64()) {
+        return l == r;
+    }
+
+    // Structural equality for Lists
+    if let (Value::Array(l), Value::Array(r)) = (left, right) {
+        if l.len() != r.len() {
+            return false;
+        }
+        return l.iter().zip(r.iter()).all(|(lv, rv)| cypher_eq(lv, rv));
+    }
+
+    // Structural equality for Maps
+    if let (Value::Object(l), Value::Object(r)) = (left, right) {
+        if l.len() != r.len() {
+            return false;
+        }
+        for (k, lv) in l {
+            if let Some(rv) = r.get(k) {
+                if !cypher_eq(lv, rv) {
+                    return false;
+                }
+            } else {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // Fallback to standard equality for other types (String, Bool, Null)
+    left == right
 }
 
 /// Evaluate IN operator.
@@ -315,7 +362,7 @@ fn eval_div(left: &Value, right: &Value) -> Result<Value> {
     eval_numeric_op(left, right, |a, b| a / b)
 }
 
-/// Helper for comparisons between two values with temporal awareness.
+/// Helper for comparisons between two values with temporal awareness and structural support.
 ///
 /// Per Cypher semantics:
 /// - NULL compared with anything returns NULL
@@ -329,76 +376,83 @@ where
         return Ok(Value::Null);
     }
 
-    // Integer comparison (both must be i64)
-    if let (Some(l), Some(r)) = (left.as_i64(), right.as_i64()) {
-        return Ok(Value::Bool(check(l.cmp(&r))));
+    let ord = cypher_partial_cmp(left, right);
+    match ord {
+        Some(o) => Ok(Value::Bool(check(o))),
+        None => Ok(Value::Null),
+    }
+}
+
+/// Deep partial comparison with Cypher-compliant numeric coercion and structural support.
+fn cypher_partial_cmp(left: &Value, right: &Value) -> Option<Ordering> {
+    if left.is_null() || right.is_null() {
+        return None;
     }
 
-    // Float comparison (handles int-float coercion via as_f64)
-    // Note: as_f64() returns Some for both Int and Float types
-    if left.is_number()
-        && right.is_number()
-        && let (Some(l), Some(r)) = (left.as_f64(), right.as_f64())
-    {
-        let ord = l.partial_cmp(&r);
-        return match ord {
-            Some(o) => Ok(Value::Bool(check(o))),
-            None => Ok(Value::Null), // NaN comparisons return NULL
-        };
+    // Number vs Number
+    if let (Some(l), Some(r)) = (left.as_f64(), right.as_f64()) {
+        return l.partial_cmp(&r);
     }
 
-    // String comparison
+    // String vs String
     if let (Some(l), Some(r)) = (left.as_str(), right.as_str()) {
         // Temporal-aware comparison
         if let (Some(lt), Some(rt)) = (classify_temporal(l), classify_temporal(r))
             && lt == rt
         {
-            return eval_temporal_comparison(l, r, lt, &check);
+            let res = match lt {
+                TemporalType::Date => {
+                    let ld = chrono::NaiveDate::parse_from_str(l, "%Y-%m-%d").ok();
+                    let rd = chrono::NaiveDate::parse_from_str(r, "%Y-%m-%d").ok();
+                    ld.and_then(|l| rd.map(|r| l.cmp(&r)))
+                }
+                TemporalType::LocalTime => {
+                    let lt = parse_time_for_cmp(l).ok();
+                    let rt = parse_time_for_cmp(r).ok();
+                    lt.and_then(|l| rt.map(|r| l.cmp(&r)))
+                }
+                TemporalType::Time => {
+                    let ln = time_with_tz_to_utc_nanos(l).ok();
+                    let rn = time_with_tz_to_utc_nanos(r).ok();
+                    ln.and_then(|l| rn.map(|r| l.cmp(&r)))
+                }
+                TemporalType::LocalDateTime => {
+                    let ldt = parse_local_datetime_for_cmp(l).ok();
+                    let rdt = parse_local_datetime_for_cmp(r).ok();
+                    ldt.and_then(|l| rdt.map(|r| l.cmp(&r)))
+                }
+                TemporalType::DateTime => {
+                    let ldt = parse_datetime_utc(l).ok();
+                    let rdt = parse_datetime_utc(r).ok();
+                    ldt.and_then(|l| rdt.map(|r| l.cmp(&r)))
+                }
+                TemporalType::Duration => None, // Durations are not orderable
+            };
+            if res.is_some() {
+                return res;
+            }
         }
-        // Fall through to lexicographic comparison
-        return Ok(Value::Bool(check(l.cmp(r))));
+        return l.partial_cmp(r);
     }
 
-    // Incompatible types (e.g., string vs number) - return NULL per Cypher semantics
-    Ok(Value::Null)
-}
-
-/// Compare two temporal values of the same type.
-fn eval_temporal_comparison<F>(l: &str, r: &str, ttype: TemporalType, check: &F) -> Result<Value>
-where
-    F: Fn(Ordering) -> bool,
-{
-    match ttype {
-        TemporalType::Date => {
-            let ld = chrono::NaiveDate::parse_from_str(l, "%Y-%m-%d")
-                .map_err(|_| anyhow!("Cannot parse date: {}", l))?;
-            let rd = chrono::NaiveDate::parse_from_str(r, "%Y-%m-%d")
-                .map_err(|_| anyhow!("Cannot parse date: {}", r))?;
-            Ok(Value::Bool(check(ld.cmp(&rd))))
-        }
-        TemporalType::LocalTime => {
-            let lt = parse_time_for_cmp(l)?;
-            let rt = parse_time_for_cmp(r)?;
-            Ok(Value::Bool(check(lt.cmp(&rt))))
-        }
-        TemporalType::Time => {
-            // Normalize to UTC nanoseconds for comparison
-            let ln = time_with_tz_to_utc_nanos(l)?;
-            let rn = time_with_tz_to_utc_nanos(r)?;
-            Ok(Value::Bool(check(ln.cmp(&rn))))
-        }
-        TemporalType::LocalDateTime => {
-            let ldt = parse_local_datetime_for_cmp(l)?;
-            let rdt = parse_local_datetime_for_cmp(r)?;
-            Ok(Value::Bool(check(ldt.cmp(&rdt))))
-        }
-        TemporalType::DateTime => {
-            let ldt = parse_datetime_utc(l)?;
-            let rdt = parse_datetime_utc(r)?;
-            Ok(Value::Bool(check(ldt.cmp(&rdt))))
-        }
-        TemporalType::Duration => Err(anyhow!("Durations are not orderable")),
+    // Boolean vs Boolean
+    if let (Some(l), Some(r)) = (left.as_bool(), right.as_bool()) {
+        return l.partial_cmp(&r);
     }
+
+    // Array vs Array (Lexicographic)
+    if let (Value::Array(l), Value::Array(r)) = (left, right) {
+        for (lv, rv) in l.iter().zip(r.iter()) {
+            match cypher_partial_cmp(lv, rv) {
+                Some(Ordering::Equal) => continue,
+                other => return other,
+            }
+        }
+        return l.len().partial_cmp(&r.len());
+    }
+
+    // Maps are not orderable in Cypher, only comparable for equality
+    None
 }
 
 /// Parse a time string for comparison.
@@ -575,7 +629,9 @@ fn eval_tointeger(arg: &Value) -> Result<Value> {
         }
         Value::String(s) => Ok(s.parse::<i64>().map(|i| json!(i)).unwrap_or(Value::Null)),
         Value::Null => Ok(Value::Null),
-        _ => Ok(Value::Null),
+        _ => Err(anyhow!(
+            "InvalidArgumentValue: toInteger() cannot convert type"
+        )),
     }
 }
 
@@ -584,7 +640,9 @@ fn eval_tofloat(arg: &Value) -> Result<Value> {
         Value::Number(n) => Ok(n.as_f64().map(|f| json!(f)).unwrap_or(Value::Null)),
         Value::String(s) => Ok(s.parse::<f64>().map(|f| json!(f)).unwrap_or(Value::Null)),
         Value::Null => Ok(Value::Null),
-        _ => Ok(Value::Null),
+        _ => Err(anyhow!(
+            "InvalidArgumentValue: toFloat() cannot convert type"
+        )),
     }
 }
 
@@ -612,7 +670,9 @@ fn eval_toboolean(arg: &Value) -> Result<Value> {
             }
         }
         Value::Null => Ok(Value::Null),
-        _ => Ok(Value::Null),
+        _ => Err(anyhow!(
+            "InvalidArgumentValue: toBoolean() cannot convert type"
+        )),
     }
 }
 

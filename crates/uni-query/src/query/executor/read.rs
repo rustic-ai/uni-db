@@ -1488,7 +1488,9 @@ impl Executor {
                             match val.as_bool() {
                                 Some(b) => Ok(Value::Bool(!b)),
                                 None if val.is_null() => Ok(Value::Null),
-                                None => Err(anyhow!("Expected bool for NOT")),
+                                None => Err(anyhow!(
+                                    "InvalidArgumentType: NOT requires a boolean argument"
+                                )),
                             }
                         }
                         UnaryOp::Neg => {

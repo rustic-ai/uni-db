@@ -76,6 +76,11 @@ pub fn register_cypher_udfs(ctx: &SessionContext) -> DFResult<()> {
     ctx.register_udf(create_keys_udf());
     ctx.register_udf(create_range_udf());
 
+    // Type conversion UDFs
+    ctx.register_udf(create_to_integer_udf());
+    ctx.register_udf(create_to_float_udf());
+    ctx.register_udf(create_to_boolean_udf());
+
     // Bitwise UDFs
     ctx.register_udf(create_bitwise_or_udf());
     ctx.register_udf(create_bitwise_and_udf());
@@ -914,8 +919,8 @@ fn columnar_args_to_json(args: &[ColumnarValue]) -> DFResult<Vec<serde_json::Val
 fn scalar_to_json(scalar: &ScalarValue) -> DFResult<serde_json::Value> {
     match scalar {
         ScalarValue::Utf8(Some(s)) | ScalarValue::LargeUtf8(Some(s)) => {
-            // Try to parse as JSON object (for map arguments serialized as JSON).
-            if s.starts_with('{')
+            // Try to parse as JSON (for arguments serialized as JSON in UNWIND or Map literals).
+            if (s.starts_with('{') || s.starts_with('[') || s.starts_with('"'))
                 && let Ok(obj) = serde_json::from_str::<serde_json::Value>(s)
             {
                 return Ok(obj);
@@ -927,6 +932,16 @@ fn scalar_to_json(scalar: &ScalarValue) -> DFResult<serde_json::Value> {
         ScalarValue::Float64(Some(f)) => Ok(serde_json::json!(*f)),
         ScalarValue::Boolean(Some(b)) => Ok(serde_json::json!(*b)),
         ScalarValue::Struct(arr) => {
+            if arr.len() == 0 || arr.is_null(0) {
+                Ok(serde_json::Value::Null)
+            } else {
+                Ok(uni_store::storage::arrow_convert::arrow_to_value(
+                    arr.as_ref(),
+                    0,
+                ))
+            }
+        }
+        ScalarValue::List(arr) => {
             if arr.len() == 0 || arr.is_null(0) {
                 Ok(serde_json::Value::Null)
             } else {
@@ -983,9 +998,235 @@ fn extract_scalar_utf8(val: &ColumnarValue) -> DFResult<String> {
 }
 
 // ============================================================================
-// JSON UDFs - Now using Lance's built-in implementations
+// toInteger(x) -> Int64
 // ============================================================================
-// Lance provides optimized JSONB binary UDFs:
+
+pub fn create_to_integer_udf() -> ScalarUDF {
+    ScalarUDF::new_from_impl(ToIntegerUdf::new())
+}
+
+#[derive(Debug)]
+struct ToIntegerUdf {
+    signature: Signature,
+}
+
+impl ToIntegerUdf {
+    fn new() -> Self {
+        Self {
+            signature: Signature::any(1, Volatility::Immutable),
+        }
+    }
+}
+
+impl_udf_eq_hash!(ToIntegerUdf);
+
+impl ScalarUDFImpl for ToIntegerUdf {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn name(&self) -> &str {
+        "toInteger"
+    }
+
+    fn signature(&self) -> &Signature {
+        &self.signature
+    }
+
+    fn return_type(&self, _arg_types: &[DataType]) -> DFResult<DataType> {
+        Ok(DataType::Int64)
+    }
+
+    fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DFResult<ColumnarValue> {
+        let json_args = columnar_args_to_json(&args.args)?;
+        if json_args.is_empty() {
+            return Err(datafusion::error::DataFusionError::Execution(
+                "toInteger() requires 1 argument".to_string(),
+            ));
+        }
+
+        let val = &json_args[0];
+        let result = match val {
+            serde_json::Value::Number(n) => {
+                if let Some(i) = n.as_i64() {
+                    serde_json::Value::Number(i.into())
+                } else if let Some(f) = n.as_f64() {
+                    serde_json::Value::Number((f as i64).into())
+                } else {
+                    serde_json::Value::Null
+                }
+            }
+            serde_json::Value::String(s) => {
+                if let Ok(i) = s.parse::<i64>() {
+                    serde_json::Value::Number(i.into())
+                } else if let Ok(f) = s.parse::<f64>() {
+                    serde_json::Value::Number((f as i64).into())
+                } else {
+                    serde_json::Value::Null
+                }
+            }
+            serde_json::Value::Null => serde_json::Value::Null,
+            _ => {
+                return Err(datafusion::error::DataFusionError::Execution(
+                    "InvalidArgumentValue: toInteger() cannot convert type".to_string(),
+                ));
+            }
+        };
+
+        json_value_to_columnar(&result)
+    }
+}
+
+// ============================================================================
+// toFloat(x) -> Float64
+// ============================================================================
+
+pub fn create_to_float_udf() -> ScalarUDF {
+    ScalarUDF::new_from_impl(ToFloatUdf::new())
+}
+
+#[derive(Debug)]
+struct ToFloatUdf {
+    signature: Signature,
+}
+
+impl ToFloatUdf {
+    fn new() -> Self {
+        Self {
+            signature: Signature::any(1, Volatility::Immutable),
+        }
+    }
+}
+
+impl_udf_eq_hash!(ToFloatUdf);
+
+impl ScalarUDFImpl for ToFloatUdf {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn name(&self) -> &str {
+        "toFloat"
+    }
+
+    fn signature(&self) -> &Signature {
+        &self.signature
+    }
+
+    fn return_type(&self, _arg_types: &[DataType]) -> DFResult<DataType> {
+        Ok(DataType::Float64)
+    }
+
+    fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DFResult<ColumnarValue> {
+        let json_args = columnar_args_to_json(&args.args)?;
+        if json_args.is_empty() {
+            return Err(datafusion::error::DataFusionError::Execution(
+                "toFloat() requires 1 argument".to_string(),
+            ));
+        }
+
+        let val = &json_args[0];
+        let result = match val {
+            serde_json::Value::Number(n) => {
+                if let Some(f) = n.as_f64() {
+                    serde_json::Value::Number(serde_json::Number::from_f64(f).unwrap())
+                } else {
+                    serde_json::Value::Null
+                }
+            }
+            serde_json::Value::String(s) => {
+                if let Ok(f) = s.parse::<f64>() {
+                    serde_json::Value::Number(serde_json::Number::from_f64(f).unwrap())
+                } else {
+                    serde_json::Value::Null
+                }
+            }
+            serde_json::Value::Null => serde_json::Value::Null,
+            _ => {
+                return Err(datafusion::error::DataFusionError::Execution(
+                    "InvalidArgumentValue: toFloat() cannot convert type".to_string(),
+                ));
+            }
+        };
+
+        json_value_to_columnar(&result)
+    }
+}
+
+// ============================================================================
+// toBoolean(x) -> Boolean
+// ============================================================================
+
+pub fn create_to_boolean_udf() -> ScalarUDF {
+    ScalarUDF::new_from_impl(ToBooleanUdf::new())
+}
+
+#[derive(Debug)]
+struct ToBooleanUdf {
+    signature: Signature,
+}
+
+impl ToBooleanUdf {
+    fn new() -> Self {
+        Self {
+            signature: Signature::any(1, Volatility::Immutable),
+        }
+    }
+}
+
+impl_udf_eq_hash!(ToBooleanUdf);
+
+impl ScalarUDFImpl for ToBooleanUdf {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn name(&self) -> &str {
+        "toBoolean"
+    }
+
+    fn signature(&self) -> &Signature {
+        &self.signature
+    }
+
+    fn return_type(&self, _arg_types: &[DataType]) -> DFResult<DataType> {
+        Ok(DataType::Boolean)
+    }
+
+    fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DFResult<ColumnarValue> {
+        let json_args = columnar_args_to_json(&args.args)?;
+        if json_args.is_empty() {
+            return Err(datafusion::error::DataFusionError::Execution(
+                "toBoolean() requires 1 argument".to_string(),
+            ));
+        }
+
+        let val = &json_args[0];
+        let result = match val {
+            serde_json::Value::Bool(b) => serde_json::Value::Bool(*b),
+            serde_json::Value::String(s) => {
+                let s_lower = s.to_lowercase();
+                if s_lower == "true" {
+                    serde_json::Value::Bool(true)
+                } else if s_lower == "false" {
+                    serde_json::Value::Bool(false)
+                } else {
+                    serde_json::Value::Null
+                }
+            }
+            serde_json::Value::Null => serde_json::Value::Null,
+            _ => {
+                return Err(datafusion::error::DataFusionError::Execution(
+                    "InvalidArgumentValue: toBoolean() cannot convert type".to_string(),
+                ));
+            }
+        };
+
+        json_value_to_columnar(&result)
+    }
+}
+
+// JSON UDFs - Now using Lance's built-in implementations
 // - json_get_string(jsonb_binary, key) -> String
 // - json_get_int(jsonb_binary, key) -> Int64
 // - json_get_float(jsonb_binary, key) -> Float64

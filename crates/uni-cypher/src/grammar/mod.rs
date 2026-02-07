@@ -34,7 +34,7 @@ pub fn parse_expression(input: &str) -> Result<Expr, ParseError> {
 }
 
 fn map_pest_error(e: pest::error::Error<Rule>) -> ParseError {
-    ParseError::new(format!("{}", e))
+    ParseError::new(format!("UnexpectedSyntax: {}", e))
 }
 
 #[cfg(test)]

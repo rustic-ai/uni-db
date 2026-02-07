@@ -13,13 +13,13 @@
 - [x] Task: Conductor - User Manual Verification 'Phase 1: Literals & Type System' (Protocol in workflow.md) f10a8a1
 
 ## Phase 2: Type Conversions & Comparisons
-- [ ] Task: Standardize `toInteger()`, `toFloat()`, and `toBoolean()` behavior according to TCK.
-    - [ ] Write Tests
-    - [ ] Implement Fix
-- [ ] Task: Fix cross-type comparison semantics (e.g., comparing Int to String).
-    - [ ] Write Tests
-    - [ ] Implement Fix
-- [ ] Task: Fix `NOT` operator logic for null and non-boolean values.
-    - [ ] Write Tests
-    - [ ] Implement Fix
+- [x] Task: Standardize `toInteger()`, `toFloat()`, and `toBoolean()` behavior according to TCK.
+    - [x] Write Tests
+    - [x] Implement Fix
+- [x] Task: Fix cross-type comparison semantics (e.g., comparing Int to String).
+    - [x] Write Tests
+    - [x] Implement Fix
+- [x] Task: Fix `NOT` operator logic for null and non-boolean values.
+    - [x] Write Tests
+    - [x] Implement Fix
 - [ ] Task: Conductor - User Manual Verification 'Phase 2: Type Conversions & Comparisons' (Protocol in workflow.md)
