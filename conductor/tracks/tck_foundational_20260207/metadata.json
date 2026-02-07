@@ -1,0 +1,8 @@
+{
+  "track_id": "tck_foundational_20260207",
+  "type": "feature",
+  "status": "new",
+  "created_at": "2026-02-07T07:30:00Z",
+  "updated_at": "2026-02-07T07:30:00Z",
+  "description": "Achieve foundational TCK compatibility for core data types and literal expressions."
+}

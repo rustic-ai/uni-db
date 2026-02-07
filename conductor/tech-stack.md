@@ -1,26 +1,29 @@
-# Tech Stack
+# Technology Stack
 
-## Architecture
-Uni employs a layered architecture optimized for read-heavy workloads with batched mutations:
+## Core Engine
+- **Programming Language:** Rust (2024 edition)
+- **Concurrency:** Tokio (Async runtime)
+- **Error Handling:** `anyhow` and `thiserror`
 
-1.  **Query Layer**:
-    *   **OpenCypher**: Parses and plans queries using `uni-query`.
-    *   **Vectorized Engine**: Executes plans using columnar batches (Arrow). Supports complex expressions, window functions, and subqueries.
-    *   **Hybrid Planning**: Optimizes across graph traversals, vector/scalar indices, and performs predicate pushdown.
+## Query & Data Processing
+- **Query Language:** OpenCypher (Parser based on `sqlparser`)
+- **Memory Format:** Apache Arrow (Columnar memory)
+- **Query Engine:** DataFusion (Vectorized query execution)
+- **Type System:** Custom VID (64-bit) and UniId (Content-addressed SHA3-256)
 
-2.  **Runtime Layer**:
-    *   **WorkingGraph**: A topology-only (SimpleGraph) in-memory graph for algorithms.
-    *   **PropertyManager**: Lazily fetches properties from disk/cache with batched loading.
-    *   **L0 Buffer**: An in-memory buffer handling uncommitted mutations, supporting transactions and CRDT merge-on-write.
+## Storage Layer
+- **On-Disk Format:** Lance (High-performance columnar storage)
+- **Database Engine:** LanceDB integration
+- **Storage Abstraction:** `object_store` (Native support for Local FS, S3, GCS, Azure)
+- **LSM Architecture:** Custom L0 (In-memory) -> L1 (Sorted Runs) -> L2 (Base Lance)
 
-3.  **Storage Layer (Lance + LSM)**:
-    *   **Lance**: Uses LanceDB format for columnar storage of vertices and edges.
-    *   **LSM Tree**: Multi-level storage with L0 (Memory) -> L1 (Sorted Runs) -> L2 (Base Lance Files).
-    *   **Adjacency**: Stores chunked CSR (Compressed Sparse Row) adjacency lists for fast traversal.
-    *   **Object Store**: Supports S3/GCS with resilience features (retries, circuit breakers).
+## Connectivity & Integration
+- **Rust Library:** `uni_db` (Public Rust API facade)
+- **Python Bindings:** PyO3 (Native Rust bindings for Python)
+- **OGM Layer:** Pydantic v2 (for Python `uni-pydantic` package)
 
-## Languages & Tools
-- **Language**: Rust
-- **Build System**: Cargo (Workspace)
-- **Data Format**: Arrow, LanceDB, Parquet
-- **Graph Query Language**: OpenCypher
+## Observability & Tooling
+- **Logging:** `tracing` and `tracing-subscriber`
+- **Metrics:** `metrics` and `metrics-exporter-prometheus`
+- **CLI:** `clap` (Rust CLI) and `poetry` (Python dependency management)
+- **Testing:** `cargo nextest` (Rust), `pytest` (Python), Cucumber (TCK)
