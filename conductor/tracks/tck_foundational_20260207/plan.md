@@ -7,7 +7,7 @@
 - [x] Task: Fix String literal escaping and Unicode support. 0747675
     - [ ] Write Tests
     - [ ] Implement Fix
-- [ ] Task: Resolve nested List and Map literal evaluation failures in the vectorized engine.
+- [x] Task: Resolve nested List and Map literal evaluation failures in the vectorized engine. 6448d33
     - [ ] Write Tests
     - [ ] Implement Fix
 - [ ] Task: Conductor - User Manual Verification 'Phase 1: Literals & Type System' (Protocol in workflow.md)
