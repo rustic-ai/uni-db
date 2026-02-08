@@ -497,18 +497,15 @@ impl ScalarUDFImpl for LabelsUdf {
         }
 
         let node = &json_args[0];
-        if let serde_json::Value::Object(map) = node {
-            if let Some(labels) = map.get("_labels") {
-                if let serde_json::Value::Array(arr) = labels {
-                    let scalars: Vec<ScalarValue> = arr
-                        .iter()
-                        .map(|v| ScalarValue::Utf8(v.as_str().map(|s| s.to_string())))
-                        .collect();
-                    let list =
-                        ScalarValue::List(ScalarValue::new_list(&scalars, &DataType::Utf8, true));
-                    return Ok(ColumnarValue::Scalar(list));
-                }
-            }
+        if let serde_json::Value::Object(map) = node
+            && let Some(serde_json::Value::Array(arr)) = map.get("_labels")
+        {
+            let scalars: Vec<ScalarValue> = arr
+                .iter()
+                .map(|v| ScalarValue::Utf8(v.as_str().map(|s| s.to_string())))
+                .collect();
+            let list = ScalarValue::List(ScalarValue::new_list(&scalars, &DataType::Utf8, true));
+            return Ok(ColumnarValue::Scalar(list));
         }
 
         let empty_list = ScalarValue::List(ScalarValue::new_list_nullable(&[], &DataType::Utf8));
