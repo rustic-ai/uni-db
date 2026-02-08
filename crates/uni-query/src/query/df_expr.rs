@@ -754,7 +754,30 @@ fn translate_function_call(
                 &df_args,
             )))
         }
-
+        "SUBSTRING" => {
+            require_args(&df_args, 2, "substring")?;
+            // substring(str, start, length?)
+            // Cypher is 0-based, DataFusion is 1-based.
+            let str_expr = df_args[0].clone();
+            let start_expr = df_args[1].clone();
+            
+            // start = start + 1
+            let one = datafusion::logical_expr::lit(1i64);
+            let start_adjusted = datafusion::logical_expr::binary_expr(
+                start_expr,
+                datafusion::logical_expr::Operator::Plus,
+                one,
+            );
+            
+            let len_expr = if df_args.len() > 2 {
+                df_args[2].clone()
+            } else {
+                // If length is missing, use a large number to emulate "rest of string"
+                datafusion::logical_expr::lit(i64::MAX)
+            };
+            
+            Ok(datafusion::functions::unicode::expr_fn::substring(str_expr, start_adjusted, len_expr))
+        }
         // Trim functions
         "TRIM" => {
             require_arg(&df_args, "TRIM")?;
@@ -776,31 +799,6 @@ fn translate_function_call(
         }
 
         // String manipulation functions
-        "SUBSTRING" | "SUBSTR" => {
-            require_args(&df_args, 2, "substring")?;
-            // Cypher uses 0-based indexing, DataFusion uses 1-based
-            // Convert by adding 1 to the start index
-            let adjusted_start = df_args[1].clone() + lit(1i64);
-
-            // For 3-arg case, use left() on substr() result
-            if df_args.len() == 2 {
-                Ok(datafusion::functions::unicode::expr_fn::substr(
-                    df_args[0].clone(),
-                    adjusted_start,
-                ))
-            } else {
-                // substr(string, start) gives us from start to end
-                // then left(result, length) gives us the first length chars
-                let substr_result = datafusion::functions::unicode::expr_fn::substr(
-                    df_args[0].clone(),
-                    adjusted_start,
-                );
-                Ok(datafusion::functions::unicode::expr_fn::left(
-                    substr_result,
-                    df_args[2].clone(),
-                ))
-            }
-        }
         "LEFT" => {
             require_args(&df_args, 2, "left")?;
             Ok(datafusion::functions::unicode::expr_fn::left(

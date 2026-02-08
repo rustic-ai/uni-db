@@ -1,8 +1,8 @@
 # Implementation Plan - TCK Core Compliance
 
 ## Phase 1: String Functions
-- [ ] Task: Implement `STARTS WITH`, `ENDS WITH`, `CONTAINS` in `expr_compiler.rs`.
-    - [ ] Map `BinaryOp` to DataFusion `Like` or custom UDFs.
+- [x] Task: Implement `STARTS WITH`, `ENDS WITH`, `CONTAINS` in `expr_compiler.rs`.
+    - [x] Map `BinaryOp` to DataFusion `Like` or custom UDFs.
 - [ ] Task: Implement `substring`, `toLower`, `toUpper` UDFs.
     - [ ] Register in `df_udfs.rs`.
     - [ ] Add support in `expr_compiler.rs` (should be automatic if UDF).
