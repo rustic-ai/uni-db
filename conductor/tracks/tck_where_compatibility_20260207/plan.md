@@ -2,9 +2,9 @@
 
 ## Phase 1: Basic Comparisons & Ranges (Category A)
 - [x] Identification: Run TCK comparison tests and catalog specific failures. 147f973
-- [~] Implementation: Update `df_planner.rs` and `expr_eval.rs` to support all comparison operators.
-- [ ] Edge Cases: Handle heterogeneous type comparisons (e.g., String vs Int) as per Cypher spec.
-- [ ] Verification: 100% pass rate for `expressions/comparison` and relevant `match-where` scenarios.
+- [x] Implementation: Update `df_planner.rs` and `expr_eval.rs` to support all comparison operators.
+- [x] Edge Cases: Handle heterogeneous type comparisons (e.g., String vs Int) as per Cypher spec.
+- [x] Verification: 100% pass rate for `expressions/comparison` and relevant `match-where` scenarios. f752ebc
 
 ## Phase 2: Boolean Logic & Precedence (Category B)
 - [ ] Identification: Run TCK boolean logic tests.
