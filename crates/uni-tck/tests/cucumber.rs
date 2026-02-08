@@ -23,6 +23,31 @@ async fn main() {
     let json_path = output_dir.join("results.json");
     eprintln!("📝 Writing JSON results to: {}", json_path.display());
 
+    // Parse command line arguments for feature filtering
+    let args: Vec<String> = std::env::args().collect();
+    // args[0] is the executable name
+    // args[1] if present, is the feature filter passed via cargo test -- args
+    let feature_path = if args.len() > 1 {
+        // If argument is a path, use it. If it's a keyword, map it.
+        let arg = &args[1];
+        if arg.starts_with("tck/") {
+            arg.to_string()
+        } else {
+            // Check common shortcuts
+            match arg.as_str() {
+                "boolean" => "tck/features/expressions/boolean".to_string(),
+                "comparison" => "tck/features/expressions/comparison".to_string(),
+                "match" => "tck/features/clauses/match".to_string(),
+                "where" => "tck/features/clauses/match-where".to_string(), // TCK structure varies
+                _ => format!("tck/features/{}", arg) // Try generic mapping
+            }
+        }
+    } else {
+        "tck/features/".to_string()
+    };
+
+    eprintln!("🚀 Running features from: {}", feature_path);
+
     // Run tests with JSON output
     UniWorld::cucumber()
         .fail_on_skipped()
@@ -32,6 +57,6 @@ async fn main() {
             )
             .normalized(),
         )
-        .run("tck/features/")
+        .run(feature_path)
         .await;
 }
