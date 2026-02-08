@@ -11,13 +11,13 @@
 | Metric | Count | Pass Rate |
 |--------|-------|-----------|
 | **Features** | 192 | - |
-| **Scenarios** | 3,897 | **67.2%** (2,620 passed, 1,238 failed) |
+| **Scenarios** | 3,897 | **67.3%** (2,623 passed, 1,235 failed) |
 | **Skipped** | 39 | - |
 | **Parsing Errors** | 0 | None (harness fixed) |
 
 **Last Update (2026-02-08):**
-Verification run - corrected category breakdowns to match actual test results.
-Pass rate: 67.2% (2,620/3,897 scenarios). 39 scenarios skipped (step failures cause remaining steps to be skipped).
+Latest verification run. Pass rate: 67.3% (2,623/3,897 scenarios). 39 scenarios skipped (step failures cause remaining steps to be skipped).
+Minor improvements (+3 scenarios from previous run).
 
 **Previous Fixes (2026-02-07 PM):**
 1. Boolean NOT operator improvements: Boolean4 now 100% (+24 scenarios)
@@ -33,7 +33,7 @@ Pass rate: 67.2% (2,620/3,897 scenarios). 39 scenarios skipped (step failures ca
 3. List and Map handling improvements: List1 now 100%, Map3 now 100%
 4. Literals improvements: Literals1, Literals2, Literals3, Literals4, Literals6 all improved
 
-The high step pass rate (~91%) vs lower scenario pass rate (67.2%) indicates that most basic operations work, but many scenarios fail at specific assertion points.
+The high step pass rate (~91%) vs lower scenario pass rate (67.3%) indicates that most basic operations work, but many scenarios fail at specific assertion points.
 
 ---
 
@@ -480,13 +480,13 @@ An error is raised but the message doesn't contain the expected keyword.
 | 2026-02-07 (PM) | 2,599 | 66.7% | Boolean NOT/XOR, String search, Precedence, Quantifier improvements (+92) |
 | 2026-02-07 (evening) | 2,601 | 66.7% | Minor improvements (+2) |
 | 2026-02-07 (late evening) | 2,620 | 67.2% | Dynamic access improvements: Map2, Graph, List (+19) |
-| 2026-02-08 | **2,620** | **67.2%** | Verification run - stable results |
+| 2026-02-08 | **2,623** | **67.3%** | Verification run (+3 scenarios) |
 
 ### Cumulative Improvement
 
 | From | To | Scenarios Gained | Improvement |
 |------|-----|------------------|-------------|
-| Baseline (1,279) | Current (2,620) | **+1,341** | **+104.8%** |
+| Baseline (1,279) | Current (2,623) | **+1,344** | **+105.1%** |
 
 ---
 
@@ -557,8 +557,8 @@ An error is raised but the message doesn't contain the expected keyword.
 | ~~55%~~ | ~~2,127~~ | ~~55.0%~~ | **ACHIEVED** |
 | ~~60%~~ | ~~2,321~~ | ~~60.0%~~ | **ACHIEVED** |
 | ~~65%~~ | ~~2,533~~ | ~~65.0%~~ | **ACHIEVED** |
-| 70% | 2,727 | 70.0% | +107 scenarios |
-| 75% | 2,922 | 75.0% | +302 scenarios |
+| 70% | 2,727 | 70.0% | +104 scenarios |
+| 75% | 2,922 | 75.0% | +299 scenarios |
 
 Achieving 70% likely requires:
 - Aggregation functions (+35)
