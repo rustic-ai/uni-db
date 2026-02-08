@@ -1,6 +1,6 @@
 # Implementation Plan - TCK WHERE Compatibility
 
-## Phase 1: Basic Comparisons & Ranges (Category A)
+## Phase 1: Basic Comparisons & Ranges (Category A) [checkpoint: a522cd9]
 - [x] Identification: Run TCK comparison tests and catalog specific failures. 147f973
 - [x] Implementation: Update `df_planner.rs` and `expr_eval.rs` to support all comparison operators.
 - [x] Edge Cases: Handle heterogeneous type comparisons (e.g., String vs Int) as per Cypher spec.
