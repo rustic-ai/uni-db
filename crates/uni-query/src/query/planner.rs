@@ -244,6 +244,7 @@ fn is_non_boolean_literal(expr: &Expr) -> bool {
             | Expr::Literal(CypherLiteral::Float(_))
             | Expr::Literal(CypherLiteral::String(_))
             | Expr::List(_)
+            | Expr::Map(_)
     )
 }
 

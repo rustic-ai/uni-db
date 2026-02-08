@@ -1352,7 +1352,10 @@ mod index_tests {
 
         for (vid, labels) in vids.iter().zip(label_combinations.iter()) {
             let mut props = HashMap::new();
-            props.insert("name".to_string(), json!(format!("Person{}", vid.as_u64())).into());
+            props.insert(
+                "name".to_string(),
+                json!(format!("Person{}", vid.as_u64())).into(),
+            );
             writer
                 .insert_vertex_with_labels(*vid, props, labels.clone())
                 .await?;

@@ -42,7 +42,10 @@ async fn test_data_survives_restart() -> Result<()> {
         // 2. Insert Data
         let vid = Vid::new(42);
         let mut props = HashMap::new();
-        props.insert("name".to_string(), serde_json::json!("PersistenceCheck").into());
+        props.insert(
+            "name".to_string(),
+            serde_json::json!("PersistenceCheck").into(),
+        );
         writer
             .insert_vertex_with_labels(vid, props, vec!["Person".to_string()])
             .await?;

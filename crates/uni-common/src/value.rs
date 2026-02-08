@@ -197,7 +197,12 @@ impl fmt::Display for Value {
             }
             Value::Node(n) => write!(f, "(:{} {{vid: {}}})", n.label, n.vid),
             Value::Edge(e) => write!(f, "-[:{}]-", e.edge_type),
-            Value::Path(p) => write!(f, "<path: {} nodes, {} edges>", p.nodes.len(), p.edges.len()),
+            Value::Path(p) => write!(
+                f,
+                "<path: {} nodes, {} edges>",
+                p.nodes.len(),
+                p.edges.len()
+            ),
             Value::Vector(v) => write!(f, "<vector: {} dims>", v.len()),
         }
     }
@@ -361,7 +366,19 @@ macro_rules! impl_try_from_value_owned {
     };
 }
 
-impl_try_from_value_owned!(String, i64, i32, f64, bool, Vid, Eid, Vec<f32>, Path, Node, Edge);
+impl_try_from_value_owned!(
+    String,
+    i64,
+    i32,
+    f64,
+    bool,
+    Vid,
+    Eid,
+    Vec<f32>,
+    Path,
+    Node,
+    Edge
+);
 
 // ---------------------------------------------------------------------------
 // TryFrom<&Value> implementations for standard types
@@ -775,9 +792,7 @@ impl From<Value> for serde_json::Value {
             Value::String(s) => serde_json::Value::String(s),
             Value::Bytes(b) => {
                 use base64::Engine;
-                serde_json::Value::String(
-                    base64::engine::general_purpose::STANDARD.encode(b),
-                )
+                serde_json::Value::String(base64::engine::general_purpose::STANDARD.encode(b))
             }
             Value::List(l) => {
                 serde_json::Value::Array(l.into_iter().map(serde_json::Value::from).collect())

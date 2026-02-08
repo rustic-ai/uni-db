@@ -453,7 +453,6 @@ impl DeltaDataset {
             Err(_) => return Ok(vec![]),
         };
 
-        use futures::TryStreamExt;
         use lancedb::query::ExecutableQuery;
         let stream = table.query().execute().await?;
         let batches: Vec<arrow_array::RecordBatch> = stream.try_collect().await?;
@@ -488,7 +487,6 @@ impl DeltaDataset {
             "dst_vid"
         };
 
-        use futures::TryStreamExt;
         use lancedb::query::{ExecutableQuery, QueryBase};
 
         let base_filter = format!("{} = {}", filter_col, vid.as_u64());

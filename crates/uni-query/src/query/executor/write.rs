@@ -352,10 +352,8 @@ impl Executor {
                     // Generate EID and insert edge
                     let mut writer = writer_arc.write().await;
                     let eid = writer.next_eid(edge_type_id).await?;
-                    let properties: uni_common::Properties = properties
-                        .into_iter()
-                        .map(|(k, v)| (k, v.into()))
-                        .collect();
+                    let properties: uni_common::Properties =
+                        properties.into_iter().map(|(k, v)| (k, v.into())).collect();
                     writer
                         .insert_edge(src, dst, edge_type_id, eid, properties)
                         .await?;
@@ -413,10 +411,8 @@ impl Executor {
                     // Generate VID and insert
                     let mut writer = writer_arc.write().await;
                     let vid = writer.next_vid().await?;
-                    let properties: uni_common::Properties = properties
-                        .into_iter()
-                        .map(|(k, v)| (k, v.into()))
-                        .collect();
+                    let properties: uni_common::Properties =
+                        properties.into_iter().map(|(k, v)| (k, v.into())).collect();
                     let _ = writer
                         .insert_vertex_with_labels(vid, properties, vec![label.to_string()])
                         .await?;
@@ -1096,10 +1092,8 @@ impl Executor {
                             }
 
                             // Insert vertex and get back final properties (includes auto-generated embeddings)
-                            let props: uni_common::Properties = props
-                                .into_iter()
-                                .map(|(k, v)| (k, v.into()))
-                                .collect();
+                            let props: uni_common::Properties =
+                                props.into_iter().map(|(k, v)| (k, v.into())).collect();
                             let final_props = writer
                                 .insert_vertex_with_labels(new_vid, props, n.labels.clone())
                                 .await?;
@@ -1144,10 +1138,8 @@ impl Executor {
                                     _ => (src, current_vid),
                                 };
 
-                                let rel_props: uni_common::Properties = rel_props
-                                    .into_iter()
-                                    .map(|(k, v)| (k, v.into()))
-                                    .collect();
+                                let rel_props: uni_common::Properties =
+                                    rel_props.into_iter().map(|(k, v)| (k, v.into())).collect();
                                 writer
                                     .insert_edge(edge_src, edge_dst, type_id, eid, rel_props)
                                     .await?;
@@ -1245,10 +1237,8 @@ impl Executor {
                             }
 
                             // Convert back to uni_common::Properties for storage
-                            let props: uni_common::Properties = props
-                                .into_iter()
-                                .map(|(k, v)| (k, v.into()))
-                                .collect();
+                            let props: uni_common::Properties =
+                                props.into_iter().map(|(k, v)| (k, v.into())).collect();
                             let _ = writer.insert_vertex_with_labels(vid, props, labels).await?;
                         } else if let Value::Object(map) = node_val
                             && let (Some(eid_v), Some(src_v), Some(dst_v), Some(type_v)) = (

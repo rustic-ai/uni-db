@@ -23,6 +23,7 @@ use arrow_array::builder::{
 };
 use arrow_array::{Array, ArrayRef, BooleanArray, RecordBatch, UInt64Array};
 use arrow_schema::{DataType, Field, Schema as ArrowSchema, TimeUnit};
+use futures::TryStreamExt;
 use lancedb::Table;
 use lancedb::index::Index as LanceDbIndex;
 use lancedb::index::scalar::BTreeIndexBuilder;
@@ -307,7 +308,6 @@ impl MainVertexDataset {
             .await
             .map_err(|e| anyhow!("Query failed: {}", e))?;
 
-        use futures::TryStreamExt;
         let results: Vec<RecordBatch> = batches.try_collect().await?;
 
         for batch in results {
@@ -348,7 +348,6 @@ impl MainVertexDataset {
             .await
             .map_err(|e| anyhow!("Query failed: {}", e))?;
 
-        use futures::TryStreamExt;
         let results: Vec<RecordBatch> = batches.try_collect().await?;
 
         for batch in results {
@@ -401,7 +400,6 @@ impl MainVertexDataset {
             .await
             .map_err(|e| anyhow!("Query failed: {}", e))?;
 
-        use futures::TryStreamExt;
         let results: Vec<RecordBatch> = batches.try_collect().await?;
 
         let mut vids = Vec::new();
@@ -447,7 +445,6 @@ impl MainVertexDataset {
             .await
             .map_err(|e| anyhow!("Query failed: {}", e))?;
 
-        use futures::TryStreamExt;
         let results: Vec<RecordBatch> = batches.try_collect().await?;
 
         let mut vids = Vec::new();
@@ -498,7 +495,6 @@ impl MainVertexDataset {
             .await
             .map_err(|e| anyhow!("Query failed: {}", e))?;
 
-        use futures::TryStreamExt;
         let results: Vec<RecordBatch> = batches.try_collect().await?;
 
         let mut vids = Vec::new();
@@ -553,7 +549,6 @@ impl MainVertexDataset {
             .await
             .map_err(|e| anyhow!("Query failed: {}", e))?;
 
-        use futures::TryStreamExt;
         let results: Vec<RecordBatch> = batches.try_collect().await?;
 
         let mut props_map = HashMap::new();
@@ -620,7 +615,6 @@ impl MainVertexDataset {
             .await
             .map_err(|e| anyhow!("Query failed: {}", e))?;
 
-        use futures::TryStreamExt;
         let results: Vec<RecordBatch> = batches.try_collect().await?;
 
         // Find the row with highest version (latest)
@@ -690,7 +684,6 @@ impl MainVertexDataset {
             .await
             .map_err(|e| anyhow!("Query failed: {}", e))?;
 
-        use futures::TryStreamExt;
         let results: Vec<RecordBatch> = batches.try_collect().await?;
 
         let mut label_map = HashMap::new();

@@ -47,12 +47,14 @@ use crate::query::planner::{
 };
 use anyhow::{Result, anyhow};
 use arrow_schema::{Schema, SchemaRef};
+use datafusion::common::JoinType;
 use datafusion::execution::SessionState;
-use datafusion::logical_expr::{Expr as DfExpr, ExprSchemable, SortExpr as DfSortExpr};
+use datafusion::logical_expr::{Expr as DfExpr, SortExpr as DfSortExpr};
 use datafusion::physical_expr::{create_physical_expr, create_physical_sort_exprs};
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion::physical_plan::aggregates::{AggregateExec, AggregateMode, PhysicalGroupBy};
 use datafusion::physical_plan::filter::FilterExec;
+use datafusion::physical_plan::joins::NestedLoopJoinExec;
 use datafusion::physical_plan::limit::LocalLimitExec;
 use datafusion::physical_plan::placeholder_row::PlaceholderRowExec;
 use datafusion::physical_plan::projection::ProjectionExec;
@@ -255,6 +257,36 @@ impl HybridPhysicalPlanner {
         self.plan_internal(logical, &all_properties)
     }
 
+    /// Wrap a plan with optional semantics.
+    ///
+    /// If optional is true, performs a Left Outer Join with a single-row source (PlaceholderRow)
+    /// to ensure at least one row (of NULLs) is returned if the input is empty.
+    ///
+    /// Conceptually: SELECT * FROM (SELECT 1) LEFT JOIN Plan ON true
+    fn wrap_optional(
+        &self,
+        plan: Arc<dyn ExecutionPlan>,
+        optional: bool,
+    ) -> Result<Arc<dyn ExecutionPlan>> {
+        if !optional {
+            return Ok(plan);
+        }
+
+        // Create a single-row source
+        let empty_schema = Arc::new(Schema::empty());
+        let placeholder = Arc::new(PlaceholderRowExec::new(empty_schema));
+
+        // Use NestedLoopJoin with Left Outer Join type
+        // This ensures if 'plan' is empty, we get 1 row with all NULLs
+        Ok(Arc::new(NestedLoopJoinExec::try_new(
+            placeholder,
+            plan,
+            None, // No filter
+            &JoinType::Left,
+            None, // No projection
+        )?))
+    }
+
     fn plan_internal(
         &self,
         logical: &LogicalPlan,
@@ -267,14 +299,26 @@ impl HybridPhysicalPlanner {
                 labels,
                 variable,
                 filter,
-                optional: _,
+                optional,
             } => {
                 if labels.len() > 1 {
                     // Multi-label: use main table with intersection semantics
-                    self.plan_multi_label_scan(labels, variable, filter.as_ref(), all_properties)
+                    self.plan_multi_label_scan(
+                        labels,
+                        variable,
+                        filter.as_ref(),
+                        *optional,
+                        all_properties,
+                    )
                 } else {
                     // Single-label: use per-label table
-                    self.plan_scan(*label_id, variable, filter.as_ref(), all_properties)
+                    self.plan_scan(
+                        *label_id,
+                        variable,
+                        filter.as_ref(),
+                        *optional,
+                        all_properties,
+                    )
                 }
             }
 
@@ -283,17 +327,29 @@ impl HybridPhysicalPlanner {
                 labels,
                 variable,
                 filter,
-                optional: _,
+                optional,
             } => {
                 if labels.len() > 1 {
                     // Multi-label schemaless scan
-                    self.plan_multi_label_scan(labels, variable, filter.as_ref(), all_properties)
+                    self.plan_multi_label_scan(
+                        labels,
+                        variable,
+                        filter.as_ref(),
+                        *optional,
+                        all_properties,
+                    )
                 } else if let Some(label_name) = labels.first() {
                     // Single label schemaless scan
-                    self.plan_schemaless_scan(label_name, variable, filter.as_ref(), all_properties)
+                    self.plan_schemaless_scan(
+                        label_name,
+                        variable,
+                        filter.as_ref(),
+                        *optional,
+                        all_properties,
+                    )
                 } else {
                     // Empty labels - should not happen, fallback to scan all
-                    self.plan_scan_all(variable, filter.as_ref(), all_properties)
+                    self.plan_scan_all(variable, filter.as_ref(), *optional, all_properties)
                 }
             }
 
@@ -301,8 +357,8 @@ impl HybridPhysicalPlanner {
             LogicalPlan::ScanAll {
                 variable,
                 filter,
-                optional: _,
-            } => self.plan_scan_all(variable, filter.as_ref(), all_properties),
+                optional,
+            } => self.plan_scan_all(variable, filter.as_ref(), *optional, all_properties),
 
             // TraverseMainByType is now supported via schemaless traversal
             LogicalPlan::TraverseMainByType {
@@ -764,6 +820,7 @@ impl HybridPhysicalPlanner {
         label_id: u16,
         variable: &str,
         filter: Option<&Expr>,
+        optional: bool,
         all_properties: &HashMap<String, HashSet<String>>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
         let label_name = self
@@ -790,7 +847,8 @@ impl HybridPhysicalPlanner {
             scan_plan = self.add_structural_projection(scan_plan, variable, &properties)?;
         }
 
-        self.apply_scan_filter(scan_plan, variable, filter)
+        let filtered_plan = self.apply_scan_filter(scan_plan, variable, filter)?;
+        self.wrap_optional(filtered_plan, optional)
     }
 
     /// Plan a schemaless vertex scan using the main vertices table.
@@ -802,6 +860,7 @@ impl HybridPhysicalPlanner {
         label_name: &str,
         variable: &str,
         filter: Option<&Expr>,
+        optional: bool,
         all_properties: &HashMap<String, HashSet<String>>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
         let mut properties: Vec<String> = all_properties
@@ -832,7 +891,8 @@ impl HybridPhysicalPlanner {
             scan_plan = self.add_alias_projection(scan_plan, variable, &col_name)?;
         }
 
-        self.apply_scan_filter(scan_plan, variable, filter)
+        let filtered_plan = self.apply_scan_filter(scan_plan, variable, filter)?;
+        self.wrap_optional(filtered_plan, optional)
     }
 
     /// Plan a multi-label vertex scan using the main vertices table.
@@ -843,6 +903,7 @@ impl HybridPhysicalPlanner {
         labels: &[String],
         variable: &str,
         filter: Option<&Expr>,
+        optional: bool,
         all_properties: &HashMap<String, HashSet<String>>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
         let mut properties: Vec<String> = all_properties
@@ -873,7 +934,8 @@ impl HybridPhysicalPlanner {
             scan_plan = self.add_alias_projection(scan_plan, variable, &col_name)?;
         }
 
-        self.apply_scan_filter(scan_plan, variable, filter)
+        let filtered_plan = self.apply_scan_filter(scan_plan, variable, filter)?;
+        self.wrap_optional(filtered_plan, optional)
     }
 
     /// Plan a scan of all vertices regardless of label.
@@ -884,6 +946,7 @@ impl HybridPhysicalPlanner {
         &self,
         variable: &str,
         filter: Option<&Expr>,
+        optional: bool,
         all_properties: &HashMap<String, HashSet<String>>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
         let mut properties: Vec<String> = all_properties
@@ -913,7 +976,8 @@ impl HybridPhysicalPlanner {
             scan_plan = self.add_alias_projection(scan_plan, variable, &col_name)?;
         }
 
-        self.apply_scan_filter(scan_plan, variable, filter)
+        let filtered_plan = self.apply_scan_filter(scan_plan, variable, filter)?;
+        self.wrap_optional(filtered_plan, optional)
     }
 
     /// Plan a graph traversal.
@@ -1300,7 +1364,6 @@ impl HybridPhysicalPlanner {
         projections: &[(Expr, Option<String>)],
         context_plan: Option<&LogicalPlan>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
-        let input_plan = input_plan;
         let schema = input_plan.schema();
 
         let session = self.session_ctx.read();
@@ -1955,7 +2018,7 @@ impl HybridPhysicalPlanner {
         let resolved_expr = Self::resolve_udfs(expr, &state)?;
 
         // Apply type coercion to resolve Int32/Int64, Float32/Float64 mismatches
-        let coerced_expr = Self::apply_type_coercion(&resolved_expr, &df_schema)?;
+        let coerced_expr = crate::query::df_expr::apply_type_coercion(&resolved_expr, &df_schema)?;
 
         // Use SessionState's create_physical_expr to properly resolve UDFs
         use datafusion::physical_planner::PhysicalPlanner;
@@ -2138,110 +2201,6 @@ impl HybridPhysicalPlanner {
             state.execution_props(),
         )?;
         Ok(agg_expr)
-    }
-
-    /// Apply type coercion to a DataFusion expression.
-    ///
-    /// Resolves numeric type mismatches (e.g., Int32 vs Int64, Boolean vs Int64)
-    /// by inserting explicit CAST nodes. This is needed because our schema may
-    /// declare properties as one numeric type while literals are a different type.
-    fn apply_type_coercion(expr: &DfExpr, schema: &datafusion::common::DFSchema) -> Result<DfExpr> {
-        use datafusion::logical_expr::Operator;
-        match expr {
-            DfExpr::BinaryExpr(binary) => {
-                let left = Self::apply_type_coercion(&binary.left, schema)?;
-                let right = Self::apply_type_coercion(&binary.right, schema)?;
-
-                // For comparison and arithmetic operators, coerce numeric types
-                let is_comparison_or_arithmetic = matches!(
-                    binary.op,
-                    Operator::Eq
-                        | Operator::NotEq
-                        | Operator::Lt
-                        | Operator::LtEq
-                        | Operator::Gt
-                        | Operator::GtEq
-                        | Operator::Plus
-                        | Operator::Minus
-                        | Operator::Multiply
-                        | Operator::Divide
-                        | Operator::Modulo
-                );
-
-                if is_comparison_or_arithmetic {
-                    let left_type = left.get_type(schema).ok();
-                    let right_type = right.get_type(schema).ok();
-
-                    if let (Some(lt), Some(rt)) = (&left_type, &right_type)
-                        && lt != rt
-                        && lt.is_numeric()
-                        && rt.is_numeric()
-                    {
-                        // Coerce to the wider numeric type
-                        let target = wider_numeric_type(lt, rt);
-                        let coerced_left = if *lt != target {
-                            datafusion::logical_expr::cast(left, target.clone())
-                        } else {
-                            left
-                        };
-                        let coerced_right = if *rt != target {
-                            datafusion::logical_expr::cast(right, target)
-                        } else {
-                            right
-                        };
-                        return Ok(DfExpr::BinaryExpr(
-                            datafusion::logical_expr::expr::BinaryExpr::new(
-                                Box::new(coerced_left),
-                                binary.op,
-                                Box::new(coerced_right),
-                            ),
-                        ));
-                    }
-                }
-
-                Ok(DfExpr::BinaryExpr(
-                    datafusion::logical_expr::expr::BinaryExpr::new(
-                        Box::new(left),
-                        binary.op,
-                        Box::new(right),
-                    ),
-                ))
-            }
-            // For other expression types, return as-is
-            _ => Ok(expr.clone()),
-        }
-    }
-}
-
-/// Returns the wider of two numeric DataTypes for type coercion.
-///
-/// Follows standard numeric promotion rules:
-/// - Any Float type wins over Int types
-/// - Float64 > Float32
-/// - Int64 > Int32 > Int16 > Int8
-fn wider_numeric_type(
-    a: &datafusion::arrow::datatypes::DataType,
-    b: &datafusion::arrow::datatypes::DataType,
-) -> datafusion::arrow::datatypes::DataType {
-    use datafusion::arrow::datatypes::DataType;
-
-    fn numeric_rank(dt: &DataType) -> u8 {
-        match dt {
-            DataType::Int8 | DataType::UInt8 => 1,
-            DataType::Int16 | DataType::UInt16 => 2,
-            DataType::Int32 | DataType::UInt32 => 3,
-            DataType::Int64 | DataType::UInt64 => 4,
-            DataType::Float16 => 5,
-            DataType::Float32 => 6,
-            DataType::Float64 => 7,
-            _ => 0,
-        }
-    }
-
-    if numeric_rank(a) >= numeric_rank(b) {
-        a.clone()
-    } else {
-        b.clone()
     }
 }
 

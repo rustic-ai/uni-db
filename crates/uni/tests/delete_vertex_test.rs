@@ -4,11 +4,11 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use tempfile::tempdir;
+use uni_db::Value;
 use uni_db::core::schema::{DataType, SchemaManager};
 use uni_db::runtime::property_manager::PropertyManager;
 use uni_db::runtime::writer::Writer;
 use uni_db::storage::manager::StorageManager;
-use uni_db::Value;
 
 #[tokio::test]
 async fn test_delete_vertex_persistence() -> anyhow::Result<()> {

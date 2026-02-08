@@ -23,15 +23,11 @@ async fn main() {
     let json_path = output_dir.join("results.json");
     eprintln!("📝 Writing JSON results to: {}", json_path.display());
 
-    // Parse command line arguments for feature filtering
-    let args: Vec<String> = std::env::args().collect();
-    // args[0] is the executable name
-    // args[1] if present, is the feature filter passed via cargo test -- args
-    let feature_path = if args.len() > 1 {
-        // If argument is a path, use it. If it's a keyword, map it.
-        let arg = &args[1];
+    // Use environment variable for feature filtering
+    // Usage: TCK_FEATURE=boolean cargo test --package uni-tck --test cucumber
+    let feature_path = if let Ok(arg) = std::env::var("TCK_FEATURE") {
         if arg.starts_with("tck/") {
-            arg.to_string()
+            arg
         } else {
             // Check common shortcuts
             match arg.as_str() {

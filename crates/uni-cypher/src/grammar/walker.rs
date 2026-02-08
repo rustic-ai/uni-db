@@ -737,20 +737,82 @@ fn build_not_expression(pair: Pair<Rule>) -> Result<Expr, ParseError> {
 
 fn build_comparison_expression(pair: Pair<Rule>) -> Result<Expr, ParseError> {
     let mut inner = pair.into_inner();
-    let mut expr = build_expression(inner.next().unwrap())?;
+    let first = build_expression(inner.next().unwrap())?;
 
-    // Process all comparison tails (supports chaining like "a IS NULL <> b IS NULL")
-    for tail in inner {
-        expr = build_comparison_with_tail(expr, tail)?;
+    let tails: Vec<Pair<Rule>> = inner.collect();
+    if tails.is_empty() {
+        return Ok(first);
     }
 
-    Ok(expr)
+    let mut operands = vec![first];
+    let mut ops = vec![];
+
+    for tail in tails {
+        let mut tail_inner = tail.into_inner();
+        let op_pair = tail_inner.next().unwrap();
+        let rule = op_pair.as_rule();
+
+        let chain_op = match rule {
+            Rule::eq => Some(BinaryOp::Eq),
+            Rule::not_eq => Some(BinaryOp::NotEq),
+            Rule::lt => Some(BinaryOp::Lt),
+            Rule::gt => Some(BinaryOp::Gt),
+            Rule::lt_eq => Some(BinaryOp::LtEq),
+            Rule::gt_eq => Some(BinaryOp::GtEq),
+            Rule::approx_eq => Some(BinaryOp::ApproxEq),
+            _ => None,
+        };
+
+        if let Some(op) = chain_op {
+            // It is a chainable operator.
+            let rhs = build_expression(tail_inner.next().unwrap())?;
+            ops.push(op);
+            operands.push(rhs);
+        } else {
+            // It is a non-chainable operator (IS NULL, IN, etc.)
+            // Apply it to the LAST operand in the list.
+            let last_idx = operands.len() - 1;
+            let last = operands.remove(last_idx);
+            let modified = apply_tail_to_expr(last, rule, op_pair, tail_inner)?;
+            operands.push(modified);
+        }
+    }
+
+    // Now build the result
+    if ops.is_empty() {
+        return Ok(operands.pop().unwrap());
+    }
+
+    // Create chain of ANDs
+    let mut final_expr = Expr::BinaryOp {
+        left: Box::new(operands[0].clone()),
+        op: ops[0],
+        right: Box::new(operands[1].clone()),
+    };
+
+    for i in 1..ops.len() {
+        let next_cmp = Expr::BinaryOp {
+            left: Box::new(operands[i].clone()),
+            op: ops[i],
+            right: Box::new(operands[i + 1].clone()),
+        };
+        final_expr = Expr::BinaryOp {
+            left: Box::new(final_expr),
+            op: BinaryOp::And,
+            right: Box::new(next_cmp),
+        };
+    }
+
+    Ok(final_expr)
 }
 
-fn build_comparison_with_tail(left: Expr, tail: Pair<Rule>) -> Result<Expr, ParseError> {
-    let mut tail_inner = tail.into_inner();
-    let op_pair = tail_inner.next().unwrap();
-    match op_pair.as_rule() {
+fn apply_tail_to_expr(
+    left: Expr,
+    rule: Rule,
+    op_pair: Pair<Rule>,
+    mut tail_inner: Pairs<Rule>,
+) -> Result<Expr, ParseError> {
+    match rule {
         Rule::IS => {
             let next = tail_inner.next().unwrap();
             match next.as_rule() {
@@ -781,7 +843,7 @@ fn build_comparison_with_tail(left: Expr, tail: Pair<Rule>) -> Result<Expr, Pars
             right: Box::new(build_expression(tail_inner.next().unwrap())?),
         }),
         Rule::STARTS => {
-            tail_inner.next();
+            tail_inner.next(); // WITH
             Ok(Expr::BinaryOp {
                 left: Box::new(left),
                 op: BinaryOp::StartsWith,
@@ -789,7 +851,7 @@ fn build_comparison_with_tail(left: Expr, tail: Pair<Rule>) -> Result<Expr, Pars
             })
         }
         Rule::ENDS => {
-            tail_inner.next();
+            tail_inner.next(); // WITH
             Ok(Expr::BinaryOp {
                 left: Box::new(left),
                 op: BinaryOp::EndsWith,
@@ -802,13 +864,6 @@ fn build_comparison_with_tail(left: Expr, tail: Pair<Rule>) -> Result<Expr, Pars
             right: Box::new(build_expression(tail_inner.next().unwrap())?),
         }),
         Rule::VALID_AT => {
-            // VALID_AT has two forms:
-            // 1. Simple: e VALID_AT timestamp
-            // 2. Custom: e VALID_AT(timestamp, 'start_prop', 'end_prop')
-            //
-            // Pest only includes named rules in the iterator, not literals like "(" or ","
-            // So we get: [expression] or [expression, string, string]
-
             let timestamp = build_expression(tail_inner.next().unwrap())?;
 
             // Check if there are additional string pairs (custom property names)
@@ -861,23 +916,7 @@ fn build_comparison_with_tail(left: Expr, tail: Pair<Rule>) -> Result<Expr, Pars
                 window_spec: None,
             })
         }
-        _ => {
-            let op = match op_pair.as_rule() {
-                Rule::eq => BinaryOp::Eq,
-                Rule::not_eq => BinaryOp::NotEq,
-                Rule::lt => BinaryOp::Lt,
-                Rule::gt => BinaryOp::Gt,
-                Rule::lt_eq => BinaryOp::LtEq,
-                Rule::gt_eq => BinaryOp::GtEq,
-                Rule::approx_eq => BinaryOp::ApproxEq,
-                _ => unreachable!(),
-            };
-            Ok(Expr::BinaryOp {
-                left: Box::new(left),
-                op,
-                right: Box::new(build_expression(tail_inner.next().unwrap())?),
-            })
-        }
+        _ => unreachable!("Unexpected non-chainable rule: {:?}", rule),
     }
 }
 

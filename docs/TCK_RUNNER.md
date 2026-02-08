@@ -1,6 +1,6 @@
 # TCK Test Runner
 
-The Uni TCK runner is built on the `cucumber-rs` crate and supports running specific feature sets via command-line arguments.
+The Uni TCK runner is built on the `cucumber-rs` crate and supports running specific feature sets via the `TCK_FEATURE` environment variable.
 
 ## Running Tests
 
@@ -10,11 +10,11 @@ cargo test --package uni-tck --test cucumber
 ```
 
 ### Running Specific Features
-You can pass a feature directory path or a shortcut keyword as an argument to the test binary.
+Set the `TCK_FEATURE` environment variable to a feature directory path or a shortcut keyword.
 
 **Syntax:**
 ```bash
-cargo test --package uni-tck --test cucumber -- <feature_filter>
+TCK_FEATURE=<feature_filter> cargo test --package uni-tck --test cucumber
 ```
 
 **Supported Shortcuts:**
@@ -25,7 +25,7 @@ cargo test --package uni-tck --test cucumber -- <feature_filter>
 **Custom Path:**
 You can also provide a relative path:
 ```bash
-cargo test --package uni-tck --test cucumber -- tck/features/expressions/null
+TCK_FEATURE=tck/features/expressions/null cargo test --package uni-tck --test cucumber
 ```
 
 ## Parallel Execution
@@ -35,10 +35,10 @@ Since the runner is a single binary, "parallelism" here refers to:
 
 **Example: Running Comparison and Boolean tests in parallel**
 ```bash
-cargo test --package uni-tck --test cucumber -- comparison &
-cargo test --package uni-tck --test cucumber -- boolean &
+TCK_FEATURE=comparison cargo test --package uni-tck --test cucumber &
+TCK_FEATURE=boolean cargo test --package uni-tck --test cucumber &
 wait
 ```
 
 ## Reports
-Results are written to `target/cucumber/results.json`. Note that running multiple instances concurrently will overwrite this file unless you configure separate output directories (currently not supported via CLI args).
+Results are written to `target/cucumber/results.json`. Note that running multiple instances concurrently will overwrite this file unless you configure separate output directories (currently not supported).

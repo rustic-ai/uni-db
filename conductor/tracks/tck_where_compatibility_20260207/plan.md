@@ -35,6 +35,10 @@
 ## Phase 5: Refinements & Final Integration
 - [ ] Fix: Resolve `substring()` default length behavior (String1).
 - [ ] Fix: Align column naming for functions like `reverse()` (String3).
+- [ ] Fix: `count(b)` Struct aggregation returning Null (Comparison1 [4],[5]).
+- [ ] Fix: Large Integer literal handling (Comparison1 [10]-[13]).
+- [ ] Fix: Cross-type comparisons yielding Null (Comparison2 [3]).
+- [ ] Fix: NaN Range comparisons returning Null instead of False (Comparison2 [5]).
 - [ ] Investigation: Explore `UNWIND` type preservation for mixed lists (String8/9/10).
 - [ ] Run full TCK suite to ensure no regressions in other areas.
 - [ ] Clean up any temporary debug logs or workarounds.

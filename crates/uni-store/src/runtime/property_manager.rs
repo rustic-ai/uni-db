@@ -13,13 +13,13 @@ use futures::TryStreamExt;
 use lancedb::query::{ExecutableQuery, QueryBase, Select};
 use lru::LruCache;
 use metrics;
-use uni_common::Value;
 use std::collections::HashMap;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::{debug, instrument};
 use uni_common::Properties;
+use uni_common::Value;
 use uni_common::core::id::{Eid, Vid};
 use uni_common::core::schema::{DataType, SchemaManager};
 use uni_crdt::Crdt;
@@ -1183,14 +1183,9 @@ impl PropertyManager {
             && let Some(binary_array) = overflow_col.as_any().downcast_ref::<LargeBinaryArray>()
         {
             let jsonb_bytes = binary_array.value(row);
-            let bytes_list: Vec<Value> = jsonb_bytes
-                .iter()
-                .map(|&b| Value::Int(b as i64))
-                .collect();
-            props.insert(
-                "overflow_json".to_string(),
-                Value::List(bytes_list),
-            );
+            let bytes_list: Vec<Value> =
+                jsonb_bytes.iter().map(|&b| Value::Int(b as i64)).collect();
+            props.insert("overflow_json".to_string(), Value::List(bytes_list));
         }
 
         // Extract and merge individual overflow properties
@@ -1644,8 +1639,7 @@ impl PropertyManager {
 
     /// Decode an Arrow column value with strict CRDT error handling.
     pub fn value_from_column(col: &dyn Array, data_type: &DataType, row: usize) -> Result<Value> {
-        value_codec::value_from_column(col, data_type, row, CrdtDecodeMode::Strict)
-            .map(Value::from)
+        value_codec::value_from_column(col, data_type, row, CrdtDecodeMode::Strict).map(Value::from)
     }
 
     pub(crate) fn merge_crdt_values(&self, a: &Value, b: &Value) -> Result<Value> {

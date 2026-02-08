@@ -30,8 +30,14 @@ pub fn eval_binary_op(left: &Value, op: &BinaryOp, right: &Value) -> Result<Valu
     }
 
     match op {
-        BinaryOp::Eq => Ok(Value::Bool(cypher_eq(left, right))),
-        BinaryOp::NotEq => Ok(Value::Bool(!cypher_eq(left, right))),
+        BinaryOp::Eq => Ok(match cypher_eq(left, right) {
+            Some(b) => Value::Bool(b),
+            None => Value::Null,
+        }),
+        BinaryOp::NotEq => Ok(match cypher_eq(left, right) {
+            Some(b) => Value::Bool(!b),
+            None => Value::Null,
+        }),
         BinaryOp::And => {
             // Three-valued logic: false dominates, null propagates with true
             match (left.as_bool(), right.as_bool()) {
@@ -103,59 +109,117 @@ pub fn eval_binary_op(left: &Value, op: &BinaryOp, right: &Value) -> Result<Valu
     }
 }
 
-/// Deep equality comparison with Cypher-compliant numeric coercion.
-fn cypher_eq(left: &Value, right: &Value) -> bool {
+/// Deep equality comparison with Cypher-compliant numeric coercion and 3-valued logic.
+/// Returns Some(bool) for True/False, and None for Null/Unknown.
+pub fn cypher_eq(left: &Value, right: &Value) -> Option<bool> {
+    if left.is_null() || right.is_null() {
+        return None;
+    }
+
     // Mixed numeric equality (1 = 1.0)
-    if let (Some(l), Some(r)) = (left.as_f64(), right.as_f64()) {
-        return l == r;
+    if let (Some(l), Some(r)) = (value_as_f64(left), value_as_f64(right)) {
+        if l.is_nan() || r.is_nan() {
+            return Some(false);
+        }
+        return Some(l == r);
     }
 
     // Structural equality for Lists
     if let (Value::Array(l), Value::Array(r)) = (left, right) {
         if l.len() != r.len() {
-            return false;
+            return Some(false);
         }
-        return l.iter().zip(r.iter()).all(|(lv, rv)| cypher_eq(lv, rv));
+        let mut has_null = false;
+        for (lv, rv) in l.iter().zip(r.iter()) {
+            match cypher_eq(lv, rv) {
+                Some(false) => return Some(false),
+                None => has_null = true,
+                Some(true) => {}
+            }
+        }
+        return if has_null { None } else { Some(true) };
     }
 
     // Structural equality for Maps (Nodes)
     if let (Value::Object(l), Value::Object(r)) = (left, right) {
         // If both are nodes (have _vid), compare by _vid ONLY
         if let (Some(vid_l), Some(vid_r)) = (l.get("_vid"), r.get("_vid")) {
-            return vid_l == vid_r;
+            return Some(vid_l == vid_r);
+        }
+
+        // Handle special Cypher types (NaN, Infinity) encoded as objects
+        #[allow(clippy::collapsible_if)]
+        if let (Some(l_type), Some(r_type)) = (l.get("_cypher_type"), r.get("_cypher_type")) {
+            if l_type == r_type {
+                if l_type == "NaN" {
+                    return Some(false);
+                } // NaN = NaN is false
+                if l_type == "Infinity" {
+                    return Some(l.get("pos") == r.get("pos"));
+                }
+            }
         }
 
         if l.len() != r.len() {
-            return false;
+            return Some(false);
         }
+
+        let mut has_null = false;
         for (k, lv) in l {
             if let Some(rv) = r.get(k) {
-                if !cypher_eq(lv, rv) {
-                    return false;
+                match cypher_eq(lv, rv) {
+                    Some(false) => return Some(false),
+                    None => has_null = true,
+                    Some(true) => {}
                 }
             } else {
-                return false;
+                return Some(false);
             }
         }
-        return true;
+        return if has_null { None } else { Some(true) };
     }
 
-    // Fallback to standard equality for other types (String, Bool, Null)
-    left == right
+    // Fallback to standard equality for other types (String, Bool)
+    Some(left == right)
+}
+
+fn value_as_f64(v: &Value) -> Option<f64> {
+    if let Some(f) = v.as_f64() {
+        return Some(f);
+    }
+    #[allow(clippy::collapsible_if)]
+    if let Value::Object(obj) = v {
+        if let Some(Value::String(t)) = obj.get("_cypher_type") {
+            if t == "NaN" {
+                return Some(f64::NAN);
+            }
+            if t == "Infinity" {
+                let pos = obj.get("pos").and_then(|p| p.as_bool()).unwrap_or(true);
+                return Some(if pos {
+                    f64::INFINITY
+                } else {
+                    f64::NEG_INFINITY
+                });
+            }
+        }
+    }
+    None
 }
 
 /// Evaluate IN operator.
 pub fn eval_in_op(left: &Value, right: &Value) -> Result<Value> {
     if let Value::Array(arr) = right {
+        let mut has_null = false;
         // Check exact match using cypher_eq (handles numeric coercion and node identity)
         for item in arr {
-            if cypher_eq(left, item) {
-                return Ok(Value::Bool(true));
+            match cypher_eq(left, item) {
+                Some(true) => return Ok(Value::Bool(true)),
+                None => has_null = true,
+                _ => {}
             }
         }
 
         // Fallback: Check for Node Object vs VID mismatch
-        // If left is a Node Object with _vid
         if let Value::Object(map) = left
             && let Some(vid_val) = map.get("_vid")
         {
@@ -179,10 +243,18 @@ pub fn eval_in_op(left: &Value, right: &Value) -> Result<Value> {
                 {
                     return Ok(Value::Bool(true));
                 }
+
+                if item.is_null() {
+                    has_null = true;
+                }
             }
         }
 
-        Ok(Value::Bool(false))
+        if has_null {
+            Ok(Value::Null)
+        } else {
+            Ok(Value::Bool(false))
+        }
     } else {
         Err(anyhow!("Right side of IN must be a list"))
     }
@@ -207,16 +279,31 @@ fn eval_numeric_op<F>(left: &Value, right: &Value, op: F) -> Result<Value>
 where
     F: Fn(f64, f64) -> f64,
 {
-    let (l, r) = match (left.as_f64(), right.as_f64()) {
+    let (l, r) = match (value_as_f64(left), value_as_f64(right)) {
         (Some(l), Some(r)) => (l, r),
         _ => return Err(anyhow!("Arithmetic operation requires numbers")),
     };
     let result = op(l, r);
     // Return integer if result has no fractional part and both inputs were integers
-    if result.fract() == 0.0 && left.is_i64() && right.is_i64() {
+    if !result.is_nan()
+        && !result.is_infinite()
+        && result.fract() == 0.0
+        && left.is_i64()
+        && right.is_i64()
+    {
         Ok(json!(result as i64))
     } else {
-        Ok(json!(result))
+        Ok(json_f64(result))
+    }
+}
+
+fn json_f64(f: f64) -> Value {
+    if f.is_nan() {
+        json!({"_cypher_type": "NaN"})
+    } else if f.is_infinite() {
+        json!({"_cypher_type": "Infinity", "pos": f > 0.0})
+    } else {
+        json!(f)
     }
 }
 
@@ -242,11 +329,11 @@ fn add_temporal_duration(temporal_str: &str, dur: &CypherDuration) -> Result<Val
 /// Evaluate addition with temporal-aware dispatch.
 fn eval_add(left: &Value, right: &Value) -> Result<Value> {
     // Numeric addition
-    if let (Some(l), Some(r)) = (left.as_f64(), right.as_f64()) {
+    if let (Some(l), Some(r)) = (value_as_f64(left), value_as_f64(right)) {
         if left.is_i64() && right.is_i64() {
             return Ok(json!(left.as_i64().unwrap() + right.as_i64().unwrap()));
         }
-        return Ok(json!(l + r));
+        return Ok(json_f64(l + r));
     }
 
     // String concatenation
@@ -339,14 +426,14 @@ fn eval_sub(left: &Value, right: &Value) -> Result<Value> {
 /// Evaluate multiplication with duration support.
 fn eval_mul(left: &Value, right: &Value) -> Result<Value> {
     // duration * number
-    if let (Value::String(s), Some(factor)) = (left, right.as_f64())
+    if let (Value::String(s), Some(factor)) = (left, value_as_f64(right))
         && is_duration_value(left)
     {
         let dur = parse_duration_to_cypher(s)?;
         return Ok(Value::String(dur.multiply(factor).to_iso8601()));
     }
     // number * duration
-    if let (Some(factor), Value::String(s)) = (left.as_f64(), right)
+    if let (Some(factor), Value::String(s)) = (value_as_f64(left), right)
         && is_duration_value(right)
     {
         let dur = parse_duration_to_cypher(s)?;
@@ -359,7 +446,7 @@ fn eval_mul(left: &Value, right: &Value) -> Result<Value> {
 /// Evaluate division with duration support.
 fn eval_div(left: &Value, right: &Value) -> Result<Value> {
     // duration / number
-    if let (Value::String(s), Some(divisor)) = (left, right.as_f64())
+    if let (Value::String(s), Some(divisor)) = (left, value_as_f64(right))
         && is_duration_value(left)
     {
         let dur = parse_duration_to_cypher(s)?;
@@ -383,6 +470,13 @@ where
         return Ok(Value::Null);
     }
 
+    // Handle NaN - comparisons with NaN return false in Cypher (except <>)
+    if value_as_f64(left).is_some_and(|f| f.is_nan())
+        || value_as_f64(right).is_some_and(|f| f.is_nan())
+    {
+        return Ok(Value::Bool(false));
+    }
+
     let ord = cypher_partial_cmp(left, right);
     match ord {
         Some(o) => Ok(Value::Bool(check(o))),
@@ -397,7 +491,7 @@ fn cypher_partial_cmp(left: &Value, right: &Value) -> Option<Ordering> {
     }
 
     // Number vs Number
-    if let (Some(l), Some(r)) = (left.as_f64(), right.as_f64()) {
+    if let (Some(l), Some(r)) = (value_as_f64(left), value_as_f64(right)) {
         return l.partial_cmp(&r);
     }
 

@@ -20,16 +20,6 @@ use uni_common::Properties;
 use uni_common::Value;
 use uni_common::core::id::{Eid, Vid};
 
-/// Result of a property lookup indicating whether to continue searching.
-pub enum LookupResult {
-    /// Found the value, stop searching
-    Found(Value),
-    /// Entity is deleted (tombstone), stop searching
-    Deleted,
-    /// Not found in this layer, continue to next
-    NotFound,
-}
-
 /// Check if a vertex is deleted in the L0 chain.
 /// Returns true if a tombstone is found at any layer.
 pub fn is_vertex_deleted(vid: Vid, ctx: Option<&QueryContext>) -> bool {
@@ -615,8 +605,8 @@ mod tests {
     use super::*;
     use crate::runtime::l0::L0Buffer;
     use parking_lot::RwLock;
-    use uni_common::Value;
     use std::sync::Arc;
+    use uni_common::Value;
 
     fn make_ctx_with_l0(l0: L0Buffer) -> QueryContext {
         QueryContext::new(Arc::new(RwLock::new(l0)))
@@ -693,6 +683,9 @@ mod tests {
 
         // Accumulated props should also have transaction value
         let all_props = accumulate_vertex_props(Vid::from(1), Some(&ctx));
-        assert_eq!(all_props.unwrap().get("name"), Some(&Value::String("Bob".to_string())));
+        assert_eq!(
+            all_props.unwrap().get("name"),
+            Some(&Value::String("Bob".to_string()))
+        );
     }
 }

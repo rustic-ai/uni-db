@@ -41,11 +41,17 @@ async fn test_lancedb_flush_vertices() -> anyhow::Result<()> {
     let vid2 = writer.next_vid().await?;
 
     let mut props1 = HashMap::new();
-    props1.insert("name".to_string(), uni_common::Value::String("Alice".to_string()));
+    props1.insert(
+        "name".to_string(),
+        uni_common::Value::String("Alice".to_string()),
+    );
     props1.insert("age".to_string(), uni_common::Value::Int(30));
 
     let mut props2 = HashMap::new();
-    props2.insert("name".to_string(), uni_common::Value::String("Bob".to_string()));
+    props2.insert(
+        "name".to_string(),
+        uni_common::Value::String("Bob".to_string()),
+    );
     props2.insert("age".to_string(), uni_common::Value::Int(25));
 
     writer

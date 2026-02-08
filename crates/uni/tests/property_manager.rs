@@ -70,7 +70,10 @@ async fn test_property_lookup_uses_vid_filter() -> anyhow::Result<()> {
     assert_eq!(alice_name, uni_db::Value::String("Alice".to_string()));
 
     let bob_props = prop_mgr.get_all_vertex_props(bob_vid).await?;
-    assert_eq!(bob_props.get("name"), Some(&uni_db::Value::String("Bob".to_string())));
+    assert_eq!(
+        bob_props.get("name"),
+        Some(&uni_db::Value::String("Bob".to_string()))
+    );
 
     Ok(())
 }

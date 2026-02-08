@@ -138,7 +138,8 @@ async fn test_vector_clock_integration() -> anyhow::Result<()> {
     let read_val_conflict = prop_manager
         .get_vertex_prop_with_ctx(vid, "state", Some(&query_ctx_conflict))
         .await?;
-    let read_crdt_conflict: Crdt = serde_json::from_value(serde_json::Value::from(read_val_conflict))?;
+    let read_crdt_conflict: Crdt =
+        serde_json::from_value(serde_json::Value::from(read_val_conflict))?;
 
     if let Crdt::VCRegister(reg) = read_crdt_conflict {
         // Clock should be merged

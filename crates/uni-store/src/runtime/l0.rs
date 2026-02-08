@@ -4,6 +4,7 @@
 use crate::runtime::wal::{Mutation, WriteAheadLog};
 use anyhow::Result;
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::{instrument, trace};
 use uni_common::Properties;
@@ -26,10 +27,6 @@ pub struct TombstoneEntry {
     pub dst_vid: Vid,
     pub edge_type: u32,
 }
-
-use std::sync::Arc;
-
-// ...
 
 pub struct L0Buffer {
     /// Graph topology using simple adjacency lists
@@ -94,8 +91,7 @@ impl L0Buffer {
             let json_v: serde_json::Value = v.clone().into();
             if let Ok(mut new_crdt) = serde_json::from_value::<Crdt>(json_v)
                 && let Some(existing_v) = entry.get(&k)
-                && let Ok(existing_crdt) =
-                    serde_json::from_value::<Crdt>(existing_v.clone().into())
+                && let Ok(existing_crdt) = serde_json::from_value::<Crdt>(existing_v.clone().into())
             {
                 // Use try_merge to avoid panic on type mismatch
                 if new_crdt.try_merge(&existing_crdt).is_ok()
@@ -781,11 +777,13 @@ mod tests {
         let counter1: Value = json!({
             "t": "gc",
             "d": {"counts": {"node1": 5}}
-        }).into();
+        })
+        .into();
         let counter2: Value = json!({
             "t": "gc",
             "d": {"counts": {"node2": 3}}
-        }).into();
+        })
+        .into();
 
         // First mutation: insert vertex with counter1
         let mut props1 = HashMap::new();

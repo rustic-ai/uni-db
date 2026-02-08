@@ -11,13 +11,21 @@
 | Metric | Count | Pass Rate |
 |--------|-------|-----------|
 | **Features** | 192 | - |
-| **Scenarios** | 3,897 | **67.3%** (2,623 passed, 1,235 failed) |
+| **Scenarios** | 3,897 | **68.8%** (2,683 passed, 1,175 failed) |
 | **Skipped** | 39 | - |
 | **Parsing Errors** | 0 | None (harness fixed) |
 
 **Last Update (2026-02-08):**
-Latest verification run. Pass rate: 67.3% (2,623/3,897 scenarios). 39 scenarios skipped (step failures cause remaining steps to be skipped).
-Minor improvements (+3 scenarios from previous run).
+Latest verification run. Pass rate: 68.8% (2,683/3,897 scenarios). 39 scenarios skipped (step failures cause remaining steps to be skipped).
+Significant improvements (+60 scenarios from previous run).
+
+Key improvements in this run:
+1. Boolean operations now fully passing: Boolean1, Boolean2, Boolean5 all at 100%
+2. Comparison improvements: Comparison3 now 100%, Comparison4 now 100%
+3. Null handling improvements: Null1, Null2 now 100%, Null3 at 90%
+4. Precedence1 (boolean values) now 100%
+5. WithOrderBy3 now 100%
+6. Unwind1 improved to 64%
 
 **Previous Fixes (2026-02-07 PM):**
 1. Boolean NOT operator improvements: Boolean4 now 100% (+24 scenarios)
@@ -33,7 +41,7 @@ Minor improvements (+3 scenarios from previous run).
 3. List and Map handling improvements: List1 now 100%, Map3 now 100%
 4. Literals improvements: Literals1, Literals2, Literals3, Literals4, Literals6 all improved
 
-The high step pass rate (~91%) vs lower scenario pass rate (67.3%) indicates that most basic operations work, but many scenarios fail at specific assertion points.
+The high step pass rate (~91%) vs lower scenario pass rate (68.8%) indicates that most basic operations work, but many scenarios fail at specific assertion points.
 
 ---
 
@@ -81,40 +89,41 @@ This separation ensures:
 
 | Category | Passed | Failed | Total | Rate |
 |----------|--------|--------|-------|------|
+| **Boolean** | **150** | **0** | **150** | **100.0%** |
 | **Conditional** | **13** | **0** | **13** | **100.0%** |
+| **Null** | **43** | **1** | **44** | **97.7%** |
 | **MatchWhere** | **33** | **1** | **34** | **97.1%** |
-| **Boolean** | **139** | **11** | **150** | **92.7%** |
+| **Precedence** | **109** | **12** | **121** | **90.1%** |
 | **ExistentialSubquery** | **9** | **1** | **10** | **90.0%** |
 | Literals | 117 | 14 | 131 | 89.3% |
-| Null | 38 | 6 | 44 | 86.4% |
+| Temporal10 (Duration) | 119 | 12 | 131 | 90.8% |
 | Quantifier | 502 | 102 | 604 | 83.1% |
 | String | 26 | 6 | 32 | 81.2% |
 | Call | 42 | 10 | 52 | 80.8% |
-| Match | 300 | 80 | 381 | 78.9% |
-| WithOrderBy | 227 | 65 | 292 | 77.7% |
-| Temporal (overall) | 749 | 255 | 1,004 | 74.6% |
+| WithOrderBy | 234 | 58 | 292 | 80.1% |
+| Match | 300 | 81 | 381 | 78.7% |
+| Temporal (overall) | 743 | 261 | 1,004 | 74.0% |
 | WithWhere | 14 | 5 | 19 | 73.7% |
-| Map | 25 | 10 | 44 | 71.4% |
-| Union | 8 | 4 | 12 | 66.7% |
+| Map | 25 | 10 | 44 | 56.8% |
+| Comparison | 49 | 23 | 72 | 68.1% |
 | WithSkipLimit | 6 | 3 | 9 | 66.7% |
+| Union | 8 | 4 | 12 | 66.7% |
 | Mathematical | 4 | 2 | 6 | 66.7% |
-| Precedence | 80 | 41 | 121 | 66.1% |
-| Unwind | 8 | 6 | 14 | 57.1% |
-| List | 89 | 78 | 185 | 53.3% |
-| Comparison | 37 | 35 | 72 | 51.4% |
+| Unwind | 9 | 5 | 14 | 64.3% |
+| List | 89 | 78 | 185 | 48.1% |
 | ReturnSkipLimit | 15 | 16 | 31 | 48.4% |
 | With | 14 | 15 | 29 | 48.3% |
-| ReturnOrderBy | 15 | 19 | 35 | 44.1% |
-| TypeConversion | 20 | 27 | 47 | 42.6% |
-| Return | 26 | 36 | 63 | 41.9% |
-| Graph | 21 | 37 | 61 | 36.2% |
+| ReturnOrderBy | 16 | 19 | 35 | 45.7% |
+| TypeConversion | 21 | 26 | 47 | 44.7% |
+| Return | 26 | 37 | 63 | 41.3% |
+| Graph | 23 | 35 | 61 | 37.7% |
 | Pattern | 15 | 35 | 50 | 30.0% |
 | Path | 2 | 5 | 7 | 28.6% |
 | Create | 13 | 65 | 78 | 16.7% |
 | Delete | 5 | 36 | 41 | 12.2% |
 | Remove | 4 | 29 | 33 | 12.1% |
 | TriadicSelection | 2 | 17 | 19 | 10.5% |
-| Set | 2 | 49 | 53 | 3.9% |
+| Set | 2 | 49 | 53 | 3.8% |
 | Merge | 0 | 72 | 75 | 0.0% |
 | Aggregation | 0 | 34 | 35 | 0.0% |
 | **CountingSubgraphMatches** | **0** | **11** | **11** | **0.0%** |
@@ -127,10 +136,15 @@ This separation ensures:
 
 | Feature | Passed | Total |
 |---------|--------|-------|
+| Boolean1 - And logical operations | 30 | 30 |
+| Boolean2 - OR logical operations | 30 | 30 |
 | Boolean3 - XOR logical operations | 30 | 30 |
 | Boolean4 - NOT logical operations | 52 | 52 |
+| Boolean5 - Interop of logical operations | 8 | 8 |
 | Call3 - Assignable-type arguments | 6 | 6 |
 | Call4 - Null Arguments | 2 | 2 |
+| Comparison3 - Full-Bound Range | 9 | 9 |
+| Comparison4 - Combination of Comparisons | 1 | 1 |
 | Conditional1 - Coalesce expression | 1 | 1 |
 | Conditional2 - Case Expression | 12 | 12 |
 | ExistentialSubquery1 - Simple existential subquery | 4 | 4 |
@@ -145,15 +159,20 @@ This separation ensures:
 | Mathematical11 - Signed numbers functions | 1 | 1 |
 | Mathematical13 - Square root | 1 | 1 |
 | Mathematical2 - Addition | 1 | 1 |
+| Null1 - IS NULL validation | 17 | 17 |
+| Null2 - IS NOT NULL validation | 17 | 17 |
+| Precedence1 - On boolean values | 72 | 72 |
 | Quantifier5 - None quantifier interop | 31 | 31 |
 | Quantifier6 - Single quantifier interop | 21 | 21 |
 | Quantifier7 - Any quantifier interop | 36 | 36 |
 | Quantifier8 - All quantifier interop | 31 | 31 |
 | Return1 - Return single variable | 2 | 2 |
+| ReturnOrderBy4 - Order by in combination with projection | 2 | 2 |
 | String11 - Combining Exact String Search | 2 | 2 |
 | Temporal6 - Render Temporal Values as a String | 17 | 17 |
 | Temporal8 - Compute Arithmetic Operations on Temporal Values | 27 | 27 |
 | With2 - Forward single expression | 2 | 2 |
+| WithOrderBy3 - Order by multiple expressions | 93 | 93 |
 | WithWhere2 - Filter multiple variables | 2 | 2 |
 | WithWhere3 - Equi-Joins on variables | 3 | 3 |
 | WithWhere4 - Non-Equi-Joins on variables | 2 | 2 |
@@ -169,34 +188,32 @@ This separation ensures:
 | Literals5 - Float | 26 | 27 | 96.3% |
 | Literals8 - Maps | 26 | 27 | 96.3% |
 | Temporal1 - Create Temporal Values from a Map | 199 | 207 | 96.1% |
-| Temporal10 - Compute Durations Between two Temporal Values | 125 | 131 | 95.4% |
 | Temporal7 - Compare Temporal Values | 17 | 18 | 94.4% |
-| Null1 - IS NULL validation | 16 | 17 | 94.1% |
-| Null2 - IS NOT NULL validation | 16 | 17 | 94.1% |
+| Precedence4 - On null value | 11 | 12 | 91.7% |
 | Literals2 - Decimal integer | 11 | 12 | 91.7% |
 | Literals6 - String | 12 | 13 | 92.3% |
 | Quantifier1 - None quantifier | 96 | 105 | 91.4% |
 | Quantifier3 - Any quantifier | 96 | 105 | 91.4% |
-| WithOrderBy3 - Order by multiple expressions | 85 | 93 | 91.4% |
 | Match6 - Match named paths | 88 | 97 | 90.7% |
+| Temporal10 - Compute Durations Between two Temporal Values | 119 | 131 | 90.8% |
+| Null3 - Null evaluation | 9 | 10 | 90.0% |
 | Quantifier4 - All quantifier | 95 | 105 | 90.5% |
 | Quantifier2 - Single quantifier | 95 | 106 | 89.6% |
 | String8 - Exact String Prefix Search | 8 | 9 | 88.9% |
 | String9 - Exact String Suffix Search | 8 | 9 | 88.9% |
 | String10 - Exact Substring Search | 8 | 9 | 88.9% |
 | MatchWhere6 - Filter optional matches | 7 | 8 | 87.5% |
-| Boolean1 - And logical operations | 26 | 30 | 86.7% |
-| Boolean2 - OR logical operations | 26 | 30 | 86.7% |
 | Graph9 - Retrieve all properties as a property map | 6 | 7 | 85.7% |
 | Call5 - Results projection | 16 | 19 | 84.2% |
 | With1 - Forward single variable | 5 | 6 | 83.3% |
-| WithOrderBy2 - Order by a single expression | 69 | 83 | 83.1% |
+| WithOrderBy2 - Order by a single expression | 67 | 83 | 80.7% |
 | Literals3 - Hexadecimal integer | 13 | 16 | 81.2% |
 | Return5 - Implicit grouping with distinct | 4 | 5 | 80.0% |
 | Union1 - Union | 4 | 5 | 80.0% |
 | Union2 - Union All | 4 | 5 | 80.0% |
 | Temporal9 - Truncate Temporal Values | 255 | 322 | 79.2% |
 | Map2 - Dynamic Value Access | 11 | 14 | 78.6% |
+| Match3 - Match fixed length patterns | 23 | 30 | 76.7% |
 | Precedence2 - On numeric values | 20 | 26 | 76.9% |
 | Match3 - Match fixed length patterns | 23 | 30 | 76.7% |
 | WithSkipLimit2 - Limit | 3 | 4 | 75.0% |
@@ -480,13 +497,14 @@ An error is raised but the message doesn't contain the expected keyword.
 | 2026-02-07 (PM) | 2,599 | 66.7% | Boolean NOT/XOR, String search, Precedence, Quantifier improvements (+92) |
 | 2026-02-07 (evening) | 2,601 | 66.7% | Minor improvements (+2) |
 | 2026-02-07 (late evening) | 2,620 | 67.2% | Dynamic access improvements: Map2, Graph, List (+19) |
-| 2026-02-08 | **2,623** | **67.3%** | Verification run (+3 scenarios) |
+| 2026-02-08 (AM) | 2,623 | 67.3% | Verification run (+3 scenarios) |
+| 2026-02-08 (PM) | **2,683** | **68.8%** | Boolean ops now 100%, Comparison3/4 now 100%, Null1/2 now 100%, Precedence1 now 100%, WithOrderBy3 now 100% (+60) |
 
 ### Cumulative Improvement
 
 | From | To | Scenarios Gained | Improvement |
 |------|-----|------------------|-------------|
-| Baseline (1,279) | Current (2,623) | **+1,344** | **+105.1%** |
+| Baseline (1,279) | Current (2,683) | **+1,404** | **+109.8%** |
 
 ---
 
@@ -557,15 +575,13 @@ An error is raised but the message doesn't contain the expected keyword.
 | ~~55%~~ | ~~2,127~~ | ~~55.0%~~ | **ACHIEVED** |
 | ~~60%~~ | ~~2,321~~ | ~~60.0%~~ | **ACHIEVED** |
 | ~~65%~~ | ~~2,533~~ | ~~65.0%~~ | **ACHIEVED** |
-| 70% | 2,727 | 70.0% | +104 scenarios |
-| 75% | 2,922 | 75.0% | +299 scenarios |
+| 70% | 2,727 | 70.0% | +44 scenarios |
+| 75% | 2,922 | 75.0% | +239 scenarios |
 
 Achieving 70% likely requires:
 - Aggregation functions (+35)
 - Path functions (+7)
-- Variable-length paths (+39)
-- Partial MERGE implementation (+30)
-- Additional validation coverage (+20)
+- A few more edge case fixes
 
 ---
 

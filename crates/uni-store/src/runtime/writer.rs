@@ -16,11 +16,11 @@ use chrono::Utc;
 use futures::TryStreamExt;
 use metrics;
 use parking_lot::RwLock;
-use uni_common::Value;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use tracing::{debug, info, instrument};
 use uni_common::Properties;
+use uni_common::Value;
 use uni_common::config::UniConfig;
 use uni_common::core::id::{Eid, Vid};
 use uni_common::core::schema::{ConstraintTarget, ConstraintType, EmbeddingModel, IndexDefinition};
@@ -881,19 +881,35 @@ impl Writer {
 
     fn compare_values(&self, a: &Value, b: &Value) -> Result<i8> {
         match (a, b) {
-            (Value::Int(n1), Value::Int(n2)) => {
-                Ok(n1.cmp(n2) as i8)
-            }
+            (Value::Int(n1), Value::Int(n2)) => Ok(n1.cmp(n2) as i8),
             (Value::Float(f1), Value::Float(f2)) => {
-                if f1 < f2 { Ok(-1) } else if f1 > f2 { Ok(1) } else { Ok(0) }
+                if f1 < f2 {
+                    Ok(-1)
+                } else if f1 > f2 {
+                    Ok(1)
+                } else {
+                    Ok(0)
+                }
             }
             (Value::Int(n), Value::Float(f)) => {
                 let nf = *n as f64;
-                if nf < *f { Ok(-1) } else if nf > *f { Ok(1) } else { Ok(0) }
+                if nf < *f {
+                    Ok(-1)
+                } else if nf > *f {
+                    Ok(1)
+                } else {
+                    Ok(0)
+                }
             }
             (Value::Float(f), Value::Int(n)) => {
                 let nf = *n as f64;
-                if *f < nf { Ok(-1) } else if *f > nf { Ok(1) } else { Ok(0) }
+                if *f < nf {
+                    Ok(-1)
+                } else if *f > nf {
+                    Ok(1)
+                } else {
+                    Ok(0)
+                }
             }
             (Value::String(s1), Value::String(s2)) => match s1.cmp(s2) {
                 std::cmp::Ordering::Less => Ok(-1),
@@ -1687,9 +1703,9 @@ impl Writer {
                 // Distribute results back to properties
                 for (embedding_idx, &prop_idx) in needs_embedding.iter().enumerate() {
                     if let Some(vec) = embeddings.get(embedding_idx) {
-                        let vals: Vec<Value> = vec.iter().map(|f| Value::Float(*f as f64)).collect();
-                        properties_batch[prop_idx]
-                            .insert(target_prop.clone(), Value::List(vals));
+                        let vals: Vec<Value> =
+                            vec.iter().map(|f| Value::Float(*f as f64)).collect();
+                        properties_batch[prop_idx].insert(target_prop.clone(), Value::List(vals));
                     }
                 }
             }

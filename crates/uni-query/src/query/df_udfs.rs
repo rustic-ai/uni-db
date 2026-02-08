@@ -24,6 +24,7 @@
 //! register_cypher_udfs(&ctx)?;
 //! ```
 
+use arrow::array::ArrayRef;
 use arrow::datatypes::DataType;
 use arrow_array::Array;
 use datafusion::error::Result as DFResult;
@@ -39,6 +40,7 @@ use lance_datafusion::udf::json::{
 use std::any::Any;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
+use uni_cypher::ast::BinaryOp;
 use uni_store::storage::arrow_convert::values_to_array;
 
 /// Macro to implement common UDF trait boilerplate.
@@ -147,6 +149,12 @@ pub fn register_cypher_udfs(ctx: &SessionContext) -> DFResult<()> {
     // Duration property accessor UDF
     ctx.register_udf(create_duration_property_udf());
     ctx.register_udf(create_type_rank_udf());
+    ctx.register_udf(create_has_null_udf());
+
+    // String matching UDFs (used by CypherStringMatchExpr in expr_compiler)
+    ctx.register_udf(create_cypher_starts_with_udf());
+    ctx.register_udf(create_cypher_ends_with_udf());
+    ctx.register_udf(create_cypher_contains_udf());
 
     // Temporal extraction UDFs (year, month, day, etc.)
     for name in &["year", "month", "day", "hour", "minute", "second"] {
@@ -1217,7 +1225,8 @@ where
 fn scalar_to_json(scalar: &ScalarValue) -> DFResult<serde_json::Value> {
     match scalar {
         ScalarValue::Utf8(Some(s)) | ScalarValue::LargeUtf8(Some(s)) => {
-            // Try to parse as JSON (for arguments serialized as JSON in UNWIND or Map literals).
+            // Try to parse as JSON ONLY if it looks like a JSON object, array or quoted string.
+            // This avoids misinterpreting unquoted strings that happen to be numbers/bools.
             if (s.starts_with('{') || s.starts_with('[') || s.starts_with('"'))
                 && let Ok(obj) = serde_json::from_str::<serde_json::Value>(s)
             {
@@ -1225,30 +1234,48 @@ fn scalar_to_json(scalar: &ScalarValue) -> DFResult<serde_json::Value> {
             }
             Ok(serde_json::Value::String(s.clone()))
         }
+        ScalarValue::LargeBinary(Some(b)) => {
+            // LargeBinary may contain JSONB binary (from typed Json properties) or
+            // plain JSON text bytes (from UNWIND or schemaless scans).
+            // Try JSONB first (the common case for typed properties), then plain JSON.
+            let raw = jsonb::RawJsonb::new(b);
+            let jsonb_str = raw.to_string();
+            if (jsonb_str != "null" || b.is_empty())
+                && let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&jsonb_str)
+            {
+                return Ok(parsed);
+            }
+            // Fallback: try plain JSON text
+            if let Ok(obj) = serde_json::from_slice(b) {
+                Ok(obj)
+            } else {
+                Ok(serde_json::Value::Null)
+            }
+        }
         ScalarValue::Int64(Some(i)) => Ok(serde_json::json!(*i)),
         ScalarValue::Int32(Some(i)) => Ok(serde_json::json!(*i as i64)),
-        ScalarValue::Float64(Some(f)) => Ok(serde_json::json!(*f)),
+        ScalarValue::Float64(Some(f)) => {
+            if f.is_nan() {
+                Ok(serde_json::json!({"_cypher_type": "NaN"}))
+            } else if f.is_infinite() {
+                Ok(serde_json::json!({"_cypher_type": "Infinity", "pos": *f > 0.0}))
+            } else {
+                Ok(serde_json::json!(*f))
+            }
+        }
         ScalarValue::Boolean(Some(b)) => Ok(serde_json::json!(*b)),
         ScalarValue::Struct(arr) => {
             if arr.len() == 0 || arr.is_null(0) {
                 Ok(serde_json::Value::Null)
             } else {
-                Ok(uni_store::storage::arrow_convert::arrow_to_value(
-                    arr.as_ref(),
-                    0,
-                )
-                .into())
+                Ok(uni_store::storage::arrow_convert::arrow_to_value(arr.as_ref(), 0).into())
             }
         }
         ScalarValue::List(arr) => {
             if arr.len() == 0 || arr.is_null(0) {
                 Ok(serde_json::Value::Null)
             } else {
-                Ok(uni_store::storage::arrow_convert::arrow_to_value(
-                    arr.as_ref(),
-                    0,
-                )
-                .into())
+                Ok(uni_store::storage::arrow_convert::arrow_to_value(arr.as_ref(), 0).into())
             }
         }
         ScalarValue::Null
@@ -1283,6 +1310,143 @@ fn json_value_to_columnar(val: &serde_json::Value) -> DFResult<ColumnarValue> {
         other => Err(datafusion::error::DataFusionError::Execution(format!(
             "Temporal function returned unsupported type: {other:?}"
         ))),
+    }
+}
+
+// ============================================================================
+// _has_null(list) -> Boolean
+// Internal UDF to check if a list contains any nulls
+// ============================================================================
+
+pub fn create_has_null_udf() -> ScalarUDF {
+    ScalarUDF::new_from_impl(HasNullUdf::new())
+}
+
+#[derive(Debug)]
+struct HasNullUdf {
+    signature: Signature,
+}
+
+impl HasNullUdf {
+    fn new() -> Self {
+        Self {
+            signature: Signature::any(1, Volatility::Immutable),
+        }
+    }
+}
+
+impl_udf_eq_hash!(HasNullUdf);
+
+impl ScalarUDFImpl for HasNullUdf {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn name(&self) -> &str {
+        "_has_null"
+    }
+
+    fn signature(&self) -> &Signature {
+        &self.signature
+    }
+
+    fn return_type(&self, _arg_types: &[DataType]) -> DFResult<DataType> {
+        Ok(DataType::Boolean)
+    }
+
+    fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DFResult<ColumnarValue> {
+        if args.args.len() != 1 {
+            return Err(datafusion::error::DataFusionError::Execution(
+                "_has_null requires 1 argument".to_string(),
+            ));
+        }
+
+        let arg = &args.args[0];
+
+        match arg {
+            ColumnarValue::Scalar(scalar) => {
+                match scalar {
+                    ScalarValue::List(arr) => {
+                        // Try downcasting to ListArray (GenericListArray<i32>)
+                        if let Some(list_arr) =
+                            arr.as_any().downcast_ref::<arrow::array::ListArray>()
+                        {
+                            if list_arr.is_empty() {
+                                Ok(ColumnarValue::Scalar(ScalarValue::Boolean(Some(false))))
+                            } else {
+                                let values = list_arr.value(0);
+                                let null_count = values.null_count();
+                                Ok(ColumnarValue::Scalar(ScalarValue::Boolean(Some(
+                                    null_count > 0,
+                                ))))
+                            }
+                        } else {
+                            // Fallback: check array itself
+                            let null_count = arr.null_count();
+                            Ok(ColumnarValue::Scalar(ScalarValue::Boolean(Some(
+                                null_count > 0,
+                            ))))
+                        }
+                    }
+                    ScalarValue::LargeList(arr) => {
+                        if arr.len() == 0 {
+                            Ok(ColumnarValue::Scalar(ScalarValue::Boolean(Some(false))))
+                        } else {
+                            let values = arr.value(0);
+                            let null_count = values.null_count();
+                            Ok(ColumnarValue::Scalar(ScalarValue::Boolean(Some(
+                                null_count > 0,
+                            ))))
+                        }
+                    }
+                    ScalarValue::FixedSizeList(arr) => {
+                        if arr.len() == 0 {
+                            Ok(ColumnarValue::Scalar(ScalarValue::Boolean(Some(false))))
+                        } else {
+                            let values = arr.value(0);
+                            let null_count = values.null_count();
+                            Ok(ColumnarValue::Scalar(ScalarValue::Boolean(Some(
+                                null_count > 0,
+                            ))))
+                        }
+                    }
+                    _ => Ok(ColumnarValue::Scalar(ScalarValue::Boolean(Some(false)))),
+                }
+            }
+            ColumnarValue::Array(arr) => {
+                use arrow_array::{LargeListArray, ListArray};
+
+                if let Some(list_arr) = arr.as_any().downcast_ref::<ListArray>() {
+                    let mut builder = arrow::array::BooleanBuilder::with_capacity(list_arr.len());
+                    for i in 0..list_arr.len() {
+                        if list_arr.is_null(i) {
+                            builder.append_null();
+                        } else {
+                            let value_slice = list_arr.value(i);
+                            builder.append_value(value_slice.null_count() > 0);
+                        }
+                    }
+                    Ok(ColumnarValue::Array(Arc::new(builder.finish()) as ArrayRef))
+                } else if let Some(large_list_arr) = arr.as_any().downcast_ref::<LargeListArray>() {
+                    let mut builder =
+                        arrow::array::BooleanBuilder::with_capacity(large_list_arr.len());
+                    for i in 0..large_list_arr.len() {
+                        if large_list_arr.is_null(i) {
+                            builder.append_null();
+                        } else {
+                            let value_slice = large_list_arr.value(i);
+                            builder.append_value(value_slice.null_count() > 0);
+                        }
+                    }
+                    Ok(ColumnarValue::Array(Arc::new(builder.finish()) as ArrayRef))
+                } else {
+                    // Not a list array?
+                    Err(datafusion::error::DataFusionError::Execution(
+                        "_has_null requires List array".to_string(),
+                    ))
+                }
+            }
+        }
     }
 }
 
@@ -1641,6 +1805,303 @@ fn get_type_rank_scalar(val: &ScalarValue) -> i32 {
     }
 }
 
+// ============================================================================
+// String Matching UDFs (_cypher_starts_with, etc.)
+// ============================================================================
+
+pub fn invoke_cypher_string_op<F>(
+    args: &ScalarFunctionArgs,
+    name: &str,
+    op: F,
+) -> DFResult<ColumnarValue>
+where
+    F: Fn(&str, &str) -> bool,
+{
+    use arrow_array::{BooleanArray, LargeStringArray, StringArray};
+    use datafusion::common::ScalarValue;
+    use datafusion::error::DataFusionError;
+
+    if args.args.len() != 2 {
+        return Err(DataFusionError::Execution(format!(
+            "{} requires exactly 2 arguments",
+            name
+        )));
+    }
+
+    let left = &args.args[0];
+    let right = &args.args[1];
+
+    match (left, right) {
+        (ColumnarValue::Scalar(l_scalar), ColumnarValue::Scalar(r_scalar)) => {
+            let l_str = match l_scalar {
+                ScalarValue::Utf8(Some(s)) | ScalarValue::LargeUtf8(Some(s)) => Some(s.as_str()),
+                ScalarValue::Utf8(None) | ScalarValue::LargeUtf8(None) | ScalarValue::Null => None, // Null
+                _ => None, // Non-string -> Null
+            };
+            let r_str = match r_scalar {
+                ScalarValue::Utf8(Some(s)) | ScalarValue::LargeUtf8(Some(s)) => Some(s.as_str()),
+                ScalarValue::Utf8(None) | ScalarValue::LargeUtf8(None) | ScalarValue::Null => None,
+                _ => None,
+            };
+
+            match (l_str, r_str) {
+                (Some(l), Some(r)) => {
+                    Ok(ColumnarValue::Scalar(ScalarValue::Boolean(Some(op(l, r)))))
+                }
+                _ => Ok(ColumnarValue::Scalar(ScalarValue::Boolean(None))),
+            }
+        }
+        (ColumnarValue::Array(l_arr), ColumnarValue::Scalar(r_scalar)) => {
+            // Check right scalar first
+            let r_val = match r_scalar {
+                ScalarValue::Utf8(Some(s)) | ScalarValue::LargeUtf8(Some(s)) => Some(s.as_str()),
+                _ => None,
+            };
+
+            if r_val.is_none() {
+                // If rhs is null or non-string, result is all null
+                let nulls = arrow_array::new_null_array(&DataType::Boolean, l_arr.len());
+                return Ok(ColumnarValue::Array(nulls));
+            }
+            let pattern = r_val.unwrap();
+
+            // Handle left array
+            let result_array = if let Some(arr) = l_arr.as_any().downcast_ref::<StringArray>() {
+                arr.iter()
+                    .map(|opt_s| opt_s.map(|s| op(s, pattern)))
+                    .collect::<BooleanArray>()
+            } else if let Some(arr) = l_arr.as_any().downcast_ref::<LargeStringArray>() {
+                arr.iter()
+                    .map(|opt_s| opt_s.map(|s| op(s, pattern)))
+                    .collect::<BooleanArray>()
+            } else {
+                // Left array is not string -> return nulls
+                arrow_array::new_null_array(&DataType::Boolean, l_arr.len())
+                    .as_any()
+                    .downcast_ref::<BooleanArray>()
+                    .unwrap()
+                    .clone()
+            };
+
+            Ok(ColumnarValue::Array(Arc::new(result_array)))
+        }
+        (ColumnarValue::Scalar(l_scalar), ColumnarValue::Array(r_arr)) => {
+            // Check left scalar first
+            let l_val = match l_scalar {
+                ScalarValue::Utf8(Some(s)) | ScalarValue::LargeUtf8(Some(s)) => Some(s.as_str()),
+                _ => None,
+            };
+
+            if l_val.is_none() {
+                let nulls = arrow_array::new_null_array(&DataType::Boolean, r_arr.len());
+                return Ok(ColumnarValue::Array(nulls));
+            }
+            let target = l_val.unwrap();
+
+            let result_array = if let Some(arr) = r_arr.as_any().downcast_ref::<StringArray>() {
+                arr.iter()
+                    .map(|opt_s| opt_s.map(|s| op(target, s)))
+                    .collect::<BooleanArray>()
+            } else if let Some(arr) = r_arr.as_any().downcast_ref::<LargeStringArray>() {
+                arr.iter()
+                    .map(|opt_s| opt_s.map(|s| op(target, s)))
+                    .collect::<BooleanArray>()
+            } else {
+                // Right array is not string -> return nulls
+                arrow_array::new_null_array(&DataType::Boolean, r_arr.len())
+                    .as_any()
+                    .downcast_ref::<BooleanArray>()
+                    .unwrap()
+                    .clone()
+            };
+
+            Ok(ColumnarValue::Array(Arc::new(result_array)))
+        }
+        (ColumnarValue::Array(l_arr), ColumnarValue::Array(r_arr)) => {
+            // Both arrays.
+            if l_arr.len() != r_arr.len() {
+                return Err(DataFusionError::Execution(
+                    "Array lengths must match".to_string(),
+                ));
+            }
+
+            // We need to iterate both. Since we can't easily zip different types (String vs LargeString vs Other),
+            // we handle common cases or fallback to row-by-row scalar extraction (slow but general)
+            // Or just support StringArray/LargeStringArray combinations.
+
+            // Helper to get iterator of Option<&str>
+            // This is a bit tricky due to types.
+            // Let's implement for StringArray vs StringArray for now, and Large vs Large.
+            // Cross types (String vs Large) requires more boilerplate.
+            // Fallback: use scalar extraction for simplicity if types differ?
+
+            // For now, simplify: if either is not string array, return nulls.
+            let l_is_string =
+                l_arr.data_type() == &DataType::Utf8 || l_arr.data_type() == &DataType::LargeUtf8;
+            let r_is_string =
+                r_arr.data_type() == &DataType::Utf8 || r_arr.data_type() == &DataType::LargeUtf8;
+
+            if !l_is_string || !r_is_string {
+                let nulls = arrow_array::new_null_array(&DataType::Boolean, l_arr.len());
+                return Ok(ColumnarValue::Array(nulls));
+            }
+
+            // Use arrow_cast to normalize to LargeUtf8?
+            let l_cast = datafusion::arrow::compute::cast(l_arr, &DataType::LargeUtf8)
+                .map_err(|e| DataFusionError::Execution(e.to_string()))?;
+            let r_cast = datafusion::arrow::compute::cast(r_arr, &DataType::LargeUtf8)
+                .map_err(|e| DataFusionError::Execution(e.to_string()))?;
+
+            let l_strings = l_cast.as_any().downcast_ref::<LargeStringArray>().unwrap();
+            let r_strings = r_cast.as_any().downcast_ref::<LargeStringArray>().unwrap();
+
+            let result: BooleanArray = l_strings
+                .iter()
+                .zip(r_strings.iter())
+                .map(|(l, r)| match (l, r) {
+                    (Some(l_str), Some(r_str)) => Some(op(l_str, r_str)),
+                    _ => None,
+                })
+                .collect();
+
+            Ok(ColumnarValue::Array(Arc::new(result)))
+        }
+    }
+}
+
+macro_rules! define_string_op_udf {
+    ($struct_name:ident, $udf_name:literal, $op:expr) => {
+        #[derive(Debug)]
+        struct $struct_name {
+            signature: Signature,
+        }
+
+        impl $struct_name {
+            fn new() -> Self {
+                Self {
+                    // Accepts any types, handles type checking at runtime
+                    signature: Signature::any(2, Volatility::Immutable),
+                }
+            }
+        }
+
+        impl_udf_eq_hash!($struct_name);
+
+        impl ScalarUDFImpl for $struct_name {
+            fn as_any(&self) -> &dyn Any {
+                self
+            }
+            fn name(&self) -> &str {
+                $udf_name
+            }
+            fn signature(&self) -> &Signature {
+                &self.signature
+            }
+            fn return_type(&self, _arg_types: &[DataType]) -> DFResult<DataType> {
+                Ok(DataType::Boolean)
+            }
+
+            fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DFResult<ColumnarValue> {
+                invoke_cypher_string_op(&args, $udf_name, $op)
+            }
+        }
+    };
+}
+
+define_string_op_udf!(CypherStartsWithUdf, "_cypher_starts_with", |s, p| s
+    .starts_with(p));
+define_string_op_udf!(CypherEndsWithUdf, "_cypher_ends_with", |s, p| s
+    .ends_with(p));
+define_string_op_udf!(CypherContainsUdf, "_cypher_contains", |s, p| s.contains(p));
+
+pub fn create_cypher_starts_with_udf() -> ScalarUDF {
+    ScalarUDF::new_from_impl(CypherStartsWithUdf::new())
+}
+pub fn create_cypher_ends_with_udf() -> ScalarUDF {
+    ScalarUDF::new_from_impl(CypherEndsWithUdf::new())
+}
+pub fn create_cypher_contains_udf() -> ScalarUDF {
+    ScalarUDF::new_from_impl(CypherContainsUdf::new())
+}
+
+pub fn create_cypher_equal_udf() -> ScalarUDF {
+    ScalarUDF::new_from_impl(CypherCompareUdf::new("_cypher_equal", BinaryOp::Eq))
+}
+pub fn create_cypher_not_equal_udf() -> ScalarUDF {
+    ScalarUDF::new_from_impl(CypherCompareUdf::new("_cypher_not_equal", BinaryOp::NotEq))
+}
+pub fn create_cypher_lt_udf() -> ScalarUDF {
+    ScalarUDF::new_from_impl(CypherCompareUdf::new("_cypher_lt", BinaryOp::Lt))
+}
+pub fn create_cypher_lt_eq_udf() -> ScalarUDF {
+    ScalarUDF::new_from_impl(CypherCompareUdf::new("_cypher_lt_eq", BinaryOp::LtEq))
+}
+pub fn create_cypher_gt_udf() -> ScalarUDF {
+    ScalarUDF::new_from_impl(CypherCompareUdf::new("_cypher_gt", BinaryOp::Gt))
+}
+pub fn create_cypher_gt_eq_udf() -> ScalarUDF {
+    ScalarUDF::new_from_impl(CypherCompareUdf::new("_cypher_gt_eq", BinaryOp::GtEq))
+}
+
+#[derive(Debug)]
+struct CypherCompareUdf {
+    name: String,
+    op: BinaryOp,
+    signature: Signature,
+}
+
+impl CypherCompareUdf {
+    fn new(name: &str, op: BinaryOp) -> Self {
+        Self {
+            name: name.to_string(),
+            op,
+            signature: Signature::any(2, Volatility::Immutable),
+        }
+    }
+}
+
+impl PartialEq for CypherCompareUdf {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name
+    }
+}
+
+impl Eq for CypherCompareUdf {}
+
+impl std::hash::Hash for CypherCompareUdf {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.name.hash(state);
+    }
+}
+
+impl ScalarUDFImpl for CypherCompareUdf {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+    fn name(&self) -> &str {
+        &self.name
+    }
+    fn signature(&self) -> &Signature {
+        &self.signature
+    }
+    fn return_type(&self, _arg_types: &[DataType]) -> DFResult<DataType> {
+        Ok(DataType::Boolean)
+    }
+
+    fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DFResult<ColumnarValue> {
+        let output_type = DataType::Boolean;
+        invoke_cypher_udf(args, &output_type, |json_args| {
+            if json_args.len() != 2 {
+                return Err(datafusion::error::DataFusionError::Execution(
+                    "comparison UDF requires 2 arguments".to_string(),
+                ));
+            }
+            crate::query::expr_eval::eval_binary_op(&json_args[0], &self.op, &json_args[1])
+                .map_err(|e| datafusion::error::DataFusionError::Execution(e.to_string()))
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1670,8 +2131,44 @@ mod tests {
     }
 
     #[test]
-    fn test_type_udf_signature() {
-        let udf = create_type_udf();
-        assert_eq!(udf.name(), "type");
+    fn test_has_null_udf() {
+        use datafusion::arrow::datatypes::{DataType, Field};
+        use datafusion::config::ConfigOptions;
+        use datafusion::scalar::ScalarValue;
+        use std::sync::Arc;
+
+        let udf = create_has_null_udf();
+
+        // Test [1, 2, null] (Int64)
+        let values = vec![
+            ScalarValue::Int64(Some(1)),
+            ScalarValue::Int64(Some(2)),
+            ScalarValue::Int64(None),
+        ];
+
+        // Construct list manually
+        let list_scalar = ScalarValue::List(ScalarValue::new_list(&values, &DataType::Int64, true));
+
+        let list_field = Arc::new(Field::new(
+            "item",
+            DataType::List(Arc::new(Field::new("item", DataType::Int64, true))),
+            true,
+        ));
+
+        let args = ScalarFunctionArgs {
+            args: vec![ColumnarValue::Scalar(list_scalar)],
+            arg_fields: vec![list_field],
+            number_rows: 1,
+            return_field: Arc::new(Field::new("result", DataType::Boolean, true)),
+            config_options: Arc::new(ConfigOptions::default()),
+        };
+
+        let result = udf.invoke_with_args(args).unwrap();
+
+        if let ColumnarValue::Scalar(ScalarValue::Boolean(Some(b))) = result {
+            assert!(b, "has_null should return true for list with null");
+        } else {
+            panic!("Unexpected result: {:?}", result);
+        }
     }
 }

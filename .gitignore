@@ -67,7 +67,9 @@ CLAUDE.md
 GEMINI.md
 
 .claude/
+.gemini/
 .serena/
+conductor/
 
 # Git worktrees
 .worktrees/

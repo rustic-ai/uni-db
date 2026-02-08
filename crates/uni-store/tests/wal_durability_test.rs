@@ -261,9 +261,12 @@ async fn test_wal_delete_vertex_mutation() -> Result<()> {
     // Insert then delete vertex
     wal.append(&Mutation::InsertVertex {
         vid: test_vid,
-        properties: [("name".to_string(), uni_common::Value::String("Test".to_string()))]
-            .into_iter()
-            .collect(),
+        properties: [(
+            "name".to_string(),
+            uni_common::Value::String("Test".to_string()),
+        )]
+        .into_iter()
+        .collect(),
     })?;
 
     wal.append(&Mutation::DeleteVertex { vid: test_vid })?;

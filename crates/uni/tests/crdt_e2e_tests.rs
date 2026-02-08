@@ -779,7 +779,10 @@ mod multi_crdt {
                             "counter".to_string(),
                             serde_json::to_value(Crdt::GCounter(gc1))?.into(),
                         ),
-                        ("items".to_string(), serde_json::to_value(Crdt::GSet(gs1))?.into()),
+                        (
+                            "items".to_string(),
+                            serde_json::to_value(Crdt::GSet(gs1))?.into(),
+                        ),
                     ]),
                     vec!["MultiCrdtNode".to_string()],
                 )
@@ -807,7 +810,10 @@ mod multi_crdt {
                             "counter".to_string(),
                             serde_json::to_value(Crdt::GCounter(gc2))?.into(),
                         ),
-                        ("items".to_string(), serde_json::to_value(Crdt::GSet(gs2))?.into()),
+                        (
+                            "items".to_string(),
+                            serde_json::to_value(Crdt::GSet(gs2))?.into(),
+                        ),
                         (
                             "clock".to_string(),
                             serde_json::to_value(Crdt::VectorClock(vc))?.into(),

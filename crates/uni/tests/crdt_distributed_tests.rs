@@ -268,7 +268,8 @@ mod merge_order_independence {
         let extract_counter_value = |buffer: &L0Buffer| -> u64 {
             let props = buffer.vertex_properties.get(&vid).unwrap();
             let counter = props.get("counter").unwrap();
-            let crdt: Crdt = serde_json::from_value(serde_json::Value::from(counter.clone())).unwrap();
+            let crdt: Crdt =
+                serde_json::from_value(serde_json::Value::from(counter.clone())).unwrap();
             if let Crdt::GCounter(gc) = crdt {
                 gc.value()
             } else {
@@ -324,7 +325,8 @@ mod merge_order_independence {
         let extract_set_len = |buffer: &L0Buffer| -> usize {
             let props = buffer.vertex_properties.get(&vid).unwrap();
             let items = props.get("items").unwrap();
-            let crdt: Crdt = serde_json::from_value(serde_json::Value::from(items.clone())).unwrap();
+            let crdt: Crdt =
+                serde_json::from_value(serde_json::Value::from(items.clone())).unwrap();
             if let Crdt::GSet(gs) = crdt {
                 gs.len()
             } else {

@@ -263,10 +263,9 @@ pub fn arrow_to_value(col: &dyn Array, row: usize) -> Value {
                 "{:02}:{:02}:{:02}.{:06}",
                 hours, minutes, seconds, micro_part
             ));
+        } else if seconds == 0 {
+            return Value::String(format!("{:02}:{:02}", hours, minutes));
         } else {
-            if seconds == 0 {
-                return Value::String(format!("{:02}:{:02}", hours, minutes));
-            }
             return Value::String(format!("{:02}:{:02}:{:02}", hours, minutes, seconds));
         }
     }
@@ -287,8 +286,8 @@ pub fn arrow_to_value(col: &dyn Array, row: usize) -> Value {
         if json_str == "null" {
             return Value::Null;
         }
-        let json_val: serde_json::Value = serde_json::from_str(&json_str)
-            .unwrap_or_else(|_| serde_json::Value::String(json_str));
+        let json_val: serde_json::Value =
+            serde_json::from_str(&json_str).unwrap_or_else(|_| serde_json::Value::String(json_str));
         return Value::from(json_val);
     }
 
@@ -860,8 +859,8 @@ impl<'a> PropertyExtractor<'a> {
                 (values, true)
             }
             Some(Value::List(_)) => (zeros(), false), // Wrong dimensions
-            _ if is_deleted => (zeros(), true),        // Deleted entry gets default
-            _ => (zeros(), false),                     // Missing or unsupported value
+            _ if is_deleted => (zeros(), true),       // Deleted entry gets default
+            _ => (zeros(), false),                    // Missing or unsupported value
         }
     }
 
@@ -1389,10 +1388,7 @@ mod tests {
         assert!(result.as_object().is_some());
         let obj = result.as_object().unwrap();
         // GCounter serializes with tag "t": "gc"
-        assert_eq!(
-            obj.get("t"),
-            Some(&Value::String("gc".to_string()))
-        );
+        assert_eq!(obj.get("t"), Some(&Value::String("gc".to_string())));
 
         // Null value should return null
         assert_eq!(arrow_to_value(&arr, 1), Value::Null);

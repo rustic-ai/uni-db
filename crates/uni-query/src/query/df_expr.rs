@@ -138,13 +138,9 @@ pub fn cypher_expr_to_df(expr: &Expr, context: Option<&TranslationContext>) -> R
 
                 if !is_graph_entity && crate::query::datetime::is_duration_accessor(prop) {
                     let base_expr = DfExpr::Column(Column::from_name(var_name));
-                    return Ok(DfExpr::ScalarFunction(
-                        datafusion::logical_expr::expr::ScalarFunction {
-                            func: Arc::new(datafusion::logical_expr::ScalarUDF::new_from_impl(
-                                DummyUdf::new("_duration_property".to_string()),
-                            )),
-                            args: vec![base_expr, lit(prop.to_string())],
-                        },
+                    return Ok(dummy_udf_expr(
+                        "_duration_property",
+                        vec![base_expr, lit(prop.to_string())],
                     ));
                 }
 
@@ -156,13 +152,9 @@ pub fn cypher_expr_to_df(expr: &Expr, context: Option<&TranslationContext>) -> R
                 // Try duration accessor first, otherwise fall back to column.
                 if crate::query::datetime::is_duration_accessor(prop) {
                     let base_expr = cypher_expr_to_df(base, context)?;
-                    return Ok(DfExpr::ScalarFunction(
-                        datafusion::logical_expr::expr::ScalarFunction {
-                            func: Arc::new(datafusion::logical_expr::ScalarUDF::new_from_impl(
-                                DummyUdf::new("_duration_property".to_string()),
-                            )),
-                            args: vec![base_expr, lit(prop.to_string())],
-                        },
+                    return Ok(dummy_udf_expr(
+                        "_duration_property",
+                        vec![base_expr, lit(prop.to_string())],
                     ));
                 }
                 let var_name = extract_variable_name(base)?;
@@ -176,14 +168,7 @@ pub fn cypher_expr_to_df(expr: &Expr, context: Option<&TranslationContext>) -> R
             let index_expr = cypher_expr_to_df(index, context)?;
 
             // Use custom index UDF to support dynamic Map and List access
-            Ok(DfExpr::ScalarFunction(
-                datafusion::logical_expr::expr::ScalarFunction {
-                    func: Arc::new(datafusion::logical_expr::ScalarUDF::new_from_impl(
-                        DummyUdf::new("index".to_string()),
-                    )),
-                    args: vec![array_expr, index_expr],
-                },
-            ))
+            Ok(dummy_udf_expr("index", vec![array_expr, index_expr]))
         }
 
         Expr::ArraySlice { array, start, end } => {
@@ -230,6 +215,48 @@ pub fn cypher_expr_to_df(expr: &Expr, context: Option<&TranslationContext>) -> R
         }
 
         Expr::List(items) => {
+            // Check for mixed types or nested lists which cause issues in DataFusion
+            let mut has_string = false;
+            let mut has_bool = false;
+            let mut has_list = false;
+            let mut has_map = false;
+            let mut has_numeric = false;
+
+            for item in items {
+                match item {
+                    Expr::Literal(CypherLiteral::Float(_))
+                    | Expr::Literal(CypherLiteral::Integer(_)) => has_numeric = true,
+                    Expr::Literal(CypherLiteral::String(_)) => has_string = true,
+                    Expr::Literal(CypherLiteral::Bool(_)) => has_bool = true,
+                    Expr::List(_) => has_list = true,
+                    Expr::Map(_) => has_map = true,
+                    // Treat Null as compatible with anything
+                    // If complex expr (e.g. Variable), assume compatibility or let DF handle it
+                    _ => {}
+                }
+            }
+
+            // Reject mixed types that can't be coerced (e.g. String + Numeric)
+            // Nested lists are problematic in general for make_array if types differ
+            if has_list {
+                // For now, reject lists of lists to force fallback, as verifying inner types is hard
+                return Err(anyhow!(
+                    "Nested lists not supported in DataFusion translation"
+                ));
+            }
+
+            // Check distinct non-null types count
+            let types_count = (if has_numeric { 1 } else { 0 })
+                + (if has_string { 1 } else { 0 })
+                + (if has_bool { 1 } else { 0 })
+                + (if has_map { 1 } else { 0 });
+
+            if types_count > 1 {
+                return Err(anyhow!(
+                    "Mixed type lists (e.g. [1, 'a']) not supported in DataFusion translation"
+                ));
+            }
+
             // Use make_array to create a List type in DataFusion.
             // This supports dynamic values and performs type coercion for mixed numeric types.
             let mut df_args = Vec::with_capacity(items.len());
@@ -325,10 +352,65 @@ pub fn cypher_expr_to_df(expr: &Expr, context: Option<&TranslationContext>) -> R
                 Ok(datafusion::prelude::in_list(left_expr, expanded, false))
             } else {
                 let right_expr = cypher_expr_to_df(list, context)?;
-                // For array columns/expressions, use array_has(array, element)
-                Ok(datafusion::functions_nested::expr_fn::array_has(
-                    right_expr, left_expr,
-                ))
+
+                // Implement Cypher IN semantics for dynamic arrays (e.g. variables/parameters)
+                // 1. If rhs IS NULL -> NULL
+                // 2. If lhs IS NULL:
+                //    - If rhs is empty -> FALSE
+                //    - Else -> NULL
+                // 3. If lhs IS NOT NULL:
+                //    - If array_has(rhs, lhs) -> TRUE
+                //    - If array_has(rhs, NULL) -> NULL
+                //    - Else -> FALSE
+
+                use datafusion::arrow::datatypes::DataType;
+                use datafusion::functions_nested::expr_fn::{array_has, array_length};
+                use datafusion::logical_expr::{Cast, when};
+
+                // If rhs is literal null, return null immediately to avoid type errors in array functions
+                if matches!(right_expr, DfExpr::Literal(ScalarValue::Null, _)) {
+                    return Ok(lit(ScalarValue::Boolean(None)));
+                }
+
+                let rhs_is_null = right_expr.clone().is_null();
+                let lhs_is_null = left_expr.clone().is_null();
+
+                // Ensure rhs is a list for array_length/array_has to satisfy planner
+                // If it's Null type, cast to List(Null)
+                // Note: This cast might only be needed if type inference fails, but good for safety
+                // We use the original expr for logic, but maybe we need a "typed" version
+
+                let len = array_length(right_expr.clone());
+                // Check if 0 (handle UInt64 return type of array_length)
+                // We use cast to Int64 to compare with 0 safely
+                let len_i64 = DfExpr::Cast(Cast::new(Box::new(len), DataType::Int64));
+                let rhs_empty = len_i64.eq(lit(0i64));
+
+                // Check if array contains null using our custom UDF which handles it robustly
+                // Use real UDF directly since this is created post-resolution
+                let has_null_udf = crate::query::df_udfs::create_has_null_udf();
+                let has_null_expr =
+                    DfExpr::ScalarFunction(datafusion::logical_expr::expr::ScalarFunction {
+                        func: std::sync::Arc::new(has_null_udf),
+                        args: vec![right_expr.clone()],
+                    });
+
+                let branch_lhs_null =
+                    when(rhs_empty, lit(false)).otherwise(lit(ScalarValue::Boolean(None)))?;
+
+                // If lhs is NOT null:
+                // 1. Found exact match -> true
+                // 2. Found null in list -> null
+                // 3. Not found and no nulls -> false
+
+                let branch_lhs_not_null =
+                    when(array_has(right_expr.clone(), left_expr.clone()), lit(true))
+                        .when(has_null_expr, lit(ScalarValue::Boolean(None)))
+                        .otherwise(lit(false))?;
+
+                Ok(when(rhs_is_null, lit(ScalarValue::Boolean(None)))
+                    .when(lhs_is_null, branch_lhs_null)
+                    .otherwise(branch_lhs_not_null)?)
             }
         }
 
@@ -523,8 +605,116 @@ fn json_value_to_scalar(value: &Value) -> Result<ScalarValue> {
             }
         }
         Value::String(s) => Ok(ScalarValue::Utf8(Some(s.clone()))),
-        Value::Array(_) => Err(anyhow!("Array literals should use Expr::List")),
-        Value::Object(_) => Err(anyhow!("Object literals should use Expr::Map")),
+        Value::Array(items) => {
+            // Recursively convert items
+            let scalars: Result<Vec<ScalarValue>> =
+                items.iter().map(json_value_to_scalar).collect();
+            let scalars = scalars?;
+
+            // Determine common type (simple inference), ignoring nulls
+            let non_null_scalars: Vec<&ScalarValue> = scalars
+                .iter()
+                .filter(|s| !matches!(s, ScalarValue::Null))
+                .collect();
+
+            let data_type = if non_null_scalars.is_empty() {
+                datafusion::arrow::datatypes::DataType::Null
+            } else if non_null_scalars
+                .iter()
+                .all(|s| matches!(s, ScalarValue::Int64(_)))
+            {
+                datafusion::arrow::datatypes::DataType::Int64
+            } else if non_null_scalars
+                .iter()
+                .all(|s| matches!(s, ScalarValue::Float64(_) | ScalarValue::Int64(_)))
+            {
+                datafusion::arrow::datatypes::DataType::Float64
+            } else if non_null_scalars
+                .iter()
+                .all(|s| matches!(s, ScalarValue::Utf8(_)))
+            {
+                datafusion::arrow::datatypes::DataType::Utf8
+            } else if non_null_scalars
+                .iter()
+                .all(|s| matches!(s, ScalarValue::Boolean(_)))
+            {
+                datafusion::arrow::datatypes::DataType::Boolean
+            } else {
+                // Mixed types - use LargeBinary (JSON) to preserve type information
+                datafusion::arrow::datatypes::DataType::LargeBinary
+            };
+
+            // Convert scalars to the target type if needed
+            let typed_scalars: Vec<ScalarValue> = scalars
+                .into_iter()
+                .map(|s| {
+                    if matches!(s, ScalarValue::Null) {
+                        return ScalarValue::try_from(&data_type).unwrap_or(ScalarValue::Null);
+                    }
+
+                    match (s, &data_type) {
+                        (
+                            ScalarValue::Int64(Some(v)),
+                            datafusion::arrow::datatypes::DataType::Float64,
+                        ) => ScalarValue::Float64(Some(v as f64)),
+                        (s, datafusion::arrow::datatypes::DataType::LargeBinary) => {
+                            // Convert scalar to JSON-like string bytes
+                            let s_str = s.to_string();
+                            ScalarValue::LargeBinary(Some(s_str.into_bytes()))
+                        }
+                        (s, datafusion::arrow::datatypes::DataType::Utf8) => {
+                            // Coerce anything to String if target is Utf8 (mixed list)
+                            if matches!(s, ScalarValue::Utf8(_)) {
+                                s
+                            } else {
+                                ScalarValue::Utf8(Some(s.to_string()))
+                            }
+                        }
+                        (s, _) => s,
+                    }
+                })
+                .collect();
+
+            // Construct list
+            // ScalarValue::new_list returns an Arc<ListArray> which needs to be wrapped in ScalarValue::List
+            if typed_scalars.is_empty() {
+                Ok(ScalarValue::List(ScalarValue::new_list_nullable(
+                    &[],
+                    &data_type,
+                )))
+            } else {
+                // new_list takes (values, data_type, nullable)? Or just (values, data_type)?
+                // Error said 3 args, 3rd is bool? Likely 'nullable' for the list field?
+                // But wait, new_list implementation in common typically matches.
+                // Assuming 3rd arg is boolean nullable=true for now.
+                Ok(ScalarValue::List(ScalarValue::new_list(
+                    &typed_scalars,
+                    &data_type,
+                    true,
+                )))
+            }
+        }
+        Value::Object(map) => {
+            // Convert JSON object to ScalarValue::Struct
+            // Need to collect fields and values
+            // Sort keys to ensure deterministic field order
+            let mut entries: Vec<(&String, &Value)> = map.iter().collect();
+            entries.sort_by_key(|(k, _)| *k);
+
+            let mut fields_arrays = Vec::with_capacity(entries.len());
+
+            for (k, v) in entries {
+                let scalar = json_value_to_scalar(v)?;
+                let dt = scalar.data_type();
+                let field = Arc::new(datafusion::arrow::datatypes::Field::new(k, dt, true));
+                let array = scalar.to_array()?;
+                fields_arrays.push((field, array));
+            }
+
+            Ok(ScalarValue::Struct(Arc::new(
+                datafusion::arrow::array::StructArray::from(fields_arrays),
+            )))
+        }
     }
 }
 
@@ -569,21 +759,16 @@ fn translate_binary_op(left: DfExpr, op: &BinaryOp, right: DfExpr) -> Result<DfE
 
         // String operators
         BinaryOp::Contains => {
-            // CONTAINS -> LIKE '%value%'
-            // Need to wrap right in CONCAT('%', right, '%')
-            let pattern =
-                datafusion::functions::string::expr_fn::concat(vec![lit("%"), right, lit("%")]);
-            Ok(left.like(pattern))
+            // Use _cypher_contains UDF for safe type handling
+            Ok(dummy_udf_expr("_cypher_contains", vec![left, right]))
         }
         BinaryOp::StartsWith => {
-            // STARTS WITH -> LIKE 'value%'
-            let pattern = datafusion::functions::string::expr_fn::concat(vec![right, lit("%")]);
-            Ok(left.like(pattern))
+            // Use _cypher_starts_with UDF for safe type handling
+            Ok(dummy_udf_expr("_cypher_starts_with", vec![left, right]))
         }
         BinaryOp::EndsWith => {
-            // ENDS WITH -> LIKE '%value'
-            let pattern = datafusion::functions::string::expr_fn::concat(vec![lit("%"), right]);
-            Ok(left.like(pattern))
+            // Use _cypher_ends_with UDF for safe type handling
+            Ok(dummy_udf_expr("_cypher_ends_with", vec![left, right]))
         }
 
         // Regex
@@ -625,6 +810,21 @@ fn cast_expr(expr: DfExpr, data_type: datafusion::arrow::datatypes::DataType) ->
         expr: Box::new(expr),
         data_type,
     })
+}
+
+/// Apply a single-argument math function with Float64 casting.
+///
+/// This is a common pattern for trig functions and other math operations
+/// that require Float64 input for Int64 compatibility.
+fn apply_unary_math_f64<F>(df_args: &[DfExpr], func_name: &str, math_fn: F) -> Result<DfExpr>
+where
+    F: FnOnce(DfExpr) -> DfExpr,
+{
+    require_arg(df_args, func_name)?;
+    Ok(math_fn(cast_expr(
+        first_arg(df_args),
+        datafusion::arrow::datatypes::DataType::Float64,
+    )))
 }
 
 /// Translate a function call to DataFusion.
@@ -709,36 +909,15 @@ fn translate_function_call(
         }
         "TOINTEGER" | "TOINT" => {
             require_arg(&df_args, "toInteger")?;
-            Ok(DfExpr::ScalarFunction(
-                datafusion::logical_expr::expr::ScalarFunction {
-                    func: Arc::new(datafusion::logical_expr::ScalarUDF::new_from_impl(
-                        DummyUdf::new("toInteger".to_string()),
-                    )),
-                    args: df_args,
-                },
-            ))
+            Ok(dummy_udf_expr("toInteger", df_args))
         }
         "TOFLOAT" => {
             require_arg(&df_args, "toFloat")?;
-            Ok(DfExpr::ScalarFunction(
-                datafusion::logical_expr::expr::ScalarFunction {
-                    func: Arc::new(datafusion::logical_expr::ScalarUDF::new_from_impl(
-                        DummyUdf::new("toFloat".to_string()),
-                    )),
-                    args: df_args,
-                },
-            ))
+            Ok(dummy_udf_expr("toFloat", df_args))
         }
         "TOBOOLEAN" | "TOBOOL" => {
             require_arg(&df_args, "toBoolean")?;
-            Ok(DfExpr::ScalarFunction(
-                datafusion::logical_expr::expr::ScalarFunction {
-                    func: Arc::new(datafusion::logical_expr::ScalarUDF::new_from_impl(
-                        DummyUdf::new("toBoolean".to_string()),
-                    )),
-                    args: df_args,
-                },
-            ))
+            Ok(dummy_udf_expr("toBoolean", df_args))
         }
 
         // String case functions
@@ -876,85 +1055,37 @@ fn translate_function_call(
             };
             Ok(datafusion::functions::math::expr_fn::round(args))
         }
-        "SIGN" => {
-            require_arg(&df_args, "sign")?;
-            // Cast to Float64 for Int64 compatibility (DataFusion signum doesn't support Int64)
-            Ok(datafusion::functions::math::expr_fn::signum(cast_expr(
-                first_arg(&df_args),
-                datafusion::arrow::datatypes::DataType::Float64,
-            )))
-        }
+        // Cast to Float64 for Int64 compatibility (DataFusion signum doesn't support Int64)
+        "SIGN" => apply_unary_math_f64(
+            &df_args,
+            "sign",
+            datafusion::functions::math::expr_fn::signum,
+        ),
         "SQRT" => {
-            require_arg(&df_args, "sqrt")?;
-            Ok(datafusion::functions::math::expr_fn::sqrt(cast_expr(
-                first_arg(&df_args),
-                datafusion::arrow::datatypes::DataType::Float64,
-            )))
+            apply_unary_math_f64(&df_args, "sqrt", datafusion::functions::math::expr_fn::sqrt)
         }
         "LOG" | "LN" => {
-            require_arg(&df_args, "log")?;
-            Ok(datafusion::functions::math::expr_fn::ln(cast_expr(
-                first_arg(&df_args),
-                datafusion::arrow::datatypes::DataType::Float64,
-            )))
+            apply_unary_math_f64(&df_args, "log", datafusion::functions::math::expr_fn::ln)
         }
-        "LOG10" => {
-            require_arg(&df_args, "log10")?;
-            Ok(datafusion::functions::math::expr_fn::log10(cast_expr(
-                first_arg(&df_args),
-                datafusion::arrow::datatypes::DataType::Float64,
-            )))
-        }
-        "EXP" => {
-            require_arg(&df_args, "exp")?;
-            Ok(datafusion::functions::math::expr_fn::exp(cast_expr(
-                first_arg(&df_args),
-                datafusion::arrow::datatypes::DataType::Float64,
-            )))
-        }
+        "LOG10" => apply_unary_math_f64(
+            &df_args,
+            "log10",
+            datafusion::functions::math::expr_fn::log10,
+        ),
+        "EXP" => apply_unary_math_f64(&df_args, "exp", datafusion::functions::math::expr_fn::exp),
 
-        // Trigonometric functions — cast args to Float64 for Int64 compatibility
-        "SIN" => {
-            require_arg(&df_args, "sin")?;
-            Ok(datafusion::functions::math::expr_fn::sin(cast_expr(
-                first_arg(&df_args),
-                datafusion::arrow::datatypes::DataType::Float64,
-            )))
-        }
-        "COS" => {
-            require_arg(&df_args, "cos")?;
-            Ok(datafusion::functions::math::expr_fn::cos(cast_expr(
-                first_arg(&df_args),
-                datafusion::arrow::datatypes::DataType::Float64,
-            )))
-        }
-        "TAN" => {
-            require_arg(&df_args, "tan")?;
-            Ok(datafusion::functions::math::expr_fn::tan(cast_expr(
-                first_arg(&df_args),
-                datafusion::arrow::datatypes::DataType::Float64,
-            )))
-        }
+        // Trigonometric functions - cast args to Float64 for Int64 compatibility
+        "SIN" => apply_unary_math_f64(&df_args, "sin", datafusion::functions::math::expr_fn::sin),
+        "COS" => apply_unary_math_f64(&df_args, "cos", datafusion::functions::math::expr_fn::cos),
+        "TAN" => apply_unary_math_f64(&df_args, "tan", datafusion::functions::math::expr_fn::tan),
         "ASIN" => {
-            require_arg(&df_args, "asin")?;
-            Ok(datafusion::functions::math::expr_fn::asin(cast_expr(
-                first_arg(&df_args),
-                datafusion::arrow::datatypes::DataType::Float64,
-            )))
+            apply_unary_math_f64(&df_args, "asin", datafusion::functions::math::expr_fn::asin)
         }
         "ACOS" => {
-            require_arg(&df_args, "acos")?;
-            Ok(datafusion::functions::math::expr_fn::acos(cast_expr(
-                first_arg(&df_args),
-                datafusion::arrow::datatypes::DataType::Float64,
-            )))
+            apply_unary_math_f64(&df_args, "acos", datafusion::functions::math::expr_fn::acos)
         }
         "ATAN" => {
-            require_arg(&df_args, "atan")?;
-            Ok(datafusion::functions::math::expr_fn::atan(cast_expr(
-                first_arg(&df_args),
-                datafusion::arrow::datatypes::DataType::Float64,
-            )))
+            apply_unary_math_f64(&df_args, "atan", datafusion::functions::math::expr_fn::atan)
         }
         "ATAN2" => {
             require_args(&df_args, 2, "atan2")?;
@@ -1014,14 +1145,7 @@ fn translate_function_call(
         | "LOCALTIME.REALTIME"
         | "LOCALDATETIME.TRANSACTION"
         | "LOCALDATETIME.STATEMENT"
-        | "LOCALDATETIME.REALTIME" => Ok(DfExpr::ScalarFunction(
-            datafusion::logical_expr::expr::ScalarFunction {
-                func: Arc::new(datafusion::logical_expr::ScalarUDF::new_from_impl(
-                    DummyUdf::new(name.to_lowercase()),
-                )),
-                args: df_args,
-            },
-        )),
+        | "LOCALDATETIME.REALTIME" => Ok(dummy_udf_expr(name, df_args)),
 
         // Null handling
         "COALESCE" => {
@@ -1064,15 +1188,7 @@ fn translate_function_call(
         }
         "RANGE" => {
             require_args(&df_args, 2, "range")?;
-            // Use the range UDF registered in the session context
-            Ok(DfExpr::ScalarFunction(
-                datafusion::logical_expr::expr::ScalarFunction {
-                    func: Arc::new(datafusion::logical_expr::ScalarUDF::new_from_impl(
-                        DummyUdf::new("range".to_string()),
-                    )),
-                    args: df_args,
-                },
-            ))
+            Ok(dummy_udf_expr("range", df_args))
         }
 
         // Graph-specific functions (registered as UDFs)
@@ -1084,14 +1200,7 @@ fn translate_function_call(
             if let Some(Expr::Variable(var)) = args.first() {
                 Ok(DfExpr::Column(Column::from_name(format!("{}._vid", var))))
             } else {
-                Ok(DfExpr::ScalarFunction(
-                    datafusion::logical_expr::expr::ScalarFunction {
-                        func: Arc::new(datafusion::logical_expr::ScalarUDF::new_from_impl(
-                            DummyUdf::new("id".to_string()),
-                        )),
-                        args: df_args,
-                    },
-                ))
+                Ok(dummy_udf_expr("id", df_args))
             }
         }
         "TYPE" | "LABELS" | "KEYS" | "PROPERTIES" | "UNI.TEMPORAL.VALIDAT" => {
@@ -1104,23 +1213,9 @@ fn translate_function_call(
             } else {
                 df_args
             };
-            Ok(DfExpr::ScalarFunction(
-                datafusion::logical_expr::expr::ScalarFunction {
-                    func: Arc::new(datafusion::logical_expr::ScalarUDF::new_from_impl(
-                        DummyUdf::new(name.to_lowercase()),
-                    )),
-                    args: rewritten_args,
-                },
-            ))
+            Ok(dummy_udf_expr(name, rewritten_args))
         }
-        "NODES" | "RELATIONSHIPS" => Ok(DfExpr::ScalarFunction(
-            datafusion::logical_expr::expr::ScalarFunction {
-                func: Arc::new(datafusion::logical_expr::ScalarUDF::new_from_impl(
-                    DummyUdf::new(name.to_lowercase()),
-                )),
-                args: df_args,
-            },
-        )),
+        "NODES" | "RELATIONSHIPS" => Ok(dummy_udf_expr(name, df_args)),
 
         // Label predicate: hasLabel(n, 'Label') translates to n._label = 'Label'
         "HASLABEL" => {
@@ -1146,14 +1241,7 @@ fn translate_function_call(
         }
 
         // Unknown function - try as a UDF
-        _ => Ok(DfExpr::ScalarFunction(
-            datafusion::logical_expr::expr::ScalarFunction {
-                func: Arc::new(datafusion::logical_expr::ScalarUDF::new_from_impl(
-                    DummyUdf::new(name.to_lowercase()),
-                )),
-                args: df_args,
-            },
-        )),
+        _ => Ok(dummy_udf_expr(name, df_args)),
     }
 }
 
@@ -1190,6 +1278,16 @@ impl Hash for DummyUdf {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.name.hash(state);
     }
+}
+
+/// Helper to create a DummyUdf wrapped in a ScalarFunction expression.
+fn dummy_udf_expr(name: &str, args: Vec<DfExpr>) -> DfExpr {
+    DfExpr::ScalarFunction(datafusion::logical_expr::expr::ScalarFunction {
+        func: Arc::new(datafusion::logical_expr::ScalarUDF::new_from_impl(
+            DummyUdf::new(name.to_lowercase()),
+        )),
+        args,
+    })
 }
 
 impl datafusion::logical_expr::ScalarUDFImpl for DummyUdf {
@@ -1344,6 +1442,160 @@ fn collect_properties_recursive(expr: &Expr, properties: &mut Vec<(String, Strin
         // Terminal nodes and subqueries (which have their own scope)
         Expr::Wildcard | Expr::Variable(_) | Expr::Parameter(_) | Expr::Literal(_) => {}
         Expr::Exists(_) | Expr::CountSubquery(_) | Expr::CollectSubquery(_) => {}
+    }
+}
+
+/// Returns the wider of two numeric DataTypes for type coercion.
+///
+/// Follows standard numeric promotion rules:
+/// - Any Float type wins over Int types
+/// - Float64 > Float32
+/// - Int64 > Int32 > Int16 > Int8
+pub fn wider_numeric_type(
+    a: &datafusion::arrow::datatypes::DataType,
+    b: &datafusion::arrow::datatypes::DataType,
+) -> datafusion::arrow::datatypes::DataType {
+    use datafusion::arrow::datatypes::DataType;
+
+    fn numeric_rank(dt: &DataType) -> u8 {
+        match dt {
+            DataType::Int8 | DataType::UInt8 => 1,
+            DataType::Int16 | DataType::UInt16 => 2,
+            DataType::Int32 | DataType::UInt32 => 3,
+            DataType::Int64 | DataType::UInt64 => 4,
+            DataType::Float16 => 5,
+            DataType::Float32 => 6,
+            DataType::Float64 => 7,
+            _ => 0,
+        }
+    }
+
+    if numeric_rank(a) >= numeric_rank(b) {
+        a.clone()
+    } else {
+        b.clone()
+    }
+}
+
+/// Apply type coercion to a DataFusion expression.
+///
+/// Resolves numeric type mismatches (e.g., Int32 vs Int64, Boolean vs Int64)
+/// by inserting explicit CAST nodes. This is needed because our schema may
+/// declare properties as one numeric type while literals are a different type.
+pub fn apply_type_coercion(expr: &DfExpr, schema: &datafusion::common::DFSchema) -> Result<DfExpr> {
+    use datafusion::logical_expr::ExprSchemable;
+    use datafusion::logical_expr::Operator;
+
+    match expr {
+        DfExpr::BinaryExpr(binary) => {
+            let left = apply_type_coercion(&binary.left, schema)?;
+            let right = apply_type_coercion(&binary.right, schema)?;
+
+            // For comparison and arithmetic operators, coerce numeric types
+            let is_comparison = matches!(
+                binary.op,
+                Operator::Eq
+                    | Operator::NotEq
+                    | Operator::Lt
+                    | Operator::LtEq
+                    | Operator::Gt
+                    | Operator::GtEq
+            );
+
+            let is_arithmetic = matches!(
+                binary.op,
+                Operator::Plus
+                    | Operator::Minus
+                    | Operator::Multiply
+                    | Operator::Divide
+                    | Operator::Modulo
+            );
+
+            if is_comparison || is_arithmetic {
+                let left_type = left.get_type(schema).ok();
+                let right_type = right.get_type(schema).ok();
+
+                if let (Some(lt), Some(rt)) = (&left_type, &right_type)
+                    && lt != rt
+                {
+                    // 1. Numeric Coercion
+                    if lt.is_numeric() && rt.is_numeric() {
+                        // Coerce to the wider numeric type
+                        let target = wider_numeric_type(lt, rt);
+                        let coerced_left = if *lt != target {
+                            datafusion::logical_expr::cast(left, target.clone())
+                        } else {
+                            left
+                        };
+                        let coerced_right = if *rt != target {
+                            datafusion::logical_expr::cast(right, target)
+                        } else {
+                            right
+                        };
+                        return Ok(DfExpr::BinaryExpr(
+                            datafusion::logical_expr::expr::BinaryExpr::new(
+                                Box::new(coerced_left),
+                                binary.op,
+                                Box::new(coerced_right),
+                            ),
+                        ));
+                    }
+
+                    // 2. Cross-Type Comparison -> Null
+                    // If types are different and not both numeric, Cypher says comparison yields NULL.
+                    // However, we only strictly enforce this for Lists to avoid panics in DataFusion's array kernels.
+                    // For scalars (e.g. schemaless Int vs Utf8), we let DataFusion attempt coercion to maintain backward compatibility.
+                    if is_comparison && !lt.is_null() && !rt.is_null() {
+                        use datafusion::arrow::datatypes::DataType;
+                        let is_list_mismatch = match (lt, rt) {
+                            (DataType::List(l_field), DataType::List(r_field))
+                            | (DataType::LargeList(l_field), DataType::LargeList(r_field))
+                            | (DataType::List(l_field), DataType::LargeList(r_field))
+                            | (DataType::LargeList(l_field), DataType::List(r_field)) => {
+                                // Check inner types
+                                let l_inner = l_field.data_type();
+                                let r_inner = r_field.data_type();
+
+                                // If inner types are incompatible (and not just null), it's a mismatch
+                                // Allow Null vs Any (coercible to Nullable Any)
+                                // Allow Int vs Float (numeric coercion)
+                                // Disallow String vs Int, etc.
+                                let compatible = l_inner == r_inner
+                                    || l_inner == &DataType::Null
+                                    || r_inner == &DataType::Null
+                                    || (l_inner.is_numeric() && r_inner.is_numeric());
+
+                                !compatible
+                            }
+                            // One is list, other is not -> mismatch (e.g. List vs Int)
+                            (DataType::List(_), _)
+                            | (DataType::LargeList(_), _)
+                            | (_, DataType::List(_))
+                            | (_, DataType::LargeList(_)) => true,
+                            _ => false,
+                        };
+
+                        if is_list_mismatch {
+                            // Mismatching types involving Lists (e.g. List<Int> vs List<String>)
+                            // Return NULL (Boolean)
+                            return Ok(datafusion::logical_expr::lit(
+                                datafusion::common::ScalarValue::Boolean(None),
+                            ));
+                        }
+                    }
+                }
+            }
+
+            Ok(DfExpr::BinaryExpr(
+                datafusion::logical_expr::expr::BinaryExpr::new(
+                    Box::new(left),
+                    binary.op,
+                    Box::new(right),
+                ),
+            ))
+        }
+        // For other expression types, return as-is
+        _ => Ok(expr.clone()),
     }
 }
 

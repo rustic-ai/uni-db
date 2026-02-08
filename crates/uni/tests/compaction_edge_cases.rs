@@ -5,7 +5,6 @@ use arrow_array::{
     BooleanArray, FixedSizeBinaryArray, LargeBinaryArray, RecordBatch, StringArray,
     TimestampMicrosecondArray, UInt64Array,
 };
-use serde_json::json;
 use std::sync::Arc;
 use tempfile::tempdir;
 use uni_db::core::id::Vid;

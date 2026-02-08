@@ -8,7 +8,7 @@ use anyhow::{Result, anyhow};
 use arrow_schema::{Field, Schema};
 use datafusion::execution::context::SessionState;
 use datafusion::logical_expr::expr::Alias;
-use datafusion::physical_expr::expressions::{binary, like, lit};
+use datafusion::physical_expr::expressions::binary;
 use datafusion::physical_plan::PhysicalExpr;
 use datafusion::physical_planner::PhysicalPlanner;
 use std::sync::Arc;
@@ -169,9 +169,13 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
         let resolved_expr = self.resolve_udfs(df_expr)?;
 
         let df_schema = datafusion::common::DFSchema::try_from(input_schema.clone())?;
+
+        // Apply type coercion to resolve type mismatches
+        let coerced_expr = crate::query::df_expr::apply_type_coercion(&resolved_expr, &df_schema)?;
+
         let planner = datafusion::physical_planner::DefaultPhysicalPlanner::default();
         planner
-            .create_physical_expr(&resolved_expr, &df_schema, self.state)
+            .create_physical_expr(&coerced_expr, &df_schema, self.state)
             .map_err(|e| anyhow!("DataFusion planning failed: {}", e))
     }
 
@@ -337,38 +341,28 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
         // Map Cypher BinaryOp to DataFusion Operator
         use datafusion::logical_expr::Operator;
 
-        // String operators mapping (simulated via LIKE/Concat)
+        // String operators mapping (using custom physical expr for safe type handling)
         match op {
             BinaryOp::StartsWith => {
-                let percent = lit("%");
-                // pattern = right + "%"
-                let pattern = binary(right, Operator::Plus, percent, input_schema)
-                    .map_err(|e| anyhow!("Failed to create pattern for STARTS WITH: {}", e))?;
-                // like(negated, case_insensitive, expr, pattern, schema)
-                return like(false, false, left, pattern, input_schema)
-                    .map_err(|e| anyhow!("Failed to create LIKE expr for STARTS WITH: {}", e));
+                return Ok(Arc::new(CypherStringMatchExpr::new(
+                    left,
+                    right,
+                    StringOp::StartsWith,
+                )));
             }
             BinaryOp::EndsWith => {
-                let percent = lit("%");
-                // pattern = "%" + right
-                let pattern = binary(percent, Operator::Plus, right, input_schema)
-                    .map_err(|e| anyhow!("Failed to create pattern for ENDS WITH: {}", e))?;
-                // like(negated, case_insensitive, expr, pattern, schema)
-                return like(false, false, left, pattern, input_schema)
-                    .map_err(|e| anyhow!("Failed to create LIKE expr for ENDS WITH: {}", e));
+                return Ok(Arc::new(CypherStringMatchExpr::new(
+                    left,
+                    right,
+                    StringOp::EndsWith,
+                )));
             }
             BinaryOp::Contains => {
-                let percent1 = lit("%");
-                let percent2 = lit("%");
-                // pattern = "%" + right + "%"
-                // suffix = right + "%"
-                let suffix = binary(right, Operator::Plus, percent2, input_schema)
-                    .map_err(|e| anyhow!("Failed to create suffix for CONTAINS: {}", e))?;
-                let pattern = binary(percent1, Operator::Plus, suffix, input_schema)
-                    .map_err(|e| anyhow!("Failed to create pattern for CONTAINS: {}", e))?;
-                // like(negated, case_insensitive, expr, pattern, schema)
-                return like(false, false, left, pattern, input_schema)
-                    .map_err(|e| anyhow!("Failed to create LIKE expr for CONTAINS: {}", e));
+                return Ok(Arc::new(CypherStringMatchExpr::new(
+                    left,
+                    right,
+                    StringOp::Contains,
+                )));
             }
             _ => {}
         }
@@ -418,5 +412,141 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
             UnaryOp::Neg => datafusion::physical_expr::expressions::negative(expr, input_schema),
         }
         .map_err(|e| anyhow!("Failed to create unary expression: {}", e))
+    }
+}
+
+use datafusion::physical_plan::DisplayAs;
+use datafusion::physical_plan::DisplayFormatType;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum StringOp {
+    StartsWith,
+    EndsWith,
+    Contains,
+}
+
+impl std::fmt::Display for StringOp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            StringOp::StartsWith => write!(f, "STARTS WITH"),
+            StringOp::EndsWith => write!(f, "ENDS WITH"),
+            StringOp::Contains => write!(f, "CONTAINS"),
+        }
+    }
+}
+
+#[derive(Debug, Eq)]
+struct CypherStringMatchExpr {
+    left: Arc<dyn PhysicalExpr>,
+    right: Arc<dyn PhysicalExpr>,
+    op: StringOp,
+}
+
+impl PartialEq for CypherStringMatchExpr {
+    fn eq(&self, other: &Self) -> bool {
+        self.op == other.op && self.left.eq(&other.left) && self.right.eq(&other.right)
+    }
+}
+
+impl std::hash::Hash for CypherStringMatchExpr {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.op.hash(state);
+        self.left.hash(state);
+        self.right.hash(state);
+    }
+}
+
+impl CypherStringMatchExpr {
+    fn new(left: Arc<dyn PhysicalExpr>, right: Arc<dyn PhysicalExpr>, op: StringOp) -> Self {
+        Self { left, right, op }
+    }
+}
+
+impl std::fmt::Display for CypherStringMatchExpr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} {} {}", self.left, self.op, self.right)
+    }
+}
+
+impl DisplayAs for CypherStringMatchExpr {
+    fn fmt_as(&self, _t: DisplayFormatType, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "{}", self)
+    }
+}
+
+impl PhysicalExpr for CypherStringMatchExpr {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn data_type(
+        &self,
+        _input_schema: &Schema,
+    ) -> datafusion::error::Result<arrow_schema::DataType> {
+        Ok(arrow_schema::DataType::Boolean)
+    }
+
+    fn nullable(&self, _input_schema: &Schema) -> datafusion::error::Result<bool> {
+        Ok(true)
+    }
+
+    fn evaluate(
+        &self,
+        batch: &arrow_array::RecordBatch,
+    ) -> datafusion::error::Result<datafusion::physical_plan::ColumnarValue> {
+        use crate::query::df_udfs::invoke_cypher_string_op;
+        use arrow_schema::Field;
+        use datafusion::config::ConfigOptions;
+        use datafusion::logical_expr::ScalarFunctionArgs;
+
+        let left_val = self.left.evaluate(batch)?;
+        let right_val = self.right.evaluate(batch)?;
+
+        let args = ScalarFunctionArgs {
+            args: vec![left_val, right_val],
+            number_rows: batch.num_rows(),
+            return_field: Arc::new(Field::new("result", arrow_schema::DataType::Boolean, true)),
+            config_options: Arc::new(ConfigOptions::default()),
+            arg_fields: vec![], // Not used by invoke_cypher_string_op
+        };
+
+        match self.op {
+            StringOp::StartsWith => {
+                invoke_cypher_string_op(&args, "starts_with", |s, p| s.starts_with(p))
+            }
+            StringOp::EndsWith => {
+                invoke_cypher_string_op(&args, "ends_with", |s, p| s.ends_with(p))
+            }
+            StringOp::Contains => invoke_cypher_string_op(&args, "contains", |s, p| s.contains(p)),
+        }
+    }
+
+    fn children(&self) -> Vec<&Arc<dyn PhysicalExpr>> {
+        vec![&self.left, &self.right]
+    }
+
+    fn with_new_children(
+        self: Arc<Self>,
+        children: Vec<Arc<dyn PhysicalExpr>>,
+    ) -> datafusion::error::Result<Arc<dyn PhysicalExpr>> {
+        Ok(Arc::new(CypherStringMatchExpr::new(
+            children[0].clone(),
+            children[1].clone(),
+            self.op,
+        )))
+    }
+
+    fn fmt_sql(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self)
+    }
+}
+
+impl PartialEq<dyn PhysicalExpr> for CypherStringMatchExpr {
+    fn eq(&self, other: &dyn PhysicalExpr) -> bool {
+        if let Some(other) = other.as_any().downcast_ref::<CypherStringMatchExpr>() {
+            self == other
+        } else {
+            false
+        }
     }
 }

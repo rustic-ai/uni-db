@@ -101,17 +101,23 @@ async fn test_wal_with_object_store() -> Result<()> {
     // Append entries
     let entry1 = Mutation::InsertVertex {
         vid: Vid::new(100),
-        properties: [("name".to_string(), uni_common::Value::String("Alice".to_string()))]
-            .into_iter()
-            .collect(),
+        properties: [(
+            "name".to_string(),
+            uni_common::Value::String("Alice".to_string()),
+        )]
+        .into_iter()
+        .collect(),
     };
     wal.append(&entry1)?;
 
     let entry2 = Mutation::InsertVertex {
         vid: Vid::new(101),
-        properties: [("name".to_string(), uni_common::Value::String("Bob".to_string()))]
-            .into_iter()
-            .collect(),
+        properties: [(
+            "name".to_string(),
+            uni_common::Value::String("Bob".to_string()),
+        )]
+        .into_iter()
+        .collect(),
     };
     wal.append(&entry2)?;
 
@@ -304,8 +310,14 @@ async fn test_wal_large_entries() -> Result<()> {
     let entry = Mutation::InsertVertex {
         vid: Vid::new(100),
         properties: [
-            ("name".to_string(), uni_common::Value::String("Test".to_string())),
-            ("large_field".to_string(), uni_common::Value::String(large_value)),
+            (
+                "name".to_string(),
+                uni_common::Value::String("Test".to_string()),
+            ),
+            (
+                "large_field".to_string(),
+                uni_common::Value::String(large_value),
+            ),
         ]
         .into_iter()
         .collect(),

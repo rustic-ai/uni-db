@@ -121,8 +121,8 @@ async fn test_compaction_l1_to_l2() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn test_compaction_vertices_crdt() -> anyhow::Result<()> {
-    use uni_db::Value;
     use uni_crdt::{Crdt, GCounter};
+    use uni_db::Value;
     use uni_db::core::schema::{CrdtType, DataType};
 
     let temp_dir = tempdir()?;

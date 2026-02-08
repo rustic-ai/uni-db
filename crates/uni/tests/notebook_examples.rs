@@ -414,7 +414,8 @@ async fn test_sales_analytics() -> anyhow::Result<()> {
         .unwrap();
 
     // Create region
-    let regions: Vec<uni_db::common::Properties> = vec![HashMap::from([("name".to_string(), json!("North").into())])];
+    let regions: Vec<uni_db::common::Properties> =
+        vec![HashMap::from([("name".to_string(), json!("North").into())])];
 
     let region_vids = db.bulk_insert_vertices("Region", regions).await.unwrap();
     let north = region_vids[0];

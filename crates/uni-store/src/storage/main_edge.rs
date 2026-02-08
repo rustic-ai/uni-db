@@ -263,7 +263,6 @@ impl MainEdgeDataset {
             .await
             .map_err(|e| anyhow!("Query failed: {}", e))?;
 
-        use futures::TryStreamExt;
         let results: Vec<RecordBatch> = batches.try_collect().await?;
 
         for batch in results {

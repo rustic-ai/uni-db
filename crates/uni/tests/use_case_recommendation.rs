@@ -54,7 +54,10 @@ async fn test_recommendation_use_case() -> anyhow::Result<()> {
 
     let products = vec![
         HashMap::from([
-            ("name".to_string(), Value::String("Running Shoes".to_string())),
+            (
+                "name".to_string(),
+                Value::String("Running Shoes".to_string()),
+            ),
             ("price".to_string(), Value::Float(100.0)),
             ("embedding".to_string(), Value::Vector(p1_vec.clone())),
         ]),

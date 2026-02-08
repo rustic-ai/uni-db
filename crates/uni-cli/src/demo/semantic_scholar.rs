@@ -111,7 +111,8 @@ pub async fn import_semantic_scholar(
             }
 
             // Insert vertex — convert serde_json values to uni_common values
-            let uni_props: uni_common::Properties = props.into_iter().map(|(k, v)| (k, v.into())).collect();
+            let uni_props: uni_common::Properties =
+                props.into_iter().map(|(k, v)| (k, v.into())).collect();
             w.insert_vertex(vid, uni_props).await?;
 
             count += 1;
