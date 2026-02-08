@@ -18,11 +18,11 @@
 - [x] Refactoring: Ensure `NOT` correctly negates complex predicates.
 - [x] Verification: 100% pass rate for `expressions/boolean` and `expressions/precedence`.
 
-## Phase 3: Null Handling (Category C)
-- [ ] Identification: Run TCK null handling tests.
-- [ ] Implementation: Improve `IS NULL` / `IS NOT NULL` support in both legacy and vectorized executors.
-- [ ] Logic Fix: Ensure 3-valued logic (True, False, Unknown) is correctly handled in `WHERE` filters.
-- [ ] Verification: 100% pass rate for `expressions/null`.
+## Phase 3: Null Handling (Category C) [checkpoint: 4484201]
+- [x] Identification: Run TCK null handling tests.
+- [x] Implementation: Improve `IS NULL` / `IS NOT NULL` support in both legacy and vectorized executors.
+- [x] Logic Fix: Ensure 3-valued logic (True, False, Unknown) is correctly handled in `WHERE` filters.
+- [x] Verification: 100% pass rate for `expressions/null`.
 
 ## Phase 4: String Matching (Category D)
 - [ ] Identification: Run TCK string matching tests.
