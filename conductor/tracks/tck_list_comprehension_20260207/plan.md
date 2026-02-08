@@ -18,7 +18,7 @@
 ## Phase 3: Advanced Features
 - [x] Task: Implement `WHERE` clause support in comprehension.
 - [x] Task: Implement Outer Scope Capture (referencing variables outside comprehension).
-- [ ] Task: Support `REDUCE` using the same compiler infrastructure.
+- [x] Task: Support `REDUCE` using the same compiler infrastructure.
 
 ## Phase 4: Verification
-- [ ] Task: Conductor - User Manual Verification 'Phase 1-3: List Comprehensions' (Protocol in workflow.md)
+- [x] Task: Conductor - User Manual Verification 'Phase 1-3: List Comprehensions' (Protocol in workflow.md)

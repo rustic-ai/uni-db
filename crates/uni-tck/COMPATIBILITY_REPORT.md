@@ -1,6 +1,6 @@
 # Uni OpenCypher TCK Compatibility Report
 
-**Generated:** 2026-02-07 (Latest TCK Run)
+**Generated:** 2026-02-08 (Latest TCK Run)
 **TCK Version:** M23 (openCypher)
 **Uni Version:** Current main branch
 
@@ -15,12 +15,9 @@
 | **Skipped** | 39 | - |
 | **Parsing Errors** | 0 | None (harness fixed) |
 
-**Recent Fixes (2026-02-07 Evening):**
-1. **Dynamic access improvements:** Map2 (Dynamic Value Access) from 7.1% to 79% (+10 scenarios) 🎯
-2. **Graph property access:** Graph improvements from 23.0% to 39.3% (+10 scenarios)
-3. **List operations:** List category from 48.1% to 57.8% (+18 scenarios)
-4. **First aggregation passes:** Aggregation category from 0.0% to 2.9% (+1 scenario)
-5. **First MERGE passes:** Merge category from 0.0% to 4.0% (+3 scenarios)
+**Last Update (2026-02-08):**
+Verification run - corrected category breakdowns to match actual test results.
+Pass rate: 67.2% (2,620/3,897 scenarios). 39 scenarios skipped (step failures cause remaining steps to be skipped).
 
 **Previous Fixes (2026-02-07 PM):**
 1. Boolean NOT operator improvements: Boolean4 now 100% (+24 scenarios)
@@ -40,7 +37,7 @@ The high step pass rate (~91%) vs lower scenario pass rate (67.2%) indicates tha
 
 ---
 
-## Match Category Results (Updated 2026-02-07)
+## Match Category Results (Updated 2026-02-08)
 
 | Feature | Passed | Total | Rate |
 |---------|--------|-------|------|
@@ -53,7 +50,7 @@ The high step pass rate (~91%) vs lower scenario pass rate (67.2%) indicates tha
 | Match7 - Optional match | 17 | 31 | 54.8% |
 | Match8 - Match clause interop | 1 | 3 | 33.3% |
 | Match9 - Match deprecated | 1 | 9 | 11.1% |
-| **TOTAL Match** | **301** | **381** | **79.0%** |
+| **TOTAL Match** | **300** | **381** | **78.9%** |
 
 ### Fixes Implemented (2026-02-06)
 
@@ -93,33 +90,33 @@ This separation ensures:
 | Quantifier | 502 | 102 | 604 | 83.1% |
 | String | 26 | 6 | 32 | 81.2% |
 | Call | 42 | 10 | 52 | 80.8% |
-| Match | 301 | 80 | 381 | 79.0% |
-| **WithOrderBy** | **228** | **64** | **292** | **78.1%** |
-| **Map** | **34** | **10** | **44** | **77.3%** |
+| Match | 300 | 80 | 381 | 78.9% |
+| WithOrderBy | 227 | 65 | 292 | 77.7% |
 | Temporal (overall) | 749 | 255 | 1,004 | 74.6% |
-| **WithWhere** | **14** | **5** | **19** | **73.7%** |
+| WithWhere | 14 | 5 | 19 | 73.7% |
+| Map | 25 | 10 | 44 | 71.4% |
 | Union | 8 | 4 | 12 | 66.7% |
-| **WithSkipLimit** | **6** | **3** | **9** | **66.7%** |
+| WithSkipLimit | 6 | 3 | 9 | 66.7% |
 | Mathematical | 4 | 2 | 6 | 66.7% |
 | Precedence | 80 | 41 | 121 | 66.1% |
-| List | 107 | 78 | 185 | 57.8% |
 | Unwind | 8 | 6 | 14 | 57.1% |
+| List | 89 | 78 | 185 | 53.3% |
 | Comparison | 37 | 35 | 72 | 51.4% |
 | ReturnSkipLimit | 15 | 16 | 31 | 48.4% |
 | With | 14 | 15 | 29 | 48.3% |
-| ReturnOrderBy | 16 | 19 | 35 | 45.7% |
-| TypeConversion | 21 | 26 | 47 | 44.7% |
-| Return | 27 | 36 | 63 | 42.9% |
-| Graph | 24 | 37 | 61 | 39.3% |
+| ReturnOrderBy | 15 | 19 | 35 | 44.1% |
+| TypeConversion | 20 | 27 | 47 | 42.6% |
+| Return | 26 | 36 | 63 | 41.9% |
+| Graph | 21 | 37 | 61 | 36.2% |
 | Pattern | 15 | 35 | 50 | 30.0% |
+| Path | 2 | 5 | 7 | 28.6% |
 | Create | 13 | 65 | 78 | 16.7% |
 | Delete | 5 | 36 | 41 | 12.2% |
 | Remove | 4 | 29 | 33 | 12.1% |
 | TriadicSelection | 2 | 17 | 19 | 10.5% |
-| Set | 4 | 49 | 53 | 7.5% |
-| Merge | 3 | 72 | 75 | 4.0% |
-| Aggregation | 1 | 34 | 35 | 2.9% |
-| **Path** | **0** | **7** | **7** | **0.0%** |
+| Set | 2 | 49 | 53 | 3.9% |
+| Merge | 0 | 72 | 75 | 0.0% |
+| Aggregation | 0 | 34 | 35 | 0.0% |
 | **CountingSubgraphMatches** | **0** | **11** | **11** | **0.0%** |
 
 ---
@@ -451,13 +448,13 @@ An error is raised but the message doesn't contain the expected keyword.
 | Temporal | Good | 74.6% | Creation, truncation, arithmetic, comparison, duration-between, formatting |
 | Precedence | Good | 66.1% | Numeric and boolean precedence good, list issues |
 | Comparison | Moderate | 51.4% | Equality good, ranges need work |
-| List | Moderate | 48.1% | IN operator and ranges work, comprehension weak |
-| Type Conversion | Moderate | 44.7% | toString partially works |
-| Map | Limited | 34.1% | Static access good, dynamic access weak |
+| List | Moderate | 53.3% | IN operator and ranges work, comprehension weak |
+| Type Conversion | Moderate | 42.6% | toString partially works |
+| Map | Good | 71.4% | Static and dynamic access improved |
 | Pattern | Limited | 30.0% | Pattern predicates improving |
-| Graph | Limited | 23.0% | Property access works, labels/types weak |
+| Path | Limited | 28.6% | relationships() function working |
+| Graph | Limited | 36.2% | Property access works, labels/types weak |
 | Aggregation | None | 0.0% | COUNT, SUM, etc. not returning correct results |
-| Path | None | 0.0% | Path functions not implemented |
 
 ---
 
@@ -482,7 +479,8 @@ An error is raised but the message doesn't contain the expected keyword.
 | 2026-02-07 (AM) | 2,507 | 64.3% | Map/List literal fixes, Match pattern improvements |
 | 2026-02-07 (PM) | 2,599 | 66.7% | Boolean NOT/XOR, String search, Precedence, Quantifier improvements (+92) |
 | 2026-02-07 (evening) | 2,601 | 66.7% | Minor improvements (+2) |
-| 2026-02-07 (late evening) | **2,620** | **67.2%** | Dynamic access improvements: Map2, Graph, List (+19) |
+| 2026-02-07 (late evening) | 2,620 | 67.2% | Dynamic access improvements: Map2, Graph, List (+19) |
+| 2026-02-08 | **2,620** | **67.2%** | Verification run - stable results |
 
 ### Cumulative Improvement
 

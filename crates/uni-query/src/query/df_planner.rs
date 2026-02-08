@@ -1268,8 +1268,10 @@ impl HybridPhysicalPlanner {
 
         let session = self.session_ctx.read();
         let state = session.state();
-        let compiler =
-            crate::query::df_graph::expr_compiler::CypherPhysicalExprCompiler::new(&state, Some(&ctx));
+        let compiler = crate::query::df_graph::expr_compiler::CypherPhysicalExprCompiler::new(
+            &state,
+            Some(&ctx),
+        );
         let physical_predicate = compiler.compile(predicate, &schema)?;
 
         Ok(Arc::new(FilterExec::try_new(
@@ -1345,8 +1347,10 @@ impl HybridPhysicalPlanner {
                 continue;
             }
 
-            let compiler =
-                crate::query::df_graph::expr_compiler::CypherPhysicalExprCompiler::new(&state, ctx.as_ref());
+            let compiler = crate::query::df_graph::expr_compiler::CypherPhysicalExprCompiler::new(
+                &state,
+                ctx.as_ref(),
+            );
             let physical_expr = compiler.compile(expr, &schema)?;
 
             let name = alias.clone().unwrap_or_else(|| expr.to_string_repr());
@@ -1376,8 +1380,10 @@ impl HybridPhysicalPlanner {
         // Translate group by expressions
         let mut group_exprs: Vec<(Arc<dyn datafusion::physical_expr::PhysicalExpr>, String)> =
             Vec::new();
-        let compiler =
-            crate::query::df_graph::expr_compiler::CypherPhysicalExprCompiler::new(&state, Some(&ctx));
+        let compiler = crate::query::df_graph::expr_compiler::CypherPhysicalExprCompiler::new(
+            &state,
+            Some(&ctx),
+        );
         for expr in group_by {
             let physical_expr = compiler.compile(expr, &schema)?;
             let name = expr.to_string_repr();

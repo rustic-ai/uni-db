@@ -13,6 +13,8 @@ This file tracks all major tracks for the project. Each track has its own detail
 
 
 
-- [~] **Track: TCK List Comprehension**
+| tck_list_comprehension_20260207 | TCK List Comprehension | completed | 2026-02-07 | 2026-02-07 |
 
-  *Link: [./tracks/tck_list_comprehension_20260207/](./tracks/tck_list_comprehension_20260207/)*
+
+
+

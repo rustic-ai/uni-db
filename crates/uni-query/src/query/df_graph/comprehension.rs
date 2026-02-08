@@ -2,17 +2,17 @@
 // Copyright 2024-2026 Dragonscale Team
 
 use std::any::Any;
-use std::sync::Arc;
 use std::fmt::{self, Display, Formatter};
 use std::hash::Hash;
+use std::sync::Arc;
 
-use datafusion::arrow::array::{Array, RecordBatch, BooleanArray, UInt32Array};
-use datafusion::arrow::datatypes::{DataType, Schema, Field};
-use datafusion::arrow::compute::{cast, take, filter, filter_record_batch};
+use datafusion::arrow::array::{Array, BooleanArray, RecordBatch, UInt32Array};
 use datafusion::arrow::buffer::{OffsetBuffer, ScalarBuffer};
-use datafusion::physical_plan::PhysicalExpr;
+use datafusion::arrow::compute::{cast, filter, filter_record_batch, take};
+use datafusion::arrow::datatypes::{DataType, Field, Schema};
 use datafusion::common::Result;
 use datafusion::logical_expr::ColumnarValue;
+use datafusion::physical_plan::PhysicalExpr;
 
 /// Physical expression for Cypher List Comprehension: `[x IN list WHERE pred | expr]`
 #[derive(Debug)]
@@ -66,21 +66,25 @@ impl ListComprehensionExecExpr {
 
 impl Display for ListComprehensionExecExpr {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        write!(f, "ListComprehension(var={}, list={})", self.variable_name, self.input_list)
+        write!(
+            f,
+            "ListComprehension(var={}, list={})",
+            self.variable_name, self.input_list
+        )
     }
 }
 
 impl PartialEq for ListComprehensionExecExpr {
     fn eq(&self, other: &Self) -> bool {
-        self.variable_name == other.variable_name &&
-        self.output_item_type == other.output_item_type &&
-        Arc::ptr_eq(&self.input_list, &other.input_list) &&
-        Arc::ptr_eq(&self.map_expr, &other.map_expr) &&
-        match (&self.predicate, &other.predicate) {
-             (Some(a), Some(b)) => Arc::ptr_eq(a, b),
-             (None, None) => true,
-             _ => false,
-        }
+        self.variable_name == other.variable_name
+            && self.output_item_type == other.output_item_type
+            && Arc::ptr_eq(&self.input_list, &other.input_list)
+            && Arc::ptr_eq(&self.map_expr, &other.map_expr)
+            && match (&self.predicate, &other.predicate) {
+                (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+                (None, None) => true,
+                _ => false,
+            }
     }
 }
 
@@ -95,7 +99,8 @@ impl Hash for ListComprehensionExecExpr {
 
 impl PartialEq<dyn Any> for ListComprehensionExecExpr {
     fn eq(&self, other: &dyn Any) -> bool {
-        other.downcast_ref::<Self>()
+        other
+            .downcast_ref::<Self>()
             .map(|x| self == x)
             .unwrap_or(false)
     }
@@ -107,7 +112,11 @@ impl PhysicalExpr for ListComprehensionExecExpr {
     }
 
     fn data_type(&self, _input_schema: &Schema) -> Result<DataType> {
-        Ok(DataType::LargeList(Arc::new(Field::new("item", self.output_item_type.clone(), true))))
+        Ok(DataType::LargeList(Arc::new(Field::new(
+            "item",
+            self.output_item_type.clone(),
+            true,
+        ))))
     }
 
     fn nullable(&self, _input_schema: &Schema) -> Result<bool> {
@@ -121,15 +130,23 @@ impl PhysicalExpr for ListComprehensionExecExpr {
 
         // 2. Normalize to LargeListArray
         let list_array = if let DataType::List(field) = list_array.data_type() {
-             let target_type = DataType::LargeList(field.clone());
-             cast(&list_array, &target_type)
-                .map_err(|e| datafusion::error::DataFusionError::Execution(format!("Cast failed: {}", e)))?
+            let target_type = DataType::LargeList(field.clone());
+            cast(&list_array, &target_type).map_err(|e| {
+                datafusion::error::DataFusionError::Execution(format!("Cast failed: {}", e))
+            })?
         } else {
-             list_array
+            list_array
         };
-        
-        let large_list = list_array.as_any().downcast_ref::<datafusion::arrow::array::LargeListArray>()
-            .ok_or_else(|| datafusion::error::DataFusionError::Execution(format!("Expected LargeListArray, got {:?}", list_array.data_type())))?;
+
+        let large_list = list_array
+            .as_any()
+            .downcast_ref::<datafusion::arrow::array::LargeListArray>()
+            .ok_or_else(|| {
+                datafusion::error::DataFusionError::Execution(format!(
+                    "Expected LargeListArray, got {:?}",
+                    list_array.data_type()
+                ))
+            })?;
 
         let values = large_list.values();
         let offsets = large_list.offsets();
@@ -138,77 +155,89 @@ impl PhysicalExpr for ListComprehensionExecExpr {
         // 3. Prepare inner batch
         let num_rows = batch.num_rows();
         let num_values = values.len();
-        let mut indices_builder = datafusion::arrow::array::UInt32Builder::with_capacity(num_values);
+        let mut indices_builder =
+            datafusion::arrow::array::UInt32Builder::with_capacity(num_values);
         for row_idx in 0..num_rows {
-             let start = offsets[row_idx] as usize;
-             let end = offsets[row_idx+1] as usize;
-             let len = end - start;
-             for _ in 0..len {
-                 indices_builder.append_value(row_idx as u32);
-             }
+            let start = offsets[row_idx] as usize;
+            let end = offsets[row_idx + 1] as usize;
+            let len = end - start;
+            for _ in 0..len {
+                indices_builder.append_value(row_idx as u32);
+            }
         }
         let indices = indices_builder.finish();
-        
+
         let mut inner_columns = Vec::with_capacity(batch.num_columns() + 1);
         for col in batch.columns() {
-            let taken = take(col, &indices, None)
-                .map_err(|e| datafusion::error::DataFusionError::Execution(format!("Take failed: {}", e)))?;
+            let taken = take(col, &indices, None).map_err(|e| {
+                datafusion::error::DataFusionError::Execution(format!("Take failed: {}", e))
+            })?;
             inner_columns.push(taken);
         }
-        
+
         inner_columns.push(values.clone());
-        
+
         let mut inner_fields = batch.schema().fields().to_vec();
-        inner_fields.push(Arc::new(Field::new(&self.variable_name, values.data_type().clone(), true)));
+        inner_fields.push(Arc::new(Field::new(
+            &self.variable_name,
+            values.data_type().clone(),
+            true,
+        )));
         let inner_schema = Arc::new(Schema::new(inner_fields));
-        
+
         let inner_batch = RecordBatch::try_new(inner_schema, inner_columns)?;
-        
+
         // 4. Filter (Predicate)
         let (filtered_batch, filtered_indices) = if let Some(pred) = &self.predicate {
-             let mask = pred.evaluate(&inner_batch)?.into_array(inner_batch.num_rows())?;
-             let mask = cast(&mask, &DataType::Boolean)?;
-             let boolean_mask = mask.as_any().downcast_ref::<BooleanArray>().unwrap();
-             
-             let filtered_batch = filter_record_batch(&inner_batch, boolean_mask)?;
-             
-             let indices_array: Arc<dyn Array> = Arc::new(indices.clone());
-             let filtered_indices = filter(&indices_array, boolean_mask)?;
-             let filtered_indices = filtered_indices.as_any().downcast_ref::<UInt32Array>().unwrap().clone();
-             
-             (filtered_batch, filtered_indices)
+            let mask = pred
+                .evaluate(&inner_batch)?
+                .into_array(inner_batch.num_rows())?;
+            let mask = cast(&mask, &DataType::Boolean)?;
+            let boolean_mask = mask.as_any().downcast_ref::<BooleanArray>().unwrap();
+
+            let filtered_batch = filter_record_batch(&inner_batch, boolean_mask)?;
+
+            let indices_array: Arc<dyn Array> = Arc::new(indices.clone());
+            let filtered_indices = filter(&indices_array, boolean_mask)?;
+            let filtered_indices = filtered_indices
+                .as_any()
+                .downcast_ref::<UInt32Array>()
+                .unwrap()
+                .clone();
+
+            (filtered_batch, filtered_indices)
         } else {
-             (inner_batch, indices.clone())
+            (inner_batch, indices.clone())
         };
-        
+
         // 5. Evaluate Map Expression
         let mapped_val = self.map_expr.evaluate(&filtered_batch)?;
         let mapped_array = mapped_val.into_array(filtered_batch.num_rows())?;
-        
+
         // 6. Reconstruct ListArray
         let new_offsets = if self.predicate.is_some() {
-             let num_rows = batch.num_rows();
-             let mut new_offsets = Vec::with_capacity(num_rows + 1);
-             new_offsets.push(0);
-             
-             let indices_slice = filtered_indices.values();
-             let mut pos = 0;
-             let mut current_len = 0;
-             
-             for row_idx in 0..num_rows {
-                 let mut count = 0;
-                 while pos < indices_slice.len() && indices_slice[pos] as usize == row_idx {
-                     count += 1;
-                     pos += 1;
-                 }
-                 current_len += count;
-                 new_offsets.push(current_len);
-             }
-             OffsetBuffer::new(ScalarBuffer::from(new_offsets))
+            let num_rows = batch.num_rows();
+            let mut new_offsets = Vec::with_capacity(num_rows + 1);
+            new_offsets.push(0);
+
+            let indices_slice = filtered_indices.values();
+            let mut pos = 0;
+            let mut current_len = 0;
+
+            for row_idx in 0..num_rows {
+                let mut count = 0;
+                while pos < indices_slice.len() && indices_slice[pos] as usize == row_idx {
+                    count += 1;
+                    pos += 1;
+                }
+                current_len += count;
+                new_offsets.push(current_len);
+            }
+            OffsetBuffer::new(ScalarBuffer::from(new_offsets))
         } else {
-             offsets.clone()
+            offsets.clone()
         };
-        
+
         let new_field = Arc::new(Field::new("item", mapped_array.data_type().clone(), true));
         let new_list = datafusion::arrow::array::LargeListArray::new(
             new_field,
@@ -216,38 +245,31 @@ impl PhysicalExpr for ListComprehensionExecExpr {
             mapped_array,
             nulls.cloned(),
         );
-        
+
         Ok(ColumnarValue::Array(Arc::new(new_list)))
     }
 
     fn children(&self) -> Vec<&Arc<dyn PhysicalExpr>> {
-        let mut children = vec![&self.input_list, &self.map_expr];
-        if let Some(pred) = &self.predicate {
-            children.push(pred);
-        }
-        children
+        // Only expose input_list as a child. The map_expr and predicate are compiled
+        // against an inner schema (with the loop variable) and should not be exposed
+        // to DataFusion's expression tree traversal (e.g., equivalence analysis).
+        vec![&self.input_list]
     }
 
     fn with_new_children(
         self: Arc<Self>,
         children: Vec<Arc<dyn PhysicalExpr>>,
     ) -> Result<Arc<dyn PhysicalExpr>> {
-        if children.len() < 2 {
-            return Err(datafusion::error::DataFusionError::Internal("ListComprehension requires at least 2 children".to_string()));
+        if children.len() != 1 {
+            return Err(datafusion::error::DataFusionError::Internal(
+                "ListComprehension requires exactly 1 child (input_list)".to_string(),
+            ));
         }
-        
-        let input_list = children[0].clone();
-        let map_expr = children[1].clone();
-        let predicate = if children.len() > 2 {
-            Some(children[2].clone())
-        } else {
-            None
-        };
 
         Ok(Arc::new(Self {
-            input_list,
-            map_expr,
-            predicate,
+            input_list: children[0].clone(),
+            map_expr: self.map_expr.clone(),
+            predicate: self.predicate.clone(),
             variable_name: self.variable_name.clone(),
             input_schema: self.input_schema.clone(),
             output_item_type: self.output_item_type.clone(),
@@ -256,9 +278,17 @@ impl PhysicalExpr for ListComprehensionExecExpr {
 
     fn fmt_sql(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if let Some(pred) = &self.predicate {
-            write!(f, "[{} IN {} WHERE {} | {}]", self.variable_name, self.input_list, pred, self.map_expr)
+            write!(
+                f,
+                "[{} IN {} WHERE {} | {}]",
+                self.variable_name, self.input_list, pred, self.map_expr
+            )
         } else {
-            write!(f, "[{} IN {} | {}]", self.variable_name, self.input_list, self.map_expr)
+            write!(
+                f,
+                "[{} IN {} | {}]",
+                self.variable_name, self.input_list, self.map_expr
+            )
         }
     }
 }

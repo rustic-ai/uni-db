@@ -2,16 +2,16 @@
 // Copyright 2024-2026 Dragonscale Team
 
 use std::any::Any;
-use std::sync::Arc;
 use std::fmt::{self, Display, Formatter};
 use std::hash::Hash;
+use std::sync::Arc;
 
 use datafusion::arrow::array::{Array, RecordBatch};
-use datafusion::arrow::datatypes::{DataType, Schema, Field};
 use datafusion::arrow::compute::cast;
-use datafusion::physical_plan::PhysicalExpr;
+use datafusion::arrow::datatypes::{DataType, Field, Schema};
 use datafusion::common::Result;
 use datafusion::logical_expr::ColumnarValue;
+use datafusion::physical_plan::PhysicalExpr;
 
 /// Physical expression for Cypher REDUCE: `reduce(acc = init, x IN list | expr)`
 ///
@@ -61,19 +61,23 @@ impl Display for ReduceExecExpr {
         write!(
             f,
             "reduce({} = {}, {} IN {} | {})",
-            self.accumulator_name, self.initial_expr, self.variable_name, self.list_expr, self.reduce_expr
+            self.accumulator_name,
+            self.initial_expr,
+            self.variable_name,
+            self.list_expr,
+            self.reduce_expr
         )
     }
 }
 
 impl PartialEq for ReduceExecExpr {
     fn eq(&self, other: &Self) -> bool {
-        self.accumulator_name == other.accumulator_name &&
-        self.variable_name == other.variable_name &&
-        self.output_type == other.output_type &&
-        Arc::ptr_eq(&self.initial_expr, &other.initial_expr) &&
-        Arc::ptr_eq(&self.list_expr, &other.list_expr) &&
-        Arc::ptr_eq(&self.reduce_expr, &other.reduce_expr)
+        self.accumulator_name == other.accumulator_name
+            && self.variable_name == other.variable_name
+            && self.output_type == other.output_type
+            && Arc::ptr_eq(&self.initial_expr, &other.initial_expr)
+            && Arc::ptr_eq(&self.list_expr, &other.list_expr)
+            && Arc::ptr_eq(&self.reduce_expr, &other.reduce_expr)
     }
 }
 
@@ -89,7 +93,8 @@ impl Hash for ReduceExecExpr {
 
 impl PartialEq<dyn Any> for ReduceExecExpr {
     fn eq(&self, other: &dyn Any) -> bool {
-        other.downcast_ref::<Self>()
+        other
+            .downcast_ref::<Self>()
             .map(|x| self == x)
             .unwrap_or(false)
     }
@@ -112,26 +117,31 @@ impl PhysicalExpr for ReduceExecExpr {
         // 1. Evaluate input list
         let list_val = self.list_expr.evaluate(batch)?;
         let list_array = list_val.into_array(batch.num_rows())?;
-        
+
         // Normalize to LargeList
         let list_array = if let DataType::List(field) = list_array.data_type() {
-             let target_type = DataType::LargeList(field.clone());
-             cast(&list_array, &target_type)
-                .map_err(|e| datafusion::error::DataFusionError::Execution(format!("Cast failed: {}", e)))?
+            let target_type = DataType::LargeList(field.clone());
+            cast(&list_array, &target_type).map_err(|e| {
+                datafusion::error::DataFusionError::Execution(format!("Cast failed: {}", e))
+            })?
         } else {
-             list_array
+            list_array
         };
-        
-        let large_list = list_array.as_any().downcast_ref::<datafusion::arrow::array::LargeListArray>()
-            .ok_or_else(|| datafusion::error::DataFusionError::Execution("Expected LargeListArray".to_string()))?;
-            
+
+        let large_list = list_array
+            .as_any()
+            .downcast_ref::<datafusion::arrow::array::LargeListArray>()
+            .ok_or_else(|| {
+                datafusion::error::DataFusionError::Execution("Expected LargeListArray".to_string())
+            })?;
+
         let offsets = large_list.offsets();
         let values = large_list.values();
-        
+
         // 2. Evaluate initial value -> current accumulator
         let init_val = self.initial_expr.evaluate(batch)?;
         let mut current_acc = init_val.into_array(batch.num_rows())?;
-        
+
         // 3. Layer-by-layer evaluation
         // Find max length
         let mut max_len = 0;
@@ -141,12 +151,14 @@ impl PhysicalExpr for ReduceExecExpr {
                 max_len = len;
             }
         }
-        
+
         for i in 0..max_len {
             // Identify active rows (list len > i)
-            let mut active_indices_builder = datafusion::arrow::array::UInt32Builder::with_capacity(batch.num_rows());
-            let mut variable_indices_builder = datafusion::arrow::array::UInt32Builder::with_capacity(batch.num_rows());
-            
+            let mut active_indices_builder =
+                datafusion::arrow::array::UInt32Builder::with_capacity(batch.num_rows());
+            let mut variable_indices_builder =
+                datafusion::arrow::array::UInt32Builder::with_capacity(batch.num_rows());
+
             for (row_idx, window) in offsets.windows(2).enumerate() {
                 let start = window[0] as usize;
                 let end = window[1] as usize;
@@ -158,11 +170,11 @@ impl PhysicalExpr for ReduceExecExpr {
             }
             let active_indices = active_indices_builder.finish();
             let variable_indices = variable_indices_builder.finish();
-            
+
             if active_indices.is_empty() {
                 break;
             }
-            
+
             // Construct inner batch for active rows
             // 1. Take outer columns using active_indices
             let mut inner_columns = Vec::with_capacity(batch.num_columns() + 2);
@@ -170,29 +182,37 @@ impl PhysicalExpr for ReduceExecExpr {
                 let taken = datafusion::arrow::compute::take(col, &active_indices, None)?;
                 inner_columns.push(taken);
             }
-            
+
             // 2. Take accumulator values
             let acc_taken = datafusion::arrow::compute::take(&current_acc, &active_indices, None)?;
             inner_columns.push(acc_taken);
-            
+
             // 3. Take variable values from flattened list values
             let var_taken = datafusion::arrow::compute::take(values, &variable_indices, None)?;
             inner_columns.push(var_taken);
-            
+
             // Construct inner schema
             let mut inner_fields = batch.schema().fields().to_vec();
-            inner_fields.push(Arc::new(Field::new(&self.accumulator_name, current_acc.data_type().clone(), true)));
-            inner_fields.push(Arc::new(Field::new(&self.variable_name, values.data_type().clone(), true)));
+            inner_fields.push(Arc::new(Field::new(
+                &self.accumulator_name,
+                current_acc.data_type().clone(),
+                true,
+            )));
+            inner_fields.push(Arc::new(Field::new(
+                &self.variable_name,
+                values.data_type().clone(),
+                true,
+            )));
             let inner_schema = Arc::new(Schema::new(inner_fields));
-            
+
             let inner_batch = RecordBatch::try_new(inner_schema, inner_columns)?;
-            
+
             // Evaluate reduce expr
             let new_acc_val = self.reduce_expr.evaluate(&inner_batch)?;
             let new_acc_array = new_acc_val.into_array(inner_batch.num_rows())?;
-            
+
             // Scatter updates back to current_acc
-            
+
             if active_indices.len() == batch.num_rows() {
                 current_acc = new_acc_array;
             } else {
@@ -201,40 +221,45 @@ impl PhysicalExpr for ReduceExecExpr {
                 for (k, &row_idx) in active_indices.values().iter().enumerate() {
                     active_map[row_idx as usize] = Some(k);
                 }
-                
-                for row_idx in 0..batch.num_rows() {
-                    if let Some(k) = active_map[row_idx] {
-                        interleave_indices.push((1, k)); // 1 = new_acc_array
+
+                for (row_idx, slot) in active_map.iter().enumerate() {
+                    if let Some(k) = slot {
+                        interleave_indices.push((1, *k)); // 1 = new_acc_array
                     } else {
                         interleave_indices.push((0, row_idx)); // 0 = current_acc
                     }
                 }
-                
+
                 current_acc = datafusion::arrow::compute::interleave(
                     &[&current_acc, &new_acc_array],
-                    &interleave_indices
+                    &interleave_indices,
                 )?;
             }
         }
-        
+
         Ok(ColumnarValue::Array(current_acc))
     }
 
     fn children(&self) -> Vec<&Arc<dyn PhysicalExpr>> {
-        vec![&self.initial_expr, &self.list_expr, &self.reduce_expr]
+        // Only expose expressions compiled against the outer schema.
+        // reduce_expr is compiled against an inner schema (with loop variable and accumulator)
+        // and should not be exposed to DataFusion's expression tree traversal.
+        vec![&self.initial_expr, &self.list_expr]
     }
 
     fn with_new_children(
         self: Arc<Self>,
         children: Vec<Arc<dyn PhysicalExpr>>,
     ) -> Result<Arc<dyn PhysicalExpr>> {
-        if children.len() != 3 {
-            return Err(datafusion::error::DataFusionError::Internal("Reduce requires 3 children".to_string()));
+        if children.len() != 2 {
+            return Err(datafusion::error::DataFusionError::Internal(
+                "Reduce requires 2 children (initial_expr, list_expr)".to_string(),
+            ));
         }
         Ok(Arc::new(Self {
             initial_expr: children[0].clone(),
             list_expr: children[1].clone(),
-            reduce_expr: children[2].clone(),
+            reduce_expr: self.reduce_expr.clone(),
             accumulator_name: self.accumulator_name.clone(),
             variable_name: self.variable_name.clone(),
             input_schema: self.input_schema.clone(),
@@ -246,7 +271,11 @@ impl PhysicalExpr for ReduceExecExpr {
         write!(
             f,
             "reduce({} = {}, {} IN {} | {})",
-            self.accumulator_name, self.initial_expr, self.variable_name, self.list_expr, self.reduce_expr
+            self.accumulator_name,
+            self.initial_expr,
+            self.variable_name,
+            self.list_expr,
+            self.reduce_expr
         )
     }
 }
