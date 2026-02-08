@@ -6,6 +6,12 @@
 - [x] Edge Cases: Handle heterogeneous type comparisons (e.g., String vs Int) as per Cypher spec.
 - [x] Verification: 100% pass rate for `expressions/comparison` and relevant `match-where` scenarios. f752ebc
 
+## Phase 1.5: Advanced Comparisons (Category A Extended)
+- [ ] Identification: Analyze remaining failures in `Comparison1` (Equality) and `Comparison2` (Ranges).
+- [ ] Implementation: Implement node/relationship equality comparisons in DataFusion translation.
+- [ ] Edge Cases: Fix NaN comparison behavior and Map equality logic.
+- [ ] Verification: Achieve near-100% pass rate for `Comparison1` and `Comparison2`.
+
 ## Phase 2: Boolean Logic & Precedence (Category B)
 - [ ] Identification: Run TCK boolean logic tests.
 - [ ] Implementation: Fix `XOR` implementation and verify `AND`/`OR` precedence in `planner.rs`.
