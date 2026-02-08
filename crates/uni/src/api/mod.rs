@@ -481,7 +481,7 @@ impl Uni {
     pub async fn bulk_insert_vertices(
         &self,
         label: &str,
-        properties_list: Vec<std::collections::HashMap<String, serde_json::Value>>,
+        properties_list: Vec<uni_common::Properties>,
     ) -> Result<Vec<uni_common::core::id::Vid>> {
         let schema = self.schema.schema();
         // Validate label exists in schema
@@ -528,7 +528,7 @@ impl Uni {
         edges: Vec<(
             uni_common::core::id::Vid,
             uni_common::core::id::Vid,
-            std::collections::HashMap<String, serde_json::Value>,
+            uni_common::Properties,
         )>,
     ) -> Result<()> {
         let schema = self.schema.schema();

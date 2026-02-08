@@ -21,9 +21,9 @@ use arrow_array::{
     UInt64Array,
 };
 use arrow_schema::{DataType as ArrowDataType, Field};
-use serde_json::{Value, json};
 use std::sync::Arc;
 use uni_common::DataType;
+use uni_common::Value;
 use uni_crdt::Crdt;
 
 // ============================================================================
@@ -116,12 +116,12 @@ fn parse_datetime_to_micros(s: &str) -> Option<i64> {
         })
 }
 
-/// Detect the Arrow Map-as-List(Struct(key, value)) pattern and reconstruct a JSON object.
+/// Detect the Arrow Map-as-List(Struct(key, value)) pattern and reconstruct a map.
 ///
 /// Arrow represents Map columns as `List(Struct { key, value })`. This helper
 /// checks whether the given array matches that layout and, if so, converts the
-/// key/value pairs back into a `serde_json::Map`.
-fn try_reconstruct_map(arr: &ArrayRef) -> Option<serde_json::Map<String, Value>> {
+/// key/value pairs back into a `HashMap<String, Value>`.
+fn try_reconstruct_map(arr: &ArrayRef) -> Option<HashMap<String, Value>> {
     let structs = arr.as_any().downcast_ref::<StructArray>()?;
     let fields = structs.fields();
     if fields.len() != 2 || fields[0].name() != "key" || fields[1].name() != "value" {
@@ -129,7 +129,7 @@ fn try_reconstruct_map(arr: &ArrayRef) -> Option<serde_json::Map<String, Value>>
     }
     let key_col = structs.column(0);
     let val_col = structs.column(1);
-    let mut map = serde_json::Map::new();
+    let mut map = HashMap::new();
     for i in 0..structs.len() {
         if let Value::String(k) = arrow_to_value(key_col.as_ref(), i) {
             map.insert(k, arrow_to_value(val_col.as_ref(), i));
@@ -154,21 +154,21 @@ pub fn arrow_to_value(col: &dyn Array, row: usize) -> Value {
 
     // Integer types
     if let Some(u) = col.as_any().downcast_ref::<UInt64Array>() {
-        return json!(u.value(row));
+        return Value::Int(u.value(row) as i64);
     }
     if let Some(i) = col.as_any().downcast_ref::<Int64Array>() {
-        return json!(i.value(row));
+        return Value::Int(i.value(row));
     }
     if let Some(i) = col.as_any().downcast_ref::<Int32Array>() {
-        return json!(i.value(row));
+        return Value::Int(i.value(row) as i64);
     }
 
     // Float types
     if let Some(f) = col.as_any().downcast_ref::<Float64Array>() {
-        return json!(f.value(row));
+        return Value::Float(f.value(row));
     }
     if let Some(f) = col.as_any().downcast_ref::<Float32Array>() {
-        return json!(f.value(row));
+        return Value::Float(f.value(row) as f64);
     }
 
     // Boolean type
@@ -183,23 +183,23 @@ pub fn arrow_to_value(col: &dyn Array, row: usize) -> Value {
         for i in 0..arr.len() {
             vals.push(arrow_to_value(arr.as_ref(), i));
         }
-        return Value::Array(vals);
+        return Value::List(vals);
     }
 
     // Variable-size list
     if let Some(list) = col.as_any().downcast_ref::<ListArray>() {
         let arr = list.value(row);
 
-        // Map types are stored as List(Struct(key, value)); reconstruct as JSON object
+        // Map types are stored as List(Struct(key, value)); reconstruct as map
         if let Some(obj) = try_reconstruct_map(&arr) {
-            return Value::Object(obj);
+            return Value::Map(obj);
         }
 
         let mut vals = Vec::with_capacity(arr.len());
         for i in 0..arr.len() {
             vals.push(arrow_to_value(arr.as_ref(), i));
         }
-        return Value::Array(vals);
+        return Value::List(vals);
     }
 
     // Large list (variable-size list with i64 offsets)
@@ -209,16 +209,16 @@ pub fn arrow_to_value(col: &dyn Array, row: usize) -> Value {
         for i in 0..arr.len() {
             vals.push(arrow_to_value(arr.as_ref(), i));
         }
-        return Value::Array(vals);
+        return Value::List(vals);
     }
 
     // Struct type
     if let Some(s) = col.as_any().downcast_ref::<StructArray>() {
-        let mut map = serde_json::Map::new();
+        let mut map = HashMap::new();
         for (field, child) in s.fields().iter().zip(s.columns()) {
             map.insert(field.name().clone(), arrow_to_value(child.as_ref(), row));
         }
-        return Value::Object(map);
+        return Value::Map(map);
     }
 
     // Date32 type (days since epoch) - convert to ISO date string
@@ -273,7 +273,7 @@ pub fn arrow_to_value(col: &dyn Array, row: usize) -> Value {
 
     // Duration (microseconds) - return as numeric for arithmetic
     if let Some(d) = col.as_any().downcast_ref::<DurationMicrosecondArray>() {
-        return json!(d.value(row));
+        return Value::Int(d.value(row));
     }
 
     // LargeBinary (JSONB-encoded JSON values)
@@ -287,15 +287,18 @@ pub fn arrow_to_value(col: &dyn Array, row: usize) -> Value {
         if json_str == "null" {
             return Value::Null;
         }
-        return serde_json::from_str(&json_str).unwrap_or_else(|_| Value::String(json_str));
+        let json_val: serde_json::Value = serde_json::from_str(&json_str)
+            .unwrap_or_else(|_| serde_json::Value::String(json_str));
+        return Value::from(json_val);
     }
 
-    // Binary (CRDT MessagePack) - decode to JSON
+    // Binary (CRDT MessagePack) - decode to Value via serde_json boundary
     if let Some(b) = col.as_any().downcast_ref::<BinaryArray>() {
         let bytes = b.value(row);
         return Crdt::from_msgpack(bytes)
             .ok()
             .and_then(|crdt| serde_json::to_value(&crdt).ok())
+            .map(Value::from)
             .unwrap_or(Value::Null);
     }
 
@@ -396,7 +399,7 @@ fn values_to_float64_array(values: &[Value]) -> ArrayRef {
 fn values_to_fixed_size_binary_array(values: &[Value], size: i32) -> Result<ArrayRef> {
     let mut builder = FixedSizeBinaryBuilder::with_capacity(values.len(), size);
     for v in values {
-        if let Value::Array(bytes) = v {
+        if let Value::List(bytes) = v {
             let b: Vec<u8> = bytes
                 .iter()
                 .map(|bv| bv.as_u64().unwrap_or(0) as u8)
@@ -416,7 +419,7 @@ fn values_to_fixed_size_binary_array(values: &[Value], size: i32) -> Result<Arra
 fn values_to_fixed_size_list_f32_array(values: &[Value], size: i32) -> ArrayRef {
     let mut builder = FixedSizeListBuilder::new(Float32Builder::new(), size);
     for v in values {
-        if let Value::Array(arr) = v {
+        if let Value::List(arr) = v {
             if arr.len() as i32 == size {
                 for item in arr {
                     builder
@@ -463,8 +466,9 @@ fn values_to_large_binary_array(values: &[Value]) -> ArrayRef {
         if v.is_null() {
             builder.append_null();
         } else {
-            // Encode as JSONB
-            let jsonb_bytes = jsonb::to_owned_jsonb(v)
+            // Encode as JSONB — convert to serde_json::Value at the serialization boundary
+            let json_val: serde_json::Value = v.clone().into();
+            let jsonb_bytes = jsonb::to_owned_jsonb(&json_val)
                 .map(|b| b.to_vec())
                 .unwrap_or_else(|_| vec![]);
             builder.append_value(&jsonb_bytes);
@@ -499,7 +503,7 @@ pub fn values_to_array(values: &[Value], dt: &ArrowDataType) -> Result<ArrayRef>
             if field.data_type() == &ArrowDataType::Utf8 {
                 let mut builder = ListBuilder::new(StringBuilder::new());
                 for v in values {
-                    if let Value::Array(arr) = v {
+                    if let Value::List(arr) = v {
                         for item in arr {
                             if let Some(s) = item.as_str() {
                                 builder.values().append_value(s);
@@ -822,8 +826,8 @@ impl<'a> PropertyExtractor<'a> {
         let mut builder = FixedSizeListBuilder::new(Float32Builder::new(), dimensions as i32);
 
         for (i, &is_deleted) in deleted.iter().enumerate().take(len) {
-            let val_array = get_props(i).and_then(|v| v.as_array());
-            let (values, valid) = self.extract_vector_values(val_array, is_deleted, dimensions);
+            let val = get_props(i);
+            let (values, valid) = self.extract_vector_values(val, is_deleted, dimensions);
             for v in values {
                 builder.values().append_value(v);
             }
@@ -832,26 +836,32 @@ impl<'a> PropertyExtractor<'a> {
         Ok(Arc::new(builder.finish()))
     }
 
-    /// Extract vector values from a JSON array, handling defaults and validation.
+    /// Extract vector values from a property value, handling defaults and validation.
+    ///
+    /// Supports both `Value::Vector(Vec<f32>)` and `Value::List(Vec<Value>)` inputs.
     fn extract_vector_values(
         &self,
-        val_array: Option<&Vec<Value>>,
+        val: Option<&Value>,
         is_deleted: bool,
         dimensions: usize,
     ) -> (Vec<f32>, bool) {
         let zeros = || vec![0.0_f32; dimensions];
 
-        match val_array {
-            Some(arr) if arr.len() == dimensions => {
+        match val {
+            // Native f32 vector (Value::Vector)
+            Some(Value::Vector(v)) if v.len() == dimensions => (v.clone(), true),
+            Some(Value::Vector(_)) => (zeros(), false), // Wrong dimensions
+            // List of values (Value::List) - convert to f32
+            Some(Value::List(arr)) if arr.len() == dimensions => {
                 let values: Vec<f32> = arr
                     .iter()
                     .map(|v| v.as_f64().unwrap_or(0.0) as f32)
                     .collect();
                 (values, true)
             }
-            Some(_) => (zeros(), false),           // Wrong dimensions
-            None if is_deleted => (zeros(), true), // Deleted entry gets default
-            None => (zeros(), false),              // Missing value
+            Some(Value::List(_)) => (zeros(), false), // Wrong dimensions
+            _ if is_deleted => (zeros(), true),        // Deleted entry gets default
+            _ => (zeros(), false),                     // Missing or unsupported value
         }
     }
 
@@ -863,12 +873,14 @@ impl<'a> PropertyExtractor<'a> {
         let mut builder = arrow_array::builder::LargeBinaryBuilder::with_capacity(len, len * 64);
         for (i, &is_deleted) in deleted.iter().enumerate().take(len) {
             let val = get_props(i);
-            let json_val = if val.is_none() && is_deleted {
+            let uni_val = if val.is_none() && is_deleted {
                 &null_val
             } else {
                 val.unwrap_or(&null_val)
             };
-            let jsonb_bytes = jsonb::to_owned_jsonb(json_val)
+            // Convert to serde_json::Value at the JSONB serialization boundary
+            let json_val: serde_json::Value = uni_val.clone().into();
+            let jsonb_bytes = jsonb::to_owned_jsonb(&json_val)
                 .map_err(|e| anyhow!("JSONB encode error: {}", e))?
                 .to_vec();
             builder.append_value(&jsonb_bytes);
@@ -1077,7 +1089,9 @@ impl<'a> PropertyExtractor<'a> {
                 let crdt_result = if let Some(s) = val.as_str() {
                     serde_json::from_str::<Crdt>(s)
                 } else {
-                    serde_json::from_value::<Crdt>(val.clone())
+                    // Convert uni_common::Value to serde_json::Value at the CRDT boundary
+                    let json_val: serde_json::Value = val.clone().into();
+                    serde_json::from_value::<Crdt>(json_val)
                 };
 
                 if let Ok(crdt) = crdt_result {
@@ -1218,16 +1232,16 @@ mod tests {
     #[test]
     fn test_arrow_to_value_int64() {
         let arr = Int64Array::from(vec![Some(42), None, Some(-10)]);
-        assert_eq!(arrow_to_value(&arr, 0), json!(42));
+        assert_eq!(arrow_to_value(&arr, 0), Value::Int(42));
         assert_eq!(arrow_to_value(&arr, 1), Value::Null);
-        assert_eq!(arrow_to_value(&arr, 2), json!(-10));
+        assert_eq!(arrow_to_value(&arr, 2), Value::Int(-10));
     }
 
     #[test]
     #[allow(clippy::approx_constant)]
     fn test_arrow_to_value_float64() {
         let arr = Float64Array::from(vec![Some(3.14), None]);
-        assert_eq!(arrow_to_value(&arr, 0), json!(3.14));
+        assert_eq!(arrow_to_value(&arr, 0), Value::Float(3.14));
         assert_eq!(arrow_to_value(&arr, 1), Value::Null);
     }
 
@@ -1241,7 +1255,7 @@ mod tests {
 
     #[test]
     fn test_values_to_array_int64() {
-        let values = vec![json!(1), json!(2), Value::Null, json!(4)];
+        let values = vec![Value::Int(1), Value::Int(2), Value::Null, Value::Int(4)];
         let arr = values_to_array(&values, &ArrowDataType::Int64).unwrap();
         assert_eq!(arr.len(), 4);
 
@@ -1271,8 +1285,12 @@ mod tests {
     #[test]
     fn test_property_extractor_string() {
         let props: Vec<HashMap<String, Value>> = vec![
-            [("name".to_string(), json!("Alice"))].into_iter().collect(),
-            [("name".to_string(), json!("Bob"))].into_iter().collect(),
+            [("name".to_string(), Value::String("Alice".to_string()))]
+                .into_iter()
+                .collect(),
+            [("name".to_string(), Value::String("Bob".to_string()))]
+                .into_iter()
+                .collect(),
             HashMap::new(),
         ];
         let deleted = vec![false, false, true];
@@ -1291,8 +1309,8 @@ mod tests {
     #[test]
     fn test_property_extractor_int64() {
         let props: Vec<HashMap<String, Value>> = vec![
-            [("age".to_string(), json!(25))].into_iter().collect(),
-            [("age".to_string(), json!(30))].into_iter().collect(),
+            [("age".to_string(), Value::Int(25))].into_iter().collect(),
+            [("age".to_string(), Value::Int(30))].into_iter().collect(),
             HashMap::new(),
         ];
         let deleted = vec![false, false, true];
@@ -1343,9 +1361,9 @@ mod tests {
             None,
         ]);
 
-        assert_eq!(arrow_to_value(&arr, 0), json!(1_000_000_i64));
-        assert_eq!(arrow_to_value(&arr, 1), json!(3_600_000_000_i64));
-        assert_eq!(arrow_to_value(&arr, 2), json!(86_400_000_000_i64));
+        assert_eq!(arrow_to_value(&arr, 0), Value::Int(1_000_000));
+        assert_eq!(arrow_to_value(&arr, 1), Value::Int(3_600_000_000));
+        assert_eq!(arrow_to_value(&arr, 2), Value::Int(86_400_000_000));
         assert_eq!(arrow_to_value(&arr, 3), Value::Null);
     }
 
@@ -1366,12 +1384,15 @@ mod tests {
 
         let arr = builder.finish();
 
-        // The first value should deserialize back to JSON
+        // The first value should deserialize back to a map
         let result = arrow_to_value(&arr, 0);
-        assert!(result.is_object());
+        assert!(result.as_object().is_some());
         let obj = result.as_object().unwrap();
         // GCounter serializes with tag "t": "gc"
-        assert_eq!(obj.get("t"), Some(&json!("gc")));
+        assert_eq!(
+            obj.get("t"),
+            Some(&Value::String("gc".to_string()))
+        );
 
         // Null value should return null
         assert_eq!(arrow_to_value(&arr, 1), Value::Null);

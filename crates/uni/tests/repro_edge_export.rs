@@ -70,7 +70,7 @@ async fn test_edge_export_failure() -> anyhow::Result<()> {
         // Edge Alice -> Bob
         let eid = uni_db::common::core::id::Eid::new(0); // Type 1 (KNOWS)
         let mut props = HashMap::new();
-        props.insert("since".to_string(), json!(2022));
+        props.insert("since".to_string(), json!(2022).into());
         w.insert_edge(
             uni_db::common::core::id::Vid::new(0),
             uni_db::common::core::id::Vid::new(1),

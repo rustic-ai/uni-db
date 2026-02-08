@@ -88,14 +88,14 @@ fn test_build_overflow_json_column_filters_schema_props() -> Result<()> {
     let dataset = VertexDataset::new("test_uri", "Person", 1);
 
     let mut props1 = HashMap::new();
-    props1.insert("name".to_string(), serde_json::json!("Alice"));
-    props1.insert("age".to_string(), serde_json::json!(30));
-    props1.insert("city".to_string(), serde_json::json!("NYC")); // overflow!
-    props1.insert("phone".to_string(), serde_json::json!("555-1234")); // overflow!
+    props1.insert("name".to_string(), uni_common::Value::String("Alice".to_string()));
+    props1.insert("age".to_string(), uni_common::Value::Int(30));
+    props1.insert("city".to_string(), uni_common::Value::String("NYC".to_string())); // overflow!
+    props1.insert("phone".to_string(), uni_common::Value::String("555-1234".to_string())); // overflow!
 
     let mut props2 = HashMap::new();
-    props2.insert("name".to_string(), serde_json::json!("Bob"));
-    props2.insert("age".to_string(), serde_json::json!(25));
+    props2.insert("name".to_string(), uni_common::Value::String("Bob".to_string()));
+    props2.insert("age".to_string(), uni_common::Value::Int(25));
     // No overflow for Bob
 
     let vertices = vec![(Vid::new(1), props1), (Vid::new(2), props2)];
@@ -152,9 +152,9 @@ fn test_build_overflow_json_excludes_ext_id() -> Result<()> {
     let dataset = VertexDataset::new("test_uri", "Person", 1);
 
     let mut props = HashMap::new();
-    props.insert("name".to_string(), serde_json::json!("Charlie"));
-    props.insert("ext_id".to_string(), serde_json::json!("charlie-123")); // system column
-    props.insert("custom_field".to_string(), serde_json::json!("value")); // overflow
+    props.insert("name".to_string(), uni_common::Value::String("Charlie".to_string()));
+    props.insert("ext_id".to_string(), uni_common::Value::String("charlie-123".to_string())); // system column
+    props.insert("custom_field".to_string(), uni_common::Value::String("value".to_string())); // overflow
 
     let vertices = vec![(Vid::new(1), props)];
     let deleted = vec![false];
@@ -190,8 +190,8 @@ fn test_empty_overflow_properties() -> Result<()> {
 
     // Create vertex with only schema-defined properties
     let mut props = HashMap::new();
-    props.insert("name".to_string(), serde_json::json!("Dave"));
-    props.insert("age".to_string(), serde_json::json!(40));
+    props.insert("name".to_string(), uni_common::Value::String("Dave".to_string()));
+    props.insert("age".to_string(), uni_common::Value::Int(40));
 
     let vertices = vec![(Vid::new(1), props)];
     let deleted = vec![false];
@@ -285,11 +285,11 @@ mod delta_tests {
         let delta_dataset = DeltaDataset::new("test_uri", "KNOWS", "fwd");
 
         let mut props1 = HashMap::new();
-        props1.insert("since".to_string(), serde_json::json!(2020)); // in schema
-        props1.insert("strength".to_string(), serde_json::json!(0.8)); // overflow!
+        props1.insert("since".to_string(), uni_common::Value::Int(2020)); // in schema
+        props1.insert("strength".to_string(), uni_common::Value::Float(0.8)); // overflow!
 
         let mut props2 = HashMap::new();
-        props2.insert("since".to_string(), serde_json::json!(2021)); // in schema only
+        props2.insert("since".to_string(), uni_common::Value::Int(2021)); // in schema only
 
         let entries = vec![
             L1Entry {

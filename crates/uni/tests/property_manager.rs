@@ -67,10 +67,10 @@ async fn test_property_lookup_uses_vid_filter() -> anyhow::Result<()> {
     let bob_vid = Vid::new(1);
 
     let alice_name = prop_mgr.get_vertex_prop(alice_vid, "name").await?;
-    assert_eq!(alice_name, json!("Alice"));
+    assert_eq!(alice_name, uni_db::Value::String("Alice".to_string()));
 
     let bob_props = prop_mgr.get_all_vertex_props(bob_vid).await?;
-    assert_eq!(bob_props.get("name"), Some(&json!("Bob")));
+    assert_eq!(bob_props.get("name"), Some(&uni_db::Value::String("Bob".to_string())));
 
     Ok(())
 }
@@ -160,7 +160,8 @@ async fn test_list_property_storage() -> anyhow::Result<()> {
     let vid = Vid::new(0);
 
     let val = prop_mgr.get_vertex_prop(vid, "tags").await?;
-    assert_eq!(val, json!(["a", "b"]));
+    let expected: uni_db::Value = json!(["a", "b"]).into();
+    assert_eq!(val, expected);
 
     Ok(())
 }

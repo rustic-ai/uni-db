@@ -52,13 +52,13 @@ async fn test_l0_auto_flush_threshold() -> anyhow::Result<()> {
     // 4. Perform mutations below threshold
     let v1 = writer.next_vid().await?;
     let mut p1 = HashMap::new();
-    p1.insert("name".to_string(), serde_json::json!("v1"));
+    p1.insert("name".to_string(), serde_json::json!("v1").into());
     writer
         .insert_vertex_with_labels(v1, p1, vec!["Person".to_string()])
         .await?;
     let v2 = writer.next_vid().await?;
     let mut p2 = HashMap::new();
-    p2.insert("name".to_string(), serde_json::json!("v2"));
+    p2.insert("name".to_string(), serde_json::json!("v2").into());
     writer
         .insert_vertex_with_labels(v2, p2, vec!["Person".to_string()])
         .await?;
@@ -75,7 +75,7 @@ async fn test_l0_auto_flush_threshold() -> anyhow::Result<()> {
     // 5. Perform the 3rd mutation (Trigger threshold)
     let v3 = writer.next_vid().await?;
     let mut p3 = HashMap::new();
-    p3.insert("name".to_string(), serde_json::json!("v3"));
+    p3.insert("name".to_string(), serde_json::json!("v3").into());
     writer
         .insert_vertex_with_labels(v3, p3, vec!["Person".to_string()])
         .await?;

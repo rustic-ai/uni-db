@@ -22,7 +22,7 @@ async fn test_vertex_serialization_nulls() -> anyhow::Result<()> {
 
     // Create vertices with nulls
     let mut props = HashMap::new();
-    props.insert("name".to_string(), serde_json::Value::Null);
+    props.insert("name".to_string(), uni_db::Value::Null);
 
     let vid = Vid::new(0);
     let vertices = vec![(vid, props)];
@@ -52,7 +52,7 @@ async fn test_vertex_large_properties() -> anyhow::Result<()> {
 
     let large_str = "a".repeat(100_000);
     let mut props = HashMap::new();
-    props.insert("data".to_string(), json!(large_str));
+    props.insert("data".to_string(), json!(large_str).into());
 
     let vid = Vid::new(0);
     let vertices = vec![(vid, props)];

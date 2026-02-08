@@ -70,7 +70,7 @@ async fn hydrate_entity_if_needed(
                 .await
             {
                 for (key, value) in props {
-                    map.entry(key).or_insert(value);
+                    map.entry(key).or_insert(value.into());
                 }
             }
         } else {
@@ -95,7 +95,7 @@ async fn hydrate_entity_if_needed(
                 .await
             {
                 for (key, value) in props {
-                    map.entry(key).or_insert(value);
+                    map.entry(key).or_insert(value.into());
                 }
             }
         } else {
@@ -132,7 +132,7 @@ impl Executor {
             };
 
             if let Some(expr) = filter {
-                let mut props_json: serde_json::Map<String, Value> = props.into_iter().collect();
+                let mut props_json: serde_json::Map<String, Value> = props.into_iter().map(|(k, v)| (k, v.into())).collect();
                 props_json.insert("_vid".to_string(), json!(vid.as_u64()));
 
                 let mut row = HashMap::new();
@@ -530,7 +530,7 @@ impl Executor {
 
                 for (col_idx, field) in schema.fields().iter().enumerate() {
                     let column = batch.column(col_idx);
-                    let mut value = arrow_convert::arrow_to_value(column.as_ref(), row_idx);
+                    let mut value: Value = arrow_convert::arrow_to_value(column.as_ref(), row_idx).into();
 
                     // Check if this field contains JSON-encoded values (e.g., from UNWIND)
                     // Parse JSON string to restore the original type
@@ -961,7 +961,7 @@ impl Executor {
     /// Converts an Arrow array element at a given row index to a JSON Value.
     /// Delegates to the shared implementation in arrow_convert module.
     pub(crate) fn arrow_to_value(col: &dyn Array, row: usize) -> Value {
-        arrow_convert::arrow_to_value(col, row)
+        arrow_convert::arrow_to_value(col, row).into()
     }
 
     pub(crate) fn evaluate_expr<'a>(
@@ -1119,12 +1119,12 @@ impl Executor {
                                 .get_vertex_prop_with_ctx(vid, prop_name, ctx)
                                 .await
                             {
-                                return Ok(val);
+                                return Ok(val.into());
                             }
                         } else if let Some(id) = map.get("_eid").and_then(|v| v.as_u64()) {
                             let eid = uni_common::core::id::Eid::from(id);
                             if let Ok(val) = prop_manager.get_edge_prop(eid, prop_name, ctx).await {
-                                return Ok(val);
+                                return Ok(val.into());
                             }
                         }
                         return Ok(Value::Null);
@@ -1134,7 +1134,8 @@ impl Executor {
                     if let Ok(vid) = Self::vid_from_value(&base_val) {
                         return prop_manager
                             .get_vertex_prop_with_ctx(vid, prop_name, ctx)
-                            .await;
+                            .await
+                            .map(|v| v.into());
                     }
 
                     if base_val.is_null() {
@@ -1844,12 +1845,13 @@ impl Executor {
                             .map_err(|_| anyhow!("Invalid query time format: {}", time_str))?;
 
                         // Fetch temporal property values - supports both vertices and edges
-                        let valid_from_val = if let Ok(vid) = Self::vid_from_value(&node_val) {
+                        let valid_from_val: Option<Value> = if let Ok(vid) = Self::vid_from_value(&node_val) {
                             // Vertex case - VID string format
                             prop_manager
                                 .get_vertex_prop_with_ctx(vid, &start_prop, ctx)
                                 .await
                                 .ok()
+                                .map(|v| v.into())
                         } else if let Value::Object(map) = &node_val {
                             // Check for embedded _vid or _eid in object
                             if let Some(vid_val) = map.get("_vid").and_then(|v| v.as_u64()) {
@@ -1858,10 +1860,11 @@ impl Executor {
                                     .get_vertex_prop_with_ctx(vid, &start_prop, ctx)
                                     .await
                                     .ok()
+                                    .map(|v| v.into())
                             } else if let Some(eid_val) = map.get("_eid").and_then(|v| v.as_u64()) {
                                 // Edge case
                                 let eid = uni_common::core::id::Eid::from(eid_val);
-                                prop_manager.get_edge_prop(eid, &start_prop, ctx).await.ok()
+                                prop_manager.get_edge_prop(eid, &start_prop, ctx).await.ok().map(|v| v.into())
                             } else {
                                 // Inline object - property embedded directly
                                 map.get(&start_prop).cloned()
@@ -1883,12 +1886,13 @@ impl Executor {
                             }
                         };
 
-                        let valid_to_val = if let Ok(vid) = Self::vid_from_value(&node_val) {
+                        let valid_to_val: Option<Value> = if let Ok(vid) = Self::vid_from_value(&node_val) {
                             // Vertex case - VID string format
                             prop_manager
                                 .get_vertex_prop_with_ctx(vid, &end_prop, ctx)
                                 .await
                                 .ok()
+                                .map(|v| v.into())
                         } else if let Value::Object(map) = &node_val {
                             // Check for embedded _vid or _eid in object
                             if let Some(vid_val) = map.get("_vid").and_then(|v| v.as_u64()) {
@@ -1897,10 +1901,11 @@ impl Executor {
                                     .get_vertex_prop_with_ctx(vid, &end_prop, ctx)
                                     .await
                                     .ok()
+                                    .map(|v| v.into())
                             } else if let Some(eid_val) = map.get("_eid").and_then(|v| v.as_u64()) {
                                 // Edge case
                                 let eid = uni_common::core::id::Eid::from(eid_val);
-                                prop_manager.get_edge_prop(eid, &end_prop, ctx).await.ok()
+                                prop_manager.get_edge_prop(eid, &end_prop, ctx).await.ok().map(|v| v.into())
                             } else {
                                 // Inline object - property embedded directly
                                 map.get(&end_prop).cloned()
@@ -2297,7 +2302,7 @@ impl Executor {
                     for vid in vids {
                         if let Some(props) = batch_props.get(&vid) {
                             let mut props_json: serde_json::Map<String, Value> =
-                                props.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+                                props.iter().map(|(k, v)| (k.clone(), v.clone().into())).collect();
                             props_json.insert("_vid".to_string(), json!(vid.as_u64()));
                             props_json.insert("_label".to_string(), json!(label_name.clone()));
 
@@ -2340,7 +2345,7 @@ impl Executor {
                                 .unwrap_or_default();
 
                             let mut props_json: serde_json::Map<String, Value> =
-                                props.into_iter().collect();
+                                props.into_iter().map(|(k, v)| (k, v.into())).collect();
                             props_json.insert("_vid".to_string(), json!(vid.as_u64()));
                             props_json.insert("ext_id".to_string(), json!(ext_id.clone()));
                             // Add first label or "Unknown" if no labels
@@ -2403,7 +2408,7 @@ impl Executor {
                         };
 
                         let mut props_json: serde_json::Map<String, Value> = props_opt
-                            .map(|p| p.into_iter().collect())
+                            .map(|p| p.into_iter().map(|(k, v)| (k, v.into())).collect())
                             .unwrap_or_default();
 
                         props_json.insert("_vid".to_string(), json!(vid.as_u64()));
@@ -2484,7 +2489,7 @@ impl Executor {
                         };
 
                         let mut props_json: serde_json::Map<String, Value> = props_opt
-                            .map(|p| p.into_iter().collect())
+                            .map(|p| p.into_iter().map(|(k, v)| (k, v.into())).collect())
                             .unwrap_or_default();
 
                         props_json.insert("_vid".to_string(), json!(vid.as_u64()));
@@ -3788,7 +3793,7 @@ impl Executor {
                     .await?
                     .unwrap_or_default();
                 let mut target_json: serde_json::Map<String, Value> =
-                    target_props.into_iter().collect();
+                    target_props.into_iter().map(|(k, v)| (k, v.into())).collect();
                 target_json.insert("_vid".to_string(), json!(target_vid.as_u64()));
 
                 // Look up target label - first from L0 (for recently created nodes),
@@ -3821,7 +3826,7 @@ impl Executor {
                 // Build step (relationship) variable if present
                 if let Some(sv) = step_variable {
                     let mut edge_json: serde_json::Map<String, Value> =
-                        edge_props.clone().into_iter().collect();
+                        edge_props.clone().into_iter().map(|(k, v)| (k, v.into())).collect();
                     edge_json.insert("_eid".to_string(), json!(eid.as_u64()));
                     edge_json.insert("_type".to_string(), json!(edge_type));
                     edge_json.insert("_src".to_string(), json!(src_vid.as_u64()));
@@ -4811,9 +4816,12 @@ impl Executor {
             .collect();
 
         let prop_refs: Vec<&str> = all_props.into_iter().collect();
-        prop_manager
+        let result = prop_manager
             .get_batch_vertex_props(vids, &prop_refs, ctx)
-            .await
+            .await?;
+        Ok(result.into_iter().map(|(vid, props)| {
+            (vid, props.into_iter().map(|(k, v)| (k, v.into())).collect())
+        }).collect())
     }
 
     /// Batch loads edge properties for a set of EIDs.
@@ -4837,9 +4845,12 @@ impl Executor {
             .collect();
 
         let prop_refs: Vec<&str> = all_props.into_iter().collect();
-        prop_manager
+        let result = prop_manager
             .get_batch_edge_props(eids, &prop_refs, ctx)
-            .await
+            .await?;
+        Ok(result.into_iter().map(|(vid, props)| {
+            (vid, props.into_iter().map(|(k, v)| (k, v.into())).collect())
+        }).collect())
     }
 
     /// Builds a mapping from VID to label string.
@@ -6045,6 +6056,7 @@ impl Executor {
                 }
 
                 let vid = writer.next_vid().await?;
+                let props: uni_common::Properties = props.into_iter().map(|(k, v)| (k, v.into())).collect();
                 writer
                     .insert_vertex_with_labels(vid, props, vec![target.to_string()])
                     .await?;
@@ -6095,6 +6107,7 @@ impl Executor {
                     .ok_or_else(|| anyhow!("Missing destination VID in column '{}'", dst_col))?;
 
                 let eid = writer.next_eid(type_id).await?;
+                let props: uni_common::Properties = props.into_iter().map(|(k, v)| (k, v.into())).collect();
                 writer.insert_edge(src, dst, type_id, eid, props).await?;
                 count += 1;
             }
@@ -6168,6 +6181,7 @@ impl Executor {
                         }
                     }
                     let vid = writer.next_vid().await?;
+                    let props: uni_common::Properties = props.into_iter().map(|(k, v)| (k, v.into())).collect();
                     writer
                         .insert_vertex_with_labels(vid, props, vec![target.to_string()])
                         .await?;
@@ -6223,6 +6237,7 @@ impl Executor {
                     })?;
 
                     let eid = writer.next_eid(type_id).await?;
+                    let props: uni_common::Properties = props.into_iter().map(|(k, v)| (k, v.into())).collect();
                     writer.insert_edge(src, dst, type_id, eid, props).await?;
                     count += 1;
                 }
@@ -6571,7 +6586,7 @@ impl Executor {
             // We use get_all_vertex_props_with_ctx to respect transaction isolation
             let props_opt = prop_manager.get_all_vertex_props_with_ctx(vid, ctx).await?;
             if let Some(props) = props_opt {
-                let mut props_json: serde_json::Map<String, Value> = props.into_iter().collect();
+                let mut props_json: serde_json::Map<String, Value> = props.into_iter().map(|(k, v)| (k, v.into())).collect();
                 props_json.insert("_vid".to_string(), json!(vid.as_u64()));
                 props_json.insert("_label".to_string(), json!(label_name));
 
@@ -6965,7 +6980,7 @@ impl Executor {
                 let mut row = Vec::with_capacity(headers.len());
                 row.push(vid.to_string());
                 for p_name in &prop_names {
-                    let val = props.get(p_name).cloned().unwrap_or(Value::Null);
+                    let val: Value = props.get(p_name).cloned().map(|v| v.into()).unwrap_or(Value::Null);
                     row.push(self.format_csv_value(val));
                 }
                 wtr.write_record(&row)?;
@@ -7004,7 +7019,7 @@ impl Executor {
                 row.push(meta.id.to_string());
 
                 for p_name in &prop_names {
-                    let val = props.get(p_name).cloned().unwrap_or(Value::Null);
+                    let val: Value = props.get(p_name).cloned().map(|v| v.into()).unwrap_or(Value::Null);
                     row.push(self.format_csv_value(val));
                 }
                 wtr.write_record(&row)?;
@@ -7047,7 +7062,7 @@ impl Executor {
             dataset.get_arrow_schema(&schema)?
         };
 
-        let mut rows = Vec::new();
+        let mut rows: Vec<HashMap<String, uni_common::Value>> = Vec::new();
 
         if let Some(meta) = label_meta {
             let label_id = meta.id;
@@ -7061,12 +7076,12 @@ impl Executor {
                     .await?
                     .unwrap_or_default();
 
-                props.insert("_vid".to_string(), json!(vid.as_u64()));
+                props.insert("_vid".to_string(), uni_common::Value::Int(vid.as_u64() as i64));
                 if !props.contains_key("_uid") {
-                    props.insert("_uid".to_string(), Value::Array(vec![json!(0); 32]));
+                    props.insert("_uid".to_string(), uni_common::Value::List(vec![uni_common::Value::Int(0); 32]));
                 }
-                props.insert("_deleted".to_string(), Value::Bool(false));
-                props.insert("_version".to_string(), json!(1));
+                props.insert("_deleted".to_string(), uni_common::Value::Bool(false));
+                props.insert("_version".to_string(), uni_common::Value::Int(1));
                 rows.push(props);
             }
         } else if edge_meta.is_some() {
@@ -7077,11 +7092,11 @@ impl Executor {
                     .await?
                     .unwrap_or_default();
 
-                props.insert("eid".to_string(), json!(eid.as_u64()));
-                props.insert("src_vid".to_string(), json!(src.as_u64()));
-                props.insert("dst_vid".to_string(), json!(dst.as_u64()));
-                props.insert("_deleted".to_string(), Value::Bool(false));
-                props.insert("_version".to_string(), json!(1));
+                props.insert("eid".to_string(), uni_common::Value::Int(eid.as_u64() as i64));
+                props.insert("src_vid".to_string(), uni_common::Value::Int(src.as_u64() as i64));
+                props.insert("dst_vid".to_string(), uni_common::Value::Int(dst.as_u64() as i64));
+                props.insert("_deleted".to_string(), uni_common::Value::Bool(false));
+                props.insert("_version".to_string(), uni_common::Value::Int(1));
                 rows.push(props);
             }
         }
@@ -7115,7 +7130,7 @@ impl Executor {
     async fn write_parquet_to_cloud(
         &self,
         dest_url: &str,
-        rows: &[HashMap<String, Value>],
+        rows: &[HashMap<String, uni_common::Value>],
         arrow_schema: &arrow_schema::Schema,
     ) -> Result<()> {
         use object_store::ObjectStore;
@@ -7147,7 +7162,7 @@ impl Executor {
 
     pub(crate) fn rows_to_batch(
         &self,
-        rows: &[HashMap<String, Value>],
+        rows: &[HashMap<String, uni_common::Value>],
         schema: &arrow_schema::Schema,
     ) -> Result<RecordBatch> {
         let mut columns: Vec<Arc<dyn Array>> = Vec::new();
@@ -7156,9 +7171,9 @@ impl Executor {
             let name = field.name();
             let dt = field.data_type();
 
-            let values: Vec<Value> = rows
+            let values: Vec<uni_common::Value> = rows
                 .iter()
-                .map(|row| row.get(name).cloned().unwrap_or(Value::Null))
+                .map(|row| row.get(name).cloned().unwrap_or(uni_common::Value::Null))
                 .collect();
             let array = self.values_to_array(&values, dt)?;
             columns.push(array);
@@ -7167,11 +7182,11 @@ impl Executor {
         Ok(RecordBatch::try_new(Arc::new(schema.clone()), columns)?)
     }
 
-    /// Convert a slice of JSON Values to an Arrow array.
+    /// Convert a slice of Values to an Arrow array.
     /// Delegates to the shared implementation in arrow_convert module.
     pub(crate) fn values_to_array(
         &self,
-        values: &[Value],
+        values: &[uni_common::Value],
         dt: &arrow_schema::DataType,
     ) -> Result<Arc<dyn Array>> {
         arrow_convert::values_to_array(values, dt)

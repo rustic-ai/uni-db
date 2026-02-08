@@ -41,12 +41,12 @@ async fn test_lancedb_flush_vertices() -> anyhow::Result<()> {
     let vid2 = writer.next_vid().await?;
 
     let mut props1 = HashMap::new();
-    props1.insert("name".to_string(), serde_json::json!("Alice"));
-    props1.insert("age".to_string(), serde_json::json!(30));
+    props1.insert("name".to_string(), uni_common::Value::String("Alice".to_string()));
+    props1.insert("age".to_string(), uni_common::Value::Int(30));
 
     let mut props2 = HashMap::new();
-    props2.insert("name".to_string(), serde_json::json!("Bob"));
-    props2.insert("age".to_string(), serde_json::json!(25));
+    props2.insert("name".to_string(), uni_common::Value::String("Bob".to_string()));
+    props2.insert("age".to_string(), uni_common::Value::Int(25));
 
     writer
         .insert_vertex_with_labels(vid1, props1, vec!["Person".to_string()])

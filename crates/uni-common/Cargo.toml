@@ -19,6 +19,7 @@ chrono = { workspace = true, features = ["serde"] }
 tokio = { workspace = true, features = ["fs", "io-util"] }
 arrow-schema = { workspace = true }
 object_store = { workspace = true }
+base64 = "0.21"
 
 [dev-dependencies]
 tempfile = { workspace = true }

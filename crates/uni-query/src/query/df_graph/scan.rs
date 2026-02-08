@@ -992,15 +992,17 @@ pub(crate) fn get_property_value(
 ) -> Option<Value> {
     if prop_name == "_all_props" {
         return props_map.get(vid).map(|p| {
-            let map: serde_json::Map<String, Value> =
-                p.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+            let map: serde_json::Map<String, Value> = p
+                .iter()
+                .map(|(k, v)| (k.clone(), serde_json::Value::from(v.clone())))
+                .collect();
             Value::Object(map)
         });
     }
     props_map
         .get(vid)
         .and_then(|props| props.get(prop_name))
-        .cloned()
+        .map(|v| serde_json::Value::from(v.clone()))
 }
 
 /// Build a numeric column from property values using the specified builder and extractor.

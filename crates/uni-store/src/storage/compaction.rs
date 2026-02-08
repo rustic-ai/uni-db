@@ -8,13 +8,12 @@ use arrow_array::builder::{ArrayBuilder, ListBuilder, UInt64Builder};
 use arrow_array::{ListArray, RecordBatch, UInt64Array};
 use futures::TryStreamExt;
 use metrics;
-use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tracing::{error, info, instrument};
-use uni_common::Properties;
 use uni_common::core::id::{Eid, Vid};
 use uni_common::core::schema::DataType;
+use uni_common::{Properties, Value};
 use uni_crdt::Crdt;
 
 pub struct Compactor {
@@ -256,12 +255,12 @@ impl Compactor {
         if b.is_null() {
             return Ok(a.clone());
         }
-        let mut crdt_a: Crdt = serde_json::from_value(a.clone())?;
-        let crdt_b: Crdt = serde_json::from_value(b.clone())?;
+        let mut crdt_a: Crdt = serde_json::from_value(a.clone().into())?;
+        let crdt_b: Crdt = serde_json::from_value(b.clone().into())?;
         crdt_a
             .try_merge(&crdt_b)
             .map_err(|e| anyhow::anyhow!("{e}"))?;
-        Ok(serde_json::to_value(crdt_a)?)
+        Ok(Value::from(serde_json::to_value(crdt_a)?))
     }
 
     /// Merge row properties into state based on version comparison.

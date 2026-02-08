@@ -15,9 +15,9 @@
 
 use crate::runtime::context::QueryContext;
 use crate::runtime::l0::L0Buffer;
-use serde_json::Value;
 use std::collections::HashMap;
 use uni_common::Properties;
+use uni_common::Value;
 use uni_common::core::id::{Eid, Vid};
 
 /// Result of a property lookup indicating whether to continue searching.
@@ -615,7 +615,7 @@ mod tests {
     use super::*;
     use crate::runtime::l0::L0Buffer;
     use parking_lot::RwLock;
-    use serde_json::json;
+    use uni_common::Value;
     use std::sync::Arc;
 
     fn make_ctx_with_l0(l0: L0Buffer) -> QueryContext {
@@ -641,12 +641,12 @@ mod tests {
     fn test_lookup_vertex_prop_in_main_l0() {
         let mut l0 = L0Buffer::new(0, None);
         let mut props = HashMap::new();
-        props.insert("name".to_string(), json!("Alice"));
+        props.insert("name".to_string(), Value::String("Alice".to_string()));
         l0.vertex_properties.insert(Vid::from(1), props);
         let ctx = make_ctx_with_l0(l0);
 
         let result = lookup_vertex_prop(Vid::from(1), "name", Some(&ctx));
-        assert_eq!(result, Some(json!("Alice")));
+        assert_eq!(result, Some(Value::String("Alice".to_string())));
 
         let result = lookup_vertex_prop(Vid::from(1), "age", Some(&ctx));
         assert_eq!(result, None);
@@ -656,16 +656,16 @@ mod tests {
     fn test_accumulate_vertex_props() {
         let mut l0 = L0Buffer::new(0, None);
         let mut props = HashMap::new();
-        props.insert("name".to_string(), json!("Alice"));
-        props.insert("age".to_string(), json!(30));
+        props.insert("name".to_string(), Value::String("Alice".to_string()));
+        props.insert("age".to_string(), Value::Int(30));
         l0.vertex_properties.insert(Vid::from(1), props);
         let ctx = make_ctx_with_l0(l0);
 
         let result = accumulate_vertex_props(Vid::from(1), Some(&ctx));
         assert!(result.is_some());
         let props = result.unwrap();
-        assert_eq!(props.get("name"), Some(&json!("Alice")));
-        assert_eq!(props.get("age"), Some(&json!(30)));
+        assert_eq!(props.get("name"), Some(&Value::String("Alice".to_string())));
+        assert_eq!(props.get("age"), Some(&Value::Int(30)));
     }
 
     #[test]
@@ -673,13 +673,13 @@ mod tests {
         // Main L0 has older value
         let mut main_l0 = L0Buffer::new(0, None);
         let mut main_props = HashMap::new();
-        main_props.insert("name".to_string(), json!("Alice"));
+        main_props.insert("name".to_string(), Value::String("Alice".to_string()));
         main_l0.vertex_properties.insert(Vid::from(1), main_props);
 
         // Transaction L0 has newer value
         let mut tx_l0 = L0Buffer::new(0, None);
         let mut tx_props = HashMap::new();
-        tx_props.insert("name".to_string(), json!("Bob"));
+        tx_props.insert("name".to_string(), Value::String("Bob".to_string()));
         tx_l0.vertex_properties.insert(Vid::from(1), tx_props);
 
         let ctx = QueryContext::new_with_tx(
@@ -689,10 +689,10 @@ mod tests {
 
         // Single property lookup should return transaction value
         let result = lookup_vertex_prop(Vid::from(1), "name", Some(&ctx));
-        assert_eq!(result, Some(json!("Bob")));
+        assert_eq!(result, Some(Value::String("Bob".to_string())));
 
         // Accumulated props should also have transaction value
         let all_props = accumulate_vertex_props(Vid::from(1), Some(&ctx));
-        assert_eq!(all_props.unwrap().get("name"), Some(&json!("Bob")));
+        assert_eq!(all_props.unwrap().get("name"), Some(&Value::String("Bob".to_string())));
     }
 }

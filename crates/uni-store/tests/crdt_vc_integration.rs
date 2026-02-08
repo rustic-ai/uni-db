@@ -44,11 +44,11 @@ async fn test_vector_clock_integration() -> anyhow::Result<()> {
     let props1 = HashMap::from([
         (
             "vclock".to_string(),
-            serde_json::to_value(Crdt::VectorClock(vc1.clone()))?,
+            uni_common::Value::from(serde_json::to_value(Crdt::VectorClock(vc1.clone()))?),
         ),
         (
             "state".to_string(),
-            serde_json::to_value(Crdt::VCRegister(reg1))?,
+            uni_common::Value::from(serde_json::to_value(Crdt::VCRegister(reg1))?),
         ),
     ]);
 
@@ -70,11 +70,11 @@ async fn test_vector_clock_integration() -> anyhow::Result<()> {
     let props2 = HashMap::from([
         (
             "vclock".to_string(),
-            serde_json::to_value(Crdt::VectorClock(vc2.clone()))?,
+            uni_common::Value::from(serde_json::to_value(Crdt::VectorClock(vc2.clone()))?),
         ),
         (
             "state".to_string(),
-            serde_json::to_value(Crdt::VCRegister(reg2))?,
+            uni_common::Value::from(serde_json::to_value(Crdt::VCRegister(reg2))?),
         ),
     ]);
 
@@ -90,7 +90,7 @@ async fn test_vector_clock_integration() -> anyhow::Result<()> {
     let read_val = prop_manager
         .get_vertex_prop_with_ctx(vid, "state", Some(&query_ctx))
         .await?;
-    let read_crdt: Crdt = serde_json::from_value(read_val.clone())?;
+    let read_crdt: Crdt = serde_json::from_value(serde_json::Value::from(read_val.clone()))?;
 
     if let Crdt::VCRegister(reg) = read_crdt {
         println!("DEBUG: reg value: {:?} clock: {:?}", reg.value, reg.clock);
@@ -114,7 +114,7 @@ async fn test_vector_clock_integration() -> anyhow::Result<()> {
 
     let props3 = HashMap::from([(
         "state".to_string(),
-        serde_json::to_value(Crdt::VCRegister(reg3))?,
+        uni_common::Value::from(serde_json::to_value(Crdt::VCRegister(reg3))?),
     )]);
 
     writer
@@ -138,7 +138,7 @@ async fn test_vector_clock_integration() -> anyhow::Result<()> {
     let read_val_conflict = prop_manager
         .get_vertex_prop_with_ctx(vid, "state", Some(&query_ctx_conflict))
         .await?;
-    let read_crdt_conflict: Crdt = serde_json::from_value(read_val_conflict)?;
+    let read_crdt_conflict: Crdt = serde_json::from_value(serde_json::Value::from(read_val_conflict))?;
 
     if let Crdt::VCRegister(reg) = read_crdt_conflict {
         // Clock should be merged

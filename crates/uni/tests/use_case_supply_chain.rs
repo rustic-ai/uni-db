@@ -54,28 +54,29 @@ async fn test_supply_chain_use_case() -> anyhow::Result<()> {
 
     // Part P1: Resistor (Document mode!)
     let p1_props = HashMap::from([
-        ("sku".to_string(), json!("RES-10K")),
-        ("cost".to_string(), json!(0.05)),
+        ("sku".to_string(), json!("RES-10K").into()),
+        ("cost".to_string(), json!(0.05).into()),
         (
             "_doc".to_string(),
             json!({
                 "type": "resistor",
                 "specs": { "resistance": "10k", "tolerance": "5%" },
                 "compliance": ["RoHS"]
-            }),
+            })
+            .into(),
         ),
     ]);
 
     // Part P2: Motherboard (Contains P1)
     let p2_props = HashMap::from([
-        ("sku".to_string(), json!("MB-X1")),
-        ("cost".to_string(), json!(50.0)),
+        ("sku".to_string(), json!("MB-X1").into()),
+        ("cost".to_string(), json!(50.0).into()),
     ]);
 
     // Part P3: Screen
     let p3_props = HashMap::from([
-        ("sku".to_string(), json!("SCR-OLED")),
-        ("cost".to_string(), json!(30.0)),
+        ("sku".to_string(), json!("SCR-OLED").into()),
+        ("cost".to_string(), json!(30.0).into()),
     ]);
 
     let parts = vec![p1_props, p2_props, p3_props];
@@ -86,8 +87,8 @@ async fn test_supply_chain_use_case() -> anyhow::Result<()> {
 
     // Product: Phone
     let prod_props = HashMap::from([
-        ("name".to_string(), json!("Smartphone X")),
-        ("price".to_string(), json!(500.0)),
+        ("name".to_string(), json!("Smartphone X").into()),
+        ("price".to_string(), json!(500.0).into()),
     ]);
     let prod_vids = db.bulk_insert_vertices("Product", vec![prod_props]).await?;
     let phone = prod_vids[0];

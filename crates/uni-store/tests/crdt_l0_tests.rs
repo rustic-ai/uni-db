@@ -8,37 +8,41 @@
 
 use serde_json::json;
 use uni_common::Properties;
+use uni_common::Value;
 use uni_common::core::id::{Eid, Vid};
 use uni_crdt::{Crdt, GCounter, GSet, VectorClock};
 use uni_store::runtime::L0Buffer;
 
-/// Helper to create a GCounter CRDT JSON value.
-fn gcounter_json(counts: &[(&str, u64)]) -> serde_json::Value {
+/// Helper to create a GCounter CRDT value as uni_common::Value.
+fn gcounter_val(counts: &[(&str, u64)]) -> Value {
     let mut gc = GCounter::new();
     for (actor, count) in counts {
         gc.increment(actor, *count);
     }
-    serde_json::to_value(Crdt::GCounter(gc)).expect("to_value should succeed")
+    let json_val = serde_json::to_value(Crdt::GCounter(gc)).expect("to_value should succeed");
+    json_val.into()
 }
 
-/// Helper to create a GSet CRDT JSON value.
-fn gset_json(elements: &[&str]) -> serde_json::Value {
+/// Helper to create a GSet CRDT value as uni_common::Value.
+fn gset_val(elements: &[&str]) -> Value {
     let mut gs = GSet::new();
     for elem in elements {
         gs.add(elem.to_string());
     }
-    serde_json::to_value(Crdt::GSet(gs)).expect("to_value should succeed")
+    let json_val = serde_json::to_value(Crdt::GSet(gs)).expect("to_value should succeed");
+    json_val.into()
 }
 
-/// Helper to create a VectorClock CRDT JSON value.
-fn vector_clock_json(clocks: &[(&str, usize)]) -> serde_json::Value {
+/// Helper to create a VectorClock CRDT value as uni_common::Value.
+fn vector_clock_val(clocks: &[(&str, usize)]) -> Value {
     let mut vc = VectorClock::new();
     for (actor, count) in clocks {
         for _ in 0..*count {
             vc.increment(actor);
         }
     }
-    serde_json::to_value(Crdt::VectorClock(vc)).expect("to_value should succeed")
+    let json_val = serde_json::to_value(Crdt::VectorClock(vc)).expect("to_value should succeed");
+    json_val.into()
 }
 
 // ============================================================================
@@ -54,18 +58,18 @@ mod gcounter_merge {
         let vid = Vid::new(1);
 
         // First insert: actor1 = 10
-        let props1: Properties = [("counter".to_string(), gcounter_json(&[("actor1", 10)]))].into();
+        let props1: Properties = [("counter".to_string(), gcounter_val(&[("actor1", 10)]))].into();
         l0.insert_vertex(vid, props1);
 
         // Second insert: actor2 = 20 (should merge, not overwrite)
-        let props2: Properties = [("counter".to_string(), gcounter_json(&[("actor2", 20)]))].into();
+        let props2: Properties = [("counter".to_string(), gcounter_val(&[("actor2", 20)]))].into();
         l0.insert_vertex(vid, props2);
 
         // Verify merge: both actors should be present
         let stored = l0.vertex_properties.get(&vid).expect("vertex should exist");
         let counter = stored.get("counter").expect("counter should exist");
 
-        let crdt: Crdt = serde_json::from_value(counter.clone()).expect("should parse as CRDT");
+        let crdt: Crdt = serde_json::from_value(serde_json::Value::from(counter.clone())).expect("should parse as CRDT");
         if let Crdt::GCounter(gc) = crdt {
             assert_eq!(gc.actor_count("actor1"), 10);
             assert_eq!(gc.actor_count("actor2"), 20);
@@ -81,17 +85,17 @@ mod gcounter_merge {
         let vid = Vid::new(1);
 
         // First insert: actor1 = 10
-        let props1: Properties = [("counter".to_string(), gcounter_json(&[("actor1", 10)]))].into();
+        let props1: Properties = [("counter".to_string(), gcounter_val(&[("actor1", 10)]))].into();
         l0.insert_vertex(vid, props1);
 
         // Second insert: actor1 = 15 (should take max)
-        let props2: Properties = [("counter".to_string(), gcounter_json(&[("actor1", 15)]))].into();
+        let props2: Properties = [("counter".to_string(), gcounter_val(&[("actor1", 15)]))].into();
         l0.insert_vertex(vid, props2);
 
         let stored = l0.vertex_properties.get(&vid).expect("vertex should exist");
         let counter = stored.get("counter").expect("counter should exist");
 
-        let crdt: Crdt = serde_json::from_value(counter.clone()).expect("should parse as CRDT");
+        let crdt: Crdt = serde_json::from_value(serde_json::Value::from(counter.clone())).expect("should parse as CRDT");
         if let Crdt::GCounter(gc) = crdt {
             assert_eq!(gc.actor_count("actor1"), 15); // max(10, 15)
             assert_eq!(gc.value(), 15);
@@ -110,7 +114,7 @@ mod gcounter_merge {
             let actor = format!("actor{}", i);
             let props: Properties = [(
                 "counter".to_string(),
-                gcounter_json(&[(&actor, (i + 1) as u64 * 10)]),
+                gcounter_val(&[(&actor, (i + 1) as u64 * 10)]),
             )]
             .into();
             l0.insert_vertex(vid, props);
@@ -119,7 +123,7 @@ mod gcounter_merge {
         let stored = l0.vertex_properties.get(&vid).expect("vertex should exist");
         let counter = stored.get("counter").expect("counter should exist");
 
-        let crdt: Crdt = serde_json::from_value(counter.clone()).expect("should parse as CRDT");
+        let crdt: Crdt = serde_json::from_value(serde_json::Value::from(counter.clone())).expect("should parse as CRDT");
         if let Crdt::GCounter(gc) = crdt {
             // 10 + 20 + 30 + 40 + 50 = 150
             assert_eq!(gc.value(), 150);
@@ -142,17 +146,17 @@ mod gset_merge {
         let vid = Vid::new(1);
 
         // First insert: {a, b}
-        let props1: Properties = [("items".to_string(), gset_json(&["a", "b"]))].into();
+        let props1: Properties = [("items".to_string(), gset_val(&["a", "b"]))].into();
         l0.insert_vertex(vid, props1);
 
         // Second insert: {c, d} (should merge to {a, b, c, d})
-        let props2: Properties = [("items".to_string(), gset_json(&["c", "d"]))].into();
+        let props2: Properties = [("items".to_string(), gset_val(&["c", "d"]))].into();
         l0.insert_vertex(vid, props2);
 
         let stored = l0.vertex_properties.get(&vid).expect("vertex should exist");
         let items = stored.get("items").expect("items should exist");
 
-        let crdt: Crdt = serde_json::from_value(items.clone()).expect("should parse as CRDT");
+        let crdt: Crdt = serde_json::from_value(serde_json::Value::from(items.clone())).expect("should parse as CRDT");
         if let Crdt::GSet(gs) = crdt {
             assert_eq!(gs.len(), 4);
             assert!(gs.contains(&"a".to_string()));
@@ -170,17 +174,17 @@ mod gset_merge {
         let vid = Vid::new(1);
 
         // First insert: {a, b}
-        let props1: Properties = [("items".to_string(), gset_json(&["a", "b"]))].into();
+        let props1: Properties = [("items".to_string(), gset_val(&["a", "b"]))].into();
         l0.insert_vertex(vid, props1);
 
         // Second insert: {b, c} (b overlaps)
-        let props2: Properties = [("items".to_string(), gset_json(&["b", "c"]))].into();
+        let props2: Properties = [("items".to_string(), gset_val(&["b", "c"]))].into();
         l0.insert_vertex(vid, props2);
 
         let stored = l0.vertex_properties.get(&vid).expect("vertex should exist");
         let items = stored.get("items").expect("items should exist");
 
-        let crdt: Crdt = serde_json::from_value(items.clone()).expect("should parse as CRDT");
+        let crdt: Crdt = serde_json::from_value(serde_json::Value::from(items.clone())).expect("should parse as CRDT");
         if let Crdt::GSet(gs) = crdt {
             assert_eq!(gs.len(), 3); // {a, b, c}
         } else {
@@ -202,17 +206,17 @@ mod vector_clock_merge {
         let vid = Vid::new(1);
 
         // First insert: {node1: 2}
-        let props1: Properties = [("clock".to_string(), vector_clock_json(&[("node1", 2)]))].into();
+        let props1: Properties = [("clock".to_string(), vector_clock_val(&[("node1", 2)]))].into();
         l0.insert_vertex(vid, props1);
 
         // Second insert: {node2: 3}
-        let props2: Properties = [("clock".to_string(), vector_clock_json(&[("node2", 3)]))].into();
+        let props2: Properties = [("clock".to_string(), vector_clock_val(&[("node2", 3)]))].into();
         l0.insert_vertex(vid, props2);
 
         let stored = l0.vertex_properties.get(&vid).expect("vertex should exist");
         let clock = stored.get("clock").expect("clock should exist");
 
-        let crdt: Crdt = serde_json::from_value(clock.clone()).expect("should parse as CRDT");
+        let crdt: Crdt = serde_json::from_value(serde_json::Value::from(clock.clone())).expect("should parse as CRDT");
         if let Crdt::VectorClock(vc) = crdt {
             assert_eq!(vc.get("node1"), 2);
             assert_eq!(vc.get("node2"), 3);
@@ -229,7 +233,7 @@ mod vector_clock_merge {
         // First insert: {node1: 5, node2: 2}
         let props1: Properties = [(
             "clock".to_string(),
-            vector_clock_json(&[("node1", 5), ("node2", 2)]),
+            vector_clock_val(&[("node1", 5), ("node2", 2)]),
         )]
         .into();
         l0.insert_vertex(vid, props1);
@@ -237,7 +241,7 @@ mod vector_clock_merge {
         // Second insert: {node1: 3, node2: 4}
         let props2: Properties = [(
             "clock".to_string(),
-            vector_clock_json(&[("node1", 3), ("node2", 4)]),
+            vector_clock_val(&[("node1", 3), ("node2", 4)]),
         )]
         .into();
         l0.insert_vertex(vid, props2);
@@ -245,7 +249,7 @@ mod vector_clock_merge {
         let stored = l0.vertex_properties.get(&vid).expect("vertex should exist");
         let clock = stored.get("clock").expect("clock should exist");
 
-        let crdt: Crdt = serde_json::from_value(clock.clone()).expect("should parse as CRDT");
+        let crdt: Crdt = serde_json::from_value(serde_json::Value::from(clock.clone())).expect("should parse as CRDT");
         if let Crdt::VectorClock(vc) = crdt {
             assert_eq!(vc.get("node1"), 5); // max(5, 3)
             assert_eq!(vc.get("node2"), 4); // max(2, 4)
@@ -269,16 +273,16 @@ mod mixed_properties {
 
         // First insert: CRDT counter + regular name
         let props1: Properties = [
-            ("counter".to_string(), gcounter_json(&[("a", 10)])),
-            ("name".to_string(), json!("Alice")),
+            ("counter".to_string(), gcounter_val(&[("a", 10)])),
+            ("name".to_string(), Value::String("Alice".to_string())),
         ]
         .into();
         l0.insert_vertex(vid, props1);
 
         // Second insert: Different CRDT counter + different name
         let props2: Properties = [
-            ("counter".to_string(), gcounter_json(&[("b", 20)])),
-            ("name".to_string(), json!("Bob")),
+            ("counter".to_string(), gcounter_val(&[("b", 20)])),
+            ("name".to_string(), Value::String("Bob".to_string())),
         ]
         .into();
         l0.insert_vertex(vid, props2);
@@ -287,7 +291,7 @@ mod mixed_properties {
 
         // CRDT should be merged
         let counter = stored.get("counter").expect("counter should exist");
-        let crdt: Crdt = serde_json::from_value(counter.clone()).expect("should parse as CRDT");
+        let crdt: Crdt = serde_json::from_value(serde_json::Value::from(counter.clone())).expect("should parse as CRDT");
         if let Crdt::GCounter(gc) = crdt {
             assert_eq!(gc.value(), 30); // 10 + 20 merged
         } else {
@@ -296,7 +300,7 @@ mod mixed_properties {
 
         // Regular property should be overwritten
         let name = stored.get("name").expect("name should exist");
-        assert_eq!(name, &json!("Bob"));
+        assert_eq!(name, &Value::String("Bob".to_string()));
     }
 
     #[test]
@@ -306,16 +310,16 @@ mod mixed_properties {
 
         // First insert: counter + items
         let props1: Properties = [
-            ("counter".to_string(), gcounter_json(&[("a", 10)])),
-            ("items".to_string(), gset_json(&["x", "y"])),
+            ("counter".to_string(), gcounter_val(&[("a", 10)])),
+            ("items".to_string(), gset_val(&["x", "y"])),
         ]
         .into();
         l0.insert_vertex(vid, props1);
 
         // Second insert: different counter + different items
         let props2: Properties = [
-            ("counter".to_string(), gcounter_json(&[("b", 20)])),
-            ("items".to_string(), gset_json(&["z"])),
+            ("counter".to_string(), gcounter_val(&[("b", 20)])),
+            ("items".to_string(), gset_val(&["z"])),
         ]
         .into();
         l0.insert_vertex(vid, props2);
@@ -324,7 +328,7 @@ mod mixed_properties {
 
         // Counter should be merged
         let counter = stored.get("counter").unwrap();
-        let crdt: Crdt = serde_json::from_value(counter.clone()).unwrap();
+        let crdt: Crdt = serde_json::from_value(serde_json::Value::from(counter.clone())).unwrap();
         if let Crdt::GCounter(gc) = crdt {
             assert_eq!(gc.value(), 30);
         } else {
@@ -333,7 +337,7 @@ mod mixed_properties {
 
         // Items should be merged
         let items = stored.get("items").unwrap();
-        let crdt: Crdt = serde_json::from_value(items.clone()).unwrap();
+        let crdt: Crdt = serde_json::from_value(serde_json::Value::from(items.clone())).unwrap();
         if let Crdt::GSet(gs) = crdt {
             assert_eq!(gs.len(), 3); // {x, y, z}
         } else {
@@ -355,18 +359,18 @@ mod type_mismatch {
         let vid = Vid::new(1);
 
         // First insert: GCounter
-        let props1: Properties = [("prop".to_string(), gcounter_json(&[("a", 10)]))].into();
+        let props1: Properties = [("prop".to_string(), gcounter_val(&[("a", 10)]))].into();
         l0.insert_vertex(vid, props1);
 
         // Second insert: GSet (type mismatch, should overwrite)
-        let props2: Properties = [("prop".to_string(), gset_json(&["x", "y"]))].into();
+        let props2: Properties = [("prop".to_string(), gset_val(&["x", "y"]))].into();
         l0.insert_vertex(vid, props2);
 
         let stored = l0.vertex_properties.get(&vid).expect("vertex should exist");
         let prop = stored.get("prop").expect("prop should exist");
 
         // Should now be a GSet (overwrite)
-        let crdt: Crdt = serde_json::from_value(prop.clone()).expect("should parse as CRDT");
+        let crdt: Crdt = serde_json::from_value(serde_json::Value::from(prop.clone())).expect("should parse as CRDT");
         assert!(matches!(crdt, Crdt::GSet(_)));
     }
 
@@ -376,17 +380,17 @@ mod type_mismatch {
         let vid = Vid::new(1);
 
         // First insert: regular value
-        let props1: Properties = [("prop".to_string(), json!(42))].into();
+        let props1: Properties = [("prop".to_string(), Value::Int(42))].into();
         l0.insert_vertex(vid, props1);
 
         // Second insert: CRDT (should overwrite since first was not CRDT)
-        let props2: Properties = [("prop".to_string(), gcounter_json(&[("a", 10)]))].into();
+        let props2: Properties = [("prop".to_string(), gcounter_val(&[("a", 10)]))].into();
         l0.insert_vertex(vid, props2);
 
         let stored = l0.vertex_properties.get(&vid).expect("vertex should exist");
         let prop = stored.get("prop").expect("prop should exist");
 
-        let crdt: Crdt = serde_json::from_value(prop.clone()).expect("should parse as CRDT");
+        let crdt: Crdt = serde_json::from_value(serde_json::Value::from(prop.clone())).expect("should parse as CRDT");
         if let Crdt::GCounter(gc) = crdt {
             assert_eq!(gc.value(), 10);
         } else {
@@ -410,11 +414,11 @@ mod buffer_merge {
         let vid = Vid::new(1);
 
         // Main L0: actor1 = 10
-        let props1: Properties = [("counter".to_string(), gcounter_json(&[("actor1", 10)]))].into();
+        let props1: Properties = [("counter".to_string(), gcounter_val(&[("actor1", 10)]))].into();
         main_l0.insert_vertex(vid, props1);
 
         // Transaction L0: actor2 = 20
-        let props2: Properties = [("counter".to_string(), gcounter_json(&[("actor2", 20)]))].into();
+        let props2: Properties = [("counter".to_string(), gcounter_val(&[("actor2", 20)]))].into();
         tx_l0.insert_vertex(vid, props2);
 
         // Merge tx into main
@@ -426,7 +430,7 @@ mod buffer_merge {
             .expect("vertex should exist");
         let counter = stored.get("counter").expect("counter should exist");
 
-        let crdt: Crdt = serde_json::from_value(counter.clone()).expect("should parse as CRDT");
+        let crdt: Crdt = serde_json::from_value(serde_json::Value::from(counter.clone())).expect("should parse as CRDT");
         if let Crdt::GCounter(gc) = crdt {
             assert_eq!(gc.actor_count("actor1"), 10);
             assert_eq!(gc.actor_count("actor2"), 20);
@@ -449,17 +453,17 @@ mod buffer_merge {
         // Main L0: vid1 with counter
         main_l0.insert_vertex(
             vid1,
-            [("counter".to_string(), gcounter_json(&[("a", 10)]))].into(),
+            [("counter".to_string(), gcounter_val(&[("a", 10)]))].into(),
         );
 
         // Transaction L0: vid1 with different counter, vid2 new
         tx_l0.insert_vertex(
             vid1,
-            [("counter".to_string(), gcounter_json(&[("b", 20)]))].into(),
+            [("counter".to_string(), gcounter_val(&[("b", 20)]))].into(),
         );
         tx_l0.insert_vertex(
             vid2,
-            [("counter".to_string(), gcounter_json(&[("c", 30)]))].into(),
+            [("counter".to_string(), gcounter_val(&[("c", 30)]))].into(),
         );
 
         main_l0.merge(&tx_l0)?;
@@ -467,7 +471,7 @@ mod buffer_merge {
         // vid1 should have merged counter
         let stored1 = main_l0.vertex_properties.get(&vid1).unwrap();
         let counter1 = stored1.get("counter").unwrap();
-        let crdt1: Crdt = serde_json::from_value(counter1.clone()).unwrap();
+        let crdt1: Crdt = serde_json::from_value(serde_json::Value::from(counter1.clone())).unwrap();
         if let Crdt::GCounter(gc) = crdt1 {
             assert_eq!(gc.value(), 30); // 10 + 20
         } else {
@@ -477,7 +481,7 @@ mod buffer_merge {
         // vid2 should have new counter
         let stored2 = main_l0.vertex_properties.get(&vid2).unwrap();
         let counter2 = stored2.get("counter").unwrap();
-        let crdt2: Crdt = serde_json::from_value(counter2.clone()).unwrap();
+        let crdt2: Crdt = serde_json::from_value(serde_json::Value::from(counter2.clone())).unwrap();
         if let Crdt::GCounter(gc) = crdt2 {
             assert_eq!(gc.value(), 30);
         } else {
@@ -508,7 +512,7 @@ mod edge_crdt {
             vid_b,
             1, // edge_type
             eid,
-            [("weight".to_string(), gcounter_json(&[("a", 5)]))].into(),
+            [("weight".to_string(), gcounter_val(&[("a", 5)]))].into(),
         )
         .expect("insert should succeed");
 
@@ -518,14 +522,14 @@ mod edge_crdt {
             vid_b,
             1, // edge_type
             eid,
-            [("weight".to_string(), gcounter_json(&[("b", 10)]))].into(),
+            [("weight".to_string(), gcounter_val(&[("b", 10)]))].into(),
         )
         .expect("insert should succeed");
 
         let stored = l0.edge_properties.get(&eid).expect("edge should exist");
         let weight = stored.get("weight").expect("weight should exist");
 
-        let crdt: Crdt = serde_json::from_value(weight.clone()).expect("should parse as CRDT");
+        let crdt: Crdt = serde_json::from_value(serde_json::Value::from(weight.clone())).expect("should parse as CRDT");
         if let Crdt::GCounter(gc) = crdt {
             assert_eq!(gc.value(), 15); // 5 + 10
         } else {
@@ -550,19 +554,21 @@ mod wal_replay {
         // Simulate WAL replay with sequential CRDT mutations
         l0.replay_mutations(vec![Mutation::InsertVertex {
             vid,
-            properties: [("counter".to_string(), gcounter_json(&[("node1", 5)]))].into(),
+            properties: [("counter".to_string(), gcounter_val(&[("node1", 5)]))].into(),
         }])?;
 
         l0.replay_mutations(vec![Mutation::InsertVertex {
             vid,
-            properties: [("counter".to_string(), gcounter_json(&[("node2", 3)]))].into(),
+            properties: [("counter".to_string(), gcounter_val(&[("node2", 3)]))].into(),
         }])?;
 
         let stored = l0.vertex_properties.get(&vid).expect("vertex should exist");
         let counter = stored.get("counter").expect("counter should exist");
 
+        // Convert back to serde_json::Value for nested access
+        let counter_json: serde_json::Value = counter.clone().into();
         // Verify CRDT was merged
-        let data = counter.get("d").unwrap();
+        let data = counter_json.get("d").unwrap();
         let counts = data.get("counts").unwrap();
         assert_eq!(counts.get("node1"), Some(&json!(5)));
         assert_eq!(counts.get("node2"), Some(&json!(3)));

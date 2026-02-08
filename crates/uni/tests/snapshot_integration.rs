@@ -44,13 +44,13 @@ async fn test_snapshot_creation_on_flush() -> anyhow::Result<()> {
     let eid = writer.next_eid(knows_type).await?;
 
     let mut p1 = HashMap::new();
-    p1.insert("name".to_string(), serde_json::json!("Alice"));
+    p1.insert("name".to_string(), serde_json::json!("Alice").into());
     writer
         .insert_vertex_with_labels(vid_a, p1, vec!["Person".to_string()])
         .await?;
 
     let mut p2 = HashMap::new();
-    p2.insert("name".to_string(), serde_json::json!("Bob"));
+    p2.insert("name".to_string(), serde_json::json!("Bob").into());
     writer
         .insert_vertex_with_labels(vid_b, p2, vec!["Person".to_string()])
         .await?;
@@ -89,7 +89,7 @@ async fn test_snapshot_creation_on_flush() -> anyhow::Result<()> {
     let vid_c = writer.next_vid().await?;
     let eid2 = writer.next_eid(knows_type).await?;
     let mut p3 = HashMap::new();
-    p3.insert("name".to_string(), serde_json::json!("Charlie"));
+    p3.insert("name".to_string(), serde_json::json!("Charlie").into());
     writer
         .insert_vertex_with_labels(vid_c, p3, vec!["Person".to_string()])
         .await?;

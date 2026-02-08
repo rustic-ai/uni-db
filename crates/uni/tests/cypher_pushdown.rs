@@ -136,13 +136,13 @@ async fn test_pushdown_execution() -> anyhow::Result<()> {
         let mut w = writer.write().await;
         let v1 = w.next_vid().await?;
         let mut p1 = std::collections::HashMap::new();
-        p1.insert("name".to_string(), json!("Alice"));
+        p1.insert("name".to_string(), json!("Alice").into());
         w.insert_vertex_with_labels(v1, p1, vec!["Person".to_string()])
             .await?;
 
         let v2 = w.next_vid().await?;
         let mut p2 = std::collections::HashMap::new();
-        p2.insert("name".to_string(), json!("Bob"));
+        p2.insert("name".to_string(), json!("Bob").into());
         w.insert_vertex_with_labels(v2, p2, vec!["Person".to_string()])
             .await?;
 
@@ -195,19 +195,19 @@ async fn test_or_pushdown_execution() -> anyhow::Result<()> {
         let mut w = writer.write().await;
         let v1 = w.next_vid().await?;
         let mut p1 = std::collections::HashMap::new();
-        p1.insert("status".to_string(), json!("active"));
+        p1.insert("status".to_string(), json!("active").into());
         w.insert_vertex_with_labels(v1, p1, vec!["Person".to_string()])
             .await?;
 
         let v2 = w.next_vid().await?;
         let mut p2 = std::collections::HashMap::new();
-        p2.insert("status".to_string(), json!("pending"));
+        p2.insert("status".to_string(), json!("pending").into());
         w.insert_vertex_with_labels(v2, p2, vec!["Person".to_string()])
             .await?;
 
         let v3 = w.next_vid().await?;
         let mut p3 = std::collections::HashMap::new();
-        p3.insert("status".to_string(), json!("archived"));
+        p3.insert("status".to_string(), json!("archived").into());
         w.insert_vertex_with_labels(v3, p3, vec!["Person".to_string()])
             .await?;
 
@@ -264,7 +264,7 @@ async fn test_is_null_execution() -> anyhow::Result<()> {
         // v1: has email
         let v1 = w.next_vid().await?;
         let mut p1 = std::collections::HashMap::new();
-        p1.insert("email".to_string(), json!("alice@example.com"));
+        p1.insert("email".to_string(), json!("alice@example.com").into());
         w.insert_vertex_with_labels(v1, p1, vec!["Person".to_string()])
             .await?;
 
@@ -346,19 +346,19 @@ async fn test_traverse_target_pushdown() -> anyhow::Result<()> {
         // Insert ALL vertices - v1 was missing before!
         w.insert_vertex_with_labels(
             v1,
-            [("name".to_string(), json!("Source"))].into(),
+            [("name".to_string(), json!("Source").into())].into(),
             vec!["Person".to_string()],
         )
         .await?;
         w.insert_vertex_with_labels(
             v2,
-            [("age".to_string(), json!(25))].into(),
+            [("age".to_string(), json!(25).into())].into(),
             vec!["Person".to_string()],
         )
         .await?;
         w.insert_vertex_with_labels(
             v3,
-            [("age".to_string(), json!(35))].into(),
+            [("age".to_string(), json!(35).into())].into(),
             vec!["Person".to_string()],
         )
         .await?;
@@ -460,9 +460,9 @@ async fn test_apply_input_filter_pushdown() -> anyhow::Result<()> {
         w.insert_vertex_with_labels(
             alice,
             [
-                ("name".to_string(), json!("Alice")),
-                ("status".to_string(), json!("active")),
-                ("score".to_string(), json!(100)),
+                ("name".to_string(), json!("Alice").into()),
+                ("status".to_string(), json!("active").into()),
+                ("score".to_string(), json!(100).into()),
             ]
             .into(),
             vec!["Person".to_string()],
@@ -471,9 +471,9 @@ async fn test_apply_input_filter_pushdown() -> anyhow::Result<()> {
         w.insert_vertex_with_labels(
             bob,
             [
-                ("name".to_string(), json!("Bob")),
-                ("status".to_string(), json!("inactive")),
-                ("score".to_string(), json!(200)),
+                ("name".to_string(), json!("Bob").into()),
+                ("status".to_string(), json!("inactive").into()),
+                ("score".to_string(), json!(200).into()),
             ]
             .into(),
             vec!["Person".to_string()],
@@ -482,9 +482,9 @@ async fn test_apply_input_filter_pushdown() -> anyhow::Result<()> {
         w.insert_vertex_with_labels(
             charlie,
             [
-                ("name".to_string(), json!("Charlie")),
-                ("status".to_string(), json!("active")),
-                ("score".to_string(), json!(150)),
+                ("name".to_string(), json!("Charlie").into()),
+                ("status".to_string(), json!("active").into()),
+                ("score".to_string(), json!(150).into()),
             ]
             .into(),
             vec!["Person".to_string()],
@@ -581,8 +581,8 @@ async fn test_call_subquery_input_filter_pushdown() -> anyhow::Result<()> {
         w.insert_vertex_with_labels(
             alice,
             [
-                ("name".to_string(), json!("Alice")),
-                ("age".to_string(), json!(25)),
+                ("name".to_string(), json!("Alice").into()),
+                ("age".to_string(), json!(25).into()),
             ]
             .into(),
             vec!["Person".to_string()],
@@ -591,8 +591,8 @@ async fn test_call_subquery_input_filter_pushdown() -> anyhow::Result<()> {
         w.insert_vertex_with_labels(
             bob,
             [
-                ("name".to_string(), json!("Bob")),
-                ("age".to_string(), json!(35)),
+                ("name".to_string(), json!("Bob").into()),
+                ("age".to_string(), json!(35).into()),
             ]
             .into(),
             vec!["Person".to_string()],
@@ -601,8 +601,8 @@ async fn test_call_subquery_input_filter_pushdown() -> anyhow::Result<()> {
         w.insert_vertex_with_labels(
             charlie,
             [
-                ("name".to_string(), json!("Charlie")),
-                ("age".to_string(), json!(45)),
+                ("name".to_string(), json!("Charlie").into()),
+                ("age".to_string(), json!(45).into()),
             ]
             .into(),
             vec!["Person".to_string()],

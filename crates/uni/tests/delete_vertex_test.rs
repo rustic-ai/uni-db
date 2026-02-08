@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2024-2026 Dragonscale Team
 
-use serde_json::json;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tempfile::tempdir;
@@ -9,6 +8,7 @@ use uni_db::core::schema::{DataType, SchemaManager};
 use uni_db::runtime::property_manager::PropertyManager;
 use uni_db::runtime::writer::Writer;
 use uni_db::storage::manager::StorageManager;
+use uni_db::Value;
 
 #[tokio::test]
 async fn test_delete_vertex_persistence() -> anyhow::Result<()> {
@@ -35,7 +35,7 @@ async fn test_delete_vertex_persistence() -> anyhow::Result<()> {
     // 2. Insert Vertex
     let vid = writer.next_vid().await?;
     let mut props = HashMap::new();
-    props.insert("name".to_string(), json!("Alice"));
+    props.insert("name".to_string(), Value::String("Alice".to_string()));
     writer
         .insert_vertex_with_labels(vid, props, vec!["Person".to_string()])
         .await?;

@@ -425,7 +425,7 @@ fn build_result_row(
     vid: Vid,
     ext_id: &str,
     label: &str,
-    props: &HashMap<String, serde_json::Value>,
+    props: &HashMap<String, uni_common::Value>,
     _variable: &str,
     properties: &[String],
     schema: &SchemaRef,
@@ -450,8 +450,8 @@ fn build_result_row(
         let mut builder = StringBuilder::new();
         if let Some(val) = props.get(prop) {
             match val {
-                serde_json::Value::String(s) => builder.append_value(s),
-                serde_json::Value::Null => builder.append_null(),
+                uni_common::Value::String(s) => builder.append_value(s),
+                uni_common::Value::Null => builder.append_null(),
                 other => builder.append_value(other.to_string()),
             }
         } else {

@@ -8,43 +8,46 @@
 
 use object_store::local::LocalFileSystem;
 use object_store::path::Path as ObjectStorePath;
-use serde_json::json;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tempfile::tempdir;
+use uni_common::Value;
 use uni_common::core::schema::{CrdtType, DataType, SchemaManager};
 use uni_crdt::{Crdt, GCounter, GSet, VectorClock};
 use uni_store::runtime::property_manager::PropertyManager;
 use uni_store::runtime::writer::Writer;
 use uni_store::storage::manager::StorageManager;
 
-/// Helper to create a GCounter CRDT JSON value.
-fn gcounter_json(counts: &[(&str, u64)]) -> serde_json::Value {
+/// Helper to create a GCounter CRDT value as uni_common::Value.
+fn gcounter_val(counts: &[(&str, u64)]) -> Value {
     let mut gc = GCounter::new();
     for (actor, count) in counts {
         gc.increment(actor, *count);
     }
-    serde_json::to_value(Crdt::GCounter(gc)).expect("to_value should succeed")
+    let json_val = serde_json::to_value(Crdt::GCounter(gc)).expect("to_value should succeed");
+    json_val.into()
 }
 
-/// Helper to create a GSet CRDT JSON value.
-fn gset_json(elements: &[&str]) -> serde_json::Value {
+/// Helper to create a GSet CRDT value as uni_common::Value.
+fn gset_val(elements: &[&str]) -> Value {
     let mut gs = GSet::new();
     for elem in elements {
         gs.add(elem.to_string());
     }
-    serde_json::to_value(Crdt::GSet(gs)).expect("to_value should succeed")
+    let json_val = serde_json::to_value(Crdt::GSet(gs)).expect("to_value should succeed");
+    json_val.into()
 }
 
-/// Helper to create a VectorClock CRDT JSON value.
-fn vector_clock_json(clocks: &[(&str, usize)]) -> serde_json::Value {
+/// Helper to create a VectorClock CRDT value as uni_common::Value.
+fn vector_clock_val(clocks: &[(&str, usize)]) -> Value {
     let mut vc = VectorClock::new();
     for (actor, count) in clocks {
         for _ in 0..*count {
             vc.increment(actor);
         }
     }
-    serde_json::to_value(Crdt::VectorClock(vc)).expect("to_value should succeed")
+    let json_val = serde_json::to_value(Crdt::VectorClock(vc)).expect("to_value should succeed");
+    json_val.into()
 }
 
 // ============================================================================
@@ -83,14 +86,14 @@ mod basic_compaction {
         let vid = writer.next_vid().await?;
 
         // Version 1: actor1 = 10
-        let props1 = HashMap::from([("count".to_string(), gcounter_json(&[("actor1", 10)]))]);
+        let props1 = HashMap::from([("count".to_string(), gcounter_val(&[("actor1", 10)]))]);
         let _ = writer
             .insert_vertex_with_labels(vid, props1, vec!["Counter".to_string()])
             .await?;
         writer.flush_to_l1(None).await?;
 
         // Version 2: actor2 = 20
-        let props2 = HashMap::from([("count".to_string(), gcounter_json(&[("actor2", 20)]))]);
+        let props2 = HashMap::from([("count".to_string(), gcounter_val(&[("actor2", 20)]))]);
         let _ = writer
             .insert_vertex_with_labels(vid, props2, vec!["Counter".to_string()])
             .await?;
@@ -98,7 +101,7 @@ mod basic_compaction {
 
         // Read and verify merge
         let result = prop_manager.get_vertex_prop(vid, "count").await?;
-        let crdt: Crdt = serde_json::from_value(result)?;
+        let crdt: Crdt = serde_json::from_value(serde_json::Value::from(result))?;
 
         if let Crdt::GCounter(gc) = crdt {
             assert_eq!(gc.actor_count("actor1"), 10);
@@ -143,7 +146,7 @@ mod basic_compaction {
             let actor = format!("actor{}", i);
             let props = HashMap::from([(
                 "count".to_string(),
-                gcounter_json(&[(&actor, (i + 1) as u64 * 10)]),
+                gcounter_val(&[(&actor, (i + 1) as u64 * 10)]),
             )]);
             let _ = writer
                 .insert_vertex_with_labels(vid, props, vec!["Counter".to_string()])
@@ -153,7 +156,7 @@ mod basic_compaction {
 
         // Read and verify all actors are merged
         let result = prop_manager.get_vertex_prop(vid, "count").await?;
-        let crdt: Crdt = serde_json::from_value(result)?;
+        let crdt: Crdt = serde_json::from_value(serde_json::Value::from(result))?;
 
         if let Crdt::GCounter(gc) = crdt {
             // 10 + 20 + 30 = 60
@@ -200,7 +203,7 @@ mod tombstone_handling {
         let vid = writer.next_vid().await?;
 
         // Create vertex with CRDT
-        let props = HashMap::from([("count".to_string(), gcounter_json(&[("actor1", 100)]))]);
+        let props = HashMap::from([("count".to_string(), gcounter_val(&[("actor1", 100)]))]);
         let _ = writer
             .insert_vertex_with_labels(vid, props, vec!["Counter".to_string()])
             .await?;
@@ -262,8 +265,8 @@ mod multiple_crdt_types {
 
         // First flush: partial CRDTs
         let props1 = HashMap::from([
-            ("counter".to_string(), gcounter_json(&[("a", 10)])),
-            ("items".to_string(), gset_json(&["x", "y"])),
+            ("counter".to_string(), gcounter_val(&[("a", 10)])),
+            ("items".to_string(), gset_val(&["x", "y"])),
         ]);
         let _ = writer
             .insert_vertex_with_labels(vid, props1, vec!["MultiCrdt".to_string()])
@@ -272,9 +275,9 @@ mod multiple_crdt_types {
 
         // Second flush: more CRDTs
         let props2 = HashMap::from([
-            ("counter".to_string(), gcounter_json(&[("b", 20)])),
-            ("items".to_string(), gset_json(&["z"])),
-            ("clock".to_string(), vector_clock_json(&[("n1", 2)])),
+            ("counter".to_string(), gcounter_val(&[("b", 20)])),
+            ("items".to_string(), gset_val(&["z"])),
+            ("clock".to_string(), vector_clock_val(&[("n1", 2)])),
         ]);
         let _ = writer
             .insert_vertex_with_labels(vid, props2, vec!["MultiCrdt".to_string()])
@@ -283,7 +286,7 @@ mod multiple_crdt_types {
 
         // Verify all CRDTs merged correctly
         let counter = prop_manager.get_vertex_prop(vid, "counter").await?;
-        let crdt: Crdt = serde_json::from_value(counter)?;
+        let crdt: Crdt = serde_json::from_value(serde_json::Value::from(counter))?;
         if let Crdt::GCounter(gc) = crdt {
             assert_eq!(gc.value(), 30);
         } else {
@@ -291,7 +294,7 @@ mod multiple_crdt_types {
         }
 
         let items = prop_manager.get_vertex_prop(vid, "items").await?;
-        let crdt: Crdt = serde_json::from_value(items)?;
+        let crdt: Crdt = serde_json::from_value(serde_json::Value::from(items))?;
         if let Crdt::GSet(gs) = crdt {
             assert_eq!(gs.len(), 3); // {x, y, z}
         } else {
@@ -299,7 +302,7 @@ mod multiple_crdt_types {
         }
 
         let clock = prop_manager.get_vertex_prop(vid, "clock").await?;
-        let crdt: Crdt = serde_json::from_value(clock)?;
+        let crdt: Crdt = serde_json::from_value(serde_json::Value::from(clock))?;
         if let Crdt::VectorClock(vc) = crdt {
             assert_eq!(vc.get("n1"), 2);
         } else {
@@ -348,9 +351,9 @@ mod mixed_properties {
 
         // First write
         let props1 = HashMap::from([
-            ("counter".to_string(), gcounter_json(&[("a", 10)])),
-            ("name".to_string(), json!("Alice")),
-            ("score".to_string(), json!(100)),
+            ("counter".to_string(), gcounter_val(&[("a", 10)])),
+            ("name".to_string(), Value::String("Alice".to_string())),
+            ("score".to_string(), Value::Int(100)),
         ]);
         let _ = writer
             .insert_vertex_with_labels(vid, props1, vec!["MixedNode".to_string()])
@@ -359,9 +362,9 @@ mod mixed_properties {
 
         // Second write
         let props2 = HashMap::from([
-            ("counter".to_string(), gcounter_json(&[("b", 20)])),
-            ("name".to_string(), json!("Bob")),
-            ("score".to_string(), json!(200)),
+            ("counter".to_string(), gcounter_val(&[("b", 20)])),
+            ("name".to_string(), Value::String("Bob".to_string())),
+            ("score".to_string(), Value::Int(200)),
         ]);
         let _ = writer
             .insert_vertex_with_labels(vid, props2, vec!["MixedNode".to_string()])
@@ -370,7 +373,7 @@ mod mixed_properties {
 
         // CRDT should be merged
         let counter = prop_manager.get_vertex_prop(vid, "counter").await?;
-        let crdt: Crdt = serde_json::from_value(counter)?;
+        let crdt: Crdt = serde_json::from_value(serde_json::Value::from(counter))?;
         if let Crdt::GCounter(gc) = crdt {
             assert_eq!(gc.value(), 30); // 10 + 20
         } else {
@@ -379,10 +382,10 @@ mod mixed_properties {
 
         // Non-CRDT properties should use LWW (latest value)
         let name = prop_manager.get_vertex_prop(vid, "name").await?;
-        assert_eq!(name, json!("Bob"));
+        assert_eq!(name, Value::String("Bob".to_string()));
 
         let score = prop_manager.get_vertex_prop(vid, "score").await?;
-        assert_eq!(score, json!(200));
+        assert_eq!(score, Value::Int(200));
 
         Ok(())
     }
@@ -431,7 +434,7 @@ mod large_scale {
             let value = (i + 1) as u64 * 10;
             expected_total += value;
 
-            let props = HashMap::from([("count".to_string(), gcounter_json(&[(&actor, value)]))]);
+            let props = HashMap::from([("count".to_string(), gcounter_val(&[(&actor, value)]))]);
             let _ = writer
                 .insert_vertex_with_labels(vid, props, vec!["Counter".to_string()])
                 .await?;
@@ -440,7 +443,7 @@ mod large_scale {
 
         // Verify all actors merged
         let result = prop_manager.get_vertex_prop(vid, "count").await?;
-        let crdt: Crdt = serde_json::from_value(result)?;
+        let crdt: Crdt = serde_json::from_value(serde_json::Value::from(result))?;
 
         if let Crdt::GCounter(gc) = crdt {
             assert_eq!(gc.value(), expected_total);
@@ -508,14 +511,14 @@ mod edge_compaction {
 
         // Create edge with CRDT weight
         let eid = writer.next_eid(edge_type).await?;
-        let props1 = HashMap::from([("weight".to_string(), gcounter_json(&[("a", 5)]))]);
+        let props1 = HashMap::from([("weight".to_string(), gcounter_val(&[("a", 5)]))]);
         writer
             .insert_edge(vid_a, vid_b, edge_type, eid, props1)
             .await?;
         writer.flush_to_l1(None).await?;
 
         // Update edge weight
-        let props2 = HashMap::from([("weight".to_string(), gcounter_json(&[("b", 10)]))]);
+        let props2 = HashMap::from([("weight".to_string(), gcounter_val(&[("b", 10)]))]);
         writer
             .insert_edge(vid_a, vid_b, edge_type, eid, props2)
             .await?;
@@ -523,7 +526,7 @@ mod edge_compaction {
 
         // Verify edge CRDT merged
         let weight = prop_manager.get_edge_prop(eid, "weight", None).await?;
-        let crdt: Crdt = serde_json::from_value(weight)?;
+        let crdt: Crdt = serde_json::from_value(serde_json::Value::from(weight))?;
 
         if let Crdt::GCounter(gc) = crdt {
             assert_eq!(gc.value(), 15); // 5 + 10

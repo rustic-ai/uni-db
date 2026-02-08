@@ -61,8 +61,8 @@ impl PersonTestHarness {
         for (name, age) in people {
             let vid = w.next_vid().await?;
             let mut props = HashMap::new();
-            props.insert("name".to_string(), json!(name));
-            props.insert("age".to_string(), json!(age));
+            props.insert("name".to_string(), json!(name).into());
+            props.insert("age".to_string(), json!(age).into());
             w.insert_vertex_with_labels(vid, props, vec!["Person".to_string()])
                 .await?;
         }
@@ -131,8 +131,8 @@ async fn test_cypher_set_remove() -> anyhow::Result<()> {
         assert_eq!(l0.vertex_properties.len(), 1);
         vid = *l0.vertex_properties.keys().next().unwrap();
         let props = &l0.vertex_properties[&vid];
-        assert_eq!(props.get("name"), Some(&json!("Alice")));
-        assert_eq!(props.get("age"), Some(&json!(30)));
+        assert_eq!(props.get("name"), Some(&json!("Alice").into()));
+        assert_eq!(props.get("age"), Some(&json!(30).into()));
     }
 
     // 2. SET property — flush first so MATCH can find it
@@ -148,10 +148,10 @@ async fn test_cypher_set_remove() -> anyhow::Result<()> {
         let l0 = w.l0_manager.get_current();
         let l0 = l0.read();
         let props = &l0.vertex_properties[&vid];
-        assert_eq!(props.get("age"), Some(&json!(31)));
+        assert_eq!(props.get("age"), Some(&json!(31).into()));
         assert_eq!(
             props.get("name"),
-            Some(&json!("Alice")),
+            Some(&json!("Alice").into()),
             "Name should be preserved"
         );
     }
@@ -164,7 +164,7 @@ async fn test_cypher_set_remove() -> anyhow::Result<()> {
         let l0 = w.l0_manager.get_current();
         let l0 = l0.read();
         let props = &l0.vertex_properties[&vid];
-        assert_eq!(props.get("age"), Some(&json!(null)));
+        assert_eq!(props.get("age"), Some(&json!(null).into()));
     }
 
     Ok(())
@@ -202,7 +202,7 @@ async fn test_cypher_with() -> anyhow::Result<()> {
         let mut w = writer.write().await;
         let vid = w.next_vid().await?;
         let mut props = HashMap::new();
-        props.insert("name".to_string(), json!("Alice"));
+        props.insert("name".to_string(), json!("Alice").into());
         w.insert_vertex_with_labels(vid, props, vec!["Person".to_string()])
             .await?;
         w.flush_to_l1(None).await?;

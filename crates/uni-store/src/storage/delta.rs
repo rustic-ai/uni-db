@@ -348,7 +348,7 @@ impl DeltaDataset {
                 continue;
             }
             let val = Self::value_from_column(col.as_ref(), dtype, row)?;
-            properties.insert(name.to_string(), val);
+            properties.insert(name.to_string(), uni_common::Value::from(val));
         }
         Ok(properties)
     }

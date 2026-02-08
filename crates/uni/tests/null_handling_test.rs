@@ -62,23 +62,23 @@ async fn test_null_handling_functions() -> anyhow::Result<()> {
         // Person 1: Alice, age 30, no nickname
         let vid1 = Vid::new(1);
         let mut props1 = HashMap::new();
-        props1.insert("name".to_string(), json!("Alice"));
-        props1.insert("age".to_string(), json!(30));
+        props1.insert("name".to_string(), json!("Alice").into());
+        props1.insert("age".to_string(), json!(30).into());
         w.insert_vertex_with_labels(vid1, props1, vec!["Person".to_string()])
             .await?;
 
         // Person 2: Bob, no age, nickname 'Bobby'
         let vid2 = Vid::new(2);
         let mut props2 = HashMap::new();
-        props2.insert("name".to_string(), json!("Bob"));
-        props2.insert("nickname".to_string(), json!("Bobby"));
+        props2.insert("name".to_string(), json!("Bob").into());
+        props2.insert("nickname".to_string(), json!("Bobby").into());
         w.insert_vertex_with_labels(vid2, props2, vec!["Person".to_string()])
             .await?;
 
         // Person 3: Charlie, no age, no nickname
         let vid3 = Vid::new(3);
         let mut props3 = HashMap::new();
-        props3.insert("name".to_string(), json!("Charlie"));
+        props3.insert("name".to_string(), json!("Charlie").into());
         w.insert_vertex_with_labels(vid3, props3, vec!["Person".to_string()])
             .await?;
 

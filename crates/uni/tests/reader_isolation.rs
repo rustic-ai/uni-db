@@ -50,7 +50,7 @@ async fn test_reader_isolation_lifecycle() -> anyhow::Result<()> {
         let mut w = writer.write().await;
         let v1 = w.next_vid().await?;
         let mut p1 = HashMap::new();
-        p1.insert("name".to_string(), json!("Alice"));
+        p1.insert("name".to_string(), json!("Alice").into());
         w.insert_vertex_with_labels(v1, p1, vec!["Person".to_string()])
             .await?;
     }

@@ -199,9 +199,9 @@ fn mutation_strategy() -> impl Strategy<Value = Mutation> {
             prop::collection::hash_map(
                 "[a-z]{1,8}",
                 prop_oneof![
-                    any::<i64>().prop_map(serde_json::Value::from),
-                    any::<bool>().prop_map(serde_json::Value::from),
-                    "[a-z]{0,20}".prop_map(serde_json::Value::String),
+                    any::<i64>().prop_map(uni_common::Value::from),
+                    any::<bool>().prop_map(uni_common::Value::from),
+                    "[a-z]{0,20}".prop_map(|s| uni_common::Value::String(s)),
                 ],
                 0..5
             )
@@ -221,7 +221,7 @@ fn mutation_strategy() -> impl Strategy<Value = Mutation> {
             0u64..1000,
             prop::collection::hash_map(
                 "[a-z]{1,8}",
-                any::<i64>().prop_map(serde_json::Value::from),
+                any::<i64>().prop_map(uni_common::Value::from),
                 0..3
             )
         )

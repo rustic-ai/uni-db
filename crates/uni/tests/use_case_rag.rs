@@ -68,17 +68,17 @@ async fn test_rag_use_case() -> anyhow::Result<()> {
         HashMap::from([
             (
                 "text".to_string(),
-                json!("Function verify() checks signatures."),
+                json!("Function verify() checks signatures.").into(),
             ),
-            ("embedding".to_string(), json!(c1_vec)),
+            ("embedding".to_string(), json!(c1_vec).into()),
         ]),
         HashMap::from([
-            ("text".to_string(), json!("Other text about verify.")),
-            ("embedding".to_string(), json!(c2_vec)),
+            ("text".to_string(), json!("Other text about verify.").into()),
+            ("embedding".to_string(), json!(c2_vec).into()),
         ]),
         HashMap::from([
-            ("text".to_string(), json!("Bananas are yellow.")),
-            ("embedding".to_string(), json!(c3_vec)),
+            ("text".to_string(), json!("Bananas are yellow.").into()),
+            ("embedding".to_string(), json!(c3_vec).into()),
         ]),
     ];
     let chunk_vids = db.bulk_insert_vertices("Chunk", chunks).await?;
@@ -87,8 +87,8 @@ async fn test_rag_use_case() -> anyhow::Result<()> {
     let _c3 = chunk_vids[2];
 
     let entities = vec![HashMap::from([
-        ("name".to_string(), json!("verify")),
-        ("type".to_string(), json!("function")),
+        ("name".to_string(), json!("verify").into()),
+        ("type".to_string(), json!("function").into()),
     ])];
     let entity_vids = db.bulk_insert_vertices("Entity", entities).await?;
     let e1 = entity_vids[0];

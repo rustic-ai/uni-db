@@ -64,7 +64,7 @@ mod gcounter_lifecycle {
             writer
                 .insert_vertex_with_labels(
                     vid,
-                    HashMap::from([("counter".to_string(), val1)]),
+                    HashMap::from([("counter".to_string(), val1.into())]),
                     vec!["CounterNode".to_string()],
                 )
                 .await?;
@@ -81,7 +81,7 @@ mod gcounter_lifecycle {
             writer
                 .insert_vertex_with_labels(
                     vid,
-                    HashMap::from([("counter".to_string(), val2)]),
+                    HashMap::from([("counter".to_string(), val2.into())]),
                     vec!["CounterNode".to_string()],
                 )
                 .await?;
@@ -93,7 +93,7 @@ mod gcounter_lifecycle {
         let prop_manager = PropertyManager::new(storage.clone(), schema_manager.clone(), 100);
 
         let result = prop_manager.get_vertex_prop(vid, "counter").await?;
-        let crdt: Crdt = serde_json::from_value(result)?;
+        let crdt: Crdt = serde_json::from_value(result.into())?;
 
         if let Crdt::GCounter(gc) = crdt {
             assert_eq!(gc.value(), 30); // 10 + 20
@@ -140,7 +140,7 @@ mod gcounter_lifecycle {
                 writer
                     .insert_vertex_with_labels(
                         vid,
-                        HashMap::from([("counter".to_string(), val)]),
+                        HashMap::from([("counter".to_string(), val.into())]),
                         vec!["CounterNode".to_string()],
                     )
                     .await?;
@@ -152,7 +152,7 @@ mod gcounter_lifecycle {
         let prop_manager = PropertyManager::new(storage.clone(), schema_manager.clone(), 100);
 
         let result = prop_manager.get_vertex_prop(vid, "counter").await?;
-        let crdt: Crdt = serde_json::from_value(result)?;
+        let crdt: Crdt = serde_json::from_value(result.into())?;
 
         if let Crdt::GCounter(gc) = crdt {
             // 10 + 20 + 30 + 40 + 50 = 150
@@ -201,7 +201,7 @@ mod gset_lifecycle {
             writer
                 .insert_vertex_with_labels(
                     vid,
-                    HashMap::from([("items".to_string(), val1)]),
+                    HashMap::from([("items".to_string(), val1.into())]),
                     vec!["SetNode".to_string()],
                 )
                 .await?;
@@ -219,7 +219,7 @@ mod gset_lifecycle {
             writer
                 .insert_vertex_with_labels(
                     vid,
-                    HashMap::from([("items".to_string(), val2)]),
+                    HashMap::from([("items".to_string(), val2.into())]),
                     vec!["SetNode".to_string()],
                 )
                 .await?;
@@ -231,7 +231,7 @@ mod gset_lifecycle {
         let prop_manager = PropertyManager::new(storage.clone(), schema_manager.clone(), 100);
 
         let result = prop_manager.get_vertex_prop(vid, "items").await?;
-        let crdt: Crdt = serde_json::from_value(result)?;
+        let crdt: Crdt = serde_json::from_value(result.into())?;
 
         if let Crdt::GSet(gs) = crdt {
             assert_eq!(gs.len(), 4);
@@ -283,7 +283,7 @@ mod orset_lifecycle {
             writer
                 .insert_vertex_with_labels(
                     vid,
-                    HashMap::from([("items".to_string(), val1)]),
+                    HashMap::from([("items".to_string(), val1.into())]),
                     vec!["ORSetNode".to_string()],
                 )
                 .await?;
@@ -300,7 +300,7 @@ mod orset_lifecycle {
             writer
                 .insert_vertex_with_labels(
                     vid,
-                    HashMap::from([("items".to_string(), val2)]),
+                    HashMap::from([("items".to_string(), val2.into())]),
                     vec!["ORSetNode".to_string()],
                 )
                 .await?;
@@ -312,7 +312,7 @@ mod orset_lifecycle {
         let prop_manager = PropertyManager::new(storage.clone(), schema_manager.clone(), 100);
 
         let result = prop_manager.get_vertex_prop(vid, "items").await?;
-        let crdt: Crdt = serde_json::from_value(result)?;
+        let crdt: Crdt = serde_json::from_value(result.into())?;
 
         if let Crdt::ORSet(os) = crdt {
             // item1 was removed, item2 and item3 should be present
@@ -366,7 +366,7 @@ mod lww_register_lifecycle {
             writer
                 .insert_vertex_with_labels(
                     vid,
-                    HashMap::from([("value".to_string(), val1)]),
+                    HashMap::from([("value".to_string(), val1.into())]),
                     vec!["RegisterNode".to_string()],
                 )
                 .await?;
@@ -382,7 +382,7 @@ mod lww_register_lifecycle {
             writer
                 .insert_vertex_with_labels(
                     vid,
-                    HashMap::from([("value".to_string(), val2)]),
+                    HashMap::from([("value".to_string(), val2.into())]),
                     vec!["RegisterNode".to_string()],
                 )
                 .await?;
@@ -394,7 +394,7 @@ mod lww_register_lifecycle {
         let prop_manager = PropertyManager::new(storage.clone(), schema_manager.clone(), 100);
 
         let result = prop_manager.get_vertex_prop(vid, "value").await?;
-        let crdt: Crdt = serde_json::from_value(result)?;
+        let crdt: Crdt = serde_json::from_value(result.into())?;
 
         if let Crdt::LWWRegister(reg) = crdt {
             assert_eq!(reg.get(), &serde_json::json!("second"));
@@ -442,7 +442,7 @@ mod lww_map_lifecycle {
             writer
                 .insert_vertex_with_labels(
                     vid,
-                    HashMap::from([("data".to_string(), val1)]),
+                    HashMap::from([("data".to_string(), val1.into())]),
                     vec!["MapNode".to_string()],
                 )
                 .await?;
@@ -459,7 +459,7 @@ mod lww_map_lifecycle {
             writer
                 .insert_vertex_with_labels(
                     vid,
-                    HashMap::from([("data".to_string(), val2)]),
+                    HashMap::from([("data".to_string(), val2.into())]),
                     vec!["MapNode".to_string()],
                 )
                 .await?;
@@ -471,7 +471,7 @@ mod lww_map_lifecycle {
         let prop_manager = PropertyManager::new(storage.clone(), schema_manager.clone(), 100);
 
         let result = prop_manager.get_vertex_prop(vid, "data").await?;
-        let crdt: Crdt = serde_json::from_value(result)?;
+        let crdt: Crdt = serde_json::from_value(result.into())?;
 
         if let Crdt::LWWMap(map) = crdt {
             assert_eq!(
@@ -526,7 +526,7 @@ mod rga_lifecycle {
             writer
                 .insert_vertex_with_labels(
                     vid,
-                    HashMap::from([("sequence".to_string(), val1)]),
+                    HashMap::from([("sequence".to_string(), val1.into())]),
                     vec!["RgaNode".to_string()],
                 )
                 .await?;
@@ -543,7 +543,7 @@ mod rga_lifecycle {
             writer
                 .insert_vertex_with_labels(
                     vid,
-                    HashMap::from([("sequence".to_string(), val2)]),
+                    HashMap::from([("sequence".to_string(), val2.into())]),
                     vec!["RgaNode".to_string()],
                 )
                 .await?;
@@ -555,7 +555,7 @@ mod rga_lifecycle {
         let prop_manager = PropertyManager::new(storage.clone(), schema_manager.clone(), 100);
 
         let result = prop_manager.get_vertex_prop(vid, "sequence").await?;
-        let crdt: Crdt = serde_json::from_value(result)?;
+        let crdt: Crdt = serde_json::from_value(result.into())?;
 
         if let Crdt::Rga(rga) = crdt {
             let vec = rga.to_vec();
@@ -609,7 +609,7 @@ mod vector_clock_lifecycle {
             writer
                 .insert_vertex_with_labels(
                     vid,
-                    HashMap::from([("clock".to_string(), val1)]),
+                    HashMap::from([("clock".to_string(), val1.into())]),
                     vec!["VCNode".to_string()],
                 )
                 .await?;
@@ -629,7 +629,7 @@ mod vector_clock_lifecycle {
             writer
                 .insert_vertex_with_labels(
                     vid,
-                    HashMap::from([("clock".to_string(), val2)]),
+                    HashMap::from([("clock".to_string(), val2.into())]),
                     vec!["VCNode".to_string()],
                 )
                 .await?;
@@ -641,7 +641,7 @@ mod vector_clock_lifecycle {
         let prop_manager = PropertyManager::new(storage.clone(), schema_manager.clone(), 100);
 
         let result = prop_manager.get_vertex_prop(vid, "clock").await?;
-        let crdt: Crdt = serde_json::from_value(result)?;
+        let crdt: Crdt = serde_json::from_value(result.into())?;
 
         if let Crdt::VectorClock(vc) = crdt {
             assert_eq!(vc.get("node1"), 2); // max(2, 1)
@@ -688,7 +688,7 @@ mod vc_register_lifecycle {
             writer
                 .insert_vertex_with_labels(
                     vid,
-                    HashMap::from([("state".to_string(), val1)]),
+                    HashMap::from([("state".to_string(), val1.into())]),
                     vec!["VCRegNode".to_string()],
                 )
                 .await?;
@@ -705,7 +705,7 @@ mod vc_register_lifecycle {
             writer
                 .insert_vertex_with_labels(
                     vid,
-                    HashMap::from([("state".to_string(), val2)]),
+                    HashMap::from([("state".to_string(), val2.into())]),
                     vec!["VCRegNode".to_string()],
                 )
                 .await?;
@@ -717,7 +717,7 @@ mod vc_register_lifecycle {
         let prop_manager = PropertyManager::new(storage.clone(), schema_manager.clone(), 100);
 
         let result = prop_manager.get_vertex_prop(vid, "state").await?;
-        let crdt: Crdt = serde_json::from_value(result)?;
+        let crdt: Crdt = serde_json::from_value(result.into())?;
 
         if let Crdt::VCRegister(reg) = crdt {
             assert_eq!(reg.get(), &serde_json::json!("updated"));
@@ -777,9 +777,9 @@ mod multi_crdt {
                     HashMap::from([
                         (
                             "counter".to_string(),
-                            serde_json::to_value(Crdt::GCounter(gc1))?,
+                            serde_json::to_value(Crdt::GCounter(gc1))?.into(),
                         ),
-                        ("items".to_string(), serde_json::to_value(Crdt::GSet(gs1))?),
+                        ("items".to_string(), serde_json::to_value(Crdt::GSet(gs1))?.into()),
                     ]),
                     vec!["MultiCrdtNode".to_string()],
                 )
@@ -805,12 +805,12 @@ mod multi_crdt {
                     HashMap::from([
                         (
                             "counter".to_string(),
-                            serde_json::to_value(Crdt::GCounter(gc2))?,
+                            serde_json::to_value(Crdt::GCounter(gc2))?.into(),
                         ),
-                        ("items".to_string(), serde_json::to_value(Crdt::GSet(gs2))?),
+                        ("items".to_string(), serde_json::to_value(Crdt::GSet(gs2))?.into()),
                         (
                             "clock".to_string(),
-                            serde_json::to_value(Crdt::VectorClock(vc))?,
+                            serde_json::to_value(Crdt::VectorClock(vc))?.into(),
                         ),
                     ]),
                     vec!["MultiCrdtNode".to_string()],
@@ -824,7 +824,7 @@ mod multi_crdt {
         let prop_manager = PropertyManager::new(storage.clone(), schema_manager.clone(), 100);
 
         let counter = prop_manager.get_vertex_prop(vid, "counter").await?;
-        let crdt: Crdt = serde_json::from_value(counter)?;
+        let crdt: Crdt = serde_json::from_value(counter.into())?;
         if let Crdt::GCounter(gc) = crdt {
             assert_eq!(gc.value(), 30);
         } else {
@@ -832,7 +832,7 @@ mod multi_crdt {
         }
 
         let items = prop_manager.get_vertex_prop(vid, "items").await?;
-        let crdt: Crdt = serde_json::from_value(items)?;
+        let crdt: Crdt = serde_json::from_value(items.into())?;
         if let Crdt::GSet(gs) = crdt {
             assert_eq!(gs.len(), 2);
         } else {
@@ -840,7 +840,7 @@ mod multi_crdt {
         }
 
         let clock = prop_manager.get_vertex_prop(vid, "clock").await?;
-        let crdt: Crdt = serde_json::from_value(clock)?;
+        let crdt: Crdt = serde_json::from_value(clock.into())?;
         if let Crdt::VectorClock(vc) = crdt {
             assert_eq!(vc.get("node1"), 1);
         } else {
@@ -909,7 +909,7 @@ mod edge_crdt {
                     eid,
                     HashMap::from([(
                         "weight".to_string(),
-                        serde_json::to_value(Crdt::GCounter(gc1))?,
+                        serde_json::to_value(Crdt::GCounter(gc1))?.into(),
                     )]),
                 )
                 .await?;
@@ -926,7 +926,7 @@ mod edge_crdt {
                     eid,
                     HashMap::from([(
                         "weight".to_string(),
-                        serde_json::to_value(Crdt::GCounter(gc2))?,
+                        serde_json::to_value(Crdt::GCounter(gc2))?.into(),
                     )]),
                 )
                 .await?;
@@ -937,7 +937,7 @@ mod edge_crdt {
             let prop_manager = PropertyManager::new(storage.clone(), schema_manager.clone(), 100);
 
             let weight = prop_manager.get_edge_prop(eid, "weight", None).await?;
-            let crdt: Crdt = serde_json::from_value(weight)?;
+            let crdt: Crdt = serde_json::from_value(weight.into())?;
 
             if let Crdt::GCounter(gc) = crdt {
                 assert_eq!(gc.value(), 15); // 5 + 10

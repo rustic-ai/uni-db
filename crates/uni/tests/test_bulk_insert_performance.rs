@@ -52,11 +52,11 @@ async fn test_bulk_insert_performance() {
         let create_start = Instant::now();
         let mut props = Vec::new();
         for i in 0..scale {
-            let mut p: HashMap<String, serde_json::Value> = HashMap::new();
-            p.insert("name".to_string(), json!(format!("Person_{}", i)));
+            let mut p: HashMap<String, uni_db::Value> = HashMap::new();
+            p.insert("name".to_string(), json!(format!("Person_{}", i)).into());
             p.insert(
                 "email".to_string(),
-                json!(format!("person_{}@example.com", i)),
+                json!(format!("person_{}@example.com", i)).into(),
             );
             props.push(p);
         }
@@ -145,12 +145,12 @@ async fn test_bulk_insert_with_constraints() {
         let create_start = Instant::now();
         let mut props = Vec::new();
         for i in 0..scale {
-            let mut p: HashMap<String, serde_json::Value> = HashMap::new();
+            let mut p: HashMap<String, uni_db::Value> = HashMap::new();
             p.insert(
                 "email".to_string(),
-                json!(format!("user_{}@example.com", i)),
+                json!(format!("user_{}@example.com", i)).into(),
             );
-            p.insert("age".to_string(), json!(25 + (i % 50)));
+            p.insert("age".to_string(), json!(25 + (i % 50)).into());
             props.push(p);
         }
 

@@ -79,7 +79,7 @@ async fn test_writer_vertex_flush() -> anyhow::Result<()> {
     // 3. Insert Vertex
     let vid = Vid::new(10);
     let mut props = HashMap::new();
-    props.insert("name".to_string(), json!("Alice"));
+    props.insert("name".to_string(), json!("Alice").into());
     writer
         .insert_vertex_with_labels(vid, props, vec!["Person".to_string()])
         .await?;

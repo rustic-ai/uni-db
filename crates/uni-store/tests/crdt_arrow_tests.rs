@@ -7,7 +7,7 @@
 
 use arrow_array::builder::BinaryBuilder;
 use arrow_array::{Array, BinaryArray};
-use serde_json::Value;
+use uni_common::Value;
 use uni_common::core::schema::{CrdtType, DataType};
 use uni_crdt::{Crdt, GCounter, GSet, LWWMap, LWWRegister, ORSet, Rga, VCRegister, VectorClock};
 use uni_store::storage::arrow_convert::PropertyExtractor;
@@ -94,7 +94,7 @@ mod encoding {
         gc.increment("actor2", 20);
 
         let crdt = Crdt::GCounter(gc);
-        let val = serde_json::to_value(&crdt).expect("to_value should succeed");
+        let val: Value = serde_json::to_value(&crdt).expect("to_value should succeed").into();
 
         let extractor = PropertyExtractor::new("counter", &DataType::Crdt(CrdtType::GCounter));
         let deleted = vec![false];
@@ -130,7 +130,7 @@ mod encoding {
         gs.add("item2".to_string());
 
         let crdt = Crdt::GSet(gs);
-        let val = serde_json::to_value(&crdt).expect("to_value should succeed");
+        let val: Value = serde_json::to_value(&crdt).expect("to_value should succeed").into();
 
         let extractor = PropertyExtractor::new("items", &DataType::Crdt(CrdtType::GSet));
         let deleted = vec![false];
@@ -162,7 +162,7 @@ mod encoding {
         os.remove(&"removed".to_string());
 
         let crdt = Crdt::ORSet(os);
-        let val = serde_json::to_value(&crdt).expect("to_value should succeed");
+        let val: Value = serde_json::to_value(&crdt).expect("to_value should succeed").into();
 
         let extractor = PropertyExtractor::new("items", &DataType::Crdt(CrdtType::ORSet));
         let deleted = vec![false];
@@ -190,7 +190,7 @@ mod encoding {
         let reg = LWWRegister::new(serde_json::json!("hello world"), 12345);
 
         let crdt = Crdt::LWWRegister(reg);
-        let val = serde_json::to_value(&crdt).expect("to_value should succeed");
+        let val: Value = serde_json::to_value(&crdt).expect("to_value should succeed").into();
 
         let extractor = PropertyExtractor::new("value", &DataType::Crdt(CrdtType::LWWRegister));
         let deleted = vec![false];
@@ -220,7 +220,7 @@ mod encoding {
         map.put("key2".to_string(), serde_json::json!("value"), 200);
 
         let crdt = Crdt::LWWMap(map);
-        let val = serde_json::to_value(&crdt).expect("to_value should succeed");
+        let val: Value = serde_json::to_value(&crdt).expect("to_value should succeed").into();
 
         let extractor = PropertyExtractor::new("data", &DataType::Crdt(CrdtType::LWWMap));
         let deleted = vec![false];
@@ -257,7 +257,7 @@ mod encoding {
         rga.insert(Some(id2), "!".to_string(), 3);
 
         let crdt = Crdt::Rga(rga);
-        let val = serde_json::to_value(&crdt).expect("to_value should succeed");
+        let val: Value = serde_json::to_value(&crdt).expect("to_value should succeed").into();
 
         let extractor = PropertyExtractor::new("sequence", &DataType::Crdt(CrdtType::Rga));
         let deleted = vec![false];
@@ -290,7 +290,7 @@ mod encoding {
         vc.increment("node2");
 
         let crdt = Crdt::VectorClock(vc);
-        let val = serde_json::to_value(&crdt).expect("to_value should succeed");
+        let val: Value = serde_json::to_value(&crdt).expect("to_value should succeed").into();
 
         let extractor = PropertyExtractor::new("clock", &DataType::Crdt(CrdtType::VectorClock));
         let deleted = vec![false];
@@ -318,7 +318,7 @@ mod encoding {
         let reg = VCRegister::new(serde_json::json!("test value"), "actor1");
 
         let crdt = Crdt::VCRegister(reg);
-        let val = serde_json::to_value(&crdt).expect("to_value should succeed");
+        let val: Value = serde_json::to_value(&crdt).expect("to_value should succeed").into();
 
         let extractor = PropertyExtractor::new("state", &DataType::Crdt(CrdtType::VCRegister));
         let deleted = vec![false];
@@ -346,7 +346,7 @@ mod encoding {
         let mut gc = GCounter::new();
         gc.increment("actor", 10);
         let crdt = Crdt::GCounter(gc);
-        let val = serde_json::to_value(&crdt).expect("to_value should succeed");
+        let val: Value = serde_json::to_value(&crdt).expect("to_value should succeed").into();
 
         let extractor = PropertyExtractor::new("counter", &DataType::Crdt(CrdtType::GCounter));
         let deleted = vec![true, false, true];
@@ -413,7 +413,7 @@ mod decoding {
         )
         .expect("decode should succeed");
 
-        let decoded: Crdt = serde_json::from_value(val).expect("from_value should succeed");
+        let decoded: Crdt = serde_json::from_value(serde_json::Value::from(val)).expect("from_value should succeed");
         if let Crdt::GCounter(decoded_gc) = decoded {
             assert_eq!(decoded_gc.value(), 42);
         } else {
@@ -437,7 +437,7 @@ mod decoding {
         )
         .expect("decode should succeed");
 
-        let decoded: Crdt = serde_json::from_value(val).expect("from_value should succeed");
+        let decoded: Crdt = serde_json::from_value(serde_json::Value::from(val)).expect("from_value should succeed");
         if let Crdt::GSet(decoded_gs) = decoded {
             assert_eq!(decoded_gs.len(), 2);
         } else {
@@ -475,7 +475,7 @@ mod decoding {
                 .expect("decode should succeed");
 
             // Round-trip should work
-            let decoded: Crdt = serde_json::from_value(val).expect("from_value should succeed");
+            let decoded: Crdt = serde_json::from_value(serde_json::Value::from(val)).expect("from_value should succeed");
             assert_eq!(crdt, decoded, "Round-trip failed for {:?}", dt);
         }
     }
@@ -513,7 +513,7 @@ mod decoding {
         .expect("Lenient mode should not error");
 
         // Should return a default GCounter
-        let decoded: Crdt = serde_json::from_value(val).expect("from_value should succeed");
+        let decoded: Crdt = serde_json::from_value(serde_json::Value::from(val)).expect("from_value should succeed");
         if let Crdt::GCounter(gc) = decoded {
             assert_eq!(gc.value(), 0);
         } else {
@@ -535,7 +535,7 @@ mod roundtrip {
         F: Fn(&Crdt),
     {
         // Step 1: CRDT to JSON value
-        let json_val = serde_json::to_value(&crdt).expect("to_value should succeed");
+        let json_val: Value = serde_json::to_value(&crdt).expect("to_value should succeed").into();
 
         // Step 2: JSON value to Arrow BinaryArray
         let extractor = PropertyExtractor::new("prop", &data_type);
@@ -550,7 +550,7 @@ mod roundtrip {
 
         // Step 4: JSON value to CRDT
         let decoded_crdt: Crdt =
-            serde_json::from_value(decoded_json).expect("from_value should succeed");
+            serde_json::from_value(serde_json::Value::from(decoded_json)).expect("from_value should succeed");
 
         // Verify the result
         verify(&decoded_crdt);
@@ -754,7 +754,7 @@ mod multi_row {
 
         let vals: Vec<Value> = crdts
             .iter()
-            .map(|c| serde_json::to_value(c).unwrap())
+            .map(|c| Value::from(serde_json::to_value(c).unwrap()))
             .collect();
 
         let extractor = PropertyExtractor::new("counter", &DataType::Crdt(CrdtType::GCounter));
@@ -801,7 +801,7 @@ mod multi_row {
             CrdtDecodeMode::Strict,
         )
         .expect("decode row 0 should succeed");
-        let decoded0: Crdt = serde_json::from_value(val0).unwrap();
+        let decoded0: Crdt = serde_json::from_value(serde_json::Value::from(val0)).unwrap();
         assert!(matches!(decoded0, Crdt::GCounter(_)));
 
         // Row 1: null - should error in strict mode when trying to read null
@@ -817,7 +817,7 @@ mod multi_row {
             CrdtDecodeMode::Strict,
         )
         .expect("decode row 2 should succeed");
-        let decoded2: Crdt = serde_json::from_value(val2).unwrap();
+        let decoded2: Crdt = serde_json::from_value(serde_json::Value::from(val2)).unwrap();
         assert!(matches!(decoded2, Crdt::GCounter(_)));
     }
 }

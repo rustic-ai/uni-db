@@ -51,15 +51,15 @@ async fn test_property_batch_loading() -> anyhow::Result<()> {
     let vid2 = Vid::new(2);
 
     let mut props0 = HashMap::new();
-    props0.insert("name".to_string(), json!("Alice"));
-    props0.insert("age".to_string(), json!(30));
+    props0.insert("name".to_string(), json!("Alice").into());
+    props0.insert("age".to_string(), json!(30).into());
     writer
         .insert_vertex_with_labels(vid0, props0, vec!["Person".to_string()])
         .await?;
 
     let mut props1 = HashMap::new();
-    props1.insert("name".to_string(), json!("Bob"));
-    props1.insert("age".to_string(), json!(40));
+    props1.insert("name".to_string(), json!("Bob").into());
+    props1.insert("age".to_string(), json!(40).into());
     writer
         .insert_vertex_with_labels(vid1, props1, vec!["Person".to_string()])
         .await?;
@@ -69,16 +69,16 @@ async fn test_property_batch_loading() -> anyhow::Result<()> {
 
     // 3. Insert L0 Data
     let mut props2 = HashMap::new();
-    props2.insert("name".to_string(), json!("Charlie"));
-    props2.insert("age".to_string(), json!(20));
+    props2.insert("name".to_string(), json!("Charlie").into());
+    props2.insert("age".to_string(), json!(20).into());
     writer
         .insert_vertex_with_labels(vid2, props2, vec!["Person".to_string()])
         .await?;
 
     // Update vid0 in L0
     let mut props0_update = HashMap::new();
-    props0_update.insert("age".to_string(), json!(31)); // Birthday!
-    props0_update.insert("name".to_string(), json!("Alice")); // Must provide mandatory field
+    props0_update.insert("age".to_string(), json!(31).into()); // Birthday!
+    props0_update.insert("name".to_string(), json!("Alice").into()); // Must provide mandatory field
     writer
         .insert_vertex_with_labels(vid0, props0_update, vec!["Person".to_string()])
         .await?;
@@ -129,18 +129,18 @@ async fn test_property_batch_loading() -> anyhow::Result<()> {
     // However, if L0 has (Age: 31), and Storage has (Name: Alice, Age: 30).
     // Result will be (Name: Alice, Age: 31). Correct.
 
-    assert_eq!(p0.get("name"), Some(&json!("Alice")));
-    assert_eq!(p0.get("age"), Some(&json!(31)));
+    assert_eq!(p0.get("name"), Some(&json!("Alice").into()));
+    assert_eq!(p0.get("age"), Some(&json!(31).into()));
 
     // Verify vid1 (Pure Storage)
     let p1 = results.get(&vid1).unwrap();
-    assert_eq!(p1.get("name"), Some(&json!("Bob")));
-    assert_eq!(p1.get("age"), Some(&json!(40)));
+    assert_eq!(p1.get("name"), Some(&json!("Bob").into()));
+    assert_eq!(p1.get("age"), Some(&json!(40).into()));
 
     // Verify vid2 (Pure L0)
     let p2 = results.get(&vid2).unwrap();
-    assert_eq!(p2.get("name"), Some(&json!("Charlie")));
-    assert_eq!(p2.get("age"), Some(&json!(20)));
+    assert_eq!(p2.get("name"), Some(&json!("Charlie").into()));
+    assert_eq!(p2.get("age"), Some(&json!(20).into()));
 
     Ok(())
 }

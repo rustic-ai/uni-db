@@ -3,9 +3,9 @@
 
 //! Test to isolate COUNT performance issue
 
-use serde_json::json;
 use std::collections::HashMap;
 use std::time::Instant;
+use uni_db::Value;
 
 const SCHEMA_JSON: &str = r#"{
     "schema_version": 1,
@@ -51,8 +51,8 @@ async fn test_count_scaling() {
         let create_start = Instant::now();
         let mut props = Vec::new();
         for i in 0..scale {
-            let mut p: HashMap<String, serde_json::Value> = HashMap::new();
-            p.insert("name".to_string(), json!(format!("Person_{}", i)));
+            let mut p: HashMap<String, Value> = HashMap::new();
+            p.insert("name".to_string(), Value::String(format!("Person_{}", i)));
             props.push(p);
         }
         db.bulk_insert_vertices("Person", props).await.unwrap();
@@ -121,8 +121,8 @@ async fn test_count_vs_scan_all() {
     // Create vertices
     let mut props = Vec::new();
     for i in 0..num_vertices {
-        let mut p: HashMap<String, serde_json::Value> = HashMap::new();
-        p.insert("name".to_string(), json!(format!("Person_{}", i)));
+        let mut p: HashMap<String, Value> = HashMap::new();
+        p.insert("name".to_string(), Value::String(format!("Person_{}", i)));
         props.push(p);
     }
     db.bulk_insert_vertices("Person", props).await.unwrap();

@@ -29,7 +29,7 @@
 use crate::api::Uni;
 use anyhow::{Result, anyhow};
 use chrono::Utc;
-use serde_json::Value;
+use uni_common::Value;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -351,20 +351,23 @@ impl<'a> BulkWriter<'a> {
         size
     }
 
-    /// Estimate the size of a JSON value in bytes.
+    /// Estimate the size of a value in bytes.
     fn estimate_value_size(value: &Value) -> usize {
         match value {
             Value::Null => 1,
             Value::Bool(_) => 1,
-            Value::Number(_) => 8, // approximate
+            Value::Int(_) | Value::Float(_) => 8,
             Value::String(s) => s.len(),
-            Value::Array(arr) => arr.iter().map(Self::estimate_value_size).sum::<usize>() + 8,
-            Value::Object(obj) => {
+            Value::Bytes(b) => b.len(),
+            Value::List(arr) => arr.iter().map(Self::estimate_value_size).sum::<usize>() + 8,
+            Value::Map(obj) => {
                 obj.iter()
                     .map(|(k, v)| k.len() + Self::estimate_value_size(v))
                     .sum::<usize>()
                     + 8
             }
+            Value::Vector(v) => v.len() * 4,
+            _ => 16, // Node, Edge, Path
         }
     }
 
@@ -515,8 +518,10 @@ impl<'a> BulkWriter<'a> {
             || (val_str.starts_with('"') && val_str.ends_with('"'))
         {
             Value::String(val_str[1..val_str.len() - 1].to_string())
+        } else if let Ok(n) = val_str.parse::<i64>() {
+            Value::Int(n)
         } else if let Ok(n) = val_str.parse::<f64>() {
-            Value::Number(serde_json::Number::from_f64(n).unwrap())
+            Value::Float(n)
         } else if let Ok(b) = val_str.parse::<bool>() {
             Value::Bool(b)
         } else {
@@ -542,19 +547,20 @@ impl<'a> BulkWriter<'a> {
         }
     }
 
-    /// Compare two JSON values, returning -1, 0, or 1.
+    /// Compare two values, returning -1, 0, or 1.
     fn compare_json_values(&self, a: &Value, b: &Value) -> Result<i8> {
         match (a, b) {
-            (Value::Number(n1), Value::Number(n2)) => {
-                let f1 = n1.as_f64().unwrap_or(0.0);
-                let f2 = n2.as_f64().unwrap_or(0.0);
-                if f1 < f2 {
-                    Ok(-1)
-                } else if f1 > f2 {
-                    Ok(1)
-                } else {
-                    Ok(0)
-                }
+            (Value::Int(n1), Value::Int(n2)) => Ok(n1.cmp(n2) as i8),
+            (Value::Float(f1), Value::Float(f2)) => {
+                if f1 < f2 { Ok(-1) } else if f1 > f2 { Ok(1) } else { Ok(0) }
+            }
+            (Value::Int(n), Value::Float(f)) => {
+                let nf = *n as f64;
+                if nf < *f { Ok(-1) } else if nf > *f { Ok(1) } else { Ok(0) }
+            }
+            (Value::Float(f), Value::Int(n)) => {
+                let nf = *n as f64;
+                if *f < nf { Ok(-1) } else if *f > nf { Ok(1) } else { Ok(0) }
             }
             (Value::String(s1), Value::String(s2)) => match s1.cmp(s2) {
                 std::cmp::Ordering::Less => Ok(-1),

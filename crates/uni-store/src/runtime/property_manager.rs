@@ -13,7 +13,7 @@ use futures::TryStreamExt;
 use lancedb::query::{ExecutableQuery, QueryBase, Select};
 use lru::LruCache;
 use metrics;
-use serde_json::Value;
+use uni_common::Value;
 use std::collections::HashMap;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
@@ -1093,7 +1093,7 @@ impl PropertyManager {
             if let DataType::Crdt(_) = prop_meta.r#type
                 && let Some(val) = props.get_mut(prop_name)
             {
-                *val = Self::parse_crdt_value(val)?;
+                *val = Value::from(Self::parse_crdt_value(val)?);
             }
         }
 
@@ -1183,13 +1183,13 @@ impl PropertyManager {
             && let Some(binary_array) = overflow_col.as_any().downcast_ref::<LargeBinaryArray>()
         {
             let jsonb_bytes = binary_array.value(row);
-            let bytes_array: Vec<serde_json::Value> = jsonb_bytes
+            let bytes_list: Vec<Value> = jsonb_bytes
                 .iter()
-                .map(|&b| serde_json::Value::Number(b.into()))
+                .map(|&b| Value::Int(b as i64))
                 .collect();
             props.insert(
                 "overflow_json".to_string(),
-                serde_json::Value::Array(bytes_array),
+                Value::List(bytes_list),
             );
         }
 
@@ -1642,9 +1642,10 @@ impl PropertyManager {
         Ok(best_value.unwrap_or(Value::Null))
     }
 
-    /// Decode an Arrow column value to JSON with strict CRDT error handling.
+    /// Decode an Arrow column value with strict CRDT error handling.
     pub fn value_from_column(col: &dyn Array, data_type: &DataType, row: usize) -> Result<Value> {
         value_codec::value_from_column(col, data_type, row, CrdtDecodeMode::Strict)
+            .map(Value::from)
     }
 
     pub(crate) fn merge_crdt_values(&self, a: &Value, b: &Value) -> Result<Value> {
@@ -1652,10 +1653,10 @@ impl PropertyManager {
         // (this happens when values come from Cypher CREATE statements)
         // Parse before checking for null to ensure proper format conversion
         if a.is_null() {
-            return Self::parse_crdt_value(b);
+            return Self::parse_crdt_value(b).map(Value::from);
         }
         if b.is_null() {
-            return Self::parse_crdt_value(a);
+            return Self::parse_crdt_value(a).map(Value::from);
         }
 
         let a_parsed = Self::parse_crdt_value(a)?;
@@ -1666,17 +1667,18 @@ impl PropertyManager {
         crdt_a
             .try_merge(&crdt_b)
             .map_err(|e| anyhow::anyhow!("{e}"))?;
-        Ok(serde_json::to_value(crdt_a)?)
+        Ok(Value::from(serde_json::to_value(crdt_a)?))
     }
 
     /// Parse a CRDT value that may be either a JSON object or a JSON string containing JSON.
-    fn parse_crdt_value(val: &Value) -> Result<Value> {
+    /// Returns `serde_json::Value` for internal CRDT processing.
+    fn parse_crdt_value(val: &Value) -> Result<serde_json::Value> {
         if let Value::String(s) = val {
             // Value is a JSON string - parse the string content as JSON
             serde_json::from_str(s).map_err(|e| anyhow!("Failed to parse CRDT JSON string: {}", e))
         } else {
-            // Value is already a JSON object
-            Ok(val.clone())
+            // Convert uni_common::Value to serde_json::Value for CRDT processing
+            Ok(serde_json::Value::from(val.clone()))
         }
     }
 

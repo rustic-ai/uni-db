@@ -1207,7 +1207,8 @@ where
         results.push(f(&row_args)?);
     }
 
-    let arr = values_to_array(&results, output_type)
+    let uni_results: Vec<uni_common::Value> = results.into_iter().map(|v| v.into()).collect();
+    let arr = values_to_array(&uni_results, output_type)
         .map_err(|e| datafusion::error::DataFusionError::Execution(e.to_string()))?;
     Ok(ColumnarValue::Array(arr))
 }
@@ -1235,7 +1236,8 @@ fn scalar_to_json(scalar: &ScalarValue) -> DFResult<serde_json::Value> {
                 Ok(uni_store::storage::arrow_convert::arrow_to_value(
                     arr.as_ref(),
                     0,
-                ))
+                )
+                .into())
             }
         }
         ScalarValue::List(arr) => {
@@ -1245,7 +1247,8 @@ fn scalar_to_json(scalar: &ScalarValue) -> DFResult<serde_json::Value> {
                 Ok(uni_store::storage::arrow_convert::arrow_to_value(
                     arr.as_ref(),
                     0,
-                ))
+                )
+                .into())
             }
         }
         ScalarValue::Null

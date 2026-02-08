@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2024-2026 Dragonscale Team
 
-use serde_json::json;
 use std::collections::HashMap;
 use uni_db::Uni;
+use uni_db::Value;
 
 #[tokio::test]
 async fn test_fraud_detection_use_case() -> anyhow::Result<()> {
@@ -45,10 +45,10 @@ async fn test_fraud_detection_use_case() -> anyhow::Result<()> {
 
     // Insert Users: A, B, C, D (fraudster)
     let users = vec![
-        HashMap::from([("risk_score".to_string(), json!(0.1))]), // User A
-        HashMap::from([("risk_score".to_string(), json!(0.2))]), // User B
-        HashMap::from([("risk_score".to_string(), json!(0.3))]), // User C
-        HashMap::from([("risk_score".to_string(), json!(0.9))]), // User D (Fraudster)
+        HashMap::from([("risk_score".to_string(), Value::Float(0.1))]), // User A
+        HashMap::from([("risk_score".to_string(), Value::Float(0.2))]), // User B
+        HashMap::from([("risk_score".to_string(), Value::Float(0.3))]), // User C
+        HashMap::from([("risk_score".to_string(), Value::Float(0.9))]), // User D (Fraudster)
     ];
     let user_vids = db.bulk_insert_vertices("User", users).await?;
     let user_a = user_vids[0];
@@ -71,24 +71,24 @@ async fn test_fraud_detection_use_case() -> anyhow::Result<()> {
             user_a,
             user_b,
             HashMap::from([
-                ("amount".to_string(), json!(5000.0)),
-                ("ts".to_string(), json!(current_time)),
+                ("amount".to_string(), Value::Float(5000.0)),
+                ("ts".to_string(), Value::Int(current_time)),
             ]),
         ),
         (
             user_b,
             user_c,
             HashMap::from([
-                ("amount".to_string(), json!(5000.0)),
-                ("ts".to_string(), json!(current_time + 10)),
+                ("amount".to_string(), Value::Float(5000.0)),
+                ("ts".to_string(), Value::Int(current_time + 10)),
             ]),
         ),
         (
             user_c,
             user_a,
             HashMap::from([
-                ("amount".to_string(), json!(5000.0)),
-                ("ts".to_string(), json!(current_time + 20)),
+                ("amount".to_string(), Value::Float(5000.0)),
+                ("ts".to_string(), Value::Int(current_time + 20)),
             ]),
         ),
     ];
@@ -117,7 +117,7 @@ async fn test_fraud_detection_use_case() -> anyhow::Result<()> {
 
     let result_cycle = db
         .query_with(query_cycle)
-        .param("threshold", json!(threshold))
+        .param("threshold", Value::Int(threshold))
         .fetch_all()
         .await?;
 
@@ -146,7 +146,7 @@ async fn test_fraud_detection_use_case() -> anyhow::Result<()> {
     ";
 
     // Cast user_a (Vid is u64) to Value
-    let sender_vid_val = json!(user_a.as_u64());
+    let sender_vid_val = Value::Int(user_a.as_u64() as i64);
 
     let result_identity = db
         .query_with(query_identity)

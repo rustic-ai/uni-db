@@ -754,9 +754,10 @@ mod tests {
 
     #[test]
     fn test_build_record_batch() {
+        use uni_common::Value;
         let mut props = HashMap::new();
-        props.insert("name".to_string(), serde_json::json!("Alice"));
-        props.insert("ext_id".to_string(), serde_json::json!("user_001"));
+        props.insert("name".to_string(), Value::String("Alice".to_string()));
+        props.insert("ext_id".to_string(), Value::String("user_001".to_string()));
 
         let vertices = vec![(Vid::new(1), vec!["Person".to_string()], props, false, 1u64)];
 

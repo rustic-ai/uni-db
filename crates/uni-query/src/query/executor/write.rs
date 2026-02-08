@@ -352,6 +352,10 @@ impl Executor {
                     // Generate EID and insert edge
                     let mut writer = writer_arc.write().await;
                     let eid = writer.next_eid(edge_type_id).await?;
+                    let properties: uni_common::Properties = properties
+                        .into_iter()
+                        .map(|(k, v)| (k, v.into()))
+                        .collect();
                     writer
                         .insert_edge(src, dst, edge_type_id, eid, properties)
                         .await?;
@@ -409,6 +413,10 @@ impl Executor {
                     // Generate VID and insert
                     let mut writer = writer_arc.write().await;
                     let vid = writer.next_vid().await?;
+                    let properties: uni_common::Properties = properties
+                        .into_iter()
+                        .map(|(k, v)| (k, v.into()))
+                        .collect();
                     let _ = writer
                         .insert_vertex_with_labels(vid, properties, vec![label.to_string()])
                         .await?;
@@ -1088,6 +1096,10 @@ impl Executor {
                             }
 
                             // Insert vertex and get back final properties (includes auto-generated embeddings)
+                            let props: uni_common::Properties = props
+                                .into_iter()
+                                .map(|(k, v)| (k, v.into()))
+                                .collect();
                             let final_props = writer
                                 .insert_vertex_with_labels(new_vid, props, n.labels.clone())
                                 .await?;
@@ -1097,7 +1109,8 @@ impl Executor {
                                 let mut obj = serde_json::Map::new();
                                 obj.insert("_vid".to_string(), json!(new_vid.as_u64()));
                                 for (k, v) in &final_props {
-                                    obj.insert(k.clone(), v.clone());
+                                    let json_v: serde_json::Value = v.clone().into();
+                                    obj.insert(k.clone(), json_v);
                                 }
                                 // Store node as an Object with _vid, matching MATCH behavior
                                 row.insert(var.clone(), Value::Object(obj));
@@ -1131,6 +1144,10 @@ impl Executor {
                                     _ => (src, current_vid),
                                 };
 
+                                let rel_props: uni_common::Properties = rel_props
+                                    .into_iter()
+                                    .map(|(k, v)| (k, v.into()))
+                                    .collect();
                                 writer
                                     .insert_edge(edge_src, edge_dst, type_id, eid, rel_props)
                                     .await?;
@@ -1198,10 +1215,15 @@ impl Executor {
                         && let Some(node_val) = row.get(var_name)
                     {
                         if let Ok(vid) = Self::vid_from_value(node_val) {
-                            let mut props = prop_manager
+                            let storage_props = prop_manager
                                 .get_all_vertex_props_with_ctx(vid, ctx)
                                 .await?
                                 .unwrap_or_default();
+                            // Convert from uni_common::Value to serde_json::Value for enrich/evaluate
+                            let mut props: HashMap<String, Value> = storage_props
+                                .into_iter()
+                                .map(|(k, v)| (k, v.into()))
+                                .collect();
                             let val = self
                                 .evaluate_expr(value, row, prop_manager, params, ctx)
                                 .await?;
@@ -1222,6 +1244,11 @@ impl Executor {
                                 .await?;
                             }
 
+                            // Convert back to uni_common::Properties for storage
+                            let props: uni_common::Properties = props
+                                .into_iter()
+                                .map(|(k, v)| (k, v.into()))
+                                .collect();
                             let _ = writer.insert_vertex_with_labels(vid, props, labels).await?;
                         } else if let Value::Object(map) = node_val
                             && let (Some(eid_v), Some(src_v), Some(dst_v), Some(type_v)) = (
@@ -1245,7 +1272,7 @@ impl Executor {
                             let val = self
                                 .evaluate_expr(value, row, prop_manager, params, ctx)
                                 .await?;
-                            props.insert(prop_name.clone(), val);
+                            props.insert(prop_name.clone(), val.into());
                             writer.insert_edge(src, dst, etype, eid, props).await?;
                         }
                     }
@@ -1347,7 +1374,7 @@ impl Executor {
                     .get_all_vertex_props_with_ctx(vid, ctx)
                     .await?
                     .unwrap_or_default();
-                props.insert(prop_name.clone(), Value::Null);
+                props.insert(prop_name.clone(), uni_common::Value::Null);
                 let labels = Self::extract_labels_from_node(node_val).unwrap_or_default();
                 let _ = writer.insert_vertex_with_labels(vid, props, labels).await?;
 
@@ -1394,7 +1421,7 @@ impl Executor {
                 .get_all_edge_props_with_ctx(eid, ctx)
                 .await?
                 .unwrap_or_default();
-            props.insert(prop_name.to_string(), Value::Null);
+            props.insert(prop_name.to_string(), uni_common::Value::Null);
             writer.insert_edge(src, dst, etype, eid, props).await?;
         }
         Ok(())

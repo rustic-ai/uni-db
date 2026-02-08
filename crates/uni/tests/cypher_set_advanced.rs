@@ -78,7 +78,13 @@ async fn test_cypher_set_advanced() -> anyhow::Result<()> {
 
     let emb = res[0].get("i.embedding").unwrap().as_array().unwrap();
     assert_eq!(emb.len(), 3);
-    assert_eq!(emb[0].as_f64(), Some(0.1));
+    // Vector values are stored as f32, so compare with f32 precision
+    let actual = emb[0].as_f64().unwrap();
+    let expected = 0.1_f32 as f64;
+    assert!(
+        (actual - expected).abs() < 1e-6,
+        "expected ~{expected} but got {actual}"
+    );
 
     let meta = res[0].get("i.metadata").unwrap().as_object().unwrap();
     assert_eq!(meta.get("valid"), Some(&json!(true)));
@@ -96,7 +102,13 @@ async fn test_cypher_set_advanced() -> anyhow::Result<()> {
     let res = executor.execute(plan, &prop_manager, &params).await?;
 
     let emb = res[0].get("i.embedding").unwrap().as_array().unwrap();
-    assert_eq!(emb[0].as_f64(), Some(0.4));
+    // Vector values are stored as f32, so compare with f32 precision
+    let actual = emb[0].as_f64().unwrap();
+    let expected = 0.4_f32 as f64;
+    assert!(
+        (actual - expected).abs() < 1e-6,
+        "expected ~{expected} but got {actual}"
+    );
 
     let meta = res[0].get("i.metadata").unwrap().as_object().unwrap();
     assert_eq!(meta.get("valid"), Some(&json!(false)));

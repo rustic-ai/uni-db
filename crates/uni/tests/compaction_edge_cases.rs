@@ -81,7 +81,7 @@ async fn test_compact_vertices_with_null_props() -> anyhow::Result<()> {
     // Verify
     let prop_mgr = PropertyManager::new(storage.clone(), schema_manager.clone(), 10);
     let val1 = prop_mgr.get_vertex_prop(Vid::new(1), "name").await?;
-    assert_eq!(val1, json!("A"));
+    assert_eq!(val1, uni_db::Value::String("A".to_string()));
 
     let val2 = prop_mgr.get_vertex_prop(Vid::new(2), "name").await?;
     assert!(val2.is_null());

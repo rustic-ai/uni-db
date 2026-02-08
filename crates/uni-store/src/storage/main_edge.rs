@@ -597,8 +597,9 @@ mod tests {
 
     #[test]
     fn test_build_record_batch() {
+        use uni_common::Value;
         let mut props = HashMap::new();
-        props.insert("weight".to_string(), serde_json::json!(0.5));
+        props.insert("weight".to_string(), Value::Float(0.5));
 
         let edges = vec![(
             Eid::new(1),

@@ -7,6 +7,7 @@ pub mod api {
 
 pub mod config;
 pub mod sync;
+pub mod value;
 
 pub mod core {
     pub mod edge_type;
@@ -26,5 +27,8 @@ pub use core::edge_type::EdgeTypeId;
 pub use core::id::{Eid, UniId, Vid};
 pub use core::schema::{CrdtType, DataType, Schema};
 pub use graph::simple_graph::SimpleGraph;
+#[doc(inline)]
+pub use value::{Edge, FromValue, Node, Path, Value};
 
-pub type Properties = std::collections::HashMap<String, serde_json::Value>;
+/// String-keyed property map using [`Value`] for type-preserving storage.
+pub type Properties = std::collections::HashMap<String, Value>;

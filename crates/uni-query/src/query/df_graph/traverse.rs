@@ -1430,8 +1430,8 @@ impl GraphTraverseMainStream {
                 let mut builder = arrow_array::builder::StringBuilder::new();
                 for (_, _, _, props) in &expansions {
                     match props.get(prop_name) {
-                        Some(serde_json::Value::String(s)) => builder.append_value(s),
-                        Some(serde_json::Value::Null) | None => builder.append_null(),
+                        Some(uni_common::Value::String(s)) => builder.append_value(s),
+                        Some(uni_common::Value::Null) | None => builder.append_null(),
                         Some(other) => builder.append_value(other.to_string()),
                     }
                 }

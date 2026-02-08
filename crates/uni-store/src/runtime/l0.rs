@@ -90,16 +90,18 @@ impl L0Buffer {
     /// Attempts CRDT merge if both values are valid CRDTs, falls back to overwrite.
     fn merge_crdt_properties(entry: &mut Properties, properties: Properties) {
         for (k, v) in properties {
-            // Attempt merge if CRDT
-            if let Ok(mut new_crdt) = serde_json::from_value::<Crdt>(v.clone())
+            // Attempt merge if CRDT — convert to serde_json::Value for CRDT deserialization
+            let json_v: serde_json::Value = v.clone().into();
+            if let Ok(mut new_crdt) = serde_json::from_value::<Crdt>(json_v)
                 && let Some(existing_v) = entry.get(&k)
-                && let Ok(existing_crdt) = serde_json::from_value::<Crdt>(existing_v.clone())
+                && let Ok(existing_crdt) =
+                    serde_json::from_value::<Crdt>(existing_v.clone().into())
             {
                 // Use try_merge to avoid panic on type mismatch
                 if new_crdt.try_merge(&existing_crdt).is_ok()
                     && let Ok(merged_json) = serde_json::to_value(new_crdt)
                 {
-                    entry.insert(k, merged_json);
+                    entry.insert(k, uni_common::Value::from(merged_json));
                     continue;
                 }
                 // try_merge failed (type mismatch) - fall through to overwrite
@@ -769,20 +771,21 @@ mod tests {
     fn test_replay_crdt_merge() -> Result<()> {
         use crate::runtime::wal::Mutation;
         use serde_json::json;
+        use uni_common::Value;
 
         let mut l0 = L0Buffer::new(0, None);
         let vid = Vid::new(1);
 
         // Create GCounter CRDT values using correct serde format:
         // {"t": "gc", "d": {"counts": {...}}}
-        let counter1 = json!({
+        let counter1: Value = json!({
             "t": "gc",
             "d": {"counts": {"node1": 5}}
-        });
-        let counter2 = json!({
+        }).into();
+        let counter2: Value = json!({
             "t": "gc",
             "d": {"counts": {"node2": 3}}
-        });
+        }).into();
 
         // First mutation: insert vertex with counter1
         let mut props1 = HashMap::new();
@@ -804,8 +807,10 @@ mod tests {
         let stored_props = l0.vertex_properties.get(&vid).unwrap();
         let stored_counter = stored_props.get("counter").unwrap();
 
+        // Convert back to serde_json::Value for nested access
+        let stored_json: serde_json::Value = stored_counter.clone().into();
         // The merged counter should have both node1: 5 and node2: 3
-        let data = stored_counter.get("d").unwrap();
+        let data = stored_json.get("d").unwrap();
         let counts = data.get("counts").unwrap();
         assert_eq!(counts.get("node1"), Some(&json!(5)));
         assert_eq!(counts.get("node2"), Some(&json!(3)));

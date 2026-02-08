@@ -9,6 +9,7 @@ use tokio::sync::RwLock;
 use uni_db::core::id::{Eid, Vid};
 use uni_db::core::schema::{DataType, SchemaManager};
 use uni_db::query::executor::Executor;
+use uni_db::Value;
 
 use uni_db::query::planner::QueryPlanner;
 use uni_db::runtime::property_manager::PropertyManager;
@@ -53,7 +54,7 @@ async fn test_shortest_path_match() -> anyhow::Result<()> {
         let mut w = writer.write().await;
         for (vid, name) in [(vid_a, "A"), (vid_b, "B"), (vid_c, "C"), (vid_d, "D")] {
             let mut props = HashMap::new();
-            props.insert("name".to_string(), json!(name));
+            props.insert("name".to_string(), Value::String(name.to_string()));
             w.insert_vertex_with_labels(vid, props, vec!["Node".to_string()])
                 .await?;
         }

@@ -121,7 +121,7 @@ async fn test_compaction_l1_to_l2() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn test_compaction_vertices_crdt() -> anyhow::Result<()> {
-    use serde_json::Value;
+    use uni_db::Value;
     use uni_crdt::{Crdt, GCounter};
     use uni_db::core::schema::{CrdtType, DataType};
 
@@ -159,7 +159,7 @@ async fn test_compaction_vertices_crdt() -> anyhow::Result<()> {
     let props1 = HashMap::from([
         (
             "visits".to_string(),
-            serde_json::to_value(Crdt::GCounter(gc1))?,
+            serde_json::to_value(Crdt::GCounter(gc1))?.into(),
         ),
         ("name".to_string(), Value::String("Version1".to_string())),
     ]);
@@ -175,7 +175,7 @@ async fn test_compaction_vertices_crdt() -> anyhow::Result<()> {
     let props2 = HashMap::from([
         (
             "visits".to_string(),
-            serde_json::to_value(Crdt::GCounter(gc2))?,
+            serde_json::to_value(Crdt::GCounter(gc2))?.into(),
         ),
         ("name".to_string(), Value::String("Version2".to_string())),
     ]);
@@ -215,7 +215,7 @@ async fn test_compaction_vertices_crdt() -> anyhow::Result<()> {
     assert_eq!(name_val, Value::String("Version2".to_string())); // LWW -> Newest wins
 
     let visits_val = prop_manager.get_vertex_prop(vid, "visits").await?;
-    let crdt: Crdt = serde_json::from_value(visits_val)?;
+    let crdt: Crdt = serde_json::from_value(visits_val.into())?;
 
     if let Crdt::GCounter(gc) = crdt {
         // Merged: actor_A=10 (from v1), actor_B=5 (from v2) => total 15

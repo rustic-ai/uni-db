@@ -40,7 +40,7 @@ async fn test_crdt_merge_on_write() -> anyhow::Result<()> {
     let val1 = serde_json::to_value(Crdt::GCounter(gc1))?;
 
     let mut props1 = HashMap::new();
-    props1.insert("counter".to_string(), val1);
+    props1.insert("counter".to_string(), val1.into());
 
     // Use internal writer to simulate direct writes
     // Note: Uni::execute uses writer internally
@@ -60,7 +60,7 @@ async fn test_crdt_merge_on_write() -> anyhow::Result<()> {
     let val2 = serde_json::to_value(Crdt::GCounter(gc2))?;
 
     let mut props2 = HashMap::new();
-    props2.insert("counter".to_string(), val2);
+    props2.insert("counter".to_string(), val2.into());
 
     {
         let mut writer = writer_lock.write().await;
@@ -78,7 +78,7 @@ async fn test_crdt_merge_on_write() -> anyhow::Result<()> {
     let result = prop_manager.get_vertex_prop(vid, "counter").await?;
 
     println!("Result: {:?}", result);
-    let result_crdt: Crdt = serde_json::from_value(result)?;
+    let result_crdt: Crdt = serde_json::from_value(result.into())?;
 
     if let Crdt::GCounter(gc) = result_crdt {
         assert_eq!(gc.value(), 30); // 10 + 20

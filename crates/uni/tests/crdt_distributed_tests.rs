@@ -68,7 +68,7 @@ mod multi_actor_convergence {
                 writer
                     .insert_vertex_with_labels(
                         vid,
-                        HashMap::from([("counter".to_string(), val)]),
+                        HashMap::from([("counter".to_string(), val.into())]),
                         vec!["CounterNode".to_string()],
                     )
                     .await?;
@@ -86,7 +86,7 @@ mod multi_actor_convergence {
         let prop_manager = PropertyManager::new(storage.clone(), schema_manager.clone(), 100);
 
         let result = prop_manager.get_vertex_prop(vid, "counter").await?;
-        let crdt: Crdt = serde_json::from_value(result)?;
+        let crdt: Crdt = serde_json::from_value(result.into())?;
 
         if let Crdt::GCounter(gc) = crdt {
             let expected_total = num_actors as u64 * increment_per_actor;
@@ -135,7 +135,7 @@ mod multi_actor_convergence {
             writer
                 .insert_vertex_with_labels(
                     vid,
-                    HashMap::from([("items".to_string(), val1)]),
+                    HashMap::from([("items".to_string(), val1.into())]),
                     vec!["SetNode".to_string()],
                 )
                 .await?;
@@ -154,7 +154,7 @@ mod multi_actor_convergence {
             writer
                 .insert_vertex_with_labels(
                     vid,
-                    HashMap::from([("items".to_string(), val2)]),
+                    HashMap::from([("items".to_string(), val2.into())]),
                     vec!["SetNode".to_string()],
                 )
                 .await?;
@@ -171,7 +171,7 @@ mod multi_actor_convergence {
             writer
                 .insert_vertex_with_labels(
                     vid,
-                    HashMap::from([("items".to_string(), val3)]),
+                    HashMap::from([("items".to_string(), val3.into())]),
                     vec!["SetNode".to_string()],
                 )
                 .await?;
@@ -183,7 +183,7 @@ mod multi_actor_convergence {
         let prop_manager = PropertyManager::new(storage.clone(), schema_manager.clone(), 100);
 
         let result = prop_manager.get_vertex_prop(vid, "items").await?;
-        let crdt: Crdt = serde_json::from_value(result)?;
+        let crdt: Crdt = serde_json::from_value(result.into())?;
 
         if let Crdt::ORSet(os) = crdt {
             // The re-add should have created a new tag, so item should be visible
@@ -220,7 +220,7 @@ mod merge_order_independence {
             vid,
             HashMap::from([(
                 "counter".to_string(),
-                serde_json::to_value(Crdt::GCounter(gc1))?,
+                serde_json::to_value(Crdt::GCounter(gc1))?.into(),
             )]),
         );
 
@@ -231,7 +231,7 @@ mod merge_order_independence {
             vid,
             HashMap::from([(
                 "counter".to_string(),
-                serde_json::to_value(Crdt::GCounter(gc2))?,
+                serde_json::to_value(Crdt::GCounter(gc2))?.into(),
             )]),
         );
 
@@ -242,7 +242,7 @@ mod merge_order_independence {
             vid,
             HashMap::from([(
                 "counter".to_string(),
-                serde_json::to_value(Crdt::GCounter(gc3))?,
+                serde_json::to_value(Crdt::GCounter(gc3))?.into(),
             )]),
         );
 
@@ -268,7 +268,7 @@ mod merge_order_independence {
         let extract_counter_value = |buffer: &L0Buffer| -> u64 {
             let props = buffer.vertex_properties.get(&vid).unwrap();
             let counter = props.get("counter").unwrap();
-            let crdt: Crdt = serde_json::from_value(counter.clone()).unwrap();
+            let crdt: Crdt = serde_json::from_value(serde_json::Value::from(counter.clone())).unwrap();
             if let Crdt::GCounter(gc) = crdt {
                 gc.value()
             } else {
@@ -293,14 +293,14 @@ mod merge_order_independence {
         let vid = Vid::new(1);
 
         // Helper to create GSet props
-        let create_gset_props = |items: &[&str]| -> HashMap<String, serde_json::Value> {
+        let create_gset_props = |items: &[&str]| -> HashMap<String, uni_common::Value> {
             let mut gs = GSet::new();
             for item in items {
                 gs.add(item.to_string());
             }
             HashMap::from([(
                 "items".to_string(),
-                serde_json::to_value(Crdt::GSet(gs)).unwrap(),
+                serde_json::to_value(Crdt::GSet(gs)).unwrap().into(),
             )])
         };
 
@@ -324,7 +324,7 @@ mod merge_order_independence {
         let extract_set_len = |buffer: &L0Buffer| -> usize {
             let props = buffer.vertex_properties.get(&vid).unwrap();
             let items = props.get("items").unwrap();
-            let crdt: Crdt = serde_json::from_value(items.clone()).unwrap();
+            let crdt: Crdt = serde_json::from_value(serde_json::Value::from(items.clone())).unwrap();
             if let Crdt::GSet(gs) = crdt {
                 gs.len()
             } else {

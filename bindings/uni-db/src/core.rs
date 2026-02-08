@@ -308,7 +308,11 @@ pub async fn bulk_insert_vertices_core(
     label: &str,
     rust_props: Vec<HashMap<String, serde_json::Value>>,
 ) -> Result<Vec<Vid>, String> {
-    db.bulk_insert_vertices(label, rust_props)
+    let uni_props: Vec<uni_common::Properties> = rust_props
+        .into_iter()
+        .map(|m| m.into_iter().map(|(k, v)| (k, v.into())).collect())
+        .collect();
+    db.bulk_insert_vertices(label, uni_props)
         .await
         .map_err(|e| e.to_string())
 }
@@ -319,7 +323,11 @@ pub async fn bulk_insert_edges_core(
     edge_type: &str,
     edges: Vec<(Vid, Vid, HashMap<String, serde_json::Value>)>,
 ) -> Result<(), String> {
-    db.bulk_insert_edges(edge_type, edges)
+    let uni_edges: Vec<(Vid, Vid, uni_common::Properties)> = edges
+        .into_iter()
+        .map(|(s, d, m)| (s, d, m.into_iter().map(|(k, v)| (k, v.into())).collect()))
+        .collect();
+    db.bulk_insert_edges(edge_type, uni_edges)
         .await
         .map_err(|e| e.to_string())
 }

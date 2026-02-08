@@ -56,24 +56,24 @@ async fn test_case_expression() -> anyhow::Result<()> {
         // Alice: 10
         let vid1 = Vid::new(1);
         let mut props1 = HashMap::new();
-        props1.insert("name".to_string(), json!("Alice"));
-        props1.insert("age".to_string(), json!(10));
+        props1.insert("name".to_string(), uni_common::Value::String("Alice".to_string()));
+        props1.insert("age".to_string(), uni_common::Value::Int(10));
         w.insert_vertex_with_labels(vid1, props1, vec!["Person".to_string()])
             .await?;
 
         // Bob: 20
         let vid2 = Vid::new(2);
         let mut props2 = HashMap::new();
-        props2.insert("name".to_string(), json!("Bob"));
-        props2.insert("age".to_string(), json!(20));
+        props2.insert("name".to_string(), uni_common::Value::String("Bob".to_string()));
+        props2.insert("age".to_string(), uni_common::Value::Int(20));
         w.insert_vertex_with_labels(vid2, props2, vec!["Person".to_string()])
             .await?;
 
         // Charlie: 30
         let vid3 = Vid::new(3);
         let mut props3 = HashMap::new();
-        props3.insert("name".to_string(), json!("Charlie"));
-        props3.insert("age".to_string(), json!(30));
+        props3.insert("name".to_string(), uni_common::Value::String("Charlie".to_string()));
+        props3.insert("age".to_string(), uni_common::Value::Int(30));
         w.insert_vertex_with_labels(vid3, props3, vec!["Person".to_string()])
             .await?;
 

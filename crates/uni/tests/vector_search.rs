@@ -202,7 +202,7 @@ async fn test_l0_vertex_appears_in_vector_search() -> anyhow::Result<()> {
     // Insert a closer vertex into L0 only (not flushed).
     let vid2 = writer.next_vid().await?;
     let mut props = HashMap::new();
-    props.insert("embedding".to_string(), serde_json::json!([0.0, 0.0]));
+    props.insert("embedding".to_string(), serde_json::json!([0.0, 0.0]).into());
     writer
         .insert_vertex_with_labels(vid2, props, vec!["Item".to_string()])
         .await?;
@@ -290,7 +290,7 @@ async fn test_l0_updated_embedding_wins() -> anyhow::Result<()> {
     {
         let mut l0 = l0_arc.write();
         let mut props = HashMap::new();
-        props.insert("embedding".to_string(), serde_json::json!([0.0, 0.0]));
+        props.insert("embedding".to_string(), serde_json::json!([0.0, 0.0]).into());
         l0.vertex_properties.insert(Vid::new(1), props);
         l0.vertex_labels
             .insert(Vid::new(1), vec!["Item".to_string()]);

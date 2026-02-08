@@ -77,10 +77,10 @@ async fn test_100k_property_lookup() {
         let mut props = Vec::new();
         for i in batch_start..batch_end {
             let embedding: Vec<f32> = (0..128).map(|x| (x + i) as f32).collect();
-            let mut p: HashMap<String, serde_json::Value> = HashMap::new();
-            p.insert("name".to_string(), json!(format!("Person_{}", i)));
-            p.insert("age".to_string(), json!((i % 100) as i32));
-            p.insert("embedding".to_string(), json!(embedding));
+            let mut p: HashMap<String, uni_db::Value> = HashMap::new();
+            p.insert("name".to_string(), json!(format!("Person_{}", i)).into());
+            p.insert("age".to_string(), json!((i % 100) as i32).into());
+            p.insert("embedding".to_string(), json!(embedding).into());
             props.push(p);
         }
         let prep_time = prep_start.elapsed();
@@ -125,7 +125,7 @@ async fn test_100k_property_lookup() {
         let batch_end = (batch_start + edge_batch_size).min(num_edges);
 
         let edge_prep_start = Instant::now();
-        let edges: Vec<(Vid, Vid, HashMap<String, serde_json::Value>)> = (batch_start..batch_end)
+        let edges: Vec<(Vid, Vid, HashMap<String, uni_db::Value>)> = (batch_start..batch_end)
             .map(|i| {
                 let src = all_vids[i % all_vids.len()];
                 let dst = all_vids[(i * 7 + 13) % all_vids.len()]; // pseudo-random dest

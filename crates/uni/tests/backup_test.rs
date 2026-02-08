@@ -44,7 +44,7 @@ async fn test_backup_and_restore() -> anyhow::Result<()> {
         let mut w = writer.write().await;
         let vid = Vid::new(1);
         let mut props = std::collections::HashMap::new();
-        props.insert("name".to_string(), serde_json::json!("Alice"));
+        props.insert("name".to_string(), serde_json::json!("Alice").into());
         w.insert_vertex_with_labels(vid, props, vec!["Person".to_string()])
             .await?;
         w.flush_to_l1(None).await?; // This creates a snapshot

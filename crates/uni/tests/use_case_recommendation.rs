@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2024-2026 Dragonscale Team
 
-use serde_json::json;
 use std::collections::HashMap;
 use uni_db::Uni;
+use uni_db::Value;
 
 #[tokio::test]
 async fn test_recommendation_use_case() -> anyhow::Result<()> {
@@ -49,19 +49,19 @@ async fn test_recommendation_use_case() -> anyhow::Result<()> {
 
     // 2. Data Ingestion
     // Products: P1 (Shoes, [1,0,0,0]), P2 (Socks, [0.9,0.1,0,0])
-    let p1_vec = vec![1.0, 0.0, 0.0, 0.0];
-    let p2_vec = vec![0.9, 0.1, 0.0, 0.0];
+    let p1_vec: Vec<f32> = vec![1.0, 0.0, 0.0, 0.0];
+    let p2_vec: Vec<f32> = vec![0.9, 0.1, 0.0, 0.0];
 
     let products = vec![
         HashMap::from([
-            ("name".to_string(), json!("Running Shoes")),
-            ("price".to_string(), json!(100.0)),
-            ("embedding".to_string(), json!(p1_vec)),
+            ("name".to_string(), Value::String("Running Shoes".to_string())),
+            ("price".to_string(), Value::Float(100.0)),
+            ("embedding".to_string(), Value::Vector(p1_vec.clone())),
         ]),
         HashMap::from([
-            ("name".to_string(), json!("Socks")),
-            ("price".to_string(), json!(10.0)),
-            ("embedding".to_string(), json!(p2_vec)),
+            ("name".to_string(), Value::String("Socks".to_string())),
+            ("price".to_string(), Value::Float(10.0)),
+            ("embedding".to_string(), Value::Vector(p2_vec.clone())),
         ]),
     ];
     let product_vids = db.bulk_insert_vertices("Product", products).await?;
@@ -88,11 +88,11 @@ async fn test_recommendation_use_case() -> anyhow::Result<()> {
     // 3. Hybrid Query (Simulated via 2 queries due to Parser limitation)
 
     // A. Vector Search
-    let search_vec = vec![1.0, 0.0, 0.0, 0.0];
+    let search_vec: Vec<f32> = vec![1.0, 0.0, 0.0, 0.0];
     let vec_query = "CALL uni.vector.query('Product', 'embedding', $vec, 10) YIELD node, distance RETURN node._vid AS vid, distance";
     let vec_result = db
         .query_with(vec_query)
-        .param("vec", json!(search_vec))
+        .param("vec", Value::Vector(search_vec))
         .fetch_all()
         .await?;
 
@@ -119,7 +119,7 @@ async fn test_recommendation_use_case() -> anyhow::Result<()> {
     let graph_query = "MATCH (other_user:User)-[:PURCHASED]->(product) WHERE product._vid = $pid RETURN COUNT(other_user) as count";
     let graph_result = db
         .query_with(graph_query)
-        .param("pid", json!(p1.as_u64()))
+        .param("pid", Value::Int(p1.as_u64() as i64))
         .fetch_all()
         .await?;
 

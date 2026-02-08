@@ -206,7 +206,7 @@ async fn test_wal_edge_mutations() -> Result<()> {
         edge_type: 1,
         eid: test_eid,
         version: 1,
-        properties: [("weight".to_string(), serde_json::json!(1.5))]
+        properties: [("weight".to_string(), uni_common::Value::Float(1.5))]
             .into_iter()
             .collect(),
     })?;
@@ -261,7 +261,7 @@ async fn test_wal_delete_vertex_mutation() -> Result<()> {
     // Insert then delete vertex
     wal.append(&Mutation::InsertVertex {
         vid: test_vid,
-        properties: [("name".to_string(), serde_json::json!("Test"))]
+        properties: [("name".to_string(), uni_common::Value::String("Test".to_string()))]
             .into_iter()
             .collect(),
     })?;

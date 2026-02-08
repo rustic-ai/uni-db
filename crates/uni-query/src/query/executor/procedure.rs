@@ -474,7 +474,7 @@ impl Executor {
 
                                 // Flatten properties into top level
                                 for (key, val) in properties {
-                                    node_obj.insert(key, val);
+                                    node_obj.insert(key, val.into());
                                 }
 
                                 node_obj_opt = Some(Value::Object(node_obj));
@@ -616,7 +616,7 @@ impl Executor {
                                 node_obj.insert("_label".to_string(), json!(label.clone()));
 
                                 for (key, val) in properties {
-                                    node_obj.insert(key, val);
+                                    node_obj.insert(key, val.into());
                                 }
 
                                 node_obj_opt = Some(Value::Object(node_obj));
@@ -875,7 +875,7 @@ impl Executor {
                                 node_obj.insert("_label".to_string(), json!(label.clone()));
 
                                 for (key, val) in properties {
-                                    node_obj.insert(key, val);
+                                    node_obj.insert(key, val.into());
                                 }
 
                                 node_obj_opt = Some(Value::Object(node_obj));
