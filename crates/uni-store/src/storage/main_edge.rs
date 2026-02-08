@@ -9,7 +9,7 @@
 //! - `src_vid`: Source vertex ID
 //! - `dst_vid`: Destination vertex ID
 //! - `type`: Edge type name
-//! - `props_json`: All properties as JSON blob
+//! - `props_json`: All properties as JSONB blob
 //! - `_deleted`: Soft-delete flag
 //! - `_version`: MVCC version
 //! - `_created_at`: Creation timestamp
@@ -18,7 +18,7 @@
 use crate::lancedb::LanceDbStore;
 use crate::storage::arrow_convert::build_timestamp_column_from_eid_map;
 use anyhow::{Result, anyhow};
-use arrow_array::builder::StringBuilder;
+use arrow_array::builder::{LargeBinaryBuilder, StringBuilder};
 use arrow_array::{Array, ArrayRef, BooleanArray, RecordBatch, UInt64Array};
 use arrow_schema::{DataType, Field, Schema as ArrowSchema, TimeUnit};
 use futures::TryStreamExt;
@@ -55,7 +55,7 @@ impl MainEdgeDataset {
             Field::new("src_vid", DataType::UInt64, false),
             Field::new("dst_vid", DataType::UInt64, false),
             Field::new("type", DataType::Utf8, false),
-            Field::new("props_json", DataType::Utf8, true),
+            Field::new("props_json", DataType::LargeBinary, true),
             Field::new("_deleted", DataType::Boolean, false),
             Field::new("_version", DataType::UInt64, false),
             Field::new(
@@ -118,11 +118,17 @@ impl MainEdgeDataset {
         }
         columns.push(Arc::new(type_builder.finish()));
 
-        // props_json column
-        let mut props_json_builder = StringBuilder::new();
+        // props_json column (JSONB binary encoding)
+        let mut props_json_builder = LargeBinaryBuilder::new();
         for (_, _, _, _, props, _, _) in edges.iter() {
-            let json = serde_json::to_string(props).unwrap_or_else(|_| "{}".to_string());
-            props_json_builder.append_value(&json);
+            let jsonb_bytes = jsonb::to_owned_jsonb(props)
+                .map(|b| b.to_vec())
+                .unwrap_or_else(|_| {
+                    jsonb::to_owned_jsonb(&serde_json::json!({}))
+                        .unwrap()
+                        .to_vec()
+                });
+            props_json_builder.append_value(&jsonb_bytes);
         }
         columns.push(Arc::new(props_json_builder.finish()));
 
@@ -273,15 +279,21 @@ impl MainEdgeDataset {
                         src.as_any().downcast_ref::<UInt64Array>(),
                         dst.as_any().downcast_ref::<UInt64Array>(),
                         typ.as_any().downcast_ref::<arrow_array::StringArray>(),
-                        props.as_any().downcast_ref::<arrow_array::StringArray>(),
+                        props
+                            .as_any()
+                            .downcast_ref::<arrow_array::LargeBinaryArray>(),
                     )
                 {
                     let src_vid = Vid::from(src_arr.value(0));
                     let dst_vid = Vid::from(dst_arr.value(0));
                     let edge_type = type_arr.value(0).to_string();
-                    let props_json = props_arr.value(0);
                     let properties: Properties =
-                        serde_json::from_str(props_json).unwrap_or_default();
+                        if props_arr.is_null(0) || props_arr.value(0).is_empty() {
+                            Properties::new()
+                        } else {
+                            let raw = jsonb::RawJsonb::new(props_arr.value(0));
+                            serde_json::from_str(&raw.to_string()).unwrap_or_default()
+                        };
 
                     return Ok(Some((src_vid, dst_vid, edge_type, properties)));
                 }
@@ -389,7 +401,7 @@ impl MainEdgeDataset {
             let version_col = batch.column_by_name("_version");
 
             if let (Some(props_arr), Some(ver_arr)) = (
-                props_col.and_then(|c| c.as_any().downcast_ref::<arrow_array::StringArray>()),
+                props_col.and_then(|c| c.as_any().downcast_ref::<arrow_array::LargeBinaryArray>()),
                 version_col.and_then(|c| c.as_any().downcast_ref::<UInt64Array>()),
             ) {
                 for i in 0..batch.num_rows() {
@@ -410,13 +422,15 @@ impl MainEdgeDataset {
         Ok(best_props)
     }
 
-    /// Parse props_json from a StringArray at the given index.
-    fn parse_props_json(arr: &arrow_array::StringArray, idx: usize) -> Result<Properties> {
+    /// Parse props_json from a LargeBinaryArray (JSONB) at the given index.
+    fn parse_props_json(arr: &arrow_array::LargeBinaryArray, idx: usize) -> Result<Properties> {
         if arr.is_null(idx) || arr.value(idx).is_empty() {
             return Ok(Properties::new());
         }
-        serde_json::from_str(arr.value(idx))
-            .map_err(|e| anyhow!("Failed to parse props_json: {}", e))
+        let bytes = arr.value(idx);
+        let raw = jsonb::RawJsonb::new(bytes);
+        let json_str = raw.to_string();
+        serde_json::from_str(&json_str).map_err(|e| anyhow!("Failed to parse props_json: {}", e))
     }
 
     /// Find edge type name by EID in the main edges table.
@@ -536,7 +550,7 @@ impl MainEdgeDataset {
             .and_then(|c| c.as_any().downcast_ref::<arrow_array::StringArray>());
         let props_arr = batch
             .column_by_name("props_json")
-            .and_then(|c| c.as_any().downcast_ref::<arrow_array::StringArray>());
+            .and_then(|c| c.as_any().downcast_ref::<arrow_array::LargeBinaryArray>());
 
         for i in 0..batch.num_rows() {
             if eid_arr.is_null(i) || src_arr.is_null(i) || dst_arr.is_null(i) {

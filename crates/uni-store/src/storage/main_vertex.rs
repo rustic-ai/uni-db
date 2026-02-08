@@ -9,7 +9,7 @@
 //! - `_uid`: Content-addressed unique ID (SHA3-256 hash)
 //! - `ext_id`: Optional external/user-provided ID (globally unique)
 //! - `labels`: List of label names (OpenCypher multi-label)
-//! - `props_json`: All properties as JSON blob
+//! - `props_json`: All properties as JSONB blob
 //! - `_deleted`: Soft-delete flag
 //! - `_version`: MVCC version
 //! - `_created_at`: Creation timestamp
@@ -18,7 +18,9 @@
 use crate::lancedb::LanceDbStore;
 use crate::storage::arrow_convert::build_timestamp_column_from_vid_map;
 use anyhow::{Result, anyhow};
-use arrow_array::builder::{FixedSizeBinaryBuilder, ListBuilder, StringBuilder};
+use arrow_array::builder::{
+    FixedSizeBinaryBuilder, LargeBinaryBuilder, ListBuilder, StringBuilder,
+};
 use arrow_array::{Array, ArrayRef, BooleanArray, RecordBatch, UInt64Array};
 use arrow_schema::{DataType, Field, Schema as ArrowSchema, TimeUnit};
 use lancedb::Table;
@@ -60,7 +62,7 @@ impl MainVertexDataset {
                 DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
                 false,
             ),
-            Field::new("props_json", DataType::Utf8, true),
+            Field::new("props_json", DataType::LargeBinary, true),
             Field::new("_deleted", DataType::Boolean, false),
             Field::new("_version", DataType::UInt64, false),
             Field::new(
@@ -178,11 +180,17 @@ impl MainVertexDataset {
         }
         columns.push(Arc::new(labels_builder.finish()));
 
-        // props_json column
-        let mut props_json_builder = StringBuilder::new();
+        // props_json column (JSONB binary encoding)
+        let mut props_json_builder = LargeBinaryBuilder::new();
         for (_, _, props, _, _) in vertices.iter() {
-            let json = serde_json::to_string(props).unwrap_or_else(|_| "{}".to_string());
-            props_json_builder.append_value(&json);
+            let jsonb_bytes = jsonb::to_owned_jsonb(props)
+                .map(|b| b.to_vec())
+                .unwrap_or_else(|_| {
+                    jsonb::to_owned_jsonb(&serde_json::json!({}))
+                        .unwrap()
+                        .to_vec()
+                });
+            props_json_builder.append_value(&jsonb_bytes);
         }
         columns.push(Arc::new(props_json_builder.finish()));
 
@@ -556,7 +564,7 @@ impl MainVertexDataset {
 
             if let (Some(vid_arr), Some(props_arr)) = (
                 vid_col.and_then(|c| c.as_any().downcast_ref::<UInt64Array>()),
-                props_col.and_then(|c| c.as_any().downcast_ref::<arrow_array::StringArray>()),
+                props_col.and_then(|c| c.as_any().downcast_ref::<arrow_array::LargeBinaryArray>()),
             ) {
                 for i in 0..batch.num_rows() {
                     if vid_arr.is_null(i) {
@@ -568,7 +576,10 @@ impl MainVertexDataset {
                     {
                         Properties::new()
                     } else {
-                        serde_json::from_str(props_arr.value(i))
+                        let bytes = props_arr.value(i);
+                        let raw = jsonb::RawJsonb::new(bytes);
+                        let json_str = raw.to_string();
+                        serde_json::from_str(&json_str)
                             .map_err(|e| anyhow!("Failed to parse props_json: {}", e))?
                     };
 
@@ -621,7 +632,7 @@ impl MainVertexDataset {
             let version_col = batch.column_by_name("_version");
 
             if let (Some(props_arr), Some(ver_arr)) = (
-                props_col.and_then(|c| c.as_any().downcast_ref::<arrow_array::StringArray>()),
+                props_col.and_then(|c| c.as_any().downcast_ref::<arrow_array::LargeBinaryArray>()),
                 version_col.and_then(|c| c.as_any().downcast_ref::<UInt64Array>()),
             ) {
                 for i in 0..batch.num_rows() {
@@ -636,8 +647,10 @@ impl MainVertexDataset {
                         if props_arr.is_null(i) || props_arr.value(i).is_empty() {
                             best_props = Some(Properties::new());
                         } else {
-                            let json_str = props_arr.value(i);
-                            let parsed: Properties = serde_json::from_str(json_str)
+                            let bytes = props_arr.value(i);
+                            let raw = jsonb::RawJsonb::new(bytes);
+                            let json_str = raw.to_string();
+                            let parsed: Properties = serde_json::from_str(&json_str)
                                 .map_err(|e| anyhow!("Failed to parse props_json: {}", e))?;
                             best_props = Some(parsed);
                         }

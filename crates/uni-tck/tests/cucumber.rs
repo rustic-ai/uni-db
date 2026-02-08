@@ -39,7 +39,7 @@ async fn main() {
                 "comparison" => "tck/features/expressions/comparison".to_string(),
                 "match" => "tck/features/clauses/match".to_string(),
                 "where" => "tck/features/clauses/match-where".to_string(), // TCK structure varies
-                _ => format!("tck/features/{}", arg) // Try generic mapping
+                _ => format!("tck/features/{}", arg),                      // Try generic mapping
             }
         }
     } else {

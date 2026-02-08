@@ -258,17 +258,6 @@ impl AdjacencyCache {
         Ok(())
     }
 
-    /// Get CSR for an edge type and direction (new API without label).
-    pub fn get_csr_unified(
-        &self,
-        edge_type: u16,
-        direction: Direction,
-    ) -> Option<Arc<CompressedSparseRow>> {
-        self.csr_maps
-            .get(&(edge_type, direction))
-            .map(|r| r.value().clone())
-    }
-
     /// Get CSR for an edge type and direction.
     pub fn get_csr(
         &self,
@@ -276,21 +265,31 @@ impl AdjacencyCache {
         direction: Direction,
     ) -> Option<Arc<CompressedSparseRow>> {
         self.csr_maps
-            .get(&(edge_type, direction))
+            .get(&(u32::from(edge_type), direction))
             .map(|r| r.value().clone())
     }
 
-    /// Get neighbors with O(1) lookup
+    /// Get CSR for an edge type and direction (alias for get_csr).
+    #[inline]
+    pub fn get_csr_unified(
+        &self,
+        edge_type: u16,
+        direction: Direction,
+    ) -> Option<Arc<CompressedSparseRow>> {
+        self.get_csr(edge_type, direction)
+    }
+
+    /// Get neighbors with O(1) lookup.
+    ///
+    /// Note: The `_vid` parameter is unused - the CSR is returned for the edge type
+    /// and direction, and the caller uses the VID to index into it.
     pub fn get_neighbors(
         &self,
         _vid: Vid,
         edge_type: u16,
         direction: Direction,
     ) -> Option<Arc<CompressedSparseRow>> {
-        let res = self
-            .csr_maps
-            .get(&(edge_type, direction))
-            .map(|r| r.value().clone());
+        let res = self.get_csr(edge_type, direction);
 
         if res.is_some() {
             metrics::counter!("uni_adjacency_cache_hits_total").increment(1);
@@ -421,6 +420,8 @@ impl AdjacencyCache {
 
     /// Invalidate cache entries for a specific edge type.
     pub fn invalidate(&self, edge_type: u16) {
-        self.csr_maps.retain(|(k_edge, _), _| *k_edge != edge_type);
+        let edge_type_u32 = u32::from(edge_type);
+        self.csr_maps
+            .retain(|(k_edge, _), _| *k_edge != edge_type_u32);
     }
 }

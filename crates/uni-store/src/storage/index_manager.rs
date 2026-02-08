@@ -382,11 +382,10 @@ impl IndexManager {
     pub async fn drop_index(&self, name: &str) -> Result<()> {
         info!("Dropping index '{}'", name);
 
-        let idx_def = self.schema_manager.get_index(name);
-        if idx_def.is_none() {
-            return Err(anyhow!("Index '{}' not found in schema", name));
-        }
-        let idx_def = idx_def.unwrap();
+        let idx_def = self
+            .schema_manager
+            .get_index(name)
+            .ok_or_else(|| anyhow!("Index '{}' not found in schema", name))?;
 
         let label = idx_def.label();
 

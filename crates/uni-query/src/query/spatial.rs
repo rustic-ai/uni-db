@@ -95,10 +95,10 @@ fn eval_distance(args: &[Value]) -> Result<Value> {
 
     match crs1 {
         "WGS84" => {
-            let lat1 = p1["latitude"].as_f64().unwrap().to_radians();
-            let lon1 = p1["longitude"].as_f64().unwrap().to_radians();
-            let lat2 = p2["latitude"].as_f64().unwrap().to_radians();
-            let lon2 = p2["longitude"].as_f64().unwrap().to_radians();
+            let (lat1, lon1) = get_geo_coords(p1, "First point")?;
+            let (lat2, lon2) = get_geo_coords(p2, "Second point")?;
+            let (lat1, lon1) = (lat1.to_radians(), lon1.to_radians());
+            let (lat2, lon2) = (lat2.to_radians(), lon2.to_radians());
 
             let dlat = lat2 - lat1;
             let dlon = lon2 - lon1;
@@ -110,19 +110,15 @@ fn eval_distance(args: &[Value]) -> Result<Value> {
             Ok(json!(EARTH_RADIUS_KM * c * 1000.0)) // Return meters
         }
         "Cartesian" => {
-            let x1 = p1["x"].as_f64().unwrap();
-            let y1 = p1["y"].as_f64().unwrap();
-            let x2 = p2["x"].as_f64().unwrap();
-            let y2 = p2["y"].as_f64().unwrap();
+            let (x1, y1) = get_cartesian_coords(p1, "First point")?;
+            let (x2, y2) = get_cartesian_coords(p2, "Second point")?;
 
             Ok(json!(((x2 - x1).powi(2) + (y2 - y1).powi(2)).sqrt()))
         }
         "Cartesian-3D" => {
-            let x1 = p1["x"].as_f64().unwrap();
-            let y1 = p1["y"].as_f64().unwrap();
+            let (x1, y1) = get_cartesian_coords(p1, "First point")?;
+            let (x2, y2) = get_cartesian_coords(p2, "Second point")?;
             let z1 = p1["z"].as_f64().unwrap_or(0.0);
-            let x2 = p2["x"].as_f64().unwrap();
-            let y2 = p2["y"].as_f64().unwrap();
             let z2 = p2["z"].as_f64().unwrap_or(0.0);
 
             Ok(json!(

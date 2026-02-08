@@ -63,16 +63,13 @@ impl InvertedIndex {
         let mut postings: HashMap<String, Vec<u64>> = HashMap::new();
         let mut count = 0;
 
-        println!(
-            "DEBUG: build_from_dataset start for property {}",
-            self.property
-        );
+        debug!(property = %self.property, "Building inverted index from dataset");
 
         if let Ok(ds) = vertex_dataset.open().await {
             let scanner = ds.scan();
             let mut stream = scanner.try_into_stream().await?;
             while let Some(batch) = stream.try_next().await? {
-                println!("DEBUG: processing batch {} rows", batch.num_rows());
+                debug!(rows = batch.num_rows(), "Processing batch");
                 let vid_col = batch
                     .column_by_name("_vid")
                     .ok_or_else(|| anyhow!("Missing _vid"))?
@@ -140,10 +137,10 @@ impl InvertedIndex {
                 }
             }
         } else {
-            println!("DEBUG: Failed to open vertex dataset");
+            debug!("Vertex dataset not found, creating empty index");
         }
 
-        println!("DEBUG: Built index with {} terms", postings.len());
+        debug!(terms = postings.len(), "Built inverted index");
 
         self.write_postings(postings).await?;
         Ok(())
@@ -197,11 +194,10 @@ impl InvertedIndex {
     }
 
     pub async fn query_any(&self, terms: &[String]) -> Result<Vec<Vid>> {
-        if self.dataset.is_none() {
-            println!("DEBUG: Dataset is None in query_any");
+        let Some(ds) = &self.dataset else {
+            debug!("Inverted index not initialized, returning empty result");
             return Ok(Vec::new());
-        }
-        let ds = self.dataset.as_ref().unwrap();
+        };
 
         let normalized: Vec<String> = if self.config.normalize {
             terms
@@ -222,7 +218,7 @@ impl InvertedIndex {
             .collect::<Vec<_>>()
             .join(" OR ");
 
-        println!("DEBUG: Querying inverted index with filter: {}", filter);
+        debug!(filter = %filter, "Querying inverted index");
 
         let mut scanner = ds.scan();
         scanner.filter(&filter)?;

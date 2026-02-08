@@ -133,10 +133,12 @@ async fn test_edge_export_failure() -> anyhow::Result<()> {
                     .downcast_ref::<arrow_array::UInt64Array>()
                 && let Some(props) = props_json_array
                     .as_any()
-                    .downcast_ref::<arrow_array::StringArray>()
+                    .downcast_ref::<arrow_array::LargeBinaryArray>()
             {
-                // props_json is a JSON string containing {"since": 2022}
-                let props_str = props.value(0);
+                // props_json is a JSONB binary blob containing {"since": 2022}
+                let bytes = props.value(0);
+                let raw = jsonb::RawJsonb::new(bytes);
+                let props_str = raw.to_string();
                 if src.value(0) == 0 && dst.value(0) == 1 && props_str.contains("2022") {
                     found_correct_edge = true;
                 }

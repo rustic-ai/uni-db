@@ -10,7 +10,7 @@ use std::sync::LazyLock;
 ///
 /// This helps the query planner understand which properties need to be loaded
 /// for entity arguments to a function, enabling pushdown hydration.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct FunctionPropertySpec {
     /// Argument positions containing entity references (0-indexed).
     /// For example, in `validAt(entity, start, end, ts)`, position 0 is the entity.
@@ -28,137 +28,57 @@ pub struct FunctionPropertySpec {
 
 /// Static registry of function property specifications.
 /// Function names are uppercase for case-insensitive lookup.
-static FUNCTION_SPECS: LazyLock<[(&'static str, FunctionPropertySpec); 13]> = LazyLock::new(|| {
-    [
-        // uni.temporal.validAt(entity, start_prop, end_prop, timestamp)
-        (
-            "UNI.TEMPORAL.VALIDAT",
-            FunctionPropertySpec {
-                entity_args: &[0],
-                property_name_args: &[(1, 0), (2, 0)],
-                needs_full_entity: false,
-            },
-        ),
-        // keys(entity) - returns all property names
-        (
-            "KEYS",
-            FunctionPropertySpec {
-                entity_args: &[0],
-                property_name_args: &[],
-                needs_full_entity: true,
-            },
-        ),
-        // properties(entity) - returns property map
-        (
-            "PROPERTIES",
-            FunctionPropertySpec {
-                entity_args: &[0],
-                property_name_args: &[],
-                needs_full_entity: true,
-            },
-        ),
-        // labels(entity) - returns all label names
-        (
-            "LABELS",
-            FunctionPropertySpec {
-                entity_args: &[0],
-                property_name_args: &[],
-                needs_full_entity: true,
-            },
-        ),
-        // nodes(path) - returns all nodes in a path
-        (
-            "NODES",
-            FunctionPropertySpec {
-                entity_args: &[0],
-                property_name_args: &[],
-                needs_full_entity: true,
-            },
-        ),
-        // relationships(path) - returns all relationships in a path
-        (
-            "RELATIONSHIPS",
-            FunctionPropertySpec {
-                entity_args: &[0],
-                property_name_args: &[],
-                needs_full_entity: true,
-            },
-        ),
-        // coalesce(entity.prop1, entity.prop2, ...)
-        // Properties extracted from PropertyAccess in arguments
-        (
-            "COALESCE",
-            FunctionPropertySpec {
-                entity_args: &[],
-                property_name_args: &[],
-                needs_full_entity: false,
-            },
-        ),
-        // Aggregate functions - do not need full entity materialization
-        // COUNT(entity) or COUNT(*)
-        (
-            "COUNT",
-            FunctionPropertySpec {
-                entity_args: &[0],
-                property_name_args: &[],
-                needs_full_entity: false,
-            },
-        ),
-        // SUM(entity.prop) - property extracted from PropertyAccess
-        (
-            "SUM",
-            FunctionPropertySpec {
-                entity_args: &[],
-                property_name_args: &[],
-                needs_full_entity: false,
-            },
-        ),
-        // AVG(entity.prop) - property extracted from PropertyAccess
-        (
-            "AVG",
-            FunctionPropertySpec {
-                entity_args: &[],
-                property_name_args: &[],
-                needs_full_entity: false,
-            },
-        ),
-        // MIN(entity.prop) - property extracted from PropertyAccess
-        (
-            "MIN",
-            FunctionPropertySpec {
-                entity_args: &[],
-                property_name_args: &[],
-                needs_full_entity: false,
-            },
-        ),
-        // MAX(entity.prop) - property extracted from PropertyAccess
-        (
-            "MAX",
-            FunctionPropertySpec {
-                entity_args: &[],
-                property_name_args: &[],
-                needs_full_entity: false,
-            },
-        ),
-        // COLLECT(entity.prop) - property extracted from PropertyAccess
-        (
-            "COLLECT",
-            FunctionPropertySpec {
-                entity_args: &[],
-                property_name_args: &[],
-                needs_full_entity: false,
-            },
-        ),
-    ]
-});
+static FUNCTION_SPECS: LazyLock<std::collections::HashMap<&'static str, FunctionPropertySpec>> =
+    LazyLock::new(|| {
+        // Helper specs for common patterns
+        let full_entity = FunctionPropertySpec {
+            entity_args: &[0],
+            property_name_args: &[],
+            needs_full_entity: true,
+        };
+        let entity_arg_only = FunctionPropertySpec {
+            entity_args: &[0],
+            property_name_args: &[],
+            needs_full_entity: false,
+        };
+        let no_entity = FunctionPropertySpec {
+            entity_args: &[],
+            property_name_args: &[],
+            needs_full_entity: false,
+        };
+
+        std::collections::HashMap::from([
+            // uni.temporal.validAt(entity, start_prop, end_prop, timestamp)
+            (
+                "UNI.TEMPORAL.VALIDAT",
+                FunctionPropertySpec {
+                    entity_args: &[0],
+                    property_name_args: &[(1, 0), (2, 0)],
+                    needs_full_entity: false,
+                },
+            ),
+            // Functions that need full entity materialization
+            ("KEYS", full_entity),
+            ("PROPERTIES", full_entity),
+            ("LABELS", full_entity),
+            ("NODES", full_entity),
+            ("RELATIONSHIPS", full_entity),
+            // Functions that take entity arg but don't need full entity
+            ("COUNT", entity_arg_only),
+            // Functions where properties are extracted from PropertyAccess
+            ("COALESCE", no_entity),
+            ("SUM", no_entity),
+            ("AVG", no_entity),
+            ("MIN", no_entity),
+            ("MAX", no_entity),
+            ("COLLECT", no_entity),
+        ])
+    });
 
 /// Look up the property specification for a function by name (case-insensitive).
 pub fn get_function_spec(name: &str) -> Option<&'static FunctionPropertySpec> {
     let name_upper = name.to_uppercase();
-    FUNCTION_SPECS
-        .iter()
-        .find(|(n, _)| *n == name_upper)
-        .map(|(_, spec)| spec)
+    FUNCTION_SPECS.get(name_upper.as_str())
 }
 
 #[cfg(test)]

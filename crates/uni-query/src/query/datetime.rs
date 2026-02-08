@@ -129,28 +129,24 @@ fn has_timezone_suffix(s: &str) -> bool {
     false
 }
 
+/// Check if a string value matches a specific temporal type.
+fn is_temporal_type(val: &Value, expected: TemporalType) -> bool {
+    matches!(val, Value::String(s) if classify_temporal(s) == Some(expected))
+}
+
 /// Check if a string value is a local time (no timezone).
 pub fn is_localtime_value(val: &Value) -> bool {
-    match val {
-        Value::String(s) => classify_temporal(s) == Some(TemporalType::LocalTime),
-        _ => false,
-    }
+    is_temporal_type(val, TemporalType::LocalTime)
 }
 
 /// Check if a string value is a time with timezone.
 pub fn is_time_value(val: &Value) -> bool {
-    match val {
-        Value::String(s) => classify_temporal(s) == Some(TemporalType::Time),
-        _ => false,
-    }
+    is_temporal_type(val, TemporalType::Time)
 }
 
 /// Check if a string value is a local datetime (no timezone).
 pub fn is_localdatetime_value(val: &Value) -> bool {
-    match val {
-        Value::String(s) => classify_temporal(s) == Some(TemporalType::LocalDateTime),
-        _ => false,
-    }
+    is_temporal_type(val, TemporalType::LocalDateTime)
 }
 
 /// Parse a duration from a Value, handling both ISO 8601 strings and integer microseconds.

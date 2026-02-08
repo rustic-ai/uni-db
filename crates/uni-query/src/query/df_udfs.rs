@@ -1585,7 +1585,7 @@ fn get_type_rank_scalar(val: &ScalarValue) -> i32 {
     if val.is_null() {
         return 9;
     }
-    
+
     // println!("DEBUG: Rank {:?} -> {}", val, rank);
     match val {
         ScalarValue::Null => 9,

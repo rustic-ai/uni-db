@@ -35,6 +35,7 @@ chrono = { workspace = true }
 
 [dev-dependencies]
 criterion = "0.5"
+jsonb = "0.5.3"
 uni-cypher = { workspace = true }
 tempfile = { workspace = true }
 rand = { workspace = true }
