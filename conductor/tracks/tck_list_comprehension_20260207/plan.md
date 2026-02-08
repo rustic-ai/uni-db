@@ -9,11 +9,11 @@
     - [x] Replace `cypher_expr_to_df` + `DefaultPhysicalPlanner` pipeline in Projection/Filter.
 
 ## Phase 2: ListComprehension Implementation
-- [ ] Task: Implement `ListComprehensionPhysicalExpr` evaluation logic.
-    - [ ] Local Unnest / Flattening.
-    - [ ] Inner expression evaluation on flattened batch.
-    - [ ] Reconstruction of list offsets.
-- [ ] Task: Verify with basic TCK scenarios (`[x IN list | x]`).
+- [x] Task: Implement `ListComprehensionPhysicalExpr` evaluation logic.
+    - [x] Local Unnest / Flattening.
+    - [x] Inner expression evaluation on flattened batch.
+    - [x] Reconstruction of list offsets.
+- [x] Task: Verify with basic TCK scenarios (`[x IN list | x]`).
 
 ## Phase 3: Advanced Features
 - [ ] Task: Implement `WHERE` clause support in comprehension.

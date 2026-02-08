@@ -6,10 +6,10 @@ use std::sync::Arc;
 use std::fmt::{self, Display, Formatter};
 use std::hash::Hash;
 
-use datafusion::arrow::array::{Array, RecordBatch};
+use datafusion::arrow::array::{Array, RecordBatch, BooleanArray, UInt32Array};
 use datafusion::arrow::datatypes::{DataType, Schema, Field};
-use datafusion::arrow::compute::cast;
-use datafusion::arrow::compute::take;
+use datafusion::arrow::compute::{cast, take, filter, filter_record_batch};
+use datafusion::arrow::buffer::{OffsetBuffer, ScalarBuffer};
 use datafusion::physical_plan::PhysicalExpr;
 use datafusion::common::Result;
 use datafusion::logical_expr::ColumnarValue;
@@ -164,17 +164,55 @@ impl PhysicalExpr for ListComprehensionExecExpr {
         
         let inner_batch = RecordBatch::try_new(inner_schema, inner_columns)?;
         
-        if let Some(_pred) = &self.predicate {
-             return Err(datafusion::error::DataFusionError::NotImplemented("ListComprehension WHERE not yet implemented".to_string()));
-        }
+        // 4. Filter (Predicate)
+        let (filtered_batch, filtered_indices) = if let Some(pred) = &self.predicate {
+             let mask = pred.evaluate(&inner_batch)?.into_array(inner_batch.num_rows())?;
+             let mask = cast(&mask, &DataType::Boolean)?;
+             let boolean_mask = mask.as_any().downcast_ref::<BooleanArray>().unwrap();
+             
+             let filtered_batch = filter_record_batch(&inner_batch, boolean_mask)?;
+             
+             let indices_array: Arc<dyn Array> = Arc::new(indices.clone());
+             let filtered_indices = filter(&indices_array, boolean_mask)?;
+             let filtered_indices = filtered_indices.as_any().downcast_ref::<UInt32Array>().unwrap().clone();
+             
+             (filtered_batch, filtered_indices)
+        } else {
+             (inner_batch, indices.clone())
+        };
         
-        let mapped_val = self.map_expr.evaluate(&inner_batch)?;
-        let mapped_array = mapped_val.into_array(inner_batch.num_rows())?;
+        // 5. Evaluate Map Expression
+        let mapped_val = self.map_expr.evaluate(&filtered_batch)?;
+        let mapped_array = mapped_val.into_array(filtered_batch.num_rows())?;
+        
+        // 6. Reconstruct ListArray
+        let new_offsets = if self.predicate.is_some() {
+             let num_rows = batch.num_rows();
+             let mut new_offsets = Vec::with_capacity(num_rows + 1);
+             new_offsets.push(0);
+             
+             let indices_slice = filtered_indices.values();
+             let mut pos = 0;
+             let mut current_len = 0;
+             
+             for row_idx in 0..num_rows {
+                 let mut count = 0;
+                 while pos < indices_slice.len() && indices_slice[pos] as usize == row_idx {
+                     count += 1;
+                     pos += 1;
+                 }
+                 current_len += count;
+                 new_offsets.push(current_len);
+             }
+             OffsetBuffer::new(ScalarBuffer::from(new_offsets))
+        } else {
+             offsets.clone()
+        };
         
         let new_field = Arc::new(Field::new("item", mapped_array.data_type().clone(), true));
         let new_list = datafusion::arrow::array::LargeListArray::new(
             new_field,
-            offsets.clone(),
+            new_offsets,
             mapped_array,
             nulls.cloned(),
         );
@@ -217,6 +255,10 @@ impl PhysicalExpr for ListComprehensionExecExpr {
     }
 
     fn fmt_sql(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "[{} IN {} | {}]", self.variable_name, self.input_list, self.map_expr)
+        if let Some(pred) = &self.predicate {
+            write!(f, "[{} IN {} WHERE {} | {}]", self.variable_name, self.input_list, pred, self.map_expr)
+        } else {
+            write!(f, "[{} IN {} | {}]", self.variable_name, self.input_list, self.map_expr)
+        }
     }
 }
