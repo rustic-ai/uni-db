@@ -8,13 +8,13 @@
     - [x] Add support in `expr_compiler.rs` (should be automatic if UDF/mapped).
 
 ## Phase 2: Ordering Logic
-- [ ] Task: Implement Cypher-compliant Sort Comparator.
-    - [ ] DataFusion's default sort is SQL-style. Cypher has specific type ordering (`Map > Node > ... > Null`).
-    - [ ] Create `CypherSortExpr` or wrap values to enforce order?
-    - [ ] Or rely on `Arrow` custom comparator if possible.
-    - [ ] Fix `NULL` handling (Nulls are generally largest in Cypher, check TCK).
-- [ ] Task: Fix `ORDER BY` expression evaluation in `df_planner.rs`.
-    - [ ] Ensure expressions in `ORDER BY` are properly compiled and aliased.
+- [x] Task: Implement Cypher-compliant Sort Comparator.
+    - [x] DataFusion's default sort is SQL-style. Cypher has specific type ordering (`Map > Node > ... > Null`).
+    - [x] Create `CypherSortExpr` or wrap values to enforce order?
+    - [x] Or rely on `Arrow` custom comparator if possible.
+    - [x] Fix `NULL` handling (Nulls are generally largest in Cypher, check TCK).
+- [x] Task: Fix `ORDER BY` expression evaluation in `df_planner.rs`.
+    - [x] Ensure expressions in `ORDER BY` are properly compiled and aliased.
 
 ## Phase 3: Temporal Foundations
 - [ ] Task: Fix Temporal Formatting.

@@ -235,9 +235,17 @@ pub fn arrow_to_value(col: &dyn Array, row: usize) -> Value {
     // Timestamp (microseconds since epoch) - convert to ISO datetime string
     if let Some(ts) = col.as_any().downcast_ref::<TimestampMicrosecondArray>() {
         let micros = ts.value(row);
-        // Convert microseconds since Unix epoch to datetime string
         if let Some(dt) = chrono::DateTime::from_timestamp_micros(micros) {
-            return Value::String(dt.format("%Y-%m-%dT%H:%M:%SZ").to_string());
+            use chrono::Timelike;
+            if dt.nanosecond() > 0 {
+                let s = dt.format("%Y-%m-%dT%H:%M:%S").to_string();
+                let micros_part = dt.nanosecond() / 1000;
+                return Value::String(format!("{}.{:06}Z", s, micros_part));
+            } else if dt.second() == 0 {
+                return Value::String(dt.format("%Y-%m-%dT%H:%MZ").to_string());
+            } else {
+                return Value::String(dt.format("%Y-%m-%dT%H:%M:%SZ").to_string());
+            }
         }
         return Value::Null;
     }
@@ -256,6 +264,9 @@ pub fn arrow_to_value(col: &dyn Array, row: usize) -> Value {
                 hours, minutes, seconds, micro_part
             ));
         } else {
+            if seconds == 0 {
+                return Value::String(format!("{:02}:{:02}", hours, minutes));
+            }
             return Value::String(format!("{:02}:{:02}:{:02}", hours, minutes, seconds));
         }
     }
