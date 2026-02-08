@@ -760,7 +760,7 @@ fn translate_function_call(
             // Cypher is 0-based, DataFusion is 1-based.
             let str_expr = df_args[0].clone();
             let start_expr = df_args[1].clone();
-            
+
             // start = start + 1
             let one = datafusion::logical_expr::lit(1i64);
             let start_adjusted = datafusion::logical_expr::binary_expr(
@@ -768,15 +768,19 @@ fn translate_function_call(
                 datafusion::logical_expr::Operator::Plus,
                 one,
             );
-            
+
             let len_expr = if df_args.len() > 2 {
                 df_args[2].clone()
             } else {
                 // If length is missing, use a large number to emulate "rest of string"
                 datafusion::logical_expr::lit(i64::MAX)
             };
-            
-            Ok(datafusion::functions::unicode::expr_fn::substring(str_expr, start_adjusted, len_expr))
+
+            Ok(datafusion::functions::unicode::expr_fn::substring(
+                str_expr,
+                start_adjusted,
+                len_expr,
+            ))
         }
         // Trim functions
         "TRIM" => {

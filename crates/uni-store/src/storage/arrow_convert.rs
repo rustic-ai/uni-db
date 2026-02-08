@@ -1284,7 +1284,7 @@ mod tests {
         );
         assert_eq!(
             arrow_to_value(&arr, 1),
-            Value::String("00:00:00".to_string())
+            Value::String("00:00".to_string())
         );
         assert_eq!(
             arrow_to_value(&arr, 2),

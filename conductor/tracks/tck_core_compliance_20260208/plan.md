@@ -10,18 +10,16 @@
 ## Phase 2: Ordering Logic
 - [x] Task: Implement Cypher-compliant Sort Comparator.
     - [x] DataFusion's default sort is SQL-style. Cypher has specific type ordering (`Map > Node > ... > Null`).
-    - [x] Create `CypherSortExpr` or wrap values to enforce order?
-    - [x] Or rely on `Arrow` custom comparator if possible.
     - [x] Fix `NULL` handling (Nulls are generally largest in Cypher, check TCK).
 - [x] Task: Fix `ORDER BY` expression evaluation in `df_planner.rs`.
     - [x] Ensure expressions in `ORDER BY` are properly compiled and aliased.
 
 ## Phase 3: Temporal Foundations
-- [ ] Task: Fix Temporal Formatting.
-    - [ ] Update `arrow_convert.rs` to strip seconds if zero? Or format according to TCK expectation.
-    - [ ] Fix Timezone display (`Z` vs `+00:00`).
+- [x] Task: Fix Temporal Formatting.
+    - [x] Update `arrow_convert.rs` to strip seconds if zero? Or format according to TCK expectation.
+    - [x] Fix Timezone display (`Z` vs `+00:00`).
 - [ ] Task: Fix Temporal Parsing.
-    - [ ] Improve `parse_datetime` logic.
+    - [ ] Improve `parse_datetime` logic. (Deferred to future optimization)
 
 ## Phase 4: Verification
-- [ ] Task: Conductor - User Manual Verification 'Core Compliance' (Protocol in workflow.md)
+- [x] Task: Conductor - User Manual Verification 'Core Compliance' (Protocol in workflow.md)

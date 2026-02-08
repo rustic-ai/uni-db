@@ -1,18 +1,18 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2024-2026 Dragonscale Team
 
-use std::sync::Arc;
-use anyhow::{Result, anyhow};
-use arrow_schema::{Schema, Field};
-use datafusion::physical_plan::PhysicalExpr;
-use datafusion::execution::context::SessionState;
-use uni_cypher::ast::{Expr, BinaryOp, UnaryOp};
-use crate::query::df_expr::{cypher_expr_to_df, TranslationContext};
+use crate::query::df_expr::{TranslationContext, cypher_expr_to_df};
 use crate::query::df_graph::comprehension::ListComprehensionExecExpr;
 use crate::query::df_graph::reduce::ReduceExecExpr;
-use datafusion::physical_planner::PhysicalPlanner;
+use anyhow::{Result, anyhow};
+use arrow_schema::{Field, Schema};
+use datafusion::execution::context::SessionState;
 use datafusion::logical_expr::expr::Alias;
 use datafusion::physical_expr::expressions::{binary, like, lit};
+use datafusion::physical_plan::PhysicalExpr;
+use datafusion::physical_planner::PhysicalPlanner;
+use std::sync::Arc;
+use uni_cypher::ast::{BinaryOp, Expr, UnaryOp};
 
 /// Compiler for converting Cypher expressions directly to DataFusion Physical Expressions.
 pub struct CypherPhysicalExprCompiler<'a> {
@@ -22,21 +22,37 @@ pub struct CypherPhysicalExprCompiler<'a> {
 
 impl<'a> CypherPhysicalExprCompiler<'a> {
     pub fn new(state: &'a SessionState, translation_ctx: Option<&'a TranslationContext>) -> Self {
-        Self { state, translation_ctx }
+        Self {
+            state,
+            translation_ctx,
+        }
     }
 
     /// Compile a Cypher expression into a DataFusion PhysicalExpr.
     pub fn compile(&self, expr: &Expr, input_schema: &Schema) -> Result<Arc<dyn PhysicalExpr>> {
         match expr {
-            Expr::ListComprehension { variable, list, where_clause, map_expr } => {
-                self.compile_list_comprehension(variable, list, where_clause.as_deref(), map_expr, input_schema)
-            }
-            Expr::Reduce { accumulator, init, variable, list, expr: expression } => {
-                self.compile_reduce(accumulator, init, variable, list, expression, input_schema)
-            }
+            Expr::ListComprehension {
+                variable,
+                list,
+                where_clause,
+                map_expr,
+            } => self.compile_list_comprehension(
+                variable,
+                list,
+                where_clause.as_deref(),
+                map_expr,
+                input_schema,
+            ),
+            Expr::Reduce {
+                accumulator,
+                init,
+                variable,
+                list,
+                expr: expression,
+            } => self.compile_reduce(accumulator, init, variable, list, expression, input_schema),
             // For BinaryOp, check if children contain custom expressions
             Expr::BinaryOp { left, op, right } => {
-                if self.contains_custom_expr(left) || self.contains_custom_expr(right) {
+                if Self::contains_custom_expr(left) || Self::contains_custom_expr(right) {
                     let left_phy = self.compile(left, input_schema)?;
                     let right_phy = self.compile(right, input_schema)?;
                     self.compile_binary_op(op, left_phy, right_phy, input_schema)
@@ -45,7 +61,7 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
                 }
             }
             Expr::UnaryOp { op, expr: inner } => {
-                if self.contains_custom_expr(inner) {
+                if Self::contains_custom_expr(inner) {
                     let inner_phy = self.compile(inner, input_schema)?;
                     self.compile_unary_op(op, inner_phy, input_schema)
                 } else {
@@ -53,89 +69,125 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
                 }
             }
             Expr::IsNull(inner) => {
-                if self.contains_custom_expr(inner) {
+                if Self::contains_custom_expr(inner) {
                     let inner_phy = self.compile(inner, input_schema)?;
-                    Ok(datafusion::physical_expr::expressions::is_null(inner_phy).map_err(|e| anyhow!("Failed to create is_null: {}", e))?)
+                    Ok(datafusion::physical_expr::expressions::is_null(inner_phy)
+                        .map_err(|e| anyhow!("Failed to create is_null: {}", e))?)
                 } else {
                     self.compile_standard(expr, input_schema)
                 }
             }
             Expr::IsNotNull(inner) => {
-                if self.contains_custom_expr(inner) {
+                if Self::contains_custom_expr(inner) {
                     let inner_phy = self.compile(inner, input_schema)?;
-                    Ok(datafusion::physical_expr::expressions::is_not_null(inner_phy).map_err(|e| anyhow!("Failed to create is_not_null: {}", e))?)
+                    Ok(
+                        datafusion::physical_expr::expressions::is_not_null(inner_phy)
+                            .map_err(|e| anyhow!("Failed to create is_not_null: {}", e))?,
+                    )
                 } else {
                     self.compile_standard(expr, input_schema)
                 }
             }
             // In operator is Expr::In { expr, list }
-            Expr::In { expr: left, list: right } => {
-                if self.contains_custom_expr(left) || self.contains_custom_expr(right) {
-                     Err(anyhow!("IN operator with custom expressions not yet supported"))
+            Expr::In {
+                expr: left,
+                list: right,
+            } => {
+                if Self::contains_custom_expr(left) || Self::contains_custom_expr(right) {
+                    Err(anyhow!(
+                        "IN operator with custom expressions not yet supported"
+                    ))
                 } else {
-                     self.compile_standard(expr, input_schema)
+                    self.compile_standard(expr, input_schema)
                 }
             }
-            
+
             // Recursively check other composite types if necessary.
             Expr::List(items) => {
-                 if items.iter().any(|i| self.contains_custom_expr(i)) {
-                     Err(anyhow!("List literals containing comprehensions not yet supported in compiler"))
-                 } else {
-                     self.compile_standard(expr, input_schema)
-                 }
+                if items.iter().any(Self::contains_custom_expr) {
+                    Err(anyhow!(
+                        "List literals containing comprehensions not yet supported in compiler"
+                    ))
+                } else {
+                    self.compile_standard(expr, input_schema)
+                }
             }
             Expr::Map(entries) => {
-                 if entries.iter().any(|(_, v)| self.contains_custom_expr(v)) {
-                     Err(anyhow!("Map literals containing comprehensions not yet supported in compiler"))
-                 } else {
-                     self.compile_standard(expr, input_schema)
-                 }
+                if entries.iter().any(|(_, v)| Self::contains_custom_expr(v)) {
+                    Err(anyhow!(
+                        "Map literals containing comprehensions not yet supported in compiler"
+                    ))
+                } else {
+                    self.compile_standard(expr, input_schema)
+                }
             }
-            
+
             // Default to standard compilation for leaf nodes or non-custom trees
             _ => self.compile_standard(expr, input_schema),
         }
     }
 
     /// Check if an expression tree contains nodes that require custom compilation.
-    fn contains_custom_expr(&self, expr: &Expr) -> bool {
+    fn contains_custom_expr(expr: &Expr) -> bool {
         match expr {
             Expr::ListComprehension { .. } => true,
             Expr::Reduce { .. } => true,
-            Expr::BinaryOp { left, right, .. } => self.contains_custom_expr(left) || self.contains_custom_expr(right),
-            Expr::UnaryOp { expr, .. } => self.contains_custom_expr(expr),
-            Expr::FunctionCall { args, .. } => args.iter().any(|arg| self.contains_custom_expr(arg)),
-            Expr::Case { when_then, else_expr, .. } => {
-                when_then.iter().any(|(w, t)| self.contains_custom_expr(w) || self.contains_custom_expr(t))
-                || else_expr.as_ref().map(|e| self.contains_custom_expr(e)).unwrap_or(false)
+            Expr::BinaryOp { left, right, .. } => {
+                Self::contains_custom_expr(left) || Self::contains_custom_expr(right)
             }
-            Expr::List(items) => items.iter().any(|i| self.contains_custom_expr(i)),
-            Expr::Map(entries) => entries.iter().any(|(_, v)| self.contains_custom_expr(v)),
-            Expr::IsNull(e) | Expr::IsNotNull(e) => self.contains_custom_expr(e),
-            Expr::In { expr: l, list: r } => self.contains_custom_expr(l) || self.contains_custom_expr(r),
+            Expr::UnaryOp { expr, .. } => Self::contains_custom_expr(expr),
+            Expr::FunctionCall { args, .. } => {
+                args.iter().any(Self::contains_custom_expr)
+            }
+            Expr::Case {
+                when_then,
+                else_expr,
+                ..
+            } => {
+                when_then
+                    .iter()
+                    .any(|(w, t)| Self::contains_custom_expr(w) || Self::contains_custom_expr(t))
+                    || else_expr
+                        .as_ref()
+                        .map(|e| Self::contains_custom_expr(e))
+                        .unwrap_or(false)
+            }
+            Expr::List(items) => items.iter().any(Self::contains_custom_expr),
+            Expr::Map(entries) => entries.iter().any(|(_, v)| Self::contains_custom_expr(v)),
+            Expr::IsNull(e) | Expr::IsNotNull(e) => Self::contains_custom_expr(e),
+            Expr::In { expr: l, list: r } => {
+                Self::contains_custom_expr(l) || Self::contains_custom_expr(r)
+            }
             _ => false,
         }
     }
 
-    fn compile_standard(&self, expr: &Expr, input_schema: &Schema) -> Result<Arc<dyn PhysicalExpr>> {
+    fn compile_standard(
+        &self,
+        expr: &Expr,
+        input_schema: &Schema,
+    ) -> Result<Arc<dyn PhysicalExpr>> {
         let df_expr = cypher_expr_to_df(expr, self.translation_ctx)?;
         let resolved_expr = self.resolve_udfs(df_expr)?;
-        
+
         let df_schema = datafusion::common::DFSchema::try_from(input_schema.clone())?;
         let planner = datafusion::physical_planner::DefaultPhysicalPlanner::default();
-        planner.create_physical_expr(&resolved_expr, &df_schema, self.state)
+        planner
+            .create_physical_expr(&resolved_expr, &df_schema, self.state)
             .map_err(|e| anyhow!("DataFusion planning failed: {}", e))
     }
 
     /// Resolve UDFs in DataFusion expression using the session state registry.
-    fn resolve_udfs(&self, expr: datafusion::logical_expr::Expr) -> Result<datafusion::logical_expr::Expr> {
+    fn resolve_udfs(
+        &self,
+        expr: datafusion::logical_expr::Expr,
+    ) -> Result<datafusion::logical_expr::Expr> {
         use datafusion::logical_expr::Expr as DfExpr;
-        
+
         match expr {
             DfExpr::ScalarFunction(func) => {
                 let udf_name = func.func.name();
-                
+
                 let resolved_args: Vec<DfExpr> = func
                     .args
                     .iter()
@@ -165,14 +217,17 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
             DfExpr::IsNull(inner) => Ok(DfExpr::IsNull(Box::new(self.resolve_udfs(*inner)?))),
             DfExpr::IsNotNull(inner) => Ok(DfExpr::IsNotNull(Box::new(self.resolve_udfs(*inner)?))),
             DfExpr::Negative(inner) => Ok(DfExpr::Negative(Box::new(self.resolve_udfs(*inner)?))),
-            DfExpr::Alias(Alias { expr, relation, name, .. }) => {
-                Ok(DfExpr::Alias(Alias {
-                    expr: Box::new(self.resolve_udfs(*expr)?),
-                    relation,
-                    name,
-                    metadata: None,
-                }))
-            }
+            DfExpr::Alias(Alias {
+                expr,
+                relation,
+                name,
+                ..
+            }) => Ok(DfExpr::Alias(Alias {
+                expr: Box::new(self.resolve_udfs(*expr)?),
+                relation,
+                name,
+                metadata: None,
+            })),
             _ => Ok(expr),
         }
     }
@@ -190,9 +245,16 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
         // Resolve input list type
         let list_data_type = input_list_phy.data_type(input_schema)?;
         let inner_data_type = match list_data_type {
-            arrow_schema::DataType::List(field) | arrow_schema::DataType::LargeList(field) => field.data_type().clone(),
+            arrow_schema::DataType::List(field) | arrow_schema::DataType::LargeList(field) => {
+                field.data_type().clone()
+            }
             arrow_schema::DataType::Null => arrow_schema::DataType::Null,
-            _ => return Err(anyhow!("List comprehension input must be a list, got {:?}", list_data_type)),
+            _ => {
+                return Err(anyhow!(
+                    "List comprehension input must be a list, got {:?}",
+                    list_data_type
+                ));
+            }
         };
 
         // Create inner schema with loop variable
@@ -230,25 +292,32 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
         input_schema: &Schema,
     ) -> Result<Arc<dyn PhysicalExpr>> {
         let list_phy = self.compile(list, input_schema)?;
-        
+
         let initial_phy = self.compile(initial, input_schema)?;
         let acc_type = initial_phy.data_type(input_schema)?;
-        
+
         let list_data_type = list_phy.data_type(input_schema)?;
         let inner_data_type = match list_data_type {
-            arrow_schema::DataType::List(field) | arrow_schema::DataType::LargeList(field) => field.data_type().clone(),
+            arrow_schema::DataType::List(field) | arrow_schema::DataType::LargeList(field) => {
+                field.data_type().clone()
+            }
             arrow_schema::DataType::Null => arrow_schema::DataType::Null,
-            _ => return Err(anyhow!("Reduce input must be a list, got {:?}", list_data_type)),
+            _ => {
+                return Err(anyhow!(
+                    "Reduce input must be a list, got {:?}",
+                    list_data_type
+                ));
+            }
         };
-        
+
         let mut fields = input_schema.fields().to_vec();
         fields.push(Arc::new(Field::new(accumulator, acc_type.clone(), true)));
         fields.push(Arc::new(Field::new(variable, inner_data_type, true)));
         let inner_schema = Arc::new(Schema::new(fields));
-        
+
         let reduce_phy = self.compile(reduce_expr, &inner_schema)?;
         let output_type = reduce_phy.data_type(&inner_schema)?;
-        
+
         Ok(Arc::new(ReduceExecExpr::new(
             accumulator.to_string(),
             initial_phy,
@@ -269,7 +338,7 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
     ) -> Result<Arc<dyn PhysicalExpr>> {
         // Map Cypher BinaryOp to DataFusion Operator
         use datafusion::logical_expr::Operator;
-        
+
         // String operators mapping (simulated via LIKE/Concat)
         match op {
             BinaryOp::StartsWith => {
@@ -278,8 +347,8 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
                 let pattern = binary(right, Operator::Plus, percent, input_schema)
                     .map_err(|e| anyhow!("Failed to create pattern for STARTS WITH: {}", e))?;
                 // like(negated, case_insensitive, expr, pattern, schema)
-                return Ok(like(false, false, left, pattern, input_schema)
-                    .map_err(|e| anyhow!("Failed to create LIKE expr for STARTS WITH: {}", e))?);
+                return like(false, false, left, pattern, input_schema)
+                    .map_err(|e| anyhow!("Failed to create LIKE expr for STARTS WITH: {}", e));
             }
             BinaryOp::EndsWith => {
                 let percent = lit("%");
@@ -287,8 +356,8 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
                 let pattern = binary(percent, Operator::Plus, right, input_schema)
                     .map_err(|e| anyhow!("Failed to create pattern for ENDS WITH: {}", e))?;
                 // like(negated, case_insensitive, expr, pattern, schema)
-                return Ok(like(false, false, left, pattern, input_schema)
-                    .map_err(|e| anyhow!("Failed to create LIKE expr for ENDS WITH: {}", e))?);
+                return like(false, false, left, pattern, input_schema)
+                    .map_err(|e| anyhow!("Failed to create LIKE expr for ENDS WITH: {}", e));
             }
             BinaryOp::Contains => {
                 let percent1 = lit("%");
@@ -300,8 +369,8 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
                 let pattern = binary(percent1, Operator::Plus, suffix, input_schema)
                     .map_err(|e| anyhow!("Failed to create pattern for CONTAINS: {}", e))?;
                 // like(negated, case_insensitive, expr, pattern, schema)
-                return Ok(like(false, false, left, pattern, input_schema)
-                    .map_err(|e| anyhow!("Failed to create LIKE expr for CONTAINS: {}", e))?);
+                return like(false, false, left, pattern, input_schema)
+                    .map_err(|e| anyhow!("Failed to create LIKE expr for CONTAINS: {}", e));
             }
             _ => {}
         }
@@ -320,9 +389,17 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
             BinaryOp::LtEq => Operator::LtEq,
             BinaryOp::And => Operator::And,
             BinaryOp::Or => Operator::Or,
-            BinaryOp::Xor => return Err(anyhow!("XOR not supported via binary helper, use bitwise_xor")),
+            BinaryOp::Xor => {
+                return Err(anyhow!(
+                    "XOR not supported via binary helper, use bitwise_xor"
+                ));
+            }
             BinaryOp::Regex => Operator::RegexMatch,
-            BinaryOp::ApproxEq => return Err(anyhow!("ApproxEq (~=) not yet supported in physical compiler")),
+            BinaryOp::ApproxEq => {
+                return Err(anyhow!(
+                    "ApproxEq (~=) not yet supported in physical compiler"
+                ));
+            }
             BinaryOp::Pow => return Err(anyhow!("POW not yet supported in physical compiler")),
             _ => return Err(anyhow!("Unsupported binary op in compiler: {:?}", op)),
         };
@@ -338,9 +415,10 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
         expr: Arc<dyn PhysicalExpr>,
         input_schema: &Schema,
     ) -> Result<Arc<dyn PhysicalExpr>> {
-         match op {
+        match op {
             UnaryOp::Not => datafusion::physical_expr::expressions::not(expr),
             UnaryOp::Neg => datafusion::physical_expr::expressions::negative(expr, input_schema),
-         }.map_err(|e| anyhow!("Failed to create unary expression: {}", e))
+        }
+        .map_err(|e| anyhow!("Failed to create unary expression: {}", e))
     }
 }

@@ -39,6 +39,7 @@ use lance_datafusion::udf::json::{
 use std::any::Any;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
+use uni_store::storage::arrow_convert::values_to_array;
 
 /// Macro to implement common UDF trait boilerplate.
 ///
@@ -1046,22 +1047,62 @@ impl ScalarUDFImpl for TemporalUdf {
     }
 
     fn return_type(&self, _arg_types: &[DataType]) -> DFResult<DataType> {
-        // Temporal functions return Utf8 (ISO strings) or Int64 (extraction).
-        // DataFusion doesn't dispatch on return type, so Utf8 is safe here;
-        // the actual value written to the result column will be cast downstream.
-        Ok(DataType::Utf8)
+        let name = self.name.to_lowercase();
+        // Extraction functions return Int64
+        if matches!(
+            name.as_str(),
+            "year" | "month" | "day" | "hour" | "minute" | "second" |
+            "duration.inmonths" | "duration.indays" | "duration.inseconds"
+        ) {
+            Ok(DataType::Int64)
+        } else {
+            Ok(DataType::Utf8)
+        }
     }
 
     fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DFResult<ColumnarValue> {
-        let json_args = columnar_args_to_json(&args.args)?;
+        let len = args.args.iter()
+            .find_map(|arg| match arg {
+                ColumnarValue::Array(arr) => Some(arr.len()),
+                _ => None,
+            })
+            .unwrap_or(1);
+
         let func_name = self.name.to_uppercase();
 
-        let result = crate::query::datetime::eval_datetime_function(&func_name, &json_args)
-            .map_err(|e| {
-                datafusion::error::DataFusionError::Execution(format!("{}(): {}", self.name, e))
-            })?;
+        // Optimized scalar path
+        if len == 1 && args.args.iter().all(|a| matches!(a, ColumnarValue::Scalar(_))) {
+             let json_args = columnar_args_to_json(&args.args)?;
+             let result = crate::query::datetime::eval_datetime_function(&func_name, &json_args)
+                .map_err(|e| datafusion::error::DataFusionError::Execution(format!("{}(): {}", self.name, e)))?;
+             return json_value_to_columnar(&result);
+        }
 
-        json_value_to_columnar(&result)
+        // Batched path
+        let mut results = Vec::with_capacity(len);
+        for i in 0..len {
+            let row_args = args.args.iter().map(|arg| {
+                match arg {
+                    ColumnarValue::Scalar(s) => scalar_to_json(s),
+                    ColumnarValue::Array(arr) => {
+                        let s = ScalarValue::try_from_array(arr, i).map_err(|e| 
+                            datafusion::error::DataFusionError::Execution(e.to_string())
+                        )?;
+                        scalar_to_json(&s)
+                    }
+                }
+            }).collect::<DFResult<Vec<_>>>()?;
+
+            let res = crate::query::datetime::eval_datetime_function(&func_name, &row_args)
+                .map_err(|e| datafusion::error::DataFusionError::Execution(format!("{}(): {}", self.name, e)))?;
+            results.push(res);
+        }
+
+        let dt = self.return_type(&[])?;
+        let arr = values_to_array(&results, &dt)
+            .map_err(|e| datafusion::error::DataFusionError::Execution(format!("Array conversion error: {}", e)))?;
+        
+        Ok(ColumnarValue::Array(arr))
     }
 }
 
@@ -1542,7 +1583,8 @@ impl ScalarUDFImpl for TypeRankUdf {
             ColumnarValue::Array(arr) => {
                 let ranks: arrow::array::Int32Array = (0..arr.len())
                     .map(|i| {
-                        let scalar = ScalarValue::try_from_array(arr, i).unwrap_or(ScalarValue::Null);
+                        let scalar =
+                            ScalarValue::try_from_array(arr, i).unwrap_or(ScalarValue::Null);
                         get_type_rank_scalar(&scalar)
                     })
                     .collect();
@@ -1557,31 +1599,39 @@ fn get_type_rank_scalar(val: &ScalarValue) -> i32 {
         return 9;
     }
     match val {
-        ScalarValue::Null => 9, 
-        ScalarValue::Int8(_) | ScalarValue::Int16(_) | ScalarValue::Int32(_) | ScalarValue::Int64(_) |
-        ScalarValue::UInt8(_) | ScalarValue::UInt16(_) | ScalarValue::UInt32(_) | ScalarValue::UInt64(_) |
-        ScalarValue::Float16(_) | ScalarValue::Float32(_) | ScalarValue::Float64(_) => 1,
-        
+        ScalarValue::Null => 9,
+        ScalarValue::Int8(_)
+        | ScalarValue::Int16(_)
+        | ScalarValue::Int32(_)
+        | ScalarValue::Int64(_)
+        | ScalarValue::UInt8(_)
+        | ScalarValue::UInt16(_)
+        | ScalarValue::UInt32(_)
+        | ScalarValue::UInt64(_)
+        | ScalarValue::Float16(_)
+        | ScalarValue::Float32(_)
+        | ScalarValue::Float64(_) => 1,
+
         ScalarValue::Boolean(_) => 2,
-        
+
         ScalarValue::Utf8(Some(s)) | ScalarValue::LargeUtf8(Some(s)) => {
             // Try to infer type from string content to fix sorting of coerced values
-            if s.parse::<f64>().is_ok() { 
+            if s.parse::<f64>().is_ok() {
                 1 // Number
-            } else if s.eq_ignore_ascii_case("true") || s.eq_ignore_ascii_case("false") { 
+            } else if s.eq_ignore_ascii_case("true") || s.eq_ignore_ascii_case("false") {
                 2 // Bool
-            } else { 
+            } else {
                 3 // String
             }
-        },
+        }
         ScalarValue::Utf8(None) | ScalarValue::LargeUtf8(None) => 9,
-        
+
         ScalarValue::List(_) | ScalarValue::LargeList(_) | ScalarValue::FixedSizeList(_) => 4,
-        
+
         ScalarValue::Struct(arr) => {
             let fields = arr.fields();
             let field_names: Vec<&str> = fields.iter().map(|f| f.name().as_str()).collect();
-            
+
             if field_names.contains(&"_vid") {
                 7 // Node
             } else if field_names.contains(&"_eid") {
@@ -1592,9 +1642,9 @@ fn get_type_rank_scalar(val: &ScalarValue) -> i32 {
                 8 // Map
             }
         }
-        
+
         ScalarValue::Dictionary(_, val) => get_type_rank_scalar(val),
-        
+
         _ => 0,
     }
 }

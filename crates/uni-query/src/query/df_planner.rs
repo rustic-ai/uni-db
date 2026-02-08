@@ -1545,10 +1545,10 @@ impl HybridPhysicalPlanner {
                 let col_name = name.as_str();
                 let exists_in_schema = schema.fields().iter().any(|f| f.name() == col_name);
 
-                if !exists_in_schema {
-                    if let Some(aliased_expr) = alias_map.get(col_name) {
-                        sort_expr = aliased_expr.clone();
-                    }
+                if !exists_in_schema
+                    && let Some(aliased_expr) = alias_map.get(col_name)
+                {
+                    sort_expr = aliased_expr.clone();
                 }
             }
 
@@ -1560,13 +1560,13 @@ impl HybridPhysicalPlanner {
             // We prepend a type rank sort key to ensure correct ordering across mixed types
             let rank_udf = crate::query::df_udfs::create_type_rank_udf();
             let rank_expr = rank_udf.call(vec![df_expr.clone()]);
-            
+
             // For ranks that share the same underlying DataFusion type (e.g. String vs Number vs Bool all coerced to String),
             // we need secondary keys to sort correctly within the rank.
             // Rank 1 (Number): sort by toFloat(x)
             let float_udf = crate::query::df_udfs::create_to_float_udf();
             let float_expr = float_udf.call(vec![df_expr.clone()]);
-            
+
             // Rank 2 (Bool): sort by toBoolean(x)
             let bool_udf = crate::query::df_udfs::create_to_boolean_udf();
             let bool_expr = bool_udf.call(vec![df_expr.clone()]);

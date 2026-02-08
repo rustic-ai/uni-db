@@ -15,7 +15,7 @@ This file tracks all major tracks for the project. Each track has its own detail
 
 | tck_list_comprehension_20260207 | TCK List Comprehension | completed | 2026-02-07 | 2026-02-07 |
 
-- [ ] **Track: TCK Core Compliance**
+- [x] **Track: TCK Core Compliance**
   *Link: [./tracks/tck_core_compliance_20260208/](./tracks/tck_core_compliance_20260208/)*
 
 
