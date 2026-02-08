@@ -335,7 +335,7 @@ impl ScalarUDFImpl for KeysUdf {
                     key_strings.sort();
                     key_strings
                         .into_iter()
-                        .map(|k| serde_json::Value::String(k))
+                        .map(serde_json::Value::String)
                         .collect::<Vec<_>>()
                 }
                 serde_json::Value::Null => {
@@ -690,7 +690,7 @@ impl ScalarUDFImpl for RangeUdf {
 
         // range() handles its own array extraction for now as it's a bit special
         // but we only support Scalar arguments for range() in practice for now.
-        
+
         // Extract scalar values
         let start = match &args.args[0] {
             ColumnarValue::Scalar(datafusion::common::ScalarValue::Int64(Some(v))) => *v,
@@ -1044,8 +1044,15 @@ impl ScalarUDFImpl for TemporalUdf {
         // Extraction functions return Int64
         if matches!(
             name.as_str(),
-            "year" | "month" | "day" | "hour" | "minute" | "second" |
-            "duration.inmonths" | "duration.indays" | "duration.inseconds"
+            "year"
+                | "month"
+                | "day"
+                | "hour"
+                | "minute"
+                | "second"
+                | "duration.inmonths"
+                | "duration.indays"
+                | "duration.inseconds"
         ) {
             Ok(DataType::Int64)
         } else {
@@ -1057,10 +1064,9 @@ impl ScalarUDFImpl for TemporalUdf {
         let func_name = self.name.to_uppercase();
         let output_type = self.return_type(&[])?;
         invoke_cypher_udf(args, &output_type, |json_args| {
-            crate::query::datetime::eval_datetime_function(&func_name, json_args)
-                .map_err(|e| {
-                    datafusion::error::DataFusionError::Execution(format!("{}(): {}", self.name, e))
-                })
+            crate::query::datetime::eval_datetime_function(&func_name, json_args).map_err(|e| {
+                datafusion::error::DataFusionError::Execution(format!("{}(): {}", self.name, e))
+            })
         })
     }
 }
@@ -1113,21 +1119,30 @@ impl ScalarUDFImpl for DurationPropertyUdf {
         invoke_cypher_udf(args, &output_type, |json_args| {
             if json_args.len() != 2 {
                 return Err(datafusion::error::DataFusionError::Execution(
-                    "_duration_property requires 2 arguments (duration_string, component)".to_string(),
+                    "_duration_property requires 2 arguments (duration_string, component)"
+                        .to_string(),
                 ));
             }
 
             let dur_str = match &json_args[0] {
                 serde_json::Value::String(s) => s,
-                _ => return Err(datafusion::error::DataFusionError::Execution("Duration must be string".to_string())),
+                _ => {
+                    return Err(datafusion::error::DataFusionError::Execution(
+                        "Duration must be string".to_string(),
+                    ));
+                }
             };
             let component = match &json_args[1] {
                 serde_json::Value::String(s) => s,
-                _ => return Err(datafusion::error::DataFusionError::Execution("Component must be string".to_string())),
+                _ => {
+                    return Err(datafusion::error::DataFusionError::Execution(
+                        "Component must be string".to_string(),
+                    ));
+                }
             };
 
-            let result =
-                crate::query::datetime::eval_duration_accessor(&dur_str, &component).map_err(|e| {
+            let result = crate::query::datetime::eval_duration_accessor(dur_str, component)
+                .map_err(|e| {
                     datafusion::error::DataFusionError::Execution(format!(
                         "_duration_property(): {}",
                         e
@@ -1147,7 +1162,8 @@ fn get_json_args_for_row(args: &[ColumnarValue], row: usize) -> DFResult<Vec<ser
             ColumnarValue::Array(arr) => {
                 let scalar = ScalarValue::try_from_array(arr, row).map_err(|e| {
                     datafusion::error::DataFusionError::Execution(format!(
-                        "Cannot extract scalar from array at row {}: {}", row, e
+                        "Cannot extract scalar from array at row {}: {}",
+                        row, e
                     ))
                 })?;
                 scalar_to_json(&scalar)
@@ -1157,7 +1173,11 @@ fn get_json_args_for_row(args: &[ColumnarValue], row: usize) -> DFResult<Vec<ser
 }
 
 /// Generic implementation for simple Cypher UDFs that process JSON arguments.
-fn invoke_cypher_udf<F>(args: ScalarFunctionArgs, output_type: &DataType, f: F) -> DFResult<ColumnarValue>
+fn invoke_cypher_udf<F>(
+    args: ScalarFunctionArgs,
+    output_type: &DataType,
+    f: F,
+) -> DFResult<ColumnarValue>
 where
     F: Fn(&[serde_json::Value]) -> DFResult<serde_json::Value>,
 {
@@ -1170,7 +1190,12 @@ where
         })
         .unwrap_or(1);
 
-    if len == 1 && args.args.iter().all(|a| matches!(a, ColumnarValue::Scalar(_))) {
+    if len == 1
+        && args
+            .args
+            .iter()
+            .all(|a| matches!(a, ColumnarValue::Scalar(_)))
+    {
         let row_args = get_json_args_for_row(&args.args, 0)?;
         let res = f(&row_args)?;
         return json_value_to_columnar(&res);
@@ -1545,7 +1570,8 @@ impl ScalarUDFImpl for TypeRankUdf {
             ColumnarValue::Array(arr) => {
                 let ranks: arrow::array::Int32Array = (0..arr.len())
                     .map(|i| {
-                        let scalar = ScalarValue::try_from_array(arr, i).unwrap_or(ScalarValue::Null);
+                        let scalar =
+                            ScalarValue::try_from_array(arr, i).unwrap_or(ScalarValue::Null);
                         get_type_rank_scalar(&scalar)
                     })
                     .collect();
@@ -1559,32 +1585,42 @@ fn get_type_rank_scalar(val: &ScalarValue) -> i32 {
     if val.is_null() {
         return 9;
     }
-    let rank = match val {
-        ScalarValue::Null => 9, 
-        ScalarValue::Int8(_) | ScalarValue::Int16(_) | ScalarValue::Int32(_) | ScalarValue::Int64(_) |
-        ScalarValue::UInt8(_) | ScalarValue::UInt16(_) | ScalarValue::UInt32(_) | ScalarValue::UInt64(_) |
-        ScalarValue::Float16(_) | ScalarValue::Float32(_) | ScalarValue::Float64(_) => 1,
-        
+    
+    // println!("DEBUG: Rank {:?} -> {}", val, rank);
+    match val {
+        ScalarValue::Null => 9,
+        ScalarValue::Int8(_)
+        | ScalarValue::Int16(_)
+        | ScalarValue::Int32(_)
+        | ScalarValue::Int64(_)
+        | ScalarValue::UInt8(_)
+        | ScalarValue::UInt16(_)
+        | ScalarValue::UInt32(_)
+        | ScalarValue::UInt64(_)
+        | ScalarValue::Float16(_)
+        | ScalarValue::Float32(_)
+        | ScalarValue::Float64(_) => 1,
+
         ScalarValue::Boolean(_) => 2,
-        
+
         ScalarValue::Utf8(Some(s)) | ScalarValue::LargeUtf8(Some(s)) => {
             // Try to infer type from string content to fix sorting of coerced values
-            if s.parse::<f64>().is_ok() { 
+            if s.parse::<f64>().is_ok() {
                 1 // Number
-            } else if s.eq_ignore_ascii_case("true") || s.eq_ignore_ascii_case("false") { 
+            } else if s.eq_ignore_ascii_case("true") || s.eq_ignore_ascii_case("false") {
                 2 // Bool
-            } else { 
+            } else {
                 3 // String
             }
-        },
+        }
         ScalarValue::Utf8(None) | ScalarValue::LargeUtf8(None) => 9,
 
         ScalarValue::List(_) | ScalarValue::LargeList(_) | ScalarValue::FixedSizeList(_) => 4,
-        
+
         ScalarValue::Struct(arr) => {
             let fields = arr.fields();
             let field_names: Vec<&str> = fields.iter().map(|f| f.name().as_str()).collect();
-            
+
             if field_names.contains(&"_vid") {
                 7 // Node
             } else if field_names.contains(&"_eid") {
@@ -1595,13 +1631,11 @@ fn get_type_rank_scalar(val: &ScalarValue) -> i32 {
                 8 // Map
             }
         }
-        
+
         ScalarValue::Dictionary(_, val) => get_type_rank_scalar(val),
-        
+
         _ => 0,
-    };
-    // println!("DEBUG: Rank {:?} -> {}", val, rank);
-    rank
+    }
 }
 
 #[cfg(test)]

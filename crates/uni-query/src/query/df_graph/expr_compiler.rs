@@ -136,9 +136,7 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
                 Self::contains_custom_expr(left) || Self::contains_custom_expr(right)
             }
             Expr::UnaryOp { expr, .. } => Self::contains_custom_expr(expr),
-            Expr::FunctionCall { args, .. } => {
-                args.iter().any(Self::contains_custom_expr)
-            }
+            Expr::FunctionCall { args, .. } => args.iter().any(Self::contains_custom_expr),
             Expr::Case {
                 when_then,
                 else_expr,

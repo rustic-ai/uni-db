@@ -457,7 +457,8 @@ fn values_to_timestamp_array(values: &[Value], tz: Option<&Arc<str>>) -> ArrayRe
 }
 
 fn values_to_large_binary_array(values: &[Value]) -> ArrayRef {
-    let mut builder = arrow_array::builder::LargeBinaryBuilder::with_capacity(values.len(), values.len() * 64);
+    let mut builder =
+        arrow_array::builder::LargeBinaryBuilder::with_capacity(values.len(), values.len() * 64);
     for v in values {
         if v.is_null() {
             builder.append_null();
@@ -513,7 +514,10 @@ pub fn values_to_array(values: &[Value], dt: &ArrowDataType) -> Result<ArrayRef>
                 }
                 Ok(Arc::new(builder.finish()))
             } else {
-                Err(anyhow!("Unsupported List inner type: {:?}", field.data_type()))
+                Err(anyhow!(
+                    "Unsupported List inner type: {:?}",
+                    field.data_type()
+                ))
             }
         }
         _ => Err(anyhow!("Unsupported type for conversion: {:?}", dt)),
@@ -1321,10 +1325,7 @@ mod tests {
             arrow_to_value(&arr, 0),
             Value::String("10:30:45".to_string())
         );
-        assert_eq!(
-            arrow_to_value(&arr, 1),
-            Value::String("00:00".to_string())
-        );
+        assert_eq!(arrow_to_value(&arr, 1), Value::String("00:00".to_string()));
         assert_eq!(
             arrow_to_value(&arr, 2),
             Value::String("23:59:59.123456".to_string())

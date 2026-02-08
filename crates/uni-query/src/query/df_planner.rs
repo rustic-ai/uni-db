@@ -1545,9 +1545,7 @@ impl HybridPhysicalPlanner {
                 let col_name = name.as_str();
                 let exists_in_schema = schema.fields().iter().any(|f| f.name() == col_name);
 
-                if !exists_in_schema
-                    && let Some(aliased_expr) = alias_map.get(col_name)
-                {
+                if !exists_in_schema && let Some(aliased_expr) = alias_map.get(col_name) {
                     sort_expr = aliased_expr.clone();
                 }
             }
