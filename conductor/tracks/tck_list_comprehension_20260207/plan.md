@@ -1,12 +1,12 @@
 # Implementation Plan - TCK List Comprehension
 
 ## Phase 1: Expression Compiler Infrastructure
-- [ ] Task: Implement `CypherPhysicalExprCompiler` to bridge Cypher AST and DataFusion PhysicalExpr directly.
-    - [ ] Create `crates/uni-query/src/query/df_graph/expr_compiler.rs`.
-    - [ ] Implement recursive compilation logic handling schema extension.
-    - [ ] Support mixing standard DF expressions with custom `ListComprehensionPhysicalExpr`.
-- [ ] Task: Integrate Compiler into `HybridPhysicalPlanner`.
-    - [ ] Replace `cypher_expr_to_df` + `DefaultPhysicalPlanner` pipeline in Projection/Filter.
+- [x] Task: Implement `CypherPhysicalExprCompiler` to bridge Cypher AST and DataFusion PhysicalExpr directly.
+    - [x] Create `crates/uni-query/src/query/df_graph/expr_compiler.rs`.
+    - [x] Implement recursive compilation logic handling schema extension.
+    - [x] Support mixing standard DF expressions with custom `ListComprehensionPhysicalExpr`.
+- [x] Task: Integrate Compiler into `HybridPhysicalPlanner`.
+    - [x] Replace `cypher_expr_to_df` + `DefaultPhysicalPlanner` pipeline in Projection/Filter.
 
 ## Phase 2: ListComprehension Implementation
 - [ ] Task: Implement `ListComprehensionPhysicalExpr` evaluation logic.

@@ -202,6 +202,16 @@ pub fn arrow_to_value(col: &dyn Array, row: usize) -> Value {
         return Value::Array(vals);
     }
 
+    // Large list (variable-size list with i64 offsets)
+    if let Some(list) = col.as_any().downcast_ref::<arrow_array::LargeListArray>() {
+        let arr = list.value(row);
+        let mut vals = Vec::with_capacity(arr.len());
+        for i in 0..arr.len() {
+            vals.push(arrow_to_value(arr.as_ref(), i));
+        }
+        return Value::Array(vals);
+    }
+
     // Struct type
     if let Some(s) = col.as_any().downcast_ref::<StructArray>() {
         let mut map = serde_json::Map::new();

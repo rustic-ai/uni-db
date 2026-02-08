@@ -53,8 +53,7 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
             Expr::IsNull(inner) => {
                 if self.contains_custom_expr(inner) {
                     let inner_phy = self.compile(inner, input_schema)?;
-                    Ok(datafusion::physical_expr::expressions::is_null(inner_phy)
-                        .map_err(|e| anyhow!("Failed to create is_null: {}", e))?)
+                    Ok(datafusion::physical_expr::expressions::is_null(inner_phy).map_err(|e| anyhow!("Failed to create is_null: {}", e))?)
                 } else {
                     self.compile_standard(expr, input_schema)
                 }
@@ -62,8 +61,7 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
             Expr::IsNotNull(inner) => {
                 if self.contains_custom_expr(inner) {
                     let inner_phy = self.compile(inner, input_schema)?;
-                    Ok(datafusion::physical_expr::expressions::is_not_null(inner_phy)
-                        .map_err(|e| anyhow!("Failed to create is_not_null: {}", e))?)
+                    Ok(datafusion::physical_expr::expressions::is_not_null(inner_phy).map_err(|e| anyhow!("Failed to create is_not_null: {}", e))?)
                 } else {
                     self.compile_standard(expr, input_schema)
                 }
@@ -208,6 +206,7 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
         };
 
         let map_phy = self.compile(map_expr, &inner_schema)?;
+        let output_item_type = map_phy.data_type(&inner_schema)?;
 
         Ok(Arc::new(ListComprehensionExecExpr::new(
             input_list_phy,
@@ -215,6 +214,7 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
             predicate_phy,
             variable.to_string(),
             Arc::new(input_schema.clone()),
+            output_item_type,
         )))
     }
 
