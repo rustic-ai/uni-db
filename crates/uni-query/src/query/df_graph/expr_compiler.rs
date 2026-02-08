@@ -3,19 +3,17 @@
 
 use std::sync::Arc;
 use anyhow::{Result, anyhow};
-use arrow_schema::Schema;
+use arrow_schema::{Schema, Field};
 use datafusion::physical_plan::PhysicalExpr;
 use datafusion::execution::context::SessionState;
 use uni_cypher::ast::{Expr, BinaryOp, UnaryOp};
 use crate::query::df_expr::{cypher_expr_to_df, TranslationContext};
 use crate::query::df_graph::comprehension::ListComprehensionExecExpr;
+use crate::query::df_graph::reduce::ReduceExecExpr;
 use datafusion::physical_planner::PhysicalPlanner;
 use datafusion::logical_expr::expr::Alias;
 
 /// Compiler for converting Cypher expressions directly to DataFusion Physical Expressions.
-///
-/// This compiler handles expressions that cannot be represented in DataFusion's LogicalExpr,
-/// such as List Comprehensions with lambda-like semantics.
 pub struct CypherPhysicalExprCompiler<'a> {
     state: &'a SessionState,
     translation_ctx: Option<&'a TranslationContext>,
@@ -31,6 +29,9 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
         match expr {
             Expr::ListComprehension { variable, list, where_clause, map_expr } => {
                 self.compile_list_comprehension(variable, list, where_clause.as_deref(), map_expr, input_schema)
+            }
+            Expr::Reduce { accumulator, init, variable, list, expr: expression } => {
+                self.compile_reduce(accumulator, init, variable, list, expression, input_schema)
             }
             // For BinaryOp, check if children contain custom expressions
             Expr::BinaryOp { left, op, right } => {
@@ -100,6 +101,7 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
     fn contains_custom_expr(&self, expr: &Expr) -> bool {
         match expr {
             Expr::ListComprehension { .. } => true,
+            Expr::Reduce { .. } => true,
             Expr::BinaryOp { left, right, .. } => self.contains_custom_expr(left) || self.contains_custom_expr(right),
             Expr::UnaryOp { expr, .. } => self.contains_custom_expr(expr),
             Expr::FunctionCall { args, .. } => args.iter().any(|arg| self.contains_custom_expr(arg)),
@@ -126,7 +128,6 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
     }
 
     /// Resolve UDFs in DataFusion expression using the session state registry.
-    /// This ensures we use the registered UDF instances which might differ from static definitions.
     fn resolve_udfs(&self, expr: datafusion::logical_expr::Expr) -> Result<datafusion::logical_expr::Expr> {
         use datafusion::logical_expr::Expr as DfExpr;
         
@@ -195,7 +196,7 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
 
         // Create inner schema with loop variable
         let mut fields = input_schema.fields().to_vec();
-        fields.push(std::sync::Arc::new(arrow_schema::Field::new(variable, inner_data_type, true)));
+        fields.push(Arc::new(Field::new(variable, inner_data_type, true)));
         let inner_schema = Arc::new(Schema::new(fields));
 
         // Compile inner expressions
@@ -215,6 +216,46 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
             variable.to_string(),
             Arc::new(input_schema.clone()),
             output_item_type,
+        )))
+    }
+
+    fn compile_reduce(
+        &self,
+        accumulator: &str,
+        initial: &Expr,
+        variable: &str,
+        list: &Expr,
+        reduce_expr: &Expr,
+        input_schema: &Schema,
+    ) -> Result<Arc<dyn PhysicalExpr>> {
+        let list_phy = self.compile(list, input_schema)?;
+        
+        let initial_phy = self.compile(initial, input_schema)?;
+        let acc_type = initial_phy.data_type(input_schema)?;
+        
+        let list_data_type = list_phy.data_type(input_schema)?;
+        let inner_data_type = match list_data_type {
+            arrow_schema::DataType::List(field) | arrow_schema::DataType::LargeList(field) => field.data_type().clone(),
+            arrow_schema::DataType::Null => arrow_schema::DataType::Null,
+            _ => return Err(anyhow!("Reduce input must be a list, got {:?}", list_data_type)),
+        };
+        
+        let mut fields = input_schema.fields().to_vec();
+        fields.push(Arc::new(Field::new(accumulator, acc_type.clone(), true)));
+        fields.push(Arc::new(Field::new(variable, inner_data_type, true)));
+        let inner_schema = Arc::new(Schema::new(fields));
+        
+        let reduce_phy = self.compile(reduce_expr, &inner_schema)?;
+        let output_type = reduce_phy.data_type(&inner_schema)?;
+        
+        Ok(Arc::new(ReduceExecExpr::new(
+            accumulator.to_string(),
+            initial_phy,
+            variable.to_string(),
+            list_phy,
+            reduce_phy,
+            Arc::new(input_schema.clone()),
+            output_type,
         )))
     }
 

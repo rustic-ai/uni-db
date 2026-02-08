@@ -16,8 +16,8 @@
 - [x] Task: Verify with basic TCK scenarios (`[x IN list | x]`).
 
 ## Phase 3: Advanced Features
-- [ ] Task: Implement `WHERE` clause support in comprehension.
-- [ ] Task: Implement Outer Scope Capture (referencing variables outside comprehension).
+- [x] Task: Implement `WHERE` clause support in comprehension.
+- [x] Task: Implement Outer Scope Capture (referencing variables outside comprehension).
 - [ ] Task: Support `REDUCE` using the same compiler infrastructure.
 
 ## Phase 4: Verification

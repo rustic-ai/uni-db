@@ -41,6 +41,7 @@ pub mod common;
 pub mod comprehension;
 pub mod expr_compiler;
 pub mod ext_id_lookup;
+pub mod reduce;
 pub mod scan;
 pub mod shortest_path;
 pub mod traverse;
