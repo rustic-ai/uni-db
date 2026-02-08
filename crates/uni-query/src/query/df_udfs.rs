@@ -66,7 +66,7 @@ macro_rules! impl_udf_eq_hash {
 ///
 /// Only registers UDFs that are graph-specific or not available in DataFusion.
 /// Type conversions (toInteger, toFloat, etc.) use CAST expressions instead.
-/// String functions (left, right, substring, split) use DataFusion's built-in functions.
+/// String functions (left, right, substring, split) use DataFusion's built-ins.
 ///
 /// # Errors
 ///
@@ -316,41 +316,40 @@ impl ScalarUDFImpl for KeysUdf {
     }
 
     fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DFResult<ColumnarValue> {
-        let json_args = columnar_args_to_json(&args.args)?;
-        if json_args.is_empty() {
-            return Err(datafusion::error::DataFusionError::Execution(
-                "keys() requires 1 argument".to_string(),
-            ));
-        }
+        let output_type = self.return_type(&[])?;
+        invoke_cypher_udf(args, &output_type, |json_args| {
+            if json_args.is_empty() {
+                return Err(datafusion::error::DataFusionError::Execution(
+                    "keys() requires 1 argument".to_string(),
+                ));
+            }
 
-        let arg = &json_args[0];
-        let keys = match arg {
-            serde_json::Value::Object(map) => {
-                let mut key_strings: Vec<String> = map
-                    .iter()
-                    .filter(|(k, v)| !v.is_null() && !k.starts_with('_'))
-                    .map(|(k, _)| k.clone())
-                    .collect();
-                key_strings.sort();
-                key_strings
-                    .into_iter()
-                    .map(|k| ScalarValue::Utf8(Some(k)))
-                    .collect::<Vec<_>>()
-            }
-            serde_json::Value::Null => {
-                return Ok(ColumnarValue::Scalar(ScalarValue::List(
-                    ScalarValue::new_list_nullable(&[], &DataType::Utf8),
-                )));
-            }
-            _ => {
-                // Not a map/object, return empty list or error?
-                // Cypher: keys(non-map) returns empty list or errors depending on type.
-                vec![]
-            }
-        };
+            let arg = &json_args[0];
+            let keys = match arg {
+                serde_json::Value::Object(map) => {
+                    let mut key_strings: Vec<String> = map
+                        .iter()
+                        .filter(|(k, v)| !v.is_null() && !k.starts_with('_'))
+                        .map(|(k, _)| k.clone())
+                        .collect();
+                    key_strings.sort();
+                    key_strings
+                        .into_iter()
+                        .map(|k| serde_json::Value::String(k))
+                        .collect::<Vec<_>>()
+                }
+                serde_json::Value::Null => {
+                    return Ok(serde_json::Value::Null);
+                }
+                _ => {
+                    // Not a map/object, return empty list or error?
+                    // Cypher: keys(non-map) returns empty list or errors depending on type.
+                    vec![]
+                }
+            };
 
-        let list = ScalarValue::List(ScalarValue::new_list(&keys, &DataType::Utf8, true));
-        Ok(ColumnarValue::Scalar(list))
+            Ok(serde_json::Value::Array(keys))
+        })
     }
 }
 
@@ -396,55 +395,52 @@ impl ScalarUDFImpl for IndexUdf {
     }
 
     fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DFResult<ColumnarValue> {
-        let json_args = columnar_args_to_json(&args.args)?;
-        if json_args.len() != 2 {
-            return Err(datafusion::error::DataFusionError::Execution(
-                "index() requires 2 arguments".to_string(),
-            ));
-        }
+        let output_type = self.return_type(&[])?;
+        invoke_cypher_udf(args, &output_type, |json_args| {
+            if json_args.len() != 2 {
+                return Err(datafusion::error::DataFusionError::Execution(
+                    "index() requires 2 arguments".to_string(),
+                ));
+            }
 
-        let container = &json_args[0];
-        let index = &json_args[1];
+            let container = &json_args[0];
+            let index = &json_args[1];
 
-        let result = match container {
-            serde_json::Value::Array(arr) => {
-                if let Some(i) = index.as_i64() {
-                    let idx = if i < 0 {
-                        let pos = arr.len() as i64 + i;
-                        if pos < 0 { -1 } else { pos }
-                    } else {
-                        i
-                    };
-                    if idx >= 0 && (idx as usize) < arr.len() {
-                        arr[idx as usize].clone()
+            let result = match container {
+                serde_json::Value::Array(arr) => {
+                    if let Some(i) = index.as_i64() {
+                        let idx = if i < 0 {
+                            let pos = arr.len() as i64 + i;
+                            if pos < 0 { -1 } else { pos }
+                        } else {
+                            i
+                        };
+                        if idx >= 0 && (idx as usize) < arr.len() {
+                            arr[idx as usize].clone()
+                        } else {
+                            serde_json::Value::Null
+                        }
                     } else {
                         serde_json::Value::Null
                     }
-                } else {
-                    serde_json::Value::Null
                 }
-            }
-            serde_json::Value::Object(map) => {
-                if let Some(key) = index.as_str() {
-                    map.get(key).cloned().unwrap_or(serde_json::Value::Null)
-                } else if !index.is_null() {
-                    return Err(datafusion::error::DataFusionError::Execution(
-                        "InvalidArgumentValue: Map index must be a string".to_string(),
-                    ));
-                } else {
-                    serde_json::Value::Null
+                serde_json::Value::Object(map) => {
+                    if let Some(key) = index.as_str() {
+                        map.get(key).cloned().unwrap_or(serde_json::Value::Null)
+                    } else if !index.is_null() {
+                        return Err(datafusion::error::DataFusionError::Execution(
+                            "InvalidArgumentValue: Map index must be a string".to_string(),
+                        ));
+                    } else {
+                        serde_json::Value::Null
+                    }
                 }
-            }
-            serde_json::Value::Null => serde_json::Value::Null,
-            _ => serde_json::Value::Null,
-        };
+                serde_json::Value::Null => serde_json::Value::Null,
+                _ => serde_json::Value::Null,
+            };
 
-        // Serialize to JSONB (LargeBinary) so result conversion can decode it.
-        // We use standard JSON string here, record_batches_to_rows handles it.
-        let json_str = serde_json::to_string(&result).unwrap_or_else(|_| "null".to_string());
-        Ok(ColumnarValue::Scalar(ScalarValue::LargeBinary(Some(
-            json_str.into_bytes(),
-        ))))
+            Ok(result)
+        })
     }
 }
 
@@ -491,27 +487,23 @@ impl ScalarUDFImpl for LabelsUdf {
     }
 
     fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DFResult<ColumnarValue> {
-        let json_args = columnar_args_to_json(&args.args)?;
-        if json_args.is_empty() {
-            return Err(datafusion::error::DataFusionError::Execution(
-                "labels() requires 1 argument".to_string(),
-            ));
-        }
+        let output_type = self.return_type(&[])?;
+        invoke_cypher_udf(args, &output_type, |json_args| {
+            if json_args.is_empty() {
+                return Err(datafusion::error::DataFusionError::Execution(
+                    "labels() requires 1 argument".to_string(),
+                ));
+            }
 
-        let node = &json_args[0];
-        if let serde_json::Value::Object(map) = node
-            && let Some(serde_json::Value::Array(arr)) = map.get("_labels")
-        {
-            let scalars: Vec<ScalarValue> = arr
-                .iter()
-                .map(|v| ScalarValue::Utf8(v.as_str().map(|s| s.to_string())))
-                .collect();
-            let list = ScalarValue::List(ScalarValue::new_list(&scalars, &DataType::Utf8, true));
-            return Ok(ColumnarValue::Scalar(list));
-        }
+            let node = &json_args[0];
+            if let serde_json::Value::Object(map) = node
+                && let Some(serde_json::Value::Array(arr)) = map.get("_labels")
+            {
+                return Ok(serde_json::Value::Array(arr.clone()));
+            }
 
-        let empty_list = ScalarValue::List(ScalarValue::new_list_nullable(&[], &DataType::Utf8));
-        Ok(ColumnarValue::Scalar(empty_list))
+            Ok(serde_json::Value::Null)
+        })
     }
 }
 
@@ -556,25 +548,24 @@ impl ScalarUDFImpl for NodesUdf {
     }
 
     fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DFResult<ColumnarValue> {
-        let json_args = columnar_args_to_json(&args.args)?;
-        if json_args.is_empty() {
-            return Err(datafusion::error::DataFusionError::Execution(
-                "nodes() requires 1 argument".to_string(),
-            ));
-        }
-
-        let path = &json_args[0];
-        let nodes = match path {
-            serde_json::Value::Object(map) => {
-                map.get("nodes").cloned().unwrap_or(serde_json::Value::Null)
+        let output_type = self.return_type(&[])?;
+        invoke_cypher_udf(args, &output_type, |json_args| {
+            if json_args.is_empty() {
+                return Err(datafusion::error::DataFusionError::Execution(
+                    "nodes() requires 1 argument".to_string(),
+                ));
             }
-            _ => serde_json::Value::Null,
-        };
 
-        let json_str = serde_json::to_string(&nodes).unwrap_or_else(|_| "null".to_string());
-        Ok(ColumnarValue::Scalar(ScalarValue::LargeBinary(Some(
-            json_str.into_bytes(),
-        ))))
+            let path = &json_args[0];
+            let nodes = match path {
+                serde_json::Value::Object(map) => {
+                    map.get("nodes").cloned().unwrap_or(serde_json::Value::Null)
+                }
+                _ => serde_json::Value::Null,
+            };
+
+            Ok(nodes)
+        })
     }
 }
 
@@ -619,26 +610,25 @@ impl ScalarUDFImpl for RelationshipsUdf {
     }
 
     fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DFResult<ColumnarValue> {
-        let json_args = columnar_args_to_json(&args.args)?;
-        if json_args.is_empty() {
-            return Err(datafusion::error::DataFusionError::Execution(
-                "relationships() requires 1 argument".to_string(),
-            ));
-        }
+        let output_type = self.return_type(&[])?;
+        invoke_cypher_udf(args, &output_type, |json_args| {
+            if json_args.is_empty() {
+                return Err(datafusion::error::DataFusionError::Execution(
+                    "relationships() requires 1 argument".to_string(),
+                ));
+            }
 
-        let path = &json_args[0];
-        let rels = match path {
-            serde_json::Value::Object(map) => map
-                .get("relationships")
-                .cloned()
-                .unwrap_or(serde_json::Value::Null),
-            _ => serde_json::Value::Null,
-        };
+            let path = &json_args[0];
+            let rels = match path {
+                serde_json::Value::Object(map) => map
+                    .get("relationships")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null),
+                _ => serde_json::Value::Null,
+            };
 
-        let json_str = serde_json::to_string(&rels).unwrap_or_else(|_| "null".to_string());
-        Ok(ColumnarValue::Scalar(ScalarValue::LargeBinary(Some(
-            json_str.into_bytes(),
-        ))))
+            Ok(rels)
+        })
     }
 }
 
@@ -698,6 +688,9 @@ impl ScalarUDFImpl for RangeUdf {
             ));
         }
 
+        // range() handles its own array extraction for now as it's a bit special
+        // but we only support Scalar arguments for range() in practice for now.
+        
         // Extract scalar values
         let start = match &args.args[0] {
             ColumnarValue::Scalar(datafusion::common::ScalarValue::Int64(Some(v))) => *v,
@@ -1061,48 +1054,14 @@ impl ScalarUDFImpl for TemporalUdf {
     }
 
     fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DFResult<ColumnarValue> {
-        let len = args.args.iter()
-            .find_map(|arg| match arg {
-                ColumnarValue::Array(arr) => Some(arr.len()),
-                _ => None,
-            })
-            .unwrap_or(1);
-
         let func_name = self.name.to_uppercase();
-
-        // Optimized scalar path
-        if len == 1 && args.args.iter().all(|a| matches!(a, ColumnarValue::Scalar(_))) {
-             let json_args = columnar_args_to_json(&args.args)?;
-             let result = crate::query::datetime::eval_datetime_function(&func_name, &json_args)
-                .map_err(|e| datafusion::error::DataFusionError::Execution(format!("{}(): {}", self.name, e)))?;
-             return json_value_to_columnar(&result);
-        }
-
-        // Batched path
-        let mut results = Vec::with_capacity(len);
-        for i in 0..len {
-            let row_args = args.args.iter().map(|arg| {
-                match arg {
-                    ColumnarValue::Scalar(s) => scalar_to_json(s),
-                    ColumnarValue::Array(arr) => {
-                        let s = ScalarValue::try_from_array(arr, i).map_err(|e| 
-                            datafusion::error::DataFusionError::Execution(e.to_string())
-                        )?;
-                        scalar_to_json(&s)
-                    }
-                }
-            }).collect::<DFResult<Vec<_>>>()?;
-
-            let res = crate::query::datetime::eval_datetime_function(&func_name, &row_args)
-                .map_err(|e| datafusion::error::DataFusionError::Execution(format!("{}(): {}", self.name, e)))?;
-            results.push(res);
-        }
-
-        let dt = self.return_type(&[])?;
-        let arr = values_to_array(&results, &dt)
-            .map_err(|e| datafusion::error::DataFusionError::Execution(format!("Array conversion error: {}", e)))?;
-        
-        Ok(ColumnarValue::Array(arr))
+        let output_type = self.return_type(&[])?;
+        invoke_cypher_udf(args, &output_type, |json_args| {
+            crate::query::datetime::eval_datetime_function(&func_name, json_args)
+                .map_err(|e| {
+                    datafusion::error::DataFusionError::Execution(format!("{}(): {}", self.name, e))
+                })
+        })
     }
 }
 
@@ -1150,59 +1109,82 @@ impl ScalarUDFImpl for DurationPropertyUdf {
     }
 
     fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DFResult<ColumnarValue> {
-        if args.args.len() != 2 {
-            return Err(datafusion::error::DataFusionError::Execution(
-                "_duration_property requires 2 arguments (duration_string, component)".to_string(),
-            ));
-        }
-
-        let dur_str = extract_scalar_utf8(&args.args[0])?;
-        let component = extract_scalar_utf8(&args.args[1])?;
-
-        let result =
-            crate::query::datetime::eval_duration_accessor(&dur_str, &component).map_err(|e| {
-                datafusion::error::DataFusionError::Execution(format!(
-                    "_duration_property(): {}",
-                    e
-                ))
-            })?;
-
-        // Duration accessors return integers.
-        match result {
-            serde_json::Value::Number(n) => {
-                let i = n.as_i64().ok_or_else(|| {
-                    datafusion::error::DataFusionError::Execution(
-                        "Duration accessor returned non-integer".to_string(),
-                    )
-                })?;
-                Ok(ColumnarValue::Scalar(ScalarValue::Int64(Some(i))))
+        let output_type = self.return_type(&[])?;
+        invoke_cypher_udf(args, &output_type, |json_args| {
+            if json_args.len() != 2 {
+                return Err(datafusion::error::DataFusionError::Execution(
+                    "_duration_property requires 2 arguments (duration_string, component)".to_string(),
+                ));
             }
-            _ => Err(datafusion::error::DataFusionError::Execution(
-                "Duration accessor returned unexpected type".to_string(),
-            )),
-        }
+
+            let dur_str = match &json_args[0] {
+                serde_json::Value::String(s) => s,
+                _ => return Err(datafusion::error::DataFusionError::Execution("Duration must be string".to_string())),
+            };
+            let component = match &json_args[1] {
+                serde_json::Value::String(s) => s,
+                _ => return Err(datafusion::error::DataFusionError::Execution("Component must be string".to_string())),
+            };
+
+            let result =
+                crate::query::datetime::eval_duration_accessor(&dur_str, &component).map_err(|e| {
+                    datafusion::error::DataFusionError::Execution(format!(
+                        "_duration_property(): {}",
+                        e
+                    ))
+                })?;
+
+            Ok(result)
+        })
     }
 }
 
 /// Convert DataFusion `ColumnarValue` arguments to `serde_json::Value` for the datetime module.
-fn columnar_args_to_json(args: &[ColumnarValue]) -> DFResult<Vec<serde_json::Value>> {
+fn get_json_args_for_row(args: &[ColumnarValue], row: usize) -> DFResult<Vec<serde_json::Value>> {
     args.iter()
         .map(|arg| match arg {
             ColumnarValue::Scalar(scalar) => scalar_to_json(scalar),
-            ColumnarValue::Array(arr) if arr.len() == 1 => {
-                // Single-row array — extract the scalar.
-                let scalar = ScalarValue::try_from_array(arr, 0).map_err(|e| {
+            ColumnarValue::Array(arr) => {
+                let scalar = ScalarValue::try_from_array(arr, row).map_err(|e| {
                     datafusion::error::DataFusionError::Execution(format!(
-                        "Cannot extract scalar from array: {e}"
+                        "Cannot extract scalar from array at row {}: {}", row, e
                     ))
                 })?;
                 scalar_to_json(&scalar)
             }
-            ColumnarValue::Array(_) => Err(datafusion::error::DataFusionError::Execution(
-                "Temporal UDFs do not support batched array execution yet".to_string(),
-            )),
         })
         .collect()
+}
+
+/// Generic implementation for simple Cypher UDFs that process JSON arguments.
+fn invoke_cypher_udf<F>(args: ScalarFunctionArgs, output_type: &DataType, f: F) -> DFResult<ColumnarValue>
+where
+    F: Fn(&[serde_json::Value]) -> DFResult<serde_json::Value>,
+{
+    let len = args
+        .args
+        .iter()
+        .find_map(|arg| match arg {
+            ColumnarValue::Array(arr) => Some(arr.len()),
+            _ => None,
+        })
+        .unwrap_or(1);
+
+    if len == 1 && args.args.iter().all(|a| matches!(a, ColumnarValue::Scalar(_))) {
+        let row_args = get_json_args_for_row(&args.args, 0)?;
+        let res = f(&row_args)?;
+        return json_value_to_columnar(&res);
+    }
+
+    let mut results = Vec::with_capacity(len);
+    for i in 0..len {
+        let row_args = get_json_args_for_row(&args.args, i)?;
+        results.push(f(&row_args)?);
+    }
+
+    let arr = values_to_array(&results, output_type)
+        .map_err(|e| datafusion::error::DataFusionError::Execution(e.to_string()))?;
+    Ok(ColumnarValue::Array(arr))
 }
 
 /// Convert a single `ScalarValue` to `serde_json::Value`.
@@ -1276,17 +1258,6 @@ fn json_value_to_columnar(val: &serde_json::Value) -> DFResult<ColumnarValue> {
     }
 }
 
-/// Extract a scalar Utf8 string from a `ColumnarValue`.
-fn extract_scalar_utf8(val: &ColumnarValue) -> DFResult<String> {
-    match val {
-        ColumnarValue::Scalar(ScalarValue::Utf8(Some(s)))
-        | ColumnarValue::Scalar(ScalarValue::LargeUtf8(Some(s))) => Ok(s.clone()),
-        _ => Err(datafusion::error::DataFusionError::Execution(
-            "Expected Utf8 scalar".to_string(),
-        )),
-    }
-}
-
 // ============================================================================
 // toInteger(x) -> Int64
 // ============================================================================
@@ -1328,42 +1299,42 @@ impl ScalarUDFImpl for ToIntegerUdf {
     }
 
     fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DFResult<ColumnarValue> {
-        let json_args = columnar_args_to_json(&args.args)?;
-        if json_args.is_empty() {
-            return Err(datafusion::error::DataFusionError::Execution(
-                "toInteger() requires 1 argument".to_string(),
-            ));
-        }
-
-        let val = &json_args[0];
-        let result = match val {
-            serde_json::Value::Number(n) => {
-                if let Some(i) = n.as_i64() {
-                    serde_json::Value::Number(i.into())
-                } else if let Some(f) = n.as_f64() {
-                    serde_json::Value::Number((f as i64).into())
-                } else {
-                    serde_json::Value::Null
-                }
-            }
-            serde_json::Value::String(s) => {
-                if let Ok(i) = s.parse::<i64>() {
-                    serde_json::Value::Number(i.into())
-                } else if let Ok(f) = s.parse::<f64>() {
-                    serde_json::Value::Number((f as i64).into())
-                } else {
-                    serde_json::Value::Null
-                }
-            }
-            serde_json::Value::Null => serde_json::Value::Null,
-            _ => {
+        let output_type = self.return_type(&[])?;
+        invoke_cypher_udf(args, &output_type, |json_args| {
+            if json_args.is_empty() {
                 return Err(datafusion::error::DataFusionError::Execution(
-                    "InvalidArgumentValue: toInteger() cannot convert type".to_string(),
+                    "toInteger() requires 1 argument".to_string(),
                 ));
             }
-        };
 
-        json_value_to_columnar(&result)
+            let val = &json_args[0];
+            let result = match val {
+                serde_json::Value::Number(n) => {
+                    if let Some(i) = n.as_i64() {
+                        serde_json::Value::Number(i.into())
+                    } else if let Some(f) = n.as_f64() {
+                        serde_json::Value::Number((f as i64).into())
+                    } else {
+                        serde_json::Value::Null
+                    }
+                }
+                serde_json::Value::String(s) => {
+                    if let Ok(i) = s.parse::<i64>() {
+                        serde_json::Value::Number(i.into())
+                    } else if let Ok(f) = s.parse::<f64>() {
+                        serde_json::Value::Number((f as i64).into())
+                    } else {
+                        serde_json::Value::Null
+                    }
+                }
+                serde_json::Value::Null => serde_json::Value::Null,
+                _ => {
+                    // Cypher: return null if cannot convert
+                    serde_json::Value::Null
+                }
+            };
+            Ok(result)
+        })
     }
 }
 
@@ -1408,38 +1379,38 @@ impl ScalarUDFImpl for ToFloatUdf {
     }
 
     fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DFResult<ColumnarValue> {
-        let json_args = columnar_args_to_json(&args.args)?;
-        if json_args.is_empty() {
-            return Err(datafusion::error::DataFusionError::Execution(
-                "toFloat() requires 1 argument".to_string(),
-            ));
-        }
-
-        let val = &json_args[0];
-        let result = match val {
-            serde_json::Value::Number(n) => {
-                if let Some(f) = n.as_f64() {
-                    serde_json::Value::Number(serde_json::Number::from_f64(f).unwrap())
-                } else {
-                    serde_json::Value::Null
-                }
-            }
-            serde_json::Value::String(s) => {
-                if let Ok(f) = s.parse::<f64>() {
-                    serde_json::Value::Number(serde_json::Number::from_f64(f).unwrap())
-                } else {
-                    serde_json::Value::Null
-                }
-            }
-            serde_json::Value::Null => serde_json::Value::Null,
-            _ => {
+        let output_type = self.return_type(&[])?;
+        invoke_cypher_udf(args, &output_type, |json_args| {
+            if json_args.is_empty() {
                 return Err(datafusion::error::DataFusionError::Execution(
-                    "InvalidArgumentValue: toFloat() cannot convert type".to_string(),
+                    "toFloat() requires 1 argument".to_string(),
                 ));
             }
-        };
 
-        json_value_to_columnar(&result)
+            let val = &json_args[0];
+            let result = match val {
+                serde_json::Value::Number(n) => {
+                    if let Some(f) = n.as_f64() {
+                        serde_json::Value::Number(serde_json::Number::from_f64(f).unwrap())
+                    } else {
+                        serde_json::Value::Null
+                    }
+                }
+                serde_json::Value::String(s) => {
+                    if let Ok(f) = s.parse::<f64>() {
+                        serde_json::Value::Number(serde_json::Number::from_f64(f).unwrap())
+                    } else {
+                        serde_json::Value::Null
+                    }
+                }
+                serde_json::Value::Null => serde_json::Value::Null,
+                _ => {
+                    // Cypher: return null if cannot convert
+                    serde_json::Value::Null
+                }
+            };
+            Ok(result)
+        })
     }
 }
 
@@ -1484,46 +1455,37 @@ impl ScalarUDFImpl for ToBooleanUdf {
     }
 
     fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DFResult<ColumnarValue> {
-        let json_args = columnar_args_to_json(&args.args)?;
-        if json_args.is_empty() {
-            return Err(datafusion::error::DataFusionError::Execution(
-                "toBoolean() requires 1 argument".to_string(),
-            ));
-        }
-
-        let val = &json_args[0];
-        let result = match val {
-            serde_json::Value::Bool(b) => serde_json::Value::Bool(*b),
-            serde_json::Value::String(s) => {
-                let s_lower = s.to_lowercase();
-                if s_lower == "true" {
-                    serde_json::Value::Bool(true)
-                } else if s_lower == "false" {
-                    serde_json::Value::Bool(false)
-                } else {
-                    serde_json::Value::Null
-                }
-            }
-            serde_json::Value::Null => serde_json::Value::Null,
-            _ => {
+        let output_type = self.return_type(&[])?;
+        invoke_cypher_udf(args, &output_type, |json_args| {
+            if json_args.is_empty() {
                 return Err(datafusion::error::DataFusionError::Execution(
-                    "InvalidArgumentValue: toBoolean() cannot convert type".to_string(),
+                    "toBoolean() requires 1 argument".to_string(),
                 ));
             }
-        };
 
-        json_value_to_columnar(&result)
+            let val = &json_args[0];
+            let result = match val {
+                serde_json::Value::Bool(b) => serde_json::Value::Bool(*b),
+                serde_json::Value::String(s) => {
+                    let s_lower = s.to_lowercase();
+                    if s_lower == "true" {
+                        serde_json::Value::Bool(true)
+                    } else if s_lower == "false" {
+                        serde_json::Value::Bool(false)
+                    } else {
+                        serde_json::Value::Null
+                    }
+                }
+                serde_json::Value::Null => serde_json::Value::Null,
+                _ => {
+                    // Cypher: return null if cannot convert
+                    serde_json::Value::Null
+                }
+            };
+            Ok(result)
+        })
     }
 }
-
-// JSON UDFs - Now using Lance's built-in implementations
-// - json_get_string(jsonb_binary, key) -> String
-// - json_get_int(jsonb_binary, key) -> Int64
-// - json_get_float(jsonb_binary, key) -> Float64
-// - json_get_bool(jsonb_binary, key) -> Boolean
-//
-// These are registered in register_cypher_udfs() above.
-// ============================================================================
 
 // ============================================================================
 // _cypher_type_rank(x) -> Int32
@@ -1583,8 +1545,7 @@ impl ScalarUDFImpl for TypeRankUdf {
             ColumnarValue::Array(arr) => {
                 let ranks: arrow::array::Int32Array = (0..arr.len())
                     .map(|i| {
-                        let scalar =
-                            ScalarValue::try_from_array(arr, i).unwrap_or(ScalarValue::Null);
+                        let scalar = ScalarValue::try_from_array(arr, i).unwrap_or(ScalarValue::Null);
                         get_type_rank_scalar(&scalar)
                     })
                     .collect();
@@ -1598,40 +1559,32 @@ fn get_type_rank_scalar(val: &ScalarValue) -> i32 {
     if val.is_null() {
         return 9;
     }
-    match val {
-        ScalarValue::Null => 9,
-        ScalarValue::Int8(_)
-        | ScalarValue::Int16(_)
-        | ScalarValue::Int32(_)
-        | ScalarValue::Int64(_)
-        | ScalarValue::UInt8(_)
-        | ScalarValue::UInt16(_)
-        | ScalarValue::UInt32(_)
-        | ScalarValue::UInt64(_)
-        | ScalarValue::Float16(_)
-        | ScalarValue::Float32(_)
-        | ScalarValue::Float64(_) => 1,
-
+    let rank = match val {
+        ScalarValue::Null => 9, 
+        ScalarValue::Int8(_) | ScalarValue::Int16(_) | ScalarValue::Int32(_) | ScalarValue::Int64(_) |
+        ScalarValue::UInt8(_) | ScalarValue::UInt16(_) | ScalarValue::UInt32(_) | ScalarValue::UInt64(_) |
+        ScalarValue::Float16(_) | ScalarValue::Float32(_) | ScalarValue::Float64(_) => 1,
+        
         ScalarValue::Boolean(_) => 2,
-
+        
         ScalarValue::Utf8(Some(s)) | ScalarValue::LargeUtf8(Some(s)) => {
             // Try to infer type from string content to fix sorting of coerced values
-            if s.parse::<f64>().is_ok() {
+            if s.parse::<f64>().is_ok() { 
                 1 // Number
-            } else if s.eq_ignore_ascii_case("true") || s.eq_ignore_ascii_case("false") {
+            } else if s.eq_ignore_ascii_case("true") || s.eq_ignore_ascii_case("false") { 
                 2 // Bool
-            } else {
+            } else { 
                 3 // String
             }
-        }
+        },
         ScalarValue::Utf8(None) | ScalarValue::LargeUtf8(None) => 9,
 
         ScalarValue::List(_) | ScalarValue::LargeList(_) | ScalarValue::FixedSizeList(_) => 4,
-
+        
         ScalarValue::Struct(arr) => {
             let fields = arr.fields();
             let field_names: Vec<&str> = fields.iter().map(|f| f.name().as_str()).collect();
-
+            
             if field_names.contains(&"_vid") {
                 7 // Node
             } else if field_names.contains(&"_eid") {
@@ -1642,11 +1595,13 @@ fn get_type_rank_scalar(val: &ScalarValue) -> i32 {
                 8 // Map
             }
         }
-
+        
         ScalarValue::Dictionary(_, val) => get_type_rank_scalar(val),
-
+        
         _ => 0,
-    }
+    };
+    // println!("DEBUG: Rank {:?} -> {}", val, rank);
+    rank
 }
 
 #[cfg(test)]

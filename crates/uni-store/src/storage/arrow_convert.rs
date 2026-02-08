@@ -456,6 +456,22 @@ fn values_to_timestamp_array(values: &[Value], tz: Option<&Arc<str>>) -> ArrayRe
     Arc::new(arr.with_timezone(tz_str))
 }
 
+fn values_to_large_binary_array(values: &[Value]) -> ArrayRef {
+    let mut builder = arrow_array::builder::LargeBinaryBuilder::with_capacity(values.len(), values.len() * 64);
+    for v in values {
+        if v.is_null() {
+            builder.append_null();
+        } else {
+            // Encode as JSONB
+            let jsonb_bytes = jsonb::to_owned_jsonb(v)
+                .map(|b| b.to_vec())
+                .unwrap_or_else(|_| vec![]);
+            builder.append_value(&jsonb_bytes);
+        }
+    }
+    Arc::new(builder.finish())
+}
+
 /// Convert a slice of JSON Values to an Arrow array based on the target Arrow DataType.
 pub fn values_to_array(values: &[Value], dt: &ArrowDataType) -> Result<ArrayRef> {
     match dt {
@@ -476,6 +492,29 @@ pub fn values_to_array(values: &[Value], dt: &ArrowDataType) -> Result<ArrayRef>
         }
         ArrowDataType::Timestamp(arrow_schema::TimeUnit::Microsecond, tz) => {
             Ok(values_to_timestamp_array(values, tz.as_ref()))
+        }
+        ArrowDataType::LargeBinary => Ok(values_to_large_binary_array(values)),
+        ArrowDataType::List(field) => {
+            if field.data_type() == &ArrowDataType::Utf8 {
+                let mut builder = ListBuilder::new(StringBuilder::new());
+                for v in values {
+                    if let Value::Array(arr) = v {
+                        for item in arr {
+                            if let Some(s) = item.as_str() {
+                                builder.values().append_value(s);
+                            } else {
+                                builder.values().append_null();
+                            }
+                        }
+                        builder.append(true);
+                    } else {
+                        builder.append_null();
+                    }
+                }
+                Ok(Arc::new(builder.finish()))
+            } else {
+                Err(anyhow!("Unsupported List inner type: {:?}", field.data_type()))
+            }
         }
         _ => Err(anyhow!("Unsupported type for conversion: {:?}", dt)),
     }

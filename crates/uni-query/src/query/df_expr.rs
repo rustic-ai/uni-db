@@ -757,30 +757,20 @@ fn translate_function_call(
         "SUBSTRING" => {
             require_args(&df_args, 2, "substring")?;
             // substring(str, start, length?)
-            // Cypher is 0-based, DataFusion is 1-based.
+            // Cypher is 0-based, DataFusion substr is 1-based.
             let str_expr = df_args[0].clone();
-            let start_expr = df_args[1].clone();
+            let start_expr = df_args[1].clone() + lit(1i64);
 
-            // start = start + 1
-            let one = datafusion::logical_expr::lit(1i64);
-            let start_adjusted = datafusion::logical_expr::binary_expr(
-                start_expr,
-                datafusion::logical_expr::Operator::Plus,
-                one,
-            );
+            let substr_expr = datafusion::functions::unicode::expr_fn::substr(str_expr, start_expr);
 
-            let len_expr = if df_args.len() > 2 {
-                df_args[2].clone()
+            if df_args.len() == 3 {
+                Ok(datafusion::functions::unicode::expr_fn::left(
+                    substr_expr,
+                    df_args[2].clone(),
+                ))
             } else {
-                // If length is missing, use a large number to emulate "rest of string"
-                datafusion::logical_expr::lit(i64::MAX)
-            };
-
-            Ok(datafusion::functions::unicode::expr_fn::substring(
-                str_expr,
-                start_adjusted,
-                len_expr,
-            ))
+                Ok(substr_expr)
+            }
         }
         // Trim functions
         "TRIM" => {
