@@ -116,6 +116,11 @@ pub fn cypher_eq(left: &Value, right: &Value) -> Option<bool> {
         return None;
     }
 
+    // Exact integer equality — avoid f64 precision loss for large i64 values
+    if let (Some(l), Some(r)) = (left.as_i64(), right.as_i64()) {
+        return Some(l == r);
+    }
+
     // Mixed numeric equality (1 = 1.0)
     if let (Some(l), Some(r)) = (value_as_f64(left), value_as_f64(right)) {
         if l.is_nan() || r.is_nan() {
@@ -470,11 +475,18 @@ where
         return Ok(Value::Null);
     }
 
-    // Handle NaN - comparisons with NaN return false in Cypher (except <>)
-    if value_as_f64(left).is_some_and(|f| f.is_nan())
-        || value_as_f64(right).is_some_and(|f| f.is_nan())
-    {
-        return Ok(Value::Bool(false));
+    // Handle NaN - NaN vs number returns false, NaN vs non-number returns null (cross-type)
+    let left_nan = value_as_f64(left).is_some_and(|f| f.is_nan());
+    let right_nan = value_as_f64(right).is_some_and(|f| f.is_nan());
+    if left_nan || right_nan {
+        if left_nan && right_nan {
+            return Ok(Value::Bool(false));
+        }
+        let other = if left_nan { right } else { left };
+        if value_as_f64(other).is_some() {
+            return Ok(Value::Bool(false)); // NaN vs number
+        }
+        return Ok(Value::Null); // NaN vs non-number (cross-type)
     }
 
     let ord = cypher_partial_cmp(left, right);
@@ -488,6 +500,11 @@ where
 fn cypher_partial_cmp(left: &Value, right: &Value) -> Option<Ordering> {
     if left.is_null() || right.is_null() {
         return None;
+    }
+
+    // Exact integer ordering — avoid f64 precision loss for large i64 values
+    if let (Some(l), Some(r)) = (left.as_i64(), right.as_i64()) {
+        return Some(l.cmp(&r));
     }
 
     // Number vs Number
@@ -2222,6 +2239,108 @@ mod tests {
         assert_eq!(
             eval_binary_op(&Value::Bool(true), &BinaryOp::Or, &Value::Bool(false)).unwrap(),
             Value::Bool(true)
+        );
+    }
+
+    #[test]
+    fn test_nan_comparison_with_non_numeric() {
+        let nan = json!({"_cypher_type": "NaN"});
+
+        // NaN > number → false
+        assert_eq!(
+            eval_binary_op(&nan, &BinaryOp::Gt, &json!(1)).unwrap(),
+            Value::Bool(false)
+        );
+
+        // NaN > NaN → false
+        assert_eq!(
+            eval_binary_op(&nan, &BinaryOp::Gt, &nan).unwrap(),
+            Value::Bool(false)
+        );
+
+        // NaN > string → null (cross-type)
+        assert_eq!(
+            eval_binary_op(&nan, &BinaryOp::Gt, &json!("a")).unwrap(),
+            Value::Null
+        );
+
+        // string < NaN → null (cross-type)
+        assert_eq!(
+            eval_binary_op(&json!("a"), &BinaryOp::Lt, &nan).unwrap(),
+            Value::Null
+        );
+    }
+
+    #[test]
+    fn test_nan_equality_with_non_numeric() {
+        let nan = json!({"_cypher_type": "NaN"});
+
+        // NaN = NaN → false
+        assert_eq!(
+            eval_binary_op(&nan, &BinaryOp::Eq, &nan).unwrap(),
+            Value::Bool(false)
+        );
+
+        // NaN <> NaN → true
+        assert_eq!(
+            eval_binary_op(&nan, &BinaryOp::NotEq, &nan).unwrap(),
+            Value::Bool(true)
+        );
+
+        // NaN = 'a' → false (structural mismatch at cypher_eq fallback)
+        assert_eq!(
+            eval_binary_op(&nan, &BinaryOp::Eq, &json!("a")).unwrap(),
+            Value::Bool(false)
+        );
+
+        // NaN <> 'a' → true
+        assert_eq!(
+            eval_binary_op(&nan, &BinaryOp::NotEq, &json!("a")).unwrap(),
+            Value::Bool(true)
+        );
+    }
+
+    #[test]
+    fn test_large_integer_equality() {
+        // These two values are distinct as i64 but collide when cast to f64
+        let a = json!(4611686018427387905_i64);
+        let b = json!(4611686018427387900_i64);
+
+        assert_eq!(
+            eval_binary_op(&a, &BinaryOp::Eq, &b).unwrap(),
+            Value::Bool(false)
+        );
+        assert_eq!(
+            eval_binary_op(&a, &BinaryOp::Eq, &a).unwrap(),
+            Value::Bool(true)
+        );
+    }
+
+    #[test]
+    fn test_large_integer_ordering() {
+        let a = json!(4611686018427387905_i64);
+        let b = json!(4611686018427387900_i64);
+
+        assert_eq!(
+            eval_binary_op(&a, &BinaryOp::Gt, &b).unwrap(),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            eval_binary_op(&b, &BinaryOp::Lt, &a).unwrap(),
+            Value::Bool(true)
+        );
+    }
+
+    #[test]
+    fn test_int_float_equality_still_works() {
+        // Regression: 1 = 1.0 must still be true
+        assert_eq!(
+            eval_binary_op(&json!(1), &BinaryOp::Eq, &json!(1.0)).unwrap(),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            eval_binary_op(&json!(1), &BinaryOp::NotEq, &json!(1.0)).unwrap(),
+            Value::Bool(false)
         );
     }
 
