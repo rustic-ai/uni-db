@@ -18,9 +18,10 @@
     - [x] Implement UDFs or planner translations.
 - [x] Task: Conductor - User Manual Verification 'Phase 2: Collection Functions' (Protocol in workflow.md) d51cb46
 
-## Phase 3: List Comprehensions & Advanced Collections
+## Phase 3: List Comprehensions & Advanced Collections (Deferred)
+
 - [ ] Task: Fix List Comprehension `[x IN list WHERE pred | expr]` scoping and mixed types.
-    - [ ] Write tests for nested and mixed-type comprehensions.
-    - [ ] Update vectorized operator or fallback evaluator.
+
 - [ ] Task: Standardize `REDUCE`, `ALL`, `ANY`, `SINGLE`, `NONE` semantics.
+
 - [ ] Task: Conductor - User Manual Verification 'Phase 3: List Comprehensions' (Protocol in workflow.md)

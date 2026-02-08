@@ -1265,11 +1265,12 @@ impl HybridPhysicalPlanner {
         let schema = input_plan.schema();
 
         let ctx = self.translation_context_for_plan(input);
-        let df_predicate = cypher_expr_to_df(predicate, Some(&ctx))?;
 
         let session = self.session_ctx.read();
-        let physical_predicate =
-            self.create_physical_filter_expr(&df_predicate, &schema, &session)?;
+        let state = session.state();
+        let compiler =
+            crate::query::df_graph::expr_compiler::CypherPhysicalExprCompiler::new(&state, Some(&ctx));
+        let physical_predicate = compiler.compile(predicate, &schema)?;
 
         Ok(Arc::new(FilterExec::try_new(
             physical_predicate,
@@ -1299,14 +1300,9 @@ impl HybridPhysicalPlanner {
     ) -> Result<Arc<dyn ExecutionPlan>> {
         let input_plan = input_plan;
         let schema = input_plan.schema();
-        let df_schema = datafusion::common::DFSchema::try_from(schema.as_ref().clone())?;
 
         let session = self.session_ctx.read();
         let state = session.state();
-
-        // Use DefaultPhysicalPlanner to properly resolve UDFs
-        use datafusion::physical_planner::PhysicalPlanner;
-        let planner = datafusion::physical_planner::DefaultPhysicalPlanner::default();
 
         // Build translation context with variable kinds if we have a logical plan
         let ctx = context_plan.map(|p| self.translation_context_for_plan(p));
@@ -1349,10 +1345,9 @@ impl HybridPhysicalPlanner {
                 continue;
             }
 
-            let df_expr = cypher_expr_to_df(expr, ctx.as_ref())?;
-            // Resolve DummyUdf placeholders to registered UDFs
-            let resolved_expr = Self::resolve_udfs(&df_expr, &state)?;
-            let physical_expr = planner.create_physical_expr(&resolved_expr, &df_schema, &state)?;
+            let compiler =
+                crate::query::df_graph::expr_compiler::CypherPhysicalExprCompiler::new(&state, ctx.as_ref());
+            let physical_expr = compiler.compile(expr, &schema)?;
 
             let name = alias.clone().unwrap_or_else(|| expr.to_string_repr());
             exprs.push((physical_expr, name));
@@ -1371,14 +1366,9 @@ impl HybridPhysicalPlanner {
     ) -> Result<Arc<dyn ExecutionPlan>> {
         let input_plan = self.plan_internal(input, all_properties)?;
         let schema = input_plan.schema();
-        let df_schema = datafusion::common::DFSchema::try_from(schema.as_ref().clone())?;
 
         let session = self.session_ctx.read();
         let state = session.state();
-
-        // Use DefaultPhysicalPlanner to properly resolve UDFs
-        use datafusion::physical_planner::PhysicalPlanner;
-        let planner = datafusion::physical_planner::DefaultPhysicalPlanner::default();
 
         // Build translation context with variable kinds from the input plan
         let ctx = self.translation_context_for_plan(input);
@@ -1386,11 +1376,10 @@ impl HybridPhysicalPlanner {
         // Translate group by expressions
         let mut group_exprs: Vec<(Arc<dyn datafusion::physical_expr::PhysicalExpr>, String)> =
             Vec::new();
+        let compiler =
+            crate::query::df_graph::expr_compiler::CypherPhysicalExprCompiler::new(&state, Some(&ctx));
         for expr in group_by {
-            let df_expr = cypher_expr_to_df(expr, Some(&ctx))?;
-            // Resolve DummyUdf placeholders to registered UDFs
-            let resolved_expr = Self::resolve_udfs(&df_expr, &state)?;
-            let physical_expr = planner.create_physical_expr(&resolved_expr, &df_schema, &state)?;
+            let physical_expr = compiler.compile(expr, &schema)?;
             let name = expr.to_string_repr();
             group_exprs.push((physical_expr, name));
         }
