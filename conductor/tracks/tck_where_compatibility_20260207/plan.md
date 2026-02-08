@@ -12,11 +12,11 @@
 - [ ] Edge Cases: Fix NaN comparison behavior and Map equality logic.
 - [ ] Verification: Achieve near-100% pass rate for `Comparison1` and `Comparison2`.
 
-## Phase 2: Boolean Logic & Precedence (Category B)
-- [ ] Identification: Run TCK boolean logic tests.
-- [ ] Implementation: Fix `XOR` implementation and verify `AND`/`OR` precedence in `planner.rs`.
-- [ ] Refactoring: Ensure `NOT` correctly negates complex predicates.
-- [ ] Verification: 100% pass rate for `expressions/boolean` and `expressions/precedence`.
+## Phase 2: Boolean Logic & Precedence (Category B) [checkpoint: 99f55a5]
+- [x] Identification: Run TCK boolean logic tests.
+- [x] Implementation: Fix `XOR` implementation and verify `AND`/`OR` precedence in `planner.rs`.
+- [x] Refactoring: Ensure `NOT` correctly negates complex predicates.
+- [x] Verification: 100% pass rate for `expressions/boolean` and `expressions/precedence`.
 
 ## Phase 3: Null Handling (Category C)
 - [ ] Identification: Run TCK null handling tests.
