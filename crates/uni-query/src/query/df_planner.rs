@@ -1534,30 +1534,48 @@ impl HybridPhysicalPlanner {
         // Translate sort expressions to DataFusion's SortExpr (a.k.a. Sort struct)
         // SortItem has `ascending: bool`, so use it directly
         // Default nulls_first to false for ASC, true for DESC
-        let df_sort_exprs: Vec<DfSortExpr> = order_by
-            .iter()
-            .map(|item| {
-                let mut sort_expr = item.expr.clone();
+        let mut df_sort_exprs = Vec::new();
+        for item in order_by {
+            let mut sort_expr = item.expr.clone();
 
-                // If the sort expression is a variable that matches an alias,
-                // replace it with the underlying expression
-                if let Expr::Variable(ref name) = sort_expr {
-                    // Check if this name exists in the input schema
-                    let col_name = name.as_str();
-                    let exists_in_schema = schema.fields().iter().any(|f| f.name() == col_name);
+            // If the sort expression is a variable that matches an alias,
+            // replace it with the underlying expression
+            if let Expr::Variable(ref name) = sort_expr {
+                // Check if this name exists in the input schema
+                let col_name = name.as_str();
+                let exists_in_schema = schema.fields().iter().any(|f| f.name() == col_name);
 
-                    if !exists_in_schema && let Some(aliased_expr) = alias_map.get(col_name) {
+                if !exists_in_schema {
+                    if let Some(aliased_expr) = alias_map.get(col_name) {
                         sort_expr = aliased_expr.clone();
                     }
                 }
+            }
 
-                let df_expr = cypher_expr_to_df(&sort_expr, Some(&ctx))?;
-                let asc = item.ascending;
-                let nulls_first = !asc; // Standard SQL behavior: nulls last for ASC, first for DESC
+            let df_expr = cypher_expr_to_df(&sort_expr, Some(&ctx))?;
+            let asc = item.ascending;
+            let nulls_first = !asc; // Standard SQL behavior: nulls last for ASC, first for DESC
 
-                Ok(DfSortExpr::new(df_expr, asc, nulls_first))
-            })
-            .collect::<Result<Vec<_>>>()?;
+            // Cypher sort order: Map > Node > Rel > Path > List > String > Bool > Number
+            // We prepend a type rank sort key to ensure correct ordering across mixed types
+            let rank_udf = crate::query::df_udfs::create_type_rank_udf();
+            let rank_expr = rank_udf.call(vec![df_expr.clone()]);
+            
+            // For ranks that share the same underlying DataFusion type (e.g. String vs Number vs Bool all coerced to String),
+            // we need secondary keys to sort correctly within the rank.
+            // Rank 1 (Number): sort by toFloat(x)
+            let float_udf = crate::query::df_udfs::create_to_float_udf();
+            let float_expr = float_udf.call(vec![df_expr.clone()]);
+            
+            // Rank 2 (Bool): sort by toBoolean(x)
+            let bool_udf = crate::query::df_udfs::create_to_boolean_udf();
+            let bool_expr = bool_udf.call(vec![df_expr.clone()]);
+
+            df_sort_exprs.push(DfSortExpr::new(rank_expr, asc, nulls_first));
+            df_sort_exprs.push(DfSortExpr::new(float_expr, asc, nulls_first));
+            df_sort_exprs.push(DfSortExpr::new(bool_expr, asc, nulls_first));
+            df_sort_exprs.push(DfSortExpr::new(df_expr, asc, nulls_first));
+        }
 
         // Build DFSchema for conversion
         let df_schema = datafusion::common::DFSchema::try_from(schema.as_ref().clone())?;

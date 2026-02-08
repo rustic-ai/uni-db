@@ -145,6 +145,7 @@ pub fn register_cypher_udfs(ctx: &SessionContext) -> DFResult<()> {
 
     // Duration property accessor UDF
     ctx.register_udf(create_duration_property_udf());
+    ctx.register_udf(create_type_rank_udf());
 
     // Temporal extraction UDFs (year, month, day, etc.)
     for name in &["year", "month", "day", "hour", "minute", "second"] {
@@ -1482,6 +1483,121 @@ impl ScalarUDFImpl for ToBooleanUdf {
 //
 // These are registered in register_cypher_udfs() above.
 // ============================================================================
+
+// ============================================================================
+// _cypher_type_rank(x) -> Int32
+// Internal UDF for Cypher ORDER BY type ranking
+// ============================================================================
+
+pub fn create_type_rank_udf() -> ScalarUDF {
+    ScalarUDF::new_from_impl(TypeRankUdf::new())
+}
+
+#[derive(Debug)]
+struct TypeRankUdf {
+    signature: Signature,
+}
+
+impl TypeRankUdf {
+    fn new() -> Self {
+        Self {
+            signature: Signature::any(1, Volatility::Immutable),
+        }
+    }
+}
+
+impl_udf_eq_hash!(TypeRankUdf);
+
+impl ScalarUDFImpl for TypeRankUdf {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn name(&self) -> &str {
+        "_cypher_type_rank"
+    }
+
+    fn signature(&self) -> &Signature {
+        &self.signature
+    }
+
+    fn return_type(&self, _arg_types: &[DataType]) -> DFResult<DataType> {
+        Ok(DataType::Int32)
+    }
+
+    fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DFResult<ColumnarValue> {
+        if args.args.len() != 1 {
+            return Err(datafusion::error::DataFusionError::Execution(
+                "_cypher_type_rank requires 1 argument".to_string(),
+            ));
+        }
+
+        let arg = &args.args[0];
+        // println!("DEBUG: TypeRankUdf arg type: {:?}", arg.data_type());
+        match arg {
+            ColumnarValue::Scalar(s) => {
+                let rank = get_type_rank_scalar(s);
+                Ok(ColumnarValue::Scalar(ScalarValue::Int32(Some(rank))))
+            }
+            ColumnarValue::Array(arr) => {
+                let ranks: arrow::array::Int32Array = (0..arr.len())
+                    .map(|i| {
+                        let scalar = ScalarValue::try_from_array(arr, i).unwrap_or(ScalarValue::Null);
+                        get_type_rank_scalar(&scalar)
+                    })
+                    .collect();
+                Ok(ColumnarValue::Array(Arc::new(ranks)))
+            }
+        }
+    }
+}
+
+fn get_type_rank_scalar(val: &ScalarValue) -> i32 {
+    if val.is_null() {
+        return 9;
+    }
+    match val {
+        ScalarValue::Null => 9, 
+        ScalarValue::Int8(_) | ScalarValue::Int16(_) | ScalarValue::Int32(_) | ScalarValue::Int64(_) |
+        ScalarValue::UInt8(_) | ScalarValue::UInt16(_) | ScalarValue::UInt32(_) | ScalarValue::UInt64(_) |
+        ScalarValue::Float16(_) | ScalarValue::Float32(_) | ScalarValue::Float64(_) => 1,
+        
+        ScalarValue::Boolean(_) => 2,
+        
+        ScalarValue::Utf8(Some(s)) | ScalarValue::LargeUtf8(Some(s)) => {
+            // Try to infer type from string content to fix sorting of coerced values
+            if s.parse::<f64>().is_ok() { 
+                1 // Number
+            } else if s.eq_ignore_ascii_case("true") || s.eq_ignore_ascii_case("false") { 
+                2 // Bool
+            } else { 
+                3 // String
+            }
+        },
+        ScalarValue::Utf8(None) | ScalarValue::LargeUtf8(None) => 9,
+        
+        ScalarValue::List(_) | ScalarValue::LargeList(_) | ScalarValue::FixedSizeList(_) => 4,
+        
+        ScalarValue::Struct(arr) => {
+            let fields = arr.fields();
+            let field_names: Vec<&str> = fields.iter().map(|f| f.name().as_str()).collect();
+            
+            if field_names.contains(&"_vid") {
+                7 // Node
+            } else if field_names.contains(&"_eid") {
+                6 // Rel
+            } else if field_names.contains(&"nodes") && field_names.contains(&"relationships") {
+                5 // Path
+            } else {
+                8 // Map
+            }
+        }
+        
+        ScalarValue::Dictionary(_, val) => get_type_rank_scalar(val),
+        
+        _ => 0,
+    }
+}
 
 #[cfg(test)]
 mod tests {

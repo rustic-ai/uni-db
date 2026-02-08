@@ -3,9 +3,9 @@
 ## Phase 1: String Functions
 - [x] Task: Implement `STARTS WITH`, `ENDS WITH`, `CONTAINS` in `expr_compiler.rs`.
     - [x] Map `BinaryOp` to DataFusion `Like` or custom UDFs.
-- [ ] Task: Implement `substring`, `toLower`, `toUpper` UDFs.
-    - [ ] Register in `df_udfs.rs`.
-    - [ ] Add support in `expr_compiler.rs` (should be automatic if UDF).
+- [x] Task: Implement `substring`, `toLower`, `toUpper` UDFs.
+    - [x] Register in `df_udfs.rs` (or map to built-ins in `df_expr.rs`).
+    - [x] Add support in `expr_compiler.rs` (should be automatic if UDF/mapped).
 
 ## Phase 2: Ordering Logic
 - [ ] Task: Implement Cypher-compliant Sort Comparator.
