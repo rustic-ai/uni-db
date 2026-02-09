@@ -5415,12 +5415,35 @@ impl Executor {
 
         // Update all path objects with loaded data
         for m in matches.iter_mut() {
-            let Some(Value::Map(path_map)) = m.get_mut(path_variable) else {
-                continue;
-            };
-
-            Self::update_path_nodes(path_map, &vid_labels, &vertex_props);
-            Self::update_path_relationships(path_map, &eid_types, &edge_props);
+            match m.get_mut(path_variable) {
+                Some(Value::Path(path)) => {
+                    // Update nodes in Value::Path directly
+                    for node in &mut path.nodes {
+                        if let Some(label) = vid_labels.get(&node.vid) {
+                            node.label = label.clone();
+                        }
+                        if let Some(props) = vertex_props.get(&node.vid) {
+                            node.properties = props.clone();
+                        }
+                    }
+                    // Update edges in Value::Path directly
+                    for edge in &mut path.edges {
+                        if let Some(type_name) = eid_types.get(&edge.eid) {
+                            edge.edge_type = type_name.clone();
+                        }
+                        let vid_key = Vid::from(edge.eid.as_u64());
+                        if let Some(props) = edge_props.get(&vid_key) {
+                            edge.properties = props.clone();
+                        }
+                    }
+                }
+                Some(Value::Map(path_map)) => {
+                    // Handle Value::Map (legacy format)
+                    Self::update_path_nodes(path_map, &vid_labels, &vertex_props);
+                    Self::update_path_relationships(path_map, &eid_types, &edge_props);
+                }
+                _ => continue,
+            }
         }
 
         Ok(())
@@ -5435,30 +5458,39 @@ impl Executor {
         let mut all_eids = HashSet::new();
 
         for m in matches {
-            let Some(Value::Map(path_map)) = m.get(path_variable) else {
-                continue;
-            };
-
-            // Extract node VIDs
-            if let Some(Value::List(nodes)) = path_map.get("nodes") {
-                for node in nodes {
-                    if let Some(vid_val) = node.get("_id")
-                        && let Ok(vid) = Self::vid_from_value(vid_val)
-                    {
-                        all_vids.insert(vid);
+            match m.get(path_variable) {
+                Some(Value::Path(path)) => {
+                    // Handle Value::Path directly
+                    for node in &path.nodes {
+                        all_vids.insert(node.vid);
+                    }
+                    for edge in &path.edges {
+                        all_eids.insert(edge.eid);
                     }
                 }
-            }
+                Some(Value::Map(path_map)) => {
+                    // Handle Value::Map (legacy format)
+                    if let Some(Value::List(nodes)) = path_map.get("nodes") {
+                        for node in nodes {
+                            if let Some(vid_val) = node.get("_id")
+                                && let Ok(vid) = Self::vid_from_value(vid_val)
+                            {
+                                all_vids.insert(vid);
+                            }
+                        }
+                    }
 
-            // Extract relationship EIDs
-            if let Some(Value::List(relationships)) = path_map.get("relationships") {
-                for rel in relationships {
-                    if let Some(eid_val) = rel.get("_id")
-                        && let Ok(vid) = Self::vid_from_value(eid_val)
-                    {
-                        all_eids.insert(Eid::from(vid.as_u64()));
+                    if let Some(Value::List(relationships)) = path_map.get("relationships") {
+                        for rel in relationships {
+                            if let Some(eid_val) = rel.get("_id")
+                                && let Ok(vid) = Self::vid_from_value(eid_val)
+                            {
+                                all_eids.insert(Eid::from(vid.as_u64()));
+                            }
+                        }
                     }
                 }
+                _ => continue,
             }
         }
 
