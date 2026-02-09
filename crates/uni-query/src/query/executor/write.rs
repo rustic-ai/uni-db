@@ -1219,7 +1219,7 @@ impl Executor {
                             let val = self
                                 .evaluate_expr(value, row, prop_manager, params, ctx)
                                 .await?;
-                            props.insert(prop_name.clone(), val);
+                            props.insert(prop_name.clone(), val.clone());
 
                             // Enrich with generated columns
                             // In the new storage model, get labels from the node value or context
@@ -1237,6 +1237,13 @@ impl Executor {
                             }
 
                             let _ = writer.insert_vertex_with_labels(vid, props, labels).await?;
+
+                            // Update the row object so subsequent RETURN sees the new value
+                            if let Some(Value::Map(node_map)) = row.get_mut(var_name) {
+                                node_map.insert(prop_name.clone(), val);
+                            } else if let Some(Value::Node(node)) = row.get_mut(var_name) {
+                                node.properties.insert(prop_name.clone(), val);
+                            }
                         } else if let Value::Map(map) = node_val
                             && let (Some(eid_v), Some(src_v), Some(dst_v), Some(type_v)) = (
                                 map.get("_eid"),
@@ -1259,8 +1266,15 @@ impl Executor {
                             let val = self
                                 .evaluate_expr(value, row, prop_manager, params, ctx)
                                 .await?;
-                            props.insert(prop_name.clone(), val);
+                            props.insert(prop_name.clone(), val.clone());
                             writer.insert_edge(src, dst, etype, eid, props).await?;
+
+                            // Update the row object so subsequent RETURN sees the new value
+                            if let Some(Value::Map(edge_map)) = row.get_mut(var_name) {
+                                edge_map.insert(prop_name.clone(), val);
+                            } else if let Some(Value::Edge(edge)) = row.get_mut(var_name) {
+                                edge.properties.insert(prop_name.clone(), val);
+                            }
                         }
                     }
                 }

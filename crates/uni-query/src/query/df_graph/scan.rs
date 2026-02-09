@@ -41,7 +41,7 @@ use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSe
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties};
 use futures::Stream;
 use std::any::Any;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -553,13 +553,18 @@ async fn scan_vertex_vids_static(
     }
 
     // Step 2: Overlay L0 buffers (pending flush, current, transaction)
+    // Also collect tombstoned VIDs to filter out deleted vertices
+    let mut tombstones: HashSet<Vid> = HashSet::new();
     for l0 in l0_ctx.iter_l0_buffers() {
-        vids.extend(l0.read().vids_for_label(label));
+        let guard = l0.read();
+        vids.extend(guard.vids_for_label(label));
+        tombstones.extend(guard.vertex_tombstones.iter().copied());
     }
 
-    // Deduplicate
+    // Deduplicate and filter out tombstoned vertices
     vids.sort_unstable();
     vids.dedup();
+    vids.retain(|vid| !tombstones.contains(vid));
 
     Ok(vids)
 }
@@ -584,13 +589,18 @@ async fn scan_vertex_vids_by_label_name_static(
         .map_err(|e| datafusion::error::DataFusionError::Execution(e.to_string()))?;
 
     // Step 2: Overlay L0 buffers (pending flush, current, transaction)
+    // Also collect tombstoned VIDs to filter out deleted vertices
+    let mut tombstones: HashSet<Vid> = HashSet::new();
     for l0 in l0_ctx.iter_l0_buffers() {
-        vids.extend(l0.read().vids_for_label(label_name));
+        let guard = l0.read();
+        vids.extend(guard.vids_for_label(label_name));
+        tombstones.extend(guard.vertex_tombstones.iter().copied());
     }
 
-    // Deduplicate
+    // Deduplicate and filter out tombstoned vertices
     vids.sort_unstable();
     vids.dedup();
+    vids.retain(|vid| !tombstones.contains(vid));
 
     Ok(vids)
 }
@@ -614,13 +624,18 @@ async fn scan_vertex_vids_by_labels_static(
         .map_err(|e| datafusion::error::DataFusionError::Execution(e.to_string()))?;
 
     // Step 2: Overlay L0 buffers with label intersection
+    // Also collect tombstoned VIDs to filter out deleted vertices
+    let mut tombstones: HashSet<Vid> = HashSet::new();
     for l0 in l0_ctx.iter_l0_buffers() {
-        vids.extend(l0.read().vids_with_all_labels(label_names));
+        let guard = l0.read();
+        vids.extend(guard.vids_with_all_labels(label_names));
+        tombstones.extend(guard.vertex_tombstones.iter().copied());
     }
 
-    // Deduplicate
+    // Deduplicate and filter out tombstoned vertices
     vids.sort_unstable();
     vids.dedup();
+    vids.retain(|vid| !tombstones.contains(vid));
 
     Ok(vids)
 }
@@ -642,13 +657,18 @@ async fn scan_all_vertex_vids_static(graph_ctx: &GraphExecutionContext) -> DFRes
         .map_err(|e| datafusion::error::DataFusionError::Execution(e.to_string()))?;
 
     // Step 2: Overlay L0 buffers (pending flush, current, transaction)
+    // Also collect tombstoned VIDs to filter out deleted vertices
+    let mut tombstones: HashSet<Vid> = HashSet::new();
     for l0 in l0_ctx.iter_l0_buffers() {
-        vids.extend(l0.read().all_vertex_vids());
+        let guard = l0.read();
+        vids.extend(guard.all_vertex_vids());
+        tombstones.extend(guard.vertex_tombstones.iter().copied());
     }
 
-    // Deduplicate
+    // Deduplicate and filter out tombstoned vertices
     vids.sort_unstable();
     vids.dedup();
+    vids.retain(|vid| !tombstones.contains(vid));
 
     Ok(vids)
 }

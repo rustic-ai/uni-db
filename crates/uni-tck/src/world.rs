@@ -1,6 +1,7 @@
 use cucumber::World;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use tempfile::TempDir;
 use uni_common::UniError;
 use uni_db::Uni;
 use uni_query::{QueryResult, Value};
@@ -9,6 +10,9 @@ use uni_query::{QueryResult, Value};
 #[world(init = Self::new)]
 pub struct UniWorld {
     db: Option<Arc<Uni>>,
+    /// Temp directory that auto-cleans when UniWorld is dropped.
+    /// This prevents accumulating temp files during parallel TCK execution.
+    _temp_dir: Option<TempDir>,
     last_result: Option<QueryResult>,
     last_error: Option<UniError>,
     side_effects: SideEffects,
@@ -19,6 +23,7 @@ impl std::fmt::Debug for UniWorld {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("UniWorld")
             .field("db", &"<Uni instance>")
+            .field("_temp_dir", &self._temp_dir.as_ref().map(|d| d.path()))
             .field("last_result", &self.last_result)
             .field("last_error", &self.last_error)
             .field("side_effects", &self.side_effects)
@@ -49,6 +54,7 @@ impl UniWorld {
     pub fn new() -> Self {
         Self {
             db: None,
+            _temp_dir: None,
             last_result: None,
             last_error: None,
             side_effects: SideEffects::default(),
@@ -57,8 +63,14 @@ impl UniWorld {
     }
 
     pub async fn init_db(&mut self) -> anyhow::Result<()> {
-        let db = Uni::in_memory().build().await?;
+        // Create a temp directory that auto-cleans when UniWorld is dropped.
+        // This prevents accumulating temp files during parallel TCK execution.
+        let temp_dir = TempDir::new()?;
+        let db = Uni::open(temp_dir.path().to_string_lossy().to_string())
+            .build()
+            .await?;
         self.db = Some(Arc::new(db));
+        self._temp_dir = Some(temp_dir);
         Ok(())
     }
 
@@ -68,27 +80,33 @@ impl UniWorld {
 
     /// Capture graph state before a mutation for side-effect tracking.
     pub async fn capture_state_before(&mut self) -> anyhow::Result<()> {
-        self.side_effects.nodes_before = self
-            .count_by_query("MATCH (n) RETURN count(n) as count")
-            .await;
-        self.side_effects.edges_before = self
-            .count_by_query("MATCH ()-[r]->() RETURN count(r) as count")
-            .await;
-        self.side_effects.properties_before = 0; // TODO: implement property counting
-        self.side_effects.labels_before = self.get_labels().await?;
+        let (nodes, edges, node_props, rel_props, labels) = tokio::join!(
+            self.count_by_query("MATCH (n) RETURN count(n) as count"),
+            self.count_by_query("MATCH ()-[r]->() RETURN count(r) as count"),
+            self.count_by_query("MATCH (n) UNWIND keys(n) AS k RETURN count(k) AS count"),
+            self.count_by_query("MATCH ()-[r]->() UNWIND keys(r) AS k RETURN count(k) AS count"),
+            self.get_labels(),
+        );
+        self.side_effects.nodes_before = nodes;
+        self.side_effects.edges_before = edges;
+        self.side_effects.properties_before = node_props + rel_props;
+        self.side_effects.labels_before = labels?;
         Ok(())
     }
 
     /// Capture graph state after a mutation for side-effect tracking.
     pub async fn capture_state_after(&mut self) -> anyhow::Result<()> {
-        self.side_effects.nodes_after = self
-            .count_by_query("MATCH (n) RETURN count(n) as count")
-            .await;
-        self.side_effects.edges_after = self
-            .count_by_query("MATCH ()-[r]->() RETURN count(r) as count")
-            .await;
-        self.side_effects.properties_after = 0; // TODO: implement property counting
-        self.side_effects.labels_after = self.get_labels().await?;
+        let (nodes, edges, node_props, rel_props, labels) = tokio::join!(
+            self.count_by_query("MATCH (n) RETURN count(n) as count"),
+            self.count_by_query("MATCH ()-[r]->() RETURN count(r) as count"),
+            self.count_by_query("MATCH (n) UNWIND keys(n) AS k RETURN count(k) AS count"),
+            self.count_by_query("MATCH ()-[r]->() UNWIND keys(r) AS k RETURN count(k) AS count"),
+            self.get_labels(),
+        );
+        self.side_effects.nodes_after = nodes;
+        self.side_effects.edges_after = edges;
+        self.side_effects.properties_after = node_props + rel_props;
+        self.side_effects.labels_after = labels?;
         Ok(())
     }
 

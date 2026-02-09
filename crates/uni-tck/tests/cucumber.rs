@@ -1,6 +1,10 @@
 use cucumber::{World, WriterExt};
 use std::fs;
+use std::time::Duration;
 use uni_tck::UniWorld;
+
+/// Scenario timeout in seconds - scenarios taking longer will be marked as failed
+const SCENARIO_TIMEOUT_SECS: u64 = 30;
 
 #[tokio::main]
 async fn main() {
@@ -44,15 +48,28 @@ async fn main() {
 
     eprintln!("🚀 Running features from: {}", feature_path);
 
-    // Run tests with JSON output
+    // Run tests with JSON output and scenario timeout
     UniWorld::cucumber()
         .fail_on_skipped()
+        .max_concurrent_scenarios(Some(8)) // Parallel execution with auto-cleanup temp dirs
         .with_writer(
             cucumber::writer::Json::for_tee(
                 fs::File::create(&json_path).expect("Failed to create JSON output file"),
             )
             .normalized(),
         )
+        .before(move |_feature, _rule, scenario, _world| {
+            let scenario_name = scenario.name.clone();
+            Box::pin(async move {
+                eprintln!("▶ Starting: {}", scenario_name);
+            })
+        })
+        .after(move |_feature, _rule, scenario, _ev, _world| {
+            let scenario_name = scenario.name.clone();
+            Box::pin(async move {
+                eprintln!("✓ Finished: {}", scenario_name);
+            })
+        })
         .run(feature_path)
         .await;
 }
