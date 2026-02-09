@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2024-2026 Dragonscale Team
 
-use serde_json::json;
+use uni_db::unival;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tempfile::tempdir;
@@ -87,7 +87,7 @@ async fn test_cypher_set_advanced() -> anyhow::Result<()> {
     );
 
     let meta = res[0].get("i.metadata").unwrap().as_object().unwrap();
-    assert_eq!(meta.get("valid"), Some(&json!(true)));
+    assert_eq!(meta.get("valid"), Some(&unival!(true)));
 
     // 4. Update Properties
     let query = "MATCH (i:Item) SET i.embedding = [0.4, 0.5, 0.6], i.metadata = {valid: false}";
@@ -111,7 +111,7 @@ async fn test_cypher_set_advanced() -> anyhow::Result<()> {
     );
 
     let meta = res[0].get("i.metadata").unwrap().as_object().unwrap();
-    assert_eq!(meta.get("valid"), Some(&json!(false)));
+    assert_eq!(meta.get("valid"), Some(&unival!(false)));
 
     // 6. Test Edge Properties
     let query = "MATCH (i:Item) CREATE (i)-[r:RELATED {scores: [1.0, 2.0]}]->(i)";

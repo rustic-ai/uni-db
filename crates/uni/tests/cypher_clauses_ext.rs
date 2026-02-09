@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2024-2026 Dragonscale Team
 
-use serde_json::json;
+use uni_db::unival;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tempfile::tempdir;
@@ -61,8 +61,8 @@ impl PersonTestHarness {
         for (name, age) in people {
             let vid = w.next_vid().await?;
             let mut props = HashMap::new();
-            props.insert("name".to_string(), json!(name).into());
-            props.insert("age".to_string(), json!(age).into());
+            props.insert("name".to_string(), unival!(*name));
+            props.insert("age".to_string(), unival!(*age));
             w.insert_vertex_with_labels(vid, props, vec!["Person".to_string()])
                 .await?;
         }
@@ -74,7 +74,7 @@ impl PersonTestHarness {
     async fn run_query(
         &self,
         cypher: &str,
-    ) -> anyhow::Result<Vec<HashMap<String, serde_json::Value>>> {
+    ) -> anyhow::Result<Vec<HashMap<String, uni_db::Value>>> {
         let query = uni_query::parse_cypher(cypher)?;
         let plan = self.planner.plan(query)?;
         self.executor
@@ -107,9 +107,9 @@ async fn test_cypher_unwind() -> anyhow::Result<()> {
     let results = executor.execute(plan, &prop_mgr, &HashMap::new()).await?;
 
     assert_eq!(results.len(), 3);
-    assert_eq!(results[0].get("x"), Some(&json!(1)));
-    assert_eq!(results[1].get("x"), Some(&json!(2)));
-    assert_eq!(results[2].get("x"), Some(&json!(3)));
+    assert_eq!(results[0].get("x"), Some(&unival!(1)));
+    assert_eq!(results[1].get("x"), Some(&unival!(2)));
+    assert_eq!(results[2].get("x"), Some(&unival!(3)));
 
     Ok(())
 }
@@ -131,8 +131,8 @@ async fn test_cypher_set_remove() -> anyhow::Result<()> {
         assert_eq!(l0.vertex_properties.len(), 1);
         vid = *l0.vertex_properties.keys().next().unwrap();
         let props = &l0.vertex_properties[&vid];
-        assert_eq!(props.get("name"), Some(&json!("Alice").into()));
-        assert_eq!(props.get("age"), Some(&json!(30).into()));
+        assert_eq!(props.get("name"), Some(&unival!("Alice")));
+        assert_eq!(props.get("age"), Some(&unival!(30)));
     }
 
     // 2. SET property — flush first so MATCH can find it
@@ -148,10 +148,10 @@ async fn test_cypher_set_remove() -> anyhow::Result<()> {
         let l0 = w.l0_manager.get_current();
         let l0 = l0.read();
         let props = &l0.vertex_properties[&vid];
-        assert_eq!(props.get("age"), Some(&json!(31).into()));
+        assert_eq!(props.get("age"), Some(&unival!(31)));
         assert_eq!(
             props.get("name"),
-            Some(&json!("Alice").into()),
+            Some(&unival!("Alice")),
             "Name should be preserved"
         );
     }
@@ -164,7 +164,7 @@ async fn test_cypher_set_remove() -> anyhow::Result<()> {
         let l0 = w.l0_manager.get_current();
         let l0 = l0.read();
         let props = &l0.vertex_properties[&vid];
-        assert_eq!(props.get("age"), Some(&json!(null).into()));
+        assert_eq!(props.get("age"), Some(&unival!(null)));
     }
 
     Ok(())
@@ -202,7 +202,7 @@ async fn test_cypher_with() -> anyhow::Result<()> {
         let mut w = writer.write().await;
         let vid = w.next_vid().await?;
         let mut props = HashMap::new();
-        props.insert("name".to_string(), json!("Alice").into());
+        props.insert("name".to_string(), unival!("Alice"));
         w.insert_vertex_with_labels(vid, props, vec!["Person".to_string()])
             .await?;
         w.flush_to_l1(None).await?;
@@ -214,7 +214,7 @@ async fn test_cypher_with() -> anyhow::Result<()> {
     let results = executor.execute(plan, &prop_mgr, &HashMap::new()).await?;
 
     assert_eq!(results.len(), 1);
-    assert_eq!(results[0].get("n.name"), Some(&json!("Alice")));
+    assert_eq!(results[0].get("n.name"), Some(&unival!("Alice")));
 
     Ok(())
 }
@@ -237,10 +237,10 @@ async fn test_with_aggregation_where() -> anyhow::Result<()> {
         "Expected 2 groups with age > 28, got {:?}",
         results
     );
-    assert_eq!(results[0].get("age"), Some(&json!(30)));
-    assert_eq!(results[0].get("cnt"), Some(&json!(1)));
-    assert_eq!(results[1].get("age"), Some(&json!(35)));
-    assert_eq!(results[1].get("cnt"), Some(&json!(1)));
+    assert_eq!(results[0].get("age"), Some(&unival!(30)));
+    assert_eq!(results[0].get("cnt"), Some(&unival!(1)));
+    assert_eq!(results[1].get("age"), Some(&unival!(35)));
+    assert_eq!(results[1].get("cnt"), Some(&unival!(1)));
 
     Ok(())
 }
@@ -258,10 +258,10 @@ async fn test_with_aggregation_return() -> anyhow::Result<()> {
 
     // age=25 (count=1), age=30 (count=2)
     assert_eq!(results.len(), 2, "Expected 2 groups, got {:?}", results);
-    assert_eq!(results[0].get("age"), Some(&json!(25)));
-    assert_eq!(results[0].get("cnt"), Some(&json!(1)));
-    assert_eq!(results[1].get("age"), Some(&json!(30)));
-    assert_eq!(results[1].get("cnt"), Some(&json!(2)));
+    assert_eq!(results[0].get("age"), Some(&unival!(25)));
+    assert_eq!(results[0].get("cnt"), Some(&unival!(1)));
+    assert_eq!(results[1].get("age"), Some(&unival!(30)));
+    assert_eq!(results[1].get("cnt"), Some(&unival!(2)));
 
     Ok(())
 }
@@ -283,8 +283,8 @@ async fn test_return_distinct() -> anyhow::Result<()> {
         "Expected 2 distinct ages, got {:?}",
         results
     );
-    assert_eq!(results[0].get("age"), Some(&json!(25)));
-    assert_eq!(results[1].get("age"), Some(&json!(30)));
+    assert_eq!(results[0].get("age"), Some(&unival!(25)));
+    assert_eq!(results[1].get("age"), Some(&unival!(30)));
 
     Ok(())
 }
@@ -328,8 +328,8 @@ async fn test_with_distinct() -> anyhow::Result<()> {
         "Expected 2 distinct ages via WITH DISTINCT, got {:?}",
         results
     );
-    assert_eq!(results[0].get("age"), Some(&json!(25)));
-    assert_eq!(results[1].get("age"), Some(&json!(30)));
+    assert_eq!(results[0].get("age"), Some(&unival!(25)));
+    assert_eq!(results[1].get("age"), Some(&unival!(30)));
 
     Ok(())
 }

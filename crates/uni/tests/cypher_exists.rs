@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2024-2026 Dragonscale Team
 
-use serde_json::json;
+use uni_db::unival;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tempfile::tempdir;
@@ -64,7 +64,7 @@ async fn test_cypher_exists() -> anyhow::Result<()> {
 
     // Should match Alice
     assert_eq!(res.len(), 1);
-    assert_eq!(res[0].get("p.name"), Some(&json!("Alice")));
+    assert_eq!(res[0].get("p.name"), Some(&unival!("Alice")));
 
     // 4. NOT EXISTS query: Find people who know no one
     let query = "MATCH (p:Person) WHERE NOT EXISTS { MATCH (p)-[:KNOWS]->(:Person) } RETURN p.name ORDER BY p.name";
@@ -75,8 +75,8 @@ async fn test_cypher_exists() -> anyhow::Result<()> {
     // Should match Bob, Charlie
     assert_eq!(res.len(), 2);
     // Assuming Bob and Charlie. Order by name -> Bob, Charlie.
-    assert_eq!(res[0].get("p.name"), Some(&json!("Bob")));
-    assert_eq!(res[1].get("p.name"), Some(&json!("Charlie")));
+    assert_eq!(res[0].get("p.name"), Some(&unival!("Bob")));
+    assert_eq!(res[1].get("p.name"), Some(&unival!("Charlie")));
 
     Ok(())
 }

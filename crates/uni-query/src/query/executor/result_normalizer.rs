@@ -4,8 +4,8 @@
 //! Result normalization - converts internal representations to user-facing types.
 //!
 //! Enforces type system invariants:
-//! - All nodes must be Value::Node (not serde_json::Value::Object with _vid/_label)
-//! - All edges must be Value::Edge (not serde_json::Value::Object with _eid/_type)
+//! - All nodes must be Value::Node (not Value::Map with _vid/_label)
+//! - All edges must be Value::Edge (not Value::Map with _eid/_type)
 //! - All paths must be Value::Path
 //! - No internal fields exposed in user-facing results
 

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2024-2026 Dragonscale Team
 
-use serde_json::json;
+use uni_db::unival;
 use std::sync::Arc;
 use tempfile::tempdir;
 use tokio::sync::RwLock;
@@ -136,13 +136,13 @@ async fn test_pushdown_execution() -> anyhow::Result<()> {
         let mut w = writer.write().await;
         let v1 = w.next_vid().await?;
         let mut p1 = std::collections::HashMap::new();
-        p1.insert("name".to_string(), json!("Alice").into());
+        p1.insert("name".to_string(), unival!("Alice"));
         w.insert_vertex_with_labels(v1, p1, vec!["Person".to_string()])
             .await?;
 
         let v2 = w.next_vid().await?;
         let mut p2 = std::collections::HashMap::new();
-        p2.insert("name".to_string(), json!("Bob").into());
+        p2.insert("name".to_string(), unival!("Bob"));
         w.insert_vertex_with_labels(v2, p2, vec!["Person".to_string()])
             .await?;
 
@@ -158,7 +158,7 @@ async fn test_pushdown_execution() -> anyhow::Result<()> {
         .await?;
 
     assert_eq!(results.len(), 1);
-    assert_eq!(results[0].get("n.name"), Some(&json!("Alice")));
+    assert_eq!(results[0].get("n.name"), Some(&unival!("Alice")));
 
     Ok(())
 }
@@ -195,19 +195,19 @@ async fn test_or_pushdown_execution() -> anyhow::Result<()> {
         let mut w = writer.write().await;
         let v1 = w.next_vid().await?;
         let mut p1 = std::collections::HashMap::new();
-        p1.insert("status".to_string(), json!("active").into());
+        p1.insert("status".to_string(), unival!("active"));
         w.insert_vertex_with_labels(v1, p1, vec!["Person".to_string()])
             .await?;
 
         let v2 = w.next_vid().await?;
         let mut p2 = std::collections::HashMap::new();
-        p2.insert("status".to_string(), json!("pending").into());
+        p2.insert("status".to_string(), unival!("pending"));
         w.insert_vertex_with_labels(v2, p2, vec!["Person".to_string()])
             .await?;
 
         let v3 = w.next_vid().await?;
         let mut p3 = std::collections::HashMap::new();
-        p3.insert("status".to_string(), json!("archived").into());
+        p3.insert("status".to_string(), unival!("archived"));
         w.insert_vertex_with_labels(v3, p3, vec!["Person".to_string()])
             .await?;
 
@@ -225,8 +225,8 @@ async fn test_or_pushdown_execution() -> anyhow::Result<()> {
 
     assert_eq!(results.len(), 2);
     // Ordered results
-    assert_eq!(results[0].get("n.status"), Some(&json!("active")));
-    assert_eq!(results[1].get("n.status"), Some(&json!("pending")));
+    assert_eq!(results[0].get("n.status"), Some(&unival!("active")));
+    assert_eq!(results[1].get("n.status"), Some(&unival!("pending")));
 
     Ok(())
 }
@@ -264,7 +264,7 @@ async fn test_is_null_execution() -> anyhow::Result<()> {
         // v1: has email
         let v1 = w.next_vid().await?;
         let mut p1 = std::collections::HashMap::new();
-        p1.insert("email".to_string(), json!("alice@example.com").into());
+        p1.insert("email".to_string(), unival!("alice@example.com"));
         w.insert_vertex_with_labels(v1, p1, vec!["Person".to_string()])
             .await?;
 
@@ -287,7 +287,7 @@ async fn test_is_null_execution() -> anyhow::Result<()> {
         .await?;
 
     assert_eq!(results.len(), 1);
-    assert_eq!(results[0].get("n.email"), Some(&json!("alice@example.com")));
+    assert_eq!(results[0].get("n.email"), Some(&unival!("alice@example.com")));
 
     // Test IS NULL
     let sql = "MATCH (n:Person) WHERE n.email IS NULL RETURN n";
@@ -346,19 +346,19 @@ async fn test_traverse_target_pushdown() -> anyhow::Result<()> {
         // Insert ALL vertices - v1 was missing before!
         w.insert_vertex_with_labels(
             v1,
-            [("name".to_string(), json!("Source").into())].into(),
+            [("name".to_string(), unival!("Source"))].into(),
             vec!["Person".to_string()],
         )
         .await?;
         w.insert_vertex_with_labels(
             v2,
-            [("age".to_string(), json!(25).into())].into(),
+            [("age".to_string(), unival!(25))].into(),
             vec!["Person".to_string()],
         )
         .await?;
         w.insert_vertex_with_labels(
             v3,
-            [("age".to_string(), json!(35).into())].into(),
+            [("age".to_string(), unival!(35))].into(),
             vec!["Person".to_string()],
         )
         .await?;
@@ -414,7 +414,7 @@ async fn test_traverse_target_pushdown() -> anyhow::Result<()> {
         .await?;
 
     assert_eq!(results.len(), 1);
-    assert_eq!(results[0].get("b.age"), Some(&json!(35)));
+    assert_eq!(results[0].get("b.age"), Some(&unival!(35)));
 
     Ok(())
 }
@@ -460,9 +460,9 @@ async fn test_apply_input_filter_pushdown() -> anyhow::Result<()> {
         w.insert_vertex_with_labels(
             alice,
             [
-                ("name".to_string(), json!("Alice").into()),
-                ("status".to_string(), json!("active").into()),
-                ("score".to_string(), json!(100).into()),
+                ("name".to_string(), unival!("Alice")),
+                ("status".to_string(), unival!("active")),
+                ("score".to_string(), unival!(100)),
             ]
             .into(),
             vec!["Person".to_string()],
@@ -471,9 +471,9 @@ async fn test_apply_input_filter_pushdown() -> anyhow::Result<()> {
         w.insert_vertex_with_labels(
             bob,
             [
-                ("name".to_string(), json!("Bob").into()),
-                ("status".to_string(), json!("inactive").into()),
-                ("score".to_string(), json!(200).into()),
+                ("name".to_string(), unival!("Bob")),
+                ("status".to_string(), unival!("inactive")),
+                ("score".to_string(), unival!(200)),
             ]
             .into(),
             vec!["Person".to_string()],
@@ -482,9 +482,9 @@ async fn test_apply_input_filter_pushdown() -> anyhow::Result<()> {
         w.insert_vertex_with_labels(
             charlie,
             [
-                ("name".to_string(), json!("Charlie").into()),
-                ("status".to_string(), json!("active").into()),
-                ("score".to_string(), json!(150).into()),
+                ("name".to_string(), unival!("Charlie")),
+                ("status".to_string(), unival!("active")),
+                ("score".to_string(), unival!(150)),
             ]
             .into(),
             vec!["Person".to_string()],
@@ -534,10 +534,10 @@ async fn test_apply_input_filter_pushdown() -> anyhow::Result<()> {
 
     // Only active people: Alice and Charlie
     assert_eq!(results.len(), 2);
-    assert_eq!(results[0].get("p.name"), Some(&json!("Alice")));
-    assert_eq!(results[0].get("doubled"), Some(&json!(200))); // 100 * 2
-    assert_eq!(results[1].get("p.name"), Some(&json!("Charlie")));
-    assert_eq!(results[1].get("doubled"), Some(&json!(300))); // 150 * 2
+    assert_eq!(results[0].get("p.name"), Some(&unival!("Alice")));
+    assert_eq!(results[0].get("doubled"), Some(&unival!(200))); // 100 * 2
+    assert_eq!(results[1].get("p.name"), Some(&unival!("Charlie")));
+    assert_eq!(results[1].get("doubled"), Some(&unival!(300))); // 150 * 2
 
     Ok(())
 }
@@ -581,8 +581,8 @@ async fn test_call_subquery_input_filter_pushdown() -> anyhow::Result<()> {
         w.insert_vertex_with_labels(
             alice,
             [
-                ("name".to_string(), json!("Alice").into()),
-                ("age".to_string(), json!(25).into()),
+                ("name".to_string(), unival!("Alice")),
+                ("age".to_string(), unival!(25)),
             ]
             .into(),
             vec!["Person".to_string()],
@@ -591,8 +591,8 @@ async fn test_call_subquery_input_filter_pushdown() -> anyhow::Result<()> {
         w.insert_vertex_with_labels(
             bob,
             [
-                ("name".to_string(), json!("Bob").into()),
-                ("age".to_string(), json!(35).into()),
+                ("name".to_string(), unival!("Bob")),
+                ("age".to_string(), unival!(35)),
             ]
             .into(),
             vec!["Person".to_string()],
@@ -601,8 +601,8 @@ async fn test_call_subquery_input_filter_pushdown() -> anyhow::Result<()> {
         w.insert_vertex_with_labels(
             charlie,
             [
-                ("name".to_string(), json!("Charlie").into()),
-                ("age".to_string(), json!(45).into()),
+                ("name".to_string(), unival!("Charlie")),
+                ("age".to_string(), unival!(45)),
             ]
             .into(),
             vec!["Person".to_string()],
@@ -625,10 +625,10 @@ async fn test_call_subquery_input_filter_pushdown() -> anyhow::Result<()> {
 
     // Bob (35) and Charlie (45) have age > 30
     assert_eq!(results.len(), 2);
-    assert_eq!(results[0].get("p.name"), Some(&json!("Bob")));
-    assert_eq!(results[0].get("doubled"), Some(&json!(70))); // 35 * 2
-    assert_eq!(results[1].get("p.name"), Some(&json!("Charlie")));
-    assert_eq!(results[1].get("doubled"), Some(&json!(90))); // 45 * 2
+    assert_eq!(results[0].get("p.name"), Some(&unival!("Bob")));
+    assert_eq!(results[0].get("doubled"), Some(&unival!(70))); // 35 * 2
+    assert_eq!(results[1].get("p.name"), Some(&unival!("Charlie")));
+    assert_eq!(results[1].get("doubled"), Some(&unival!(90))); // 45 * 2
 
     Ok(())
 }

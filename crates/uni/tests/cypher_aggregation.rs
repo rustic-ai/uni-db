@@ -5,7 +5,7 @@ use arrow_array::{
     BooleanArray, Float64Array, Int32Array, LargeBinaryArray, RecordBatch, StringArray,
     TimestampMicrosecondArray, UInt64Array,
 };
-use serde_json::{Value, json};
+use uni_db::Value;
 use std::sync::Arc;
 use tempfile::tempdir;
 use uni_db::core::id::Vid;
@@ -121,7 +121,7 @@ async fn test_cypher_aggregation() -> anyhow::Result<()> {
         .await?;
 
     assert_eq!(results.len(), 1);
-    assert_eq!(results[0].get("COUNT(*)"), Some(&Value::Number(4.into())));
+    assert_eq!(results[0].get("COUNT(*)"), Some(&Value::Int(4)));
 
     // Test 2: Group By Age (n.age, COUNT(*))
     println!("--- Test 2: Group By Age ---");
@@ -134,12 +134,12 @@ async fn test_cypher_aggregation() -> anyhow::Result<()> {
 
     assert_eq!(results.len(), 3);
     // 20: 2
-    assert_eq!(results[0].get("n.age"), Some(&json!(20)));
-    assert_eq!(results[0].get("COUNT(*)"), Some(&json!(2)));
+    assert_eq!(results[0].get("n.age"), Some(&Value::Int(20)));
+    assert_eq!(results[0].get("COUNT(*)"), Some(&Value::Int(2)));
     // 30: 1
-    assert_eq!(results[1].get("n.age"), Some(&json!(30)));
+    assert_eq!(results[1].get("n.age"), Some(&Value::Int(30)));
     // 40: 1
-    assert_eq!(results[2].get("n.age"), Some(&json!(40)));
+    assert_eq!(results[2].get("n.age"), Some(&Value::Int(40)));
 
     // Test 3: SUM(n.amount)
     println!("--- Test 3: SUM ---");
@@ -150,7 +150,7 @@ async fn test_cypher_aggregation() -> anyhow::Result<()> {
         .execute(plan, &prop_mgr, &std::collections::HashMap::new())
         .await?;
     assert_eq!(results.len(), 1);
-    assert_eq!(results[0].get("SUM(n.amount)"), Some(&json!(60.0)));
+    assert_eq!(results[0].get("SUM(n.amount)"), Some(&Value::Float(60.0)));
 
     Ok(())
 }

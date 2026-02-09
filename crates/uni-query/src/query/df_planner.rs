@@ -109,7 +109,7 @@ pub struct HybridPhysicalPlanner {
     last_flush_version: AtomicU64,
 
     /// Query parameters for expression translation.
-    params: HashMap<String, serde_json::Value>,
+    params: HashMap<String, uni_common::Value>,
 }
 
 impl std::fmt::Debug for HybridPhysicalPlanner {
@@ -139,7 +139,7 @@ impl HybridPhysicalPlanner {
         l0: Arc<RwLock<L0Buffer>>,
         property_manager: Arc<PropertyManager>,
         schema: Arc<UniSchema>,
-        params: HashMap<String, serde_json::Value>,
+        params: HashMap<String, uni_common::Value>,
     ) -> Self {
         let graph_ctx = Arc::new(GraphExecutionContext::new(
             storage.clone(),
@@ -204,7 +204,7 @@ impl HybridPhysicalPlanner {
         l0_context: L0Context,
         property_manager: Arc<PropertyManager>,
         schema: Arc<UniSchema>,
-        params: HashMap<String, serde_json::Value>,
+        params: HashMap<String, uni_common::Value>,
     ) -> Self {
         let graph_ctx = Arc::new(GraphExecutionContext::with_l0_context(
             storage.clone(),

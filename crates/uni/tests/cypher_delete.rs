@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2024-2026 Dragonscale Team
 
-use serde_json::json;
+use uni_db::unival;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tempfile::tempdir;
@@ -93,7 +93,7 @@ async fn test_cypher_delete() -> anyhow::Result<()> {
     let plan = planner.plan(ast)?;
     let res = executor.execute(plan, &prop_manager, &params).await?;
     assert_eq!(res.len(), 1);
-    assert_eq!(res[0].get("u.name"), Some(&json!("Bob")));
+    assert_eq!(res[0].get("u.name"), Some(&unival!("Bob")));
 
     // 8. Test DELETE r
     // Create another relationship
@@ -143,7 +143,7 @@ async fn test_cypher_delete() -> anyhow::Result<()> {
     let plan = planner.plan(ast)?;
     let res = executor.execute(plan, &prop_manager, &params).await?;
     assert_eq!(res.len(), 1);
-    assert_eq!(res[0].get("r.since"), Some(&json!(2021)));
+    assert_eq!(res[0].get("r.since"), Some(&unival!(2021)));
 
     Ok(())
 }

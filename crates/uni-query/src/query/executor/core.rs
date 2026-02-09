@@ -2,8 +2,8 @@
 // Copyright 2024-2026 Dragonscale Team
 
 use anyhow::{Result, anyhow};
-use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
+use uni_common::Value;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::RwLock;
@@ -27,17 +27,17 @@ pub(crate) enum Accumulator {
     CountDistinct(HashSet<String>),
 }
 
-/// Extract a numeric value from a JSON Value as f64.
+/// Extract a numeric value from a Value as f64.
 fn as_numeric(val: &Value) -> Option<f64> {
-    val.as_f64().or_else(|| val.as_i64().map(|i| i as f64))
+    val.as_f64()
 }
 
-/// Convert f64 to JSON, preserving integer representation when possible.
-fn numeric_to_json(val: f64) -> Value {
+/// Convert f64 to Value, preserving integer representation when possible.
+fn numeric_to_value(val: f64) -> Value {
     if val.fract() == 0.0 && val >= i64::MIN as f64 && val <= i64::MAX as f64 {
-        json!(val as i64)
+        Value::Int(val as i64)
     } else {
-        json!(val)
+        Value::Float(val)
     }
 }
 
@@ -99,19 +99,19 @@ impl Accumulator {
 
     pub(crate) fn finish(&self) -> Value {
         match self {
-            Accumulator::Count(c) => json!(*c),
-            Accumulator::Sum(s) => json!(*s),
-            Accumulator::Min(opt) => opt.map_or(Value::Null, numeric_to_json),
-            Accumulator::Max(opt) => opt.map_or(Value::Null, numeric_to_json),
+            Accumulator::Count(c) => Value::Int(*c),
+            Accumulator::Sum(s) => numeric_to_value(*s),
+            Accumulator::Min(opt) => opt.map_or(Value::Null, numeric_to_value),
+            Accumulator::Max(opt) => opt.map_or(Value::Null, numeric_to_value),
             Accumulator::Avg { sum, count } => {
                 if *count > 0 {
-                    json!(*sum / (*count as f64))
+                    Value::Float(*sum / (*count as f64))
                 } else {
                     Value::Null
                 }
             }
-            Accumulator::Collect(v) => Value::Array(v.clone()),
-            Accumulator::CountDistinct(s) => json!(s.len()),
+            Accumulator::Collect(v) => Value::List(v.clone()),
+            Accumulator::CountDistinct(s) => Value::Int(s.len() as i64),
         }
     }
 }
@@ -216,12 +216,15 @@ impl Executor {
 
     pub(crate) fn compare_values(a: &Value, b: &Value) -> std::cmp::Ordering {
         match (a, b) {
-            (Value::Number(n1), Value::Number(n2)) => {
-                if let (Some(f1), Some(f2)) = (n1.as_f64(), n2.as_f64()) {
-                    f1.partial_cmp(&f2).unwrap_or(std::cmp::Ordering::Equal)
-                } else {
-                    std::cmp::Ordering::Equal
-                }
+            (Value::Int(i1), Value::Int(i2)) => i1.cmp(i2),
+            (Value::Float(f1), Value::Float(f2)) => {
+                f1.partial_cmp(f2).unwrap_or(std::cmp::Ordering::Equal)
+            }
+            (Value::Int(i), Value::Float(f)) => {
+                (*i as f64).partial_cmp(f).unwrap_or(std::cmp::Ordering::Equal)
+            }
+            (Value::Float(f), Value::Int(i)) => {
+                f.partial_cmp(&(*i as f64)).unwrap_or(std::cmp::Ordering::Equal)
             }
             (Value::String(s1), Value::String(s2)) => s1.cmp(s2),
             (Value::Bool(b1), Value::Bool(b2)) => b1.cmp(b2),

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2024-2026 Dragonscale Team
 
-use serde_json::json;
+use uni_db::unival;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tempfile::tempdir;
@@ -79,7 +79,7 @@ async fn test_writer_vertex_flush() -> anyhow::Result<()> {
     // 3. Insert Vertex
     let vid = Vid::new(10);
     let mut props = HashMap::new();
-    props.insert("name".to_string(), json!("Alice").into());
+    props.insert("name".to_string(), unival!("Alice"));
     writer
         .insert_vertex_with_labels(vid, props, vec!["Person".to_string()])
         .await?;

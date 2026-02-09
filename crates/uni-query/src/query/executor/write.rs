@@ -5,8 +5,8 @@ use super::core::*;
 use crate::query::planner::LogicalPlan;
 use anyhow::{Result, anyhow};
 use lancedb::query::{ExecutableQuery, QueryBase};
-use serde_json::{Value, json};
 use std::collections::HashMap;
+use uni_common::Value;
 use std::sync::Arc;
 use uni_common::DataType;
 use uni_common::core::id::Vid;
@@ -21,11 +21,11 @@ use uni_store::runtime::property_manager::PropertyManager;
 use uni_store::runtime::writer::Writer;
 
 impl Executor {
-    /// Extract labels from a node value (JSON object with _labels field)
+    /// Extract labels from a node value (Map with _labels field)
     pub(crate) fn extract_labels_from_node(node_val: &Value) -> Option<Vec<String>> {
-        if let Value::Object(map) = node_val {
+        if let Value::Map(map) = node_val {
             // Check for _labels (plural array)
-            if let Some(Value::Array(labels_arr)) = map.get("_labels") {
+            if let Some(Value::List(labels_arr)) = map.get("_labels") {
                 let labels: Vec<String> = labels_arr
                     .iter()
                     .filter_map(|v| v.as_str().map(|s| s.to_string()))
@@ -144,13 +144,14 @@ impl Executor {
                             let column = batch.column(col_idx);
                             let value = self.arrow_value_to_json(column, row_idx)?;
 
-                            // Convert JSON value to CSV string
+                            // Convert value to CSV string
                             let csv_value = match value {
                                 Value::Null => String::new(),
                                 Value::Bool(b) => b.to_string(),
-                                Value::Number(n) => n.to_string(),
+                                Value::Int(i) => i.to_string(),
+                                Value::Float(f) => f.to_string(),
                                 Value::String(s) => s,
-                                _ => value.to_string(),
+                                _ => format!("{}", value),
                             };
                             row.push(csv_value);
                         }
@@ -332,13 +333,15 @@ impl Executor {
                         let value = self.arrow_value_to_json(column, row_idx)?;
 
                         if col_name == src_col {
-                            src_vid = Some(Vid::new(value.as_u64().unwrap_or_else(|| {
+                            let raw = value.as_u64().unwrap_or_else(|| {
                                 value.as_str().and_then(|s| s.parse().ok()).unwrap_or(0)
-                            })));
+                            });
+                            src_vid = Some(Vid::new(raw));
                         } else if col_name == dst_col {
-                            dst_vid = Some(Vid::new(value.as_u64().unwrap_or_else(|| {
+                            let raw = value.as_u64().unwrap_or_else(|| {
                                 value.as_str().and_then(|s| s.parse().ok()).unwrap_or(0)
-                            })));
+                            });
+                            dst_vid = Some(Vid::new(raw));
                         } else if !col_name.starts_with('_') && !value.is_null() {
                             properties.insert(col_name.clone(), value);
                         }
@@ -352,8 +355,6 @@ impl Executor {
                     // Generate EID and insert edge
                     let mut writer = writer_arc.write().await;
                     let eid = writer.next_eid(edge_type_id).await?;
-                    let properties: uni_common::Properties =
-                        properties.into_iter().map(|(k, v)| (k, v.into())).collect();
                     writer
                         .insert_edge(src, dst, edge_type_id, eid, properties)
                         .await?;
@@ -411,8 +412,6 @@ impl Executor {
                     // Generate VID and insert
                     let mut writer = writer_arc.write().await;
                     let vid = writer.next_vid().await?;
-                    let properties: uni_common::Properties =
-                        properties.into_iter().map(|(k, v)| (k, v.into())).collect();
                     let _ = writer
                         .insert_vertex_with_labels(vid, properties, vec![label.to_string()])
                         .await?;
@@ -452,55 +451,55 @@ impl Executor {
                     .as_any()
                     .downcast_ref::<arrow_array::StringArray>()
                     .ok_or_else(|| anyhow!("Failed to downcast to StringArray"))?;
-                Ok(json!(array.value(row_idx)))
+                Ok(Value::String(array.value(row_idx).to_string()))
             }
             ArrowDataType::Int32 => {
                 let array = column
                     .as_any()
                     .downcast_ref::<arrow_array::Int32Array>()
                     .ok_or_else(|| anyhow!("Failed to downcast to Int32Array"))?;
-                Ok(json!(array.value(row_idx)))
+                Ok(Value::Int(array.value(row_idx) as i64))
             }
             ArrowDataType::Int64 => {
                 let array = column
                     .as_any()
                     .downcast_ref::<arrow_array::Int64Array>()
                     .ok_or_else(|| anyhow!("Failed to downcast to Int64Array"))?;
-                Ok(json!(array.value(row_idx)))
+                Ok(Value::Int(array.value(row_idx)))
             }
             ArrowDataType::Float32 => {
                 let array = column
                     .as_any()
                     .downcast_ref::<arrow_array::Float32Array>()
                     .ok_or_else(|| anyhow!("Failed to downcast to Float32Array"))?;
-                Ok(json!(array.value(row_idx)))
+                Ok(Value::Float(array.value(row_idx) as f64))
             }
             ArrowDataType::Float64 => {
                 let array = column
                     .as_any()
                     .downcast_ref::<arrow_array::Float64Array>()
                     .ok_or_else(|| anyhow!("Failed to downcast to Float64Array"))?;
-                Ok(json!(array.value(row_idx)))
+                Ok(Value::Float(array.value(row_idx)))
             }
             ArrowDataType::Boolean => {
                 let array = column
                     .as_any()
                     .downcast_ref::<arrow_array::BooleanArray>()
                     .ok_or_else(|| anyhow!("Failed to downcast to BooleanArray"))?;
-                Ok(json!(array.value(row_idx)))
+                Ok(Value::Bool(array.value(row_idx)))
             }
             ArrowDataType::UInt64 => {
                 let array = column
                     .as_any()
                     .downcast_ref::<arrow_array::UInt64Array>()
                     .ok_or_else(|| anyhow!("Failed to downcast to UInt64Array"))?;
-                Ok(json!(array.value(row_idx)))
+                Ok(Value::Int(array.value(row_idx) as i64))
             }
             _ => {
                 // For other types, try to convert to string
                 let array = column.as_any().downcast_ref::<arrow_array::StringArray>();
                 if let Some(arr) = array {
-                    Ok(json!(arr.value(row_idx)))
+                    Ok(Value::String(arr.value(row_idx).to_string()))
                 } else {
                     Ok(Value::Null)
                 }
@@ -735,11 +734,11 @@ impl Executor {
 
                 // If expression has an explicit variable, use it as an object
                 if let Some(var) = expr.extract_variable() {
-                    let props_json: serde_json::Map<String, Value> = properties
+                    let props_map: HashMap<String, Value> = properties
                         .iter()
                         .map(|(k, v)| (k.clone(), v.clone()))
                         .collect();
-                    scope.insert(var, Value::Object(props_json));
+                    scope.insert(var, Value::Map(props_map));
                 } else {
                     // No explicit variable - add properties directly to scope for bare references
                     // e.g., "lower(email)" can reference "email" directly
@@ -926,7 +925,7 @@ impl Executor {
                         let val = self
                             .evaluate_expr(props_expr, &row, prop_manager, params, ctx)
                             .await?;
-                        if let Value::Object(map) = val {
+                        if let Value::Map(map) = val {
                             for (k, v) in map {
                                 pattern_props.insert(k, v);
                             }
@@ -936,10 +935,14 @@ impl Executor {
                     // Check if all constraint properties are present
                     let has_all_keys = properties.iter().all(|p| pattern_props.contains_key(p));
                     if has_all_keys {
-                        // Extract key properties
-                        let key_props: HashMap<String, Value> = properties
+                        // Extract key properties and convert to serde_json::Value for index lookup
+                        let key_props: HashMap<String, serde_json::Value> = properties
                             .iter()
-                            .filter_map(|p| pattern_props.get(p).map(|v| (p.clone(), v.clone())))
+                            .filter_map(|p| {
+                                pattern_props
+                                    .get(p)
+                                    .map(|v| (p.clone(), v.clone().into()))
+                            })
                             .collect();
 
                         // Use optimized lookup
@@ -962,7 +965,7 @@ impl Executor {
                 if let PatternElement::Node(n) = &pattern.paths[0].elements[0]
                     && let Some(var) = &n.variable
                 {
-                    match_row.insert(var.clone(), json!(vid.as_u64()));
+                    match_row.insert(var.clone(), Value::Int(vid.as_u64() as i64));
                 }
 
                 if let Some(set) = on_match {
@@ -1062,7 +1065,7 @@ impl Executor {
                                 let props_val = self
                                     .evaluate_expr(props_expr, row, prop_manager, params, ctx)
                                     .await?;
-                                if let Value::Object(map) = props_val {
+                                if let Value::Map(map) = props_val {
                                     for (k, v) in map {
                                         props.insert(k, v);
                                     }
@@ -1092,22 +1095,19 @@ impl Executor {
                             }
 
                             // Insert vertex and get back final properties (includes auto-generated embeddings)
-                            let props: uni_common::Properties =
-                                props.into_iter().map(|(k, v)| (k, v.into())).collect();
                             let final_props = writer
                                 .insert_vertex_with_labels(new_vid, props, n.labels.clone())
                                 .await?;
 
                             // Build node object with final properties (includes embeddings)
                             if let Some(var) = &n.variable {
-                                let mut obj = serde_json::Map::new();
-                                obj.insert("_vid".to_string(), json!(new_vid.as_u64()));
+                                let mut obj = HashMap::new();
+                                obj.insert("_vid".to_string(), Value::Int(new_vid.as_u64() as i64));
                                 for (k, v) in &final_props {
-                                    let json_v: serde_json::Value = v.clone().into();
-                                    obj.insert(k.clone(), json_v);
+                                    obj.insert(k.clone(), v.clone());
                                 }
-                                // Store node as an Object with _vid, matching MATCH behavior
-                                row.insert(var.clone(), Value::Object(obj));
+                                // Store node as a Map with _vid, matching MATCH behavior
+                                row.insert(var.clone(), Value::Map(obj));
                             }
                             vid = Some(new_vid);
                         }
@@ -1126,7 +1126,7 @@ impl Executor {
                                     let val = self
                                         .evaluate_expr(&expr, row, prop_manager, params, ctx)
                                         .await?;
-                                    if let Value::Object(map) = val {
+                                    if let Value::Map(map) = val {
                                         rel_props.extend(map);
                                     }
                                 }
@@ -1138,8 +1138,6 @@ impl Executor {
                                     _ => (src, current_vid),
                                 };
 
-                                let rel_props: uni_common::Properties =
-                                    rel_props.into_iter().map(|(k, v)| (k, v.into())).collect();
                                 writer
                                     .insert_edge(edge_src, edge_dst, type_id, eid, rel_props)
                                     .await?;
@@ -1148,13 +1146,12 @@ impl Executor {
                                 writer.set_edge_type(eid, type_name.clone());
 
                                 if !rel_var.is_empty() {
-                                    let edge_obj = json!({
-                                        "_eid": eid.as_u64(),
-                                        "_src": edge_src.as_u64(),
-                                        "_dst": edge_dst.as_u64(),
-                                        "_type": type_id
-                                    });
-                                    row.insert(rel_var, edge_obj);
+                                    let mut edge_map = HashMap::new();
+                                    edge_map.insert("_eid".to_string(), Value::Int(eid.as_u64() as i64));
+                                    edge_map.insert("_src".to_string(), Value::Int(edge_src.as_u64() as i64));
+                                    edge_map.insert("_dst".to_string(), Value::Int(edge_dst.as_u64() as i64));
+                                    edge_map.insert("_type".to_string(), Value::Int(type_id as i64));
+                                    row.insert(rel_var, Value::Map(edge_map));
                                 }
                             }
                         }
@@ -1207,15 +1204,10 @@ impl Executor {
                         && let Some(node_val) = row.get(var_name)
                     {
                         if let Ok(vid) = Self::vid_from_value(node_val) {
-                            let storage_props = prop_manager
+                            let mut props = prop_manager
                                 .get_all_vertex_props_with_ctx(vid, ctx)
                                 .await?
                                 .unwrap_or_default();
-                            // Convert from uni_common::Value to serde_json::Value for enrich/evaluate
-                            let mut props: HashMap<String, Value> = storage_props
-                                .into_iter()
-                                .map(|(k, v)| (k, v.into()))
-                                .collect();
                             let val = self
                                 .evaluate_expr(value, row, prop_manager, params, ctx)
                                 .await?;
@@ -1236,11 +1228,8 @@ impl Executor {
                                 .await?;
                             }
 
-                            // Convert back to uni_common::Properties for storage
-                            let props: uni_common::Properties =
-                                props.into_iter().map(|(k, v)| (k, v.into())).collect();
                             let _ = writer.insert_vertex_with_labels(vid, props, labels).await?;
-                        } else if let Value::Object(map) = node_val
+                        } else if let Value::Map(map) = node_val
                             && let (Some(eid_v), Some(src_v), Some(dst_v), Some(type_v)) = (
                                 map.get("_eid"),
                                 map.get("_src"),
@@ -1262,7 +1251,7 @@ impl Executor {
                             let val = self
                                 .evaluate_expr(value, row, prop_manager, params, ctx)
                                 .await?;
-                            props.insert(prop_name.clone(), val.into());
+                            props.insert(prop_name.clone(), val);
                             writer.insert_edge(src, dst, etype, eid, props).await?;
                         }
                     }
@@ -1297,10 +1286,11 @@ impl Executor {
                             }
 
                             // Update the node value in the row with new labels
-                            if let Some(Value::Object(obj)) = row.get_mut(variable) {
+                            if let Some(Value::Map(obj)) = row.get_mut(variable) {
                                 let mut updated_labels = current_labels;
                                 updated_labels.extend(labels_to_add);
-                                obj.insert("_labels".to_string(), json!(updated_labels));
+                                let labels_list = updated_labels.into_iter().map(Value::String).collect();
+                                obj.insert("_labels".to_string(), Value::List(labels_list));
                             }
                         }
                     }
@@ -1364,21 +1354,21 @@ impl Executor {
                     .get_all_vertex_props_with_ctx(vid, ctx)
                     .await?
                     .unwrap_or_default();
-                props.insert(prop_name.clone(), uni_common::Value::Null);
+                props.insert(prop_name.clone(), Value::Null);
                 let labels = Self::extract_labels_from_node(node_val).unwrap_or_default();
                 let _ = writer.insert_vertex_with_labels(vid, props, labels).await?;
 
                 // Update the row to reflect the property removal
-                if let Some(Value::Object(node_map)) = row.get_mut(var_name) {
+                if let Some(Value::Map(node_map)) = row.get_mut(var_name) {
                     node_map.insert(prop_name.clone(), Value::Null);
                 }
-            } else if let Value::Object(map) = node_val {
+            } else if let Value::Map(map) = node_val {
                 // Remove property from edge
                 self.execute_remove_edge_property(map, prop_name, writer, prop_manager, ctx)
                     .await?;
 
                 // Update the row to reflect the property removal
-                if let Some(Value::Object(edge_map)) = row.get_mut(var_name) {
+                if let Some(Value::Map(edge_map)) = row.get_mut(var_name) {
                     edge_map.insert(prop_name.clone(), Value::Null);
                 }
             }
@@ -1389,7 +1379,7 @@ impl Executor {
     /// Execute property removal from an edge.
     pub(crate) async fn execute_remove_edge_property(
         &self,
-        map: &serde_json::Map<String, Value>,
+        map: &HashMap<String, Value>,
         prop_name: &str,
         writer: &mut Writer,
         prop_manager: &PropertyManager,
@@ -1411,7 +1401,7 @@ impl Executor {
                 .get_all_edge_props_with_ctx(eid, ctx)
                 .await?
                 .unwrap_or_default();
-            props.insert(prop_name.to_string(), uni_common::Value::Null);
+            props.insert(prop_name.to_string(), Value::Null);
             writer.insert_edge(src, dst, etype, eid, props).await?;
         }
         Ok(())
@@ -1447,13 +1437,14 @@ impl Executor {
                 }
 
                 // Update the node value in the row with remaining labels
-                if let Some(Value::Object(obj)) = row.get_mut(variable) {
+                if let Some(Value::Map(obj)) = row.get_mut(variable) {
                     let remaining_labels: Vec<_> = current_labels
                         .iter()
                         .filter(|l| !labels_to_remove.contains(l))
                         .cloned()
                         .collect();
-                    obj.insert("_labels".to_string(), json!(remaining_labels));
+                    let labels_list = remaining_labels.into_iter().map(Value::String).collect();
+                    obj.insert("_labels".to_string(), Value::List(labels_list));
                 }
             }
         }
@@ -1471,7 +1462,7 @@ impl Executor {
             let labels = Self::extract_labels_from_node(val);
             self.execute_delete_vertex(vid, detach, labels, writer)
                 .await?;
-        } else if let Value::Object(map) = val {
+        } else if let Value::Map(map) = val {
             self.execute_delete_edge_from_map(map, writer).await?;
         }
         Ok(())
@@ -1535,7 +1526,7 @@ impl Executor {
     /// Execute edge deletion from a map representation.
     pub(crate) async fn execute_delete_edge_from_map(
         &self,
-        map: &serde_json::Map<String, Value>,
+        map: &HashMap<String, Value>,
         writer: &mut Writer,
     ) -> Result<()> {
         if let (Some(eid_v), Some(src_v), Some(dst_v), Some(type_v)) = (

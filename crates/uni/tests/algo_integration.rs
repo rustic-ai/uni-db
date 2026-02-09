@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2024-2026 Dragonscale Team
 
-use serde_json::json;
+use uni_db::unival;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tempfile::tempdir;
@@ -246,7 +246,7 @@ async fn test_shortest_path_procedure() -> anyhow::Result<()> {
         .await?;
 
     assert_eq!(results.len(), 1);
-    assert_eq!(results[0].get("length"), Some(&json!(2)));
+    assert_eq!(results[0].get("length"), Some(&unival!(2)));
 
     Ok(())
 }

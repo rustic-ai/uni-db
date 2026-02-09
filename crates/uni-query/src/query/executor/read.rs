@@ -12,7 +12,7 @@ use anyhow::{Result, anyhow};
 use futures::future::BoxFuture;
 use futures::stream::{self, BoxStream, StreamExt};
 use metrics;
-use serde_json::{Value, json};
+use crate::types::Value;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::Instant;
@@ -53,7 +53,7 @@ use super::core::*;
 /// - Edge: 5 fields (_eid, _src, _dst, _type, _type_name)
 /// - Vertex: 3 fields (_vid, _label, _uid)
 async fn hydrate_entity_if_needed(
-    map: &mut serde_json::Map<String, Value>,
+    map: &mut HashMap<String, Value>,
     prop_manager: &PropertyManager,
     ctx: Option<&QueryContext>,
 ) {
@@ -70,7 +70,7 @@ async fn hydrate_entity_if_needed(
                 .await
             {
                 for (key, value) in props {
-                    map.entry(key).or_insert(value.into());
+                    map.entry(key).or_insert(value);
                 }
             }
         } else {
@@ -95,7 +95,7 @@ async fn hydrate_entity_if_needed(
                 .await
             {
                 for (key, value) in props {
-                    map.entry(key).or_insert(value.into());
+                    map.entry(key).or_insert(value);
                 }
             }
         } else {
@@ -132,12 +132,11 @@ impl Executor {
             };
 
             if let Some(expr) = filter {
-                let mut props_json: serde_json::Map<String, Value> =
-                    props.into_iter().map(|(k, v)| (k, v.into())).collect();
-                props_json.insert("_vid".to_string(), json!(vid.as_u64()));
+                let mut props_map: HashMap<String, Value> = props;
+                props_map.insert("_vid".to_string(), Value::Int(vid.as_u64() as i64));
 
                 let mut row = HashMap::new();
-                row.insert(variable.to_string(), Value::Object(props_json));
+                row.insert(variable.to_string(), Value::Map(props_map));
 
                 let res = self
                     .evaluate_expr(expr, &row, prop_manager, params, ctx)
@@ -428,7 +427,7 @@ impl Executor {
 
     pub(crate) fn vid_from_value(val: &Value) -> Result<Vid> {
         // Handle Object (node) containing _vid field
-        if let Value::Object(map) = val
+        if let Value::Map(map) = val
             && let Some(vid_val) = map.get("_vid")
             && let Some(v) = vid_val.as_u64()
         {
@@ -531,16 +530,15 @@ impl Executor {
 
                 for (col_idx, field) in schema.fields().iter().enumerate() {
                     let column = batch.column(col_idx);
-                    let mut value: Value =
-                        arrow_convert::arrow_to_value(column.as_ref(), row_idx).into();
+                    let mut value = arrow_convert::arrow_to_value(column.as_ref(), row_idx);
 
                     // Check if this field contains JSON-encoded values (e.g., from UNWIND)
                     // Parse JSON string to restore the original type
                     if field.metadata().get("json_encoded") == Some(&"true".to_string())
                         && let Value::String(s) = &value
-                        && let Ok(parsed) = serde_json::from_str(s)
+                        && let Ok(parsed) = serde_json::from_str::<serde_json::Value>(s)
                     {
-                        value = parsed;
+                        value = Value::from(parsed);
                     }
 
                     // Normalize path structures to user-facing format
@@ -562,32 +560,32 @@ impl Executor {
     /// Other values are returned unchanged to avoid interfering with query execution.
     fn normalize_path_if_needed(value: Value) -> Value {
         // Only normalize if this looks like a path (has nodes and relationships/edges)
-        if let Value::Object(map) = value {
+        if let Value::Map(map) = value {
             if map.contains_key("nodes")
                 && (map.contains_key("relationships") || map.contains_key("edges"))
             {
-                return Self::normalize_path_json(map);
+                return Self::normalize_path_map(map);
             }
-            return Value::Object(map);
+            return Value::Map(map);
         }
         value
     }
 
-    /// Normalize a path JSON object.
-    fn normalize_path_json(mut map: serde_json::Map<String, Value>) -> Value {
+    /// Normalize a path map object.
+    fn normalize_path_map(mut map: HashMap<String, Value>) -> Value {
         // Normalize nodes array
-        if let Some(Value::Array(nodes)) = map.remove("nodes") {
+        if let Some(Value::List(nodes)) = map.remove("nodes") {
             let normalized_nodes: Vec<Value> = nodes
                 .into_iter()
                 .map(|n| {
-                    if let Value::Object(node_map) = n {
-                        Self::normalize_path_node_json(node_map)
+                    if let Value::Map(node_map) = n {
+                        Self::normalize_path_node_map(node_map)
                     } else {
                         n
                     }
                 })
                 .collect();
-            map.insert("nodes".to_string(), Value::Array(normalized_nodes));
+            map.insert("nodes".to_string(), Value::List(normalized_nodes));
         }
 
         // Normalize relationships array (may be called "relationships" or "edges")
@@ -596,29 +594,30 @@ impl Executor {
         } else {
             "edges"
         };
-        if let Some(Value::Array(rels)) = map.remove(rels_key) {
+        if let Some(Value::List(rels)) = map.remove(rels_key) {
             let normalized_rels: Vec<Value> = rels
                 .into_iter()
                 .map(|r| {
-                    if let Value::Object(rel_map) = r {
-                        Self::normalize_path_edge_json(rel_map)
+                    if let Value::Map(rel_map) = r {
+                        Self::normalize_path_edge_map(rel_map)
                     } else {
                         r
                     }
                 })
                 .collect();
-            map.insert("relationships".to_string(), Value::Array(normalized_rels));
+            map.insert("relationships".to_string(), Value::List(normalized_rels));
         }
 
-        Value::Object(map)
+        Value::Map(map)
     }
 
     /// Normalize a node within a path to user-facing format.
-    fn normalize_path_node_json(mut map: serde_json::Map<String, Value>) -> Value {
+    fn normalize_path_node_map(mut map: HashMap<String, Value>) -> Value {
         // Convert _vid to _id as string
         if let Some(vid) = map.remove("_vid") {
             let id_str = match vid {
-                Value::Number(n) => n.to_string(),
+                Value::Int(n) => n.to_string(),
+                Value::Float(n) => n.to_string(),
                 Value::String(s) => s,
                 _ => vid.to_string(),
             };
@@ -628,21 +627,22 @@ impl Executor {
         // Normalize properties if present
         if let Some(props) = map.get("properties") {
             if props.is_null() {
-                map.insert("properties".to_string(), json!({}));
+                map.insert("properties".to_string(), Value::Map(HashMap::new()));
             }
         } else {
-            map.insert("properties".to_string(), json!({}));
+            map.insert("properties".to_string(), Value::Map(HashMap::new()));
         }
 
-        Value::Object(map)
+        Value::Map(map)
     }
 
     /// Normalize an edge within a path to user-facing format.
-    fn normalize_path_edge_json(mut map: serde_json::Map<String, Value>) -> Value {
+    fn normalize_path_edge_map(mut map: HashMap<String, Value>) -> Value {
         // Convert _eid to _id as string
         if let Some(eid) = map.remove("_eid") {
             let id_str = match eid {
-                Value::Number(n) => n.to_string(),
+                Value::Int(n) => n.to_string(),
+                Value::Float(n) => n.to_string(),
                 Value::String(s) => s,
                 _ => eid.to_string(),
             };
@@ -652,7 +652,8 @@ impl Executor {
         // Convert _src and _dst to strings
         if let Some(src) = map.remove("_src") {
             let src_str = match src {
-                Value::Number(n) => n.to_string(),
+                Value::Int(n) => n.to_string(),
+                Value::Float(n) => n.to_string(),
                 Value::String(s) => s,
                 _ => src.to_string(),
             };
@@ -660,7 +661,8 @@ impl Executor {
         }
         if let Some(dst) = map.remove("_dst") {
             let dst_str = match dst {
-                Value::Number(n) => n.to_string(),
+                Value::Int(n) => n.to_string(),
+                Value::Float(n) => n.to_string(),
                 Value::String(s) => s,
                 _ => dst.to_string(),
             };
@@ -675,13 +677,13 @@ impl Executor {
         // Normalize properties if present
         if let Some(props) = map.get("properties") {
             if props.is_null() {
-                map.insert("properties".to_string(), json!({}));
+                map.insert("properties".to_string(), Value::Map(HashMap::new()));
             }
         } else {
-            map.insert("properties".to_string(), json!({}));
+            map.insert("properties".to_string(), Value::Map(HashMap::new()));
         }
 
-        Value::Object(map)
+        Value::Map(map)
     }
 
     #[instrument(
@@ -960,10 +962,10 @@ impl Executor {
             .boxed()
     }
 
-    /// Converts an Arrow array element at a given row index to a JSON Value.
+    /// Converts an Arrow array element at a given row index to a Value.
     /// Delegates to the shared implementation in arrow_convert module.
     pub(crate) fn arrow_to_value(col: &dyn Array, row: usize) -> Value {
-        arrow_convert::arrow_to_value(col, row).into()
+        arrow_convert::arrow_to_value(col, row)
     }
 
     pub(crate) fn evaluate_expr<'a>(
@@ -1039,9 +1041,9 @@ impl Executor {
                                         if let Some(path_var) = path_variable {
                                             // Create a path object from the matched pattern
                                             // For now, just bind the nodes/edges from the pattern
-                                            let path_obj = json!({
-                                                "nodes": [],
-                                                "relationships": []
+                                            let path_obj = Value::Path(crate::types::Path {
+                                                nodes: vec![],
+                                                edges: vec![],
                                             });
                                             result_row.insert(path_var.clone(), path_obj);
                                         }
@@ -1058,18 +1060,18 @@ impl Executor {
                                             .await?;
                                         mapped_values.push(mapped_val);
                                     }
-                                    Ok(Value::Array(mapped_values))
+                                    Ok(Value::List(mapped_values))
                                 }
                                 Err(e) => {
                                     // Pattern didn't match - return empty list
                                     log::debug!("Pattern comprehension execution failed: {}", e);
-                                    Ok(Value::Array(vec![]))
+                                    Ok(Value::List(vec![]))
                                 }
                             }
                         }
                         Err(e) => {
                             log::debug!("Pattern comprehension planning failed: {}", e);
-                            Ok(Value::Array(vec![]))
+                            Ok(Value::List(vec![]))
                         }
                     }
                 }
@@ -1093,18 +1095,68 @@ impl Executor {
                     if (prop_name == "_vid" || prop_name == "_id")
                         && let Ok(vid) = Self::vid_from_value(&base_val)
                     {
-                        return Ok(json!(vid.as_u64()));
+                        return Ok(Value::Int(vid.as_u64() as i64));
+                    }
+
+                    // Handle Value::Node - access properties directly or via prop manager
+                    if let Value::Node(node) = &base_val {
+                        // Handle system properties
+                        if prop_name == "_vid" || prop_name == "_id" {
+                            return Ok(Value::Int(node.vid.as_u64() as i64));
+                        }
+                        if prop_name == "_label" || prop_name == "_labels" {
+                            return Ok(Value::String(node.label.clone()));
+                        }
+                        // Check in-memory properties first
+                        if let Some(val) = node.properties.get(prop_name.as_str()) {
+                            return Ok(val.clone());
+                        }
+                        // Fallback to storage lookup
+                        if let Ok(val) = prop_manager
+                            .get_vertex_prop_with_ctx(node.vid, prop_name, ctx)
+                            .await
+                        {
+                            return Ok(val);
+                        }
+                        return Ok(Value::Null);
+                    }
+
+                    // Handle Value::Edge - access properties directly or via prop manager
+                    if let Value::Edge(edge) = &base_val {
+                        // Handle system properties
+                        if prop_name == "_eid" || prop_name == "_id" {
+                            return Ok(Value::Int(edge.eid.as_u64() as i64));
+                        }
+                        if prop_name == "_type" {
+                            return Ok(Value::String(edge.edge_type.clone()));
+                        }
+                        if prop_name == "_src" {
+                            return Ok(Value::Int(edge.src.as_u64() as i64));
+                        }
+                        if prop_name == "_dst" {
+                            return Ok(Value::Int(edge.dst.as_u64() as i64));
+                        }
+                        // Check in-memory properties first
+                        if let Some(val) = edge.properties.get(prop_name.as_str()) {
+                            return Ok(val.clone());
+                        }
+                        // Fallback to storage lookup
+                        if let Ok(val) = prop_manager.get_edge_prop(edge.eid, prop_name, ctx).await
+                        {
+                            return Ok(val);
+                        }
+                        return Ok(Value::Null);
                     }
 
                     // If base_val is an object (node/edge), check its properties first
                     // This handles properties from CREATE/MERGE that may not be persisted yet
-                    if let Value::Object(map) = &base_val {
+                    if let Value::Map(map) = &base_val {
                         // First check top-level (for system properties like _id, _label, etc.)
                         if let Some(val) = map.get(prop_name.as_str()) {
                             return Ok(val.clone());
                         }
                         // Then check inside "properties" object (for user properties)
-                        if let Some(Value::Object(props)) = map.get("properties")
+                        if let Some(Value::Map(props)) = map.get("properties")
                             && let Some(val) = props.get(prop_name.as_str())
                         {
                             return Ok(val.clone());
@@ -1121,12 +1173,12 @@ impl Executor {
                                 .get_vertex_prop_with_ctx(vid, prop_name, ctx)
                                 .await
                             {
-                                return Ok(val.into());
+                                return Ok(val);
                             }
                         } else if let Some(id) = map.get("_eid").and_then(|v| v.as_u64()) {
                             let eid = uni_common::core::id::Eid::from(id);
                             if let Ok(val) = prop_manager.get_edge_prop(eid, prop_name, ctx).await {
-                                return Ok(val.into());
+                                return Ok(val);
                             }
                         }
                         return Ok(Value::Null);
@@ -1136,8 +1188,7 @@ impl Executor {
                     if let Ok(vid) = Self::vid_from_value(&base_val) {
                         return prop_manager
                             .get_vertex_prop_with_ctx(vid, prop_name, ctx)
-                            .await
-                            .map(|v| v.into());
+                            .await;
                     }
 
                     if base_val.is_null() {
@@ -1177,7 +1228,7 @@ impl Executor {
                         .evaluate_expr(idx_expr, row, prop_manager, params, ctx)
                         .await?;
 
-                    if let Value::Array(arr) = &arr_val {
+                    if let Value::List(arr) = &arr_val {
                         // Handle signed indices (allow negative)
                         if let Some(i) = idx_val.as_i64() {
                             let idx = if i < 0 {
@@ -1196,7 +1247,7 @@ impl Executor {
                             return Ok(Value::Null);
                         }
                     }
-                    if let Value::Object(map) = &arr_val {
+                    if let Value::Map(map) = &arr_val {
                         if let Some(key) = idx_val.as_str() {
                             return Ok(map.get(key).cloned().unwrap_or(Value::Null));
                         } else if !idx_val.is_null() {
@@ -1205,6 +1256,59 @@ impl Executor {
                                 idx_val
                             ));
                         }
+                    }
+                    // Handle bracket access on Node: n['name'] returns property
+                    if let Value::Node(node) = &arr_val {
+                        if let Some(key) = idx_val.as_str() {
+                            // Check in-memory properties first
+                            if let Some(val) = node.properties.get(key) {
+                                return Ok(val.clone());
+                            }
+                            // Fallback to property manager
+                            if let Ok(val) = prop_manager
+                                .get_vertex_prop_with_ctx(node.vid, key, ctx)
+                                .await
+                            {
+                                return Ok(val);
+                            }
+                            return Ok(Value::Null);
+                        } else if !idx_val.is_null() {
+                            return Err(anyhow::anyhow!(
+                                "TypeError: Node index must be a string, got: {:?}",
+                                idx_val
+                            ));
+                        }
+                    }
+                    // Handle bracket access on Edge: e['property'] returns property
+                    if let Value::Edge(edge) = &arr_val {
+                        if let Some(key) = idx_val.as_str() {
+                            // Check in-memory properties first
+                            if let Some(val) = edge.properties.get(key) {
+                                return Ok(val.clone());
+                            }
+                            // Fallback to property manager
+                            if let Ok(val) = prop_manager.get_edge_prop(edge.eid, key, ctx).await {
+                                return Ok(val);
+                            }
+                            return Ok(Value::Null);
+                        } else if !idx_val.is_null() {
+                            return Err(anyhow::anyhow!(
+                                "TypeError: Edge index must be a string, got: {:?}",
+                                idx_val
+                            ));
+                        }
+                    }
+                    // Handle bracket access on VID (integer): n['name'] where n is a VID
+                    if let Ok(vid) = Self::vid_from_value(&arr_val)
+                        && let Some(key) = idx_val.as_str()
+                    {
+                        if let Ok(val) = prop_manager
+                            .get_vertex_prop_with_ctx(vid, key, ctx)
+                            .await
+                        {
+                            return Ok(val);
+                        }
+                        return Ok(Value::Null);
                     }
                     if arr_val.is_null() {
                         return Ok(Value::Null);
@@ -1216,7 +1320,7 @@ impl Executor {
                         .evaluate_expr(array, row, prop_manager, params, ctx)
                         .await?;
 
-                    if let Value::Array(arr) = &arr_val {
+                    if let Value::List(arr) = &arr_val {
                         let len = arr.len();
 
                         // Evaluate start index (default to 0)
@@ -1242,10 +1346,10 @@ impl Executor {
 
                         // Return sliced array
                         if start_idx >= len || start_idx >= end_idx {
-                            return Ok(Value::Array(vec![]));
+                            return Ok(Value::List(vec![]));
                         }
                         let end_idx = end_idx.min(len);
-                        return Ok(Value::Array(arr[start_idx..end_idx].to_vec()));
+                        return Ok(Value::List(arr[start_idx..end_idx].to_vec()));
                     }
 
                     if arr_val.is_null() {
@@ -1253,7 +1357,7 @@ impl Executor {
                     }
                     Err(anyhow!("Cannot slice {:?}", arr_val))
                 }
-                Expr::Literal(lit) => Ok(lit.to_json_value()),
+                Expr::Literal(lit) => Ok(lit.to_value()),
                 Expr::List(items) => {
                     let mut vals = Vec::new();
                     for item in items {
@@ -1262,17 +1366,17 @@ impl Executor {
                                 .await?,
                         );
                     }
-                    Ok(Value::Array(vals))
+                    Ok(Value::List(vals))
                 }
                 Expr::Map(items) => {
-                    let mut map = serde_json::Map::new();
+                    let mut map = HashMap::new();
                     for (key, value_expr) in items {
                         let val = this
                             .evaluate_expr(value_expr, row, prop_manager, params, ctx)
                             .await?;
                         map.insert(key.clone(), val);
                     }
-                    Ok(Value::Object(map))
+                    Ok(Value::Map(map))
                 }
                 Expr::Exists(query) => {
                     // Plan and execute subquery; failures return false (pattern doesn't match)
@@ -1349,7 +1453,7 @@ impl Executor {
 
                     // Convert to array
                     let items = match list_val {
-                        Value::Array(arr) => arr,
+                        Value::List(arr) => arr,
                         _ => return Err(anyhow!("Quantifier expects a list, got: {:?}", list_val)),
                     };
 
@@ -1404,7 +1508,7 @@ impl Executor {
 
                     // Convert to array
                     let items = match list_val {
-                        Value::Array(arr) => arr,
+                        Value::List(arr) => arr,
                         _ => {
                             return Err(anyhow!(
                                 "List comprehension expects a list, got: {:?}",
@@ -1439,7 +1543,7 @@ impl Executor {
                         results.push(mapped_val);
                     }
 
-                    Ok(Value::Array(results))
+                    Ok(Value::List(results))
                 }
                 Expr::BinaryOp { left, op, right } => {
                     // Short-circuit evaluation for AND/OR
@@ -1508,9 +1612,9 @@ impl Executor {
                         }
                         UnaryOp::Neg => {
                             if let Some(i) = val.as_i64() {
-                                Ok(json!(-i))
+                                Ok(Value::Int(-i))
                             } else if let Some(f) = val.as_f64() {
-                                Ok(json!(-f))
+                                Ok(Value::Float(-f))
                             } else {
                                 Err(anyhow!("Cannot negate non-numeric value: {:?}", val))
                             }
@@ -1577,7 +1681,7 @@ impl Executor {
                         let val = this
                             .evaluate_expr(&args[0], row, prop_manager, params, ctx)
                             .await?;
-                        if let Value::Object(map) = &val {
+                        if let Value::Map(map) = &val {
                             // Check for _vid (vertex) first
                             if let Some(vid_val) = map.get("_vid") {
                                 return Ok(vid_val.clone());
@@ -1602,7 +1706,7 @@ impl Executor {
                         let val = this
                             .evaluate_expr(&args[0], row, prop_manager, params, ctx)
                             .await?;
-                        if let Value::Object(map) = &val {
+                        if let Value::Map(map) = &val {
                             // Check for _vid (vertex) first
                             // In new storage model, VIDs are pure auto-increment - return as simple ID string
                             if let Some(vid_val) = map.get("_vid").and_then(|v| v.as_u64()) {
@@ -1625,7 +1729,7 @@ impl Executor {
                         let val = this
                             .evaluate_expr(&args[0], row, prop_manager, params, ctx)
                             .await?;
-                        if let Value::Object(map) = &val
+                        if let Value::Map(map) = &val
                             && let Some(type_val) = map.get("_type")
                         {
                             // Numeric _type is an edge type ID; string _type is already a name
@@ -1654,13 +1758,13 @@ impl Executor {
                         let val = this
                             .evaluate_expr(&args[0], row, prop_manager, params, ctx)
                             .await?;
-                        if let Value::Object(map) = &val {
+                        if let Value::Map(map) = &val {
                             if let Some(labels_val) = map.get("_labels") {
                                 return Ok(labels_val.clone());
                             }
                             // Single label case - return as array
                             if let Some(label_val) = map.get("_label") {
-                                return Ok(json!([label_val]));
+                                return Ok(Value::List(vec![label_val.clone()]));
                             }
                         }
                         return Ok(Value::Null);
@@ -1674,15 +1778,15 @@ impl Executor {
                         let val = this
                             .evaluate_expr(&args[0], row, prop_manager, params, ctx)
                             .await?;
-                        if let Value::Object(map) = &val {
+                        if let Value::Map(map) = &val {
                             // Filter out internal properties (those starting with _)
-                            let mut props = serde_json::Map::new();
+                            let mut props = HashMap::new();
                             for (k, v) in map.iter() {
                                 if !k.starts_with('_') {
                                     props.insert(k.clone(), v.clone());
                                 }
                             }
-                            return Ok(Value::Object(props));
+                            return Ok(Value::Map(props));
                         }
                         return Ok(Value::Null);
                     }
@@ -1695,13 +1799,13 @@ impl Executor {
                         let val = this
                             .evaluate_expr(&args[0], row, prop_manager, params, ctx)
                             .await?;
-                        if let Value::Object(map) = &val {
+                        if let Value::Map(map) = &val {
                             if let Some(start_node) = map.get("_startNode") {
                                 return Ok(start_node.clone());
                             }
                             // Try _src_vid for raw edge data
                             if let Some(src_vid) = map.get("_src_vid") {
-                                return Ok(json!({ "_vid": src_vid }));
+                                return Ok(Value::Map(HashMap::from([("_vid".to_string(), src_vid.clone())])));
                             }
                         }
                         return Ok(Value::Null);
@@ -1715,13 +1819,13 @@ impl Executor {
                         let val = this
                             .evaluate_expr(&args[0], row, prop_manager, params, ctx)
                             .await?;
-                        if let Value::Object(map) = &val {
+                        if let Value::Map(map) = &val {
                             if let Some(end_node) = map.get("_endNode") {
                                 return Ok(end_node.clone());
                             }
                             // Try _dst_vid for raw edge data
                             if let Some(dst_vid) = map.get("_dst_vid") {
-                                return Ok(json!({ "_vid": dst_vid }));
+                                return Ok(Value::Map(HashMap::from([("_vid".to_string(), dst_vid.clone())])));
                             }
                         }
                         return Ok(Value::Null);
@@ -1746,10 +1850,10 @@ impl Executor {
 
                         let has_label = match &node_val {
                             // Handle proper Value::Node type (from result normalization)
-                            Value::Object(map) if map.contains_key("_vid") => {
+                            Value::Map(map) if map.contains_key("_vid") => {
                                 if let Some(Value::String(label_str)) = map.get("_label") {
                                     label_str == label_to_check
-                                } else if let Some(Value::Array(labels_arr)) = map.get("_labels") {
+                                } else if let Some(Value::List(labels_arr)) = map.get("_labels") {
                                     labels_arr
                                         .iter()
                                         .any(|l| l.as_str() == Some(label_to_check))
@@ -1758,8 +1862,8 @@ impl Executor {
                                 }
                             }
                             // Also handle legacy Object format
-                            Value::Object(map) => {
-                                if let Some(Value::Array(labels_arr)) = map.get("_labels") {
+                            Value::Map(map) => {
+                                if let Some(Value::List(labels_arr)) = map.get("_labels") {
                                     labels_arr
                                         .iter()
                                         .any(|l| l.as_str() == Some(label_to_check))
@@ -1855,8 +1959,7 @@ impl Executor {
                                 .get_vertex_prop_with_ctx(vid, &start_prop, ctx)
                                 .await
                                 .ok()
-                                .map(|v| v.into())
-                        } else if let Value::Object(map) = &node_val {
+                        } else if let Value::Map(map) = &node_val {
                             // Check for embedded _vid or _eid in object
                             if let Some(vid_val) = map.get("_vid").and_then(|v| v.as_u64()) {
                                 let vid = Vid::from(vid_val);
@@ -1864,7 +1967,6 @@ impl Executor {
                                     .get_vertex_prop_with_ctx(vid, &start_prop, ctx)
                                     .await
                                     .ok()
-                                    .map(|v| v.into())
                             } else if let Some(eid_val) = map.get("_eid").and_then(|v| v.as_u64()) {
                                 // Edge case
                                 let eid = uni_common::core::id::Eid::from(eid_val);
@@ -1872,7 +1974,6 @@ impl Executor {
                                     .get_edge_prop(eid, &start_prop, ctx)
                                     .await
                                     .ok()
-                                    .map(|v| v.into())
                             } else {
                                 // Inline object - property embedded directly
                                 map.get(&start_prop).cloned()
@@ -1902,8 +2003,7 @@ impl Executor {
                                 .get_vertex_prop_with_ctx(vid, &end_prop, ctx)
                                 .await
                                 .ok()
-                                .map(|v| v.into())
-                        } else if let Value::Object(map) = &node_val {
+                        } else if let Value::Map(map) = &node_val {
                             // Check for embedded _vid or _eid in object
                             if let Some(vid_val) = map.get("_vid").and_then(|v| v.as_u64()) {
                                 let vid = Vid::from(vid_val);
@@ -1911,7 +2011,6 @@ impl Executor {
                                     .get_vertex_prop_with_ctx(vid, &end_prop, ctx)
                                     .await
                                     .ok()
-                                    .map(|v| v.into())
                             } else if let Some(eid_val) = map.get("_eid").and_then(|v| v.as_u64()) {
                                 // Edge case
                                 let eid = uni_common::core::id::Eid::from(eid_val);
@@ -1919,7 +2018,6 @@ impl Executor {
                                     .get_edge_prop(eid, &end_prop, ctx)
                                     .await
                                     .ok()
-                                    .map(|v| v.into())
                             } else {
                                 // Inline object - property embedded directly
                                 map.get(&end_prop).cloned()
@@ -1957,7 +2055,7 @@ impl Executor {
 
                         // Eagerly hydrate edge/vertex maps if pushdown hydration didn't load properties.
                         // Functions like validAt() need access to properties like valid_from/valid_to.
-                        if let Value::Object(ref mut map) = val {
+                        if let Value::Map(ref mut map) = val {
                             hydrate_entity_if_needed(map, prop_manager, ctx).await;
                         }
 
@@ -1979,7 +2077,7 @@ impl Executor {
                         .evaluate_expr(list, row, prop_manager, params, ctx)
                         .await?;
 
-                    if let Value::Array(items) = list_val {
+                    if let Value::List(items) = list_val {
                         for item in items {
                             // Create a temporary scope/row with accumulator and variable
                             // For simplicity in fallback executor, we can construct a new row map
@@ -2011,7 +2109,7 @@ impl Executor {
 
                     // Extract properties from the base object
                     let properties = match &base_value {
-                        Value::Object(map) => map,
+                        Value::Map(map) => map,
                         _ => {
                             return Err(anyhow!(
                                 "Map projection requires object, got {:?}",
@@ -2020,7 +2118,7 @@ impl Executor {
                         }
                     };
 
-                    let mut result_map = serde_json::Map::new();
+                    let mut result_map = HashMap::new();
 
                     for item in items {
                         match item {
@@ -2053,7 +2151,7 @@ impl Executor {
                         }
                     }
 
-                    Ok(Value::Object(result_map))
+                    Ok(Value::Map(result_map))
                 }
             }
         })
@@ -2185,7 +2283,7 @@ impl Executor {
                         .execute_copy_to(&label, &path, &format, &options)
                         .await?;
                     let mut result = HashMap::new();
-                    result.insert("count".to_string(), json!(count));
+                    result.insert("count".to_string(), Value::Int(count as i64));
                     Ok(vec![result])
                 }
                 LogicalPlan::CopyFrom {
@@ -2198,7 +2296,7 @@ impl Executor {
                         .execute_copy_from(&label, &path, &format, &options)
                         .await?;
                     let mut result = HashMap::new();
-                    result.insert("count".to_string(), json!(count));
+                    result.insert("count".to_string(), Value::Int(count as i64));
                     Ok(vec![result])
                 }
                 LogicalPlan::CreateLabel(clause) => {
@@ -2315,23 +2413,21 @@ impl Executor {
                     let mut matches = Vec::new();
                     for vid in vids {
                         if let Some(props) = batch_props.get(&vid) {
-                            let mut props_json: serde_json::Map<String, Value> = props
-                                .iter()
-                                .map(|(k, v)| (k.clone(), v.clone().into()))
-                                .collect();
-                            props_json.insert("_vid".to_string(), json!(vid.as_u64()));
-                            props_json.insert("_label".to_string(), json!(label_name.clone()));
+                            let mut props_json: HashMap<String, Value> =
+                                props.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+                            props_json.insert("_vid".to_string(), Value::Int(vid.as_u64() as i64));
+                            props_json.insert("_label".to_string(), Value::String(label_name.clone()));
 
                             // Add full list of labels
                             if let Some(labels) = labels_map.get(&vid) {
-                                props_json.insert("_labels".to_string(), json!(labels));
+                                props_json.insert("_labels".to_string(), Value::List(labels.iter().map(|l| Value::String(l.clone())).collect()));
                             } else {
                                 // Fallback to the scan label
-                                props_json.insert("_labels".to_string(), json!([label_name]));
+                                props_json.insert("_labels".to_string(), Value::List(vec![Value::String(label_name.clone())]));
                             }
 
                             let mut map = HashMap::new();
-                            map.insert(variable.clone(), Value::Object(props_json));
+                            map.insert(variable.clone(), Value::Map(props_json));
                             matches.push(map);
                         }
                     }
@@ -2360,19 +2456,18 @@ impl Executor {
                                 .await?
                                 .unwrap_or_default();
 
-                            let mut props_json: serde_json::Map<String, Value> =
-                                props.into_iter().map(|(k, v)| (k, v.into())).collect();
-                            props_json.insert("_vid".to_string(), json!(vid.as_u64()));
-                            props_json.insert("ext_id".to_string(), json!(ext_id.clone()));
+                            let mut props_json: HashMap<String, Value> = props;
+                            props_json.insert("_vid".to_string(), Value::Int(vid.as_u64() as i64));
+                            props_json.insert("ext_id".to_string(), Value::String(ext_id.clone()));
                             // Add first label or "Unknown" if no labels
                             let label_name = labels
                                 .first()
                                 .cloned()
                                 .unwrap_or_else(|| "Unknown".to_string());
-                            props_json.insert("_label".to_string(), json!(label_name));
+                            props_json.insert("_label".to_string(), Value::String(label_name.to_string()));
 
                             let mut map = HashMap::new();
-                            map.insert(variable.clone(), Value::Object(props_json));
+                            map.insert(variable.clone(), Value::Map(props_json));
                             return Ok(vec![map]);
                         }
                     }
@@ -2423,16 +2518,15 @@ impl Executor {
                             .unwrap_or_default()
                         };
 
-                        let mut props_json: serde_json::Map<String, Value> = props_opt
-                            .map(|p| p.into_iter().map(|(k, v)| (k, v.into())).collect())
-                            .unwrap_or_default();
+                        let mut props_json: HashMap<String, Value> =
+                            props_opt.unwrap_or_default();
 
-                        props_json.insert("_vid".to_string(), json!(vid.as_u64()));
-                        props_json.insert("_label".to_string(), json!(labels.join(":")));
-                        props_json.insert("_labels".to_string(), json!(labels));
+                        props_json.insert("_vid".to_string(), Value::Int(vid.as_u64() as i64));
+                        props_json.insert("_label".to_string(), Value::String(labels.join(":")));
+                        props_json.insert("_labels".to_string(), Value::List(labels.iter().map(|l| Value::String(l.clone())).collect()));
 
                         let mut map = HashMap::new();
-                        map.insert(variable.clone(), Value::Object(props_json));
+                        map.insert(variable.clone(), Value::Map(props_json));
                         matches.push(map);
                     }
                     Ok(matches)
@@ -2504,16 +2598,15 @@ impl Executor {
                             .unwrap_or_default()
                         };
 
-                        let mut props_json: serde_json::Map<String, Value> = props_opt
-                            .map(|p| p.into_iter().map(|(k, v)| (k, v.into())).collect())
-                            .unwrap_or_default();
+                        let mut props_json: HashMap<String, Value> =
+                            props_opt.unwrap_or_default();
 
-                        props_json.insert("_vid".to_string(), json!(vid.as_u64()));
-                        props_json.insert("_label".to_string(), json!(actual_labels.join(":")));
-                        props_json.insert("_labels".to_string(), json!(actual_labels));
+                        props_json.insert("_vid".to_string(), Value::Int(vid.as_u64() as i64));
+                        props_json.insert("_label".to_string(), Value::String(actual_labels.join(":")));
+                        props_json.insert("_labels".to_string(), Value::List(actual_labels.iter().map(|l| Value::String(l.clone())).collect()));
 
                         let mut map = HashMap::new();
-                        map.insert(variable.clone(), Value::Object(props_json));
+                        map.insert(variable.clone(), Value::Map(props_json));
                         matches.push(map);
                     }
                     Ok(matches)
@@ -2924,7 +3017,7 @@ impl Executor {
                     let mut seen = std::collections::HashSet::new();
                     let mut result = Vec::new();
                     for row in rows {
-                        let key = serde_json::to_string(&serde_json::json!(row))?;
+                        let key = format!("{:?}", row);
                         if seen.insert(key) {
                             result.push(row);
                         }
@@ -3130,7 +3223,7 @@ impl Executor {
                                         let labels = Self::extract_labels_from_node(&val);
                                         vertex_vids.push(vid);
                                         vertex_labels.push(labels);
-                                    } else if let Value::Object(_) = &val {
+                                    } else if let Value::Map(_) = &val {
                                         edge_vals.push(val);
                                     }
                                 }
@@ -3148,7 +3241,7 @@ impl Executor {
 
                             // Delete edges individually (typically few).
                             for val in &edge_vals {
-                                if let Value::Object(map) = val {
+                                if let Value::Map(map) = val {
                                     self.execute_delete_edge_from_map(map, &mut writer).await?;
                                 }
                             }
@@ -3286,22 +3379,32 @@ impl Executor {
                             let mut result_row = row.clone();
 
                             // Create node objects for the path
-                            let nodes_array: Vec<Value> = path_vids
+                            let path_nodes: Vec<crate::types::Node> = path_vids
                                 .iter()
-                                .map(|v| json!({"_vid": v.as_u64()}))
+                                .map(|v| crate::types::Node {
+                                    vid: *v,
+                                    label: String::new(),
+                                    properties: HashMap::new(),
+                                })
                                 .collect();
 
-                            // Create empty relationships array (edges between nodes)
+                            // Create empty relationships (edges between nodes)
                             // For a path of N nodes, there are N-1 edges
-                            let relationships_array: Vec<Value> =
+                            let path_edges: Vec<crate::types::Edge> =
                                 (0..path_vids.len().saturating_sub(1))
-                                    .map(|i| json!({"_eid": i}))
+                                    .map(|i| crate::types::Edge {
+                                        eid: Eid::new(i as u64),
+                                        edge_type: String::new(),
+                                        src: Vid::new(0),
+                                        dst: Vid::new(0),
+                                        properties: HashMap::new(),
+                                    })
                                     .collect();
 
                             // Create a proper path object that length() can understand
-                            let path_obj = json!({
-                                "nodes": nodes_array,
-                                "relationships": relationships_array
+                            let path_obj = Value::Path(crate::types::Path {
+                                nodes: path_nodes,
+                                edges: path_edges,
                             });
                             result_row.insert(path_variable.clone(), path_obj);
 
@@ -3337,7 +3440,7 @@ impl Executor {
                                 .await?;
 
                             let items = match list_val {
-                                Value::Array(arr) => arr,
+                                Value::List(arr) => arr,
                                 Value::Null => continue,
                                 _ => return Err(anyhow!("FOREACH requires a list")),
                             };
@@ -3390,17 +3493,19 @@ impl Executor {
                         let label = row.get(&label_key).cloned().unwrap_or(Value::Null);
 
                         // Build node for path
-                        let node = json!({
-                            "_vid": vid,
-                            "_label": label,
-                            "properties": {}
-                        });
+                        let node_vid = vid.as_u64().map(Vid::new).unwrap_or_else(|| Vid::new(0));
+                        let node_label = label.as_str().unwrap_or("").to_string();
+                        let path_node = crate::types::Node {
+                            vid: node_vid,
+                            label: node_label,
+                            properties: HashMap::new(),
+                        };
 
                         // Create path with one node and zero edges
-                        let path = Value::Object(serde_json::Map::from_iter([
-                            ("nodes".to_string(), Value::Array(vec![node])),
-                            ("relationships".to_string(), Value::Array(vec![])),
-                        ]));
+                        let path = Value::Path(crate::types::Path {
+                            nodes: vec![path_node],
+                            edges: vec![],
+                        });
 
                         row.insert(path_variable.clone(), path);
                         result.push(row);
@@ -3458,15 +3563,15 @@ impl Executor {
             let record = result?;
             let row_val: Value = if let Some(ref hdrs) = headers {
                 // Return as map
-                let mut map = serde_json::Map::new();
+                let mut map = HashMap::new();
                 for (h, v) in hdrs.iter().zip(record.iter()) {
-                    map.insert(h.clone(), json!(v));
+                    map.insert(h.clone(), Value::String(v.to_string()));
                 }
-                Value::Object(map)
+                Value::Map(map)
             } else {
                 // Return as array
-                let arr: Vec<Value> = record.iter().map(|v| json!(v)).collect();
-                Value::Array(arr)
+                let arr: Vec<Value> = record.iter().map(|v| Value::String(v.to_string())).collect();
+                Value::List(arr)
             };
 
             let mut map = HashMap::new();
@@ -3553,7 +3658,7 @@ impl Executor {
                     .await?;
 
                 let items = match list_val {
-                    Value::Array(arr) => arr,
+                    Value::List(arr) => arr,
                     Value::Null => return Ok(()),
                     _ => return Err(anyhow!("FOREACH requires a list")),
                 };
@@ -3804,15 +3909,11 @@ impl Executor {
                 let mut new_row = input_row.clone();
 
                 // Build target node value with label
-                let target_props = prop_manager
+                let mut target_json = prop_manager
                     .get_all_vertex_props_with_ctx(target_vid, ctx)
                     .await?
                     .unwrap_or_default();
-                let mut target_json: serde_json::Map<String, Value> = target_props
-                    .into_iter()
-                    .map(|(k, v)| (k, v.into()))
-                    .collect();
-                target_json.insert("_vid".to_string(), json!(target_vid.as_u64()));
+                target_json.insert("_vid".to_string(), Value::Int(target_vid.as_u64() as i64));
 
                 // Look up target label - first from L0 (for recently created nodes),
                 // Check L0 first, then fall back to storage
@@ -3837,30 +3938,31 @@ impl Executor {
                     .await?
                     .unwrap_or_default()
                 };
-                target_json.insert("_label".to_string(), json!(target_labels.join(":")));
+                target_json.insert("_label".to_string(), Value::String(target_labels.join(":")));
 
-                new_row.insert(target_variable.to_string(), Value::Object(target_json));
+                new_row.insert(target_variable.to_string(), Value::Map(target_json));
 
                 // Build step (relationship) variable if present
                 if let Some(sv) = step_variable {
-                    let mut edge_json: serde_json::Map<String, Value> = edge_props
-                        .clone()
-                        .into_iter()
-                        .map(|(k, v)| (k, v.into()))
-                        .collect();
-                    edge_json.insert("_eid".to_string(), json!(eid.as_u64()));
-                    edge_json.insert("_type".to_string(), json!(edge_type));
-                    edge_json.insert("_src".to_string(), json!(src_vid.as_u64()));
-                    edge_json.insert("_dst".to_string(), json!(dst_vid.as_u64()));
-                    new_row.insert(sv.clone(), Value::Object(edge_json));
+                    let mut edge_json = edge_props.clone();
+                    edge_json.insert("_eid".to_string(), Value::Int(eid.as_u64() as i64));
+                    edge_json.insert("_type".to_string(), Value::String(edge_type.to_string()));
+                    edge_json.insert("_src".to_string(), Value::Int(src_vid.as_u64() as i64));
+                    edge_json.insert("_dst".to_string(), Value::Int(dst_vid.as_u64() as i64));
+                    new_row.insert(sv.clone(), Value::Map(edge_json));
                 }
 
                 // Path variable not fully supported for schemaless yet
                 if let Some(pv) = path_variable {
                     // Build a minimal path representation
-                    let path_obj = json!({
-                        "nodes": [source_vid.as_u64(), target_vid.as_u64()],
-                        "relationships": [eid.as_u64()]
+                    let path_obj = Value::Path(crate::types::Path {
+                        nodes: vec![
+                            crate::types::Node { vid: source_vid, label: String::new(), properties: HashMap::new() },
+                            crate::types::Node { vid: target_vid, label: String::new(), properties: HashMap::new() },
+                        ],
+                        edges: vec![
+                            crate::types::Edge { eid: *eid, edge_type: String::new(), src: source_vid, dst: target_vid, properties: HashMap::new() },
+                        ],
                     });
                     new_row.insert(pv.clone(), path_obj);
                 }
@@ -4028,8 +4130,8 @@ impl Executor {
     fn extract_vid_from_row(row: &HashMap<String, Value>, variable: &str) -> Option<Vid> {
         // Strategy 1: Direct "variable._vid" key
         let vid_key = format!("{}._vid", variable);
-        if let Some(Value::Number(n)) = row.get(&vid_key)
-            && let Some(v) = n.as_u64()
+        if let Some(val) = row.get(&vid_key)
+            && let Some(v) = val.as_u64()
         {
             return Some(Vid::from(v));
         }
@@ -4163,12 +4265,12 @@ impl Executor {
         if max_hops == 1 && !new_matches.is_empty() {
             for m in new_matches.iter_mut() {
                 // Hydrate target node properties
-                if let Some(Value::Object(target_obj)) = m.get_mut(target_variable) {
+                if let Some(Value::Map(target_obj)) = m.get_mut(target_variable) {
                     hydrate_entity_if_needed(target_obj, prop_manager, ctx).await;
                 }
                 // Hydrate edge properties if step variable is present
                 if let Some(sv) = step_variable
-                    && let Some(Value::Object(edge_obj)) = m.get_mut(sv)
+                    && let Some(Value::Map(edge_obj)) = m.get_mut(sv)
                 {
                     hydrate_entity_if_needed(edge_obj, prop_manager, ctx).await;
                 }
@@ -4229,7 +4331,7 @@ impl Executor {
 
         // Get previously used edges from the row for relationship uniqueness across hops
         let used_edges_from_previous_hops: std::collections::HashSet<u64> =
-            if let Some(Value::Array(arr)) = row.get("__used_edges") {
+            if let Some(Value::List(arr)) = row.get("__used_edges") {
                 arr.iter().filter_map(|v| v.as_u64()).collect()
             } else {
                 std::collections::HashSet::new()
@@ -4466,15 +4568,15 @@ impl Executor {
         let mut new_m = row.clone();
 
         // Build proper node object for target variable (instead of just VID string)
-        let target_obj = json!({
-            "_vid": target_vid.as_u64(),
-            "_label": target_label_name.unwrap_or("")
-        });
+        let target_obj = Value::Map(HashMap::from([
+            ("_vid".to_string(), Value::Int(target_vid.as_u64() as i64)),
+            ("_label".to_string(), Value::String(target_label_name.unwrap_or("").to_string())),
+        ]));
         new_m.insert(target_variable.to_string(), target_obj);
 
         // Track used edges for relationship uniqueness across hops.
         // Add current edge to __used_edges internal tracking.
-        let mut used_edges: Vec<u64> = if let Some(Value::Array(arr)) = row.get("__used_edges") {
+        let mut used_edges: Vec<u64> = if let Some(Value::List(arr)) = row.get("__used_edges") {
             arr.iter().filter_map(|v| v.as_u64()).collect()
         } else {
             Vec::new()
@@ -4482,47 +4584,52 @@ impl Executor {
         used_edges.push(edge_entry.eid.as_u64());
         new_m.insert(
             "__used_edges".to_string(),
-            Value::Array(used_edges.into_iter().map(|e| json!(e)).collect()),
+            Value::List(used_edges.into_iter().map(|e| Value::Int(e as i64)).collect()),
         );
 
         if let Some(sv) = step_variable {
             if max_hops > 1 {
-                let eids: Vec<Value> = path.iter().map(|e| json!(e.as_u64())).collect();
-                new_m.insert(sv.clone(), Value::Array(eids));
+                let eids: Vec<Value> = path.iter().map(|e| Value::Int(e.as_u64() as i64)).collect();
+                new_m.insert(sv.clone(), Value::List(eids));
             } else {
                 // Build edge object with numeric _type (for internal operations)
                 // and _type_name (for user-facing output after normalization)
-                let edge_obj = json!({
-                    "_eid": edge_entry.eid.as_u64(),
-                    "_src": curr_vid.as_u64(),
-                    "_dst": target_vid.as_u64(),
-                    "_type": edge_entry.edge_type,
-                    "_type_name": edge_type_name.unwrap_or("")
-                });
+                let edge_obj = Value::Map(HashMap::from([
+                    ("_eid".to_string(), Value::Int(edge_entry.eid.as_u64() as i64)),
+                    ("_src".to_string(), Value::Int(curr_vid.as_u64() as i64)),
+                    ("_dst".to_string(), Value::Int(target_vid.as_u64() as i64)),
+                    ("_type".to_string(), Value::Int(edge_entry.edge_type as i64)),
+                    ("_type_name".to_string(), Value::String(edge_type_name.unwrap_or("").to_string())),
+                ]));
                 new_m.insert(sv.clone(), edge_obj);
             }
         }
 
         if let Some(pv) = path_variable {
             // Check if there's an existing path in the row (from previous hop in multi-hop pattern)
-            // Paths are stored as serde_json::Value with "nodes" and "relationships" arrays
+            // Paths are stored as Value::Path or Value::Map with "nodes" and "relationships" arrays
             let (mut path_nodes, mut path_edges, mut current) =
-                if let Some(Value::Object(existing_obj)) = row.get(pv) {
-                    // Try to parse existing path from JSON structure
+                if let Some(Value::Path(existing_path)) = row.get(pv) {
+                    // Already a proper Path - extract directly
+                    let current = existing_path.nodes.last().map(|n| n.vid).unwrap_or(source_vid);
+                    (existing_path.nodes.clone(), existing_path.edges.clone(), current)
+                } else if let Some(Value::Map(existing_obj)) = row.get(pv) {
+                    // Try to parse existing path from Map structure
                     // Path object uses "nodes" and "relationships" (or "edges") keys
                     let edges_key = if existing_obj.contains_key("relationships") {
                         "relationships"
                     } else {
                         "edges"
                     };
-                    if let (Some(Value::Array(nodes_arr)), Some(Value::Array(edges_arr))) =
+                    if let (Some(Value::List(nodes_arr)), Some(Value::List(edges_arr))) =
                         (existing_obj.get("nodes"), existing_obj.get(edges_key))
                     {
-                        // Convert JSON nodes back to types::Node
-                        // Note: JSON may use "_id"/"_label" or "vid"/"label" depending on serialization source
+                        // Convert Map nodes back to types::Node
                         let mut nodes: Vec<crate::types::Node> = Vec::new();
                         for node_val in nodes_arr {
-                            if let Value::Object(node_obj) = node_val {
+                            if let Value::Node(n) = node_val {
+                                nodes.push(n.clone());
+                            } else if let Value::Map(node_obj) = node_val {
                                 let vid = node_obj
                                     .get("vid")
                                     .or_else(|| node_obj.get("_id"))
@@ -4540,13 +4647,9 @@ impl Executor {
                                     .to_string();
                                 // Properties are already in the node object
                                 let mut properties = HashMap::new();
-                                if let Some(Value::Object(props)) = node_obj.get("properties") {
+                                if let Some(Value::Map(props)) = node_obj.get("properties") {
                                     for (k, v) in props {
-                                        if let Ok(pv) =
-                                            serde_json::from_value::<crate::types::Value>(v.clone())
-                                        {
-                                            properties.insert(k.clone(), pv);
-                                        }
+                                        properties.insert(k.clone(), v.clone());
                                     }
                                 }
                                 nodes.push(crate::types::Node {
@@ -4556,11 +4659,12 @@ impl Executor {
                                 });
                             }
                         }
-                        // Convert JSON edges back to types::Edge
-                        // Note: JSON may use "_id"/"_type" or "eid"/"edge_type" depending on serialization source
+                        // Convert Map edges back to types::Edge
                         let mut edges: Vec<crate::types::Edge> = Vec::new();
                         for edge_val in edges_arr {
-                            if let Value::Object(edge_obj) = edge_val {
+                            if let Value::Edge(e) = edge_val {
+                                edges.push(e.clone());
+                            } else if let Value::Map(edge_obj) = edge_val {
                                 let eid = edge_obj
                                     .get("eid")
                                     .or_else(|| edge_obj.get("_id"))
@@ -4713,7 +4817,7 @@ impl Executor {
                 edges: path_edges,
             };
 
-            new_m.insert(pv.clone(), crate::types::Value::Path(path_obj).into());
+            new_m.insert(pv.clone(), Value::Path(path_obj));
         }
 
         new_m
@@ -4766,7 +4870,7 @@ impl Executor {
 
         // Update all path objects with loaded data
         for m in matches.iter_mut() {
-            let Some(Value::Object(path_map)) = m.get_mut(path_variable) else {
+            let Some(Value::Map(path_map)) = m.get_mut(path_variable) else {
                 continue;
             };
 
@@ -4786,12 +4890,12 @@ impl Executor {
         let mut all_eids = HashSet::new();
 
         for m in matches {
-            let Some(Value::Object(path_map)) = m.get(path_variable) else {
+            let Some(Value::Map(path_map)) = m.get(path_variable) else {
                 continue;
             };
 
             // Extract node VIDs
-            if let Some(Value::Array(nodes)) = path_map.get("nodes") {
+            if let Some(Value::List(nodes)) = path_map.get("nodes") {
                 for node in nodes {
                     if let Some(vid_val) = node.get("_id")
                         && let Ok(vid) = Self::vid_from_value(vid_val)
@@ -4802,7 +4906,7 @@ impl Executor {
             }
 
             // Extract relationship EIDs
-            if let Some(Value::Array(relationships)) = path_map.get("relationships") {
+            if let Some(Value::List(relationships)) = path_map.get("relationships") {
                 for rel in relationships {
                     if let Some(eid_val) = rel.get("_id")
                         && let Ok(vid) = Self::vid_from_value(eid_val)
@@ -4841,9 +4945,7 @@ impl Executor {
             .get_batch_vertex_props(vids, &prop_refs, ctx)
             .await?;
         Ok(result
-            .into_iter()
-            .map(|(vid, props)| (vid, props.into_iter().map(|(k, v)| (k, v.into())).collect()))
-            .collect())
+)
     }
 
     /// Batch loads edge properties for a set of EIDs.
@@ -4867,13 +4969,7 @@ impl Executor {
             .collect();
 
         let prop_refs: Vec<&str> = all_props.into_iter().collect();
-        let result = prop_manager
-            .get_batch_edge_props(eids, &prop_refs, ctx)
-            .await?;
-        Ok(result
-            .into_iter()
-            .map(|(vid, props)| (vid, props.into_iter().map(|(k, v)| (k, v.into())).collect()))
-            .collect())
+        prop_manager.get_batch_edge_props(eids, &prop_refs, ctx).await
     }
 
     /// Builds a mapping from VID to label string.
@@ -5001,16 +5097,16 @@ impl Executor {
 
     /// Updates node objects in a path with labels and properties.
     fn update_path_nodes(
-        path_map: &mut serde_json::Map<String, Value>,
+        path_map: &mut HashMap<String, Value>,
         vid_labels: &HashMap<Vid, String>,
         vertex_props: &HashMap<Vid, HashMap<String, Value>>,
     ) {
-        let Some(Value::Array(nodes)) = path_map.get_mut("nodes") else {
+        let Some(Value::List(nodes)) = path_map.get_mut("nodes") else {
             return;
         };
 
         for node in nodes {
-            let Some(node_obj) = node.as_object_mut() else {
+            let Value::Map(node_obj) = node else {
                 continue;
             };
             let Some(vid_val) = node_obj.get("_id") else {
@@ -5025,23 +5121,23 @@ impl Executor {
             }
 
             if let Some(props) = vertex_props.get(&vid) {
-                node_obj.insert("properties".to_string(), Self::props_to_json(props));
+                node_obj.insert("properties".to_string(), Self::props_to_value(props));
             }
         }
     }
 
     /// Updates relationship objects in a path with types and properties.
     fn update_path_relationships(
-        path_map: &mut serde_json::Map<String, Value>,
+        path_map: &mut HashMap<String, Value>,
         eid_types: &HashMap<Eid, String>,
         edge_props: &HashMap<Vid, HashMap<String, Value>>,
     ) {
-        let Some(Value::Array(relationships)) = path_map.get_mut("relationships") else {
+        let Some(Value::List(relationships)) = path_map.get_mut("relationships") else {
             return;
         };
 
         for rel in relationships {
-            let Some(rel_obj) = rel.as_object_mut() else {
+            let Value::Map(rel_obj) = rel else {
                 continue;
             };
             let Some(eid_val) = rel_obj.get("_id") else {
@@ -5059,18 +5155,14 @@ impl Executor {
             // Edge props use Vid as key (converted from Eid)
             let vid_key = Vid::from(eid.as_u64());
             if let Some(props) = edge_props.get(&vid_key) {
-                rel_obj.insert("properties".to_string(), Self::props_to_json(props));
+                rel_obj.insert("properties".to_string(), Self::props_to_value(props));
             }
         }
     }
 
-    /// Converts a properties HashMap to a JSON Value object.
-    fn props_to_json(props: &HashMap<String, Value>) -> Value {
-        props
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect::<serde_json::Map<_, _>>()
-            .into()
+    /// Converts a properties HashMap to a Value::Map.
+    fn props_to_value(props: &HashMap<String, Value>) -> Value {
+        Value::Map(props.clone())
     }
 
     /// Execute aggregate operation: GROUP BY + aggregate functions.
@@ -5104,10 +5196,10 @@ impl Executor {
             let key_vals = self
                 .evaluate_group_keys(group_by, &row, prop_manager, params, ctx)
                 .await?;
-            // Note: JSON serialization for grouping keys is a known performance concern.
-            // serde_json::Value doesn't implement Hash/Ord, requiring string-based grouping.
+            // Note: Debug-based serialization for grouping keys is a known performance concern.
+            // Value doesn't implement Hash/Ord, requiring string-based grouping.
             // For high-performance paths, use the vectorized executor with Arrow-native grouping.
-            let key_str = serde_json::to_string(&key_vals)?;
+            let key_str = format!("{:?}", key_vals);
 
             let entry = groups
                 .entry(key_str)
@@ -5428,7 +5520,7 @@ impl Executor {
                 .ok_or_else(|| anyhow!("Variable not found: {}", name)),
             Expr::Property(base, prop) => {
                 let base_val = self.evaluate_simple_expr(base, row)?;
-                if let Value::Object(map) = base_val {
+                if let Value::Map(map) = base_val {
                     map.get(prop)
                         .cloned()
                         .ok_or_else(|| anyhow!("Property not found: {}", prop))
@@ -5436,7 +5528,7 @@ impl Executor {
                     Err(anyhow!("Cannot access property on non-object"))
                 }
             }
-            Expr::Literal(lit) => Ok(lit.to_json_value()),
+            Expr::Literal(lit) => Ok(lit.to_value()),
             _ => Err(anyhow!(
                 "Unsupported expression in window function: {:?}",
                 expr
@@ -5557,7 +5649,7 @@ impl Executor {
         pub(crate) fn row_key(row: &HashMap<String, Value>) -> String {
             let mut pairs: Vec<_> = row.iter().collect();
             pairs.sort_by(|a, b| a.0.cmp(b.0));
-            serde_json::to_string(&pairs).unwrap_or_default()
+            format!("{:?}", pairs)
         }
 
         // 1. Execute Anchor
@@ -5584,14 +5676,14 @@ impl Executor {
             }
 
             // Bind working table to CTE name in params
-            let working_val = Value::Array(
+            let working_val = Value::List(
                 working_table
                     .iter()
                     .map(|row| {
                         if row.len() == 1 {
                             row.values().next().unwrap().clone()
                         } else {
-                            Value::Object(row.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+                            Value::Map(row.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
                         }
                     })
                     .collect(),
@@ -5628,7 +5720,7 @@ impl Executor {
         }
 
         // Output accumulated results as a variable
-        let final_list = Value::Array(
+        let final_list = Value::List(
             result_table
                 .into_iter()
                 .map(|row| {
@@ -5646,7 +5738,7 @@ impl Executor {
                     if row.len() == 1 {
                         row.values().next().unwrap().clone()
                     } else {
-                        Value::Object(row.into_iter().collect())
+                        Value::Map(row.into_iter().collect())
                     }
                 })
                 .collect(),
@@ -6079,8 +6171,6 @@ impl Executor {
                 }
 
                 let vid = writer.next_vid().await?;
-                let props: uni_common::Properties =
-                    props.into_iter().map(|(k, v)| (k, v.into())).collect();
                 writer
                     .insert_vertex_with_labels(vid, props, vec![target.to_string()])
                     .await?;
@@ -6131,15 +6221,13 @@ impl Executor {
                     .ok_or_else(|| anyhow!("Missing destination VID in column '{}'", dst_col))?;
 
                 let eid = writer.next_eid(type_id).await?;
-                let props: uni_common::Properties =
-                    props.into_iter().map(|(k, v)| (k, v.into())).collect();
                 writer.insert_edge(src, dst, type_id, eid, props).await?;
                 count += 1;
             }
         }
 
         let mut res = HashMap::new();
-        res.insert("count".to_string(), json!(count));
+        res.insert("count".to_string(), Value::Int(count as i64));
         Ok(vec![res])
     }
 
@@ -6206,8 +6294,6 @@ impl Executor {
                         }
                     }
                     let vid = writer.next_vid().await?;
-                    let props: uni_common::Properties =
-                        props.into_iter().map(|(k, v)| (k, v.into())).collect();
                     writer
                         .insert_vertex_with_labels(vid, props, vec![target.to_string()])
                         .await?;
@@ -6263,8 +6349,6 @@ impl Executor {
                     })?;
 
                     let eid = writer.next_eid(type_id).await?;
-                    let props: uni_common::Properties =
-                        props.into_iter().map(|(k, v)| (k, v.into())).collect();
                     writer.insert_edge(src, dst, type_id, eid, props).await?;
                     count += 1;
                 }
@@ -6272,7 +6356,7 @@ impl Executor {
         }
 
         let mut res = HashMap::new();
-        res.insert("count".to_string(), json!(count));
+        res.insert("count".to_string(), Value::Int(count as i64));
         Ok(vec![res])
     }
 
@@ -6534,7 +6618,8 @@ impl Executor {
             .await?;
 
         let query_vector: Vec<f32> = match query_val {
-            Value::Array(arr) => {
+            Value::Vector(v) => v,
+            Value::List(arr) => {
                 let mut vec = Vec::with_capacity(arr.len());
                 for v in arr {
                     if let Some(f) = v.as_f64() {
@@ -6592,7 +6677,7 @@ impl Executor {
             .await?;
 
         let terms: Vec<String> = match terms_val {
-            Value::Array(arr) => arr
+            Value::List(arr) => arr
                 .iter()
                 .map(|v| v.as_str().map(|s| s.to_string()).unwrap_or_default())
                 .collect(),
@@ -6612,14 +6697,12 @@ impl Executor {
             // Check visibility/deletion and fetch properties
             // We use get_all_vertex_props_with_ctx to respect transaction isolation
             let props_opt = prop_manager.get_all_vertex_props_with_ctx(vid, ctx).await?;
-            if let Some(props) = props_opt {
-                let mut props_json: serde_json::Map<String, Value> =
-                    props.into_iter().map(|(k, v)| (k, v.into())).collect();
-                props_json.insert("_vid".to_string(), json!(vid.as_u64()));
-                props_json.insert("_label".to_string(), json!(label_name));
+            if let Some(mut props_json) = props_opt {
+                props_json.insert("_vid".to_string(), Value::Int(vid.as_u64() as i64));
+                props_json.insert("_label".to_string(), Value::String(label_name.to_string()));
 
                 let mut row = HashMap::new();
-                row.insert(variable.to_string(), Value::Object(props_json));
+                row.insert(variable.to_string(), Value::Map(props_json));
                 matches.push(row);
             }
         }
@@ -6665,7 +6748,7 @@ impl Executor {
             let val = self
                 .evaluate_expr(expr, &row, prop_manager, params, ctx)
                 .await?;
-            if let Value::Array(items) = val {
+            if let Value::List(items) = val {
                 for item in items {
                     let mut new_row = row.clone();
                     new_row.insert(variable.to_string(), item);
@@ -6792,14 +6875,14 @@ impl Executor {
                 let mut row = HashMap::new();
                 row.insert("type".to_string(), Value::String("Label".to_string()));
                 row.insert("name".to_string(), Value::String(label.clone()));
-                row.insert("count".to_string(), json!(s.count));
+                row.insert("count".to_string(), Value::Int(s.count as i64));
                 results.push(row);
             }
             for (edge, s) in &snap.edges {
                 let mut row = HashMap::new();
                 row.insert("type".to_string(), Value::String("Edge".to_string()));
                 row.insert("name".to_string(), Value::String(edge.clone()));
-                row.insert("count".to_string(), json!(s.count));
+                row.insert("count".to_string(), Value::Int(s.count as i64));
                 results.push(row);
             }
         }
@@ -6896,8 +6979,8 @@ impl Executor {
             let mut seen = HashSet::new();
             left_rows.retain(|row| {
                 let sorted_row: std::collections::BTreeMap<_, _> = row.iter().collect();
-                let json = serde_json::to_string(&sorted_row).unwrap();
-                seen.insert(json)
+                let key = format!("{:?}", sorted_row);
+                seen.insert(key)
             });
         }
         Ok(left_rows)
@@ -7008,11 +7091,7 @@ impl Executor {
                 let mut row = Vec::with_capacity(headers.len());
                 row.push(vid.to_string());
                 for p_name in &prop_names {
-                    let val: Value = props
-                        .get(p_name)
-                        .cloned()
-                        .map(|v| v.into())
-                        .unwrap_or(Value::Null);
+                    let val = props.get(p_name).cloned().unwrap_or(Value::Null);
                     row.push(self.format_csv_value(val));
                 }
                 wtr.write_record(&row)?;
@@ -7051,11 +7130,7 @@ impl Executor {
                 row.push(meta.id.to_string());
 
                 for p_name in &prop_names {
-                    let val: Value = props
-                        .get(p_name)
-                        .cloned()
-                        .map(|v| v.into())
-                        .unwrap_or(Value::Null);
+                    let val = props.get(p_name).cloned().unwrap_or(Value::Null);
                     row.push(self.format_csv_value(val));
                 }
                 wtr.write_record(&row)?;
@@ -7065,7 +7140,7 @@ impl Executor {
 
         wtr.flush()?;
         let mut res = HashMap::new();
-        res.insert("count".to_string(), json!(count));
+        res.insert("count".to_string(), Value::Int(count as i64));
         Ok(vec![res])
     }
 
@@ -7173,7 +7248,7 @@ impl Executor {
         }
 
         let mut res = HashMap::new();
-        res.insert("count".to_string(), json!(rows.len()));
+        res.insert("count".to_string(), Value::Int(rows.len() as i64));
         Ok(vec![res])
     }
 
@@ -7247,10 +7322,10 @@ impl Executor {
         match val {
             Value::Null => "".to_string(),
             Value::String(s) => s,
-            Value::Number(n) => n.to_string(),
+            Value::Int(i) => i.to_string(),
+            Value::Float(f) => f.to_string(),
             Value::Bool(b) => b.to_string(),
-            Value::Array(a) => serde_json::to_string(&a).unwrap(),
-            Value::Object(o) => serde_json::to_string(&o).unwrap(),
+            _ => format!("{}", val),
         }
     }
 
@@ -7275,13 +7350,13 @@ impl Executor {
                         s
                     )
                 })?;
-                Ok(json!(i))
+                Ok(Value::Int(i))
             }
             DataType::Float32 | DataType::Float64 => {
                 let f = s.parse::<f64>().map_err(|_| {
                     anyhow!("Failed to parse float for property '{}': {}", prop_name, s)
                 })?;
-                Ok(json!(f))
+                Ok(Value::Float(f))
             }
             DataType::Bool => {
                 let b = s.to_lowercase().parse::<bool>().map_err(|_| {
@@ -7294,17 +7369,16 @@ impl Executor {
                 Ok(Value::Bool(b))
             }
             DataType::Json => {
-                let v: Value = serde_json::from_str(s).map_err(|_| {
+                let json_val: serde_json::Value = serde_json::from_str(s).map_err(|_| {
                     anyhow!("Failed to parse JSON for property '{}': {}", prop_name, s)
                 })?;
-                Ok(v)
+                Ok(Value::from(json_val))
             }
             DataType::Vector { .. } => {
                 let v: Vec<f32> = serde_json::from_str(s).map_err(|_| {
                     anyhow!("Failed to parse Vector for property '{}': {}", prop_name, s)
                 })?;
-                let json_vec: Vec<Value> = v.iter().map(|f| json!(f)).collect();
-                Ok(Value::Array(json_vec))
+                Ok(Value::Vector(v))
             }
             _ => Ok(Value::String(s.to_string())),
         }

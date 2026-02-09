@@ -35,7 +35,7 @@
 //!
 
 use anyhow::Result;
-use serde_json::json;
+use uni_db::unival;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tempfile::tempdir;
@@ -163,7 +163,7 @@ mod create_tests {
         // Insert vertex with two labels: Person and Employee
         let vid = Vid::new(1);
         let mut props = HashMap::new();
-        props.insert("name".to_string(), json!("Alice").into());
+        props.insert("name".to_string(), unival!("Alice"));
 
         writer
             .insert_vertex_with_labels(
@@ -201,8 +201,8 @@ mod create_tests {
         // Insert vertex with three labels: Person, Employee, Manager
         let vid = Vid::new(1);
         let mut props = HashMap::new();
-        props.insert("name".to_string(), json!("Bob").into());
-        props.insert("department".to_string(), json!("Engineering").into());
+        props.insert("name".to_string(), unival!("Bob"));
+        props.insert("department".to_string(), unival!("Engineering"));
 
         writer
             .insert_vertex_with_labels(
@@ -244,7 +244,7 @@ mod create_tests {
         // Create vertex A with ["Person", "Employee"]
         let vid_a = Vid::new(1);
         let mut props_a = HashMap::new();
-        props_a.insert("name".to_string(), json!("Alice").into());
+        props_a.insert("name".to_string(), unival!("Alice"));
 
         writer
             .insert_vertex_with_labels(
@@ -257,7 +257,7 @@ mod create_tests {
         // Create vertex B with ["Employee", "Person"] (reversed order)
         let vid_b = Vid::new(2);
         let mut props_b = HashMap::new();
-        props_b.insert("name".to_string(), json!("Alice").into());
+        props_b.insert("name".to_string(), unival!("Alice"));
 
         writer
             .insert_vertex_with_labels(
@@ -300,7 +300,7 @@ mod create_tests {
         for i in 0..10 {
             let vid = Vid::new(i + 1);
             let mut props = HashMap::new();
-            props.insert("name".to_string(), json!(format!("Person{}", i)).into());
+            props.insert("name".to_string(), unival!(format!("Person{}", i)));
 
             let labels = if i % 3 == 0 {
                 vec!["Person".to_string(), "Employee".to_string()]
@@ -350,7 +350,7 @@ mod create_tests {
         // Test 1: Single label (standard case)
         let vid1 = Vid::new(1);
         let mut props1 = HashMap::new();
-        props1.insert("name".to_string(), json!("Alice").into());
+        props1.insert("name".to_string(), unival!("Alice"));
         writer
             .insert_vertex_with_labels(vid1, props1, vec!["Person".to_string()])
             .await?;
@@ -358,7 +358,7 @@ mod create_tests {
         // Test 2: Duplicate labels in input (should be deduplicated by VidLabelsIndex)
         let vid2 = Vid::new(2);
         let mut props2 = HashMap::new();
-        props2.insert("name".to_string(), json!("Bob").into());
+        props2.insert("name".to_string(), unival!("Bob"));
         writer
             .insert_vertex_with_labels(
                 vid2,
@@ -423,7 +423,7 @@ mod l0_flush_tests {
         // Insert multiple vertices with various label combinations
         let vid1 = Vid::new(1);
         let mut props1 = HashMap::new();
-        props1.insert("name".to_string(), json!("Alice").into());
+        props1.insert("name".to_string(), unival!("Alice"));
         writer
             .insert_vertex_with_labels(
                 vid1,
@@ -434,7 +434,7 @@ mod l0_flush_tests {
 
         let vid2 = Vid::new(2);
         let mut props2 = HashMap::new();
-        props2.insert("name".to_string(), json!("Bob").into());
+        props2.insert("name".to_string(), unival!("Bob"));
         writer
             .insert_vertex_with_labels(
                 vid2,
@@ -445,7 +445,7 @@ mod l0_flush_tests {
 
         let vid3 = Vid::new(3);
         let mut props3 = HashMap::new();
-        props3.insert("name".to_string(), json!("Charlie").into());
+        props3.insert("name".to_string(), unival!("Charlie"));
         writer
             .insert_vertex_with_labels(vid3, props3, vec!["Company".to_string()])
             .await?;
@@ -526,7 +526,7 @@ mod l0_flush_tests {
 
             let vid = Vid::new(1);
             let mut props = HashMap::new();
-            props.insert("name".to_string(), json!("Alice").into());
+            props.insert("name".to_string(), unival!("Alice"));
             writer
                 .insert_vertex_with_labels(
                     vid,
@@ -599,7 +599,7 @@ mod read_tests {
         // Create: A(Person:Employee), B(Person), C(Employee:Manager)
         let vid_a = Vid::new(1);
         let mut props_a = HashMap::new();
-        props_a.insert("name".to_string(), json!("Alice").into());
+        props_a.insert("name".to_string(), unival!("Alice"));
         writer
             .insert_vertex_with_labels(
                 vid_a,
@@ -610,14 +610,14 @@ mod read_tests {
 
         let vid_b = Vid::new(2);
         let mut props_b = HashMap::new();
-        props_b.insert("name".to_string(), json!("Bob").into());
+        props_b.insert("name".to_string(), unival!("Bob"));
         writer
             .insert_vertex_with_labels(vid_b, props_b, vec!["Person".to_string()])
             .await?;
 
         let vid_c = Vid::new(3);
         let mut props_c = HashMap::new();
-        props_c.insert("name".to_string(), json!("Charlie").into());
+        props_c.insert("name".to_string(), unival!("Charlie"));
         writer
             .insert_vertex_with_labels(
                 vid_c,
@@ -661,7 +661,7 @@ mod read_tests {
         // Create: A(Person:Employee), B(Person:Manager), C(Person:Employee:Manager)
         let vid_a = Vid::new(1);
         let mut props_a = HashMap::new();
-        props_a.insert("name".to_string(), json!("Alice").into());
+        props_a.insert("name".to_string(), unival!("Alice"));
         writer
             .insert_vertex_with_labels(
                 vid_a,
@@ -672,7 +672,7 @@ mod read_tests {
 
         let vid_b = Vid::new(2);
         let mut props_b = HashMap::new();
-        props_b.insert("name".to_string(), json!("Bob").into());
+        props_b.insert("name".to_string(), unival!("Bob"));
         writer
             .insert_vertex_with_labels(
                 vid_b,
@@ -683,7 +683,7 @@ mod read_tests {
 
         let vid_c = Vid::new(3);
         let mut props_c = HashMap::new();
-        props_c.insert("name".to_string(), json!("Charlie").into());
+        props_c.insert("name".to_string(), unival!("Charlie"));
         writer
             .insert_vertex_with_labels(
                 vid_c,
@@ -731,7 +731,7 @@ mod read_tests {
         // Create a vertex
         let vid = Vid::new(1);
         let mut props = HashMap::new();
-        props.insert("name".to_string(), json!("Alice").into());
+        props.insert("name".to_string(), unival!("Alice"));
         writer
             .insert_vertex_with_labels(vid, props, vec!["Person".to_string()])
             .await?;
@@ -764,7 +764,7 @@ mod read_tests {
         // Create vertices with known labels
         let vid = Vid::new(1);
         let mut props = HashMap::new();
-        props.insert("name".to_string(), json!("Alice").into());
+        props.insert("name".to_string(), unival!("Alice"));
         writer
             .insert_vertex_with_labels(vid, props, vec!["Person".to_string()])
             .await?;
@@ -799,7 +799,7 @@ mod read_tests {
         // Create vertex with Person:Employee labels
         let vid = Vid::new(1);
         let mut props = HashMap::new();
-        props.insert("name".to_string(), json!("Alice").into());
+        props.insert("name".to_string(), unival!("Alice"));
         writer
             .insert_vertex_with_labels(
                 vid,
@@ -860,7 +860,7 @@ mod update_tests {
         // Create vertex with Person label
         let vid = Vid::new(1);
         let mut props = HashMap::new();
-        props.insert("name".to_string(), json!("Alice").into());
+        props.insert("name".to_string(), unival!("Alice"));
         writer
             .insert_vertex_with_labels(vid, props.clone(), vec!["Person".to_string()])
             .await?;
@@ -907,7 +907,7 @@ mod update_tests {
         // Create vertex with Person:Employee labels
         let vid = Vid::new(1);
         let mut props = HashMap::new();
-        props.insert("name".to_string(), json!("Alice").into());
+        props.insert("name".to_string(), unival!("Alice"));
         writer
             .insert_vertex_with_labels(
                 vid,
@@ -954,8 +954,8 @@ mod update_tests {
         // Create vertex with Person:Employee labels
         let vid = Vid::new(1);
         let mut props1 = HashMap::new();
-        props1.insert("name".to_string(), json!("Alice").into());
-        props1.insert("age".to_string(), json!(30).into());
+        props1.insert("name".to_string(), unival!("Alice"));
+        props1.insert("age".to_string(), unival!(30));
         writer
             .insert_vertex_with_labels(
                 vid,
@@ -968,8 +968,8 @@ mod update_tests {
 
         // Update properties
         let mut props2 = HashMap::new();
-        props2.insert("name".to_string(), json!("Alicia").into());
-        props2.insert("age".to_string(), json!(31).into());
+        props2.insert("name".to_string(), unival!("Alicia"));
+        props2.insert("age".to_string(), unival!(31));
         writer
             .insert_vertex_with_labels(
                 vid,
@@ -1006,7 +1006,7 @@ mod update_tests {
         // Create vertex with Person:Employee labels
         let vid = Vid::new(1);
         let mut props = HashMap::new();
-        props.insert("name".to_string(), json!("Alice").into());
+        props.insert("name".to_string(), unival!("Alice"));
         writer
             .insert_vertex_with_labels(
                 vid,
@@ -1058,7 +1058,7 @@ mod update_tests {
         // Create vertex with Person label only
         let vid = Vid::new(1);
         let mut props = HashMap::new();
-        props.insert("name".to_string(), json!("Alice").into());
+        props.insert("name".to_string(), unival!("Alice"));
         writer
             .insert_vertex_with_labels(vid, props, vec!["Person".to_string()])
             .await?;
@@ -1108,7 +1108,7 @@ mod delete_tests {
         // Create vertex with Person:Employee:Manager labels
         let vid = Vid::new(1);
         let mut props = HashMap::new();
-        props.insert("name".to_string(), json!("Alice").into());
+        props.insert("name".to_string(), unival!("Alice"));
         writer
             .insert_vertex_with_labels(
                 vid,
@@ -1157,7 +1157,7 @@ mod delete_tests {
         // Create vertex with Person:Employee
         let vid = Vid::new(1);
         let mut props = HashMap::new();
-        props.insert("name".to_string(), json!("Alice").into());
+        props.insert("name".to_string(), unival!("Alice"));
         writer
             .insert_vertex_with_labels(
                 vid,
@@ -1174,7 +1174,7 @@ mod delete_tests {
 
         // Recreate with different labels: Person:Manager
         let mut props2 = HashMap::new();
-        props2.insert("name".to_string(), json!("Alice").into());
+        props2.insert("name".to_string(), unival!("Alice"));
         writer
             .insert_vertex_with_labels(
                 vid,
@@ -1215,7 +1215,7 @@ mod delete_tests {
         // Create multiple vertices with overlapping labels
         let vid1 = Vid::new(1);
         let mut props1 = HashMap::new();
-        props1.insert("name".to_string(), json!("Alice").into());
+        props1.insert("name".to_string(), unival!("Alice"));
         writer
             .insert_vertex_with_labels(
                 vid1,
@@ -1226,7 +1226,7 @@ mod delete_tests {
 
         let vid2 = Vid::new(2);
         let mut props2 = HashMap::new();
-        props2.insert("name".to_string(), json!("Bob").into());
+        props2.insert("name".to_string(), unival!("Bob"));
         writer
             .insert_vertex_with_labels(
                 vid2,
@@ -1271,7 +1271,7 @@ mod delete_tests {
         // Create multi-label vertex with an edge
         let vid_person = Vid::new(1);
         let mut props_person = HashMap::new();
-        props_person.insert("name".to_string(), json!("Alice").into());
+        props_person.insert("name".to_string(), unival!("Alice"));
         writer
             .insert_vertex_with_labels(
                 vid_person,
@@ -1282,7 +1282,7 @@ mod delete_tests {
 
         let vid_company = Vid::new(2);
         let mut props_company = HashMap::new();
-        props_company.insert("name".to_string(), json!("ACME Corp").into());
+        props_company.insert("name".to_string(), unival!("ACME Corp"));
         writer
             .insert_vertex_with_labels(vid_company, props_company, vec!["Company".to_string()])
             .await?;
@@ -1354,7 +1354,7 @@ mod index_tests {
             let mut props = HashMap::new();
             props.insert(
                 "name".to_string(),
-                json!(format!("Person{}", vid.as_u64())).into(),
+                unival!(format!("Person{}", vid.as_u64())),
             );
             writer
                 .insert_vertex_with_labels(*vid, props, labels.clone())
@@ -1402,7 +1402,7 @@ mod index_tests {
         // Create vertices with multi-labels
         let vid1 = Vid::new(1);
         let mut props1 = HashMap::new();
-        props1.insert("name".to_string(), json!("Alice").into());
+        props1.insert("name".to_string(), unival!("Alice"));
         writer
             .insert_vertex_with_labels(
                 vid1,
@@ -1413,7 +1413,7 @@ mod index_tests {
 
         let vid2 = Vid::new(2);
         let mut props2 = HashMap::new();
-        props2.insert("name".to_string(), json!("Bob").into());
+        props2.insert("name".to_string(), unival!("Bob"));
         writer
             .insert_vertex_with_labels(
                 vid2,
@@ -1452,7 +1452,7 @@ mod index_tests {
         for i in 0..100 {
             let vid = Vid::new(i + 1);
             let mut props = HashMap::new();
-            props.insert("name".to_string(), json!(format!("Person{}", i)).into());
+            props.insert("name".to_string(), unival!(format!("Person{}", i)));
 
             let labels = match i % 3 {
                 0 => vec!["Person".to_string()],
@@ -1509,7 +1509,7 @@ mod uniid_tests {
         // Create vertex A: ["Person", "Employee"], {name: "Alice"}
         let vid_a = Vid::new(1);
         let mut props_a = HashMap::new();
-        props_a.insert("name".to_string(), json!("Alice").into());
+        props_a.insert("name".to_string(), unival!("Alice"));
         writer
             .insert_vertex_with_labels(
                 vid_a,
@@ -1521,7 +1521,7 @@ mod uniid_tests {
         // Create vertex B: ["Employee", "Person"], {name: "Alice"} (reversed label order)
         let vid_b = Vid::new(2);
         let mut props_b = HashMap::new();
-        props_b.insert("name".to_string(), json!("Alice").into());
+        props_b.insert("name".to_string(), unival!("Alice"));
         writer
             .insert_vertex_with_labels(
                 vid_b,
@@ -1561,7 +1561,7 @@ mod uniid_tests {
         // Create vertex with ["Person"]
         let vid1 = Vid::new(1);
         let mut props1 = HashMap::new();
-        props1.insert("name".to_string(), json!("Alice").into());
+        props1.insert("name".to_string(), unival!("Alice"));
         writer
             .insert_vertex_with_labels(vid1, props1, vec!["Person".to_string()])
             .await?;
@@ -1569,7 +1569,7 @@ mod uniid_tests {
         // Create vertex with ["Person", "Employee"]
         let vid2 = Vid::new(2);
         let mut props2 = HashMap::new();
-        props2.insert("name".to_string(), json!("Alice").into());
+        props2.insert("name".to_string(), unival!("Alice"));
         writer
             .insert_vertex_with_labels(
                 vid2,
@@ -1628,7 +1628,7 @@ mod uniid_tests {
 
         for (vid, labels) in vids.iter().zip(label_orders.iter()) {
             let mut props = HashMap::new();
-            props.insert("name".to_string(), json!("Alice").into());
+            props.insert("name".to_string(), unival!("Alice"));
             writer
                 .insert_vertex_with_labels(*vid, props, labels.clone())
                 .await?;

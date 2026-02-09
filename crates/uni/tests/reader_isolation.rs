@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2024-2026 Dragonscale Team
 
-use serde_json::json;
+use uni_db::unival;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tempfile::tempdir;
@@ -50,7 +50,7 @@ async fn test_reader_isolation_lifecycle() -> anyhow::Result<()> {
         let mut w = writer.write().await;
         let v1 = w.next_vid().await?;
         let mut p1 = HashMap::new();
-        p1.insert("name".to_string(), json!("Alice").into());
+        p1.insert("name".to_string(), unival!("Alice"));
         w.insert_vertex_with_labels(v1, p1, vec!["Person".to_string()])
             .await?;
     }
@@ -62,7 +62,7 @@ async fn test_reader_isolation_lifecycle() -> anyhow::Result<()> {
     let results = executor.execute(plan, &prop_mgr, &HashMap::new()).await?;
 
     assert_eq!(results.len(), 1, "Should find Alice in L0");
-    assert_eq!(results[0].get("n.name"), Some(&json!("Alice")));
+    assert_eq!(results[0].get("n.name"), Some(&unival!("Alice")));
 
     // 4. Flush to Storage
     {
@@ -77,7 +77,7 @@ async fn test_reader_isolation_lifecycle() -> anyhow::Result<()> {
     let results = executor.execute(plan, &prop_mgr, &HashMap::new()).await?;
 
     assert_eq!(results.len(), 1, "Should find Alice in Storage");
-    assert_eq!(results[0].get("n.name"), Some(&json!("Alice")));
+    assert_eq!(results[0].get("n.name"), Some(&unival!("Alice")));
 
     // 6. Delete in L0 (No Flush)
     // We need the VID.

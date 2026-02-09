@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2024-2026 Dragonscale Team
 
-use serde_json::json;
+use uni_db::unival;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tempfile::tempdir;
@@ -53,8 +53,8 @@ async fn test_cypher_merge_actions() -> anyhow::Result<()> {
     let plan = planner.plan(ast)?;
     let res = executor.execute(plan, &prop_manager, &params).await?;
 
-    assert_eq!(res[0].get("p.created"), Some(&json!(1)));
-    assert_eq!(res[0].get("p.matched"), Some(&serde_json::Value::Null));
+    assert_eq!(res[0].get("p.created"), Some(&unival!(1)));
+    assert_eq!(res[0].get("p.matched"), Some(&uni_db::Value::Null));
 
     // 3. MERGE (Match) with ON MATCH
     let query = "MERGE (p:Person {name: 'Alice'}) ON CREATE SET p.created = 2 ON MATCH SET p.matched = 2 RETURN p.created, p.matched";
@@ -64,8 +64,8 @@ async fn test_cypher_merge_actions() -> anyhow::Result<()> {
 
     // p.created should remain 1 (from create)
     // p.matched should become 2
-    assert_eq!(res[0].get("p.created"), Some(&json!(1)));
-    assert_eq!(res[0].get("p.matched"), Some(&json!(2)));
+    assert_eq!(res[0].get("p.created"), Some(&unival!(1)));
+    assert_eq!(res[0].get("p.matched"), Some(&unival!(2)));
 
     Ok(())
 }

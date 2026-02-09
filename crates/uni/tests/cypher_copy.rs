@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2024-2026 Dragonscale Team
 
-use serde_json::json;
+use uni_db::unival;
 use std::collections::HashMap;
 use std::io::Write;
 use std::sync::Arc;
@@ -73,7 +73,7 @@ async fn test_csv_import() -> anyhow::Result<()> {
             &HashMap::new(),
         )
         .await?;
-    assert_eq!(res[0].get("count").unwrap(), &json!(2));
+    assert_eq!(res[0].get("count").unwrap(), &unival!(2));
 
     // 4. Verify People
     let res = executor
@@ -86,8 +86,8 @@ async fn test_csv_import() -> anyhow::Result<()> {
         )
         .await?;
     assert_eq!(res.len(), 2);
-    assert_eq!(res[0].get("n.name"), Some(&json!("Alice")));
-    assert_eq!(res[1].get("n.name"), Some(&json!("Bob")));
+    assert_eq!(res[0].get("n.name"), Some(&unival!("Alice")));
+    assert_eq!(res[1].get("n.name"), Some(&unival!("Bob")));
 
     // 5. Import Edges
     // We need VIDs. Alice is 0, Bob is 1 (simple auto-increment)
@@ -112,7 +112,7 @@ async fn test_csv_import() -> anyhow::Result<()> {
             &HashMap::new(),
         )
         .await?;
-    assert_eq!(res[0].get("count").unwrap(), &json!(1));
+    assert_eq!(res[0].get("count").unwrap(), &unival!(1));
 
     // 6. Verify Edges
     let res = executor
@@ -125,9 +125,9 @@ async fn test_csv_import() -> anyhow::Result<()> {
         )
         .await?;
     assert_eq!(res.len(), 1);
-    assert_eq!(res[0].get("a.name"), Some(&json!("Alice")));
-    assert_eq!(res[0].get("b.name"), Some(&json!("Bob")));
-    assert_eq!(res[0].get("r.since"), Some(&json!(2020)));
+    assert_eq!(res[0].get("a.name"), Some(&unival!("Alice")));
+    assert_eq!(res[0].get("b.name"), Some(&unival!("Bob")));
+    assert_eq!(res[0].get("r.since"), Some(&unival!(2020)));
 
     // 7. Export People
     let export_csv = path.join("people_export.csv");
@@ -139,7 +139,7 @@ async fn test_csv_import() -> anyhow::Result<()> {
             &HashMap::new(),
         )
         .await?;
-    assert_eq!(res[0].get("count").unwrap(), &json!(2));
+    assert_eq!(res[0].get("count").unwrap(), &unival!(2));
 
     // Verify Exported File
     let mut rdr = csv::ReaderBuilder::new().from_path(&export_csv)?;
@@ -187,7 +187,7 @@ async fn test_csv_import() -> anyhow::Result<()> {
             &HashMap::new(),
         )
         .await?;
-    assert_eq!(res[0].get("count").unwrap(), &json!(2));
+    assert_eq!(res[0].get("count").unwrap(), &unival!(2));
 
     let res = executor
         .execute(
@@ -199,7 +199,7 @@ async fn test_csv_import() -> anyhow::Result<()> {
         )
         .await?;
     assert_eq!(res.len(), 1);
-    assert_eq!(res[0].get("n.age"), Some(&json!(40)));
+    assert_eq!(res[0].get("n.age"), Some(&unival!(40)));
 
     Ok(())
 }
@@ -273,7 +273,7 @@ async fn test_parquet_import() -> anyhow::Result<()> {
             &HashMap::new(),
         )
         .await?;
-    assert_eq!(res[0].get("count").unwrap(), &json!(2));
+    assert_eq!(res[0].get("count").unwrap(), &unival!(2));
 
     // 4. Verify imported data
     let res = executor
@@ -286,7 +286,7 @@ async fn test_parquet_import() -> anyhow::Result<()> {
         )
         .await?;
     assert_eq!(res.len(), 1);
-    assert_eq!(res[0].get("n.age"), Some(&json!(40)));
+    assert_eq!(res[0].get("n.age"), Some(&unival!(40)));
 
     let res = executor
         .execute(
@@ -298,7 +298,7 @@ async fn test_parquet_import() -> anyhow::Result<()> {
         )
         .await?;
     assert_eq!(res.len(), 1);
-    assert_eq!(res[0].get("n.age"), Some(&json!(45)));
+    assert_eq!(res[0].get("n.age"), Some(&unival!(45)));
 
     Ok(())
 }

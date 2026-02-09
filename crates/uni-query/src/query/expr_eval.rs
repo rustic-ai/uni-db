@@ -7,7 +7,7 @@
 //! to reduce cognitive complexity and improve maintainability.
 
 use anyhow::{Result, anyhow};
-use serde_json::{Value, json};
+use uni_common::Value;
 use std::cmp::Ordering;
 
 use crate::query::datetime::{
@@ -130,7 +130,7 @@ pub fn cypher_eq(left: &Value, right: &Value) -> Option<bool> {
     }
 
     // Structural equality for Lists
-    if let (Value::Array(l), Value::Array(r)) = (left, right) {
+    if let (Value::List(l), Value::List(r)) = (left, right) {
         if l.len() != r.len() {
             return Some(false);
         }
@@ -145,24 +145,11 @@ pub fn cypher_eq(left: &Value, right: &Value) -> Option<bool> {
         return if has_null { None } else { Some(true) };
     }
 
-    // Structural equality for Maps (Nodes)
-    if let (Value::Object(l), Value::Object(r)) = (left, right) {
+    // Structural equality for Maps
+    if let (Value::Map(l), Value::Map(r)) = (left, right) {
         // If both are nodes (have _vid), compare by _vid ONLY
         if let (Some(vid_l), Some(vid_r)) = (l.get("_vid"), r.get("_vid")) {
             return Some(vid_l == vid_r);
-        }
-
-        // Handle special Cypher types (NaN, Infinity) encoded as objects
-        #[allow(clippy::collapsible_if)]
-        if let (Some(l_type), Some(r_type)) = (l.get("_cypher_type"), r.get("_cypher_type")) {
-            if l_type == r_type {
-                if l_type == "NaN" {
-                    return Some(false);
-                } // NaN = NaN is false
-                if l_type == "Infinity" {
-                    return Some(l.get("pos") == r.get("pos"));
-                }
-            }
         }
 
         if l.len() != r.len() {
@@ -189,31 +176,12 @@ pub fn cypher_eq(left: &Value, right: &Value) -> Option<bool> {
 }
 
 fn value_as_f64(v: &Value) -> Option<f64> {
-    if let Some(f) = v.as_f64() {
-        return Some(f);
-    }
-    #[allow(clippy::collapsible_if)]
-    if let Value::Object(obj) = v {
-        if let Some(Value::String(t)) = obj.get("_cypher_type") {
-            if t == "NaN" {
-                return Some(f64::NAN);
-            }
-            if t == "Infinity" {
-                let pos = obj.get("pos").and_then(|p| p.as_bool()).unwrap_or(true);
-                return Some(if pos {
-                    f64::INFINITY
-                } else {
-                    f64::NEG_INFINITY
-                });
-            }
-        }
-    }
-    None
+    v.as_f64()
 }
 
 /// Evaluate IN operator.
 pub fn eval_in_op(left: &Value, right: &Value) -> Result<Value> {
-    if let Value::Array(arr) = right {
+    if let Value::List(arr) = right {
         let mut has_null = false;
         // Check exact match using cypher_eq (handles numeric coercion and node identity)
         for item in arr {
@@ -225,7 +193,7 @@ pub fn eval_in_op(left: &Value, right: &Value) -> Result<Value> {
         }
 
         // Fallback: Check for Node Object vs VID mismatch
-        if let Value::Object(map) = left
+        if let Value::Map(map) = left
             && let Some(vid_val) = map.get("_vid")
         {
             // Check if arr contains this VID (as Number or String "label:offset")
@@ -240,13 +208,14 @@ pub fn eval_in_op(left: &Value, right: &Value) -> Result<Value> {
                         }
                     }
                 }
-                // If item is Number (raw VID)
-                if let Value::Number(n) = item
+                // If item is Int (raw VID)
+                if let Value::Int(n) = item
                     && let Some(vid_u64) = vid_val.as_u64()
-                    && let Some(n_u64) = n.as_u64()
-                    && vid_u64 == n_u64
                 {
-                    return Ok(Value::Bool(true));
+                    let n_u64 = *n as u64;
+                    if vid_u64 == n_u64 {
+                        return Ok(Value::Bool(true));
+                    }
                 }
 
                 if item.is_null() {
@@ -296,20 +265,14 @@ where
         && left.is_i64()
         && right.is_i64()
     {
-        Ok(json!(result as i64))
+        Ok(Value::Int(result as i64))
     } else {
         Ok(json_f64(result))
     }
 }
 
 fn json_f64(f: f64) -> Value {
-    if f.is_nan() {
-        json!({"_cypher_type": "NaN"})
-    } else if f.is_infinite() {
-        json!({"_cypher_type": "Infinity", "pos": f > 0.0})
-    } else {
-        json!(f)
-    }
+    Value::Float(f)
 }
 
 // ============================================================================
@@ -336,7 +299,7 @@ fn eval_add(left: &Value, right: &Value) -> Result<Value> {
     // Numeric addition
     if let (Some(l), Some(r)) = (value_as_f64(left), value_as_f64(right)) {
         if left.is_i64() && right.is_i64() {
-            return Ok(json!(left.as_i64().unwrap() + right.as_i64().unwrap()));
+            return Ok(Value::Int(left.as_i64().unwrap() + right.as_i64().unwrap()));
         }
         return Ok(json_f64(l + r));
     }
@@ -369,14 +332,16 @@ fn eval_add(left: &Value, right: &Value) -> Result<Value> {
     }
 
     // temporal string + integer microseconds
-    if let (Value::String(s), Value::Number(_)) = (left, right)
+    if let Value::String(s) = left
+        && right.is_number()
         && classify_temporal(s).is_some_and(|t| t != TemporalType::Duration)
     {
         let dur = parse_duration_from_value(right)?;
         return add_temporal_duration(s, &dur);
     }
     // integer microseconds + temporal string
-    if let (Value::Number(_), Value::String(s)) = (left, right)
+    if let Value::String(s) = right
+        && left.is_number()
         && classify_temporal(s).is_some_and(|t| t != TemporalType::Duration)
     {
         let dur = parse_duration_from_value(left)?;
@@ -418,7 +383,8 @@ fn eval_sub(left: &Value, right: &Value) -> Result<Value> {
     }
 
     // temporal - integer microseconds
-    if let (Value::String(s), Value::Number(_)) = (left, right)
+    if let Value::String(s) = left
+        && right.is_number()
         && classify_temporal(s).is_some_and(|t| t != TemporalType::Duration)
     {
         let dur = parse_duration_from_value(right)?.negate();
@@ -559,7 +525,7 @@ fn cypher_partial_cmp(left: &Value, right: &Value) -> Option<Ordering> {
     }
 
     // Array vs Array (Lexicographic)
-    if let (Value::Array(l), Value::Array(r)) = (left, right) {
+    if let (Value::List(l), Value::List(r)) = (left, right) {
         for (lv, rv) in l.iter().zip(r.iter()) {
             match cypher_partial_cmp(lv, rv) {
                 Some(Ordering::Equal) => continue,
@@ -619,9 +585,9 @@ fn time_with_tz_to_utc_nanos(s: &str) -> Result<i64> {
 
 fn eval_size(arg: &Value) -> Result<Value> {
     match arg {
-        Value::Array(arr) => Ok(json!(arr.len())),
-        Value::Object(map) => Ok(json!(map.len())),
-        Value::String(s) => Ok(json!(s.len())),
+        Value::List(arr) => Ok(Value::Int(arr.len() as i64)),
+        Value::Map(map) => Ok(Value::Int(map.len() as i64)),
+        Value::String(s) => Ok(Value::Int(s.len() as i64)),
         Value::Null => Ok(Value::Null),
         _ => Err(anyhow!("size() expects a List, Map, or String")),
     }
@@ -629,10 +595,10 @@ fn eval_size(arg: &Value) -> Result<Value> {
 
 fn eval_keys(arg: &Value) -> Result<Value> {
     match arg {
-        Value::Object(map) => {
+        Value::Map(map) => {
             let mut keys: Vec<&String> = map.keys().filter(|k| !k.starts_with('_')).collect();
             keys.sort();
-            Ok(json!(keys))
+            Ok(Value::List(keys.into_iter().map(|k| Value::String(k.clone())).collect()))
         }
         Value::Null => Ok(Value::Null),
         _ => Err(anyhow!("keys() expects a Map")),
@@ -641,7 +607,7 @@ fn eval_keys(arg: &Value) -> Result<Value> {
 
 fn eval_head(arg: &Value) -> Result<Value> {
     match arg {
-        Value::Array(arr) => Ok(arr.first().cloned().unwrap_or(Value::Null)),
+        Value::List(arr) => Ok(arr.first().cloned().unwrap_or(Value::Null)),
         Value::Null => Ok(Value::Null),
         _ => Err(anyhow!("head() expects a List")),
     }
@@ -649,11 +615,11 @@ fn eval_head(arg: &Value) -> Result<Value> {
 
 fn eval_tail(arg: &Value) -> Result<Value> {
     match arg {
-        Value::Array(arr) => {
+        Value::List(arr) => {
             if arr.is_empty() {
-                Ok(json!([]))
+                Ok(Value::List(vec![]))
             } else {
-                Ok(json!(arr[1..]))
+                Ok(Value::List(arr[1..].to_vec()))
             }
         }
         Value::Null => Ok(Value::Null),
@@ -663,7 +629,7 @@ fn eval_tail(arg: &Value) -> Result<Value> {
 
 fn eval_last(arg: &Value) -> Result<Value> {
     match arg {
-        Value::Array(arr) => Ok(arr.last().cloned().unwrap_or(Value::Null)),
+        Value::List(arr) => Ok(arr.last().cloned().unwrap_or(Value::Null)),
         Value::Null => Ok(Value::Null),
         _ => Err(anyhow!("last() expects a List")),
     }
@@ -671,15 +637,16 @@ fn eval_last(arg: &Value) -> Result<Value> {
 
 fn eval_length(arg: &Value) -> Result<Value> {
     match arg {
-        Value::Array(arr) => Ok(json!(arr.len())),
-        Value::String(s) => Ok(json!(s.len())),
-        Value::Object(map) => {
-            // Path object?
+        Value::List(arr) => Ok(Value::Int(arr.len() as i64)),
+        Value::String(s) => Ok(Value::Int(s.len() as i64)),
+        Value::Path(p) => Ok(Value::Int(p.edges.len() as i64)),
+        Value::Map(map) => {
+            // Path object encoded as map (legacy fallback)
             if map.contains_key("nodes")
                 && map.contains_key("relationships")
-                && let Some(Value::Array(rels)) = map.get("relationships")
+                && let Some(Value::List(rels)) = map.get("relationships")
             {
-                return Ok(json!(rels.len()));
+                return Ok(Value::Int(rels.len() as i64));
             }
             Ok(Value::Null)
         }
@@ -690,7 +657,10 @@ fn eval_length(arg: &Value) -> Result<Value> {
 
 fn eval_nodes(arg: &Value) -> Result<Value> {
     match arg {
-        Value::Object(map) => {
+        Value::Path(p) => Ok(Value::List(
+            p.nodes.iter().map(|n| Value::Node(n.clone())).collect(),
+        )),
+        Value::Map(map) => {
             if let Some(nodes) = map.get("nodes") {
                 Ok(nodes.clone())
             } else {
@@ -704,7 +674,10 @@ fn eval_nodes(arg: &Value) -> Result<Value> {
 
 fn eval_relationships(arg: &Value) -> Result<Value> {
     match arg {
-        Value::Object(map) => {
+        Value::Path(p) => Ok(Value::List(
+            p.edges.iter().map(|e| Value::Edge(e.clone())).collect(),
+        )),
+        Value::Map(map) => {
             if let Some(rels) = map.get("relationships") {
                 Ok(rels.clone())
             } else {
@@ -740,16 +713,9 @@ fn eval_list_function(name: &str, args: &[Value]) -> Result<Value> {
 
 fn eval_tointeger(arg: &Value) -> Result<Value> {
     match arg {
-        Value::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                Ok(json!(i))
-            } else if let Some(f) = n.as_f64() {
-                Ok(json!(f as i64))
-            } else {
-                Ok(Value::Null)
-            }
-        }
-        Value::String(s) => Ok(s.parse::<i64>().map(|i| json!(i)).unwrap_or(Value::Null)),
+        Value::Int(i) => Ok(Value::Int(*i)),
+        Value::Float(f) => Ok(Value::Int(*f as i64)),
+        Value::String(s) => Ok(s.parse::<i64>().map(Value::Int).unwrap_or(Value::Null)),
         Value::Null => Ok(Value::Null),
         _ => Err(anyhow!(
             "InvalidArgumentValue: toInteger() cannot convert type"
@@ -759,8 +725,9 @@ fn eval_tointeger(arg: &Value) -> Result<Value> {
 
 fn eval_tofloat(arg: &Value) -> Result<Value> {
     match arg {
-        Value::Number(n) => Ok(n.as_f64().map(|f| json!(f)).unwrap_or(Value::Null)),
-        Value::String(s) => Ok(s.parse::<f64>().map(|f| json!(f)).unwrap_or(Value::Null)),
+        Value::Int(i) => Ok(Value::Float(*i as f64)),
+        Value::Float(f) => Ok(Value::Float(*f)),
+        Value::String(s) => Ok(s.parse::<f64>().map(Value::Float).unwrap_or(Value::Null)),
         Value::Null => Ok(Value::Null),
         _ => Err(anyhow!(
             "InvalidArgumentValue: toFloat() cannot convert type"
@@ -771,7 +738,15 @@ fn eval_tofloat(arg: &Value) -> Result<Value> {
 fn eval_tostring(arg: &Value) -> Result<Value> {
     match arg {
         Value::String(s) => Ok(Value::String(s.clone())),
-        Value::Number(n) => Ok(Value::String(n.to_string())),
+        Value::Int(i) => Ok(Value::String(i.to_string())),
+        Value::Float(f) => {
+            // Match Cypher convention: whole floats display with ".0"
+            if f.fract() == 0.0 && f.is_finite() {
+                Ok(Value::String(format!("{f:.1}")))
+            } else {
+                Ok(Value::String(f.to_string()))
+            }
+        }
         Value::Bool(b) => Ok(Value::String(b.to_string())),
         Value::Null => Ok(Value::Null),
         other => Ok(Value::String(other.to_string())),
@@ -818,15 +793,8 @@ fn eval_type_function(name: &str, args: &[Value]) -> Result<Value> {
 
 fn eval_abs(arg: &Value) -> Result<Value> {
     match arg {
-        Value::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                Ok(json!(i.abs()))
-            } else if let Some(f) = n.as_f64() {
-                Ok(json!(f.abs()))
-            } else {
-                Ok(Value::Null)
-            }
-        }
+        Value::Int(i) => Ok(Value::Int(i.abs())),
+        Value::Float(f) => Ok(Value::Float(f.abs())),
         Value::Null => Ok(Value::Null),
         _ => Err(anyhow!("abs() expects a number")),
     }
@@ -846,15 +814,19 @@ fn eval_round(arg: &Value) -> Result<Value> {
 
 fn eval_sqrt(arg: &Value) -> Result<Value> {
     match arg {
-        Value::Number(n) => {
-            if let Some(f) = n.as_f64() {
-                if f < 0.0 {
-                    Ok(Value::Null)
-                } else {
-                    Ok(json!(f.sqrt()))
-                }
-            } else {
+        Value::Int(i) => {
+            let f = *i as f64;
+            if f < 0.0 {
                 Ok(Value::Null)
+            } else {
+                Ok(Value::Float(f.sqrt()))
+            }
+        }
+        Value::Float(f) => {
+            if *f < 0.0 {
+                Ok(Value::Null)
+            } else {
+                Ok(Value::Float(f.sqrt()))
             }
         }
         Value::Null => Ok(Value::Null),
@@ -864,17 +836,22 @@ fn eval_sqrt(arg: &Value) -> Result<Value> {
 
 fn eval_sign(arg: &Value) -> Result<Value> {
     match arg {
-        Value::Number(n) => {
-            if let Some(f) = n.as_f64() {
-                if f > 0.0 {
-                    Ok(json!(1))
-                } else if f < 0.0 {
-                    Ok(json!(-1))
-                } else {
-                    Ok(json!(0))
-                }
+        Value::Int(i) => {
+            if *i > 0 {
+                Ok(Value::Int(1))
+            } else if *i < 0 {
+                Ok(Value::Int(-1))
             } else {
-                Ok(Value::Null)
+                Ok(Value::Int(0))
+            }
+        }
+        Value::Float(f) => {
+            if *f > 0.0 {
+                Ok(Value::Int(1))
+            } else if *f < 0.0 {
+                Ok(Value::Int(-1))
+            } else {
+                Ok(Value::Int(0))
             }
         }
         Value::Null => Ok(Value::Null),
@@ -899,12 +876,10 @@ fn eval_power(args: &[Value]) -> Result<Value> {
         return Err(anyhow!("power() requires 2 arguments"));
     }
     match (&args[0], &args[1]) {
-        (Value::Number(base), Value::Number(exp)) => {
-            if let (Some(b), Some(e)) = (base.as_f64(), exp.as_f64()) {
-                Ok(json!(b.powf(e)))
-            } else {
-                Ok(Value::Null)
-            }
+        (a, b) if a.is_number() && b.is_number() => {
+            let base = a.as_f64().unwrap();
+            let exp = b.as_f64().unwrap();
+            Ok(Value::Float(base.powf(exp)))
         }
         (Value::Null, _) | (_, Value::Null) => Ok(Value::Null),
         _ => Err(anyhow!("power() expects numeric arguments")),
@@ -917,13 +892,8 @@ where
     F: Fn(f64) -> f64,
 {
     match arg {
-        Value::Number(n) => {
-            if let Some(f) = n.as_f64() {
-                Ok(json!(op(f)))
-            } else {
-                Ok(Value::Null)
-            }
-        }
+        Value::Int(i) => Ok(Value::Float(op(*i as f64))),
+        Value::Float(f) => Ok(Value::Float(op(*f))),
         Value::Null => Ok(Value::Null),
         _ => Err(anyhow!("{}() expects a number", func_name)),
     }
@@ -958,12 +928,10 @@ fn eval_atan2(args: &[Value]) -> Result<Value> {
         return Err(anyhow!("atan2() requires 2 arguments"));
     }
     match (&args[0], &args[1]) {
-        (Value::Number(y), Value::Number(x)) => {
-            if let (Some(y_val), Some(x_val)) = (y.as_f64(), x.as_f64()) {
-                Ok(json!(y_val.atan2(x_val)))
-            } else {
-                Ok(Value::Null)
-            }
+        (a, b) if a.is_number() && b.is_number() => {
+            let y_val = a.as_f64().unwrap();
+            let x_val = b.as_f64().unwrap();
+            Ok(Value::Float(y_val.atan2(x_val)))
         }
         (Value::Null, _) | (_, Value::Null) => Ok(Value::Null),
         _ => Err(anyhow!("atan2() expects numeric arguments")),
@@ -1021,13 +989,13 @@ fn eval_math_function(name: &str, args: &[Value]) -> Result<Value> {
             if !args.is_empty() {
                 return Err(anyhow!("PI takes no arguments"));
             }
-            Ok(json!(std::f64::consts::PI))
+            Ok(Value::Float(std::f64::consts::PI))
         }
         "E" => {
             if !args.is_empty() {
                 return Err(anyhow!("E takes no arguments"));
             }
-            Ok(json!(std::f64::consts::E))
+            Ok(Value::Float(std::f64::consts::E))
         }
         "RAND" => {
             if !args.is_empty() {
@@ -1035,7 +1003,7 @@ fn eval_math_function(name: &str, args: &[Value]) -> Result<Value> {
             }
             use rand::Rng;
             let mut rng = rand::thread_rng();
-            Ok(json!(rng.gen_range(0.0..1.0)))
+            Ok(Value::Float(rng.gen_range(0.0..1.0)))
         }
         _ => Err(anyhow!("Unknown math function: {}", name)),
     }
@@ -1086,7 +1054,7 @@ fn eval_reverse(args: &[Value]) -> Result<Value> {
     let arg = require_one_arg("reverse", args)?;
     match arg {
         Value::String(s) => Ok(Value::String(s.chars().rev().collect())),
-        Value::Array(arr) => Ok(Value::Array(arr.iter().rev().cloned().collect())),
+        Value::List(arr) => Ok(Value::List(arr.iter().rev().cloned().collect())),
         Value::Null => Ok(Value::Null),
         _ => Err(anyhow!("reverse() expects a string or list")),
     }
@@ -1115,7 +1083,7 @@ fn eval_split(args: &[Value]) -> Result<Value> {
                 .split(delimiter.as_str())
                 .map(|p| Value::String(p.to_string()))
                 .collect();
-            Ok(Value::Array(parts))
+            Ok(Value::List(parts))
         }
         (Value::Null, _) => Ok(Value::Null),
         _ => Err(anyhow!("split() expects string arguments")),
@@ -1155,7 +1123,7 @@ fn eval_left(args: &[Value]) -> Result<Value> {
         return Err(anyhow!("left() requires 2 arguments"));
     }
     match (&args[0], &args[1]) {
-        (Value::String(s), Value::Number(n)) => {
+        (Value::String(s), n) if n.is_number() => {
             let len = n.as_i64().unwrap_or(0) as usize;
             Ok(Value::String(s.chars().take(len).collect()))
         }
@@ -1169,7 +1137,7 @@ fn eval_right(args: &[Value]) -> Result<Value> {
         return Err(anyhow!("right() requires 2 arguments"));
     }
     match (&args[0], &args[1]) {
-        (Value::String(s), Value::Number(n)) => {
+        (Value::String(s), n) if n.is_number() => {
             let len = n.as_i64().unwrap_or(0) as usize;
             let chars: Vec<char> = s.chars().collect();
             let start = chars.len().saturating_sub(len);
@@ -1190,7 +1158,8 @@ fn eval_lpad(args: &[Value]) -> Result<Value> {
         _ => return Err(anyhow!("lpad() expects a string as first argument")),
     };
     let len = match &args[1] {
-        Value::Number(n) => n.as_i64().unwrap_or(0) as usize,
+        Value::Int(n) => *n as usize,
+        Value::Float(f) => *f as i64 as usize,
         Value::Null => return Ok(Value::Null),
         _ => return Err(anyhow!("lpad() expects an integer as second argument")),
     };
@@ -1247,7 +1216,8 @@ fn eval_rpad(args: &[Value]) -> Result<Value> {
         _ => return Err(anyhow!("rpad() expects a string as first argument")),
     };
     let len = match &args[1] {
-        Value::Number(n) => n.as_i64().unwrap_or(0) as usize,
+        Value::Int(n) => *n as usize,
+        Value::Float(f) => *f as i64 as usize,
         Value::Null => return Ok(Value::Null),
         _ => return Err(anyhow!("rpad() expects an integer as second argument")),
     };
@@ -1333,16 +1303,16 @@ fn eval_range_function(args: &[Value]) -> Result<Value> {
     let mut i = start;
     if step > 0 {
         while i <= end {
-            result.push(json!(i));
+            result.push(Value::Int(i));
             i += step;
         }
     } else {
         while i >= end {
-            result.push(json!(i));
+            result.push(Value::Int(i));
             i += step;
         }
     }
-    Ok(Value::Array(result))
+    Ok(Value::List(result))
 }
 
 /// Evaluate a built-in scalar function.
@@ -1553,7 +1523,7 @@ fn eval_valid_at(args: &[Value]) -> Result<Value> {
     }
 
     let node_map = match &args[0] {
-        Value::Object(map) => map,
+        Value::Map(map) => map,
         Value::Null => return Ok(Value::Bool(false)),
         _ => {
             return Err(anyhow!(
@@ -1609,7 +1579,7 @@ fn eval_valid_at(args: &[Value]) -> Result<Value> {
 /// Evaluate vector similarity between two vectors (cosine similarity).
 pub fn eval_vector_similarity(v1: &Value, v2: &Value) -> Result<Value> {
     let (arr1, arr2) = match (v1, v2) {
-        (Value::Array(a1), Value::Array(a2)) => (a1, a2),
+        (Value::List(a1), Value::List(a2)) => (a1, a2),
         _ => return Err(anyhow!("vector_similarity arguments must be arrays")),
     };
 
@@ -1646,13 +1616,13 @@ pub fn eval_vector_similarity(v1: &Value, v2: &Value) -> Result<Value> {
         dot / (mag1 * mag2)
     };
 
-    Ok(json!(sim))
+    Ok(Value::Float(sim))
 }
 
 /// Evaluate vector distance between two vectors.
 pub fn eval_vector_distance(v1: &Value, v2: &Value, metric: &str) -> Result<Value> {
     let (arr1, arr2) = match (v1, v2) {
-        (Value::Array(a1), Value::Array(a2)) => (a1, a2),
+        (Value::List(a1), Value::List(a2)) => (a1, a2),
         _ => return Err(anyhow!("vector_distance arguments must be arrays")),
     };
 
@@ -1691,12 +1661,12 @@ pub fn eval_vector_distance(v1: &Value, v2: &Value, metric: &str) -> Result<Valu
             let mag2 = norm2_sq.sqrt();
 
             if mag1 == 0.0 || mag2 == 0.0 {
-                Ok(json!(1.0))
+                Ok(Value::Float(1.0))
             } else {
                 let sim = dot / (mag1 * mag2);
                 // Clamp to [-1, 1] to avoid numerical errors
                 let sim = sim.clamp(-1.0, 1.0);
-                Ok(json!(1.0 - sim))
+                Ok(Value::Float(1.0 - sim))
             }
         }
         "euclidean" | "l2" => {
@@ -1707,7 +1677,7 @@ pub fn eval_vector_distance(v1: &Value, v2: &Value, metric: &str) -> Result<Valu
                 let diff = f1 - f2;
                 sum_sq_diff += diff * diff;
             }
-            Ok(json!(sum_sq_diff.sqrt()))
+            Ok(Value::Float(sum_sq_diff.sqrt()))
         }
         "dot" | "inner_product" => {
             let mut dot = 0.0;
@@ -1716,7 +1686,7 @@ pub fn eval_vector_distance(v1: &Value, v2: &Value, metric: &str) -> Result<Valu
                 let f2 = r2?;
                 dot += f1 * f2;
             }
-            Ok(json!(1.0 - dot))
+            Ok(Value::Float(1.0 - dot))
         }
         _ => Err(anyhow!("Unknown metric: {}", metric)),
     }
@@ -1824,7 +1794,7 @@ fn eval_bitwise_function(name: &str, args: &[Value]) -> Result<Value> {
         }
         let l = require_int(&args[0], fname)?;
         let r = require_int(&args[1], fname)?;
-        Ok(json!(op(l, r)))
+        Ok(Value::Int(op(l, r)))
     };
 
     match name {
@@ -1837,7 +1807,7 @@ fn eval_bitwise_function(name: &str, args: &[Value]) -> Result<Value> {
             if args.len() != 1 {
                 return Err(anyhow!("uni_bitwise_not requires exactly 1 argument"));
             }
-            Ok(json!(!require_int(&args[0], "uni_bitwise_not")?))
+            Ok(Value::Int(!require_int(&args[0], "uni_bitwise_not")?))
         }
         _ => Err(anyhow!("Unknown bitwise function: {}", name)),
     }
@@ -1846,16 +1816,23 @@ fn eval_bitwise_function(name: &str, args: &[Value]) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
+    /// Helper to create string values in tests (replaces s("..."))
+    fn s(v: &str) -> Value {
+        Value::String(v.into())
+    }
+    /// Helper to create int values in tests (replaces json!(i))
+    fn i(v: i64) -> Value {
+        Value::Int(v)
+    }
 
     #[test]
     fn test_binary_op_eq() {
         assert_eq!(
-            eval_binary_op(&json!(1), &BinaryOp::Eq, &json!(1)).unwrap(),
+            eval_binary_op(&i(1), &BinaryOp::Eq, &i(1)).unwrap(),
             Value::Bool(true)
         );
         assert_eq!(
-            eval_binary_op(&json!(1), &BinaryOp::Eq, &json!(2)).unwrap(),
+            eval_binary_op(&i(1), &BinaryOp::Eq, &i(2)).unwrap(),
             Value::Bool(false)
         );
     }
@@ -1863,11 +1840,11 @@ mod tests {
     #[test]
     fn test_binary_op_comparison() {
         assert_eq!(
-            eval_binary_op(&json!(5), &BinaryOp::Gt, &json!(3)).unwrap(),
+            eval_binary_op(&i(5), &BinaryOp::Gt, &i(3)).unwrap(),
             Value::Bool(true)
         );
         assert_eq!(
-            eval_binary_op(&json!(5), &BinaryOp::Lt, &json!(3)).unwrap(),
+            eval_binary_op(&i(5), &BinaryOp::Lt, &i(3)).unwrap(),
             Value::Bool(false)
         );
     }
@@ -1899,7 +1876,7 @@ mod tests {
     #[test]
     fn test_binary_op_contains() {
         assert_eq!(
-            eval_binary_op(&json!("hello world"), &BinaryOp::Contains, &json!("world")).unwrap(),
+            eval_binary_op(&s("hello world"), &BinaryOp::Contains, &s("world")).unwrap(),
             Value::Bool(true)
         );
     }
@@ -1907,31 +1884,31 @@ mod tests {
     #[test]
     fn test_scalar_function_size() {
         assert_eq!(
-            eval_scalar_function("SIZE", &[json!([1, 2, 3])]).unwrap(),
-            json!(3)
+            eval_scalar_function("SIZE", &[Value::List(vec![i(1), i(2), i(3)])]).unwrap(),
+            Value::Int(3)
         );
     }
 
     #[test]
     fn test_scalar_function_head() {
         assert_eq!(
-            eval_scalar_function("HEAD", &[json!([1, 2, 3])]).unwrap(),
-            json!(1)
+            eval_scalar_function("HEAD", &[Value::List(vec![i(1), i(2), i(3)])]).unwrap(),
+            Value::Int(1)
         );
     }
 
     #[test]
     fn test_scalar_function_coalesce() {
         assert_eq!(
-            eval_scalar_function("COALESCE", &[Value::Null, json!(1), json!(2)]).unwrap(),
-            json!(1)
+            eval_scalar_function("COALESCE", &[Value::Null, Value::Int(1), Value::Int(2)]).unwrap(),
+            Value::Int(1)
         );
     }
 
     #[test]
     fn test_vector_similarity() {
-        let v1 = json!([1.0, 0.0]);
-        let v2 = json!([1.0, 0.0]);
+        let v1 = Value::List(vec![Value::Float(1.0), Value::Float(0.0)]);
+        let v2 = Value::List(vec![Value::Float(1.0), Value::Float(0.0)]);
         let result = eval_vector_similarity(&v1, &v2).unwrap();
         assert_eq!(result.as_f64().unwrap(), 1.0);
     }
@@ -1940,25 +1917,25 @@ mod tests {
     fn test_regex_match() {
         // Basic regex match
         assert_eq!(
-            eval_binary_op(&json!("hello world"), &BinaryOp::Regex, &json!("hello.*")).unwrap(),
+            eval_binary_op(&s("hello world"), &BinaryOp::Regex, &s("hello.*")).unwrap(),
             Value::Bool(true)
         );
 
         // No match
         assert_eq!(
-            eval_binary_op(&json!("hello world"), &BinaryOp::Regex, &json!("^world")).unwrap(),
+            eval_binary_op(&s("hello world"), &BinaryOp::Regex, &s("^world")).unwrap(),
             Value::Bool(false)
         );
 
         // Case sensitive
         assert_eq!(
-            eval_binary_op(&json!("Hello"), &BinaryOp::Regex, &json!("hello")).unwrap(),
+            eval_binary_op(&s("Hello"), &BinaryOp::Regex, &s("hello")).unwrap(),
             Value::Bool(false)
         );
 
         // Case insensitive with flag
         assert_eq!(
-            eval_binary_op(&json!("Hello"), &BinaryOp::Regex, &json!("(?i)hello")).unwrap(),
+            eval_binary_op(&s("Hello"), &BinaryOp::Regex, &s("(?i)hello")).unwrap(),
             Value::Bool(true)
         );
     }
@@ -1967,13 +1944,13 @@ mod tests {
     fn test_regex_null_handling() {
         // Left operand is null
         assert_eq!(
-            eval_binary_op(&Value::Null, &BinaryOp::Regex, &json!(".*")).unwrap(),
+            eval_binary_op(&Value::Null, &BinaryOp::Regex, &s(".*")).unwrap(),
             Value::Null
         );
 
         // Right operand is null
         assert_eq!(
-            eval_binary_op(&json!("hello"), &BinaryOp::Regex, &Value::Null).unwrap(),
+            eval_binary_op(&s("hello"), &BinaryOp::Regex, &Value::Null).unwrap(),
             Value::Null
         );
     }
@@ -1981,7 +1958,7 @@ mod tests {
     #[test]
     fn test_regex_invalid_pattern() {
         // Invalid regex pattern should return error
-        let result = eval_binary_op(&json!("hello"), &BinaryOp::Regex, &json!("[invalid"));
+        let result = eval_binary_op(&s("hello"), &BinaryOp::Regex, &s("[invalid"));
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("Invalid regex"));
     }
@@ -1991,9 +1968,9 @@ mod tests {
         // Email pattern with escaped dots
         assert_eq!(
             eval_binary_op(
-                &json!("test@example.com"),
+                &s("test@example.com"),
                 &BinaryOp::Regex,
-                &json!(r"^[\w.-]+@[\w.-]+\.\w+$")
+                &s(r"^[\w.-]+@[\w.-]+\.\w+$")
             )
             .unwrap(),
             Value::Bool(true)
@@ -2002,9 +1979,9 @@ mod tests {
         // Phone number pattern
         assert_eq!(
             eval_binary_op(
-                &json!("123-456-7890"),
+                &s("123-456-7890"),
                 &BinaryOp::Regex,
-                &json!(r"^\d{3}-\d{3}-\d{4}$")
+                &s(r"^\d{3}-\d{3}-\d{4}$")
             )
             .unwrap(),
             Value::Bool(true)
@@ -2013,9 +1990,9 @@ mod tests {
         // Non-matching phone
         assert_eq!(
             eval_binary_op(
-                &json!("1234567890"),
+                &s("1234567890"),
                 &BinaryOp::Regex,
-                &json!(r"^\d{3}-\d{3}-\d{4}$")
+                &s(r"^\d{3}-\d{3}-\d{4}$")
             )
             .unwrap(),
             Value::Bool(false)
@@ -2026,31 +2003,31 @@ mod tests {
     fn test_regex_anchors() {
         // Start anchor
         assert_eq!(
-            eval_binary_op(&json!("hello world"), &BinaryOp::Regex, &json!("^hello")).unwrap(),
+            eval_binary_op(&s("hello world"), &BinaryOp::Regex, &s("^hello")).unwrap(),
             Value::Bool(true)
         );
         assert_eq!(
-            eval_binary_op(&json!("say hello"), &BinaryOp::Regex, &json!("^hello")).unwrap(),
+            eval_binary_op(&s("say hello"), &BinaryOp::Regex, &s("^hello")).unwrap(),
             Value::Bool(false)
         );
 
         // End anchor
         assert_eq!(
-            eval_binary_op(&json!("hello world"), &BinaryOp::Regex, &json!("world$")).unwrap(),
+            eval_binary_op(&s("hello world"), &BinaryOp::Regex, &s("world$")).unwrap(),
             Value::Bool(true)
         );
         assert_eq!(
-            eval_binary_op(&json!("world hello"), &BinaryOp::Regex, &json!("world$")).unwrap(),
+            eval_binary_op(&s("world hello"), &BinaryOp::Regex, &s("world$")).unwrap(),
             Value::Bool(false)
         );
 
         // Full match with both anchors
         assert_eq!(
-            eval_binary_op(&json!("hello"), &BinaryOp::Regex, &json!("^hello$")).unwrap(),
+            eval_binary_op(&s("hello"), &BinaryOp::Regex, &s("^hello$")).unwrap(),
             Value::Bool(true)
         );
         assert_eq!(
-            eval_binary_op(&json!("hello world"), &BinaryOp::Regex, &json!("^hello$")).unwrap(),
+            eval_binary_op(&s("hello world"), &BinaryOp::Regex, &s("^hello$")).unwrap(),
             Value::Bool(false)
         );
     }
@@ -2058,20 +2035,20 @@ mod tests {
     #[test]
     fn test_temporal_arithmetic() {
         // datetime + duration (1 hour)
-        let dt = json!("2024-01-15T10:00:00Z");
-        let dur = json!(3_600_000_000_i64);
+        let dt = s("2024-01-15T10:00:00Z");
+        let dur = Value::Int(3_600_000_000_i64);
         let result = eval_binary_op(&dt, &BinaryOp::Add, &dur).unwrap();
         assert!(result.as_str().unwrap().contains("11:00"));
 
         // date + duration (1 day)
-        let d = json!("2024-01-01");
-        let dur_day = json!(86_400_000_000_i64);
+        let d = s("2024-01-01");
+        let dur_day = Value::Int(86_400_000_000_i64);
         let result = eval_binary_op(&d, &BinaryOp::Add, &dur_day).unwrap();
         assert_eq!(result.as_str().unwrap(), "2024-01-02");
 
         // datetime - datetime (returns ISO 8601 duration)
-        let dt1 = json!("2024-01-02T00:00:00Z");
-        let dt2 = json!("2024-01-01T00:00:00Z");
+        let dt1 = s("2024-01-02T00:00:00Z");
+        let dt2 = s("2024-01-01T00:00:00Z");
         let result = eval_binary_op(&dt1, &BinaryOp::Sub, &dt2).unwrap();
         // Result is now ISO 8601 duration string (1 day = PT24H for datetime types)
         let dur_str = result.as_str().unwrap();
@@ -2085,14 +2062,14 @@ mod tests {
     #[test]
     fn test_temporal_arithmetic_edge_cases() {
         // Negative duration (subtracting time)
-        let dt = json!("2024-01-15T10:00:00Z");
-        let neg_dur = json!(-3_600_000_000_i64); // -1 hour
+        let dt = s("2024-01-15T10:00:00Z");
+        let neg_dur = Value::Int(-3_600_000_000_i64); // -1 hour
         let result = eval_binary_op(&dt, &BinaryOp::Add, &neg_dur).unwrap();
         assert!(result.as_str().unwrap().contains("09:00"));
 
         // Duration subtraction resulting in negative duration
-        let dur1 = json!("PT1H"); // 1 hour as ISO 8601
-        let dur2 = json!("PT2H"); // 2 hours as ISO 8601
+        let dur1 = s("PT1H"); // 1 hour as ISO 8601
+        let dur2 = s("PT2H"); // 2 hours as ISO 8601
         let result = eval_binary_op(&dur1, &BinaryOp::Sub, &dur2).unwrap();
         // Result is ISO 8601 duration string (negative 1 hour)
         // Note: chrono Duration doesn't support negative durations well in ISO 8601 format
@@ -2100,28 +2077,28 @@ mod tests {
         assert!(result.as_str().is_some());
 
         // Zero duration addition
-        let dt = json!("2024-01-15T10:00:00Z");
-        let zero_dur = json!(0_i64);
+        let dt = s("2024-01-15T10:00:00Z");
+        let zero_dur = Value::Int(0_i64);
         let result = eval_binary_op(&dt, &BinaryOp::Add, &zero_dur).unwrap();
         assert!(result.as_str().unwrap().contains("10:00"));
 
         // Date crossing year boundary
-        let d = json!("2023-12-31");
-        let one_day = json!(86_400_000_000_i64);
+        let d = s("2023-12-31");
+        let one_day = Value::Int(86_400_000_000_i64);
         let result = eval_binary_op(&d, &BinaryOp::Add, &one_day).unwrap();
         assert_eq!(result.as_str().unwrap(), "2024-01-01");
 
         // Same datetime subtraction yields zero duration
-        let dt1 = json!("2024-01-15T10:00:00Z");
-        let dt2 = json!("2024-01-15T10:00:00Z");
+        let dt1 = s("2024-01-15T10:00:00Z");
+        let dt2 = s("2024-01-15T10:00:00Z");
         let result = eval_binary_op(&dt1, &BinaryOp::Sub, &dt2).unwrap();
         // Zero duration should be "PT0S" or similar
         let dur_str = result.as_str().unwrap();
         assert!(dur_str.starts_with('P'));
 
         // Leap year handling
-        let leap_day = json!("2024-02-28");
-        let one_day = json!(86_400_000_000_i64);
+        let leap_day = s("2024-02-28");
+        let one_day = Value::Int(86_400_000_000_i64);
         let result = eval_binary_op(&leap_day, &BinaryOp::Add, &one_day).unwrap();
         assert_eq!(result.as_str().unwrap(), "2024-02-29");
     }
@@ -2130,19 +2107,19 @@ mod tests {
     fn test_regex_empty_string() {
         // Empty string matches empty pattern
         assert_eq!(
-            eval_binary_op(&json!(""), &BinaryOp::Regex, &json!("^$")).unwrap(),
+            eval_binary_op(&s(""), &BinaryOp::Regex, &s("^$")).unwrap(),
             Value::Bool(true)
         );
 
         // Empty string doesn't match non-empty pattern
         assert_eq!(
-            eval_binary_op(&json!(""), &BinaryOp::Regex, &json!(".+")).unwrap(),
+            eval_binary_op(&s(""), &BinaryOp::Regex, &s(".+")).unwrap(),
             Value::Bool(false)
         );
 
         // Non-empty string matches .* (matches anything including empty)
         assert_eq!(
-            eval_binary_op(&json!("hello"), &BinaryOp::Regex, &json!(".*")).unwrap(),
+            eval_binary_op(&s("hello"), &BinaryOp::Regex, &s(".*")).unwrap(),
             Value::Bool(true)
         );
     }
@@ -2150,12 +2127,12 @@ mod tests {
     #[test]
     fn test_regex_type_errors() {
         // Non-string left operand
-        let result = eval_binary_op(&json!(123), &BinaryOp::Regex, &json!("\\d+"));
+        let result = eval_binary_op(&Value::Int(123), &BinaryOp::Regex, &s("\\d+"));
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("must be a string"));
 
         // Non-string right operand (pattern)
-        let result = eval_binary_op(&json!("hello"), &BinaryOp::Regex, &json!(123));
+        let result = eval_binary_op(&s("hello"), &BinaryOp::Regex, &Value::Int(123));
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("pattern string"));
     }
@@ -2244,11 +2221,11 @@ mod tests {
 
     #[test]
     fn test_nan_comparison_with_non_numeric() {
-        let nan = json!({"_cypher_type": "NaN"});
+        let nan = Value::Float(f64::NAN);
 
         // NaN > number → false
         assert_eq!(
-            eval_binary_op(&nan, &BinaryOp::Gt, &json!(1)).unwrap(),
+            eval_binary_op(&nan, &BinaryOp::Gt, &i(1)).unwrap(),
             Value::Bool(false)
         );
 
@@ -2260,20 +2237,20 @@ mod tests {
 
         // NaN > string → null (cross-type)
         assert_eq!(
-            eval_binary_op(&nan, &BinaryOp::Gt, &json!("a")).unwrap(),
+            eval_binary_op(&nan, &BinaryOp::Gt, &s("a")).unwrap(),
             Value::Null
         );
 
         // string < NaN → null (cross-type)
         assert_eq!(
-            eval_binary_op(&json!("a"), &BinaryOp::Lt, &nan).unwrap(),
+            eval_binary_op(&s("a"), &BinaryOp::Lt, &nan).unwrap(),
             Value::Null
         );
     }
 
     #[test]
     fn test_nan_equality_with_non_numeric() {
-        let nan = json!({"_cypher_type": "NaN"});
+        let nan = Value::Float(f64::NAN);
 
         // NaN = NaN → false
         assert_eq!(
@@ -2289,13 +2266,13 @@ mod tests {
 
         // NaN = 'a' → false (structural mismatch at cypher_eq fallback)
         assert_eq!(
-            eval_binary_op(&nan, &BinaryOp::Eq, &json!("a")).unwrap(),
+            eval_binary_op(&nan, &BinaryOp::Eq, &s("a")).unwrap(),
             Value::Bool(false)
         );
 
         // NaN <> 'a' → true
         assert_eq!(
-            eval_binary_op(&nan, &BinaryOp::NotEq, &json!("a")).unwrap(),
+            eval_binary_op(&nan, &BinaryOp::NotEq, &s("a")).unwrap(),
             Value::Bool(true)
         );
     }
@@ -2303,8 +2280,8 @@ mod tests {
     #[test]
     fn test_large_integer_equality() {
         // These two values are distinct as i64 but collide when cast to f64
-        let a = json!(4611686018427387905_i64);
-        let b = json!(4611686018427387900_i64);
+        let a = Value::Int(4611686018427387905_i64);
+        let b = Value::Int(4611686018427387900_i64);
 
         assert_eq!(
             eval_binary_op(&a, &BinaryOp::Eq, &b).unwrap(),
@@ -2318,8 +2295,8 @@ mod tests {
 
     #[test]
     fn test_large_integer_ordering() {
-        let a = json!(4611686018427387905_i64);
-        let b = json!(4611686018427387900_i64);
+        let a = Value::Int(4611686018427387905_i64);
+        let b = Value::Int(4611686018427387900_i64);
 
         assert_eq!(
             eval_binary_op(&a, &BinaryOp::Gt, &b).unwrap(),
@@ -2335,11 +2312,11 @@ mod tests {
     fn test_int_float_equality_still_works() {
         // Regression: 1 = 1.0 must still be true
         assert_eq!(
-            eval_binary_op(&json!(1), &BinaryOp::Eq, &json!(1.0)).unwrap(),
+            eval_binary_op(&i(1), &BinaryOp::Eq, &Value::Float(1.0)).unwrap(),
             Value::Bool(true)
         );
         assert_eq!(
-            eval_binary_op(&json!(1), &BinaryOp::NotEq, &json!(1.0)).unwrap(),
+            eval_binary_op(&i(1), &BinaryOp::NotEq, &Value::Float(1.0)).unwrap(),
             Value::Bool(false)
         );
     }

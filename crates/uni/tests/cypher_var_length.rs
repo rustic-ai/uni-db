@@ -6,7 +6,7 @@ use arrow_array::{
     BooleanArray, LargeBinaryArray, RecordBatch, StringArray, TimestampMicrosecondArray,
     UInt64Array,
 };
-use serde_json::Value;
+use uni_db::Value;
 use std::sync::Arc;
 use tempfile::tempdir;
 use uni_db::core::id::{Eid, Vid};
@@ -135,7 +135,7 @@ async fn test_cypher_var_length() -> anyhow::Result<()> {
         .await?;
 
     assert_eq!(results.len(), 1);
-    assert_eq!(results[0].get("b.id"), Some(&Value::Number(2.into())));
+    assert_eq!(results[0].get("b.id"), Some(&Value::Int(2)));
 
     // Test 2: Range *1..2 (A->B, A->C)
     println!("--- Test 2: *1..2 ---");
@@ -148,8 +148,8 @@ async fn test_cypher_var_length() -> anyhow::Result<()> {
         .await?;
 
     assert_eq!(results.len(), 2);
-    assert_eq!(results[0].get("b.id"), Some(&Value::Number(1.into())));
-    assert_eq!(results[1].get("b.id"), Some(&Value::Number(2.into())));
+    assert_eq!(results[0].get("b.id"), Some(&Value::Int(1)));
+    assert_eq!(results[1].get("b.id"), Some(&Value::Int(2)));
 
     Ok(())
 }

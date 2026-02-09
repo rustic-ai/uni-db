@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2024-2026 Dragonscale Team
 
-use serde_json::json;
+use uni_db::unival;
 use std::collections::HashMap;
 use uni_db::Uni;
 
@@ -68,17 +68,17 @@ async fn test_rag_use_case() -> anyhow::Result<()> {
         HashMap::from([
             (
                 "text".to_string(),
-                json!("Function verify() checks signatures.").into(),
+                unival!("Function verify() checks signatures."),
             ),
-            ("embedding".to_string(), json!(c1_vec).into()),
+            ("embedding".to_string(), unival!(c1_vec)),
         ]),
         HashMap::from([
-            ("text".to_string(), json!("Other text about verify.").into()),
-            ("embedding".to_string(), json!(c2_vec).into()),
+            ("text".to_string(), unival!("Other text about verify.")),
+            ("embedding".to_string(), unival!(c2_vec)),
         ]),
         HashMap::from([
-            ("text".to_string(), json!("Bananas are yellow.").into()),
-            ("embedding".to_string(), json!(c3_vec).into()),
+            ("text".to_string(), unival!("Bananas are yellow.")),
+            ("embedding".to_string(), unival!(c3_vec)),
         ]),
     ];
     let chunk_vids = db.bulk_insert_vertices("Chunk", chunks).await?;
@@ -87,8 +87,8 @@ async fn test_rag_use_case() -> anyhow::Result<()> {
     let _c3 = chunk_vids[2];
 
     let entities = vec![HashMap::from([
-        ("name".to_string(), json!("verify").into()),
-        ("type".to_string(), json!("function").into()),
+        ("name".to_string(), unival!("verify")),
+        ("type".to_string(), unival!("function")),
     ])];
     let entity_vids = db.bulk_insert_vertices("Entity", entities).await?;
     let e1 = entity_vids[0];
@@ -119,7 +119,7 @@ async fn test_rag_use_case() -> anyhow::Result<()> {
     let debug_query = "CALL uni.vector.query('Chunk', 'embedding', $query_vec, 5) YIELD node, distance RETURN node, distance";
     let debug_result = db
         .query_with(debug_query)
-        .param("query_vec", json!(query_vec))
+        .param("query_vec", unival!(query_vec.clone()))
         .fetch_all()
         .await?;
     println!("Debug Vector Query: {} rows", debug_result.rows.len());
@@ -141,7 +141,7 @@ async fn test_rag_use_case() -> anyhow::Result<()> {
 
     let result = db
         .query_with(query)
-        .param("query_vec", json!(query_vec))
+        .param("query_vec", unival!(query_vec))
         .fetch_all()
         .await?;
 

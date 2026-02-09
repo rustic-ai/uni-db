@@ -12,7 +12,8 @@ use chrono::{
     TimeZone, Timelike, Utc,
 };
 use chrono_tz::Tz;
-use serde_json::{Map, Value, json};
+use std::collections::HashMap;
+use uni_common::Value;
 
 // ============================================================================
 // Constants
@@ -153,12 +154,7 @@ pub fn is_localdatetime_value(val: &Value) -> bool {
 pub fn parse_duration_from_value(val: &Value) -> Result<CypherDuration> {
     match val {
         Value::String(s) => parse_duration_to_cypher(s),
-        Value::Number(n) => {
-            let micros = n
-                .as_i64()
-                .ok_or_else(|| anyhow!("Expected integer duration"))?;
-            Ok(CypherDuration::from_micros(micros))
-        }
+        Value::Int(micros) => Ok(CypherDuration::from_micros(*micros)),
         _ => Err(anyhow!("Expected duration value")),
     }
 }
@@ -368,7 +364,7 @@ pub fn is_duration_value(val: &Value) -> bool {
 /// as durations when paired with datetime/date values. For standalone type
 /// checking, use `is_duration_value` instead.
 pub fn is_duration_or_micros(val: &Value) -> bool {
-    is_duration_value(val) || matches!(val, Value::Number(n) if n.is_i64())
+    is_duration_value(val) || matches!(val, Value::Int(_))
 }
 
 /// Convert a duration value (ISO 8601 string or i64 micros) to microseconds.
@@ -378,9 +374,7 @@ pub fn duration_to_micros(val: &Value) -> Result<i64> {
             let duration = parse_duration_to_cypher(s)?;
             Ok(duration.to_micros())
         }
-        Value::Number(n) => n
-            .as_i64()
-            .ok_or_else(|| anyhow!("Expected integer duration")),
+        Value::Int(i) => Ok(*i),
         _ => Err(anyhow!("Expected duration value")),
     }
 }
@@ -503,29 +497,29 @@ fn eval_extract(args: &[Value], component: Component) -> Result<Value> {
         Value::String(s) => {
             // Try parsing as DateTime, then NaiveDateTime, then NaiveDate, then NaiveTime
             if let Ok(dt) = DateTime::parse_from_rfc3339(s) {
-                return Ok(json!(extract_component(&dt, &component)));
+                return Ok(Value::Int(extract_component(&dt, &component) as i64));
             }
             if let Ok(dt) = NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S") {
-                return Ok(json!(extract_component(&dt, &component)));
+                return Ok(Value::Int(extract_component(&dt, &component) as i64));
             }
 
             match component {
                 Component::Year | Component::Month | Component::Day => {
                     if let Ok(d) = NaiveDate::parse_from_str(s, "%Y-%m-%d") {
-                        return Ok(json!(match component {
-                            Component::Year => d.year(),
-                            Component::Month => d.month() as i32,
-                            Component::Day => d.day() as i32,
+                        return Ok(Value::Int(match component {
+                            Component::Year => d.year() as i64,
+                            Component::Month => d.month() as i64,
+                            Component::Day => d.day() as i64,
                             _ => unreachable!(),
                         }));
                     }
                 }
                 Component::Hour | Component::Minute | Component::Second => {
                     if let Ok(t) = NaiveTime::parse_from_str(s, "%H:%M:%S") {
-                        return Ok(json!(match component {
-                            Component::Hour => t.hour() as i32,
-                            Component::Minute => t.minute() as i32,
-                            Component::Second => t.second() as i32,
+                        return Ok(Value::Int(match component {
+                            Component::Hour => t.hour() as i64,
+                            Component::Minute => t.minute() as i64,
+                            Component::Second => t.second() as i64,
                             _ => unreachable!(),
                         }));
                     }
@@ -650,12 +644,12 @@ pub fn is_duration_string(s: &str) -> bool {
 
 fn extract_date_component(s: &str, f: impl FnOnce(NaiveDate) -> i64) -> Result<Value> {
     let (date, _, _) = parse_datetime_with_tz(s)?;
-    Ok(json!(f(date)))
+    Ok(Value::Int(f(date)))
 }
 
 fn extract_time_component(s: &str, f: impl FnOnce(NaiveTime) -> i64) -> Result<Value> {
     let (_, time, _) = parse_datetime_with_tz(s)?;
-    Ok(json!(f(time)))
+    Ok(Value::Int(f(time)))
 }
 
 fn extract_year(s: &str) -> Result<Value> {
@@ -716,7 +710,7 @@ fn extract_day_of_quarter(s: &str) -> Result<Value> {
             )
         })?;
     let day_of_quarter = (date - quarter_start).num_days() + 1;
-    Ok(json!(day_of_quarter))
+    Ok(Value::Int(day_of_quarter))
 }
 
 fn extract_millisecond(s: &str) -> Result<Value> {
@@ -771,11 +765,11 @@ fn extract_offset_total_seconds(s: &str) -> Result<i32> {
 }
 
 fn extract_offset_minutes(s: &str) -> Result<Value> {
-    Ok(json!(extract_offset_total_seconds(s)? / 60))
+    Ok(Value::Int((extract_offset_total_seconds(s)? / 60) as i64))
 }
 
 fn extract_offset_seconds(s: &str) -> Result<Value> {
-    Ok(json!(extract_offset_total_seconds(s)?))
+    Ok(Value::Int(extract_offset_total_seconds(s)? as i64))
 }
 
 fn parse_as_utc(s: &str) -> Result<DateTime<Utc>> {
@@ -785,11 +779,11 @@ fn parse_as_utc(s: &str) -> Result<DateTime<Utc>> {
 }
 
 fn extract_epoch_seconds(s: &str) -> Result<Value> {
-    Ok(json!(parse_as_utc(s)?.timestamp()))
+    Ok(Value::Int(parse_as_utc(s)?.timestamp()))
 }
 
 fn extract_epoch_millis(s: &str) -> Result<Value> {
-    Ok(json!(parse_as_utc(s)?.timestamp_millis()))
+    Ok(Value::Int(parse_as_utc(s)?.timestamp_millis()))
 }
 
 // ============================================================================
@@ -810,28 +804,28 @@ pub fn eval_duration_accessor(duration_str: &str, component: &str) -> Result<Val
 
     match component_lower.as_str() {
         // Total components (converted to that unit)
-        "years" => Ok(json!(total_months.div_euclid(12))),
-        "months" => Ok(json!(total_months)),
-        "weeks" => Ok(json!(duration.days.div_euclid(7))),
-        "days" => Ok(json!(duration.days)),
-        "hours" => Ok(json!(total_secs.div_euclid(3600))),
-        "minutes" => Ok(json!(total_secs.div_euclid(60))),
-        "seconds" => Ok(json!(total_secs)),
-        "milliseconds" => Ok(json!(total_nanos.div_euclid(1_000_000))),
-        "microseconds" => Ok(json!(total_nanos.div_euclid(1_000))),
-        "nanoseconds" => Ok(json!(total_nanos)),
+        "years" => Ok(Value::Int(total_months.div_euclid(12))),
+        "months" => Ok(Value::Int(total_months)),
+        "weeks" => Ok(Value::Int(duration.days.div_euclid(7))),
+        "days" => Ok(Value::Int(duration.days)),
+        "hours" => Ok(Value::Int(total_secs.div_euclid(3600))),
+        "minutes" => Ok(Value::Int(total_secs.div_euclid(60))),
+        "seconds" => Ok(Value::Int(total_secs)),
+        "milliseconds" => Ok(Value::Int(total_nanos.div_euclid(1_000_000))),
+        "microseconds" => Ok(Value::Int(total_nanos.div_euclid(1_000))),
+        "nanoseconds" => Ok(Value::Int(total_nanos)),
 
         // "Of" accessors (remainder within larger unit) using Euclidean remainder
-        "quartersofyear" => Ok(json!(total_months.rem_euclid(12) / 3)),
-        "monthsofquarter" => Ok(json!(total_months.rem_euclid(3))),
-        "monthsofyear" => Ok(json!(total_months.rem_euclid(12))),
-        "daysofweek" => Ok(json!(duration.days.rem_euclid(7))),
-        "hoursofday" => Ok(json!(total_secs.div_euclid(3600).rem_euclid(24))),
-        "minutesofhour" => Ok(json!(total_secs.div_euclid(60).rem_euclid(60))),
-        "secondsofminute" => Ok(json!(total_secs.rem_euclid(60))),
-        "millisecondsofsecond" => Ok(json!(total_nanos.div_euclid(1_000_000).rem_euclid(1000))),
-        "microsecondsofsecond" => Ok(json!(total_nanos.div_euclid(1_000).rem_euclid(1_000_000))),
-        "nanosecondsofsecond" => Ok(json!(total_nanos.rem_euclid(NANOS_PER_SECOND))),
+        "quartersofyear" => Ok(Value::Int(total_months.rem_euclid(12) / 3)),
+        "monthsofquarter" => Ok(Value::Int(total_months.rem_euclid(3))),
+        "monthsofyear" => Ok(Value::Int(total_months.rem_euclid(12))),
+        "daysofweek" => Ok(Value::Int(duration.days.rem_euclid(7))),
+        "hoursofday" => Ok(Value::Int(total_secs.div_euclid(3600).rem_euclid(24))),
+        "minutesofhour" => Ok(Value::Int(total_secs.div_euclid(60).rem_euclid(60))),
+        "secondsofminute" => Ok(Value::Int(total_secs.rem_euclid(60))),
+        "millisecondsofsecond" => Ok(Value::Int(total_nanos.div_euclid(1_000_000).rem_euclid(1000))),
+        "microsecondsofsecond" => Ok(Value::Int(total_nanos.div_euclid(1_000).rem_euclid(1_000_000))),
+        "nanosecondsofsecond" => Ok(Value::Int(total_nanos.rem_euclid(NANOS_PER_SECOND))),
 
         _ => Err(anyhow!("Unknown duration component: {}", component)),
     }
@@ -881,13 +875,13 @@ fn eval_date(args: &[Value]) -> Result<Value> {
             let date = parse_date_string(s)?;
             Ok(Value::String(date.format("%Y-%m-%d").to_string()))
         }
-        Value::Object(map) => eval_date_from_map(map),
+        Value::Map(map) => eval_date_from_map(map),
         Value::Null => Ok(Value::Null),
         _ => Err(anyhow!("date() expects a string or map argument")),
     }
 }
 
-fn eval_date_from_map(map: &Map<String, Value>) -> Result<Value> {
+fn eval_date_from_map(map: &HashMap<String, Value>) -> Result<Value> {
     // Check if we have a 'date' field to copy from another date/datetime
     if let Some(dt_val) = map.get("date") {
         return eval_date_from_projection(map, dt_val);
@@ -898,7 +892,7 @@ fn eval_date_from_map(map: &Map<String, Value>) -> Result<Value> {
 }
 
 /// Handle date construction from projection (copying from another temporal value).
-fn eval_date_from_projection(map: &Map<String, Value>, source: &Value) -> Result<Value> {
+fn eval_date_from_projection(map: &HashMap<String, Value>, source: &Value) -> Result<Value> {
     let source_str = source
         .as_str()
         .ok_or_else(|| anyhow!("date field must be a string"))?;
@@ -915,7 +909,7 @@ fn eval_date_from_projection(map: &Map<String, Value>, source: &Value) -> Result
 /// - Quarter: override quarter, dayOfQuarter (uses year from source)
 /// - Calendar: override year, month, day (defaults from source)
 fn build_date_from_projection(
-    map: &Map<String, Value>,
+    map: &HashMap<String, Value>,
     source_date: &NaiveDate,
 ) -> Result<NaiveDate> {
     // Week-based: {date: other, week: 2, dayOfWeek: 3}
@@ -991,7 +985,7 @@ fn build_date_from_projection(
 /// - Week-based: year, week, dayOfWeek
 /// - Ordinal: year, ordinalDay
 /// - Quarter: year, quarter, dayOfQuarter
-fn build_date_from_map(map: &Map<String, Value>) -> Result<NaiveDate> {
+fn build_date_from_map(map: &HashMap<String, Value>) -> Result<NaiveDate> {
     // Extract year (required for all date map constructors)
     let year = map
         .get("year")
@@ -1125,7 +1119,7 @@ fn eval_time(args: &[Value]) -> Result<Value> {
                 }
             }
         }
-        Value::Object(map) => eval_time_from_map(map, true),
+        Value::Map(map) => eval_time_from_map(map, true),
         Value::Null => Ok(Value::Null),
         _ => Err(anyhow!("time() expects a string or map argument")),
     }
@@ -1142,13 +1136,13 @@ fn eval_localtime(args: &[Value]) -> Result<Value> {
             let time = parse_time_string(s)?;
             Ok(Value::String(format_time_with_nanos(&time)))
         }
-        Value::Object(map) => eval_time_from_map(map, false),
+        Value::Map(map) => eval_time_from_map(map, false),
         Value::Null => Ok(Value::Null),
         _ => Err(anyhow!("localtime() expects a string or map argument")),
     }
 }
 
-fn eval_time_from_map(map: &Map<String, Value>, with_timezone: bool) -> Result<Value> {
+fn eval_time_from_map(map: &HashMap<String, Value>, with_timezone: bool) -> Result<Value> {
     // Check if we have a 'time' field to copy from another time/datetime
     if let Some(time_val) = map.get("time") {
         return eval_time_from_projection(map, time_val, with_timezone);
@@ -1178,7 +1172,7 @@ fn eval_time_from_map(map: &Map<String, Value>, with_timezone: bool) -> Result<V
 
 /// Handle time construction from projection (copying from another temporal value).
 fn eval_time_from_projection(
-    map: &Map<String, Value>,
+    map: &HashMap<String, Value>,
     source: &Value,
     with_timezone: bool,
 ) -> Result<Value> {
@@ -1251,7 +1245,7 @@ fn parse_time_string(s: &str) -> Result<NaiveTime> {
         .map_err(|_| anyhow!("Invalid time format"))
 }
 
-fn build_nanoseconds(map: &Map<String, Value>) -> u32 {
+fn build_nanoseconds(map: &HashMap<String, Value>) -> u32 {
     let millis = map.get("millisecond").and_then(|v| v.as_i64()).unwrap_or(0) as u32;
     let micros = map.get("microsecond").and_then(|v| v.as_i64()).unwrap_or(0) as u32;
     let nanos = map.get("nanosecond").and_then(|v| v.as_i64()).unwrap_or(0) as u32;
@@ -1373,7 +1367,7 @@ fn eval_datetime(args: &[Value]) -> Result<Value> {
                 }
             }
         }
-        Value::Object(map) => eval_datetime_from_map(map, true),
+        Value::Map(map) => eval_datetime_from_map(map, true),
         Value::Null => Ok(Value::Null),
         _ => Err(anyhow!("datetime() expects a string or map argument")),
     }
@@ -1393,13 +1387,13 @@ fn eval_localdatetime(args: &[Value]) -> Result<Value> {
             let ndt = NaiveDateTime::new(date, time);
             Ok(Value::String(format_naive_datetime(&ndt)))
         }
-        Value::Object(map) => eval_datetime_from_map(map, false),
+        Value::Map(map) => eval_datetime_from_map(map, false),
         Value::Null => Ok(Value::Null),
         _ => Err(anyhow!("localdatetime() expects a string or map argument")),
     }
 }
 
-fn eval_datetime_from_map(map: &Map<String, Value>, with_timezone: bool) -> Result<Value> {
+fn eval_datetime_from_map(map: &HashMap<String, Value>, with_timezone: bool) -> Result<Value> {
     // Check if we have a 'datetime' field to copy from another datetime
     if let Some(dt_val) = map.get("datetime").or(map.get("date")) {
         return eval_datetime_from_projection(map, dt_val, with_timezone);
@@ -1445,7 +1439,7 @@ fn eval_datetime_from_map(map: &Map<String, Value>, with_timezone: bool) -> Resu
 
 /// Handle datetime construction from projection (copying from another temporal value).
 fn eval_datetime_from_projection(
-    map: &Map<String, Value>,
+    map: &HashMap<String, Value>,
     source: &Value,
     with_timezone: bool,
 ) -> Result<Value> {
@@ -2010,14 +2004,14 @@ fn eval_duration(args: &[Value]) -> Result<Value> {
             let duration = parse_duration_to_cypher(s)?;
             Ok(Value::String(duration.to_iso8601()))
         }
-        Value::Object(map) => eval_duration_from_map(map),
-        Value::Number(n) => {
+        Value::Map(map) => eval_duration_from_map(map),
+        Value::Int(_) | Value::Float(_) => {
             // Treat as microseconds, convert to ISO 8601
-            if let Some(micros) = n.as_i64() {
+            if let Some(micros) = args[0].as_i64() {
                 let duration = CypherDuration::from_micros(micros);
                 Ok(Value::String(duration.to_iso8601()))
             } else {
-                Ok(Value::Number(n.clone()))
+                Ok(args[0].clone())
             }
         }
         Value::Null => Ok(Value::Null),
@@ -2030,7 +2024,7 @@ fn eval_duration(args: &[Value]) -> Result<Value> {
 /// Fractional parts cascade to the next smaller unit:
 /// - `months: 5.5` -> 5 months + 15 days (0.5 * 30)
 /// - `days: 14.5` -> 14 days + 12 hours (0.5 * 24h in nanos)
-fn eval_duration_from_map(map: &Map<String, Value>) -> Result<Value> {
+fn eval_duration_from_map(map: &HashMap<String, Value>) -> Result<Value> {
     let mut months_f: f64 = 0.0;
     let mut days_f: f64 = 0.0;
     let mut nanos_f: f64 = 0.0;
@@ -2236,7 +2230,7 @@ fn eval_truncate(type_name: &str, args: &[Value]) -> Result<Value> {
 fn truncate_date(
     unit: &str,
     temporal: Option<&Value>,
-    adjust_map: Option<&Map<String, Value>>,
+    adjust_map: Option<&HashMap<String, Value>>,
 ) -> Result<Value> {
     let date = match temporal {
         Some(Value::String(s)) => parse_date_string(s)?,
@@ -2302,7 +2296,7 @@ fn truncate_date_to_unit(date: NaiveDate, unit: &str) -> Result<NaiveDate> {
     }
 }
 
-fn apply_date_adjustments(date: NaiveDate, map: &Map<String, Value>) -> Result<Value> {
+fn apply_date_adjustments(date: NaiveDate, map: &HashMap<String, Value>) -> Result<Value> {
     let mut result = date;
 
     // Handle dayOfWeek adjustment (moves to different day in the same week)
@@ -2329,7 +2323,7 @@ fn apply_date_adjustments(date: NaiveDate, map: &Map<String, Value>) -> Result<V
 fn truncate_time(
     unit: &str,
     temporal: Option<&Value>,
-    adjust_map: Option<&Map<String, Value>>,
+    adjust_map: Option<&HashMap<String, Value>>,
     with_timezone: bool,
 ) -> Result<Value> {
     let (date, time, tz_info) = match temporal {
@@ -2408,7 +2402,7 @@ fn truncate_time_to_unit(time: NaiveTime, unit: &str) -> Result<NaiveTime> {
 }
 
 /// Apply time adjustments from a map and return the adjusted NaiveTime.
-fn apply_time_adjustments(time: NaiveTime, map: &Map<String, Value>) -> Result<NaiveTime> {
+fn apply_time_adjustments(time: NaiveTime, map: &HashMap<String, Value>) -> Result<NaiveTime> {
     let hour = map
         .get("hour")
         .and_then(|v| v.as_i64())
@@ -2430,7 +2424,7 @@ fn apply_time_adjustments(time: NaiveTime, map: &Map<String, Value>) -> Result<N
 fn truncate_datetime(
     unit: &str,
     temporal: Option<&Value>,
-    adjust_map: Option<&Map<String, Value>>,
+    adjust_map: Option<&HashMap<String, Value>>,
     type_name: &str,
 ) -> Result<Value> {
     let (date, time, tz_info) = match temporal {
@@ -2520,7 +2514,7 @@ fn truncate_datetime_to_unit(
 fn apply_datetime_adjustments(
     date: NaiveDate,
     time: NaiveTime,
-    map: &Map<String, Value>,
+    map: &HashMap<String, Value>,
     type_name: &str,
     tz_info: Option<&TimezoneInfo>,
 ) -> Result<Value> {
@@ -3087,86 +3081,141 @@ fn parse_temporal_value_typed(val: &Value) -> Result<ParsedTemporal> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
+
+    /// Helper to build a Value::Map from key-value pairs.
+    fn map_val(pairs: Vec<(&str, Value)>) -> Value {
+        Value::Map(
+            pairs
+                .into_iter()
+                .map(|(k, v)| (k.to_string(), v))
+                .collect(),
+        )
+    }
 
     #[test]
     fn test_date_from_map_calendar() {
-        let result = eval_date(&[json!({"year": 1984, "month": 10, "day": 11})]).unwrap();
+        let result = eval_date(&[map_val(vec![
+            ("year", Value::Int(1984)),
+            ("month", Value::Int(10)),
+            ("day", Value::Int(11)),
+        ])])
+        .unwrap();
         assert_eq!(result, Value::String("1984-10-11".to_string()));
     }
 
     #[test]
     fn test_date_from_map_defaults() {
-        let result = eval_date(&[json!({"year": 1984})]).unwrap();
+        let result = eval_date(&[map_val(vec![("year", Value::Int(1984))])]).unwrap();
         assert_eq!(result, Value::String("1984-01-01".to_string()));
     }
 
     #[test]
     fn test_date_from_week() {
         // Week 10, Wednesday (day 3) of 1984
-        let result = eval_date(&[json!({"year": 1984, "week": 10, "dayOfWeek": 3})]).unwrap();
+        let result = eval_date(&[map_val(vec![
+            ("year", Value::Int(1984)),
+            ("week", Value::Int(10)),
+            ("dayOfWeek", Value::Int(3)),
+        ])])
+        .unwrap();
         assert!(result.as_str().unwrap().starts_with("1984-03"));
     }
 
     #[test]
     fn test_date_from_ordinal() {
         // Day 202 of 1984 (leap year)
-        let result = eval_date(&[json!({"year": 1984, "ordinalDay": 202})]).unwrap();
+        let result = eval_date(&[map_val(vec![
+            ("year", Value::Int(1984)),
+            ("ordinalDay", Value::Int(202)),
+        ])])
+        .unwrap();
         assert_eq!(result, Value::String("1984-07-20".to_string()));
     }
 
     #[test]
     fn test_date_from_quarter() {
         // Q3, day 45 of 1984
-        let result = eval_date(&[json!({"year": 1984, "quarter": 3, "dayOfQuarter": 45})]).unwrap();
+        let result = eval_date(&[map_val(vec![
+            ("year", Value::Int(1984)),
+            ("quarter", Value::Int(3)),
+            ("dayOfQuarter", Value::Int(45)),
+        ])])
+        .unwrap();
         assert_eq!(result, Value::String("1984-08-14".to_string()));
     }
 
     #[test]
     fn test_time_from_map() {
-        let result = eval_time(&[json!({"hour": 12, "minute": 31, "second": 14})]).unwrap();
+        let result = eval_time(&[map_val(vec![
+            ("hour", Value::Int(12)),
+            ("minute", Value::Int(31)),
+            ("second", Value::Int(14)),
+        ])])
+        .unwrap();
         assert_eq!(result, Value::String("12:31:14".to_string()));
     }
 
     #[test]
     fn test_time_from_map_with_nanos() {
-        let result = eval_time(&[json!({
-            "hour": 12,
-            "minute": 31,
-            "second": 14,
-            "millisecond": 645,
-            "microsecond": 876,
-            "nanosecond": 123
-        })])
+        let result = eval_time(&[map_val(vec![
+            ("hour", Value::Int(12)),
+            ("minute", Value::Int(31)),
+            ("second", Value::Int(14)),
+            ("millisecond", Value::Int(645)),
+            ("microsecond", Value::Int(876)),
+            ("nanosecond", Value::Int(123)),
+        ])])
         .unwrap();
         assert!(result.as_str().unwrap().starts_with("12:31:14.645876123"));
     }
 
     #[test]
     fn test_datetime_from_map() {
-        let result =
-            eval_datetime(&[json!({"year": 1984, "month": 10, "day": 11, "hour": 12})]).unwrap();
+        let result = eval_datetime(&[map_val(vec![
+            ("year", Value::Int(1984)),
+            ("month", Value::Int(10)),
+            ("day", Value::Int(11)),
+            ("hour", Value::Int(12)),
+        ])])
+        .unwrap();
         assert!(result.as_str().unwrap().contains("1984-10-11T12:00"));
     }
 
     #[test]
     fn test_localdatetime_from_week() {
         // Week 1 of 1816 should be 1816-01-01 (Monday of that week)
-        let result = eval_localdatetime(&[json!({"year": 1816, "week": 1})]).unwrap();
+        let result = eval_localdatetime(&[map_val(vec![
+            ("year", Value::Int(1816)),
+            ("week", Value::Int(1)),
+        ])])
+        .unwrap();
         assert_eq!(result, Value::String("1816-01-01T00:00".to_string()));
 
         // Week 52 of 1816
-        let result = eval_localdatetime(&[json!({"year": 1816, "week": 52})]).unwrap();
+        let result = eval_localdatetime(&[map_val(vec![
+            ("year", Value::Int(1816)),
+            ("week", Value::Int(52)),
+        ])])
+        .unwrap();
         assert_eq!(result, Value::String("1816-12-23T00:00".to_string()));
 
         // Week 1 of 1817 (starts in 1816!)
-        let result = eval_localdatetime(&[json!({"year": 1817, "week": 1})]).unwrap();
+        let result = eval_localdatetime(&[map_val(vec![
+            ("year", Value::Int(1817)),
+            ("week", Value::Int(1)),
+        ])])
+        .unwrap();
         assert_eq!(result, Value::String("1816-12-30T00:00".to_string()));
     }
 
     #[test]
     fn test_duration_from_map_extended() {
-        let result = eval_duration(&[json!({"years": 1, "months": 2, "days": 3})]).unwrap();
+        let result = eval_duration(&[map_val(vec![
+            ("years", Value::Int(1)),
+            ("months", Value::Int(2)),
+            ("days", Value::Int(3)),
+        ])])
+        .unwrap();
         // Duration is now returned as ISO 8601 string
         let dur_str = result.as_str().unwrap();
         assert!(dur_str.starts_with('P'));
@@ -3176,58 +3225,92 @@ mod tests {
 
     #[test]
     fn test_datetime_fromepoch() {
-        let result = eval_datetime_fromepoch(&[json!(0)]).unwrap();
+        let result = eval_datetime_fromepoch(&[Value::Int(0)]).unwrap();
         assert_eq!(result, Value::String("1970-01-01T00:00Z".to_string()));
     }
 
     #[test]
     fn test_datetime_fromepochmillis() {
-        let result = eval_datetime_fromepochmillis(&[json!(0)]).unwrap();
+        let result = eval_datetime_fromepochmillis(&[Value::Int(0)]).unwrap();
         assert_eq!(result, Value::String("1970-01-01T00:00Z".to_string()));
     }
 
     #[test]
     fn test_truncate_date_year() {
-        let result = eval_truncate("date", &[json!("year"), json!("1984-10-11")]).unwrap();
+        let result = eval_truncate(
+            "date",
+            &[
+                Value::String("year".to_string()),
+                Value::String("1984-10-11".to_string()),
+            ],
+        )
+        .unwrap();
         assert_eq!(result, Value::String("1984-01-01".to_string()));
     }
 
     #[test]
     fn test_truncate_date_month() {
-        let result = eval_truncate("date", &[json!("month"), json!("1984-10-11")]).unwrap();
+        let result = eval_truncate(
+            "date",
+            &[
+                Value::String("month".to_string()),
+                Value::String("1984-10-11".to_string()),
+            ],
+        )
+        .unwrap();
         assert_eq!(result, Value::String("1984-10-01".to_string()));
     }
 
     #[test]
     fn test_truncate_datetime_hour() {
-        let result =
-            eval_truncate("datetime", &[json!("hour"), json!("1984-10-11T12:31:14Z")]).unwrap();
+        let result = eval_truncate(
+            "datetime",
+            &[
+                Value::String("hour".to_string()),
+                Value::String("1984-10-11T12:31:14Z".to_string()),
+            ],
+        )
+        .unwrap();
         assert!(result.as_str().unwrap().contains("1984-10-11T12:00"));
     }
 
     #[test]
     fn test_duration_between() {
-        let result = eval_duration_between(&[json!("1984-10-11"), json!("1984-10-12")]).unwrap();
+        let result = eval_duration_between(&[
+            Value::String("1984-10-11".to_string()),
+            Value::String("1984-10-12".to_string()),
+        ])
+        .unwrap();
         assert_eq!(result.as_str().unwrap(), "P1D");
     }
 
     #[test]
     fn test_duration_in_days() {
-        let result = eval_duration_in_days(&[json!("1984-10-11"), json!("1984-10-21")]).unwrap();
+        let result = eval_duration_in_days(&[
+            Value::String("1984-10-11".to_string()),
+            Value::String("1984-10-21".to_string()),
+        ])
+        .unwrap();
         assert_eq!(result.as_str().unwrap(), "P10D");
     }
 
     #[test]
     fn test_duration_in_months() {
-        let result = eval_duration_in_months(&[json!("1984-10-11"), json!("1985-01-11")]).unwrap();
+        let result = eval_duration_in_months(&[
+            Value::String("1984-10-11".to_string()),
+            Value::String("1985-01-11".to_string()),
+        ])
+        .unwrap();
         assert_eq!(result.as_str().unwrap(), "P3M");
     }
 
     #[test]
     fn test_duration_in_seconds() {
-        let result =
-            eval_duration_in_seconds(&[json!("1984-10-11T12:00:00"), json!("1984-10-11T13:00:00")])
-                .unwrap();
+        let result = eval_duration_in_seconds(&[
+            Value::String("1984-10-11T12:00:00".to_string()),
+            Value::String("1984-10-11T13:00:00".to_string()),
+        ])
+        .unwrap();
         assert_eq!(result.as_str().unwrap(), "PT1H");
     }
 
@@ -3279,14 +3362,27 @@ mod tests {
     fn test_fractional_cascading_in_map() {
         // months: 5.5 cascades via avg Gregorian month (2629746s).
         // 0.5 months = 1314873s = 15 days + 18873s = 15d 5h 14m 33s
-        let result = eval_duration(&[json!({"months": 5.5, "days": 0})]).unwrap();
+        let result = eval_duration(&[map_val(vec![
+            ("months", Value::Float(5.5)),
+            ("days", Value::Int(0)),
+        ])])
+        .unwrap();
         let s = result.as_str().unwrap();
         assert_eq!(s, "P5M15DT5H14M33S");
     }
 
     #[test]
     fn test_fractional_cascading_full() {
-        let result = eval_duration(&[json!({"years": 12.5, "months": 5.5, "days": 14.5, "hours": 16.5, "minutes": 12.5, "seconds": 70.5, "nanoseconds": 3})]).unwrap();
+        let result = eval_duration(&[map_val(vec![
+            ("years", Value::Float(12.5)),
+            ("months", Value::Float(5.5)),
+            ("days", Value::Float(14.5)),
+            ("hours", Value::Float(16.5)),
+            ("minutes", Value::Float(12.5)),
+            ("seconds", Value::Float(70.5)),
+            ("nanoseconds", Value::Int(3)),
+        ])])
+        .unwrap();
         let s = result.as_str().unwrap();
         // Verify roundtrip
         let dur = parse_duration_to_cypher(s).unwrap();

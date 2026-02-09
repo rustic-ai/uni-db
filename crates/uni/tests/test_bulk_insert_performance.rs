@@ -3,7 +3,7 @@
 
 //! Test to demonstrate bulk insert performance improvement
 
-use serde_json::json;
+use uni_db::unival;
 use std::collections::HashMap;
 use std::time::Instant;
 
@@ -53,10 +53,10 @@ async fn test_bulk_insert_performance() {
         let mut props = Vec::new();
         for i in 0..scale {
             let mut p: HashMap<String, uni_db::Value> = HashMap::new();
-            p.insert("name".to_string(), json!(format!("Person_{}", i)).into());
+            p.insert("name".to_string(), unival!(format!("Person_{}", i)));
             p.insert(
                 "email".to_string(),
-                json!(format!("person_{}@example.com", i)).into(),
+                unival!(format!("person_{}@example.com", i)),
             );
             props.push(p);
         }
@@ -148,9 +148,9 @@ async fn test_bulk_insert_with_constraints() {
             let mut p: HashMap<String, uni_db::Value> = HashMap::new();
             p.insert(
                 "email".to_string(),
-                json!(format!("user_{}@example.com", i)).into(),
+                unival!(format!("user_{}@example.com", i)),
             );
-            p.insert("age".to_string(), json!(25 + (i % 50)).into());
+            p.insert("age".to_string(), unival!(25 + (i % 50)));
             props.push(p);
         }
 

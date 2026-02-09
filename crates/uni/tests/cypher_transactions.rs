@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2024-2026 Dragonscale Team
 
-use serde_json::json;
+use uni_db::unival;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tempfile::tempdir;
@@ -74,7 +74,7 @@ async fn test_explicit_transactions() -> anyhow::Result<()> {
         )
         .await?;
     assert_eq!(res.len(), 1);
-    assert_eq!(res[0].get("n.name"), Some(&json!("Alice")));
+    assert_eq!(res[0].get("n.name"), Some(&unival!("Alice")));
 
     // 5. ROLLBACK
     executor
@@ -127,7 +127,7 @@ async fn test_explicit_transactions() -> anyhow::Result<()> {
         )
         .await?;
     assert_eq!(res.len(), 1);
-    assert_eq!(res[0].get("n.name"), Some(&json!("Bob")));
+    assert_eq!(res[0].get("n.name"), Some(&unival!("Bob")));
 
     Ok(())
 }

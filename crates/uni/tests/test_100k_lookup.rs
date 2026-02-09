@@ -3,7 +3,7 @@
 
 //! Test for 100k property lookup bug
 
-use serde_json::json;
+use uni_db::unival;
 use std::collections::HashMap;
 use std::time::Instant;
 use uni_common::core::id::Vid;
@@ -78,9 +78,9 @@ async fn test_100k_property_lookup() {
         for i in batch_start..batch_end {
             let embedding: Vec<f32> = (0..128).map(|x| (x + i) as f32).collect();
             let mut p: HashMap<String, uni_db::Value> = HashMap::new();
-            p.insert("name".to_string(), json!(format!("Person_{}", i)).into());
-            p.insert("age".to_string(), json!((i % 100) as i32).into());
-            p.insert("embedding".to_string(), json!(embedding).into());
+            p.insert("name".to_string(), unival!(format!("Person_{}", i)));
+            p.insert("age".to_string(), unival!((i % 100) as i32));
+            p.insert("embedding".to_string(), unival!(embedding));
             props.push(p);
         }
         let prep_time = prep_start.elapsed();

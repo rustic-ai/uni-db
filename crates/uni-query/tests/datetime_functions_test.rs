@@ -1,15 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2024-2026 Dragonscale Team
 
-use serde_json::json;
+use uni_common::unival;
 use uni_query::query::expr_eval::eval_scalar_function;
 
 #[test]
 fn test_date_function() {
-    let res = eval_scalar_function("DATE", &[json!("2023-01-15")]).unwrap();
+    let res = eval_scalar_function("DATE", &[unival!("2023-01-15")]).unwrap();
     assert_eq!(res.as_str().unwrap(), "2023-01-15");
 
-    let res = eval_scalar_function("DATE", &[json!("2023-01-15 10:30:00")]).unwrap();
+    let res = eval_scalar_function("DATE", &[unival!("2023-01-15 10:30:00")]).unwrap();
     assert_eq!(res.as_str().unwrap(), "2023-01-15");
 
     // Current date (no args)
@@ -20,32 +20,32 @@ fn test_date_function() {
 #[test]
 fn test_time_function() {
     // Cypher time() always includes timezone (defaults to +00:00 when unspecified).
-    let res = eval_scalar_function("TIME", &[json!("10:30:00")]).unwrap();
+    let res = eval_scalar_function("TIME", &[unival!("10:30:00")]).unwrap();
     assert_eq!(res.as_str().unwrap(), "10:30+00:00");
 
     // Time with non-zero seconds includes seconds and timezone.
-    let res = eval_scalar_function("TIME", &[json!("10:30:45")]).unwrap();
+    let res = eval_scalar_function("TIME", &[unival!("10:30:45")]).unwrap();
     assert_eq!(res.as_str().unwrap(), "10:30:45+00:00");
 
     // Time with explicit timezone preserves it.
-    let res = eval_scalar_function("TIME", &[json!("10:30:45+01:00")]).unwrap();
+    let res = eval_scalar_function("TIME", &[unival!("10:30:45+01:00")]).unwrap();
     assert_eq!(res.as_str().unwrap(), "10:30:45+01:00");
 }
 
 #[test]
 fn test_datetime_function() {
     // Standard Cypher datetime uses T separator (not space).
-    let res = eval_scalar_function("DATETIME", &[json!("2023-01-15T10:30:00Z")]).unwrap();
+    let res = eval_scalar_function("DATETIME", &[unival!("2023-01-15T10:30:00Z")]).unwrap();
     assert_eq!(res.as_str().unwrap(), "2023-01-15T10:30Z");
 
     // Datetime with explicit timezone.
-    let res = eval_scalar_function("DATETIME", &[json!("2023-01-15T10:30:00+05:00")]).unwrap();
+    let res = eval_scalar_function("DATETIME", &[unival!("2023-01-15T10:30:00+05:00")]).unwrap();
     assert_eq!(res.as_str().unwrap(), "2023-01-15T10:30+05:00");
 }
 
 #[test]
 fn test_extract_functions() {
-    let dt = json!("2023-01-15 10:30:45");
+    let dt = unival!("2023-01-15 10:30:45");
 
     assert_eq!(
         eval_scalar_function("YEAR", std::slice::from_ref(&dt))
@@ -101,7 +101,7 @@ fn test_localdatetime_function() {
     assert!(s.len() >= 19, "Expected at least YYYY-MM-DDTHH:MM:SS");
 
     // Should work with string argument too
-    let res = eval_scalar_function("LOCALDATETIME", &[json!("2023-01-15T10:30:00")]).unwrap();
+    let res = eval_scalar_function("LOCALDATETIME", &[unival!("2023-01-15T10:30:00")]).unwrap();
     // Format omits seconds when they are zero
     assert_eq!(res.as_str().unwrap(), "2023-01-15T10:30");
 }
@@ -116,6 +116,6 @@ fn test_localtime_function() {
     assert!(s.len() >= 8, "Expected at least HH:MM:SS");
 
     // Should work with string argument too (zero seconds omitted per TCK spec)
-    let res = eval_scalar_function("LOCALTIME", &[json!("10:30:00")]).unwrap();
+    let res = eval_scalar_function("LOCALTIME", &[unival!("10:30:00")]).unwrap();
     assert_eq!(res.as_str().unwrap(), "10:30");
 }

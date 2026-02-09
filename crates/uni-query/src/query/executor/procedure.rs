@@ -5,9 +5,8 @@ use super::core::*;
 use anyhow::{Result, anyhow};
 use futures::StreamExt;
 use indexmap::IndexMap;
-use serde_json::Value;
-use serde_json::json;
 use std::collections::HashMap;
+use uni_common::Value;
 use uni_algo::algo::procedures::AlgoContext;
 use uni_common::core::id::Vid;
 use uni_common::core::schema::{DistanceMetric, SchemaManager};
@@ -294,7 +293,12 @@ impl Executor {
                 let algo_ctx = AlgoContext::new(self.storage.clone(), l0_mgr);
 
                 let signature = procedure.signature();
-                let mut stream = procedure.execute(algo_ctx, evaluated_args);
+                // Convert uni_common::Value args to serde_json::Value for algo crate
+                let serde_args: Vec<serde_json::Value> = evaluated_args
+                    .into_iter()
+                    .map(|v| v.into())
+                    .collect();
+                let mut stream = procedure.execute(algo_ctx, serde_args);
                 let mut results = Vec::new();
                 let mut row_count = 0usize;
 
@@ -315,7 +319,8 @@ impl Executor {
                             signature.yields.iter().position(|(n, _)| *n == yield_name)
                             && idx < row.values.len()
                         {
-                            result_map.insert(yield_name.clone(), row.values[idx].clone());
+                            // Convert serde_json::Value from algo crate to uni_common::Value
+                            result_map.insert(yield_name.clone(), Value::from(row.values[idx].clone()));
                         }
                     }
                     results.push(result_map);
@@ -376,7 +381,7 @@ impl Executor {
                         .ok_or_else(|| anyhow!("Embedding service returned no results"))?
                 } else {
                     // Pre-computed vector (array of floats)
-                    serde_json::from_value(query_val)?
+                    Vec::<f32>::try_from(&query_val)?
                 };
 
                 // Extract optional filter (arg 4)
@@ -444,9 +449,9 @@ impl Executor {
                     let score = calculate_score(dist, schema_manager, &label, &property)?;
 
                     // Always prepare standard yields
-                    canonical_yields.insert("vid".to_string(), json!(vid.as_u64()));
-                    canonical_yields.insert("distance".to_string(), json!(dist as f64));
-                    canonical_yields.insert("score".to_string(), json!(score));
+                    canonical_yields.insert("vid".to_string(), Value::Int(vid.as_u64() as i64));
+                    canonical_yields.insert("distance".to_string(), Value::Float(dist as f64));
+                    canonical_yields.insert("score".to_string(), Value::Float(score));
 
                     // Load node object for node-like yields
                     let mut node_obj_opt = None;
@@ -467,17 +472,17 @@ impl Executor {
                                     continue; // Skip deleted vertices
                                 };
 
-                                // Construct JSON object with flattened properties + _vid
-                                let mut node_obj = serde_json::Map::new();
-                                node_obj.insert("_vid".to_string(), json!(vid.as_u64()));
-                                node_obj.insert("_label".to_string(), json!(label.clone()));
+                                // Construct map with flattened properties + _vid
+                                let mut node_obj = HashMap::new();
+                                node_obj.insert("_vid".to_string(), Value::Int(vid.as_u64() as i64));
+                                node_obj.insert("_label".to_string(), Value::String(label.clone()));
 
                                 // Flatten properties into top level
                                 for (key, val) in properties {
-                                    node_obj.insert(key, val.into());
+                                    node_obj.insert(key, val);
                                 }
 
-                                node_obj_opt = Some(Value::Object(node_obj));
+                                node_obj_opt = Some(Value::Map(node_obj));
                             }
 
                             result.insert(yield_name.to_lowercase(), node_obj_opt.clone().unwrap());
@@ -590,9 +595,9 @@ impl Executor {
                     };
 
                     // Standard yields
-                    canonical_yields.insert("vid".to_string(), json!(vid.as_u64()));
-                    canonical_yields.insert("score".to_string(), json!(normalized_score as f64));
-                    canonical_yields.insert("raw_score".to_string(), json!(raw_score as f64));
+                    canonical_yields.insert("vid".to_string(), Value::Int(vid.as_u64() as i64));
+                    canonical_yields.insert("score".to_string(), Value::Float(normalized_score as f64));
+                    canonical_yields.insert("raw_score".to_string(), Value::Float(raw_score as f64));
 
                     // Node object for node-like yields
                     let mut node_obj_opt = None;
@@ -611,20 +616,20 @@ impl Executor {
                                     continue;
                                 };
 
-                                let mut node_obj = serde_json::Map::new();
-                                node_obj.insert("_vid".to_string(), json!(vid.as_u64()));
-                                node_obj.insert("_label".to_string(), json!(label.clone()));
+                                let mut node_obj = HashMap::new();
+                                node_obj.insert("_vid".to_string(), Value::Int(vid.as_u64() as i64));
+                                node_obj.insert("_label".to_string(), Value::String(label.clone()));
 
                                 for (key, val) in properties {
-                                    node_obj.insert(key, val.into());
+                                    node_obj.insert(key, val);
                                 }
 
-                                node_obj_opt = Some(Value::Object(node_obj));
+                                node_obj_opt = Some(Value::Map(node_obj));
                             }
 
                             result.insert(yield_name.to_lowercase(), node_obj_opt.clone().unwrap());
                         } else if yield_name.to_lowercase() == "raw_score" {
-                            result.insert("raw_score".to_string(), json!(raw_score as f64));
+                            result.insert("raw_score".to_string(), Value::Float(raw_score as f64));
                         } else if let Some(val) = canonical_yields.get(&canonical_name) {
                             result.insert(yield_name.to_lowercase(), val.clone());
                         }
@@ -727,21 +732,22 @@ impl Executor {
                     Value::Null
                 };
 
-                let fusion_method = options_val
-                    .get("method")
+                let options_map = options_val.as_object();
+                let fusion_method = options_map
+                    .and_then(|m| m.get("method"))
                     .and_then(|v| v.as_str())
                     .unwrap_or("rrf")
                     .to_string();
-                let alpha = options_val
-                    .get("alpha")
+                let alpha = options_map
+                    .and_then(|m| m.get("alpha"))
                     .and_then(|v| v.as_f64())
                     .unwrap_or(0.5) as f32;
-                let over_fetch_factor = options_val
-                    .get("over_fetch")
+                let over_fetch_factor = options_map
+                    .and_then(|m| m.get("over_fetch"))
                     .and_then(|v| v.as_f64())
                     .unwrap_or(2.0) as f32;
-                let rrf_k = options_val
-                    .get("rrf_k")
+                let rrf_k = options_map
+                    .and_then(|m| m.get("rrf_k"))
                     .and_then(|v| v.as_u64())
                     .unwrap_or(60) as usize;
 
@@ -829,15 +835,15 @@ impl Executor {
                 for (vid, fused_score) in final_results {
                     let mut canonical_yields: IndexMap<String, Value> = IndexMap::new();
 
-                    canonical_yields.insert("vid".to_string(), json!(vid.as_u64()));
-                    canonical_yields.insert("score".to_string(), json!(fused_score as f64));
+                    canonical_yields.insert("vid".to_string(), Value::Int(vid.as_u64() as i64));
+                    canonical_yields.insert("score".to_string(), Value::Float(fused_score as f64));
 
                     // Vector score (normalized 0-1 via calculate_score)
                     if let Some(&dist) = vec_score_map.get(&vid) {
                         if let Some(ref vec_prop) = vector_prop {
                             let vec_score = calculate_score(dist, schema_manager, &label, vec_prop)
                                 .unwrap_or(0.0);
-                            canonical_yields.insert("vector_score".to_string(), json!(vec_score));
+                            canonical_yields.insert("vector_score".to_string(), Value::Float(vec_score));
                         }
                     } else {
                         canonical_yields.insert("vector_score".to_string(), Value::Null);
@@ -850,7 +856,7 @@ impl Executor {
                         } else {
                             0.0
                         };
-                        canonical_yields.insert("fts_score".to_string(), json!(norm_score as f64));
+                        canonical_yields.insert("fts_score".to_string(), Value::Float(norm_score as f64));
                     } else {
                         canonical_yields.insert("fts_score".to_string(), Value::Null);
                     }
@@ -870,15 +876,15 @@ impl Executor {
                                     continue;
                                 };
 
-                                let mut node_obj = serde_json::Map::new();
-                                node_obj.insert("_vid".to_string(), json!(vid.as_u64()));
-                                node_obj.insert("_label".to_string(), json!(label.clone()));
+                                let mut node_obj = HashMap::new();
+                                node_obj.insert("_vid".to_string(), Value::Int(vid.as_u64() as i64));
+                                node_obj.insert("_label".to_string(), Value::String(label.clone()));
 
                                 for (key, val) in properties {
-                                    node_obj.insert(key, val.into());
+                                    node_obj.insert(key, val);
                                 }
 
-                                node_obj_opt = Some(Value::Object(node_obj));
+                                node_obj_opt = Some(Value::Map(node_obj));
                             }
 
                             result.insert(yield_name.to_lowercase(), node_obj_opt.clone().unwrap());
@@ -898,12 +904,12 @@ impl Executor {
             "uni.admin.compact" => {
                 let stats = self.storage.compact().await?;
                 let full_result = HashMap::from([
-                    ("files_compacted".to_string(), json!(stats.files_compacted)),
-                    ("bytes_before".to_string(), json!(stats.bytes_before)),
-                    ("bytes_after".to_string(), json!(stats.bytes_after)),
+                    ("files_compacted".to_string(), Value::Int(stats.files_compacted as i64)),
+                    ("bytes_before".to_string(), Value::Int(stats.bytes_before as i64)),
+                    ("bytes_after".to_string(), Value::Int(stats.bytes_after as i64)),
                     (
                         "duration_ms".to_string(),
-                        json!(stats.duration.as_millis() as u64),
+                        Value::Int(stats.duration.as_millis() as i64),
                     ),
                 ]);
 
@@ -912,20 +918,20 @@ impl Executor {
             "uni.admin.compactionStatus" => {
                 let status = self.storage.compaction_status();
                 let full_result = HashMap::from([
-                    ("l1_runs".to_string(), json!(status.l1_runs)),
-                    ("l1_size_bytes".to_string(), json!(status.l1_size_bytes)),
+                    ("l1_runs".to_string(), Value::Int(status.l1_runs as i64)),
+                    ("l1_size_bytes".to_string(), Value::Int(status.l1_size_bytes as i64)),
                     (
                         "in_progress".to_string(),
-                        json!(status.compaction_in_progress),
+                        Value::Bool(status.compaction_in_progress),
                     ),
-                    ("pending".to_string(), json!(status.compaction_pending)),
+                    ("pending".to_string(), Value::Int(status.compaction_pending as i64)),
                     (
                         "total_compactions".to_string(),
-                        json!(status.total_compactions),
+                        Value::Int(status.total_compactions as i64),
                     ),
                     (
                         "total_bytes_compacted".to_string(),
-                        json!(status.total_bytes_compacted),
+                        Value::Int(status.total_bytes_compacted as i64),
                     ),
                 ]);
 
@@ -968,8 +974,8 @@ impl Executor {
                             "name".to_string(),
                             m.name.map(Value::String).unwrap_or(Value::Null),
                         );
-                        row.insert("created_at".to_string(), json!(m.created_at));
-                        row.insert("version_hwm".to_string(), json!(m.version_high_water_mark));
+                        row.insert("created_at".to_string(), Value::String(m.created_at.to_rfc3339()));
+                        row.insert("version_hwm".to_string(), Value::Int(m.version_high_water_mark as i64));
                         results.push(row);
                     }
                 }
@@ -1004,7 +1010,7 @@ impl Executor {
                         .get(label_name)
                         .map(|p| p.len())
                         .unwrap_or(0);
-                    row.insert("propertyCount".to_string(), json!(prop_count));
+                    row.insert("propertyCount".to_string(), Value::Int(prop_count as i64));
 
                     let node_count = if let Ok(ds) = self.storage.vertex_dataset(label_name) {
                         if let Ok(raw) = ds.open_raw().await {
@@ -1015,14 +1021,14 @@ impl Executor {
                     } else {
                         0
                     };
-                    row.insert("nodeCount".to_string(), json!(node_count));
+                    row.insert("nodeCount".to_string(), Value::Int(node_count as i64));
 
                     let idx_count = schema
                         .indexes
                         .iter()
                         .filter(|i| i.label() == label_name)
                         .count();
-                    row.insert("indexCount".to_string(), json!(idx_count));
+                    row.insert("indexCount".to_string(), Value::Int(idx_count as i64));
 
                     results.push(row);
                 }
@@ -1038,15 +1044,15 @@ impl Executor {
                         "relationshipType".to_string(),
                         Value::String(type_name.clone()),
                     ); // Alias
-                    row.insert("sourceLabels".to_string(), json!(meta.src_labels));
-                    row.insert("targetLabels".to_string(), json!(meta.dst_labels));
+                    row.insert("sourceLabels".to_string(), Value::List(meta.src_labels.iter().map(|s| Value::String(s.clone())).collect()));
+                    row.insert("targetLabels".to_string(), Value::List(meta.dst_labels.iter().map(|s| Value::String(s.clone())).collect()));
 
                     let prop_count = schema
                         .properties
                         .get(type_name)
                         .map(|p| p.len())
                         .unwrap_or(0);
-                    row.insert("propertyCount".to_string(), json!(prop_count));
+                    row.insert("propertyCount".to_string(), Value::Int(prop_count as i64));
 
                     results.push(row);
                 }
@@ -1065,31 +1071,31 @@ impl Executor {
                             row.insert("name".to_string(), Value::String(v.name));
                             row.insert("type".to_string(), Value::String("VECTOR".to_string()));
                             row.insert("label".to_string(), Value::String(v.label));
-                            row.insert("properties".to_string(), json!(vec![v.property]));
+                            row.insert("properties".to_string(), Value::List(vec![Value::String(v.property)]));
                         }
                         uni_common::core::schema::IndexDefinition::FullText(f) => {
                             row.insert("name".to_string(), Value::String(f.name));
                             row.insert("type".to_string(), Value::String("FULLTEXT".to_string()));
                             row.insert("label".to_string(), Value::String(f.label));
-                            row.insert("properties".to_string(), json!(f.properties));
+                            row.insert("properties".to_string(), Value::List(f.properties.into_iter().map(Value::String).collect()));
                         }
                         uni_common::core::schema::IndexDefinition::Scalar(s) => {
                             row.insert("name".to_string(), Value::String(s.name));
                             row.insert("type".to_string(), Value::String("SCALAR".to_string()));
                             row.insert("label".to_string(), Value::String(s.label));
-                            row.insert("properties".to_string(), json!(s.properties));
+                            row.insert("properties".to_string(), Value::List(s.properties.into_iter().map(Value::String).collect()));
                         }
                         uni_common::core::schema::IndexDefinition::JsonFullText(j) => {
                             row.insert("name".to_string(), Value::String(j.name));
                             row.insert("type".to_string(), Value::String("JSON_FTS".to_string()));
                             row.insert("label".to_string(), Value::String(j.label));
-                            row.insert("properties".to_string(), json!(vec![j.column]));
+                            row.insert("properties".to_string(), Value::List(vec![Value::String(j.column)]));
                         }
                         uni_common::core::schema::IndexDefinition::Inverted(inv) => {
                             row.insert("name".to_string(), Value::String(inv.name));
                             row.insert("type".to_string(), Value::String("INVERTED".to_string()));
                             row.insert("label".to_string(), Value::String(inv.label));
-                            row.insert("properties".to_string(), json!(vec![inv.property]));
+                            row.insert("properties".to_string(), Value::List(vec![Value::String(inv.property)]));
                         }
                         _ => {
                             row.insert("name".to_string(), Value::String("UNKNOWN".to_string()));
@@ -1111,11 +1117,11 @@ impl Executor {
                     match c.constraint_type {
                         uni_common::core::schema::ConstraintType::Unique { properties } => {
                             row.insert("type".to_string(), Value::String("UNIQUE".to_string()));
-                            row.insert("properties".to_string(), json!(properties));
+                            row.insert("properties".to_string(), Value::List(properties.into_iter().map(Value::String).collect()));
                         }
                         uni_common::core::schema::ConstraintType::Exists { property } => {
                             row.insert("type".to_string(), Value::String("EXISTS".to_string()));
-                            row.insert("properties".to_string(), json!(vec![property]));
+                            row.insert("properties".to_string(), Value::List(vec![Value::String(property)]));
                         }
                         uni_common::core::schema::ConstraintType::Check { expression } => {
                             row.insert("type".to_string(), Value::String("CHECK".to_string()));
@@ -1522,19 +1528,19 @@ impl Executor {
     }
 }
 
-/// Checks whether a JSON value is compatible with a procedure type.
+/// Checks whether a value is compatible with a procedure type.
 fn check_type_compatible(val: &Value, expected: &ProcedureValueType) -> bool {
     match expected {
         ProcedureValueType::Any => true,
         ProcedureValueType::String => val.is_string(),
-        ProcedureValueType::Boolean => val.is_boolean(),
-        ProcedureValueType::Integer => val.is_i64() || val.is_u64(),
-        ProcedureValueType::Float => val.is_f64() || val.is_i64() || val.is_u64(),
+        ProcedureValueType::Boolean => val.is_bool(),
+        ProcedureValueType::Integer => val.is_i64(),
+        ProcedureValueType::Float => val.is_f64() || val.is_i64(),
         ProcedureValueType::Number => val.is_number(),
     }
 }
 
-/// Checks whether two JSON values match for input-column filtering.
+/// Checks whether two values match for input-column filtering.
 fn values_match(row_val: &Value, arg_val: &Value) -> bool {
     if arg_val.is_null() || row_val.is_null() {
         return arg_val.is_null() && row_val.is_null();

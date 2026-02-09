@@ -5,7 +5,7 @@ use arrow_array::builder::{FixedSizeBinaryBuilder, ListBuilder, UInt64Builder};
 use arrow_array::{
     LargeBinaryArray, RecordBatch, StringArray, TimestampMicrosecondArray, UInt64Array,
 };
-use serde_json::Value;
+use uni_db::Value;
 use std::sync::Arc;
 use tempfile::tempdir;
 use tokio::sync::RwLock;

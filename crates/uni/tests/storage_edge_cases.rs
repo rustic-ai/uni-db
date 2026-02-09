@@ -2,7 +2,7 @@
 // Copyright 2024-2026 Dragonscale Team
 
 use anyhow::Result;
-use serde_json::json;
+use uni_db::unival;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tempfile::tempdir;
@@ -30,7 +30,7 @@ async fn test_vertex_dataset_batch_writes() -> Result<()> {
     // Write a batch
     let vid1 = Vid::new(1);
     let mut props1 = HashMap::new();
-    props1.insert("name".to_string(), serde_json::json!("Alice").into());
+    props1.insert("name".to_string(), unival!("Alice"));
 
     let schema = schema_manager.schema();
     let batch = ds.build_record_batch(&[(vid1, props1)], &[false], &[1], &schema)?;
@@ -39,7 +39,7 @@ async fn test_vertex_dataset_batch_writes() -> Result<()> {
 
     let vid2 = Vid::new(2);
     let mut props2 = HashMap::new();
-    props2.insert("name".to_string(), json!("Bob").into());
+    props2.insert("name".to_string(), unival!("Bob"));
     let batch2 = ds.build_record_batch(&[(vid2, props2)], &[false], &[1], &schema)?;
     ds.write_batch_lancedb(lancedb_store, batch2, &schema)
         .await?;

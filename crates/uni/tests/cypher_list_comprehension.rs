@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2024-2026 Dragonscale Team
 
-use serde_json::json;
+use uni_db::unival;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tempfile::tempdir;
@@ -46,7 +46,7 @@ async fn test_list_comprehension_literals() -> anyhow::Result<()> {
         .values()
         .next()
         .expect("Result should have one column");
-    assert_eq!(res, &json!([10, 10, 10]));
+    assert_eq!(res, &unival!([10, 10, 10]));
 
     // 2. Filter - keep elements matching condition
     let cypher = "RETURN [x IN [1, 2, 3, 4] WHERE x > 2 | x]";
@@ -61,7 +61,7 @@ async fn test_list_comprehension_literals() -> anyhow::Result<()> {
         .values()
         .next()
         .expect("Result should have one column");
-    assert_eq!(res, &json!([3, 4]));
+    assert_eq!(res, &unival!([3, 4]));
 
     // 3. Identity (Flat List) - no transformation
     let cypher = "RETURN [x IN [1, 2, 3] | x]";
@@ -76,7 +76,7 @@ async fn test_list_comprehension_literals() -> anyhow::Result<()> {
         .values()
         .next()
         .expect("Result should have one column");
-    assert_eq!(res, &json!([1, 2, 3]));
+    assert_eq!(res, &unival!([1, 2, 3]));
 
     // 4. Property Access from Map
     let cypher = "RETURN [x IN [{a: 1}, {a: 2}] | x.a]";
@@ -91,7 +91,7 @@ async fn test_list_comprehension_literals() -> anyhow::Result<()> {
         .values()
         .next()
         .expect("Result should have one column");
-    assert_eq!(res, &json!([1, 2]));
+    assert_eq!(res, &unival!([1, 2]));
 
     // 5. Filter + Mapping combined
     let cypher = "RETURN [x IN [1, 2, 3, 4, 5] WHERE x > 2 | x * 2]";
@@ -106,7 +106,7 @@ async fn test_list_comprehension_literals() -> anyhow::Result<()> {
         .values()
         .next()
         .expect("Result should have one column");
-    assert_eq!(res, &json!([6, 8, 10])); // 3*2, 4*2, 5*2
+    assert_eq!(res, &unival!([6, 8, 10])); // 3*2, 4*2, 5*2
 
     // 6. Filter that removes all elements - empty result
     let cypher = "RETURN [x IN [1, 2, 3] WHERE x > 10 | x]";
@@ -121,7 +121,7 @@ async fn test_list_comprehension_literals() -> anyhow::Result<()> {
         .values()
         .next()
         .expect("Result should have one column");
-    assert_eq!(res, &json!([]));
+    assert_eq!(res, &unival!([]));
 
     // 7. Nested list comprehension
     let cypher = "RETURN [x IN [1, 2] | [y IN [10, 20] | x + y]]";
@@ -136,7 +136,7 @@ async fn test_list_comprehension_literals() -> anyhow::Result<()> {
         .values()
         .next()
         .expect("Result should have one column");
-    assert_eq!(res, &json!([[11, 21], [12, 22]]));
+    assert_eq!(res, &unival!([[11, 21], [12, 22]]));
 
     // 8. String operations in mapping
     let cypher = r#"RETURN [x IN ["a", "b", "c"] | upper(x)]"#;
@@ -151,7 +151,7 @@ async fn test_list_comprehension_literals() -> anyhow::Result<()> {
         .values()
         .next()
         .expect("Result should have one column");
-    assert_eq!(res, &json!(["A", "B", "C"]));
+    assert_eq!(res, &unival!(["A", "B", "C"]));
 
     Ok(())
 }

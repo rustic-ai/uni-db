@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2024-2026 Dragonscale Team
 
-use serde_json::json;
+use uni_db::unival;
 use std::collections::HashMap;
 use uni_db::Uni;
 
@@ -54,29 +54,28 @@ async fn test_supply_chain_use_case() -> anyhow::Result<()> {
 
     // Part P1: Resistor (Document mode!)
     let p1_props = HashMap::from([
-        ("sku".to_string(), json!("RES-10K").into()),
-        ("cost".to_string(), json!(0.05).into()),
+        ("sku".to_string(), unival!("RES-10K")),
+        ("cost".to_string(), unival!(0.05)),
         (
             "_doc".to_string(),
-            json!({
+            unival!({
                 "type": "resistor",
                 "specs": { "resistance": "10k", "tolerance": "5%" },
                 "compliance": ["RoHS"]
-            })
-            .into(),
+            }),
         ),
     ]);
 
     // Part P2: Motherboard (Contains P1)
     let p2_props = HashMap::from([
-        ("sku".to_string(), json!("MB-X1").into()),
-        ("cost".to_string(), json!(50.0).into()),
+        ("sku".to_string(), unival!("MB-X1")),
+        ("cost".to_string(), unival!(50.0)),
     ]);
 
     // Part P3: Screen
     let p3_props = HashMap::from([
-        ("sku".to_string(), json!("SCR-OLED").into()),
-        ("cost".to_string(), json!(30.0).into()),
+        ("sku".to_string(), unival!("SCR-OLED")),
+        ("cost".to_string(), unival!(30.0)),
     ]);
 
     let parts = vec![p1_props, p2_props, p3_props];
@@ -87,8 +86,8 @@ async fn test_supply_chain_use_case() -> anyhow::Result<()> {
 
     // Product: Phone
     let prod_props = HashMap::from([
-        ("name".to_string(), json!("Smartphone X").into()),
-        ("price".to_string(), json!(500.0).into()),
+        ("name".to_string(), unival!("Smartphone X")),
+        ("price".to_string(), unival!(500.0)),
     ]);
     let prod_vids = db.bulk_insert_vertices("Product", vec![prod_props]).await?;
     let phone = prod_vids[0];

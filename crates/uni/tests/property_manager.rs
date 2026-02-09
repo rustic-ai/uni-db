@@ -5,7 +5,7 @@ use arrow_array::{
     BooleanArray, FixedSizeBinaryArray, LargeBinaryArray, RecordBatch, StringArray,
     TimestampMicrosecondArray, UInt64Array,
 };
-use serde_json::json;
+use uni_db::unival;
 use std::sync::Arc;
 use tempfile::tempdir;
 use uni_db::core::id::Vid;
@@ -163,7 +163,7 @@ async fn test_list_property_storage() -> anyhow::Result<()> {
     let vid = Vid::new(0);
 
     let val = prop_mgr.get_vertex_prop(vid, "tags").await?;
-    let expected: uni_db::Value = json!(["a", "b"]).into();
+    let expected: uni_db::Value = unival!(["a", "b"]);
     assert_eq!(val, expected);
 
     Ok(())

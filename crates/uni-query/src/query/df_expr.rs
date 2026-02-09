@@ -35,7 +35,7 @@ use anyhow::{Result, anyhow};
 use datafusion::common::{Column, ScalarValue};
 use datafusion::logical_expr::{ColumnarValue, Expr as DfExpr, ScalarFunctionArgs, col, lit};
 use datafusion::prelude::ExprFunctionExt;
-use serde_json::Value;
+use uni_common::Value;
 use std::hash::{Hash, Hasher};
 use std::ops::Not;
 use std::sync::Arc;
@@ -164,6 +164,15 @@ pub fn cypher_expr_to_df(expr: &Expr, context: Option<&TranslationContext>) -> R
         }
 
         Expr::ArrayIndex { array, index } => {
+            // If array is a variable and index is a string literal, convert to column access
+            // e.g., n['name'] -> n.name column
+            if let Ok(var_name) = extract_variable_name(array)
+                && let Expr::Literal(CypherLiteral::String(prop_name)) = index.as_ref()
+            {
+                let col_name = format!("{}.{}", var_name, prop_name);
+                return Ok(DfExpr::Column(Column::from_name(col_name)));
+            }
+
             let array_expr = cypher_expr_to_df(array, context)?;
             let index_expr = cypher_expr_to_df(index, context)?;
 
@@ -204,7 +213,7 @@ pub fn cypher_expr_to_df(expr: &Expr, context: Option<&TranslationContext>) -> R
             if let Some(ctx) = context
                 && let Some(value) = ctx.parameters.get(name)
             {
-                return json_value_to_scalar(value).map(lit);
+                return value_to_scalar(value).map(lit);
             }
             Err(anyhow!("Unresolved parameter: ${}", name))
         }
@@ -590,25 +599,18 @@ fn cypher_literal_to_scalar(lit: &CypherLiteral) -> Result<ScalarValue> {
     }
 }
 
-/// Convert a JSON value to a DataFusion scalar value.
-fn json_value_to_scalar(value: &Value) -> Result<ScalarValue> {
+/// Convert a `uni_common::Value` to a DataFusion scalar value.
+fn value_to_scalar(value: &Value) -> Result<ScalarValue> {
     match value {
         Value::Null => Ok(ScalarValue::Null),
         Value::Bool(b) => Ok(ScalarValue::Boolean(Some(*b))),
-        Value::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                Ok(ScalarValue::Int64(Some(i)))
-            } else if let Some(f) = n.as_f64() {
-                Ok(ScalarValue::Float64(Some(f)))
-            } else {
-                Err(anyhow!("Unsupported number type: {}", n))
-            }
-        }
+        Value::Int(i) => Ok(ScalarValue::Int64(Some(*i))),
+        Value::Float(f) => Ok(ScalarValue::Float64(Some(*f))),
         Value::String(s) => Ok(ScalarValue::Utf8(Some(s.clone()))),
-        Value::Array(items) => {
+        Value::List(items) => {
             // Recursively convert items
             let scalars: Result<Vec<ScalarValue>> =
-                items.iter().map(json_value_to_scalar).collect();
+                items.iter().map(value_to_scalar).collect();
             let scalars = scalars?;
 
             // Determine common type (simple inference), ignoring nulls
@@ -676,17 +678,12 @@ fn json_value_to_scalar(value: &Value) -> Result<ScalarValue> {
                 .collect();
 
             // Construct list
-            // ScalarValue::new_list returns an Arc<ListArray> which needs to be wrapped in ScalarValue::List
             if typed_scalars.is_empty() {
                 Ok(ScalarValue::List(ScalarValue::new_list_nullable(
                     &[],
                     &data_type,
                 )))
             } else {
-                // new_list takes (values, data_type, nullable)? Or just (values, data_type)?
-                // Error said 3 args, 3rd is bool? Likely 'nullable' for the list field?
-                // But wait, new_list implementation in common typically matches.
-                // Assuming 3rd arg is boolean nullable=true for now.
                 Ok(ScalarValue::List(ScalarValue::new_list(
                     &typed_scalars,
                     &data_type,
@@ -694,9 +691,8 @@ fn json_value_to_scalar(value: &Value) -> Result<ScalarValue> {
                 )))
             }
         }
-        Value::Object(map) => {
-            // Convert JSON object to ScalarValue::Struct
-            // Need to collect fields and values
+        Value::Map(map) => {
+            // Convert Map to ScalarValue::Struct
             // Sort keys to ensure deterministic field order
             let mut entries: Vec<(&String, &Value)> = map.iter().collect();
             entries.sort_by_key(|(k, _)| *k);
@@ -704,7 +700,7 @@ fn json_value_to_scalar(value: &Value) -> Result<ScalarValue> {
             let mut fields_arrays = Vec::with_capacity(entries.len());
 
             for (k, v) in entries {
-                let scalar = json_value_to_scalar(v)?;
+                let scalar = value_to_scalar(v)?;
                 let dt = scalar.data_type();
                 let field = Arc::new(datafusion::arrow::datatypes::Field::new(k, dt, true));
                 let array = scalar.to_array()?;
@@ -714,6 +710,14 @@ fn json_value_to_scalar(value: &Value) -> Result<ScalarValue> {
             Ok(ScalarValue::Struct(Arc::new(
                 datafusion::arrow::array::StructArray::from(fields_arrays),
             )))
+        }
+        Value::Bytes(b) => Ok(ScalarValue::LargeBinary(Some(b.clone()))),
+        // For complex graph types, fall back to JSON encoding
+        other => {
+            let json_val: serde_json::Value = other.clone().into();
+            let json_str = serde_json::to_string(&json_val)
+                .map_err(|e| anyhow!("Failed to serialize value: {}", e))?;
+            Ok(ScalarValue::LargeBinary(Some(json_str.into_bytes())))
         }
     }
 }

@@ -10,7 +10,6 @@
 use crate::parser::parse_value;
 use crate::UniWorld;
 use cucumber::given;
-use serde_json::Value as JsonValue;
 use std::collections::HashMap;
 use uni_query::{ProcedureOutput, ProcedureParam, ProcedureValueType, RegisteredProcedure};
 
@@ -114,31 +113,6 @@ fn parse_procedure_signature(
     Ok((proc_name, params, outputs))
 }
 
-/// Converts a TCK `Value` to a `serde_json::Value` for storage in procedure data.
-fn tck_value_to_json(val: &uni_query::Value) -> JsonValue {
-    match val {
-        uni_query::Value::Null => JsonValue::Null,
-        uni_query::Value::Bool(b) => JsonValue::Bool(*b),
-        uni_query::Value::Int(i) => serde_json::json!(*i),
-        uni_query::Value::Float(f) => serde_json::json!(*f),
-        uni_query::Value::String(s) => JsonValue::String(s.clone()),
-        uni_query::Value::List(items) => {
-            JsonValue::Array(items.iter().map(tck_value_to_json).collect())
-        }
-        uni_query::Value::Map(m) => {
-            let obj: serde_json::Map<String, JsonValue> = m
-                .iter()
-                .map(|(k, v)| (k.clone(), tck_value_to_json(v)))
-                .collect();
-            JsonValue::Object(obj)
-        }
-        uni_query::Value::Node(_) | uni_query::Value::Edge(_) | uni_query::Value::Path(_) => {
-            JsonValue::Null
-        }
-        _ => JsonValue::Null,
-    }
-}
-
 #[given(regex = r"^there exists a procedure (.+)$")]
 async fn there_exists_a_procedure(
     world: &mut UniWorld,
@@ -164,7 +138,7 @@ async fn there_exists_a_procedure(
                     let mut map = HashMap::new();
                     for (header, cell) in headers.iter().zip(row.iter()) {
                         let val = parse_value(cell.trim()).unwrap_or(uni_query::Value::Null);
-                        map.insert(header.clone(), tck_value_to_json(&val));
+                        map.insert(header.clone(), val);
                     }
                     map
                 })

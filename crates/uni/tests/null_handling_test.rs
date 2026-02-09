@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2024-2026 Dragonscale Team
 
-use serde_json::{Value, json};
+use uni_db::{unival, Value};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tempfile::tempdir;
@@ -62,23 +62,23 @@ async fn test_null_handling_functions() -> anyhow::Result<()> {
         // Person 1: Alice, age 30, no nickname
         let vid1 = Vid::new(1);
         let mut props1 = HashMap::new();
-        props1.insert("name".to_string(), json!("Alice").into());
-        props1.insert("age".to_string(), json!(30).into());
+        props1.insert("name".to_string(), unival!("Alice"));
+        props1.insert("age".to_string(), unival!(30));
         w.insert_vertex_with_labels(vid1, props1, vec!["Person".to_string()])
             .await?;
 
         // Person 2: Bob, no age, nickname 'Bobby'
         let vid2 = Vid::new(2);
         let mut props2 = HashMap::new();
-        props2.insert("name".to_string(), json!("Bob").into());
-        props2.insert("nickname".to_string(), json!("Bobby").into());
+        props2.insert("name".to_string(), unival!("Bob"));
+        props2.insert("nickname".to_string(), unival!("Bobby"));
         w.insert_vertex_with_labels(vid2, props2, vec!["Person".to_string()])
             .await?;
 
         // Person 3: Charlie, no age, no nickname
         let vid3 = Vid::new(3);
         let mut props3 = HashMap::new();
-        props3.insert("name".to_string(), json!("Charlie").into());
+        props3.insert("name".to_string(), unival!("Charlie"));
         w.insert_vertex_with_labels(vid3, props3, vec!["Person".to_string()])
             .await?;
 
@@ -106,21 +106,21 @@ async fn test_null_handling_functions() -> anyhow::Result<()> {
 
     // Expected results sorted by name: Alice, Bob, Charlie
     // Alice: nickname=null, age=30 -> 30 (may be string "30" in vectorized engine due to mixed type promotion)
-    assert_eq!(results[0].get("n.name"), Some(&json!("Alice")));
+    assert_eq!(results[0].get("n.name"), Some(&unival!("Alice")));
     let alice_coalesce = results[0].get(coalesce_key).unwrap();
     assert!(
-        alice_coalesce == &json!(30) || alice_coalesce == &json!("30"),
+        alice_coalesce == &unival!(30) || alice_coalesce == &Value::String("30".to_string()),
         "Alice coalesce mismatch: {:?}",
         alice_coalesce
     );
 
     // Bob: nickname='Bobby', age=null -> 'Bobby'
-    assert_eq!(results[1].get("n.name"), Some(&json!("Bob")));
-    assert_eq!(results[1].get(coalesce_key), Some(&json!("Bobby")));
+    assert_eq!(results[1].get("n.name"), Some(&unival!("Bob")));
+    assert_eq!(results[1].get(coalesce_key), Some(&unival!("Bobby")));
 
     // Charlie: nickname=null, age=null -> 'Unknown'
-    assert_eq!(results[2].get("n.name"), Some(&json!("Charlie")));
-    assert_eq!(results[2].get(coalesce_key), Some(&json!("Unknown")));
+    assert_eq!(results[2].get("n.name"), Some(&unival!("Charlie")));
+    assert_eq!(results[2].get(coalesce_key), Some(&unival!("Unknown")));
 
     // 4. Test nullIf
     // MATCH (n:Person) RETURN n.name, nullIf(n.name, 'Bob') ORDER BY n.name
@@ -136,16 +136,16 @@ async fn test_null_handling_functions() -> anyhow::Result<()> {
     let nullif_key = "nullIf(n.name, \"Bob\")";
 
     // Alice: 'Alice' != 'Bob' -> 'Alice'
-    assert_eq!(results[0].get("n.name"), Some(&json!("Alice")));
-    assert_eq!(results[0].get(nullif_key), Some(&json!("Alice")));
+    assert_eq!(results[0].get("n.name"), Some(&unival!("Alice")));
+    assert_eq!(results[0].get(nullif_key), Some(&unival!("Alice")));
 
     // Bob: 'Bob' == 'Bob' -> null
-    assert_eq!(results[1].get("n.name"), Some(&json!("Bob")));
+    assert_eq!(results[1].get("n.name"), Some(&unival!("Bob")));
     assert_eq!(results[1].get(nullif_key), Some(&Value::Null));
 
     // Charlie: 'Charlie' != 'Bob' -> 'Charlie'
-    assert_eq!(results[2].get("n.name"), Some(&json!("Charlie")));
-    assert_eq!(results[2].get(nullif_key), Some(&json!("Charlie")));
+    assert_eq!(results[2].get("n.name"), Some(&unival!("Charlie")));
+    assert_eq!(results[2].get(nullif_key), Some(&unival!("Charlie")));
 
     Ok(())
 }

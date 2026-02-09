@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2024-2026 Dragonscale Team
 
-use serde_json::json;
+use uni_db::unival;
 use std::collections::HashMap;
 use tempfile::tempdir;
 use uni_db::core::id::Vid;
@@ -52,7 +52,7 @@ async fn test_vertex_large_properties() -> anyhow::Result<()> {
 
     let large_str = "a".repeat(100_000);
     let mut props = HashMap::new();
-    props.insert("data".to_string(), json!(large_str).into());
+    props.insert("data".to_string(), unival!(large_str));
 
     let vid = Vid::new(0);
     let vertices = vec![(vid, props)];

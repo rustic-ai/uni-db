@@ -2,7 +2,7 @@
 // Copyright 2024-2026 Dragonscale Team
 
 use anyhow::Result;
-use serde_json::json;
+use uni_db::unival;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tempfile::tempdir;
@@ -104,7 +104,7 @@ async fn test_auto_embedding_and_vector_search() -> Result<()> {
         let embedding_val = results[0].get("d.embedding").unwrap();
 
         // Verify embedding is generated
-        assert!(embedding_val.is_array());
+        assert!(embedding_val.is_list());
         let vec = embedding_val.as_array().unwrap();
         assert_eq!(vec.len(), 384); // AllMiniLML6V2 is 384 dim
     }
@@ -135,7 +135,7 @@ async fn test_auto_embedding_and_vector_search() -> Result<()> {
 
     let mut params = HashMap::new();
     let zero_vec: Vec<f32> = vec![0.01; 384]; // non-zero to avoid div/0 in cosine?
-    params.insert("q".to_string(), json!(zero_vec));
+    params.insert("q".to_string(), unival!(zero_vec));
 
     {
         let query = uni_query::parse_cypher(search_query_param)?;

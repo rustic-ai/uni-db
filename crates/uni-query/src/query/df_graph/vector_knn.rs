@@ -24,7 +24,7 @@ use datafusion::execution::{RecordBatchStream, SendableRecordBatchStream, TaskCo
 use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties};
 use futures::Stream;
-use serde_json::Value;
+use uni_common::Value;
 use std::any::Any;
 use std::collections::HashMap;
 use std::fmt;
@@ -157,7 +157,7 @@ impl GraphVectorKnnExec {
         let value = evaluate_simple_expr(&self.query_expr, &self.params)?;
 
         match value {
-            Value::Array(arr) => {
+            Value::List(arr) => {
                 let mut vec = Vec::with_capacity(arr.len());
                 for v in arr {
                     if let Some(f) = v.as_f64() {
@@ -171,7 +171,7 @@ impl GraphVectorKnnExec {
                 Ok(vec)
             }
             _ => Err(datafusion::error::DataFusionError::Execution(
-                "Query vector must be an array".to_string(),
+                "Query vector must be a list".to_string(),
             )),
         }
     }
@@ -488,7 +488,7 @@ fn build_result_batch(
         .map_err(|e| datafusion::error::DataFusionError::ArrowError(Box::new(e), None))
 }
 
-/// Evaluate a simple expression to get a JSON value.
+/// Evaluate a simple expression to get a `uni_common::Value`.
 ///
 /// Supports:
 /// - Literal values
@@ -496,7 +496,7 @@ fn build_result_batch(
 /// - Literal lists
 fn evaluate_simple_expr(expr: &Expr, params: &HashMap<String, Value>) -> DFResult<Value> {
     match expr {
-        Expr::Literal(lit) => Ok(lit.to_json_value()),
+        Expr::Literal(lit) => Ok(lit.to_value()),
 
         Expr::Parameter(name) => params.get(name).cloned().ok_or_else(|| {
             datafusion::error::DataFusionError::Execution(format!("Parameter '{}' not found", name))
@@ -507,7 +507,7 @@ fn evaluate_simple_expr(expr: &Expr, params: &HashMap<String, Value>) -> DFResul
             for item in items {
                 values.push(evaluate_simple_expr(item, params)?);
             }
-            Ok(Value::Array(values))
+            Ok(Value::List(values))
         }
 
         _ => Err(datafusion::error::DataFusionError::Execution(format!(
@@ -542,10 +542,10 @@ mod tests {
 
         let result = evaluate_simple_expr(&expr, &HashMap::new()).unwrap();
         match result {
-            Value::Array(arr) => {
+            Value::List(arr) => {
                 assert_eq!(arr.len(), 3);
             }
-            _ => panic!("Expected array"),
+            _ => panic!("Expected list"),
         }
     }
 
@@ -555,18 +555,15 @@ mod tests {
         let mut params = HashMap::new();
         params.insert(
             "query".to_string(),
-            Value::Array(vec![
-                Value::Number(serde_json::Number::from_f64(0.1).unwrap()),
-                Value::Number(serde_json::Number::from_f64(0.2).unwrap()),
-            ]),
+            Value::List(vec![Value::Float(0.1), Value::Float(0.2)]),
         );
 
         let result = evaluate_simple_expr(&expr, &params).unwrap();
         match result {
-            Value::Array(arr) => {
+            Value::List(arr) => {
                 assert_eq!(arr.len(), 2);
             }
-            _ => panic!("Expected array"),
+            _ => panic!("Expected list"),
         }
     }
 }

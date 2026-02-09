@@ -2,7 +2,8 @@
 // Copyright 2024-2026 Dragonscale Team
 
 use anyhow::{Result, anyhow};
-use serde_json::{Value, json};
+use std::collections::HashMap;
+use uni_common::Value;
 
 const EARTH_RADIUS_KM: f64 = 6371.0;
 
@@ -40,12 +41,12 @@ fn eval_point(args: &[Value]) -> Result<Value> {
             return Err(anyhow!("longitude must be between -180 and 180"));
         }
 
-        return Ok(json!({
-            "type": "Point",
-            "crs": "WGS84",
-            "latitude": lat,
-            "longitude": lon
-        }));
+        return Ok(Value::Map(HashMap::from([
+            ("type".to_string(), Value::String("Point".into())),
+            ("crs".to_string(), Value::String("WGS84".into())),
+            ("latitude".to_string(), Value::Float(lat)),
+            ("longitude".to_string(), Value::Float(lon)),
+        ])));
     }
 
     // Cartesian point: {x, y} or {x, y, z}
@@ -58,13 +59,25 @@ fn eval_point(args: &[Value]) -> Result<Value> {
             .ok_or_else(|| anyhow!("y must be a number"))?;
         let z = map.get("z").and_then(|v| v.as_f64());
 
-        return Ok(json!({
-            "type": "Point",
-            "crs": if z.is_some() { "Cartesian-3D" } else { "Cartesian" },
-            "x": x,
-            "y": y,
-            "z": z
-        }));
+        let crs = if z.is_some() {
+            "Cartesian-3D"
+        } else {
+            "Cartesian"
+        };
+
+        let mut entries = vec![
+            ("type".to_string(), Value::String("Point".into())),
+            ("crs".to_string(), Value::String(crs.into())),
+            ("x".to_string(), Value::Float(x)),
+            ("y".to_string(), Value::Float(y)),
+        ];
+        if let Some(z_val) = z {
+            entries.push(("z".to_string(), Value::Float(z_val)));
+        } else {
+            entries.push(("z".to_string(), Value::Null));
+        }
+
+        return Ok(Value::Map(HashMap::from_iter(entries)));
     }
 
     Err(anyhow!(
@@ -107,22 +120,24 @@ fn eval_distance(args: &[Value]) -> Result<Value> {
                 (dlat / 2.0).sin().powi(2) + lat1.cos() * lat2.cos() * (dlon / 2.0).sin().powi(2);
             let c = 2.0 * a.sqrt().asin();
 
-            Ok(json!(EARTH_RADIUS_KM * c * 1000.0)) // Return meters
+            Ok(Value::Float(EARTH_RADIUS_KM * c * 1000.0)) // Return meters
         }
         "Cartesian" => {
             let (x1, y1) = get_cartesian_coords(p1, "First point")?;
             let (x2, y2) = get_cartesian_coords(p2, "Second point")?;
 
-            Ok(json!(((x2 - x1).powi(2) + (y2 - y1).powi(2)).sqrt()))
+            Ok(Value::Float(
+                ((x2 - x1).powi(2) + (y2 - y1).powi(2)).sqrt(),
+            ))
         }
         "Cartesian-3D" => {
             let (x1, y1) = get_cartesian_coords(p1, "First point")?;
             let (x2, y2) = get_cartesian_coords(p2, "Second point")?;
-            let z1 = p1["z"].as_f64().unwrap_or(0.0);
-            let z2 = p2["z"].as_f64().unwrap_or(0.0);
+            let z1 = p1.get("z").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            let z2 = p2.get("z").and_then(|v| v.as_f64()).unwrap_or(0.0);
 
-            Ok(json!(
-                ((x2 - x1).powi(2) + (y2 - y1).powi(2) + (z2 - z1).powi(2)).sqrt()
+            Ok(Value::Float(
+                ((x2 - x1).powi(2) + (y2 - y1).powi(2) + (z2 - z1).powi(2)).sqrt(),
             ))
         }
         _ => Err(anyhow!("Unknown coordinate reference system: {}", crs1)),
@@ -130,23 +145,27 @@ fn eval_distance(args: &[Value]) -> Result<Value> {
 }
 
 /// Extract geographic coordinates (latitude, longitude) from a point object.
-fn get_geo_coords(point: &serde_json::Map<String, Value>, name: &str) -> Result<(f64, f64)> {
-    let lat = point["latitude"]
-        .as_f64()
+fn get_geo_coords(point: &HashMap<String, Value>, name: &str) -> Result<(f64, f64)> {
+    let lat = point
+        .get("latitude")
+        .and_then(|v| v.as_f64())
         .ok_or_else(|| anyhow!("{} latitude must be a number", name))?;
-    let lon = point["longitude"]
-        .as_f64()
+    let lon = point
+        .get("longitude")
+        .and_then(|v| v.as_f64())
         .ok_or_else(|| anyhow!("{} longitude must be a number", name))?;
     Ok((lat, lon))
 }
 
 /// Extract Cartesian coordinates (x, y) from a point object.
-fn get_cartesian_coords(point: &serde_json::Map<String, Value>, name: &str) -> Result<(f64, f64)> {
-    let x = point["x"]
-        .as_f64()
+fn get_cartesian_coords(point: &HashMap<String, Value>, name: &str) -> Result<(f64, f64)> {
+    let x = point
+        .get("x")
+        .and_then(|v| v.as_f64())
         .ok_or_else(|| anyhow!("{} x must be a number", name))?;
-    let y = point["y"]
-        .as_f64()
+    let y = point
+        .get("y")
+        .and_then(|v| v.as_f64())
         .ok_or_else(|| anyhow!("{} y must be a number", name))?;
     Ok((x, y))
 }
@@ -181,8 +200,8 @@ fn eval_within_bbox(args: &[Value]) -> Result<Value> {
         let (min_lat, min_lon) = get_geo_coords(lower_left, "Lower-left")?;
         let (max_lat, max_lon) = get_geo_coords(upper_right, "Upper-right")?;
 
-        return Ok(json!(
-            in_range(lat, min_lat, max_lat) && in_range(lon, min_lon, max_lon)
+        return Ok(Value::Bool(
+            in_range(lat, min_lat, max_lat) && in_range(lon, min_lon, max_lon),
         ));
     }
 
@@ -192,8 +211,8 @@ fn eval_within_bbox(args: &[Value]) -> Result<Value> {
         let (min_x, min_y) = get_cartesian_coords(lower_left, "Lower-left")?;
         let (max_x, max_y) = get_cartesian_coords(upper_right, "Upper-right")?;
 
-        return Ok(json!(
-            in_range(x, min_x, max_x) && in_range(y, min_y, max_y)
+        return Ok(Value::Bool(
+            in_range(x, min_x, max_x) && in_range(y, min_y, max_y),
         ));
     }
 

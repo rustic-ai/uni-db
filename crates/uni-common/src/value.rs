@@ -16,11 +16,15 @@ use crate::core::id::{Eid, Vid};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
+use std::hash::{Hash, Hasher};
 
 /// Dynamic value type for properties, parameters, and results.
 ///
 /// Preserves the distinction between integers and floats, and includes
 /// graph-specific variants for nodes, edges, paths, and vectors.
+///
+/// Note: `Eq` and `Hash` are implemented manually to support using `Value` as
+/// HashMap keys. Floats are compared/hashed by their bit representation.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 #[non_exhaustive]
@@ -158,6 +162,16 @@ impl Value {
     pub fn is_map(&self) -> bool {
         matches!(self, Value::Map(_))
     }
+
+    /// Gets a value by key if this is a `Map`.
+    ///
+    /// Returns `None` if not a map or key doesn't exist.
+    pub fn get(&self, key: &str) -> Option<&Value> {
+        match self {
+            Value::Map(m) => m.get(key),
+            _ => None,
+        }
+    }
 }
 
 impl fmt::Display for Value {
@@ -209,11 +223,63 @@ impl fmt::Display for Value {
 }
 
 // ---------------------------------------------------------------------------
+// Eq and Hash implementations
+// ---------------------------------------------------------------------------
+
+impl Eq for Value {}
+
+impl Hash for Value {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        // Discriminant first for type safety
+        std::mem::discriminant(self).hash(state);
+        match self {
+            Value::Null => {}
+            Value::Bool(b) => b.hash(state),
+            Value::Int(i) => i.hash(state),
+            Value::Float(f) => f.to_bits().hash(state),
+            Value::String(s) => s.hash(state),
+            Value::Bytes(b) => b.hash(state),
+            Value::List(l) => l.hash(state),
+            Value::Map(m) => {
+                // Sort keys for deterministic hashing
+                let mut pairs: Vec<_> = m.iter().collect();
+                pairs.sort_by_key(|(k, _)| *k);
+                pairs.len().hash(state);
+                for (k, v) in pairs {
+                    k.hash(state);
+                    v.hash(state);
+                }
+            }
+            Value::Node(n) => n.hash(state),
+            Value::Edge(e) => e.hash(state),
+            Value::Path(p) => p.hash(state),
+            Value::Vector(v) => {
+                v.len().hash(state);
+                for f in v {
+                    f.to_bits().hash(state);
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Graph entity types
 // ---------------------------------------------------------------------------
 
+/// Helper to hash a HashMap deterministically by sorting keys.
+fn hash_map<H: Hasher>(m: &HashMap<String, Value>, state: &mut H) {
+    let mut pairs: Vec<_> = m.iter().collect();
+    pairs.sort_by_key(|(k, _)| *k);
+    pairs.len().hash(state);
+    for (k, v) in pairs {
+        k.hash(state);
+        v.hash(state);
+    }
+}
+
 /// Graph node with identity, label, and properties.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Node {
     /// Internal vertex identifier.
     pub vid: Vid,
@@ -221,6 +287,14 @@ pub struct Node {
     pub label: String,
     /// Property key-value pairs.
     pub properties: HashMap<String, Value>,
+}
+
+impl Hash for Node {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.vid.hash(state);
+        self.label.hash(state);
+        hash_map(&self.properties, state);
+    }
 }
 
 impl Node {
@@ -250,7 +324,7 @@ impl Node {
 }
 
 /// Graph edge with identity, type, endpoints, and properties.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Edge {
     /// Internal edge identifier.
     pub eid: Eid,
@@ -262,6 +336,16 @@ pub struct Edge {
     pub dst: Vid,
     /// Property key-value pairs.
     pub properties: HashMap<String, Value>,
+}
+
+impl Hash for Edge {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.eid.hash(state);
+        self.edge_type.hash(state);
+        self.src.hash(state);
+        self.dst.hash(state);
+        hash_map(&self.properties, state);
+    }
 }
 
 impl Edge {
@@ -284,7 +368,7 @@ impl Edge {
 }
 
 /// Graph path consisting of alternating nodes and edges.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Path {
     /// Ordered sequence of nodes along the path.
     pub nodes: Vec<Node>,
@@ -860,6 +944,85 @@ impl From<Value> for serde_json::Value {
 }
 
 // ---------------------------------------------------------------------------
+// unival! macro
+// ---------------------------------------------------------------------------
+
+/// Constructs a [`Value`] from a literal or expression, similar to `serde_json::json!`.
+///
+/// # Examples
+///
+/// ```
+/// use uni_common::unival;
+/// use uni_common::Value;
+///
+/// let null = unival!(null);
+/// let b = unival!(true);
+/// let i = unival!(42);
+/// let f = unival!(3.14);
+/// let s = unival!("hello");
+/// let list = unival!([1, 2, "three"]);
+/// let map = unival!({"key": "val", "num": 42});
+/// let expr_val = { let x: i64 = 10; unival!(x) };
+/// ```
+#[macro_export]
+macro_rules! unival {
+    // Null
+    (null) => {
+        $crate::Value::Null
+    };
+
+    // Booleans
+    (true) => {
+        $crate::Value::Bool(true)
+    };
+    (false) => {
+        $crate::Value::Bool(false)
+    };
+
+    // Array
+    ([ $($elem:tt),* $(,)? ]) => {
+        $crate::Value::List(vec![ $( $crate::unival!($elem) ),* ])
+    };
+
+    // Map
+    ({ $($key:tt : $val:tt),* $(,)? }) => {
+        $crate::Value::Map({
+            #[allow(unused_mut)]
+            let mut map = ::std::collections::HashMap::new();
+            $( map.insert(($key).to_string(), $crate::unival!($val)); )*
+            map
+        })
+    };
+
+    // Fallback: any expression — uses From<T> for Value
+    ($e:expr) => {
+        $crate::Value::from($e)
+    };
+}
+
+// ---------------------------------------------------------------------------
+// Additional From impls for unival! convenience
+// ---------------------------------------------------------------------------
+
+impl From<usize> for Value {
+    fn from(v: usize) -> Self {
+        Value::Int(v as i64)
+    }
+}
+
+impl From<u64> for Value {
+    fn from(v: u64) -> Self {
+        Value::Int(v as i64)
+    }
+}
+
+impl From<f32> for Value {
+    fn from(v: f32) -> Self {
+        Value::Float(v as f64)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -918,6 +1081,36 @@ mod tests {
         let json: serde_json::Value = val.clone().into();
         let back: Value = json.into();
         assert_eq!(val, back);
+    }
+
+    #[test]
+    fn test_unival_macro() {
+        assert_eq!(unival!(null), Value::Null);
+        assert_eq!(unival!(true), Value::Bool(true));
+        assert_eq!(unival!(false), Value::Bool(false));
+        assert_eq!(unival!(42_i64), Value::Int(42));
+        assert_eq!(unival!(3.14_f64), Value::Float(3.14));
+        assert_eq!(unival!("hello"), Value::String("hello".into()));
+
+        // Array
+        let list = unival!([1_i64, 2_i64]);
+        assert_eq!(
+            list,
+            Value::List(vec![Value::Int(1), Value::Int(2)])
+        );
+
+        // Map
+        let map = unival!({"key": "val", "num": 42_i64});
+        if let Value::Map(m) = &map {
+            assert_eq!(m.get("key"), Some(&Value::String("val".into())));
+            assert_eq!(m.get("num"), Some(&Value::Int(42)));
+        } else {
+            panic!("Expected Map");
+        }
+
+        // Expression fallback
+        let x: i64 = 99;
+        assert_eq!(unival!(x), Value::Int(99));
     }
 
     #[test]

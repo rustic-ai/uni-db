@@ -1,7 +1,7 @@
 // Integration tests for Rust notebook examples
 // These tests mirror the Jupyter notebook examples to verify they work correctly.
 
-use serde_json::json;
+use uni_db::unival;
 use std::collections::HashMap;
 use tempfile::tempdir;
 use uni_db::{DataType, IndexType, ScalarType, Uni, VectorAlgo, VectorIndexCfg, VectorMetric};
@@ -35,16 +35,16 @@ async fn test_supply_chain() -> anyhow::Result<()> {
     // Insert Parts
     let part_props: Vec<uni_db::common::Properties> = vec![
         HashMap::from([
-            ("sku".to_string(), json!("RES-10K").into()),
-            ("cost".to_string(), json!(0.05).into()),
+            ("sku".to_string(), unival!("RES-10K")),
+            ("cost".to_string(), unival!(0.05)),
         ]),
         HashMap::from([
-            ("sku".to_string(), json!("MB-X1").into()),
-            ("cost".to_string(), json!(50.0).into()),
+            ("sku".to_string(), unival!("MB-X1")),
+            ("cost".to_string(), unival!(50.0)),
         ]),
         HashMap::from([
-            ("sku".to_string(), json!("SCR-OLED").into()),
-            ("cost".to_string(), json!(30.0).into()),
+            ("sku".to_string(), unival!("SCR-OLED")),
+            ("cost".to_string(), unival!(30.0)),
         ]),
     ];
 
@@ -53,8 +53,8 @@ async fn test_supply_chain() -> anyhow::Result<()> {
 
     // Insert Product
     let prod_props: Vec<uni_db::common::Properties> = vec![HashMap::from([
-        ("name".to_string(), json!("Smartphone X").into()),
-        ("price".to_string(), json!(500.0).into()),
+        ("name".to_string(), unival!("Smartphone X")),
+        ("price".to_string(), unival!(500.0)),
     ])];
 
     let phone_vids = db
@@ -145,19 +145,19 @@ async fn test_recommendation() -> anyhow::Result<()> {
 
     let products: Vec<uni_db::common::Properties> = vec![
         HashMap::from([
-            ("name".to_string(), json!("Running Shoes").into()),
-            ("price".to_string(), json!(100.0).into()),
-            ("embedding".to_string(), json!(p1_vec).into()),
+            ("name".to_string(), unival!("Running Shoes")),
+            ("price".to_string(), unival!(100.0)),
+            ("embedding".to_string(), unival!(p1_vec)),
         ]),
         HashMap::from([
-            ("name".to_string(), json!("Socks").into()),
-            ("price".to_string(), json!(10.0).into()),
-            ("embedding".to_string(), json!(p2_vec).into()),
+            ("name".to_string(), unival!("Socks")),
+            ("price".to_string(), unival!(10.0)),
+            ("embedding".to_string(), unival!(p2_vec)),
         ]),
         HashMap::from([
-            ("name".to_string(), json!("Shampoo").into()),
-            ("price".to_string(), json!(5.0).into()),
-            ("embedding".to_string(), json!(p3_vec).into()),
+            ("name".to_string(), unival!("Shampoo")),
+            ("price".to_string(), unival!(5.0)),
+            ("embedding".to_string(), unival!(p3_vec)),
         ]),
     ];
 
@@ -166,9 +166,9 @@ async fn test_recommendation() -> anyhow::Result<()> {
 
     // Users
     let users: Vec<uni_db::common::Properties> = vec![
-        HashMap::from([("name".to_string(), json!("Alice").into())]),
-        HashMap::from([("name".to_string(), json!("Bob").into())]),
-        HashMap::from([("name".to_string(), json!("Charlie").into())]),
+        HashMap::from([("name".to_string(), unival!("Alice"))]),
+        HashMap::from([("name".to_string(), unival!("Bob"))]),
+        HashMap::from([("name".to_string(), unival!("Charlie"))]),
     ];
 
     let user_vids = db.bulk_insert_vertices("User", users).await.unwrap();
@@ -248,13 +248,13 @@ async fn test_rag() -> anyhow::Result<()> {
         HashMap::from([
             (
                 "text".to_string(),
-                json!("Function verify() checks signatures.").into(),
+                unival!("Function verify() checks signatures."),
             ),
-            ("embedding".to_string(), json!(c1_vec).into()),
+            ("embedding".to_string(), unival!(c1_vec)),
         ]),
         HashMap::from([
-            ("text".to_string(), json!("Other text about verify.").into()),
-            ("embedding".to_string(), json!(c2_vec).into()),
+            ("text".to_string(), unival!("Other text about verify.")),
+            ("embedding".to_string(), unival!(c2_vec)),
         ]),
     ];
 
@@ -263,8 +263,8 @@ async fn test_rag() -> anyhow::Result<()> {
 
     // Entities
     let entities: Vec<uni_db::common::Properties> = vec![HashMap::from([
-        ("name".to_string(), json!("verify").into()),
-        ("type".to_string(), json!("function").into()),
+        ("name".to_string(), unival!("verify")),
+        ("type".to_string(), unival!("function")),
     ])];
 
     let entity_vids = db.bulk_insert_vertices("Entity", entities).await.unwrap();
@@ -321,10 +321,10 @@ async fn test_fraud_detection() -> anyhow::Result<()> {
 
     // Users with risk scores
     let users: Vec<uni_db::common::Properties> = vec![
-        HashMap::from([("risk_score".to_string(), json!(0.1).into())]), // A
-        HashMap::from([("risk_score".to_string(), json!(0.2).into())]), // B
-        HashMap::from([("risk_score".to_string(), json!(0.3).into())]), // C
-        HashMap::from([("risk_score".to_string(), json!(0.9).into())]), // D (Fraudster)
+        HashMap::from([("risk_score".to_string(), unival!(0.1))]), // A
+        HashMap::from([("risk_score".to_string(), unival!(0.2))]), // B
+        HashMap::from([("risk_score".to_string(), unival!(0.3))]), // C
+        HashMap::from([("risk_score".to_string(), unival!(0.9))]), // D (Fraudster)
     ];
 
     let user_vids = db.bulk_insert_vertices("User", users).await.unwrap();
@@ -342,17 +342,17 @@ async fn test_fraud_detection() -> anyhow::Result<()> {
             (
                 ua,
                 ub,
-                HashMap::from([("amount".to_string(), json!(5000.0).into())]),
+                HashMap::from([("amount".to_string(), unival!(5000.0))]),
             ),
             (
                 ub,
                 uc,
-                HashMap::from([("amount".to_string(), json!(5000.0).into())]),
+                HashMap::from([("amount".to_string(), unival!(5000.0))]),
             ),
             (
                 uc,
                 ua,
-                HashMap::from([("amount".to_string(), json!(5000.0).into())]),
+                HashMap::from([("amount".to_string(), unival!(5000.0))]),
             ),
         ],
     )
@@ -415,14 +415,14 @@ async fn test_sales_analytics() -> anyhow::Result<()> {
 
     // Create region
     let regions: Vec<uni_db::common::Properties> =
-        vec![HashMap::from([("name".to_string(), json!("North").into())])];
+        vec![HashMap::from([("name".to_string(), unival!("North"))])];
 
     let region_vids = db.bulk_insert_vertices("Region", regions).await.unwrap();
     let north = region_vids[0];
 
     // Create 100 orders
     let orders: Vec<uni_db::common::Properties> = (0..100)
-        .map(|i| HashMap::from([("amount".to_string(), json!(10.0 * (i + 1) as f64).into())]))
+        .map(|i| HashMap::from([("amount".to_string(), unival!(10.0 * (i + 1) as f64))]))
         .collect();
 
     let order_vids = db.bulk_insert_vertices("ORDER", orders).await.unwrap();

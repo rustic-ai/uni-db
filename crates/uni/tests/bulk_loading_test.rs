@@ -4,7 +4,7 @@
 //! Tests for bulk loading API including vertices and edges.
 
 use anyhow::Result;
-use serde_json::json;
+use uni_db::unival;
 use std::collections::HashMap;
 use uni_db::Uni;
 use uni_db::api::bulk::EdgeData;
@@ -78,8 +78,8 @@ async fn test_bulk_insert_vertices() -> Result<()> {
     let mut props = Vec::new();
     for i in 0..250 {
         let mut p: HashMap<String, uni_db::Value> = HashMap::new();
-        p.insert("name".to_string(), json!(format!("Person_{}", i)).into());
-        p.insert("age".to_string(), json!(i % 100).into());
+        p.insert("name".to_string(), unival!(format!("Person_{}", i)));
+        p.insert("age".to_string(), unival!(i % 100));
         props.push(p);
     }
 
@@ -106,8 +106,8 @@ async fn test_bulk_insert_edges() -> Result<()> {
     let mut person_props = Vec::new();
     for i in 0..100 {
         let mut p: HashMap<String, uni_db::Value> = HashMap::new();
-        p.insert("name".to_string(), json!(format!("Person_{}", i)).into());
-        p.insert("age".to_string(), json!(20 + i % 50).into());
+        p.insert("name".to_string(), unival!(format!("Person_{}", i)));
+        p.insert("age".to_string(), unival!(20 + i % 50));
         person_props.push(p);
     }
     let person_vids = bulk.insert_vertices("Person", person_props).await?;
@@ -115,7 +115,7 @@ async fn test_bulk_insert_edges() -> Result<()> {
     let mut company_props = Vec::new();
     for i in 0..10 {
         let mut p: HashMap<String, uni_db::Value> = HashMap::new();
-        p.insert("name".to_string(), json!(format!("Company_{}", i)).into());
+        p.insert("name".to_string(), unival!(format!("Company_{}", i)));
         company_props.push(p);
     }
     let company_vids = bulk.insert_vertices("Company", company_props).await?;
@@ -124,7 +124,7 @@ async fn test_bulk_insert_edges() -> Result<()> {
     let mut knows_edges = Vec::new();
     for i in 0..50 {
         let mut props = HashMap::new();
-        props.insert("since".to_string(), json!(2020 + (i % 5)).into());
+        props.insert("since".to_string(), unival!(2020 + (i % 5)));
         knows_edges.push(EdgeData::new(
             person_vids[i],
             person_vids[(i + 1) % 100],
@@ -138,7 +138,7 @@ async fn test_bulk_insert_edges() -> Result<()> {
     let mut works_edges = Vec::new();
     for i in 0..100 {
         let mut props = HashMap::new();
-        props.insert("role".to_string(), json!(format!("Role_{}", i % 5)).into());
+        props.insert("role".to_string(), unival!(format!("Role_{}", i % 5)));
         works_edges.push(EdgeData::new(person_vids[i], company_vids[i % 10], props));
     }
     let works_eids = bulk.insert_edges("WORKS_AT", works_edges).await?;
@@ -161,7 +161,7 @@ async fn test_bulk_abort_clears_buffers() -> Result<()> {
     let mut props = Vec::new();
     for i in 0..50 {
         let mut p: HashMap<String, uni_db::Value> = HashMap::new();
-        p.insert("name".to_string(), json!(format!("Person_{}", i)).into());
+        p.insert("name".to_string(), unival!(format!("Person_{}", i)));
         props.push(p);
     }
     let _vids = bulk.insert_vertices("Person", props).await?;
@@ -204,7 +204,7 @@ async fn test_bulk_progress_callback() -> Result<()> {
     let mut props = Vec::new();
     for i in 0..200 {
         let mut p: HashMap<String, uni_db::Value> = HashMap::new();
-        p.insert("name".to_string(), json!(format!("Person_{}", i)).into());
+        p.insert("name".to_string(), unival!(format!("Person_{}", i)));
         props.push(p);
     }
     bulk.insert_vertices("Person", props).await?;
@@ -225,14 +225,14 @@ async fn test_bulk_edge_with_properties() -> Result<()> {
     // Create two persons
     let p1_props = vec![{
         let mut p = HashMap::new();
-        p.insert("name".to_string(), json!("Alice").into());
-        p.insert("age".to_string(), json!(30).into());
+        p.insert("name".to_string(), unival!("Alice"));
+        p.insert("age".to_string(), unival!(30));
         p
     }];
     let p2_props = vec![{
         let mut p = HashMap::new();
-        p.insert("name".to_string(), json!("Bob").into());
-        p.insert("age".to_string(), json!(25).into());
+        p.insert("name".to_string(), unival!("Bob"));
+        p.insert("age".to_string(), unival!(25));
         p
     }];
 
@@ -241,7 +241,7 @@ async fn test_bulk_edge_with_properties() -> Result<()> {
 
     // Create edge with properties
     let mut edge_props = HashMap::new();
-    edge_props.insert("since".to_string(), json!(2020).into());
+    edge_props.insert("since".to_string(), unival!(2020));
 
     let edges = vec![EdgeData::new(p1_vids[0], p2_vids[0], edge_props)];
     let eids = bulk.insert_edges("KNOWS", edges).await?;
@@ -275,8 +275,8 @@ async fn test_bulk_async_indexes_returns_immediately() -> Result<()> {
     let mut props = Vec::new();
     for i in 0..100 {
         let mut p: HashMap<String, uni_db::Value> = HashMap::new();
-        p.insert("name".to_string(), json!(format!("Person_{}", i)).into());
-        p.insert("age".to_string(), json!(i % 100).into());
+        p.insert("name".to_string(), unival!(format!("Person_{}", i)));
+        p.insert("age".to_string(), unival!(i % 100));
         props.push(p);
     }
     bulk.insert_vertices("Person", props).await?;
@@ -322,7 +322,7 @@ async fn test_bulk_sync_indexes_blocks() -> Result<()> {
     let mut props = Vec::new();
     for i in 0..50 {
         let mut p: HashMap<String, uni_db::Value> = HashMap::new();
-        p.insert("name".to_string(), json!(format!("Person_{}", i)).into());
+        p.insert("name".to_string(), unival!(format!("Person_{}", i)));
         props.push(p);
     }
     bulk.insert_vertices("Person", props).await?;
@@ -430,7 +430,7 @@ async fn test_bulk_not_null_constraint() -> Result<()> {
     let props = vec![{
         let mut p = HashMap::new();
         // Missing "name" which is NOT NULL
-        p.insert("email".to_string(), json!("test@example.com").into());
+        p.insert("email".to_string(), unival!("test@example.com"));
         p
     }];
 
@@ -456,7 +456,7 @@ async fn test_bulk_not_null_constraint_with_explicit_null() -> Result<()> {
     let props = vec![{
         let mut p = HashMap::new();
         p.insert("name".to_string(), uni_db::Value::Null); // Explicit null
-        p.insert("email".to_string(), json!("test@example.com").into());
+        p.insert("email".to_string(), unival!("test@example.com"));
         p
     }];
 
@@ -476,14 +476,14 @@ async fn test_bulk_unique_constraint_in_batch() -> Result<()> {
     let props = vec![
         {
             let mut p = HashMap::new();
-            p.insert("name".to_string(), json!("Alice").into());
-            p.insert("email".to_string(), json!("same@example.com").into());
+            p.insert("name".to_string(), unival!("Alice"));
+            p.insert("email".to_string(), unival!("same@example.com"));
             p
         },
         {
             let mut p = HashMap::new();
-            p.insert("name".to_string(), json!("Bob").into());
-            p.insert("email".to_string(), json!("same@example.com").into()); // Duplicate!
+            p.insert("name".to_string(), unival!("Bob"));
+            p.insert("email".to_string(), unival!("same@example.com")); // Duplicate!
             p
         },
     ];
@@ -509,8 +509,8 @@ async fn test_bulk_unique_constraint_across_batches() -> Result<()> {
     // First batch succeeds
     let props1 = vec![{
         let mut p = HashMap::new();
-        p.insert("name".to_string(), json!("Alice").into());
-        p.insert("email".to_string(), json!("alice@example.com").into());
+        p.insert("name".to_string(), unival!("Alice"));
+        p.insert("email".to_string(), unival!("alice@example.com"));
         p
     }];
     bulk.insert_vertices("Person", props1).await?;
@@ -518,8 +518,8 @@ async fn test_bulk_unique_constraint_across_batches() -> Result<()> {
     // Second batch with same email should fail (conflicts with buffered data)
     let props2 = vec![{
         let mut p = HashMap::new();
-        p.insert("name".to_string(), json!("Bob").into());
-        p.insert("email".to_string(), json!("alice@example.com").into()); // Same as first batch
+        p.insert("name".to_string(), unival!("Bob"));
+        p.insert("email".to_string(), unival!("alice@example.com")); // Same as first batch
         p
     }];
 
@@ -542,8 +542,8 @@ async fn test_bulk_abort_after_flush_rollback() -> Result<()> {
     let mut props = Vec::new();
     for i in 0..25 {
         let mut p: HashMap<String, uni_db::Value> = HashMap::new();
-        p.insert("name".to_string(), json!(format!("Person_{}", i)).into());
-        p.insert("age".to_string(), json!(i).into());
+        p.insert("name".to_string(), unival!(format!("Person_{}", i)));
+        p.insert("age".to_string(), unival!(i));
         props.push(p);
     }
     let _vids = bulk.insert_vertices("Person", props).await?;
@@ -586,8 +586,8 @@ async fn test_bulk_buffer_limit_checkpoint() -> Result<()> {
     for i in 0..100 {
         let mut p: HashMap<String, uni_db::Value> = HashMap::new();
         let long_name = format!("Person_{}_with_a_very_long_name_{}", i, "x".repeat(500));
-        p.insert("name".to_string(), json!(long_name).into());
-        p.insert("age".to_string(), json!(i).into());
+        p.insert("name".to_string(), unival!(long_name));
+        p.insert("age".to_string(), unival!(i));
         props.push(p);
     }
 
@@ -617,14 +617,14 @@ async fn test_bulk_constraint_validation_disabled() -> Result<()> {
     let props = vec![
         {
             let mut p = HashMap::new();
-            p.insert("name".to_string(), json!("Alice").into());
-            p.insert("email".to_string(), json!("same@example.com").into());
+            p.insert("name".to_string(), unival!("Alice"));
+            p.insert("email".to_string(), unival!("same@example.com"));
             p
         },
         {
             let mut p = HashMap::new();
-            p.insert("name".to_string(), json!("Bob").into());
-            p.insert("email".to_string(), json!("same@example.com").into()); // Duplicate email
+            p.insert("name".to_string(), unival!("Bob"));
+            p.insert("email".to_string(), unival!("same@example.com")); // Duplicate email
             p
         },
     ];

@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2024-2026 Dragonscale Team
 
-use serde_json::json;
 use std::collections::HashMap;
+use uni_db::unival;
 use std::sync::Arc;
 use tempfile::tempdir;
 use uni_db::UniConfig;
@@ -58,13 +58,13 @@ async fn test_path_property_access() -> anyhow::Result<()> {
     let vid_b = Vid::new(1);
 
     let mut props_a = HashMap::new();
-    props_a.insert("name".to_string(), json!("Alice").into());
+    props_a.insert("name".to_string(), unival!("Alice"));
     writer
         .insert_vertex_with_labels(vid_a, props_a, vec!["Person".to_string()])
         .await?;
 
     let mut props_b = HashMap::new();
-    props_b.insert("name".to_string(), json!("Bob").into());
+    props_b.insert("name".to_string(), unival!("Bob"));
     writer
         .insert_vertex_with_labels(vid_b, props_b, vec!["Person".to_string()])
         .await?;
@@ -104,8 +104,14 @@ async fn test_path_property_access() -> anyhow::Result<()> {
         .await?;
 
     assert_eq!(results.len(), 1);
-    assert_eq!(results[0].get("nodes(p)[0].name"), Some(&json!("Alice")));
-    assert_eq!(results[0].get("nodes(p)[1].name"), Some(&json!("Bob")));
+    assert_eq!(
+        results[0].get("nodes(p)[0].name"),
+        Some(&unival!("Alice"))
+    );
+    assert_eq!(
+        results[0].get("nodes(p)[1].name"),
+        Some(&unival!("Bob"))
+    );
 
     Ok(())
 }

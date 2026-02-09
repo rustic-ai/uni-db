@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2024-2026 Dragonscale Team
 
-use serde_json::json;
+use uni_db::unival;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tempfile::tempdir;
@@ -70,7 +70,7 @@ async fn test_edge_export_failure() -> anyhow::Result<()> {
         // Edge Alice -> Bob
         let eid = uni_db::common::core::id::Eid::new(0); // Type 1 (KNOWS)
         let mut props = HashMap::new();
-        props.insert("since".to_string(), json!(2022).into());
+        props.insert("since".to_string(), unival!(2022));
         w.insert_edge(
             uni_db::common::core::id::Vid::new(0),
             uni_db::common::core::id::Vid::new(1),
@@ -93,7 +93,7 @@ async fn test_edge_export_failure() -> anyhow::Result<()> {
             &HashMap::new(),
         )
         .await?;
-    assert_eq!(res[0].get("count").unwrap(), &json!(1));
+    assert_eq!(res[0].get("count").unwrap(), &unival!(1));
 
     // Verify Exported Parquet File
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;

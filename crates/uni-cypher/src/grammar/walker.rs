@@ -2,7 +2,7 @@ use super::ParseError;
 use super::Rule;
 use crate::ast::*;
 use pest::iterators::{Pair, Pairs};
-use serde_json::Value;
+use uni_common::Value;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // HELPER FUNCTIONS
@@ -2880,10 +2880,7 @@ fn build_copy_from(pair: Pair<Rule>) -> Result<SchemaCommand, ParseError> {
 /// 1. Explicit 'format' option in the WITH clause
 /// 2. File extension (.csv, .parquet, etc.)
 /// 3. Default to 'parquet' if neither is available
-fn detect_file_format(
-    path: &str,
-    options: &std::collections::HashMap<String, serde_json::Value>,
-) -> String {
+fn detect_file_format(path: &str, options: &std::collections::HashMap<String, Value>) -> String {
     // Check if format is explicitly provided in options
     if let Some(format_value) = options.get("format")
         && let Some(format_str) = format_value.as_str()
@@ -2973,24 +2970,24 @@ fn build_property_definition(pair: Pair<Rule>) -> Result<PropertyDefinition, Par
 ///
 /// Supports:
 /// - Literals: strings, numbers, booleans, null
-/// - Maps: converted to JSON objects recursively
-/// - Lists: converted to JSON arrays recursively
+/// - Maps: converted to Value::Map recursively
+/// - Lists: converted to Value::List recursively
 fn expr_to_value(expr: Expr) -> Result<Value, ParseError> {
     match expr {
-        Expr::Literal(lit) => Ok(lit.to_json_value()),
+        Expr::Literal(lit) => Ok(lit.to_value()),
 
         Expr::Map(entries) => {
-            let mut obj = serde_json::Map::new();
+            let mut map = std::collections::HashMap::new();
             for (key, value_expr) in entries {
-                obj.insert(key, expr_to_value(value_expr)?);
+                map.insert(key, expr_to_value(value_expr)?);
             }
-            Ok(Value::Object(obj))
+            Ok(Value::Map(map))
         }
 
         Expr::List(items) => {
             let values: Result<Vec<Value>, ParseError> =
                 items.into_iter().map(expr_to_value).collect();
-            Ok(Value::Array(values?))
+            Ok(Value::List(values?))
         }
 
         _ => Err(ParseError::new(format!(

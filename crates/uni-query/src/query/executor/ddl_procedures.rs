@@ -3,8 +3,8 @@
 
 use anyhow::Result;
 use serde::Deserialize;
-use serde_json::Value;
 use std::collections::HashMap;
+use uni_common::Value;
 use uni_common::{
     UniError,
     core::schema::{
@@ -86,8 +86,9 @@ pub async fn create_label(
         .into());
     }
 
+    let json_val: serde_json::Value = config_val.clone().into();
     let config: LabelConfig =
-        serde_json::from_value(config_val.clone()).map_err(|e| UniError::InvalidArgument {
+        serde_json::from_value(json_val).map_err(|e| UniError::InvalidArgument {
             arg: "config".to_string(),
             message: e.to_string(),
         })?;
@@ -134,8 +135,9 @@ pub async fn create_edge_type(
 ) -> Result<bool> {
     validate_identifier(name)?;
 
+    let json_val: serde_json::Value = config_val.clone().into();
     let config: LabelConfig =
-        serde_json::from_value(config_val.clone()).map_err(|e| UniError::InvalidArgument {
+        serde_json::from_value(json_val).map_err(|e| UniError::InvalidArgument {
             arg: "config".to_string(),
             message: e.to_string(),
         })?;
@@ -167,8 +169,9 @@ pub async fn create_index(
     property: &str,
     config_val: &Value,
 ) -> Result<bool> {
+    let json_val: serde_json::Value = config_val.clone().into();
     let mut config: IndexConfig =
-        serde_json::from_value(config_val.clone()).map_err(|e| UniError::InvalidArgument {
+        serde_json::from_value(json_val).map_err(|e| UniError::InvalidArgument {
             arg: "config".to_string(),
             message: e.to_string(),
         })?;

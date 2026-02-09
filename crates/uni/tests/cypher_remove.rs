@@ -64,7 +64,7 @@ async fn test_cypher_remove() -> anyhow::Result<()> {
     let plan = planner.plan(ast)?;
     let res = executor.execute(plan, &prop_manager, &params).await?;
     assert_eq!(res.len(), 1);
-    assert_eq!(res[0].get("u.age"), Some(&serde_json::Value::Null));
+    assert_eq!(res[0].get("u.age"), Some(&uni_db::Value::Null));
 
     // Verify persistence (fetch again)
     let query = "MATCH (u:User {name: 'Alice'}) RETURN u.age";
@@ -72,7 +72,7 @@ async fn test_cypher_remove() -> anyhow::Result<()> {
     let plan = planner.plan(ast)?;
     let res = executor.execute(plan, &prop_manager, &params).await?;
     assert_eq!(res.len(), 1);
-    assert_eq!(res[0].get("u.age"), Some(&serde_json::Value::Null));
+    assert_eq!(res[0].get("u.age"), Some(&uni_db::Value::Null));
 
     // 4. Remove property from Relationship
     let query = "MATCH (:User {name: 'Alice'})-[r:FOLLOWS]->(:User {name: 'Bob'}) REMOVE r.since RETURN r.since";
@@ -80,7 +80,7 @@ async fn test_cypher_remove() -> anyhow::Result<()> {
     let plan = planner.plan(ast)?;
     let res = executor.execute(plan, &prop_manager, &params).await?;
     assert_eq!(res.len(), 1);
-    assert_eq!(res[0].get("r.since"), Some(&serde_json::Value::Null));
+    assert_eq!(res[0].get("r.since"), Some(&uni_db::Value::Null));
 
     // Verify persistence
     let query = "MATCH (:User {name: 'Alice'})-[r:FOLLOWS]->(:User {name: 'Bob'}) RETURN r.since";
@@ -88,7 +88,7 @@ async fn test_cypher_remove() -> anyhow::Result<()> {
     let plan = planner.plan(ast)?;
     let res = executor.execute(plan, &prop_manager, &params).await?;
     assert_eq!(res.len(), 1);
-    assert_eq!(res[0].get("r.since"), Some(&serde_json::Value::Null));
+    assert_eq!(res[0].get("r.since"), Some(&uni_db::Value::Null));
 
     // 5. Remove label from vertex
     let query = "MATCH (u:User {name: 'Bob'}) REMOVE u:User RETURN u";

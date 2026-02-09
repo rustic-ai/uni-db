@@ -40,7 +40,7 @@ use datafusion::physical_expr::PhysicalExpr;
 use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties};
 use futures::Stream;
-use serde_json::Value;
+use uni_common::Value;
 use std::any::Any;
 use std::collections::HashMap;
 use std::fmt;
@@ -992,17 +992,17 @@ pub(crate) fn get_property_value(
 ) -> Option<Value> {
     if prop_name == "_all_props" {
         return props_map.get(vid).map(|p| {
-            let map: serde_json::Map<String, Value> = p
+            let map: HashMap<String, Value> = p
                 .iter()
-                .map(|(k, v)| (k.clone(), serde_json::Value::from(v.clone())))
+                .map(|(k, v)| (k.clone(), v.clone()))
                 .collect();
-            Value::Object(map)
+            Value::Map(map)
         });
     }
     props_map
         .get(vid)
         .and_then(|props| props.get(prop_name))
-        .map(|v| serde_json::Value::from(v.clone()))
+        .cloned()
 }
 
 /// Build a numeric column from property values using the specified builder and extractor.
@@ -1011,14 +1011,14 @@ macro_rules! build_numeric_column {
         let mut builder = <$builder_ty>::new();
         for vid in $vids {
             match get_property_value(vid, $props_map, $prop_name) {
-                Some(Value::Number(n)) => {
-                    if let Some(val) = $extractor(&n) {
+                Some(ref v) => {
+                    if let Some(val) = $extractor(v) {
                         builder.append_value($cast(val));
                     } else {
                         builder.append_null();
                     }
                 }
-                _ => builder.append_null(),
+                None => builder.append_null(),
             }
         }
         Ok(Arc::new(builder.finish()) as ArrayRef)
@@ -1041,8 +1041,11 @@ pub(crate) fn build_property_column_static(
             for vid in vids {
                 match get_property_value(vid, props_map, prop_name) {
                     Some(Value::Null) | None => builder.append_null(),
-                    Some(Value::Array(arr)) if arr.iter().all(|v| v.is_u64()) => {
-                        // Raw JSONB bytes stored as array of u8 values from PropertyManager
+                    Some(Value::Bytes(bytes)) => {
+                        builder.append_value(&bytes);
+                    }
+                    Some(Value::List(arr)) if arr.iter().all(|v| v.as_u64().is_some()) => {
+                        // Raw JSONB bytes stored as list of u8 values from PropertyManager
                         let bytes: Vec<u8> = arr
                             .iter()
                             .filter_map(|v| v.as_u64().map(|n| n as u8))
@@ -1050,8 +1053,9 @@ pub(crate) fn build_property_column_static(
                         builder.append_value(&bytes);
                     }
                     Some(val) => {
-                        // JSON value from PropertyManager — re-encode to JSONB binary
-                        match jsonb::to_owned_jsonb(&val) {
+                        // Value from PropertyManager — convert to serde_json and re-encode to JSONB binary
+                        let json_val: serde_json::Value = val.into();
+                        match jsonb::to_owned_jsonb(&json_val) {
                             Ok(jsonb_bytes) => builder.append_value(jsonb_bytes.to_vec()),
                             Err(_) => builder.append_null(),
                         }
@@ -1066,7 +1070,10 @@ pub(crate) fn build_property_column_static(
             for vid in vids {
                 let bytes = get_property_value(vid, props_map, prop_name)
                     .filter(|v| !v.is_null())
-                    .and_then(|v| serde_json::from_value::<uni_crdt::Crdt>(v.clone()).ok())
+                    .and_then(|v| {
+                        let json_val: serde_json::Value = v.into();
+                        serde_json::from_value::<uni_crdt::Crdt>(json_val).ok()
+                    })
                     .and_then(|crdt| crdt.to_msgpack().ok());
                 match bytes {
                     Some(b) => builder.append_value(&b),
@@ -1092,7 +1099,7 @@ pub(crate) fn build_property_column_static(
                 props_map,
                 prop_name,
                 Int64Builder,
-                |n: &serde_json::Number| n.as_i64(),
+                |v: &Value| v.as_i64(),
                 |v| v
             )
         }
@@ -1102,7 +1109,7 @@ pub(crate) fn build_property_column_static(
                 props_map,
                 prop_name,
                 Int32Builder,
-                |n: &serde_json::Number| n.as_i64(),
+                |v: &Value| v.as_i64(),
                 |v: i64| v as i32
             )
         }
@@ -1112,7 +1119,7 @@ pub(crate) fn build_property_column_static(
                 props_map,
                 prop_name,
                 Float64Builder,
-                |n: &serde_json::Number| n.as_f64(),
+                |v: &Value| v.as_f64(),
                 |v| v
             )
         }
@@ -1122,7 +1129,7 @@ pub(crate) fn build_property_column_static(
                 props_map,
                 prop_name,
                 Float32Builder,
-                |n: &serde_json::Number| n.as_f64(),
+                |v: &Value| v.as_f64(),
                 |v: f64| v as f32
             )
         }
@@ -1142,7 +1149,7 @@ pub(crate) fn build_property_column_static(
                 props_map,
                 prop_name,
                 UInt64Builder,
-                |n: &serde_json::Number| n.as_u64(),
+                |v: &Value| v.as_u64(),
                 |v| v
             )
         }
@@ -1152,7 +1159,7 @@ pub(crate) fn build_property_column_static(
             let mut list_builder = FixedSizeListBuilder::new(values_builder, *dim);
             for vid in vids {
                 match get_property_value(vid, props_map, prop_name) {
-                    Some(Value::Array(arr)) => {
+                    Some(Value::List(arr)) => {
                         for v in arr {
                             list_builder
                                 .values()
@@ -1180,8 +1187,8 @@ pub(crate) fn build_property_column_static(
                         Ok(dt) => builder.append_value(dt.timestamp_micros()),
                         Err(_) => builder.append_null(),
                     },
-                    Some(Value::Number(n)) => {
-                        builder.append_value(n.as_i64().unwrap_or(0));
+                    Some(Value::Int(n)) => {
+                        builder.append_value(n);
                     }
                     _ => builder.append_null(),
                 }
@@ -1197,8 +1204,8 @@ pub(crate) fn build_property_column_static(
                         Ok(d) => builder.append_value((d - epoch).num_days() as i32),
                         Err(_) => builder.append_null(),
                     },
-                    Some(Value::Number(n)) => {
-                        builder.append_value(n.as_i64().unwrap_or(0) as i32);
+                    Some(Value::Int(n)) => {
+                        builder.append_value(n as i32);
                     }
                     _ => builder.append_null(),
                 }
@@ -1221,8 +1228,8 @@ pub(crate) fn build_property_column_static(
                             Err(_) => builder.append_null(),
                         }
                     }
-                    Some(Value::Number(n)) => {
-                        builder.append_value(n.as_i64().unwrap_or(0));
+                    Some(Value::Int(n)) => {
+                        builder.append_value(n);
                     }
                     _ => builder.append_null(),
                 }
@@ -1233,8 +1240,8 @@ pub(crate) fn build_property_column_static(
             let mut builder = DurationMicrosecondBuilder::new();
             for vid in vids {
                 match get_property_value(vid, props_map, prop_name) {
-                    Some(Value::Number(n)) => {
-                        builder.append_value(n.as_i64().unwrap_or(0));
+                    Some(Value::Int(n)) => {
+                        builder.append_value(n);
                     }
                     Some(Value::String(s)) => {
                         // Try to parse ISO 8601 duration or simple duration format
@@ -1268,7 +1275,7 @@ pub(crate) fn build_property_column_static(
     }
 }
 
-/// Build a List-typed Arrow column from JSON array property values.
+/// Build a List-typed Arrow column from list property values.
 fn build_list_property_column(
     vids: &[Vid],
     props_map: &HashMap<Vid, Properties>,
@@ -1280,12 +1287,12 @@ fn build_list_property_column(
             let mut builder = ListBuilder::new(StringBuilder::new());
             for vid in vids {
                 match get_property_value(vid, props_map, prop_name) {
-                    Some(Value::Array(arr)) => {
+                    Some(Value::List(arr)) => {
                         for v in arr {
                             match v {
                                 Value::String(s) => builder.values().append_value(s),
                                 Value::Null => builder.values().append_null(),
-                                other => builder.values().append_value(other.to_string()),
+                                other => builder.values().append_value(format!("{other:?}")),
                             }
                         }
                         builder.append(true);
@@ -1299,7 +1306,7 @@ fn build_list_property_column(
             let mut builder = ListBuilder::new(Int64Builder::new());
             for vid in vids {
                 match get_property_value(vid, props_map, prop_name) {
-                    Some(Value::Array(arr)) => {
+                    Some(Value::List(arr)) => {
                         for v in arr {
                             match v.as_i64() {
                                 Some(n) => builder.values().append_value(n),
@@ -1317,7 +1324,7 @@ fn build_list_property_column(
             let mut builder = ListBuilder::new(Float64Builder::new());
             for vid in vids {
                 match get_property_value(vid, props_map, prop_name) {
-                    Some(Value::Array(arr)) => {
+                    Some(Value::List(arr)) => {
                         for v in arr {
                             match v.as_f64() {
                                 Some(n) => builder.values().append_value(n),
@@ -1335,7 +1342,7 @@ fn build_list_property_column(
             let mut builder = ListBuilder::new(BooleanBuilder::new());
             for vid in vids {
                 match get_property_value(vid, props_map, prop_name) {
-                    Some(Value::Array(arr)) => {
+                    Some(Value::List(arr)) => {
                         for v in arr {
                             match v.as_bool() {
                                 Some(b) => builder.values().append_value(b),
@@ -1358,11 +1365,11 @@ fn build_list_property_column(
             let mut builder = ListBuilder::new(StringBuilder::new());
             for vid in vids {
                 match get_property_value(vid, props_map, prop_name) {
-                    Some(Value::Array(arr)) => {
+                    Some(Value::List(arr)) => {
                         for v in arr {
                             match v {
                                 Value::Null => builder.values().append_null(),
-                                other => builder.values().append_value(other.to_string()),
+                                other => builder.values().append_value(format!("{other:?}")),
                             }
                         }
                         builder.append(true);
@@ -1377,9 +1384,9 @@ fn build_list_property_column(
 
 /// Build a List(Struct(...)) column, used for Map-type properties.
 ///
-/// Handles two JSON representations:
-/// - `Value::Array([{key: k, value: v}, ...])` — pre-converted kv pairs
-/// - `Value::Object({k1: v1, k2: v2})` — raw map objects (converted to kv pairs)
+/// Handles two value representations:
+/// - `Value::List([Map{key: k, value: v}, ...])` — pre-converted kv pairs
+/// - `Value::Map({k1: v1, k2: v2})` — raw map objects (converted to kv pairs)
 fn build_list_of_structs_column(
     vids: &[Vid],
     props_map: &HashMap<Vid, Properties>,
@@ -1394,21 +1401,29 @@ fn build_list_of_structs_column(
         .collect();
 
     // Convert each row's value to an owned Vec of Maps (key-value pairs).
-    // This normalizes both Array-of-structs and Object representations.
-    let rows: Vec<Option<Vec<serde_json::Map<String, Value>>>> = values
+    // This normalizes both List-of-maps and Map representations.
+    let rows: Vec<Option<Vec<HashMap<String, Value>>>> = values
         .iter()
         .map(|val| match val {
-            Some(Value::Array(arr)) => {
-                let objs: Vec<serde_json::Map<String, Value>> =
-                    arr.iter().filter_map(|v| v.as_object().cloned()).collect();
+            Some(Value::List(arr)) => {
+                let objs: Vec<HashMap<String, Value>> = arr
+                    .iter()
+                    .filter_map(|v| {
+                        if let Value::Map(m) = v {
+                            Some(m.clone())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
                 if objs.is_empty() { None } else { Some(objs) }
             }
-            Some(Value::Object(obj)) => {
-                // Map property: convert {k1: v1, k2: v2} → [{key: k1, value: v1}, ...]
-                let kv_pairs: Vec<serde_json::Map<String, Value>> = obj
+            Some(Value::Map(obj)) => {
+                // Map property: convert {k1: v1, k2: v2} -> [{key: k1, value: v1}, ...]
+                let kv_pairs: Vec<HashMap<String, Value>> = obj
                     .iter()
                     .map(|(k, v)| {
-                        let mut m = serde_json::Map::new();
+                        let mut m = HashMap::new();
                         m.insert("key".to_string(), Value::String(k.clone()));
                         m.insert("value".to_string(), v.clone());
                         m
@@ -1438,7 +1453,7 @@ fn build_list_of_structs_column(
                         match obj.get(field_name) {
                             Some(Value::String(s)) => builder.append_value(s),
                             Some(Value::Null) | None => builder.append_null(),
-                            Some(other) => builder.append_value(other.to_string()),
+                            Some(other) => builder.append_value(format!("{other:?}")),
                         }
                     }
                     Arc::new(builder.finish()) as ArrayRef
@@ -1469,7 +1484,7 @@ fn build_list_of_structs_column(
                     for obj in rows.iter().flatten().flatten() {
                         match obj.get(field_name) {
                             Some(Value::Null) | None => builder.append_null(),
-                            Some(other) => builder.append_value(other.to_string()),
+                            Some(other) => builder.append_value(format!("{other:?}")),
                         }
                     }
                     Arc::new(builder.finish()) as ArrayRef
@@ -1513,7 +1528,7 @@ fn build_list_of_structs_column(
     Ok(Arc::new(list_array))
 }
 
-/// Build a Struct-typed Arrow column from JSON object property values (e.g. Point types).
+/// Build a Struct-typed Arrow column from Map property values (e.g. Point types).
 fn build_struct_property_column(
     vids: &[Vid],
     props_map: &HashMap<Vid, Properties>,
@@ -1536,7 +1551,7 @@ fn build_struct_property_column(
                     let mut builder = Float64Builder::with_capacity(vids.len());
                     for val in &values {
                         match val {
-                            Some(Value::Object(obj)) => {
+                            Some(Value::Map(obj)) => {
                                 match obj.get(field_name).and_then(|v| v.as_f64()) {
                                     Some(n) => builder.append_value(n),
                                     None => builder.append_null(),
@@ -1551,10 +1566,10 @@ fn build_struct_property_column(
                     let mut builder = StringBuilder::with_capacity(vids.len(), vids.len() * 16);
                     for val in &values {
                         match val {
-                            Some(Value::Object(obj)) => match obj.get(field_name) {
+                            Some(Value::Map(obj)) => match obj.get(field_name) {
                                 Some(Value::String(s)) => builder.append_value(s),
                                 Some(Value::Null) | None => builder.append_null(),
-                                Some(other) => builder.append_value(other.to_string()),
+                                Some(other) => builder.append_value(format!("{other:?}")),
                             },
                             _ => builder.append_null(),
                         }
@@ -1565,7 +1580,7 @@ fn build_struct_property_column(
                     let mut builder = Int64Builder::with_capacity(vids.len());
                     for val in &values {
                         match val {
-                            Some(Value::Object(obj)) => {
+                            Some(Value::Map(obj)) => {
                                 match obj.get(field_name).and_then(|v| v.as_i64()) {
                                     Some(n) => builder.append_value(n),
                                     None => builder.append_null(),
@@ -1581,9 +1596,9 @@ fn build_struct_property_column(
                     let mut builder = StringBuilder::with_capacity(vids.len(), vids.len() * 16);
                     for val in &values {
                         match val {
-                            Some(Value::Object(obj)) => match obj.get(field_name) {
+                            Some(Value::Map(obj)) => match obj.get(field_name) {
                                 Some(Value::Null) | None => builder.append_null(),
-                                Some(other) => builder.append_value(other.to_string()),
+                                Some(other) => builder.append_value(format!("{other:?}")),
                             },
                             _ => builder.append_null(),
                         }
@@ -1594,10 +1609,10 @@ fn build_struct_property_column(
         })
         .collect();
 
-    // Build null bitmap — null when the JSON value is null/missing
+    // Build null bitmap — null when the value is null/missing
     let nulls: Vec<bool> = values
         .iter()
-        .map(|v| matches!(v, Some(Value::Object(_))))
+        .map(|v| matches!(v, Some(Value::Map(_))))
         .collect();
 
     let struct_array = StructArray::try_new(

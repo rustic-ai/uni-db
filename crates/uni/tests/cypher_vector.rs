@@ -6,7 +6,7 @@ use arrow_array::{
     BooleanArray, LargeBinaryArray, RecordBatch, StringArray, TimestampMicrosecondArray,
     UInt64Array,
 };
-use serde_json::Value;
+use uni_db::Value;
 use std::sync::Arc;
 use tempfile::tempdir;
 use tokio::sync::RwLock;

@@ -2,7 +2,7 @@
 // Copyright 2024-2026 Dragonscale Team
 
 use arrow_array::{RecordBatch, StringArray, TimestampMicrosecondArray};
-use serde_json::{Value, json};
+use uni_common::{unival, Value};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tempfile::tempdir;
@@ -167,7 +167,7 @@ async fn test_execute_match_with_null_properties() {
         .unwrap();
 
     assert_eq!(results.len(), 1);
-    assert_eq!(results[0].get("n.age"), Some(&json!(25)));
+    assert_eq!(results[0].get("n.age"), Some(&unival!(25)));
 }
 
 #[tokio::test]
@@ -194,7 +194,7 @@ async fn test_aggregation_empty_group() {
         results
     );
     // Find the count key (may be "count(n)" or "count(1)" depending on translation)
-    let count_val = results[0].values().find(|v| v == &&json!(0));
+    let count_val = results[0].values().find(|v| v == &&unival!(0));
     assert!(
         count_val.is_some(),
         "Expected a count of 0 in result: {:?}",

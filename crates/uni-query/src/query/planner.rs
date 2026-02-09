@@ -4,8 +4,8 @@
 use crate::query::pushdown::PredicateAnalyzer;
 use crate::query::{AGGREGATE_WINDOW_FUNCTIONS, MANUAL_WINDOW_FUNCTIONS};
 use anyhow::{Result, anyhow};
-use serde_json::Value;
 use std::collections::HashMap;
+use uni_common::Value;
 use std::sync::Arc;
 use uni_common::core::schema::{
     DistanceMetric, EmbeddingConfig, EmbeddingModel, FullTextIndexConfig, IndexDefinition,
@@ -4916,7 +4916,7 @@ impl QueryPlanner {
         }
     }
 
-    fn parse_embedding_config(emb_val: &serde_json::Value) -> Result<Option<EmbeddingConfig>> {
+    fn parse_embedding_config(emb_val: &Value) -> Result<Option<EmbeddingConfig>> {
         let obj = emb_val
             .as_object()
             .ok_or_else(|| anyhow!("embedding option must be an object"))?;

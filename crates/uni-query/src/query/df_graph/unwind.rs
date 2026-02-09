@@ -34,7 +34,7 @@ use datafusion::execution::{RecordBatchStream, SendableRecordBatchStream, TaskCo
 use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties};
 use futures::{Stream, StreamExt};
-use serde_json::Value;
+use uni_common::Value;
 use std::any::Any;
 use std::collections::HashMap;
 use std::fmt;
@@ -247,7 +247,7 @@ impl GraphUnwindStream {
             let list_value = self.evaluate_expr_for_row(&batch, row_idx)?;
 
             match list_value {
-                Value::Array(items) => {
+                Value::List(items) => {
                     for item in items {
                         expansions.push((row_idx, item));
                     }
@@ -284,11 +284,11 @@ impl GraphUnwindStream {
                 for item in items {
                     values.push(self.evaluate_expr_impl(item, batch, row_idx)?);
                 }
-                Ok(Value::Array(values))
+                Ok(Value::List(values))
             }
 
             // Literal value
-            Expr::Literal(lit) => Ok(lit.to_json_value()),
+            Expr::Literal(lit) => Ok(lit.to_value()),
 
             // Parameter reference: $param
             Expr::Parameter(name) => self.params.get(name).cloned().ok_or_else(|| {
@@ -303,11 +303,11 @@ impl GraphUnwindStream {
 
             // Property access: n.prop
             Expr::Property(base_expr, prop_name) => {
-                // Get the base value (should be a map/object)
+                // Get the base value (should be a map)
                 let base_value = self.evaluate_expr_impl(base_expr, batch, row_idx)?;
 
                 match base_value {
-                    Value::Object(map) => Ok(map.get(prop_name).cloned().unwrap_or(Value::Null)),
+                    Value::Map(map) => Ok(map.get(prop_name).cloned().unwrap_or(Value::Null)),
                     _ => {
                         // Try looking up as column name: var.prop
                         if let Expr::Variable(var_name) = base_expr.as_ref() {
@@ -332,7 +332,7 @@ impl GraphUnwindStream {
                             let step = if args.len() >= 3 {
                                 self.evaluate_expr_impl(&args[2], batch, row_idx)?
                             } else {
-                                Value::Number(1.into())
+                                Value::Int(1)
                             };
 
                             if let (Some(s), Some(e), Some(st)) =
@@ -341,28 +341,28 @@ impl GraphUnwindStream {
                                 let mut result = Vec::new();
                                 let mut i = s;
                                 while (st > 0 && i <= e) || (st < 0 && i >= e) {
-                                    result.push(Value::Number(i.into()));
+                                    result.push(Value::Int(i));
                                     i += st;
                                 }
-                                return Ok(Value::Array(result));
+                                return Ok(Value::List(result));
                             }
                         }
-                        Ok(Value::Array(vec![]))
+                        Ok(Value::List(vec![]))
                     }
                     "keys" => {
                         if args.len() == 1 {
                             let val = self.evaluate_expr_impl(&args[0], batch, row_idx)?;
-                            if let Value::Object(map) = val {
+                            if let Value::Map(map) = val {
                                 let keys: Vec<Value> =
                                     map.keys().map(|k| Value::String(k.clone())).collect();
-                                return Ok(Value::Array(keys));
+                                return Ok(Value::List(keys));
                             }
                         }
-                        Ok(Value::Array(vec![]))
+                        Ok(Value::List(vec![]))
                     }
                     _ => {
-                        // Unsupported function - return empty array
-                        Ok(Value::Array(vec![]))
+                        // Unsupported function - return empty list
+                        Ok(Value::List(vec![]))
                     }
                 }
             }
@@ -420,7 +420,9 @@ impl GraphUnwindStream {
                 builder.append_null();
             } else {
                 // Serialize as JSON to preserve type (numbers stay as "1", strings as "\"hello\"")
-                let json_str = serde_json::to_string(&value).unwrap_or_else(|_| "null".to_string());
+                let json_val: serde_json::Value = value.clone().into();
+                let json_str =
+                    serde_json::to_string(&json_val).unwrap_or_else(|_| "null".to_string());
                 builder.append_value(&json_str);
             }
         }
@@ -455,7 +457,7 @@ impl RecordBatchStream for GraphUnwindStream {
     }
 }
 
-/// Convert an Arrow array value at a specific row to JSON.
+/// Convert an Arrow array value at a specific row to `uni_common::Value`.
 fn arrow_to_json_value(array: &dyn Array, row: usize) -> Value {
     use arrow_array::{
         BooleanArray, Float32Array, Float64Array, Int8Array, Int16Array, Int32Array, Int64Array,
@@ -481,7 +483,7 @@ fn arrow_to_json_value(array: &dyn Array, row: usize) -> Value {
     macro_rules! try_int {
         ($arr_type:ty) => {
             if let Some(arr) = any.downcast_ref::<$arr_type>() {
-                return Value::Number(arr.value(row).into());
+                return Value::Int(arr.value(row) as i64);
             }
         };
     }
@@ -489,21 +491,21 @@ fn arrow_to_json_value(array: &dyn Array, row: usize) -> Value {
     try_int!(Int32Array);
     try_int!(Int16Array);
     try_int!(Int8Array);
-    try_int!(UInt64Array);
     try_int!(UInt32Array);
     try_int!(UInt16Array);
     try_int!(UInt8Array);
 
+    // UInt64 needs special handling to avoid overflow
+    if let Some(arr) = any.downcast_ref::<UInt64Array>() {
+        return Value::Int(arr.value(row) as i64);
+    }
+
     // Float types
     if let Some(arr) = any.downcast_ref::<Float64Array>() {
-        return serde_json::Number::from_f64(arr.value(row))
-            .map(Value::Number)
-            .unwrap_or(Value::Null);
+        return Value::Float(arr.value(row));
     }
     if let Some(arr) = any.downcast_ref::<Float32Array>() {
-        return serde_json::Number::from_f64(arr.value(row) as f64)
-            .map(Value::Number)
-            .unwrap_or(Value::Null);
+        return Value::Float(arr.value(row) as f64);
     }
 
     // Boolean
@@ -517,7 +519,7 @@ fn arrow_to_json_value(array: &dyn Array, row: usize) -> Value {
         let result: Vec<Value> = (0..values.len())
             .map(|i| arrow_to_json_value(values.as_ref(), i))
             .collect();
-        return Value::Array(result);
+        return Value::List(result);
     }
 
     // Fallback
@@ -592,13 +594,13 @@ mod tests {
 
         let result = stream.evaluate_expr_for_row(&batch, 0).unwrap();
         match result {
-            Value::Array(items) => {
+            Value::List(items) => {
                 assert_eq!(items.len(), 3);
-                assert_eq!(items[0], Value::Number(1.into()));
-                assert_eq!(items[1], Value::Number(2.into()));
-                assert_eq!(items[2], Value::Number(3.into()));
+                assert_eq!(items[0], Value::Int(1));
+                assert_eq!(items[1], Value::Int(2));
+                assert_eq!(items[2], Value::Int(3));
             }
-            _ => panic!("Expected array"),
+            _ => panic!("Expected list"),
         }
     }
 }

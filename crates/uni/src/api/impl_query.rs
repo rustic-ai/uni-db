@@ -97,13 +97,13 @@ impl Uni {
             executor.set_writer(w.clone());
         }
 
-        let json_params: HashMap<String, serde_json::Value> = HashMap::new(); // TODO: Support params in profile
+        let params: HashMap<String, uni_common::Value> = HashMap::new(); // TODO: Support params in profile
 
         // Extract projection order
         let projection_order = extract_projection_order(&logical_plan);
 
         let (results, profile_output) = executor
-            .profile(logical_plan, &json_params)
+            .profile(logical_plan, &params)
             .await
             .map_err(|e| into_query_error(e, cypher))?;
 
@@ -123,8 +123,7 @@ impl Uni {
             .map(|map| {
                 let mut values = Vec::with_capacity(columns.len());
                 for col in columns.iter() {
-                    let json_val = map.get(col).cloned().unwrap_or(serde_json::Value::Null);
-                    let value = ApiValue::from(json_val);
+                    let value = map.get(col).cloned().unwrap_or(ApiValue::Null);
                     // Normalize to ensure proper Node/Edge/Path types
                     let normalized =
                         ResultNormalizer::normalize_value(value).unwrap_or(ApiValue::Null);
@@ -221,14 +220,11 @@ impl Uni {
             executor.set_writer(w.clone());
         }
 
-        let json_params: HashMap<String, serde_json::Value> =
-            params.into_iter().map(|(k, v)| (k, v.into())).collect();
-
         let projection_order = extract_projection_order(&logical_plan);
         let projection_order_for_rows = projection_order.clone();
         let cypher_for_error = cypher.to_string();
 
-        let stream = executor.execute_stream(logical_plan, self.properties.clone(), json_params);
+        let stream = executor.execute_stream(logical_plan, self.properties.clone(), params);
 
         let row_stream = stream.map(move |batch_res| {
             let results = batch_res.map_err(|e| UniError::Query {
@@ -254,8 +250,8 @@ impl Uni {
                 .map(|map| {
                     let mut values = Vec::with_capacity(columns.len());
                     for col in columns.iter() {
-                        let json_val = map.get(col).cloned().unwrap_or(serde_json::Value::Null);
-                        values.push(ApiValue::from(json_val));
+                        let value = map.get(col).cloned().unwrap_or(ApiValue::Null);
+                        values.push(value);
                     }
                     Row {
                         columns: columns.clone(),
@@ -333,13 +329,10 @@ impl Uni {
             executor.set_writer(w.clone());
         }
 
-        let json_params: HashMap<String, serde_json::Value> =
-            params.into_iter().map(|(k, v)| (k, v.into())).collect();
-
         let projection_order = extract_projection_order(&logical_plan);
 
         let results = executor
-            .execute(logical_plan, &self.properties, &json_params)
+            .execute(logical_plan, &self.properties, &params)
             .await
             .map_err(|e| into_query_error(e, cypher))?;
 
@@ -358,8 +351,7 @@ impl Uni {
             .map(|map| {
                 let mut values = Vec::with_capacity(columns.len());
                 for col in columns.iter() {
-                    let json_val = map.get(col).cloned().unwrap_or(serde_json::Value::Null);
-                    let value = ApiValue::from(json_val);
+                    let value = map.get(col).cloned().unwrap_or(ApiValue::Null);
                     // Normalize to ensure proper Node/Edge/Path types
                     let normalized =
                         ResultNormalizer::normalize_value(value).unwrap_or(ApiValue::Null);

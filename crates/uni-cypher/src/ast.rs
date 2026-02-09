@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use uni_common::Value;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum TimeTravelSpec {
@@ -464,22 +464,22 @@ pub enum CypherLiteral {
 }
 
 impl CypherLiteral {
-    /// Convert to `serde_json::Value` at the executor boundary where runtime
-    /// values are still JSON.
-    pub fn to_json_value(&self) -> Value {
+    /// Convert to `uni_common::Value` for the executor.
+    pub fn to_value(&self) -> Value {
         match self {
             CypherLiteral::Null => Value::Null,
             CypherLiteral::Bool(b) => Value::Bool(*b),
-            CypherLiteral::Integer(i) => Value::from(*i),
-            CypherLiteral::Float(f) => {
-                // serde_json::Number::from_f64 returns None for NaN/Infinity
-                match serde_json::Number::from_f64(*f) {
-                    Some(n) => Value::Number(n),
-                    None => Value::Null, // NaN/Inf → null in JSON
-                }
-            }
+            CypherLiteral::Integer(i) => Value::Int(*i),
+            CypherLiteral::Float(f) => Value::Float(*f),
             CypherLiteral::String(s) => Value::String(s.clone()),
         }
+    }
+
+    /// Deprecated: use `to_value()` instead.
+    /// Kept for backward compatibility during migration.
+    #[deprecated(note = "Use to_value() instead")]
+    pub fn to_json_value(&self) -> Value {
+        self.to_value()
     }
 }
 

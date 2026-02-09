@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2024-2026 Dragonscale Team
 
-use serde_json::json;
+use uni_db::unival;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tempfile::tempdir;
@@ -103,26 +103,26 @@ async fn test_case_expression() -> anyhow::Result<()> {
         .execute(plan, &prop_manager, &HashMap::new())
         .await?;
 
-    assert_eq!(results[0].get("n.name"), Some(&json!("Alice"))); // Child
+    assert_eq!(results[0].get("n.name"), Some(&unival!("Alice"))); // Child
     let val1 = results[0]
         .values()
         .find(|v| v.as_str() == Some("Child"))
         .cloned();
-    assert_eq!(val1, Some(json!("Child")));
+    assert_eq!(val1, Some(unival!("Child")));
 
-    assert_eq!(results[1].get("n.name"), Some(&json!("Bob"))); // Teen
+    assert_eq!(results[1].get("n.name"), Some(&unival!("Bob"))); // Teen
     let val2 = results[1]
         .values()
         .find(|v| v.as_str() == Some("Teen"))
         .cloned();
-    assert_eq!(val2, Some(json!("Teen")));
+    assert_eq!(val2, Some(unival!("Teen")));
 
-    assert_eq!(results[2].get("n.name"), Some(&json!("Charlie"))); // Adult
+    assert_eq!(results[2].get("n.name"), Some(&unival!("Charlie"))); // Adult
     let val3 = results[2]
         .values()
         .find(|v| v.as_str() == Some("Adult"))
         .cloned();
-    assert_eq!(val3, Some(json!("Adult")));
+    assert_eq!(val3, Some(unival!("Adult")));
 
     // 2. Simple CASE
     // MATCH (n:Person) RETURN n.name, CASE n.name WHEN 'Alice' THEN 1 WHEN 'Bob' THEN 2 ELSE 3 END ORDER BY n.name
@@ -134,19 +134,19 @@ async fn test_case_expression() -> anyhow::Result<()> {
         .await?;
 
     // Alice -> 1
-    assert_eq!(results[0].get("n.name"), Some(&json!("Alice")));
+    assert_eq!(results[0].get("n.name"), Some(&unival!("Alice")));
     let val1 = results[0].values().find(|v| v.as_u64() == Some(1)).cloned();
-    assert_eq!(val1, Some(json!(1)));
+    assert_eq!(val1, Some(unival!(1)));
 
     // Bob -> 2
-    assert_eq!(results[1].get("n.name"), Some(&json!("Bob")));
+    assert_eq!(results[1].get("n.name"), Some(&unival!("Bob")));
     let val2 = results[1].values().find(|v| v.as_u64() == Some(2)).cloned();
-    assert_eq!(val2, Some(json!(2)));
+    assert_eq!(val2, Some(unival!(2)));
 
     // Charlie -> 3
-    assert_eq!(results[2].get("n.name"), Some(&json!("Charlie")));
+    assert_eq!(results[2].get("n.name"), Some(&unival!("Charlie")));
     let val3 = results[2].values().find(|v| v.as_u64() == Some(3)).cloned();
-    assert_eq!(val3, Some(json!(3)));
+    assert_eq!(val3, Some(unival!(3)));
 
     Ok(())
 }
