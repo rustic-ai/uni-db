@@ -7,6 +7,7 @@
 //! columnar analytics, and vector search.
 
 pub mod api;
+mod shutdown;
 
 pub use api::builder::PropertiesBuilder;
 pub use api::schema::{IndexType, ScalarType, VectorAlgo, VectorIndexCfg, VectorMetric};

@@ -3,6 +3,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 pub mod builder;
 pub mod bulk;
@@ -29,6 +30,8 @@ use uni_store::storage::manager::StorageManager;
 
 use tokio::sync::RwLock;
 use uni_store::runtime::writer::Writer;
+
+use crate::shutdown::ShutdownHandle;
 
 /// Main entry point for Uni embedded database.
 ///
@@ -77,6 +80,7 @@ pub struct Uni {
     pub(crate) writer: Option<Arc<RwLock<Writer>>>,
     pub(crate) config: UniConfig,
     pub(crate) procedure_registry: Arc<uni_query::ProcedureRegistry>,
+    pub(crate) shutdown_handle: Arc<ShutdownHandle>,
 }
 
 impl Uni {
@@ -143,6 +147,10 @@ impl Uni {
             self.properties.cache_size(),
         ));
 
+        // Create a shutdown handle for this read-only snapshot view
+        // (no background tasks, but needed for consistency)
+        let shutdown_handle = Arc::new(ShutdownHandle::new(Duration::from_secs(30)));
+
         Ok(Uni {
             storage: pinned_storage,
             schema: self.schema.clone(),
@@ -150,6 +158,7 @@ impl Uni {
             writer: None,
             config: self.config.clone(),
             procedure_registry: self.procedure_registry.clone(),
+            shutdown_handle,
         })
     }
 
@@ -623,7 +632,8 @@ impl Uni {
         // Start background worker to process the retried tasks
         if !retried.is_empty() {
             let manager = std::sync::Arc::new(manager);
-            manager.start_background_worker();
+            let handle = manager.start_background_worker(self.shutdown_handle.subscribe());
+            self.shutdown_handle.track_task(handle);
         }
 
         Ok(retried)
@@ -656,7 +666,8 @@ impl Uni {
                 .map_err(UniError::Internal)?;
 
             let manager = std::sync::Arc::new(manager);
-            manager.start_background_worker();
+            let handle = manager.start_background_worker(self.shutdown_handle.subscribe());
+            self.shutdown_handle.track_task(handle);
 
             Ok(task_ids.into_iter().next())
         } else {
@@ -687,6 +698,32 @@ impl Uni {
         .map_err(UniError::Internal)?;
 
         Ok(manager.is_index_building(label))
+    }
+
+    /// Shutdown the database gracefully, flushing pending data and stopping background tasks.
+    ///
+    /// This method flushes any pending data and waits for all background tasks to complete
+    /// (with a timeout). After calling this method, the database instance should not be used.
+    pub async fn shutdown(self) -> Result<()> {
+        // Flush pending data
+        if let Some(ref writer) = self.writer {
+            let mut w = writer.write().await;
+            if let Err(e) = w.flush_to_l1(None).await {
+                tracing::error!("Error flushing during shutdown: {}", e);
+            }
+        }
+
+        self.shutdown_handle
+            .shutdown_async()
+            .await
+            .map_err(UniError::Internal)
+    }
+}
+
+impl Drop for Uni {
+    fn drop(&mut self) {
+        self.shutdown_handle.shutdown_blocking();
+        tracing::debug!("Uni dropped, shutdown signal sent");
     }
 }
 
@@ -923,8 +960,14 @@ impl UniBuilder {
 
         let storage = Arc::new(storage);
 
-        // Start background compaction
-        storage.clone().start_background_compaction();
+        // Create shutdown handle
+        let shutdown_handle = Arc::new(ShutdownHandle::new(Duration::from_secs(30)));
+
+        // Start background compaction with shutdown signal
+        let compaction_handle = storage
+            .clone()
+            .start_background_compaction(shutdown_handle.subscribe());
+        shutdown_handle.track_task(compaction_handle);
 
         // Initialize property manager
         let prop_cache_capacity = self.config.cache_size / 1024;
@@ -1019,16 +1062,29 @@ impl UniBuilder {
         // Start background flush checker for time-based auto-flush
         if let Some(interval) = self.config.auto_flush_interval {
             let writer_clone = writer.clone();
-            tokio::spawn(async move {
+            let mut shutdown_rx = shutdown_handle.subscribe();
+
+            let handle = tokio::spawn(async move {
                 let mut ticker = tokio::time::interval(interval);
                 loop {
-                    ticker.tick().await;
-                    let mut w = writer_clone.write().await;
-                    if let Err(e) = w.check_flush().await {
-                        tracing::warn!("Background flush check failed: {}", e);
+                    tokio::select! {
+                        _ = ticker.tick() => {
+                            let mut w = writer_clone.write().await;
+                            if let Err(e) = w.check_flush().await {
+                                tracing::warn!("Background flush check failed: {}", e);
+                            }
+                        }
+                        _ = shutdown_rx.recv() => {
+                            tracing::info!("Auto-flush shutting down, performing final flush");
+                            let mut w = writer_clone.write().await;
+                            let _ = w.flush_to_l1(None).await;
+                            break;
+                        }
                     }
                 }
             });
+
+            shutdown_handle.track_task(handle);
         }
 
         Ok(Uni {
@@ -1038,6 +1094,7 @@ impl UniBuilder {
             writer: Some(writer),
             config: self.config,
             procedure_registry: Arc::new(uni_query::ProcedureRegistry::new()),
+            shutdown_handle,
         })
     }
 

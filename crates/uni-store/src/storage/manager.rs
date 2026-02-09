@@ -282,29 +282,40 @@ impl StorageManager {
         }
     }
 
-    pub fn start_background_compaction(self: Arc<Self>) {
+    pub fn start_background_compaction(
+        self: Arc<Self>,
+        mut shutdown_rx: tokio::sync::broadcast::Receiver<()>,
+    ) -> tokio::task::JoinHandle<()> {
         if !self.config.compaction.enabled {
-            return;
+            return tokio::spawn(async {});
         }
 
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(self.config.compaction.check_interval);
+
             loop {
-                interval.tick().await;
+                tokio::select! {
+                    _ = interval.tick() => {
+                        if let Err(e) = self.update_compaction_status().await {
+                            log::error!("Failed to update compaction status: {}", e);
+                            continue;
+                        }
 
-                if let Err(e) = self.update_compaction_status().await {
-                    log::error!("Failed to update compaction status: {}", e);
-                    continue;
-                }
-
-                if let Some(task) = self.pick_compaction_task() {
-                    log::info!("Triggering background compaction: {:?}", task);
-                    if let Err(e) = self.execute_compaction(task).await {
-                        log::error!("Compaction failed: {}", e);
+                        if let Some(task) = self.pick_compaction_task() {
+                            log::info!("Triggering background compaction: {:?}", task);
+                            if let Err(e) = self.execute_compaction(task).await {
+                                log::error!("Compaction failed: {}", e);
+                            }
+                        }
+                    }
+                    _ = shutdown_rx.recv() => {
+                        log::info!("Background compaction shutting down");
+                        let _ = self.wait_for_compaction().await;
+                        break;
                     }
                 }
             }
-        });
+        })
     }
 
     async fn update_compaction_status(&self) -> Result<()> {

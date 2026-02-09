@@ -279,12 +279,16 @@ impl IndexRebuildManager {
     ///
     /// This spawns a tokio task that periodically checks for pending
     /// tasks and processes them.
-    pub fn start_background_worker(self: Arc<Self>) {
+    pub fn start_background_worker(
+        self: Arc<Self>,
+        mut shutdown_rx: tokio::sync::broadcast::Receiver<()>,
+    ) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(self.config.worker_check_interval);
 
             loop {
-                interval.tick().await;
+                tokio::select! {
+                    _ = interval.tick() => {
 
                 // Find a pending task
                 let task_to_process = {
@@ -361,8 +365,15 @@ impl IndexRebuildManager {
                         error!("Failed to save state after processing: {}", e);
                     }
                 }
+                    }
+                    _ = shutdown_rx.recv() => {
+                        tracing::info!("Index rebuild worker shutting down");
+                        let _ = self.save_state().await;
+                        break;
+                    }
+                }
             }
-        });
+        })
     }
 
     /// Execute the actual index rebuild for a label.

@@ -10,52 +10,90 @@ use uni_query::{ExecuteResult, QueryResult}; // for execute_internal? No, it's p
 
 /// Blocking API wrapper for Uni.
 pub struct UniSync {
-    inner: Uni,
+    inner: Option<Uni>,
     rt: tokio::runtime::Runtime,
 }
 
 impl UniSync {
     pub fn new(inner: Uni) -> Result<Self> {
         let rt = tokio::runtime::Runtime::new().map_err(UniError::Io)?;
-        Ok(Self { inner, rt })
+        Ok(Self {
+            inner: Some(inner),
+            rt,
+        })
     }
 
     /// Open an in-memory database (blocking)
     pub fn in_memory() -> Result<Self> {
         let rt = tokio::runtime::Runtime::new().map_err(UniError::Io)?;
         let inner = rt.block_on(Uni::in_memory().build())?;
-        Ok(Self { inner, rt })
+        Ok(Self {
+            inner: Some(inner),
+            rt,
+        })
+    }
+
+    fn inner(&self) -> &Uni {
+        self.inner.as_ref().expect("UniSync already shut down")
     }
 
     pub fn query(&self, cypher: &str) -> Result<QueryResult> {
-        self.rt.block_on(self.inner.query(cypher))
+        self.rt.block_on(self.inner().query(cypher))
     }
 
     pub fn execute(&self, cypher: &str) -> Result<ExecuteResult> {
-        self.rt.block_on(self.inner.execute(cypher))
+        self.rt.block_on(self.inner().execute(cypher))
     }
 
     pub fn query_with<'a>(&'a self, cypher: &'a str) -> QueryBuilderSync<'a> {
         QueryBuilderSync {
-            inner: self.inner.query_with(cypher),
+            inner: self.inner().query_with(cypher),
             rt: &self.rt,
         }
     }
 
     pub fn schema_meta(&self) -> Schema {
-        self.inner.get_schema()
+        self.inner().get_schema()
     }
 
     pub fn schema(&self) -> SchemaBuilderSync<'_> {
         SchemaBuilderSync {
-            inner: self.inner.schema(),
+            inner: self.inner().schema(),
             rt: &self.rt,
         }
     }
 
     pub fn begin(&self) -> Result<TransactionSync<'_>> {
-        let tx = self.rt.block_on(self.inner.begin())?;
+        let tx = self.rt.block_on(self.inner().begin())?;
         Ok(TransactionSync { tx, rt: &self.rt })
+    }
+
+    /// Shutdown the database gracefully (blocking).
+    ///
+    /// Note: This consumes self, which prevents the Drop impl from also
+    /// triggering shutdown. Use this for explicit shutdown with error handling.
+    pub fn shutdown(mut self) -> Result<()> {
+        // Take ownership of the inner Uni to prevent Drop from also running
+        if let Some(uni) = self.inner.take() {
+            let result = self.rt.block_on(uni.shutdown());
+
+            // Prevent Drop from running by forgetting self
+            // (we've already done the cleanup in the async shutdown)
+            std::mem::forget(self);
+
+            result
+        } else {
+            Ok(()) // Already shut down
+        }
+    }
+}
+
+impl Drop for UniSync {
+    fn drop(&mut self) {
+        if let Some(ref uni) = self.inner {
+            uni.shutdown_handle.shutdown_blocking();
+            tracing::debug!("UniSync dropped");
+        }
     }
 }
 

@@ -1019,7 +1019,8 @@ impl<'a> BulkWriter<'a> {
                 // Note: The Uni instance should manage the IndexRebuildManager lifecycle
                 // For now, we start a new worker for each bulk commit
                 let manager = Arc::new(rebuild_manager);
-                manager.start_background_worker();
+                let handle = manager.start_background_worker(self.db.shutdown_handle.subscribe());
+                self.db.shutdown_handle.track_task(handle);
             } else {
                 // Sync mode: rebuild indexes blocking
                 for label in &labels_to_rebuild {

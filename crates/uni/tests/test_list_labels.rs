@@ -1,5 +1,5 @@
-use uni_db::UniBuilder;
 use tempfile::TempDir;
+use uni_db::UniBuilder;
 
 #[tokio::test]
 async fn test_list_labels_lifecycle() -> anyhow::Result<()> {
@@ -34,13 +34,19 @@ async fn test_list_labels_lifecycle() -> anyhow::Result<()> {
 
     let labels = db.list_labels().await?;
     println!("After CREATE (:X): {:?}", labels);
-    assert!(labels.contains(&"X".to_string()), "Label X should appear after creating vertex");
+    assert!(
+        labels.contains(&"X".to_string()),
+        "Label X should appear after creating vertex"
+    );
 
     // Delete all X vertices
     db.execute("MATCH (n:X) DELETE n").await?;
     let labels = db.list_labels().await?;
     println!("After DELETE all X: {:?}", labels);
-    assert!(!labels.contains(&"X".to_string()), "Label X should disappear after deleting all vertices");
+    assert!(
+        !labels.contains(&"X".to_string()),
+        "Label X should disappear after deleting all vertices"
+    );
 
     Ok(())
 }

@@ -2,8 +2,8 @@ use cucumber::{World, WriterExt};
 use std::fs;
 use uni_tck::UniWorld;
 
-#[tokio::main]
-async fn main() {
+fn main() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
     // Configure tracing for debugging
     tracing_subscriber::fmt()
         .with_max_level(tracing::Level::WARN)
@@ -45,27 +45,35 @@ async fn main() {
     eprintln!("🚀 Running features from: {}", feature_path);
 
     // Run tests with JSON output and scenario timeout
-    UniWorld::cucumber()
-        .fail_on_skipped()
-        .max_concurrent_scenarios(Some(16)) // Parallel execution
-        .with_writer(
-            cucumber::writer::Json::for_tee(
-                fs::File::create(&json_path).expect("Failed to create JSON output file"),
+    rt.block_on(async {
+        UniWorld::cucumber()
+            .fail_on_skipped()
+            .max_concurrent_scenarios(Some(16)) // Parallel execution
+            .with_writer(
+                cucumber::writer::Json::for_tee(
+                    fs::File::create(&json_path).expect("Failed to create JSON output file"),
+                )
+                .normalized(),
             )
-            .normalized(),
-        )
-        .before(move |_feature, _rule, scenario, _world| {
-            let scenario_name = scenario.name.clone();
-            Box::pin(async move {
-                eprintln!("▶ Starting: {}", scenario_name);
+            .before(move |_feature, _rule, scenario, _world| {
+                let scenario_name = scenario.name.clone();
+                Box::pin(async move {
+                    eprintln!("▶ Starting: {}", scenario_name);
+                })
             })
-        })
-        .after(move |_feature, _rule, scenario, _ev, _world| {
-            let scenario_name = scenario.name.clone();
-            Box::pin(async move {
-                eprintln!("✓ Finished: {}", scenario_name);
+            .after(move |_feature, _rule, scenario, _ev, _world| {
+                let scenario_name = scenario.name.clone();
+                Box::pin(async move {
+                    eprintln!("✓ Finished: {}", scenario_name);
+                })
             })
-        })
-        .run(feature_path)
-        .await;
+            .run(feature_path)
+            .await;
+    });
+
+    // Force exit to avoid runtime hanging.
+    // The cucumber framework holds onto world instances until after all tests complete,
+    // preventing Uni Drop from being called in time. Since background tasks are disabled
+    // for TCK tests (see UniWorld::init_db), this is safe.
+    std::process::exit(0);
 }

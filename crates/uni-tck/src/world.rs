@@ -63,8 +63,13 @@ impl UniWorld {
     }
 
     pub async fn init_db(&mut self) -> anyhow::Result<()> {
-        // Use in_memory for fastest initialization (no temp dir tracking needed)
-        let db = Uni::in_memory().build().await?;
+        // Use in_memory for fastest initialization
+        // Disable background tasks for test databases (they create many short-lived instances)
+        let mut config = uni_common::UniConfig::default();
+        config.auto_flush_interval = None; // Disable auto-flush background task
+        config.compaction.enabled = false; // Disable background compaction
+
+        let db = Uni::in_memory().config(config).build().await?;
         self.db = Some(Arc::new(db));
         Ok(())
     }
