@@ -63,14 +63,9 @@ impl UniWorld {
     }
 
     pub async fn init_db(&mut self) -> anyhow::Result<()> {
-        // Create a temp directory that auto-cleans when UniWorld is dropped.
-        // This prevents accumulating temp files during parallel TCK execution.
-        let temp_dir = TempDir::new()?;
-        let db = Uni::open(temp_dir.path().to_string_lossy().to_string())
-            .build()
-            .await?;
+        // Use in_memory for fastest initialization (no temp dir tracking needed)
+        let db = Uni::in_memory().build().await?;
         self.db = Some(Arc::new(db));
-        self._temp_dir = Some(temp_dir);
         Ok(())
     }
 
@@ -79,34 +74,48 @@ impl UniWorld {
     }
 
     /// Capture graph state before a mutation for side-effect tracking.
+    ///
+    /// Uses sequential queries to avoid any potential lock contention.
+    /// Property counting is included for TCK compliance.
     pub async fn capture_state_before(&mut self) -> anyhow::Result<()> {
-        let (nodes, edges, node_props, rel_props, labels) = tokio::join!(
-            self.count_by_query("MATCH (n) RETURN count(n) as count"),
-            self.count_by_query("MATCH ()-[r]->() RETURN count(r) as count"),
-            self.count_by_query("MATCH (n) UNWIND keys(n) AS k RETURN count(k) AS count"),
-            self.count_by_query("MATCH ()-[r]->() UNWIND keys(r) AS k RETURN count(k) AS count"),
-            self.get_labels(),
-        );
-        self.side_effects.nodes_before = nodes;
-        self.side_effects.edges_before = edges;
+        self.side_effects.nodes_before = self
+            .count_by_query("MATCH (n) RETURN count(n) as count")
+            .await;
+        self.side_effects.edges_before = self
+            .count_by_query("MATCH ()-[r]->() RETURN count(r) as count")
+            .await;
+        // Property counting - required for some TCK tests
+        let node_props = self
+            .count_by_query("MATCH (n) UNWIND keys(n) AS k RETURN count(k) AS count")
+            .await;
+        let rel_props = self
+            .count_by_query("MATCH ()-[r]->() UNWIND keys(r) AS k RETURN count(k) AS count")
+            .await;
         self.side_effects.properties_before = node_props + rel_props;
-        self.side_effects.labels_before = labels?;
+        self.side_effects.labels_before = self.get_labels().await?;
         Ok(())
     }
 
     /// Capture graph state after a mutation for side-effect tracking.
+    ///
+    /// Uses sequential queries to avoid any potential lock contention.
+    /// Property counting is included for TCK compliance.
     pub async fn capture_state_after(&mut self) -> anyhow::Result<()> {
-        let (nodes, edges, node_props, rel_props, labels) = tokio::join!(
-            self.count_by_query("MATCH (n) RETURN count(n) as count"),
-            self.count_by_query("MATCH ()-[r]->() RETURN count(r) as count"),
-            self.count_by_query("MATCH (n) UNWIND keys(n) AS k RETURN count(k) AS count"),
-            self.count_by_query("MATCH ()-[r]->() UNWIND keys(r) AS k RETURN count(k) AS count"),
-            self.get_labels(),
-        );
-        self.side_effects.nodes_after = nodes;
-        self.side_effects.edges_after = edges;
+        self.side_effects.nodes_after = self
+            .count_by_query("MATCH (n) RETURN count(n) as count")
+            .await;
+        self.side_effects.edges_after = self
+            .count_by_query("MATCH ()-[r]->() RETURN count(r) as count")
+            .await;
+        // Property counting - required for some TCK tests
+        let node_props = self
+            .count_by_query("MATCH (n) UNWIND keys(n) AS k RETURN count(k) AS count")
+            .await;
+        let rel_props = self
+            .count_by_query("MATCH ()-[r]->() UNWIND keys(r) AS k RETURN count(k) AS count")
+            .await;
         self.side_effects.properties_after = node_props + rel_props;
-        self.side_effects.labels_after = labels?;
+        self.side_effects.labels_after = self.get_labels().await?;
         Ok(())
     }
 

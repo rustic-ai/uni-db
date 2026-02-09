@@ -1,10 +1,6 @@
 use cucumber::{World, WriterExt};
 use std::fs;
-use std::time::Duration;
 use uni_tck::UniWorld;
-
-/// Scenario timeout in seconds - scenarios taking longer will be marked as failed
-const SCENARIO_TIMEOUT_SECS: u64 = 30;
 
 #[tokio::main]
 async fn main() {
@@ -51,7 +47,7 @@ async fn main() {
     // Run tests with JSON output and scenario timeout
     UniWorld::cucumber()
         .fail_on_skipped()
-        .max_concurrent_scenarios(Some(8)) // Parallel execution with auto-cleanup temp dirs
+        .max_concurrent_scenarios(Some(16)) // Parallel execution
         .with_writer(
             cucumber::writer::Json::for_tee(
                 fs::File::create(&json_path).expect("Failed to create JSON output file"),

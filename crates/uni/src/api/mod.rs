@@ -295,21 +295,35 @@ impl Uni {
         }))
     }
 
+    /// Get all distinct labels that have at least one active vertex.
+    /// This is done by querying the database directly for all distinct labels,
+    /// rather than relying on the schema which may not be updated yet in a
+    /// schemaless database.
+    async fn get_distinct_labels(&self) -> Result<Vec<String>> {
+        // Query: MATCH (n) RETURN DISTINCT labels(n) AS labels
+        // This returns all unique label combinations on vertices
+        let query = "MATCH (n) RETURN DISTINCT labels(n) AS labels";
+        let result = self.query(query).await?;
+
+        let mut all_labels = std::collections::HashSet::new();
+        for row in &result.rows {
+            if let Ok(labels_list) = row.get::<Vec<String>>("labels") {
+                for label in labels_list {
+                    all_labels.insert(label);
+                }
+            }
+        }
+
+        Ok(all_labels.into_iter().collect())
+    }
+
     /// Get all label names.
+    /// Returns only labels that have at least one active vertex.
+    /// This aligns with OpenCypher semantics where labels are implicitly managed
+    /// by vertex lifecycle - labels appear when first vertex is created and
+    /// disappear when last vertex is deleted.
     pub async fn list_labels(&self) -> Result<Vec<String>> {
-        Ok(self
-            .schema
-            .schema()
-            .labels
-            .iter()
-            .filter(|(_, l)| {
-                matches!(
-                    l.state,
-                    uni_common::core::schema::SchemaElementState::Active
-                )
-            })
-            .map(|(name, _)| name.clone())
-            .collect())
+        self.get_distinct_labels().await
     }
 
     /// Get all edge type names.

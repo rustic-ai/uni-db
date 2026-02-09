@@ -3303,8 +3303,10 @@ impl Executor {
                     } else {
                         return Err(anyhow!("Write operation requires a Writer"));
                     }
-                    // OpenCypher spec: DELETE without RETURN returns empty result
-                    Ok(vec![])
+                    // DELETE passes through input rows to support RETURN clauses.
+                    // The planner wraps terminal DELETE operations in Limit(0) to produce
+                    // empty results when no RETURN clause is present (OpenCypher spec).
+                    Ok(rows)
                 }
                 LogicalPlan::Begin => {
                     if let Some(writer_lock) = &self.writer {

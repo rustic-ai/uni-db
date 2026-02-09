@@ -1782,9 +1782,13 @@ impl QueryPlanner {
         // Wrap write operations without RETURN in Limit(0) per OpenCypher spec.
         // CREATE (n) should return 0 rows, but CREATE (n) RETURN n should return 1 row.
         // If RETURN was used, the plan will have been wrapped in Project, so we only
-        // wrap terminal Create/CreateBatch nodes.
+        // wrap terminal Create/CreateBatch/Delete/Set/Remove nodes.
         let plan = match &plan {
-            LogicalPlan::Create { .. } | LogicalPlan::CreateBatch { .. } => LogicalPlan::Limit {
+            LogicalPlan::Create { .. }
+            | LogicalPlan::CreateBatch { .. }
+            | LogicalPlan::Delete { .. }
+            | LogicalPlan::Set { .. }
+            | LogicalPlan::Remove { .. } => LogicalPlan::Limit {
                 input: Box::new(plan),
                 skip: None,
                 fetch: Some(0),
