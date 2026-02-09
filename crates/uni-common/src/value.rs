@@ -1039,10 +1039,10 @@ mod tests {
         assert_eq!(Value::Int(42).as_bool(), None);
 
         assert_eq!(Value::Int(42).as_i64(), Some(42));
-        assert_eq!(Value::Float(3.14).as_i64(), None);
+        assert_eq!(Value::Float(2.5).as_i64(), None);
 
         // as_f64 coerces Int to Float
-        assert_eq!(Value::Float(3.14).as_f64(), Some(3.14));
+        assert_eq!(Value::Float(2.5).as_f64(), Some(2.5));
         assert_eq!(Value::Int(42).as_f64(), Some(42.0));
         assert_eq!(Value::String("x".into()).as_f64(), None);
 
@@ -1067,7 +1067,7 @@ mod tests {
         let back: Value = json.into();
         assert_eq!(val, back);
 
-        let val = Value::Float(3.14);
+        let val = Value::Float(2.5);
         let json: serde_json::Value = val.clone().into();
         let back: Value = json.into();
         assert_eq!(val, back);
@@ -1089,15 +1089,12 @@ mod tests {
         assert_eq!(unival!(true), Value::Bool(true));
         assert_eq!(unival!(false), Value::Bool(false));
         assert_eq!(unival!(42_i64), Value::Int(42));
-        assert_eq!(unival!(3.14_f64), Value::Float(3.14));
+        assert_eq!(unival!(2.5_f64), Value::Float(2.5));
         assert_eq!(unival!("hello"), Value::String("hello".into()));
 
         // Array
         let list = unival!([1_i64, 2_i64]);
-        assert_eq!(
-            list,
-            Value::List(vec![Value::Int(1), Value::Int(2)])
-        );
+        assert_eq!(list, Value::List(vec![Value::Int(1), Value::Int(2)]));
 
         // Map
         let map = unival!({"key": "val", "num": 42_i64});

@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2024-2026 Dragonscale Team
 
-use uni_db::unival;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tempfile::tempdir;
@@ -9,6 +8,7 @@ use tokio::sync::RwLock;
 use uni_db::core::id::Vid;
 use uni_db::core::schema::SchemaManager;
 use uni_db::query::executor::Executor;
+use uni_db::unival;
 
 use uni_db::query::planner::QueryPlanner;
 use uni_db::runtime::property_manager::PropertyManager;

@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2024-2026 Dragonscale Team
 
-use uni_db::unival;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tempfile::tempdir;
@@ -12,6 +11,7 @@ use uni_db::runtime::QueryContext;
 use uni_db::runtime::property_manager::PropertyManager;
 use uni_db::runtime::writer::Writer;
 use uni_db::storage::manager::StorageManager;
+use uni_db::unival;
 
 #[tokio::test]
 async fn test_property_batch_loading() -> anyhow::Result<()> {

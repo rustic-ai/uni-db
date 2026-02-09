@@ -183,4 +183,31 @@ mod tests {
         }
         panic!("Could not find relationship pattern with OR types");
     }
+
+    #[test]
+    fn test_parse_vlp_relationship_variable() {
+        // Test that VLP patterns preserve the relationship variable
+        let q = parse("MATCH (a)-[r*1..1]->(b) RETURN r").unwrap();
+        if let ast::Query::Single(single) = q
+            && let ast::Clause::Match(match_clause) = &single.clauses[0]
+            && let ast::PatternElement::Relationship(rel) =
+                &match_clause.pattern.paths[0].elements[1]
+        {
+            assert_eq!(
+                rel.variable,
+                Some("r".to_string()),
+                "VLP should preserve relationship variable 'r'"
+            );
+            assert!(rel.range.is_some(), "VLP should have range");
+            let range = rel.range.as_ref().unwrap();
+            assert_eq!(range.min, Some(1));
+            assert_eq!(range.max, Some(1));
+            println!(
+                "VLP relationship: variable={:?}, range={:?}",
+                rel.variable, rel.range
+            );
+            return;
+        }
+        panic!("Could not find VLP relationship pattern");
+    }
 }

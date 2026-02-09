@@ -2,7 +2,6 @@
 // Copyright 2024-2026 Dragonscale Team
 
 use anyhow::Result;
-use uni_db::unival;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tempfile::tempdir;
@@ -10,6 +9,7 @@ use uni_db::core::id::Vid;
 use uni_db::core::schema::{DataType, SchemaManager};
 use uni_db::storage::delta::Op;
 use uni_db::storage::manager::StorageManager;
+use uni_db::unival;
 
 #[tokio::test]
 async fn test_vertex_dataset_batch_writes() -> Result<()> {

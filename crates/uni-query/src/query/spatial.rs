@@ -126,9 +126,7 @@ fn eval_distance(args: &[Value]) -> Result<Value> {
             let (x1, y1) = get_cartesian_coords(p1, "First point")?;
             let (x2, y2) = get_cartesian_coords(p2, "Second point")?;
 
-            Ok(Value::Float(
-                ((x2 - x1).powi(2) + (y2 - y1).powi(2)).sqrt(),
-            ))
+            Ok(Value::Float(((x2 - x1).powi(2) + (y2 - y1).powi(2)).sqrt()))
         }
         "Cartesian-3D" => {
             let (x1, y1) = get_cartesian_coords(p1, "First point")?;

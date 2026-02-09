@@ -40,7 +40,6 @@ use datafusion::physical_expr::PhysicalExpr;
 use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties};
 use futures::Stream;
-use uni_common::Value;
 use std::any::Any;
 use std::collections::HashMap;
 use std::fmt;
@@ -48,6 +47,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 use uni_common::Properties;
+use uni_common::Value;
 use uni_common::core::id::{Eid, Vid};
 use uni_common::core::schema::Schema as UniSchema;
 
@@ -992,10 +992,8 @@ pub(crate) fn get_property_value(
 ) -> Option<Value> {
     if prop_name == "_all_props" {
         return props_map.get(vid).map(|p| {
-            let map: HashMap<String, Value> = p
-                .iter()
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect();
+            let map: HashMap<String, Value> =
+                p.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
             Value::Map(map)
         });
     }

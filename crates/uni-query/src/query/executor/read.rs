@@ -8,11 +8,11 @@ use crate::query::expr_eval::{
 };
 use crate::query::planner::{LogicalPlan, QueryPlanner, classify_window_expressions};
 use crate::query::pushdown::LanceFilterGenerator;
+use crate::types::Value;
 use anyhow::{Result, anyhow};
 use futures::future::BoxFuture;
 use futures::stream::{self, BoxStream, StreamExt};
 use metrics;
-use crate::types::Value;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::Instant;
@@ -1302,9 +1302,7 @@ impl Executor {
                     if let Ok(vid) = Self::vid_from_value(&arr_val)
                         && let Some(key) = idx_val.as_str()
                     {
-                        if let Ok(val) = prop_manager
-                            .get_vertex_prop_with_ctx(vid, key, ctx)
-                            .await
+                        if let Ok(val) = prop_manager.get_vertex_prop_with_ctx(vid, key, ctx).await
                         {
                             return Ok(val);
                         }
@@ -1805,7 +1803,10 @@ impl Executor {
                             }
                             // Try _src_vid for raw edge data
                             if let Some(src_vid) = map.get("_src_vid") {
-                                return Ok(Value::Map(HashMap::from([("_vid".to_string(), src_vid.clone())])));
+                                return Ok(Value::Map(HashMap::from([(
+                                    "_vid".to_string(),
+                                    src_vid.clone(),
+                                )])));
                             }
                         }
                         return Ok(Value::Null);
@@ -1825,7 +1826,10 @@ impl Executor {
                             }
                             // Try _dst_vid for raw edge data
                             if let Some(dst_vid) = map.get("_dst_vid") {
-                                return Ok(Value::Map(HashMap::from([("_vid".to_string(), dst_vid.clone())])));
+                                return Ok(Value::Map(HashMap::from([(
+                                    "_vid".to_string(),
+                                    dst_vid.clone(),
+                                )])));
                             }
                         }
                         return Ok(Value::Null);
@@ -1852,7 +1856,9 @@ impl Executor {
                             // Handle proper Value::Node type (from result normalization)
                             Value::Map(map) if map.contains_key("_vid") => {
                                 if let Some(Value::String(label_str)) = map.get("_label") {
+                                    // Labels may be colon-joined (e.g., "Person:Employee")
                                     label_str == label_to_check
+                                        || label_str.split(':').any(|l| l == label_to_check)
                                 } else if let Some(Value::List(labels_arr)) = map.get("_labels") {
                                     labels_arr
                                         .iter()
@@ -1868,7 +1874,9 @@ impl Executor {
                                         .iter()
                                         .any(|l| l.as_str() == Some(label_to_check))
                                 } else if let Some(Value::String(label_str)) = map.get("_label") {
+                                    // Labels may be colon-joined (e.g., "Person:Employee")
                                     label_str == label_to_check
+                                        || label_str.split(':').any(|l| l == label_to_check)
                                 } else {
                                     false
                                 }
@@ -1970,10 +1978,7 @@ impl Executor {
                             } else if let Some(eid_val) = map.get("_eid").and_then(|v| v.as_u64()) {
                                 // Edge case
                                 let eid = uni_common::core::id::Eid::from(eid_val);
-                                prop_manager
-                                    .get_edge_prop(eid, &start_prop, ctx)
-                                    .await
-                                    .ok()
+                                prop_manager.get_edge_prop(eid, &start_prop, ctx).await.ok()
                             } else {
                                 // Inline object - property embedded directly
                                 map.get(&start_prop).cloned()
@@ -2014,10 +2019,7 @@ impl Executor {
                             } else if let Some(eid_val) = map.get("_eid").and_then(|v| v.as_u64()) {
                                 // Edge case
                                 let eid = uni_common::core::id::Eid::from(eid_val);
-                                prop_manager
-                                    .get_edge_prop(eid, &end_prop, ctx)
-                                    .await
-                                    .ok()
+                                prop_manager.get_edge_prop(eid, &end_prop, ctx).await.ok()
                             } else {
                                 // Inline object - property embedded directly
                                 map.get(&end_prop).cloned()
@@ -2416,14 +2418,23 @@ impl Executor {
                             let mut props_json: HashMap<String, Value> =
                                 props.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
                             props_json.insert("_vid".to_string(), Value::Int(vid.as_u64() as i64));
-                            props_json.insert("_label".to_string(), Value::String(label_name.clone()));
+                            props_json
+                                .insert("_label".to_string(), Value::String(label_name.clone()));
 
                             // Add full list of labels
                             if let Some(labels) = labels_map.get(&vid) {
-                                props_json.insert("_labels".to_string(), Value::List(labels.iter().map(|l| Value::String(l.clone())).collect()));
+                                props_json.insert(
+                                    "_labels".to_string(),
+                                    Value::List(
+                                        labels.iter().map(|l| Value::String(l.clone())).collect(),
+                                    ),
+                                );
                             } else {
                                 // Fallback to the scan label
-                                props_json.insert("_labels".to_string(), Value::List(vec![Value::String(label_name.clone())]));
+                                props_json.insert(
+                                    "_labels".to_string(),
+                                    Value::List(vec![Value::String(label_name.clone())]),
+                                );
                             }
 
                             let mut map = HashMap::new();
@@ -2464,7 +2475,10 @@ impl Executor {
                                 .first()
                                 .cloned()
                                 .unwrap_or_else(|| "Unknown".to_string());
-                            props_json.insert("_label".to_string(), Value::String(label_name.to_string()));
+                            props_json.insert(
+                                "_label".to_string(),
+                                Value::String(label_name.to_string()),
+                            );
 
                             let mut map = HashMap::new();
                             map.insert(variable.clone(), Value::Map(props_json));
@@ -2518,12 +2532,14 @@ impl Executor {
                             .unwrap_or_default()
                         };
 
-                        let mut props_json: HashMap<String, Value> =
-                            props_opt.unwrap_or_default();
+                        let mut props_json: HashMap<String, Value> = props_opt.unwrap_or_default();
 
                         props_json.insert("_vid".to_string(), Value::Int(vid.as_u64() as i64));
                         props_json.insert("_label".to_string(), Value::String(labels.join(":")));
-                        props_json.insert("_labels".to_string(), Value::List(labels.iter().map(|l| Value::String(l.clone())).collect()));
+                        props_json.insert(
+                            "_labels".to_string(),
+                            Value::List(labels.iter().map(|l| Value::String(l.clone())).collect()),
+                        );
 
                         let mut map = HashMap::new();
                         map.insert(variable.clone(), Value::Map(props_json));
@@ -2598,12 +2614,20 @@ impl Executor {
                             .unwrap_or_default()
                         };
 
-                        let mut props_json: HashMap<String, Value> =
-                            props_opt.unwrap_or_default();
+                        let mut props_json: HashMap<String, Value> = props_opt.unwrap_or_default();
 
                         props_json.insert("_vid".to_string(), Value::Int(vid.as_u64() as i64));
-                        props_json.insert("_label".to_string(), Value::String(actual_labels.join(":")));
-                        props_json.insert("_labels".to_string(), Value::List(actual_labels.iter().map(|l| Value::String(l.clone())).collect()));
+                        props_json
+                            .insert("_label".to_string(), Value::String(actual_labels.join(":")));
+                        props_json.insert(
+                            "_labels".to_string(),
+                            Value::List(
+                                actual_labels
+                                    .iter()
+                                    .map(|l| Value::String(l.clone()))
+                                    .collect(),
+                            ),
+                        );
 
                         let mut map = HashMap::new();
                         map.insert(variable.clone(), Value::Map(props_json));
@@ -2689,13 +2713,14 @@ impl Executor {
                     optional,
                     target_filter,
                     path_variable,
+                    is_variable_length,
                     optional_pattern_vars,
                 } => {
                     let input_matches = self
                         .execute_subplan(*input, prop_manager, params, ctx)
                         .await?;
-                    let traverse_results = self
-                        .execute_traverse_main_by_type(
+                    let traverse_results = if is_variable_length {
+                        self.execute_vlp(
                             input_matches,
                             &type_names,
                             &direction,
@@ -2710,7 +2735,25 @@ impl Executor {
                             prop_manager,
                             ctx,
                         )
-                        .await?;
+                        .await?
+                    } else {
+                        self.execute_traverse_main_by_type(
+                            input_matches,
+                            &type_names,
+                            &direction,
+                            &source_variable,
+                            &target_variable,
+                            &step_variable,
+                            min_hops,
+                            max_hops,
+                            optional,
+                            &path_variable,
+                            &optional_pattern_vars,
+                            prop_manager,
+                            ctx,
+                        )
+                        .await?
+                    };
 
                     // Apply target_filter if present
                     // For OPTIONAL MATCH, preserve rows where target is NULL (no match found)
@@ -3570,7 +3613,10 @@ impl Executor {
                 Value::Map(map)
             } else {
                 // Return as array
-                let arr: Vec<Value> = record.iter().map(|v| Value::String(v.to_string())).collect();
+                let arr: Vec<Value> = record
+                    .iter()
+                    .map(|v| Value::String(v.to_string()))
+                    .collect();
                 Value::List(arr)
             };
 
@@ -3957,12 +4003,24 @@ impl Executor {
                     // Build a minimal path representation
                     let path_obj = Value::Path(crate::types::Path {
                         nodes: vec![
-                            crate::types::Node { vid: source_vid, label: String::new(), properties: HashMap::new() },
-                            crate::types::Node { vid: target_vid, label: String::new(), properties: HashMap::new() },
+                            crate::types::Node {
+                                vid: source_vid,
+                                label: String::new(),
+                                properties: HashMap::new(),
+                            },
+                            crate::types::Node {
+                                vid: target_vid,
+                                label: String::new(),
+                                properties: HashMap::new(),
+                            },
                         ],
-                        edges: vec![
-                            crate::types::Edge { eid: *eid, edge_type: String::new(), src: source_vid, dst: target_vid, properties: HashMap::new() },
-                        ],
+                        edges: vec![crate::types::Edge {
+                            eid: *eid,
+                            edge_type: String::new(),
+                            src: source_vid,
+                            dst: target_vid,
+                            properties: HashMap::new(),
+                        }],
                     });
                     new_row.insert(pv.clone(), path_obj);
                 }
@@ -3973,6 +4031,471 @@ impl Executor {
             if !found && optional {
                 let mut new_m = input_row.clone();
                 // For multi-hop OPTIONAL MATCH, set ALL pattern variables to NULL
+                if optional_pattern_vars.is_empty() {
+                    new_m.insert(target_variable.to_string(), Value::Null);
+                    if let Some(sv) = step_variable {
+                        new_m.insert(sv.clone(), Value::Null);
+                    }
+                    if let Some(pv) = path_variable {
+                        new_m.insert(pv.clone(), Value::Null);
+                    }
+                } else {
+                    for var in optional_pattern_vars {
+                        new_m.insert(var.clone(), Value::Null);
+                    }
+                }
+                new_matches.push(new_m);
+            }
+        }
+
+        Ok(new_matches)
+    }
+
+    /// Execute a variable-length path (VLP) traversal using BFS.
+    ///
+    /// This function handles patterns like `(a)-[r*1..3]->(b)` by performing a
+    /// breadth-first search from each source node, accumulating edges along the way.
+    ///
+    /// Key semantics:
+    /// - Relationship uniqueness: Each edge can only appear once per path
+    /// - Zero-length paths (min_hops=0): Source equals target with empty edge list
+    /// - step_variable holds `Value::List` of edge maps (even for single-hop VLP)
+    /// - path_variable holds `Value::Path` with nodes and edges
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn execute_vlp(
+        &self,
+        input_matches: Vec<HashMap<String, Value>>,
+        type_names: &[String],
+        direction: &Direction,
+        source_variable: &str,
+        target_variable: &str,
+        step_variable: &Option<String>,
+        min_hops: usize,
+        max_hops: usize,
+        optional: bool,
+        path_variable: &Option<String>,
+        optional_pattern_vars: &std::collections::HashSet<String>,
+        prop_manager: &PropertyManager,
+        ctx: Option<&QueryContext>,
+    ) -> Result<Vec<HashMap<String, Value>>> {
+        tracing::debug!(
+            "execute_vlp: step_variable={:?}, path_variable={:?}, min_hops={}, max_hops={}",
+            step_variable,
+            path_variable,
+            min_hops,
+            max_hops
+        );
+        self.execute_vlp_inner(
+            input_matches,
+            type_names,
+            direction,
+            source_variable,
+            target_variable,
+            step_variable,
+            min_hops,
+            max_hops,
+            optional,
+            path_variable,
+            optional_pattern_vars,
+            prop_manager,
+            ctx,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn execute_vlp_inner(
+        &self,
+        input_matches: Vec<HashMap<String, Value>>,
+        type_names: &[String],
+        direction: &Direction,
+        source_variable: &str,
+        target_variable: &str,
+        step_variable: &Option<String>,
+        min_hops: usize,
+        max_hops: usize,
+        optional: bool,
+        path_variable: &Option<String>,
+        optional_pattern_vars: &std::collections::HashSet<String>,
+        prop_manager: &PropertyManager,
+        ctx: Option<&QueryContext>,
+    ) -> Result<Vec<HashMap<String, Value>>> {
+        use std::collections::{HashSet, VecDeque};
+        use uni_store::storage::main_edge::MainEdgeDataset;
+
+        // Get edges from main table for all type names
+        let lancedb = self.storage.lancedb_store();
+        let type_refs: Vec<&str> = type_names.iter().map(|s| s.as_str()).collect();
+        let mut edges_by_type =
+            MainEdgeDataset::find_edges_by_type_names(lancedb, &type_refs).await?;
+
+        // Helper to collect edges from an L0 buffer for multiple types
+        fn collect_l0_edges(
+            l0: &uni_store::runtime::l0::L0Buffer,
+            type_names: &[String],
+            edges: &mut Vec<(Eid, Vid, Vid, String, uni_common::Properties)>,
+        ) {
+            for type_name in type_names {
+                for eid in l0.eids_for_type(type_name) {
+                    if let Some((src, dst)) = l0.get_edge_endpoints(eid) {
+                        let props = l0.edge_properties.get(&eid).cloned().unwrap_or_default();
+                        edges.push((eid, src, dst, type_name.clone(), props));
+                    }
+                }
+            }
+        }
+
+        // Add edges from L0 buffers
+        if let Some(ctx) = ctx {
+            collect_l0_edges(&ctx.l0.read(), type_names, &mut edges_by_type);
+
+            if let Some(tx_l0_arc) = &ctx.transaction_l0 {
+                collect_l0_edges(&tx_l0_arc.read(), type_names, &mut edges_by_type);
+            }
+
+            for pending_l0_arc in &ctx.pending_flush_l0s {
+                collect_l0_edges(&pending_l0_arc.read(), type_names, &mut edges_by_type);
+            }
+        }
+
+        // Deduplicate by eid (in case edge appears in both storage and L0)
+        let mut seen_eids = HashSet::new();
+        edges_by_type.retain(|(eid, _, _, _, _)| seen_eids.insert(*eid));
+
+        // Build adjacency index for efficient neighbor lookup
+        // Key: vid, Value: list of (eid, neighbor_vid, edge_type, edge_props)
+        let mut outgoing: HashMap<Vid, Vec<(Eid, Vid, String, uni_common::Properties)>> =
+            HashMap::new();
+        let mut incoming: HashMap<Vid, Vec<(Eid, Vid, String, uni_common::Properties)>> =
+            HashMap::new();
+
+        for (eid, src_vid, dst_vid, edge_type, edge_props) in &edges_by_type {
+            outgoing.entry(*src_vid).or_default().push((
+                *eid,
+                *dst_vid,
+                edge_type.clone(),
+                edge_props.clone(),
+            ));
+            incoming.entry(*dst_vid).or_default().push((
+                *eid,
+                *src_vid,
+                edge_type.clone(),
+                edge_props.clone(),
+            ));
+        }
+
+        let mut new_matches = Vec::new();
+
+        for input_row in &input_matches {
+            // Check timeout between rows
+            if let Some(ctx) = ctx {
+                ctx.check_timeout()?;
+            }
+
+            let source_vid = match input_row
+                .get(source_variable)
+                .and_then(|v| Self::vid_from_value(v).ok())
+            {
+                Some(v) => v,
+                None => {
+                    if optional {
+                        let mut new_m = input_row.clone();
+                        if optional_pattern_vars.is_empty() {
+                            new_m.insert(target_variable.to_string(), Value::Null);
+                            if let Some(sv) = step_variable {
+                                new_m.insert(sv.clone(), Value::Null);
+                            }
+                            if let Some(pv) = path_variable {
+                                new_m.insert(pv.clone(), Value::Null);
+                            }
+                        } else {
+                            for var in optional_pattern_vars {
+                                new_m.insert(var.clone(), Value::Null);
+                            }
+                        }
+                        new_matches.push(new_m);
+                    }
+                    continue;
+                }
+            };
+
+            // Get source node properties for path building
+            let source_props = prop_manager
+                .get_all_vertex_props_with_ctx(source_vid, ctx)
+                .await?
+                .unwrap_or_default();
+            let source_labels = if let Some(ctx) = ctx {
+                let l0_labels =
+                    uni_store::runtime::l0_visibility::get_vertex_labels(source_vid, ctx);
+                if !l0_labels.is_empty() {
+                    l0_labels
+                } else {
+                    uni_store::storage::main_vertex::MainVertexDataset::find_labels_by_vid(
+                        self.storage.lancedb_store(),
+                        source_vid,
+                    )
+                    .await?
+                    .unwrap_or_default()
+                }
+            } else {
+                uni_store::storage::main_vertex::MainVertexDataset::find_labels_by_vid(
+                    self.storage.lancedb_store(),
+                    source_vid,
+                )
+                .await?
+                .unwrap_or_default()
+            };
+
+            // BFS state: (current_vid, depth, path_edges, used_edge_ids, path_nodes)
+            // path_edges: Vec<(Eid, edge_type, src, dst, props)>
+            // path_nodes: Vec<(Vid, label, props)>
+            type BfsState = (
+                Vid,
+                usize,
+                Vec<(Eid, String, Vid, Vid, HashMap<String, Value>)>,
+                HashSet<u64>,
+                Vec<(Vid, String, HashMap<String, Value>)>,
+            );
+
+            let mut queue: VecDeque<BfsState> = VecDeque::new();
+            let mut found = false;
+
+            // Initialize BFS with source node
+            let initial_nodes = vec![(source_vid, source_labels.join(":"), source_props)];
+            queue.push_back((source_vid, 0, Vec::new(), HashSet::new(), initial_nodes));
+
+            // Zero-length path: emit result if min_hops == 0
+            if min_hops == 0 {
+                found = true;
+                let mut new_row = input_row.clone();
+
+                // Target is same as source
+                let mut target_json = input_row
+                    .get(source_variable)
+                    .and_then(|v| v.as_object())
+                    .cloned()
+                    .unwrap_or_default();
+                target_json.insert("_vid".to_string(), Value::Int(source_vid.as_u64() as i64));
+                new_row.insert(target_variable.to_string(), Value::Map(target_json.clone()));
+
+                // Empty edge list for step_variable
+                if let Some(sv) = step_variable {
+                    new_row.insert(sv.clone(), Value::List(Vec::new()));
+                }
+
+                // Path with just the source node
+                if let Some(pv) = path_variable {
+                    let path = crate::types::Path {
+                        nodes: vec![crate::types::Node {
+                            vid: source_vid,
+                            label: source_labels.join(":"),
+                            properties: target_json
+                                .into_iter()
+                                .filter(|(k, _)| !k.starts_with('_'))
+                                .collect(),
+                        }],
+                        edges: vec![],
+                    };
+                    new_row.insert(pv.clone(), Value::Path(path));
+                }
+
+                new_matches.push(new_row);
+            }
+
+            // BFS traversal
+            while let Some((current_vid, depth, path_edges, used_edges, path_nodes)) =
+                queue.pop_front()
+            {
+                if depth >= max_hops {
+                    continue;
+                }
+
+                // Get neighbors based on direction
+                let neighbors: Vec<_> = match direction {
+                    Direction::Outgoing => outgoing
+                        .get(&current_vid)
+                        .map(|v| v.as_slice())
+                        .unwrap_or(&[])
+                        .to_vec(),
+                    Direction::Incoming => incoming
+                        .get(&current_vid)
+                        .map(|v| v.as_slice())
+                        .unwrap_or(&[])
+                        .to_vec(),
+                    Direction::Both => {
+                        let mut combined = Vec::new();
+                        if let Some(out) = outgoing.get(&current_vid) {
+                            combined.extend(out.iter().cloned());
+                        }
+                        if let Some(inc) = incoming.get(&current_vid) {
+                            combined.extend(inc.iter().cloned());
+                        }
+                        combined
+                    }
+                };
+
+                for (eid, neighbor_vid, edge_type, edge_props) in neighbors {
+                    // Relationship uniqueness: skip if edge already used in this path
+                    if used_edges.contains(&eid.as_u64()) {
+                        continue;
+                    }
+
+                    let new_depth = depth + 1;
+
+                    // Build edge info for path
+                    // Determine actual src/dst based on direction
+                    let (actual_src, actual_dst) = match direction {
+                        Direction::Outgoing => (current_vid, neighbor_vid),
+                        Direction::Incoming => (neighbor_vid, current_vid),
+                        Direction::Both => {
+                            // For Both direction, check which way this edge goes
+                            if outgoing
+                                .get(&current_vid)
+                                .map(|v| v.iter().any(|(e, _, _, _)| *e == eid))
+                                .unwrap_or(false)
+                            {
+                                (current_vid, neighbor_vid)
+                            } else {
+                                (neighbor_vid, current_vid)
+                            }
+                        }
+                    };
+
+                    let mut new_path_edges = path_edges.clone();
+                    new_path_edges.push((
+                        eid,
+                        edge_type.clone(),
+                        actual_src,
+                        actual_dst,
+                        edge_props,
+                    ));
+
+                    let mut new_used_edges = used_edges.clone();
+                    new_used_edges.insert(eid.as_u64());
+
+                    // Get neighbor node info
+                    let neighbor_props = prop_manager
+                        .get_all_vertex_props_with_ctx(neighbor_vid, ctx)
+                        .await?
+                        .unwrap_or_default();
+                    let neighbor_labels = if let Some(ctx) = ctx {
+                        let l0_labels =
+                            uni_store::runtime::l0_visibility::get_vertex_labels(neighbor_vid, ctx);
+                        if !l0_labels.is_empty() {
+                            l0_labels
+                        } else {
+                            uni_store::storage::main_vertex::MainVertexDataset::find_labels_by_vid(
+                                self.storage.lancedb_store(),
+                                neighbor_vid,
+                            )
+                            .await?
+                            .unwrap_or_default()
+                        }
+                    } else {
+                        uni_store::storage::main_vertex::MainVertexDataset::find_labels_by_vid(
+                            self.storage.lancedb_store(),
+                            neighbor_vid,
+                        )
+                        .await?
+                        .unwrap_or_default()
+                    };
+
+                    let mut new_path_nodes = path_nodes.clone();
+                    new_path_nodes.push((
+                        neighbor_vid,
+                        neighbor_labels.join(":"),
+                        neighbor_props.clone(),
+                    ));
+
+                    // Emit result if within hop bounds
+                    if new_depth >= min_hops && new_depth <= max_hops {
+                        found = true;
+                        let mut new_row = input_row.clone();
+
+                        // Build target node value
+                        let mut target_json = neighbor_props.clone();
+                        target_json
+                            .insert("_vid".to_string(), Value::Int(neighbor_vid.as_u64() as i64));
+                        target_json.insert(
+                            "_label".to_string(),
+                            Value::String(neighbor_labels.join(":")),
+                        );
+                        new_row.insert(target_variable.to_string(), Value::Map(target_json));
+
+                        // Build step_variable as list of Edge objects
+                        if let Some(sv) = step_variable {
+                            let edge_list: Vec<Value> = new_path_edges
+                                .iter()
+                                .map(|(eid, etype, src, dst, props)| {
+                                    Value::Edge(crate::types::Edge {
+                                        eid: *eid,
+                                        edge_type: etype.clone(),
+                                        src: *src,
+                                        dst: *dst,
+                                        properties: props
+                                            .iter()
+                                            .filter(|(k, _)| !k.starts_with('_'))
+                                            .map(|(k, v)| (k.clone(), v.clone()))
+                                            .collect(),
+                                    })
+                                })
+                                .collect();
+                            new_row.insert(sv.clone(), Value::List(edge_list));
+                        }
+
+                        // Build path_variable
+                        if let Some(pv) = path_variable {
+                            let nodes: Vec<crate::types::Node> = new_path_nodes
+                                .iter()
+                                .map(|(vid, label, props)| crate::types::Node {
+                                    vid: *vid,
+                                    label: label.clone(),
+                                    properties: props
+                                        .iter()
+                                        .filter(|(k, _)| !k.starts_with('_'))
+                                        .map(|(k, v)| (k.clone(), v.clone()))
+                                        .collect(),
+                                })
+                                .collect();
+                            let edges: Vec<crate::types::Edge> = new_path_edges
+                                .iter()
+                                .map(|(eid, etype, src, dst, props)| crate::types::Edge {
+                                    eid: *eid,
+                                    edge_type: etype.clone(),
+                                    src: *src,
+                                    dst: *dst,
+                                    properties: props
+                                        .iter()
+                                        .filter(|(k, _)| !k.starts_with('_'))
+                                        .map(|(k, v)| (k.clone(), v.clone()))
+                                        .collect(),
+                                })
+                                .collect();
+                            new_row.insert(
+                                pv.clone(),
+                                Value::Path(crate::types::Path { nodes, edges }),
+                            );
+                        }
+
+                        new_matches.push(new_row);
+                    }
+
+                    // Continue BFS if we can still expand
+                    if new_depth < max_hops {
+                        queue.push_back((
+                            neighbor_vid,
+                            new_depth,
+                            new_path_edges,
+                            new_used_edges,
+                            new_path_nodes,
+                        ));
+                    }
+                }
+            }
+
+            // Handle OPTIONAL MATCH with no results
+            if !found && optional {
+                let mut new_m = input_row.clone();
                 if optional_pattern_vars.is_empty() {
                     new_m.insert(target_variable.to_string(), Value::Null);
                     if let Some(sv) = step_variable {
@@ -4570,7 +5093,10 @@ impl Executor {
         // Build proper node object for target variable (instead of just VID string)
         let target_obj = Value::Map(HashMap::from([
             ("_vid".to_string(), Value::Int(target_vid.as_u64() as i64)),
-            ("_label".to_string(), Value::String(target_label_name.unwrap_or("").to_string())),
+            (
+                "_label".to_string(),
+                Value::String(target_label_name.unwrap_or("").to_string()),
+            ),
         ]));
         new_m.insert(target_variable.to_string(), target_obj);
 
@@ -4584,7 +5110,12 @@ impl Executor {
         used_edges.push(edge_entry.eid.as_u64());
         new_m.insert(
             "__used_edges".to_string(),
-            Value::List(used_edges.into_iter().map(|e| Value::Int(e as i64)).collect()),
+            Value::List(
+                used_edges
+                    .into_iter()
+                    .map(|e| Value::Int(e as i64))
+                    .collect(),
+            ),
         );
 
         if let Some(sv) = step_variable {
@@ -4595,11 +5126,17 @@ impl Executor {
                 // Build edge object with numeric _type (for internal operations)
                 // and _type_name (for user-facing output after normalization)
                 let edge_obj = Value::Map(HashMap::from([
-                    ("_eid".to_string(), Value::Int(edge_entry.eid.as_u64() as i64)),
+                    (
+                        "_eid".to_string(),
+                        Value::Int(edge_entry.eid.as_u64() as i64),
+                    ),
                     ("_src".to_string(), Value::Int(curr_vid.as_u64() as i64)),
                     ("_dst".to_string(), Value::Int(target_vid.as_u64() as i64)),
                     ("_type".to_string(), Value::Int(edge_entry.edge_type as i64)),
-                    ("_type_name".to_string(), Value::String(edge_type_name.unwrap_or("").to_string())),
+                    (
+                        "_type_name".to_string(),
+                        Value::String(edge_type_name.unwrap_or("").to_string()),
+                    ),
                 ]));
                 new_m.insert(sv.clone(), edge_obj);
             }
@@ -4611,8 +5148,16 @@ impl Executor {
             let (mut path_nodes, mut path_edges, mut current) =
                 if let Some(Value::Path(existing_path)) = row.get(pv) {
                     // Already a proper Path - extract directly
-                    let current = existing_path.nodes.last().map(|n| n.vid).unwrap_or(source_vid);
-                    (existing_path.nodes.clone(), existing_path.edges.clone(), current)
+                    let current = existing_path
+                        .nodes
+                        .last()
+                        .map(|n| n.vid)
+                        .unwrap_or(source_vid);
+                    (
+                        existing_path.nodes.clone(),
+                        existing_path.edges.clone(),
+                        current,
+                    )
                 } else if let Some(Value::Map(existing_obj)) = row.get(pv) {
                     // Try to parse existing path from Map structure
                     // Path object uses "nodes" and "relationships" (or "edges") keys
@@ -4944,8 +5489,7 @@ impl Executor {
         let result = prop_manager
             .get_batch_vertex_props(vids, &prop_refs, ctx)
             .await?;
-        Ok(result
-)
+        Ok(result)
     }
 
     /// Batch loads edge properties for a set of EIDs.
@@ -4969,7 +5513,9 @@ impl Executor {
             .collect();
 
         let prop_refs: Vec<&str> = all_props.into_iter().collect();
-        prop_manager.get_batch_edge_props(eids, &prop_refs, ctx).await
+        prop_manager
+            .get_batch_edge_props(eids, &prop_refs, ctx)
+            .await
     }
 
     /// Builds a mapping from VID to label string.
@@ -5828,32 +6374,8 @@ impl Executor {
             res_row.insert(expr.to_string_repr(), key_vals[i].clone());
         }
         for (i, expr) in aggregates.iter().enumerate() {
-            // Get column name for aggregate - must match planner's get_aggregate_column_name
-            let col_name = match expr {
-                Expr::FunctionCall {
-                    name,
-                    args,
-                    distinct,
-                    ..
-                } => {
-                    // Special-case COUNT to uppercase the function name
-                    if name.eq_ignore_ascii_case("count") {
-                        if args.is_empty() {
-                            // COUNT(*) - empty args
-                            "COUNT(*)".to_string()
-                        } else {
-                            // COUNT(expr) - format with uppercase COUNT
-                            let args_str: Vec<_> =
-                                args.iter().map(|e| e.to_string_repr()).collect();
-                            let distinct_str = if *distinct { "DISTINCT " } else { "" };
-                            format!("COUNT({}{})", distinct_str, args_str.join(", "))
-                        }
-                    } else {
-                        expr.to_string_repr()
-                    }
-                }
-                _ => expr.to_string_repr(),
-            };
+            // Use aggregate_column_name to ensure consistency with planner
+            let col_name = crate::query::planner::aggregate_column_name(expr);
             res_row.insert(col_name, accs[i].finish());
         }
         res_row

@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2024-2026 Dragonscale Team
 
-use uni_db::unival;
 use std::sync::Arc;
 use tempfile::tempdir;
 use tokio::sync::RwLock;
 use uni_cypher::ast::{BinaryOp, CypherLiteral, Expr};
 use uni_db::core::schema::{DataType, SchemaManager};
 use uni_db::query::executor::Executor;
+use uni_db::unival;
 
 use uni_db::query::planner::{LogicalPlan, QueryPlanner};
 use uni_db::runtime::property_manager::PropertyManager;
@@ -287,7 +287,10 @@ async fn test_is_null_execution() -> anyhow::Result<()> {
         .await?;
 
     assert_eq!(results.len(), 1);
-    assert_eq!(results[0].get("n.email"), Some(&unival!("alice@example.com")));
+    assert_eq!(
+        results[0].get("n.email"),
+        Some(&unival!("alice@example.com"))
+    );
 
     // Test IS NULL
     let sql = "MATCH (n:Person) WHERE n.email IS NULL RETURN n";

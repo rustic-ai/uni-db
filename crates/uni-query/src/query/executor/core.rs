@@ -3,11 +3,11 @@
 
 use anyhow::{Result, anyhow};
 use std::collections::{HashMap, HashSet};
-use uni_common::Value;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::RwLock;
 use uni_algo::algo::AlgorithmRegistry;
+use uni_common::Value;
 use uni_cypher::ast::Expr;
 use uni_store::QueryContext;
 use uni_store::runtime::l0_manager::L0Manager;
@@ -220,12 +220,12 @@ impl Executor {
             (Value::Float(f1), Value::Float(f2)) => {
                 f1.partial_cmp(f2).unwrap_or(std::cmp::Ordering::Equal)
             }
-            (Value::Int(i), Value::Float(f)) => {
-                (*i as f64).partial_cmp(f).unwrap_or(std::cmp::Ordering::Equal)
-            }
-            (Value::Float(f), Value::Int(i)) => {
-                f.partial_cmp(&(*i as f64)).unwrap_or(std::cmp::Ordering::Equal)
-            }
+            (Value::Int(i), Value::Float(f)) => (*i as f64)
+                .partial_cmp(f)
+                .unwrap_or(std::cmp::Ordering::Equal),
+            (Value::Float(f), Value::Int(i)) => f
+                .partial_cmp(&(*i as f64))
+                .unwrap_or(std::cmp::Ordering::Equal),
             (Value::String(s1), Value::String(s2)) => s1.cmp(s2),
             (Value::Bool(b1), Value::Bool(b2)) => b1.cmp(b2),
             (Value::Null, Value::Null) => std::cmp::Ordering::Equal,

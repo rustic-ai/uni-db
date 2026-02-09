@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2024-2026 Dragonscale Team
 
-use uni_db::unival;
 use std::collections::HashMap;
 use tempfile::tempdir;
 use uni_db::core::id::Vid;
 use uni_db::core::schema::{DataType, SchemaManager};
 use uni_db::storage::vertex::VertexDataset;
+use uni_db::unival;
 
 #[tokio::test]
 async fn test_vertex_serialization_nulls() -> anyhow::Result<()> {

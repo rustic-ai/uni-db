@@ -4,10 +4,10 @@
 //! Tests for bulk loading API including vertices and edges.
 
 use anyhow::Result;
-use uni_db::unival;
 use std::collections::HashMap;
 use uni_db::Uni;
 use uni_db::api::bulk::EdgeData;
+use uni_db::unival;
 
 const SCHEMA_JSON: &str = r#"{
     "schema_version": 1,

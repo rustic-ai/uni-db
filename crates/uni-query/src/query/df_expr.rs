@@ -35,10 +35,10 @@ use anyhow::{Result, anyhow};
 use datafusion::common::{Column, ScalarValue};
 use datafusion::logical_expr::{ColumnarValue, Expr as DfExpr, ScalarFunctionArgs, col, lit};
 use datafusion::prelude::ExprFunctionExt;
-use uni_common::Value;
 use std::hash::{Hash, Hasher};
 use std::ops::Not;
 use std::sync::Arc;
+use uni_common::Value;
 use uni_cypher::ast::{BinaryOp, CypherLiteral, Expr, UnaryOp};
 
 /// Type of a variable in the query context.
@@ -609,8 +609,7 @@ fn value_to_scalar(value: &Value) -> Result<ScalarValue> {
         Value::String(s) => Ok(ScalarValue::Utf8(Some(s.clone()))),
         Value::List(items) => {
             // Recursively convert items
-            let scalars: Result<Vec<ScalarValue>> =
-                items.iter().map(value_to_scalar).collect();
+            let scalars: Result<Vec<ScalarValue>> = items.iter().map(value_to_scalar).collect();
             let scalars = scalars?;
 
             // Determine common type (simple inference), ignoring nulls

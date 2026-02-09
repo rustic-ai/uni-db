@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2024-2026 Dragonscale Team
 
-use uni_db::unival;
 use std::collections::HashMap;
 use uni_db::Uni;
+use uni_db::unival;
 
 #[tokio::test]
 async fn test_supply_chain_use_case() -> anyhow::Result<()> {

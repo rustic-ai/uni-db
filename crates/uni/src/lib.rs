@@ -16,7 +16,7 @@ pub use api::{Uni, UniBuilder};
 
 // Re-exports from internal crates
 pub use uni_common::{
-    unival, CrdtType, DataType, Eid, Result, Schema, UniConfig, UniError, UniId, Vid,
+    CrdtType, DataType, Eid, Result, Schema, UniConfig, UniError, UniId, Vid, unival,
 };
 pub use uni_query::{
     Edge, ExecuteResult, ExplainOutput, FromValue, Node, Path, ProfileOutput, QueryResult, Row,

@@ -25,7 +25,10 @@ fn test_point_cartesian() {
     let arg = v(json!({"x": 10.0, "y": 20.0}));
     let res = eval_scalar_function("POINT", &[arg]).unwrap();
 
-    assert_eq!(res.get("crs"), Some(&Value::String("Cartesian".to_string())));
+    assert_eq!(
+        res.get("crs"),
+        Some(&Value::String("Cartesian".to_string()))
+    );
     assert_eq!(res.get("x"), Some(&Value::Float(10.0)));
     assert_eq!(res.get("y"), Some(&Value::Float(20.0)));
 }

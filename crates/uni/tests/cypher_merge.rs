@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2024-2026 Dragonscale Team
 
-use uni_db::unival;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tempfile::tempdir;
 use uni_db::core::schema::{DataType, SchemaManager};
 use uni_db::query::executor::Executor;
+use uni_db::unival;
 
 use uni_db::query::planner::QueryPlanner;
 use uni_db::runtime::property_manager::PropertyManager;
@@ -81,7 +81,7 @@ async fn test_cypher_merge_relationship() -> anyhow::Result<()> {
     let ast = uni_query::parse_cypher(query)?;
     let plan = planner.plan(ast)?;
     let res = executor.execute(plan, &prop_manager, &params).await?;
-    assert_eq!(res[0].get("COUNT(r)"), Some(&unival!(1)));
+    assert_eq!(res[0].get("count(r)"), Some(&unival!(1)));
 
     Ok(())
 }

@@ -5,8 +5,8 @@ use crate::query::pushdown::PredicateAnalyzer;
 use crate::query::{AGGREGATE_WINDOW_FUNCTIONS, MANUAL_WINDOW_FUNCTIONS};
 use anyhow::{Result, anyhow};
 use std::collections::HashMap;
-use uni_common::Value;
 use std::sync::Arc;
+use uni_common::Value;
 use uni_common::core::schema::{
     DistanceMetric, EmbeddingConfig, EmbeddingModel, FullTextIndexConfig, IndexDefinition,
     JsonFtsIndexConfig, ScalarIndexConfig, ScalarIndexType, Schema, TokenizerConfig,
@@ -85,6 +85,12 @@ fn add_var_to_scope(
             existing.var_type = var_type;
         } else if var_type == VariableType::Imported || existing.var_type == var_type {
             // New type is Imported (keep existing) or same type — no conflict
+        } else if existing.var_type == VariableType::Scalar
+            && matches!(var_type, VariableType::Node | VariableType::Edge)
+        {
+            // Scalar can be used as Node/Edge in CREATE context — a scalar
+            // holding a node/edge reference is valid for pattern use
+            existing.var_type = var_type;
         } else {
             return Err(anyhow!(
                 "SyntaxError: VariableTypeConflict - Variable '{}' already defined as {:?}, cannot use as {:?}",
@@ -601,6 +607,9 @@ pub enum LogicalPlan {
         target_filter: Option<Expr>,
         path_variable: Option<String>,
         edge_properties: std::collections::HashSet<String>,
+        /// Whether this is a variable-length pattern (has `*` range specifier).
+        /// When true, step_variable holds a list of edges (even for *1..1).
+        is_variable_length: bool,
         /// All variables from this OPTIONAL MATCH pattern.
         /// When any hop in the pattern fails, ALL these variables should be set to NULL.
         /// This ensures proper multi-hop OPTIONAL MATCH semantics.
@@ -621,6 +630,9 @@ pub enum LogicalPlan {
         optional: bool,
         target_filter: Option<Expr>,
         path_variable: Option<String>,
+        /// Whether this is a variable-length pattern (has `*` range specifier).
+        /// When true, step_variable holds a list of edges (even for *1..1).
+        is_variable_length: bool,
         /// All variables from this OPTIONAL MATCH pattern.
         /// When any hop in the pattern fails, ALL these variables should be set to NULL.
         optional_pattern_vars: std::collections::HashSet<String>,
@@ -2611,6 +2623,13 @@ impl QueryPlanner {
         params: TraverseParams<'_>,
         source_variable: &str,
     ) -> Result<(LogicalPlan, String)> {
+        // Check for parameter used as relationship predicate
+        if let Some(Expr::Parameter(_)) = &params.rel.properties {
+            return Err(anyhow!(
+                "SyntaxError: InvalidParameterUse - Parameters cannot be used as relationship predicates"
+            ));
+        }
+
         let mut edge_type_ids = Vec::new();
         let mut dst_labels = Vec::new();
         let mut unknown_types = Vec::new();
@@ -2654,18 +2673,26 @@ impl QueryPlanner {
             ));
         }
 
-        // Check for VariableTypeConflict: node/path variable reused as relationship
+        // Check for VariableTypeConflict/RelationshipUniquenessViolation
         // e.g., (r)-[r]-() or r = ()-[]-(), ()-[r]-()
+        // Also: (a)-[r]->()-[r]->(a) where r is reused as relationship in same pattern
         if let Some(rel_var) = &params.rel.variable
             && !rel_var.is_empty()
             && let Some(info) = find_var_in_scope(vars_in_scope, rel_var)
-            && !info.var_type.is_compatible_with(VariableType::Edge)
         {
-            return Err(anyhow!(
-                "SyntaxError: VariableTypeConflict - Variable '{}' already defined as {:?}, cannot use as relationship",
-                rel_var,
-                info.var_type
-            ));
+            if info.var_type == VariableType::Edge {
+                // Same relationship variable used twice in the same MATCH clause
+                return Err(anyhow!(
+                    "SyntaxError: RelationshipUniquenessViolation - Relationship variable '{}' is already used in this pattern",
+                    rel_var
+                ));
+            } else if !info.var_type.is_compatible_with(VariableType::Edge) {
+                return Err(anyhow!(
+                    "SyntaxError: VariableTypeConflict - Variable '{}' already defined as {:?}, cannot use as relationship",
+                    rel_var,
+                    info.var_type
+                ));
+            }
         }
 
         // Check for VariableTypeConflict: target node variable already bound as non-Node
@@ -2688,7 +2715,7 @@ impl QueryPlanner {
             // All types are unknown - use schemaless traversal
 
             // Check if this is a variable-length pattern (has range specifier like *1..3)
-            let is_variable_length = params.rel.range.is_some();
+            let _is_variable_length = params.rel.range.is_some();
 
             // For VLP patterns, default min to 1 and max to a reasonable limit.
             // For single-hop patterns (no range), both are 1.
@@ -2701,20 +2728,13 @@ impl QueryPlanner {
                 (1, 1)
             };
 
-            // For variable-length paths:
+            // For both single-hop and variable-length paths:
+            // - step_var is the relationship variable (r in `()-[r]->()` or `()-[r*]->()`)
+            //   Single-hop: step_var holds a single edge object
+            //   VLP: step_var holds a list of edge objects
             // - path_var is the named path variable (p in `p = (a)-[r*]->(b)`)
-            // For single-hop paths:
-            // - step_var is the relationship variable (r in `()-[r]->()`)
-            // - path_var is the named path variable (p in `p = ...`)
-            let (step_var, path_var) = if is_variable_length {
-                (
-                    None,
-                    params.path_variable.clone().or(params.rel.variable.clone()),
-                )
-            } else {
-                (params.rel.variable.clone(), params.path_variable.clone())
-            };
-
+            let step_var = params.rel.variable.clone();
+            let path_var = params.path_variable.clone();
             let mut plan = LogicalPlan::TraverseMainByType {
                 type_names: unknown_types,
                 input: Box::new(plan),
@@ -2731,6 +2751,7 @@ impl QueryPlanner {
                     &params.target_node.properties,
                 ),
                 path_variable: path_var.clone(),
+                is_variable_length: _is_variable_length,
                 optional_pattern_vars: params.optional_pattern_vars.clone(),
             };
 
@@ -2815,18 +2836,13 @@ impl QueryPlanner {
         // For single-hop paths:
         // - step_var is the relationship variable (r in `()-[r]->()`)
         // - path_var is the named path variable (p in `p = ...`)
-        let (step_var, path_var) = if is_variable_length {
-            // Variable-length: path_var is the named path variable
-            // If no explicit path variable but relationship variable exists, use it as the path var
-            // to support `MATCH (a)-[r*]->(b) RETURN r` which expects a List<Edge>
-            (
-                None,
-                params.path_variable.clone().or(params.rel.variable.clone()),
-            )
-        } else {
-            // Single-hop: bind relationship as step_variable, path as path_variable
-            (params.rel.variable.clone(), params.path_variable.clone())
-        };
+        // For both single-hop and variable-length paths:
+        // - step_var is the relationship variable (r in `()-[r]->()` or `()-[r*]->()`)
+        //   Single-hop: step_var holds a single edge object
+        //   VLP: step_var holds a list of edge objects
+        // - path_var is the named path variable (p in `p = (a)-[r*]->(b)`)
+        let step_var = params.rel.variable.clone();
+        let path_var = params.path_variable.clone();
 
         let mut plan = LogicalPlan::Traverse {
             input: Box::new(plan),
@@ -2843,6 +2859,7 @@ impl QueryPlanner {
                 .properties_to_expr(&target_variable, &params.target_node.properties),
             path_variable: path_var.clone(),
             edge_properties: std::collections::HashSet::new(),
+            is_variable_length,
             optional_pattern_vars: params.optional_pattern_vars.clone(),
         };
 
@@ -2883,6 +2900,11 @@ impl QueryPlanner {
         // Properties handling
         let properties = match &node.properties {
             Some(Expr::Map(entries)) => entries.as_slice(),
+            Some(Expr::Parameter(_)) => {
+                return Err(anyhow!(
+                    "SyntaxError: InvalidParameterUse - Parameters cannot be used as node predicates"
+                ));
+            }
             Some(_) => return Err(anyhow!("Node properties must be a Map")),
             None => &[],
         };
@@ -3436,6 +3458,7 @@ impl QueryPlanner {
                 target_filter,
                 path_variable,
                 edge_properties,
+                is_variable_length,
                 optional_pattern_vars,
             } => {
                 if target_variable == variable {
@@ -3462,6 +3485,7 @@ impl QueryPlanner {
                         target_filter: new_filter,
                         path_variable,
                         edge_properties,
+                        is_variable_length,
                         optional_pattern_vars,
                     }
                 } else {
@@ -3482,6 +3506,7 @@ impl QueryPlanner {
                         target_filter,
                         path_variable,
                         edge_properties,
+                        is_variable_length,
                         optional_pattern_vars,
                     }
                 }
@@ -4054,6 +4079,7 @@ impl QueryPlanner {
                 target_filter,
                 path_variable,
                 edge_properties,
+                is_variable_length,
                 optional_pattern_vars,
             } => LogicalPlan::Traverse {
                 input: Box::new(Self::push_predicate_to_scan(*input, variable, predicate)),
@@ -4069,6 +4095,7 @@ impl QueryPlanner {
                 target_filter,
                 path_variable,
                 edge_properties,
+                is_variable_length,
                 optional_pattern_vars,
             },
             other => other,
@@ -4430,6 +4457,7 @@ impl QueryPlanner {
                 target_filter,
                 path_variable,
                 edge_properties,
+                is_variable_length,
                 optional_pattern_vars,
             } => LogicalPlan::Traverse {
                 input: Box::new(Self::push_predicates_to_apply(*input, current_predicate)),
@@ -4445,6 +4473,7 @@ impl QueryPlanner {
                 target_filter,
                 path_variable,
                 edge_properties,
+                is_variable_length,
                 optional_pattern_vars,
             },
             other => other,
@@ -4460,34 +4489,12 @@ impl QueryPlanner {
 
 /// Get the expected column name for an aggregate expression.
 ///
-/// This must match the logic in executor's `build_aggregate_result` and is used
-/// by both the logical planner (to create column references) and the physical
-/// planner (to rename DataFusion's auto-generated aggregate column names).
+/// This is the single source of truth for aggregate column naming, used by:
+/// - Logical planner (to create column references)
+/// - Physical planner (to rename DataFusion's auto-generated column names)
+/// - Fallback executor (to name result columns)
 pub fn aggregate_column_name(expr: &Expr) -> String {
-    match expr {
-        Expr::FunctionCall {
-            name,
-            args,
-            distinct,
-            ..
-        } => {
-            // Special-case COUNT to uppercase the function name
-            if name.eq_ignore_ascii_case("count") {
-                if args.is_empty() {
-                    // COUNT(*) - empty args
-                    "COUNT(*)".to_string()
-                } else {
-                    // COUNT(expr) - format with uppercase COUNT
-                    let args_str: Vec<_> = args.iter().map(|e| e.to_string_repr()).collect();
-                    let distinct_str = if *distinct { "DISTINCT " } else { "" };
-                    format!("COUNT({}{})", distinct_str, args_str.join(", "))
-                }
-            } else {
-                expr.to_string_repr()
-            }
-        }
-        _ => expr.to_string_repr(),
-    }
+    expr.to_string_repr()
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

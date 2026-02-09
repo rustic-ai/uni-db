@@ -27,7 +27,7 @@ use std::collections::HashMap;
 use std::env;
 use tempfile::{TempDir, tempdir};
 use tokio::runtime::Runtime;
-use uni_db::{Uni, UniConfig};
+use uni_db::{Uni, UniConfig, Value, unival};
 
 /// Schema JSON for benchmark - defines Person label with properties and KNOWS edge type
 const SCHEMA_JSON: &str = r#"{
@@ -134,11 +134,11 @@ impl BenchContext {
         // Build vertex properties
         let mut vertex_props = Vec::with_capacity(num_vertices);
         for i in 0..num_vertices {
-            let embedding: Vec<f32> = (0..128).map(|x| (x + i) as f32).collect();
-            let mut props: HashMap<String, serde_json::Value> = HashMap::new();
-            props.insert("name".to_string(), json!(format!("Person_{}", i)));
-            props.insert("age".to_string(), json!((i % 100) as i32));
-            props.insert("embedding".to_string(), json!(embedding));
+            let embedding: Vec<Value> = (0..128).map(|x| Value::Float((x + i) as f64)).collect();
+            let mut props: HashMap<String, Value> = HashMap::new();
+            props.insert("name".to_string(), unival!(format!("Person_{}", i)));
+            props.insert("age".to_string(), Value::Int((i % 100) as i64));
+            props.insert("embedding".to_string(), Value::List(embedding));
             vertex_props.push(props);
         }
 

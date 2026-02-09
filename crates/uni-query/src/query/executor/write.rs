@@ -6,9 +6,9 @@ use crate::query::planner::LogicalPlan;
 use anyhow::{Result, anyhow};
 use lancedb::query::{ExecutableQuery, QueryBase};
 use std::collections::HashMap;
-use uni_common::Value;
 use std::sync::Arc;
 use uni_common::DataType;
+use uni_common::Value;
 use uni_common::core::id::Vid;
 use uni_common::core::schema::{Constraint, ConstraintTarget, ConstraintType, SchemaManager};
 use uni_cypher::ast::{
@@ -939,9 +939,7 @@ impl Executor {
                         let key_props: HashMap<String, serde_json::Value> = properties
                             .iter()
                             .filter_map(|p| {
-                                pattern_props
-                                    .get(p)
-                                    .map(|v| (p.clone(), v.clone().into()))
+                                pattern_props.get(p).map(|v| (p.clone(), v.clone().into()))
                             })
                             .collect();
 
@@ -1147,10 +1145,20 @@ impl Executor {
 
                                 if !rel_var.is_empty() {
                                     let mut edge_map = HashMap::new();
-                                    edge_map.insert("_eid".to_string(), Value::Int(eid.as_u64() as i64));
-                                    edge_map.insert("_src".to_string(), Value::Int(edge_src.as_u64() as i64));
-                                    edge_map.insert("_dst".to_string(), Value::Int(edge_dst.as_u64() as i64));
-                                    edge_map.insert("_type".to_string(), Value::Int(type_id as i64));
+                                    edge_map.insert(
+                                        "_eid".to_string(),
+                                        Value::Int(eid.as_u64() as i64),
+                                    );
+                                    edge_map.insert(
+                                        "_src".to_string(),
+                                        Value::Int(edge_src.as_u64() as i64),
+                                    );
+                                    edge_map.insert(
+                                        "_dst".to_string(),
+                                        Value::Int(edge_dst.as_u64() as i64),
+                                    );
+                                    edge_map
+                                        .insert("_type".to_string(), Value::Int(type_id as i64));
                                     row.insert(rel_var, Value::Map(edge_map));
                                 }
                             }
@@ -1289,7 +1297,8 @@ impl Executor {
                             if let Some(Value::Map(obj)) = row.get_mut(variable) {
                                 let mut updated_labels = current_labels;
                                 updated_labels.extend(labels_to_add);
-                                let labels_list = updated_labels.into_iter().map(Value::String).collect();
+                                let labels_list =
+                                    updated_labels.into_iter().map(Value::String).collect();
                                 obj.insert("_labels".to_string(), Value::List(labels_list));
                             }
                         }
@@ -1762,6 +1771,7 @@ impl Executor {
                                         _ => String::new(),
                                     };
 
+                                    let is_variable_length = r.range.is_some();
                                     plan = LogicalPlan::Traverse {
                                         input: Box::new(plan),
                                         edge_type_ids,
@@ -1778,6 +1788,7 @@ impl Executor {
                                         target_filter: None,
                                         path_variable: None,
                                         edge_properties: std::collections::HashSet::new(),
+                                        is_variable_length,
                                         optional_pattern_vars: std::collections::HashSet::new(),
                                     };
 

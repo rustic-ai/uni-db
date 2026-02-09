@@ -649,9 +649,7 @@ impl ScalarUDFImpl for RelationshipsUdf {
 
             let path = &val_args[0];
             let rels = match path {
-                Value::Map(map) => {
-                    map.get("relationships").cloned().unwrap_or(Value::Null)
-                }
+                Value::Map(map) => map.get("relationships").cloned().unwrap_or(Value::Null),
                 _ => Value::Null,
             };
 
@@ -1171,7 +1169,10 @@ impl ScalarUDFImpl for DurationPropertyUdf {
             };
 
             crate::query::datetime::eval_duration_accessor(dur_str, component).map_err(|e| {
-                datafusion::error::DataFusionError::Execution(format!("_duration_property(): {}", e))
+                datafusion::error::DataFusionError::Execution(format!(
+                    "_duration_property(): {}",
+                    e
+                ))
             })
         })
     }
@@ -1277,14 +1278,20 @@ fn scalar_to_value(scalar: &ScalarValue) -> DFResult<Value> {
             if arr.len() == 0 || arr.is_null(0) {
                 Ok(Value::Null)
             } else {
-                Ok(uni_store::storage::arrow_convert::arrow_to_value(arr.as_ref(), 0))
+                Ok(uni_store::storage::arrow_convert::arrow_to_value(
+                    arr.as_ref(),
+                    0,
+                ))
             }
         }
         ScalarValue::List(arr) => {
             if arr.len() == 0 || arr.is_null(0) {
                 Ok(Value::Null)
             } else {
-                Ok(uni_store::storage::arrow_convert::arrow_to_value(arr.as_ref(), 0))
+                Ok(uni_store::storage::arrow_convert::arrow_to_value(
+                    arr.as_ref(),
+                    0,
+                ))
             }
         }
         ScalarValue::Null

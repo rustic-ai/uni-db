@@ -373,19 +373,17 @@ impl HybridPhysicalPlanner {
                 optional,
                 target_filter: _, // Applied as FilterExec later
                 path_variable,
+                is_variable_length,
                 ..
             } => {
-                // Determine if this is a VLP pattern (same logic as plan_traverse)
-                let is_variable_length =
-                    path_variable.is_some() || *min_hops != 1 || *max_hops != 1;
-
-                if is_variable_length {
+                if *is_variable_length {
                     self.plan_traverse_main_by_type_vlp(
                         input,
                         type_names,
                         direction.clone(),
                         source_variable,
                         target_variable,
+                        step_variable.as_deref(),
                         *min_hops,
                         *max_hops,
                         path_variable.as_deref(),
@@ -419,6 +417,7 @@ impl HybridPhysicalPlanner {
                 optional,
                 target_filter,
                 path_variable,
+                is_variable_length,
                 ..
             } => self.plan_traverse(
                 input,
@@ -433,6 +432,7 @@ impl HybridPhysicalPlanner {
                 path_variable.as_deref(),
                 *optional,
                 target_filter.as_ref(),
+                *is_variable_length,
                 all_properties,
             ),
 
@@ -999,16 +999,13 @@ impl HybridPhysicalPlanner {
         path_variable: Option<&str>,
         optional: bool,
         target_filter: Option<&Expr>,
+        is_variable_length: bool,
         all_properties: &HashMap<String, HashSet<String>>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
         let input_plan = self.plan_internal(input, all_properties)?;
 
         let adj_direction = convert_direction(direction);
         let source_col = format!("{}._vid", source_variable);
-
-        // Determine if this is a VLP pattern: either hops differ from 1..1, or path_variable is set.
-        // The planner sets path_variable when range is present (e.g., *1..1 is VLP even though min=max=1).
-        let is_variable_length = path_variable.is_some() || min_hops != 1 || max_hops != 1;
 
         let traverse_plan: Arc<dyn ExecutionPlan> = if !is_variable_length {
             // Extract edge properties for pushdown hydration, expanding "*" wildcards
@@ -1255,6 +1252,7 @@ impl HybridPhysicalPlanner {
         direction: AstDirection,
         source_variable: &str,
         target_variable: &str,
+        step_variable: Option<&str>,
         min_hops: usize,
         max_hops: usize,
         path_variable: Option<&str>,
@@ -1280,6 +1278,7 @@ impl HybridPhysicalPlanner {
             min_hops,
             max_hops,
             target_variable.to_string(),
+            step_variable.map(|s| s.to_string()),
             path_variable.map(|s| s.to_string()),
             target_properties,
             self.graph_ctx.clone(),

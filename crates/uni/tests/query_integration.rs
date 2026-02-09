@@ -5,10 +5,10 @@ use arrow_array::builder::{FixedSizeBinaryBuilder, ListBuilder, UInt64Builder};
 use arrow_array::{
     LargeBinaryArray, RecordBatch, StringArray, TimestampMicrosecondArray, UInt64Array,
 };
-use uni_db::Value;
 use std::sync::Arc;
 use tempfile::tempdir;
 use tokio::sync::RwLock;
+use uni_db::Value;
 use uni_db::core::id::{Eid, Vid};
 use uni_db::core::schema::{DataType, SchemaManager};
 use uni_db::query::executor::Executor;

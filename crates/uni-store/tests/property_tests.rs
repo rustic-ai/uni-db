@@ -201,7 +201,7 @@ fn mutation_strategy() -> impl Strategy<Value = Mutation> {
                 prop_oneof![
                     any::<i64>().prop_map(uni_common::Value::from),
                     any::<bool>().prop_map(uni_common::Value::from),
-                    "[a-z]{0,20}".prop_map(|s| uni_common::Value::String(s)),
+                    "[a-z]{0,20}".prop_map(uni_common::Value::String),
                 ],
                 0..5
             )

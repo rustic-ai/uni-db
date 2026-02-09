@@ -5,13 +5,13 @@ use arrow_array::{
     BooleanArray, FixedSizeBinaryArray, LargeBinaryArray, RecordBatch, StringArray,
     TimestampMicrosecondArray, UInt64Array,
 };
-use uni_db::unival;
 use std::sync::Arc;
 use tempfile::tempdir;
 use uni_db::core::id::Vid;
 use uni_db::core::schema::{DataType, SchemaManager};
 use uni_db::runtime::property_manager::PropertyManager;
 use uni_db::storage::manager::StorageManager;
+use uni_db::unival;
 
 #[tokio::test]
 async fn test_property_lookup_uses_vid_filter() -> anyhow::Result<()> {

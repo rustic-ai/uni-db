@@ -823,8 +823,12 @@ pub fn eval_duration_accessor(duration_str: &str, component: &str) -> Result<Val
         "hoursofday" => Ok(Value::Int(total_secs.div_euclid(3600).rem_euclid(24))),
         "minutesofhour" => Ok(Value::Int(total_secs.div_euclid(60).rem_euclid(60))),
         "secondsofminute" => Ok(Value::Int(total_secs.rem_euclid(60))),
-        "millisecondsofsecond" => Ok(Value::Int(total_nanos.div_euclid(1_000_000).rem_euclid(1000))),
-        "microsecondsofsecond" => Ok(Value::Int(total_nanos.div_euclid(1_000).rem_euclid(1_000_000))),
+        "millisecondsofsecond" => Ok(Value::Int(
+            total_nanos.div_euclid(1_000_000).rem_euclid(1000),
+        )),
+        "microsecondsofsecond" => Ok(Value::Int(
+            total_nanos.div_euclid(1_000).rem_euclid(1_000_000),
+        )),
         "nanosecondsofsecond" => Ok(Value::Int(total_nanos.rem_euclid(NANOS_PER_SECOND))),
 
         _ => Err(anyhow!("Unknown duration component: {}", component)),
@@ -3084,12 +3088,7 @@ mod tests {
 
     /// Helper to build a Value::Map from key-value pairs.
     fn map_val(pairs: Vec<(&str, Value)>) -> Value {
-        Value::Map(
-            pairs
-                .into_iter()
-                .map(|(k, v)| (k.to_string(), v))
-                .collect(),
-        )
+        Value::Map(pairs.into_iter().map(|(k, v)| (k.to_string(), v)).collect())
     }
 
     #[test]

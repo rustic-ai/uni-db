@@ -1264,7 +1264,7 @@ fn build_primary_expression(pair: Pair<Rule>) -> Result<Expr, ParseError> {
                 }
             }
             Ok(Expr::FunctionCall {
-                name: "count".to_string(),
+                name: first.as_str().to_string(),
                 args,
                 distinct,
                 window_spec,
@@ -1273,7 +1273,7 @@ fn build_primary_expression(pair: Pair<Rule>) -> Result<Expr, ParseError> {
         Rule::EXISTS => {
             let list = inner.next().unwrap();
             Ok(Expr::FunctionCall {
-                name: "exists".to_string(),
+                name: first.as_str().to_string(),
                 args: build_expression_list(list)?,
                 distinct: false,
                 window_spec: None,
@@ -2137,16 +2137,37 @@ fn build_range(pair: Pair<Rule>) -> Result<Range, ParseError> {
 
     if let Some(first) = inner.next() {
         if first.as_rule() == Rule::integer {
-            let val = first.as_str().parse().map_err(|e| {
-                ParseError::new(format!("Invalid range bound '{}': {}", first.as_str(), e))
+            let val: i64 = first.as_str().parse().map_err(|e| {
+                ParseError::new(format!(
+                    "SyntaxError: InvalidRelationshipPattern - Invalid range bound '{}': {}",
+                    first.as_str(),
+                    e
+                ))
             })?;
+            if val < 0 {
+                return Err(ParseError::new(format!(
+                    "SyntaxError: InvalidRelationshipPattern - Negative range bound '{}' is not allowed",
+                    val
+                )));
+            }
+            let val = val as u32;
             min = Some(val);
             if inner.next().is_some() {
                 if let Some(second) = inner.next() {
-                    let val = second.as_str().parse().map_err(|e| {
-                        ParseError::new(format!("Invalid range bound '{}': {}", second.as_str(), e))
+                    let val: i64 = second.as_str().parse().map_err(|e| {
+                        ParseError::new(format!(
+                            "SyntaxError: InvalidRelationshipPattern - Invalid range bound '{}': {}",
+                            second.as_str(),
+                            e
+                        ))
                     })?;
-                    max = Some(val);
+                    if val < 0 {
+                        return Err(ParseError::new(format!(
+                            "SyntaxError: InvalidRelationshipPattern - Negative range bound '{}' is not allowed",
+                            val
+                        )));
+                    }
+                    max = Some(val as u32);
                 }
             } else {
                 max = Some(val);
@@ -2154,10 +2175,20 @@ fn build_range(pair: Pair<Rule>) -> Result<Range, ParseError> {
         } else if first.as_rule() == Rule::dot_dot
             && let Some(second) = inner.next()
         {
-            let val = second.as_str().parse().map_err(|e| {
-                ParseError::new(format!("Invalid range bound '{}': {}", second.as_str(), e))
+            let val: i64 = second.as_str().parse().map_err(|e| {
+                ParseError::new(format!(
+                    "SyntaxError: InvalidRelationshipPattern - Invalid range bound '{}': {}",
+                    second.as_str(),
+                    e
+                ))
             })?;
-            max = Some(val);
+            if val < 0 {
+                return Err(ParseError::new(format!(
+                    "SyntaxError: InvalidRelationshipPattern - Negative range bound '{}' is not allowed",
+                    val
+                )));
+            }
+            max = Some(val as u32);
         }
     } else {
         // [*] alone means 0 or more (Neo4j compatibility)

@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2024-2026 Dragonscale Team
 
-use uni_db::unival;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tempfile::tempdir;
@@ -12,6 +11,7 @@ use uni_db::query::planner::QueryPlanner;
 use uni_db::runtime::property_manager::PropertyManager;
 use uni_db::runtime::writer::Writer;
 use uni_db::storage::manager::StorageManager;
+use uni_db::unival;
 
 /// Shared test harness for Cypher clause tests that need a Person schema with name+age.
 struct PersonTestHarness {
@@ -71,10 +71,7 @@ impl PersonTestHarness {
     }
 
     /// Parse, plan, and execute a Cypher query, returning the result rows.
-    async fn run_query(
-        &self,
-        cypher: &str,
-    ) -> anyhow::Result<Vec<HashMap<String, uni_db::Value>>> {
+    async fn run_query(&self, cypher: &str) -> anyhow::Result<Vec<HashMap<String, uni_db::Value>>> {
         let query = uni_query::parse_cypher(cypher)?;
         let plan = self.planner.plan(query)?;
         self.executor

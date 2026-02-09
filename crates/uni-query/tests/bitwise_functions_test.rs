@@ -76,7 +76,8 @@ fn test_shift_left_zero() {
 
 #[test]
 fn test_shift_right() {
-    let result = eval_scalar_function("uni_bitwise_shiftRight", &[unival!(12), unival!(2)]).unwrap();
+    let result =
+        eval_scalar_function("uni_bitwise_shiftRight", &[unival!(12), unival!(2)]).unwrap();
     assert_eq!(result, unival!(3)); // 12 >> 2 = 3
 }
 
@@ -191,11 +192,13 @@ fn test_power_of_two_check() {
     let n = 16;
     let n_minus_1 = n - 1;
 
-    let result = eval_scalar_function("uni_bitwise_and", &[unival!(n), unival!(n_minus_1)]).unwrap();
+    let result =
+        eval_scalar_function("uni_bitwise_and", &[unival!(n), unival!(n_minus_1)]).unwrap();
     assert_eq!(result, unival!(0)); // 16 is a power of 2
 
     let n = 15;
     let n_minus_1 = n - 1;
-    let result = eval_scalar_function("uni_bitwise_and", &[unival!(n), unival!(n_minus_1)]).unwrap();
+    let result =
+        eval_scalar_function("uni_bitwise_and", &[unival!(n), unival!(n_minus_1)]).unwrap();
     assert!(result != unival!(0)); // 15 is not a power of 2
 }

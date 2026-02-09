@@ -22,7 +22,29 @@ impl ParseError {
 pub struct CypherParser;
 
 pub fn parse(input: &str) -> Result<Query, ParseError> {
-    let pairs = CypherParser::parse(Rule::query, input).map_err(map_pest_error)?;
+    let pairs = CypherParser::parse(Rule::query, input).map_err(|e| {
+        // Detect invalid relationship patterns in the input near the error position
+        let err_pos = match &e.location {
+            pest::error::InputLocation::Pos(p) => Some(*p),
+            pest::error::InputLocation::Span((s, _)) => Some(*s),
+        };
+        if let Some(pos) = err_pos {
+            // Check if the error is within a relationship bracket pattern [...]
+            let before = &input[..pos.min(input.len())];
+            if before.contains('[') {
+                let last_bracket = before.rfind('[').unwrap_or(0);
+                let bracket_content = &input[last_bracket..pos.min(input.len())];
+                // Patterns like [:LIKES..] (missing *) or [:LIKES*-2] (negative bound)
+                if bracket_content.contains("..") || bracket_content.contains("*-") {
+                    return ParseError::new(format!(
+                        "SyntaxError: InvalidRelationshipPattern - {}",
+                        e
+                    ));
+                }
+            }
+        }
+        map_pest_error(e)
+    })?;
 
     walker::build_query(pairs)
 }
@@ -34,7 +56,8 @@ pub fn parse_expression(input: &str) -> Result<Expr, ParseError> {
 }
 
 fn map_pest_error(e: pest::error::Error<Rule>) -> ParseError {
-    ParseError::new(format!("UnexpectedSyntax: {}", e))
+    let msg = format!("{}", e);
+    ParseError::new(format!("UnexpectedSyntax: {}", msg))
 }
 
 #[cfg(test)]

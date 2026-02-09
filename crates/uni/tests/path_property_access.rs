@@ -2,13 +2,13 @@
 // Copyright 2024-2026 Dragonscale Team
 
 use std::collections::HashMap;
-use uni_db::unival;
 use std::sync::Arc;
 use tempfile::tempdir;
 use uni_db::UniConfig;
 use uni_db::core::id::{Eid, Vid};
 use uni_db::core::schema::{DataType, SchemaManager};
 use uni_db::query::executor::Executor;
+use uni_db::unival;
 
 use uni_db::query::planner::QueryPlanner;
 use uni_db::runtime::property_manager::PropertyManager;
@@ -77,10 +77,11 @@ async fn test_path_property_access() -> anyhow::Result<()> {
     // writer.flush_to_l1().await?;
 
     // 3. Test Property Access on Path Node: nodes(p)[0].name
-    // Use *1..2 to force path binding (Path object) instead of simple relationship binding
-    // *1..1 is optimized to Traverse which binds Relationship (EID) not Path.
+    // We need a named path variable to use nodes() function.
+    // The relationship variable (r) in VLP binds to a list of edges, not a Path.
+    // Use p = ... syntax to create a named path variable.
     let cypher =
-        "MATCH (a:Person)-[p:KNOWS*1..2]->(b:Person) RETURN nodes(p)[0].name, nodes(p)[1].name";
+        "MATCH p = (a:Person)-[:KNOWS*1..2]->(b:Person) RETURN nodes(p)[0].name, nodes(p)[1].name";
 
     let query_ast = uni_query::parse_cypher(cypher)?;
 
@@ -104,14 +105,8 @@ async fn test_path_property_access() -> anyhow::Result<()> {
         .await?;
 
     assert_eq!(results.len(), 1);
-    assert_eq!(
-        results[0].get("nodes(p)[0].name"),
-        Some(&unival!("Alice"))
-    );
-    assert_eq!(
-        results[0].get("nodes(p)[1].name"),
-        Some(&unival!("Bob"))
-    );
+    assert_eq!(results[0].get("nodes(p)[0].name"), Some(&unival!("Alice")));
+    assert_eq!(results[0].get("nodes(p)[1].name"), Some(&unival!("Bob")));
 
     Ok(())
 }

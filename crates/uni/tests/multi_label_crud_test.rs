@@ -35,7 +35,6 @@
 //!
 
 use anyhow::Result;
-use uni_db::unival;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tempfile::tempdir;
@@ -43,6 +42,7 @@ use uni_db::core::id::{Eid, Vid};
 use uni_db::core::schema::{DataType, SchemaManager};
 use uni_db::runtime::writer::Writer;
 use uni_db::storage::manager::StorageManager;
+use uni_db::unival;
 
 // ============================================================================
 // TEST HELPERS

@@ -431,8 +431,7 @@ mod decoding {
         )
         .expect("decode should succeed");
 
-        let decoded: Crdt = serde_json::from_value(serde_json::Value::from(val))
-            .expect("from_value should succeed");
+        let decoded: Crdt = serde_json::from_value(val).expect("from_value should succeed");
         if let Crdt::GCounter(decoded_gc) = decoded {
             assert_eq!(decoded_gc.value(), 42);
         } else {
@@ -456,8 +455,7 @@ mod decoding {
         )
         .expect("decode should succeed");
 
-        let decoded: Crdt = serde_json::from_value(serde_json::Value::from(val))
-            .expect("from_value should succeed");
+        let decoded: Crdt = serde_json::from_value(val).expect("from_value should succeed");
         if let Crdt::GSet(decoded_gs) = decoded {
             assert_eq!(decoded_gs.len(), 2);
         } else {
@@ -495,8 +493,7 @@ mod decoding {
                 .expect("decode should succeed");
 
             // Round-trip should work
-            let decoded: Crdt = serde_json::from_value(serde_json::Value::from(val))
-                .expect("from_value should succeed");
+            let decoded: Crdt = serde_json::from_value(val).expect("from_value should succeed");
             assert_eq!(crdt, decoded, "Round-trip failed for {:?}", dt);
         }
     }
@@ -534,8 +531,7 @@ mod decoding {
         .expect("Lenient mode should not error");
 
         // Should return a default GCounter
-        let decoded: Crdt = serde_json::from_value(serde_json::Value::from(val))
-            .expect("from_value should succeed");
+        let decoded: Crdt = serde_json::from_value(val).expect("from_value should succeed");
         if let Crdt::GCounter(gc) = decoded {
             assert_eq!(gc.value(), 0);
         } else {
@@ -573,8 +569,8 @@ mod roundtrip {
             .expect("decode should succeed");
 
         // Step 4: JSON value to CRDT
-        let decoded_crdt: Crdt = serde_json::from_value(serde_json::Value::from(decoded_json))
-            .expect("from_value should succeed");
+        let decoded_crdt: Crdt =
+            serde_json::from_value(decoded_json).expect("from_value should succeed");
 
         // Verify the result
         verify(&decoded_crdt);
@@ -825,7 +821,7 @@ mod multi_row {
             CrdtDecodeMode::Strict,
         )
         .expect("decode row 0 should succeed");
-        let decoded0: Crdt = serde_json::from_value(serde_json::Value::from(val0)).unwrap();
+        let decoded0: Crdt = serde_json::from_value(val0).unwrap();
         assert!(matches!(decoded0, Crdt::GCounter(_)));
 
         // Row 1: null - should error in strict mode when trying to read null
@@ -841,7 +837,7 @@ mod multi_row {
             CrdtDecodeMode::Strict,
         )
         .expect("decode row 2 should succeed");
-        let decoded2: Crdt = serde_json::from_value(serde_json::Value::from(val2)).unwrap();
+        let decoded2: Crdt = serde_json::from_value(val2).unwrap();
         assert!(matches!(decoded2, Crdt::GCounter(_)));
     }
 }

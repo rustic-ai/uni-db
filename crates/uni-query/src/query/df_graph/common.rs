@@ -53,6 +53,15 @@ pub fn edge_struct_fields() -> arrow_schema::Fields {
     ])
 }
 
+/// Build edge list field for schema with given step variable name.
+///
+/// Creates a list of edge structs for the relationship variable in VLP patterns.
+/// For example, `r` in `MATCH (a)-[r*1..3]->(b)` gets a `List<EdgeStruct>`.
+pub fn build_edge_list_field(step_var: &str) -> Field {
+    let edge_item = Field::new("item", DataType::Struct(edge_struct_fields()), true);
+    Field::new(step_var, DataType::List(Arc::new(edge_item)), false)
+}
+
 /// Build path struct field for schema with given path variable name.
 ///
 /// Creates a struct field with `nodes` and `relationships` lists.

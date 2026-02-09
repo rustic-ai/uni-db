@@ -3,10 +3,10 @@
 
 //! Test for 100k property lookup bug
 
-use uni_db::unival;
 use std::collections::HashMap;
 use std::time::Instant;
 use uni_common::core::id::Vid;
+use uni_db::unival;
 
 const SCHEMA_JSON: &str = r#"{
     "schema_version": 1,

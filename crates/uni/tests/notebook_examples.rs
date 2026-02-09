@@ -1,9 +1,9 @@
 // Integration tests for Rust notebook examples
 // These tests mirror the Jupyter notebook examples to verify they work correctly.
 
-use uni_db::unival;
 use std::collections::HashMap;
 use tempfile::tempdir;
+use uni_db::unival;
 use uni_db::{DataType, IndexType, ScalarType, Uni, VectorAlgo, VectorIndexCfg, VectorMetric};
 
 // ============================================================================

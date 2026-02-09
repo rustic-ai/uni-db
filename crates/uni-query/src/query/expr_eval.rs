@@ -7,8 +7,8 @@
 //! to reduce cognitive complexity and improve maintainability.
 
 use anyhow::{Result, anyhow};
-use uni_common::Value;
 use std::cmp::Ordering;
+use uni_common::Value;
 
 use crate::query::datetime::{
     CypherDuration, TemporalType, add_cypher_duration_to_date, add_cypher_duration_to_datetime,
@@ -598,7 +598,9 @@ fn eval_keys(arg: &Value) -> Result<Value> {
         Value::Map(map) => {
             let mut keys: Vec<&String> = map.keys().filter(|k| !k.starts_with('_')).collect();
             keys.sort();
-            Ok(Value::List(keys.into_iter().map(|k| Value::String(k.clone())).collect()))
+            Ok(Value::List(
+                keys.into_iter().map(|k| Value::String(k.clone())).collect(),
+            ))
         }
         Value::Null => Ok(Value::Null),
         _ => Err(anyhow!("keys() expects a Map")),

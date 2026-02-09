@@ -31,7 +31,9 @@
 //! L0 buffers are automatically overlaid for MVCC visibility.
 
 use crate::query::df_graph::GraphExecutionContext;
-use crate::query::df_graph::common::{build_path_struct_field, compute_plan_properties};
+use crate::query::df_graph::common::{
+    build_edge_list_field, build_path_struct_field, compute_plan_properties,
+};
 use crate::query::df_graph::scan::{build_property_column_static, resolve_property_type};
 use arrow::compute::take;
 use arrow_array::{Array, ArrayRef, RecordBatch, UInt64Array};
@@ -2330,7 +2332,10 @@ pub struct GraphVariableLengthTraverseMainExec {
     /// Variable name for target vertex columns.
     target_variable: String,
 
-    /// Variable name for relationship list (if relationship is bound in VLP).
+    /// Variable name for relationship list (r in `[r*]`) - holds `List<Edge>`.
+    step_variable: Option<String>,
+
+    /// Variable name for named path (p in `p = ...`) - holds `Path`.
     path_variable: Option<String>,
 
     /// Target vertex properties to materialize.
@@ -2376,6 +2381,7 @@ impl GraphVariableLengthTraverseMainExec {
         min_hops: usize,
         max_hops: usize,
         target_variable: impl Into<String>,
+        step_variable: Option<String>,
         path_variable: Option<String>,
         target_properties: Vec<String>,
         graph_ctx: Arc<GraphExecutionContext>,
@@ -2388,6 +2394,7 @@ impl GraphVariableLengthTraverseMainExec {
         let schema = Self::build_schema(
             input.schema(),
             &target_variable,
+            step_variable.as_deref(),
             path_variable.as_deref(),
             &target_properties,
         );
@@ -2401,6 +2408,7 @@ impl GraphVariableLengthTraverseMainExec {
             min_hops,
             max_hops,
             target_variable,
+            step_variable,
             path_variable,
             target_properties,
             is_optional,
@@ -2415,6 +2423,7 @@ impl GraphVariableLengthTraverseMainExec {
     fn build_schema(
         input_schema: SchemaRef,
         target_variable: &str,
+        step_variable: Option<&str>,
         path_variable: Option<&str>,
         target_properties: &[String],
     ) -> SchemaRef {
@@ -2433,6 +2442,12 @@ impl GraphVariableLengthTraverseMainExec {
 
         // Add hop count
         fields.push(Field::new("_hop_count", DataType::UInt64, false));
+
+        // Add step variable column (list of edge structs) if bound
+        // This is the relationship variable like `r` in `[r*1..3]`
+        if let Some(step_var) = step_variable {
+            fields.push(build_edge_list_field(step_var));
+        }
 
         // Add path struct if bound
         if let Some(path_var) = path_variable {
@@ -2507,6 +2522,7 @@ impl ExecutionPlan for GraphVariableLengthTraverseMainExec {
             self.min_hops,
             self.max_hops,
             self.target_variable.clone(),
+            self.step_variable.clone(),
             self.path_variable.clone(),
             self.target_properties.clone(),
             self.graph_ctx.clone(),
@@ -2537,6 +2553,7 @@ impl ExecutionPlan for GraphVariableLengthTraverseMainExec {
             min_hops: self.min_hops,
             max_hops: self.max_hops,
             target_variable: self.target_variable.clone(),
+            step_variable: self.step_variable.clone(),
             path_variable: self.path_variable.clone(),
             target_properties: self.target_properties.clone(),
             graph_ctx: self.graph_ctx.clone(),
@@ -2572,6 +2589,8 @@ struct GraphVariableLengthTraverseMainStream {
     max_hops: usize,
     #[allow(dead_code)]
     target_variable: String,
+    /// Relationship variable like `r` in `[r*1..3]` - gets a List of edge structs.
+    step_variable: Option<String>,
     path_variable: Option<String>,
     target_properties: Vec<String>,
     graph_ctx: Arc<GraphExecutionContext>,
@@ -2706,6 +2725,80 @@ impl GraphVariableLengthTraverseMainStream {
             .map(|(_, _, hops, _, _)| *hops as u64)
             .collect();
         columns.push(Arc::new(UInt64Array::from(hop_counts)));
+
+        // Add step variable column if bound (list of edge structs).
+        // This is the relationship variable like `r` in `[r*1..3]`.
+        if self.step_variable.is_some() {
+            use arrow_array::builder::{
+                LargeBinaryBuilder, ListBuilder, StringBuilder, StructBuilder, UInt64Builder,
+            };
+
+            // Build edge struct fields: _eid, _type_name, _src, _dst, properties
+            let edge_struct_fields = vec![
+                Arc::new(Field::new("_eid", DataType::UInt64, false)),
+                Arc::new(Field::new("_type_name", DataType::Utf8, false)),
+                Arc::new(Field::new("_src", DataType::UInt64, false)),
+                Arc::new(Field::new("_dst", DataType::UInt64, false)),
+                Arc::new(Field::new("properties", DataType::LargeBinary, true)),
+            ];
+
+            let mut edges_builder = ListBuilder::new(StructBuilder::new(
+                edge_struct_fields.clone(),
+                vec![
+                    Box::new(UInt64Builder::new()),
+                    Box::new(StringBuilder::new()),
+                    Box::new(UInt64Builder::new()),
+                    Box::new(UInt64Builder::new()),
+                    Box::new(LargeBinaryBuilder::new()),
+                ],
+            ));
+
+            // Get query context for property lookup
+            let query_ctx = self.graph_ctx.query_context();
+
+            for (_, _, _, node_path, edge_path) in expansions.iter() {
+                // Build edges list for this row
+                let edges_struct = edges_builder.values();
+                // For VLP with multiple types, join type names as we don't track which type each edge has
+                let type_names_str = self.type_names.join("|");
+                for (i, eid) in edge_path.iter().enumerate() {
+                    edges_struct
+                        .field_builder::<UInt64Builder>(0)
+                        .unwrap()
+                        .append_value(eid.as_u64());
+                    edges_struct
+                        .field_builder::<StringBuilder>(1)
+                        .unwrap()
+                        .append_value(&type_names_str);
+                    edges_struct
+                        .field_builder::<UInt64Builder>(2)
+                        .unwrap()
+                        .append_value(node_path[i].as_u64());
+                    edges_struct
+                        .field_builder::<UInt64Builder>(3)
+                        .unwrap()
+                        .append_value(node_path[i + 1].as_u64());
+                    // Look up edge properties from L0 chain and serialize to JSON
+                    let props_builder =
+                        edges_struct.field_builder::<LargeBinaryBuilder>(4).unwrap();
+                    if let Some(props) = l0_visibility::get_edge_properties(*eid, &query_ctx) {
+                        if let Ok(json) = serde_json::to_vec(&props) {
+                            props_builder.append_value(&json);
+                        } else {
+                            props_builder.append_null();
+                        }
+                    } else {
+                        props_builder.append_null();
+                    }
+                    edges_struct.append(true);
+                }
+                edges_builder.append(true);
+            }
+
+            // Finish the builder to get the array
+            let edges_array = Arc::new(edges_builder.finish()) as ArrayRef;
+            columns.push(edges_array);
+        }
 
         // Add path variable column if bound.
         // For named paths, we output a Path struct with nodes and relationships arrays.
