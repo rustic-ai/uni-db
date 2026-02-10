@@ -31,7 +31,7 @@ use arrow_array::builder::{
     Float32Builder, Float64Builder, Int32Builder, Int64Builder, ListBuilder, StringBuilder,
     Time64MicrosecondBuilder, TimestampMicrosecondBuilder, UInt64Builder,
 };
-use arrow_array::{ArrayRef, RecordBatch, UInt64Array};
+use arrow_array::{Array, ArrayRef, RecordBatch, UInt64Array};
 use arrow_schema::{DataType, Field, Fields, Schema, SchemaRef, TimeUnit};
 use chrono::{NaiveDate, NaiveTime, Timelike};
 use datafusion::common::Result as DFResult;
@@ -584,6 +584,9 @@ async fn scan_vertex_vids_static(
 ///
 /// Uses the main vertices table with `array_contains(labels, 'X')` filter.
 /// This is used for labels that aren't in the schema (schemaless mode).
+///
+/// Superseded by `columnar_scan_schemaless_vertex_batch_static`.
+#[allow(dead_code)]
 async fn scan_vertex_vids_by_label_name_static(
     graph_ctx: &GraphExecutionContext,
     label_name: &str,
@@ -619,6 +622,9 @@ async fn scan_vertex_vids_by_label_name_static(
 /// Scan vertex VIDs from main table with multi-label intersection.
 ///
 /// Returns vertices that have ALL the specified labels.
+///
+/// Superseded by `columnar_scan_schemaless_vertex_batch_static`.
+#[allow(dead_code)]
 async fn scan_vertex_vids_by_labels_static(
     graph_ctx: &GraphExecutionContext,
     label_names: &[&str],
@@ -655,6 +661,9 @@ async fn scan_vertex_vids_by_labels_static(
 ///
 /// Uses the main vertices table to find all vertices regardless of label.
 /// This is used for `MATCH (n)` without label filter (ScanAll).
+///
+/// Superseded by `columnar_scan_schemaless_vertex_batch_static`.
+#[allow(dead_code)]
 async fn scan_all_vertex_vids_static(graph_ctx: &GraphExecutionContext) -> DFResult<Vec<Vid>> {
     use uni_store::storage::main_vertex::MainVertexDataset;
 
@@ -688,6 +697,9 @@ async fn scan_all_vertex_vids_static(graph_ctx: &GraphExecutionContext) -> DFRes
 ///
 /// Fetches properties from the main vertices table's props_json column.
 /// All properties are returned as Utf8 (JSON strings).
+///
+/// Superseded by `columnar_scan_schemaless_vertex_batch_static`.
+#[allow(dead_code)]
 pub(crate) async fn materialize_schemaless_vertex_batch_static(
     graph_ctx: &GraphExecutionContext,
     schema: &SchemaRef,
@@ -736,6 +748,9 @@ pub(crate) async fn materialize_schemaless_vertex_batch_static(
 }
 
 /// Accumulate properties for a vertex from all L0 layers.
+///
+/// Superseded by `columnar_scan_schemaless_vertex_batch_static`.
+#[allow(dead_code)]
 fn accumulate_l0_vertex_props(
     vid: Vid,
     l0_ctx: &crate::query::df_graph::L0Context,
@@ -759,6 +774,9 @@ fn accumulate_l0_vertex_props(
 /// Build a RecordBatch from schemaless VIDs and their properties.
 ///
 /// Property values are encoded as LargeBinary (JSONB) to preserve types.
+///
+/// Superseded by `columnar_scan_schemaless_vertex_batch_static`.
+#[allow(dead_code)]
 fn build_schemaless_vertex_record_batch(
     schema: &SchemaRef,
     vids: &[Vid],
@@ -816,8 +834,9 @@ fn build_schemaless_vertex_record_batch(
 
 /// Scan all EIDs for a given edge type.
 ///
-/// Note: Currently scans only from L0 buffers for simplicity.
-/// Full Lance dataset scanning requires knowing src/dst labels upfront.
+/// Superseded by `columnar_scan_edge_batch_static` for edge scans.
+/// Kept for potential fallback use.
+#[allow(dead_code)]
 async fn scan_edge_eids_static(
     graph_ctx: &GraphExecutionContext,
     edge_type_name: &str,
@@ -1001,14 +1020,23 @@ fn build_overflow_json_column(
 /// Sorts by (_vid ASC, _version DESC), then keeps the first occurrence of each
 /// _vid (= the highest version). This is a pure Arrow-compute operation.
 fn mvcc_dedup_batch(batch: &RecordBatch) -> DFResult<RecordBatch> {
+    mvcc_dedup_batch_by(batch, "_vid")
+}
+
+/// MVCC deduplication: keep only the highest-version row for each unique value
+/// in the given `id_column`.
+///
+/// Sorts by (id_column ASC, _version DESC), then keeps the first occurrence of
+/// each id (= the highest version). This is a pure Arrow-compute operation.
+fn mvcc_dedup_batch_by(batch: &RecordBatch, id_column: &str) -> DFResult<RecordBatch> {
     if batch.num_rows() == 0 {
         return Ok(batch.clone());
     }
 
-    let vid_col = batch
-        .column_by_name("_vid")
+    let id_col = batch
+        .column_by_name(id_column)
         .ok_or_else(|| {
-            datafusion::error::DataFusionError::Internal("Missing _vid column".to_string())
+            datafusion::error::DataFusionError::Internal(format!("Missing {} column", id_column))
         })?
         .clone();
     let version_col = batch
@@ -1018,10 +1046,10 @@ fn mvcc_dedup_batch(batch: &RecordBatch) -> DFResult<RecordBatch> {
         })?
         .clone();
 
-    // Sort by (_vid ASC, _version DESC)
+    // Sort by (id_column ASC, _version DESC)
     let sort_columns = vec![
         arrow::compute::SortColumn {
-            values: vid_col,
+            values: id_col,
             options: Some(arrow::compute::SortOptions {
                 descending: false,
                 nulls_first: false,
@@ -1049,9 +1077,9 @@ fn mvcc_dedup_batch(batch: &RecordBatch) -> DFResult<RecordBatch> {
         RecordBatch::try_new(batch.schema(), sorted_columns)
             .map_err(|e| datafusion::error::DataFusionError::ArrowError(Box::new(e), None))?;
 
-    // Build dedup mask: keep first occurrence of each _vid
-    let sorted_vid = sorted
-        .column_by_name("_vid")
+    // Build dedup mask: keep first occurrence of each id
+    let sorted_id = sorted
+        .column_by_name(id_column)
         .unwrap()
         .as_any()
         .downcast_ref::<UInt64Array>()
@@ -1061,7 +1089,7 @@ fn mvcc_dedup_batch(batch: &RecordBatch) -> DFResult<RecordBatch> {
     if !keep.is_empty() {
         keep[0] = true;
         for (i, flag) in keep.iter_mut().enumerate().skip(1) {
-            if sorted_vid.value(i) != sorted_vid.value(i - 1) {
+            if sorted_id.value(i) != sorted_id.value(i - 1) {
                 *flag = true;
             }
         }
@@ -1104,6 +1132,44 @@ fn filter_l0_tombstones(
 
     let keep: Vec<bool> = (0..vid_col.len())
         .map(|i| !tombstones.contains(&vid_col.value(i)))
+        .collect();
+    let mask = arrow_array::BooleanArray::from(keep);
+    arrow::compute::filter_record_batch(batch, &mask)
+        .map_err(|e| datafusion::error::DataFusionError::ArrowError(Box::new(e), None))
+}
+
+/// Filter out rows whose `eid` appears in L0 edge tombstones.
+fn filter_l0_edge_tombstones(
+    batch: &RecordBatch,
+    l0_ctx: &crate::query::df_graph::L0Context,
+) -> DFResult<RecordBatch> {
+    if batch.num_rows() == 0 {
+        return Ok(batch.clone());
+    }
+
+    let mut tombstones: HashSet<u64> = HashSet::new();
+    for l0 in l0_ctx.iter_l0_buffers() {
+        let guard = l0.read();
+        for eid in guard.tombstones.keys() {
+            tombstones.insert(eid.as_u64());
+        }
+    }
+
+    if tombstones.is_empty() {
+        return Ok(batch.clone());
+    }
+
+    let eid_col = batch
+        .column_by_name("eid")
+        .ok_or_else(|| {
+            datafusion::error::DataFusionError::Internal("Missing eid column".to_string())
+        })?
+        .as_any()
+        .downcast_ref::<UInt64Array>()
+        .unwrap();
+
+    let keep: Vec<bool> = (0..eid_col.len())
+        .map(|i| !tombstones.contains(&eid_col.value(i)))
         .collect();
     let mask = arrow_array::BooleanArray::from(keep);
     arrow::compute::filter_record_batch(batch, &mask)
@@ -1253,6 +1319,165 @@ fn build_l0_property_column(
     build_property_column_static(&vid_keys, &props_map, prop_name, data_type)
 }
 
+/// Build a RecordBatch from L0 buffer data for a given edge type, matching
+/// the DeltaDataset Lance table's column set.
+///
+/// Merges L0 buffers in visibility order (pending_flush → current → transaction),
+/// with later buffers overwriting earlier ones for the same EID.
+fn build_l0_edge_batch(
+    l0_ctx: &crate::query::df_graph::L0Context,
+    edge_type: &str,
+    internal_schema: &SchemaRef,
+    type_props: Option<&HashMap<String, uni_common::core::schema::PropertyMeta>>,
+) -> DFResult<RecordBatch> {
+    // Collect all L0 edge data, merging in visibility order
+    // eid -> (src_vid, dst_vid, properties, version)
+    let mut eid_data: HashMap<u64, (u64, u64, Properties, u64)> = HashMap::new();
+    let mut tombstones: HashSet<u64> = HashSet::new();
+
+    for l0 in l0_ctx.iter_l0_buffers() {
+        let guard = l0.read();
+        // Collect tombstones
+        for eid in guard.tombstones.keys() {
+            tombstones.insert(eid.as_u64());
+        }
+        // Collect edges for this type
+        for eid in guard.eids_for_type(edge_type) {
+            let eid_u64 = eid.as_u64();
+            if tombstones.contains(&eid_u64) {
+                continue;
+            }
+            let (src_vid, dst_vid) = match guard.get_edge_endpoints(eid) {
+                Some(endpoints) => (endpoints.0.as_u64(), endpoints.1.as_u64()),
+                None => continue,
+            };
+            let version = guard.edge_versions.get(&eid).copied().unwrap_or(0);
+            let entry = eid_data
+                .entry(eid_u64)
+                .or_insert_with(|| (src_vid, dst_vid, Properties::new(), 0));
+            // Merge properties (later L0 overwrites)
+            if let Some(props) = guard.edge_properties.get(&eid) {
+                for (k, v) in props {
+                    entry.2.insert(k.clone(), v.clone());
+                }
+            }
+            // Update endpoints from latest L0 layer
+            entry.0 = src_vid;
+            entry.1 = dst_vid;
+            // Take the highest version
+            if version > entry.3 {
+                entry.3 = version;
+            }
+        }
+    }
+
+    // Remove tombstoned EIDs
+    for t in &tombstones {
+        eid_data.remove(t);
+    }
+
+    if eid_data.is_empty() {
+        return Ok(RecordBatch::new_empty(internal_schema.clone()));
+    }
+
+    // Sort EIDs for deterministic output
+    let mut eids: Vec<u64> = eid_data.keys().copied().collect();
+    eids.sort_unstable();
+
+    let num_rows = eids.len();
+    let mut columns: Vec<ArrayRef> = Vec::with_capacity(internal_schema.fields().len());
+
+    // Determine which schema property names exist
+    let schema_prop_names: HashSet<&str> = type_props
+        .map(|tp| tp.keys().map(|k| k.as_str()).collect())
+        .unwrap_or_default();
+
+    for field in internal_schema.fields() {
+        let col_name = field.name().as_str();
+        match col_name {
+            "eid" => {
+                columns.push(Arc::new(UInt64Array::from(eids.clone())));
+            }
+            "src_vid" => {
+                let vals: Vec<u64> = eids.iter().map(|e| eid_data[e].0).collect();
+                columns.push(Arc::new(UInt64Array::from(vals)));
+            }
+            "dst_vid" => {
+                let vals: Vec<u64> = eids.iter().map(|e| eid_data[e].1).collect();
+                columns.push(Arc::new(UInt64Array::from(vals)));
+            }
+            "op" => {
+                // L0 edges are always live (tombstoned ones already excluded)
+                let vals = vec![0u8; num_rows];
+                columns.push(Arc::new(arrow_array::UInt8Array::from(vals)));
+            }
+            "_version" => {
+                let vals: Vec<u64> = eids.iter().map(|e| eid_data[e].3).collect();
+                columns.push(Arc::new(UInt64Array::from(vals)));
+            }
+            "overflow_json" => {
+                // Collect non-schema properties as JSONB
+                let mut builder = arrow_array::builder::LargeBinaryBuilder::new();
+                for eid_u64 in &eids {
+                    let (_, _, props, _) = &eid_data[eid_u64];
+                    let mut overflow = serde_json::Map::new();
+                    for (k, v) in props {
+                        if k.starts_with('_') {
+                            continue;
+                        }
+                        if !schema_prop_names.contains(k.as_str()) {
+                            let json_val: serde_json::Value = v.clone().into();
+                            overflow.insert(k.clone(), json_val);
+                        }
+                    }
+                    if overflow.is_empty() {
+                        builder.append_null();
+                    } else {
+                        let json_val = serde_json::Value::Object(overflow);
+                        match serde_json_to_jsonb(&json_val) {
+                            Ok(bytes) => builder.append_value(bytes),
+                            Err(_) => builder.append_null(),
+                        }
+                    }
+                }
+                columns.push(Arc::new(builder.finish()));
+            }
+            _ => {
+                // Schema property column: convert L0 Value → Arrow typed value
+                let col = build_l0_edge_property_column(
+                    &eids,
+                    &eid_data,
+                    col_name,
+                    field.data_type(),
+                )?;
+                columns.push(col);
+            }
+        }
+    }
+
+    RecordBatch::try_new(internal_schema.clone(), columns)
+        .map_err(|e| datafusion::error::DataFusionError::ArrowError(Box::new(e), None))
+}
+
+/// Build a single Arrow column from L0 edge property values.
+///
+/// Operates on the `eid_data` map produced by `build_l0_edge_batch`.
+fn build_l0_edge_property_column(
+    eids: &[u64],
+    eid_data: &HashMap<u64, (u64, u64, Properties, u64)>,
+    prop_name: &str,
+    data_type: &DataType,
+) -> DFResult<ArrayRef> {
+    // Convert to Vid keys for reuse of existing build_property_column_static
+    let vid_keys: Vec<Vid> = eids.iter().map(|e| Vid::from(*e)).collect();
+    let props_map: HashMap<Vid, Properties> = eid_data
+        .iter()
+        .map(|(k, (_, _, props, _))| (Vid::from(*k), props.clone()))
+        .collect();
+
+    build_property_column_static(&vid_keys, &props_map, prop_name, data_type)
+}
+
 /// Synthesize the `_labels` column for known-label vertices.
 ///
 /// Each vertex gets at minimum `[label]`. Additional labels from L0 buffers
@@ -1354,6 +1579,85 @@ fn map_to_output_schema(
                         .find(|f| {
                             f.name() == &format!("{}.{}", variable, prop)
                         });
+                    let dt = target_field
+                        .map(|f| f.data_type().clone())
+                        .unwrap_or(DataType::LargeBinary);
+                    columns.push(arrow_array::new_null_array(&dt, batch.num_rows()));
+                }
+            }
+        }
+    }
+
+    RecordBatch::try_new(output_schema.clone(), columns)
+        .map_err(|e| datafusion::error::DataFusionError::ArrowError(Box::new(e), None))
+}
+
+/// Map an internal DeltaDataset-schema edge batch to the DataFusion output schema.
+///
+/// The internal batch has `eid`, `src_vid`, `dst_vid`, `op`, `_version`, and property
+/// columns. The output schema has `{variable}._eid`, `{variable}._src_vid`,
+/// `{variable}._dst_vid`, and per-property columns. Internal columns `op` and
+/// `_version` are dropped.
+fn map_edge_to_output_schema(
+    batch: &RecordBatch,
+    variable: &str,
+    projected_properties: &[String],
+    output_schema: &SchemaRef,
+) -> DFResult<RecordBatch> {
+    if batch.num_rows() == 0 {
+        return Ok(RecordBatch::new_empty(output_schema.clone()));
+    }
+
+    let mut columns: Vec<ArrayRef> = Vec::with_capacity(output_schema.fields().len());
+
+    // 1. {var}._eid
+    let eid_col = batch
+        .column_by_name("eid")
+        .ok_or_else(|| {
+            datafusion::error::DataFusionError::Internal("Missing eid column".to_string())
+        })?
+        .clone();
+    columns.push(eid_col);
+
+    // 2. {var}._src_vid
+    let src_col = batch
+        .column_by_name("src_vid")
+        .ok_or_else(|| {
+            datafusion::error::DataFusionError::Internal("Missing src_vid column".to_string())
+        })?
+        .clone();
+    columns.push(src_col);
+
+    // 3. {var}._dst_vid
+    let dst_col = batch
+        .column_by_name("dst_vid")
+        .ok_or_else(|| {
+            datafusion::error::DataFusionError::Internal("Missing dst_vid column".to_string())
+        })?
+        .clone();
+    columns.push(dst_col);
+
+    // 4. Projected properties
+    for prop in projected_properties {
+        if prop == "overflow_json" {
+            match batch.column_by_name("overflow_json") {
+                Some(col) => columns.push(col.clone()),
+                None => {
+                    columns.push(arrow_array::new_null_array(
+                        &DataType::LargeBinary,
+                        batch.num_rows(),
+                    ));
+                }
+            }
+        } else {
+            match batch.column_by_name(prop) {
+                Some(col) => columns.push(col.clone()),
+                None => {
+                    // Column missing in Lance (schema evolution) — return null column
+                    let target_field = output_schema
+                        .fields()
+                        .iter()
+                        .find(|f| f.name() == &format!("{}.{}", variable, prop));
                     let dt = target_field
                         .map(|f| f.data_type().clone())
                         .unwrap_or(DataType::LargeBinary);
@@ -1556,7 +1860,644 @@ async fn columnar_scan_vertex_batch_static(
     )
 }
 
+/// Columnar-first edge scan: single Lance query with MVCC dedup and L0 overlay.
+///
+/// Replaces the two-phase `scan_edge_eids_static()` + `materialize_edge_batch_static()`
+/// for edge scans. Reads all needed columns in a single DeltaDataset query, performs
+/// MVCC dedup via Arrow compute, merges L0 buffer data, filters tombstones, and maps
+/// to the output schema.
+async fn columnar_scan_edge_batch_static(
+    graph_ctx: &GraphExecutionContext,
+    edge_type: &str,
+    variable: &str,
+    projected_properties: &[String],
+    output_schema: &SchemaRef,
+) -> DFResult<RecordBatch> {
+    let storage = graph_ctx.storage();
+    let l0_ctx = graph_ctx.l0_context();
+    let uni_schema = storage.schema_manager().schema();
+    let type_props = uni_schema.properties.get(edge_type);
+
+    // Build the list of columns to request from DeltaDataset Lance table
+    let mut lance_columns: Vec<String> = vec![
+        "eid".to_string(),
+        "src_vid".to_string(),
+        "dst_vid".to_string(),
+        "op".to_string(),
+        "_version".to_string(),
+    ];
+    for prop in projected_properties {
+        if prop == "overflow_json" {
+            if !lance_columns.contains(&"overflow_json".to_string()) {
+                lance_columns.push("overflow_json".to_string());
+            }
+        } else {
+            let exists_in_schema = type_props.is_some_and(|tp| tp.contains_key(prop));
+            if exists_in_schema && !lance_columns.contains(prop) {
+                lance_columns.push(prop.clone());
+            }
+        }
+    }
+
+    // Check if any projected property is not in schema (needs overflow_json)
+    let needs_overflow = projected_properties.iter().any(|p| {
+        p == "overflow_json"
+            || !type_props.is_some_and(|tp| tp.contains_key(p))
+    });
+    if needs_overflow && !lance_columns.contains(&"overflow_json".to_string()) {
+        lance_columns.push("overflow_json".to_string());
+    }
+
+    // Try to query DeltaDataset (forward direction)
+    let ds = storage
+        .delta_dataset(edge_type, "fwd")
+        .map_err(|e| datafusion::error::DataFusionError::Execution(e.to_string()))?;
+    let lancedb_store = storage.lancedb_store();
+
+    let lance_batch = match ds.open_lancedb(lancedb_store).await {
+        Ok(table) => {
+            use lancedb::query::{ExecutableQuery, QueryBase, Select};
+
+            // Check which columns actually exist in the Lance table
+            let table_schema = table.schema().await
+                .map_err(|e| datafusion::error::DataFusionError::Execution(e.to_string()))?;
+            let table_field_names: HashSet<&str> = table_schema
+                .fields()
+                .iter()
+                .map(|f| f.name().as_str())
+                .collect();
+
+            let actual_columns: Vec<&str> = lance_columns
+                .iter()
+                .filter(|c| table_field_names.contains(c.as_str()))
+                .map(|c| c.as_str())
+                .collect();
+
+            // Build filter: op == 0 (INSERT only) with optional version filter
+            let filter = match storage.version_high_water_mark() {
+                Some(hwm) => format!("op = 0 AND _version <= {}", hwm),
+                None => "op = 0".to_string(),
+            };
+
+            let query = table
+                .query()
+                .select(Select::columns(&actual_columns))
+                .only_if(filter);
+
+            match query.execute().await {
+                Ok(stream) => {
+                    use futures::TryStreamExt;
+                    let batches: Vec<RecordBatch> =
+                        stream.try_collect().await.unwrap_or_default();
+                    if batches.is_empty() {
+                        None
+                    } else {
+                        Some(
+                            arrow::compute::concat_batches(&batches[0].schema(), &batches)
+                                .map_err(|e| {
+                                    datafusion::error::DataFusionError::ArrowError(
+                                        Box::new(e),
+                                        None,
+                                    )
+                                })?,
+                        )
+                    }
+                }
+                Err(_) => None,
+            }
+        }
+        Err(_) => None, // Table doesn't exist yet — only L0 data
+    };
+
+    // MVCC dedup the Lance batch (by eid)
+    let lance_deduped = match lance_batch {
+        Some(batch) => {
+            let deduped = mvcc_dedup_batch_by(&batch, "eid")?;
+            if deduped.num_rows() > 0 {
+                Some(deduped)
+            } else {
+                None
+            }
+        }
+        None => None,
+    };
+
+    // Build the internal schema for L0 batch construction.
+    // Use the Lance batch schema if available, otherwise build from scratch.
+    let internal_schema = match &lance_deduped {
+        Some(batch) => batch.schema(),
+        None => {
+            let mut fields = vec![
+                Field::new("eid", DataType::UInt64, false),
+                Field::new("src_vid", DataType::UInt64, false),
+                Field::new("dst_vid", DataType::UInt64, false),
+                Field::new("op", DataType::UInt8, false),
+                Field::new("_version", DataType::UInt64, false),
+            ];
+            for col in &lance_columns {
+                if matches!(col.as_str(), "eid" | "src_vid" | "dst_vid" | "op" | "_version") {
+                    continue;
+                }
+                if col == "overflow_json" {
+                    fields.push(Field::new("overflow_json", DataType::LargeBinary, true));
+                } else {
+                    let arrow_type = type_props
+                        .and_then(|tp| tp.get(col.as_str()))
+                        .map(|meta| meta.r#type.to_arrow())
+                        .unwrap_or(DataType::LargeBinary);
+                    fields.push(Field::new(col, arrow_type, true));
+                }
+            }
+            Arc::new(Schema::new(fields))
+        }
+    };
+
+    // Build L0 batch
+    let l0_batch = build_l0_edge_batch(l0_ctx, edge_type, &internal_schema, type_props)?;
+
+    // Merge Lance + L0
+    let merged = match (lance_deduped, l0_batch.num_rows() > 0) {
+        (Some(lance), true) => {
+            let combined = arrow::compute::concat_batches(
+                &internal_schema,
+                &[lance, l0_batch],
+            )
+            .map_err(|e| {
+                datafusion::error::DataFusionError::ArrowError(Box::new(e), None)
+            })?;
+            // Re-dedup: L0 versions are higher so they win
+            mvcc_dedup_batch_by(&combined, "eid")?
+        }
+        (Some(lance), false) => lance,
+        (None, true) => l0_batch,
+        (None, false) => {
+            return Ok(RecordBatch::new_empty(output_schema.clone()));
+        }
+    };
+
+    // Filter edge tombstones
+    let filtered = filter_l0_edge_tombstones(&merged, l0_ctx)?;
+
+    if filtered.num_rows() == 0 {
+        return Ok(RecordBatch::new_empty(output_schema.clone()));
+    }
+
+    // Map to output schema
+    map_edge_to_output_schema(
+        &filtered,
+        variable,
+        projected_properties,
+        output_schema,
+    )
+}
+
+/// Columnar-first schemaless vertex scan: single Lance query with MVCC dedup and L0 overlay.
+///
+/// Replaces the two-phase `scan_*_vids_*()` + `materialize_schemaless_vertex_batch_static()`
+/// for schemaless vertex scans. Reads `_vid`, `labels`, `props_json`, `_version` in a single
+/// Lance query on the main vertices table, performs MVCC dedup via Arrow compute, merges L0
+/// buffer data, filters tombstones, and maps to the output schema.
+async fn columnar_scan_schemaless_vertex_batch_static(
+    graph_ctx: &GraphExecutionContext,
+    label: &str,
+    variable: &str,
+    projected_properties: &[String],
+    output_schema: &SchemaRef,
+) -> DFResult<RecordBatch> {
+    use uni_store::storage::main_vertex::MainVertexDataset;
+
+    let storage = graph_ctx.storage();
+    let l0_ctx = graph_ctx.l0_context();
+    let lancedb_store = storage.lancedb_store();
+
+    // Build the Lance filter expression
+    let filter = {
+        let mut parts = vec!["_deleted = false".to_string()];
+
+        // Label filter
+        if !label.is_empty() {
+            if label.contains(':') {
+                // Multi-label: each label must be present
+                for lbl in label.split(':') {
+                    parts.push(format!("array_contains(labels, '{}')", lbl));
+                }
+            } else {
+                parts.push(format!("array_contains(labels, '{}')", label));
+            }
+        }
+
+        // MVCC version filter
+        if let Some(hwm) = storage.version_high_water_mark() {
+            parts.push(format!("_version <= {}", hwm));
+        }
+
+        parts.join(" AND ")
+    };
+
+    // Single Lance query: SELECT _vid, labels, props_json, _version WHERE <filter>
+    let lance_batch = match MainVertexDataset::open_table(lancedb_store).await {
+        Ok(table) => {
+            use lancedb::query::{ExecutableQuery, QueryBase, Select};
+
+            let query = table
+                .query()
+                .select(Select::columns(&["_vid", "labels", "props_json", "_version"]))
+                .only_if(filter);
+
+            match query.execute().await {
+                Ok(stream) => {
+                    use futures::TryStreamExt;
+                    let batches: Vec<RecordBatch> =
+                        stream.try_collect().await.unwrap_or_default();
+                    if batches.is_empty() {
+                        None
+                    } else {
+                        Some(
+                            arrow::compute::concat_batches(&batches[0].schema(), &batches)
+                                .map_err(|e| {
+                                    datafusion::error::DataFusionError::ArrowError(
+                                        Box::new(e),
+                                        None,
+                                    )
+                                })?,
+                        )
+                    }
+                }
+                Err(_) => None,
+            }
+        }
+        Err(_) => None, // Table doesn't exist yet — only L0 data
+    };
+
+    // MVCC dedup the Lance batch
+    let lance_deduped = match lance_batch {
+        Some(batch) => {
+            let deduped = mvcc_dedup_batch(&batch)?;
+            if deduped.num_rows() > 0 {
+                Some(deduped)
+            } else {
+                None
+            }
+        }
+        None => None,
+    };
+
+    // Build the internal schema for L0 batch construction.
+    // Use the Lance batch schema if available, otherwise build from scratch.
+    let internal_schema = match &lance_deduped {
+        Some(batch) => batch.schema(),
+        None => Arc::new(Schema::new(vec![
+            Field::new("_vid", DataType::UInt64, false),
+            Field::new(
+                "labels",
+                DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
+                false,
+            ),
+            Field::new("props_json", DataType::LargeBinary, true),
+            Field::new("_version", DataType::UInt64, false),
+        ])),
+    };
+
+    // Build L0 batch
+    let l0_batch = build_l0_schemaless_vertex_batch(l0_ctx, label, &internal_schema)?;
+
+    // Merge Lance + L0
+    let merged = match (lance_deduped, l0_batch.num_rows() > 0) {
+        (Some(lance), true) => {
+            let combined =
+                arrow::compute::concat_batches(&internal_schema, &[lance, l0_batch]).map_err(
+                    |e| datafusion::error::DataFusionError::ArrowError(Box::new(e), None),
+                )?;
+            // Re-dedup: L0 versions are higher so they win
+            mvcc_dedup_batch(&combined)?
+        }
+        (Some(lance), false) => lance,
+        (None, true) => l0_batch,
+        (None, false) => {
+            return Ok(RecordBatch::new_empty(output_schema.clone()));
+        }
+    };
+
+    // Filter tombstones
+    let filtered = filter_l0_tombstones(&merged, l0_ctx)?;
+
+    if filtered.num_rows() == 0 {
+        return Ok(RecordBatch::new_empty(output_schema.clone()));
+    }
+
+    // Map to output schema
+    map_to_schemaless_output_schema(
+        &filtered,
+        variable,
+        projected_properties,
+        output_schema,
+        l0_ctx,
+    )
+}
+
+/// Build a RecordBatch from L0 buffer data for schemaless vertices.
+///
+/// Merges L0 buffers in visibility order (pending_flush → current → transaction),
+/// with later buffers overwriting earlier ones for the same VID. Produces a batch
+/// matching the internal schema: `_vid, labels, props_json, _version`.
+fn build_l0_schemaless_vertex_batch(
+    l0_ctx: &crate::query::df_graph::L0Context,
+    label: &str,
+    internal_schema: &SchemaRef,
+) -> DFResult<RecordBatch> {
+    // Collect all L0 vertex data, merging in visibility order
+    // vid -> (merged_props, highest_version, labels)
+    let mut vid_data: HashMap<u64, (Properties, u64, Vec<String>)> = HashMap::new();
+    let mut tombstones: HashSet<u64> = HashSet::new();
+
+    // Parse multi-label filter
+    let label_filter: Vec<&str> = if label.is_empty() {
+        vec![]
+    } else if label.contains(':') {
+        label.split(':').collect()
+    } else {
+        vec![label]
+    };
+
+    for l0 in l0_ctx.iter_l0_buffers() {
+        let guard = l0.read();
+
+        // Collect tombstones
+        for vid in guard.vertex_tombstones.iter() {
+            tombstones.insert(vid.as_u64());
+        }
+
+        // Collect VIDs matching the label filter
+        let vids: Vec<Vid> = if label_filter.is_empty() {
+            guard.all_vertex_vids()
+        } else if label_filter.len() == 1 {
+            guard.vids_for_label(label_filter[0])
+        } else {
+            guard.vids_with_all_labels(&label_filter)
+        };
+
+        for vid in vids {
+            let vid_u64 = vid.as_u64();
+            if tombstones.contains(&vid_u64) {
+                continue;
+            }
+            let version = guard.vertex_versions.get(&vid).copied().unwrap_or(0);
+            let entry = vid_data
+                .entry(vid_u64)
+                .or_insert_with(|| (Properties::new(), 0, Vec::new()));
+
+            // Merge properties (later L0 overwrites)
+            if let Some(props) = guard.vertex_properties.get(&vid) {
+                for (k, v) in props {
+                    entry.0.insert(k.clone(), v.clone());
+                }
+            }
+            // Take the highest version
+            if version > entry.1 {
+                entry.1 = version;
+            }
+            // Update labels from latest L0 layer
+            if let Some(labels) = guard.vertex_labels.get(&vid) {
+                entry.2 = labels.clone();
+            }
+        }
+    }
+
+    // Remove tombstoned VIDs
+    for t in &tombstones {
+        vid_data.remove(t);
+    }
+
+    if vid_data.is_empty() {
+        return Ok(RecordBatch::new_empty(internal_schema.clone()));
+    }
+
+    // Sort VIDs for deterministic output
+    let mut vids: Vec<u64> = vid_data.keys().copied().collect();
+    vids.sort_unstable();
+
+    let num_rows = vids.len();
+    let mut columns: Vec<ArrayRef> = Vec::with_capacity(internal_schema.fields().len());
+
+    for field in internal_schema.fields() {
+        match field.name().as_str() {
+            "_vid" => {
+                columns.push(Arc::new(UInt64Array::from(vids.clone())));
+            }
+            "labels" => {
+                let mut labels_builder = ListBuilder::new(StringBuilder::new());
+                for vid_u64 in &vids {
+                    let (_, _, labels) = &vid_data[vid_u64];
+                    let values = labels_builder.values();
+                    for lbl in labels {
+                        values.append_value(lbl);
+                    }
+                    labels_builder.append(true);
+                }
+                columns.push(Arc::new(labels_builder.finish()));
+            }
+            "props_json" => {
+                let mut builder = arrow_array::builder::LargeBinaryBuilder::new();
+                for vid_u64 in &vids {
+                    let (props, _, _) = &vid_data[vid_u64];
+                    if props.is_empty() {
+                        builder.append_null();
+                    } else {
+                        // Encode properties as JSONB blob
+                        let json_obj: serde_json::Value = {
+                            let mut map = serde_json::Map::new();
+                            for (k, v) in props {
+                                let json_val: serde_json::Value = v.clone().into();
+                                map.insert(k.clone(), json_val);
+                            }
+                            serde_json::Value::Object(map)
+                        };
+                        match serde_json_to_jsonb(&json_obj) {
+                            Ok(bytes) => builder.append_value(bytes),
+                            Err(_) => builder.append_null(),
+                        }
+                    }
+                }
+                columns.push(Arc::new(builder.finish()));
+            }
+            "_deleted" => {
+                // L0 vertices are always live (tombstoned ones already excluded)
+                columns.push(Arc::new(arrow_array::BooleanArray::from(
+                    vec![false; num_rows],
+                )));
+            }
+            "_version" => {
+                let vals: Vec<u64> = vids.iter().map(|v| vid_data[v].1).collect();
+                columns.push(Arc::new(UInt64Array::from(vals)));
+            }
+            _ => {
+                // Unexpected column — fill with nulls
+                columns.push(arrow_array::new_null_array(field.data_type(), num_rows));
+            }
+        }
+    }
+
+    RecordBatch::try_new(internal_schema.clone(), columns)
+        .map_err(|e| datafusion::error::DataFusionError::ArrowError(Box::new(e), None))
+}
+
+/// Map an internal-schema schemaless batch to the DataFusion output schema.
+///
+/// The internal batch has `_vid, labels, props_json, _version` columns. The output
+/// schema has `{variable}._vid`, `{variable}._labels`, and per-property columns.
+/// Individual properties are extracted from the `props_json` JSONB blob using
+/// `jsonb::RawJsonb::get_by_name()` for direct sub-value extraction.
+fn map_to_schemaless_output_schema(
+    batch: &RecordBatch,
+    _variable: &str,
+    projected_properties: &[String],
+    output_schema: &SchemaRef,
+    l0_ctx: &crate::query::df_graph::L0Context,
+) -> DFResult<RecordBatch> {
+    if batch.num_rows() == 0 {
+        return Ok(RecordBatch::new_empty(output_schema.clone()));
+    }
+
+    let mut columns: Vec<ArrayRef> = Vec::with_capacity(output_schema.fields().len());
+
+    // 1. {var}._vid — passthrough
+    let vid_col = batch
+        .column_by_name("_vid")
+        .ok_or_else(|| {
+            datafusion::error::DataFusionError::Internal("Missing _vid column".to_string())
+        })?
+        .clone();
+    let vid_arr = vid_col
+        .as_any()
+        .downcast_ref::<UInt64Array>()
+        .ok_or_else(|| {
+            datafusion::error::DataFusionError::Internal("_vid not UInt64".to_string())
+        })?;
+    columns.push(vid_col.clone());
+
+    // 2. {var}._labels — from labels column with L0 overlay
+    let labels_col = batch.column_by_name("labels");
+    let labels_arr = labels_col.and_then(|c| c.as_any().downcast_ref::<arrow_array::ListArray>());
+
+    let mut labels_builder = ListBuilder::new(StringBuilder::new());
+    for i in 0..vid_arr.len() {
+        let vid_u64 = vid_arr.value(i);
+        let vid = Vid::from(vid_u64);
+
+        // Start with labels from the batch
+        let mut row_labels: Vec<String> = Vec::new();
+        if let Some(arr) = labels_arr
+            && !arr.is_null(i)
+        {
+            let list_val = arr.value(i);
+            if let Some(str_arr) = list_val.as_any().downcast_ref::<arrow_array::StringArray>() {
+                for j in 0..str_arr.len() {
+                    if !str_arr.is_null(j) {
+                        row_labels.push(str_arr.value(j).to_string());
+                    }
+                }
+            }
+        }
+
+        // Overlay L0 labels
+        for l0 in l0_ctx.iter_l0_buffers() {
+            let guard = l0.read();
+            if let Some(l0_labels) = guard.vertex_labels.get(&vid) {
+                for lbl in l0_labels {
+                    if !row_labels.contains(lbl) {
+                        row_labels.push(lbl.clone());
+                    }
+                }
+            }
+        }
+
+        let values = labels_builder.values();
+        for lbl in &row_labels {
+            values.append_value(lbl);
+        }
+        labels_builder.append(true);
+    }
+    columns.push(Arc::new(labels_builder.finish()));
+
+    // 3. Projected properties — extract from props_json
+    let props_col = batch.column_by_name("props_json");
+    let props_arr = props_col
+        .and_then(|c| c.as_any().downcast_ref::<arrow_array::LargeBinaryArray>());
+
+    for prop in projected_properties {
+        if prop == "_all_props" {
+            // Optimization: _all_props IS props_json — passthrough directly
+            match props_col {
+                Some(col) => columns.push(col.clone()),
+                None => {
+                    columns.push(arrow_array::new_null_array(
+                        &DataType::LargeBinary,
+                        batch.num_rows(),
+                    ));
+                }
+            }
+        } else {
+            // Extract individual property from JSONB blob
+            let mut builder = arrow_array::builder::LargeBinaryBuilder::new();
+            for i in 0..batch.num_rows() {
+                let vid = Vid::from(vid_arr.value(i));
+
+                // Check L0 buffers (forward = visibility order, later overwrites)
+                let mut l0_val: Option<Option<Value>> = None; // Some(None) = null, Some(Some(v)) = value
+                for l0 in l0_ctx.iter_l0_buffers() {
+                    let guard = l0.read();
+                    if let Some(props) = guard.vertex_properties.get(&vid)
+                        && let Some(val) = props.get(prop.as_str())
+                    {
+                        l0_val = Some(Some(val.clone()));
+                    }
+                }
+
+                if let Some(val_opt) = l0_val {
+                    // L0 has this property
+                    match val_opt {
+                        Some(val) if !val.is_null() => {
+                            let json_val: serde_json::Value = val.into();
+                            match serde_json_to_jsonb(&json_val) {
+                                Ok(bytes) => builder.append_value(bytes),
+                                Err(_) => builder.append_null(),
+                            }
+                        }
+                        _ => builder.append_null(),
+                    }
+                } else {
+                    // Extract from props_json JSONB blob
+                    if let Some(arr) = props_arr {
+                        if !arr.is_null(i) {
+                            let blob = arr.value(i);
+                            let raw = jsonb::RawJsonb::new(blob);
+                            match raw.get_by_name(prop, false) {
+                                Ok(Some(sub_val)) => {
+                                    builder.append_value(sub_val.as_ref());
+                                }
+                                _ => builder.append_null(),
+                            }
+                        } else {
+                            builder.append_null();
+                        }
+                    } else {
+                        builder.append_null();
+                    }
+                }
+            }
+            columns.push(Arc::new(builder.finish()));
+        }
+    }
+
+    RecordBatch::try_new(output_schema.clone(), columns)
+        .map_err(|e| datafusion::error::DataFusionError::ArrowError(Box::new(e), None))
+}
+
 /// Materialize a batch of edges with their properties (static version for async).
+///
+/// Superseded by `columnar_scan_edge_batch_static` for edge scans.
+/// Kept for potential fallback use.
+#[allow(dead_code)]
 async fn materialize_edge_batch_static(
     graph_ctx: &GraphExecutionContext,
     properties: &[String],
@@ -1593,6 +2534,10 @@ async fn materialize_edge_batch_static(
 }
 
 /// Build a RecordBatch from EIDs and their properties (static version).
+///
+/// Superseded by `columnar_scan_edge_batch_static` for edge scans.
+/// Kept for potential fallback use.
+#[allow(dead_code)]
 fn build_edge_record_batch_static(
     schema: &SchemaRef,
     eids: &[Eid],
@@ -1624,6 +2569,10 @@ fn build_edge_record_batch_static(
 }
 
 /// Build a property column for edges, converting EIDs to VIDs for lookup.
+///
+/// Superseded by `columnar_scan_edge_batch_static` for edge scans.
+/// Kept for potential fallback use.
+#[allow(dead_code)]
 fn build_edge_property_column_static(
     eids: &[Eid],
     props_map: &HashMap<Vid, Properties>,
@@ -2315,33 +3264,24 @@ impl Stream for GraphScanStream {
                         })?;
 
                         if is_edge_scan {
-                            // Scan edge EIDs
-                            let eids = scan_edge_eids_static(&graph_ctx, &label).await?;
-                            // Materialize batch with properties
-                            let batch = materialize_edge_batch_static(
+                            // Edge scan — columnar-first single query
+                            let batch = columnar_scan_edge_batch_static(
                                 &graph_ctx,
+                                &label,
+                                &variable,
                                 &properties,
                                 &schema,
-                                eids,
                             )
                             .await?;
                             Ok(Some(batch))
                         } else if is_schemaless {
-                            // Schemaless vertex scan - use main table
-                            let vids = if label.is_empty() {
-                                // ScanAll: scan all vertices regardless of label
-                                scan_all_vertex_vids_static(&graph_ctx).await?
-                            } else if label.contains(':') {
-                                // Multi-label: colon-separated label names with intersection semantics
-                                let label_names: Vec<&str> = label.split(':').collect();
-                                scan_vertex_vids_by_labels_static(&graph_ctx, &label_names).await?
-                            } else {
-                                // ScanMainByLabel: filter by label name
-                                scan_vertex_vids_by_label_name_static(&graph_ctx, &label).await?
-                            };
-                            // Materialize batch from main table's props_json
-                            let batch = materialize_schemaless_vertex_batch_static(
-                                &graph_ctx, &schema, vids,
+                            // Schemaless vertex scan — columnar-first single query
+                            let batch = columnar_scan_schemaless_vertex_batch_static(
+                                &graph_ctx,
+                                &label,
+                                &variable,
+                                &properties,
+                                &schema,
                             )
                             .await?;
                             Ok(Some(batch))
