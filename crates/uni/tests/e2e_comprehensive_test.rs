@@ -1975,7 +1975,7 @@ mod function_tests {
         setup_social_graph(&db).await?;
 
         let result = db
-            .query("MATCH (n:Person) RETURN collect(n.name) AS names ORDER BY n.name")
+            .query("MATCH (n:Person) RETURN collect(n.name) AS names")
             .await?;
         let names: Vec<String> = result.rows()[0].get("names")?;
         assert_eq!(names.len(), 4);

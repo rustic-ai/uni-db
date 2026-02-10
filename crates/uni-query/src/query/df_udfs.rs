@@ -151,6 +151,7 @@ pub fn register_cypher_udfs(ctx: &SessionContext) -> DFResult<()> {
     ctx.register_udf(create_duration_property_udf());
     ctx.register_udf(create_type_rank_udf());
     ctx.register_udf(create_has_null_udf());
+    ctx.register_udf(create_cypher_size_udf());
 
     // String matching UDFs (used by CypherStringMatchExpr in expr_compiler)
     ctx.register_udf(create_cypher_starts_with_udf());
@@ -1294,10 +1295,109 @@ fn scalar_to_value(scalar: &ScalarValue) -> DFResult<Value> {
                 ))
             }
         }
+        // Unsigned and smaller integer types
+        ScalarValue::UInt64(Some(u)) => Ok(Value::Int(*u as i64)),
+        ScalarValue::UInt32(Some(u)) => Ok(Value::Int(*u as i64)),
+        ScalarValue::UInt16(Some(u)) => Ok(Value::Int(*u as i64)),
+        ScalarValue::UInt8(Some(u)) => Ok(Value::Int(*u as i64)),
+        ScalarValue::Int16(Some(i)) => Ok(Value::Int(*i as i64)),
+        ScalarValue::Int8(Some(i)) => Ok(Value::Int(*i as i64)),
+
+        // Temporal types — convert to string representations
+        ScalarValue::Date32(Some(days)) => {
+            let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
+            let date = epoch + chrono::Duration::days(*days as i64);
+            Ok(Value::String(date.format("%Y-%m-%d").to_string()))
+        }
+        ScalarValue::Date64(Some(millis)) => {
+            let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
+            let date = epoch + chrono::Duration::milliseconds(*millis);
+            Ok(Value::String(date.format("%Y-%m-%d").to_string()))
+        }
+        ScalarValue::TimestampMicrosecond(Some(micros), _) => {
+            let secs = *micros / 1_000_000;
+            let nsecs = ((*micros % 1_000_000) * 1000) as u32;
+            if let Some(dt) = chrono::DateTime::from_timestamp(secs, nsecs) {
+                Ok(Value::String(dt.format("%Y-%m-%dT%H:%M:%S%.6fZ").to_string()))
+            } else {
+                Ok(Value::String(format!("{}us", micros)))
+            }
+        }
+        ScalarValue::TimestampMillisecond(Some(millis), _) => {
+            let secs = *millis / 1000;
+            let nsecs = ((*millis % 1000) * 1_000_000) as u32;
+            if let Some(dt) = chrono::DateTime::from_timestamp(secs, nsecs) {
+                Ok(Value::String(dt.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string()))
+            } else {
+                Ok(Value::String(format!("{}ms", millis)))
+            }
+        }
+        ScalarValue::TimestampSecond(Some(secs), _) => {
+            if let Some(dt) = chrono::DateTime::from_timestamp(*secs, 0) {
+                Ok(Value::String(dt.format("%Y-%m-%dT%H:%M:%SZ").to_string()))
+            } else {
+                Ok(Value::String(format!("{}s", secs)))
+            }
+        }
+        ScalarValue::TimestampNanosecond(Some(nanos), _) => {
+            let secs = *nanos / 1_000_000_000;
+            let nsecs = (*nanos % 1_000_000_000) as u32;
+            if let Some(dt) = chrono::DateTime::from_timestamp(secs, nsecs) {
+                Ok(Value::String(dt.format("%Y-%m-%dT%H:%M:%S%.9fZ").to_string()))
+            } else {
+                Ok(Value::String(format!("{}ns", nanos)))
+            }
+        }
+        ScalarValue::Time64Microsecond(Some(micros)) => {
+            let total_secs = *micros / 1_000_000;
+            let h = total_secs / 3600;
+            let m = (total_secs % 3600) / 60;
+            let s = total_secs % 60;
+            let frac = *micros % 1_000_000;
+            Ok(Value::String(format!("{:02}:{:02}:{:02}.{:06}", h, m, s, frac)))
+        }
+        ScalarValue::Time64Nanosecond(Some(nanos)) => {
+            let total_secs = *nanos / 1_000_000_000;
+            let h = total_secs / 3600;
+            let m = (total_secs % 3600) / 60;
+            let s = total_secs % 60;
+            let frac = *nanos % 1_000_000_000;
+            Ok(Value::String(format!("{:02}:{:02}:{:02}.{:09}", h, m, s, frac)))
+        }
+        ScalarValue::DurationMicrosecond(Some(micros)) => Ok(Value::Int(*micros)),
+        ScalarValue::DurationMillisecond(Some(millis)) => Ok(Value::Int(*millis)),
+        ScalarValue::DurationSecond(Some(secs)) => Ok(Value::Int(*secs)),
+        ScalarValue::DurationNanosecond(Some(nanos)) => Ok(Value::Int(*nanos)),
+        ScalarValue::Float32(Some(f)) => Ok(Value::Float(*f as f64)),
+
+        // All None variants for the above types
         ScalarValue::Null
         | ScalarValue::Utf8(None)
+        | ScalarValue::LargeUtf8(None)
+        | ScalarValue::LargeBinary(None)
         | ScalarValue::Int64(None)
-        | ScalarValue::Float64(None) => Ok(Value::Null),
+        | ScalarValue::Int32(None)
+        | ScalarValue::Int16(None)
+        | ScalarValue::Int8(None)
+        | ScalarValue::UInt64(None)
+        | ScalarValue::UInt32(None)
+        | ScalarValue::UInt16(None)
+        | ScalarValue::UInt8(None)
+        | ScalarValue::Float64(None)
+        | ScalarValue::Float32(None)
+        | ScalarValue::Boolean(None)
+        | ScalarValue::Date32(None)
+        | ScalarValue::Date64(None)
+        | ScalarValue::TimestampMicrosecond(None, _)
+        | ScalarValue::TimestampMillisecond(None, _)
+        | ScalarValue::TimestampSecond(None, _)
+        | ScalarValue::TimestampNanosecond(None, _)
+        | ScalarValue::Time64Microsecond(None)
+        | ScalarValue::Time64Nanosecond(None)
+        | ScalarValue::DurationMicrosecond(None)
+        | ScalarValue::DurationMillisecond(None)
+        | ScalarValue::DurationSecond(None)
+        | ScalarValue::DurationNanosecond(None) => Ok(Value::Null),
         other => Err(datafusion::error::DataFusionError::Execution(format!(
             "Unsupported scalar type for UDF: {other:?}"
         ))),
@@ -2092,6 +2192,150 @@ impl ScalarUDFImpl for CypherCompareUdf {
             crate::query::expr_eval::eval_binary_op(&val_args[0], &self.op, &val_args[1])
                 .map_err(|e| datafusion::error::DataFusionError::Execution(e.to_string()))
         })
+    }
+}
+
+// ============================================================================
+// _cypher_size(value) -> Int64
+// Polymorphic SIZE/LENGTH: dispatches on runtime type
+// ============================================================================
+
+pub fn create_cypher_size_udf() -> ScalarUDF {
+    ScalarUDF::new_from_impl(CypherSizeUdf::new())
+}
+
+#[derive(Debug)]
+struct CypherSizeUdf {
+    signature: Signature,
+}
+
+impl CypherSizeUdf {
+    fn new() -> Self {
+        Self {
+            signature: Signature::any(1, Volatility::Immutable),
+        }
+    }
+}
+
+impl_udf_eq_hash!(CypherSizeUdf);
+
+impl ScalarUDFImpl for CypherSizeUdf {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn name(&self) -> &str {
+        "_cypher_size"
+    }
+
+    fn signature(&self) -> &Signature {
+        &self.signature
+    }
+
+    fn return_type(&self, _arg_types: &[DataType]) -> DFResult<DataType> {
+        Ok(DataType::Int64)
+    }
+
+    fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DFResult<ColumnarValue> {
+        if args.args.len() != 1 {
+            return Err(datafusion::error::DataFusionError::Execution(
+                "_cypher_size() requires exactly 1 argument".to_string(),
+            ));
+        }
+
+        match &args.args[0] {
+            ColumnarValue::Scalar(scalar) => {
+                let result = cypher_size_scalar(scalar)?;
+                Ok(ColumnarValue::Scalar(result))
+            }
+            ColumnarValue::Array(arr) => {
+                let mut results: Vec<Option<i64>> = Vec::with_capacity(arr.len());
+                for i in 0..arr.len() {
+                    if arr.is_null(i) {
+                        results.push(None);
+                    } else {
+                        let scalar = ScalarValue::try_from_array(arr, i)?;
+                        match cypher_size_scalar(&scalar)? {
+                            ScalarValue::Int64(v) => results.push(v),
+                            _ => results.push(None),
+                        }
+                    }
+                }
+                let arr: ArrayRef = Arc::new(arrow_array::Int64Array::from(results));
+                Ok(ColumnarValue::Array(arr))
+            }
+        }
+    }
+}
+
+fn cypher_size_scalar(scalar: &ScalarValue) -> DFResult<ScalarValue> {
+    match scalar {
+        // String types — return character count
+        ScalarValue::Utf8(Some(s)) | ScalarValue::LargeUtf8(Some(s)) => {
+            Ok(ScalarValue::Int64(Some(s.chars().count() as i64)))
+        }
+        // List types — return list length
+        // ScalarValue::List wraps Arc<GenericListArray<i32>> with a single element
+        ScalarValue::List(arr) => {
+            if arr.is_empty() || arr.is_null(0) {
+                Ok(ScalarValue::Int64(None))
+            } else {
+                Ok(ScalarValue::Int64(Some(arr.value(0).len() as i64)))
+            }
+        }
+        ScalarValue::LargeList(arr) => {
+            if arr.is_empty() || arr.is_null(0) {
+                Ok(ScalarValue::Int64(None))
+            } else {
+                Ok(ScalarValue::Int64(Some(arr.value(0).len() as i64)))
+            }
+        }
+        // LargeBinary (JSONB) — decode and check type
+        ScalarValue::LargeBinary(Some(b)) => {
+            let raw = jsonb::RawJsonb::new(b);
+            let json_str = raw.to_string();
+            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&json_str) {
+                match parsed {
+                    serde_json::Value::Array(arr) => {
+                        Ok(ScalarValue::Int64(Some(arr.len() as i64)))
+                    }
+                    serde_json::Value::String(s) => {
+                        Ok(ScalarValue::Int64(Some(s.chars().count() as i64)))
+                    }
+                    serde_json::Value::Object(m) => {
+                        Ok(ScalarValue::Int64(Some(m.len() as i64)))
+                    }
+                    _ => Ok(ScalarValue::Int64(None)),
+                }
+            } else {
+                Ok(ScalarValue::Int64(None))
+            }
+        }
+        // Map type — return number of keys
+        ScalarValue::Map(arr) => {
+            if arr.is_empty() || arr.is_null(0) {
+                Ok(ScalarValue::Int64(None))
+            } else {
+                // MapArray wraps a single map entry; value(0) returns the entries struct
+                Ok(ScalarValue::Int64(Some(arr.value(0).len() as i64)))
+            }
+        }
+        // Struct — count fields (for node/relationship objects)
+        ScalarValue::Struct(arr) => {
+            if arr.is_null(0) {
+                Ok(ScalarValue::Int64(None))
+            } else {
+                Ok(ScalarValue::Int64(Some(arr.num_columns() as i64)))
+            }
+        }
+        // Null
+        ScalarValue::Null
+        | ScalarValue::Utf8(None)
+        | ScalarValue::LargeUtf8(None)
+        | ScalarValue::LargeBinary(None) => Ok(ScalarValue::Int64(None)),
+        other => Err(datafusion::error::DataFusionError::Execution(format!(
+            "_cypher_size: unsupported type {other:?}"
+        ))),
     }
 }
 

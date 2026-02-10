@@ -317,39 +317,6 @@ async fn test_where_label_predicate() -> Result<()> {
         result.len()
     );
 
-    // First check: what does ScanAll return?
-    let scan_all = db.query("MATCH (a) RETURN a._vid, a._label, a.id").await?;
-    eprintln!("ScanAll for a ({}):", scan_all.len());
-    for row in scan_all.rows() {
-        eprintln!(
-            "  a._vid={:?}, a._label={:?}, a.id={:?}",
-            row.value("a._vid"),
-            row.value("a._label"),
-            row.value("a.id")
-        );
-    }
-
-    // First check traverse without filter
-    let result_all_edges = db
-        .query("MATCH (a)-[:ADMIN]-(b) RETURN a._vid, a._label, a.id, b._vid, b._label, b.id")
-        .await?;
-    eprintln!("All ADMIN edges ({}):", result_all_edges.len());
-    for row in result_all_edges.rows() {
-        eprintln!(
-            "  a._vid={:?}, a._label={:?}, a.id={:?}",
-            row.value("a._vid"),
-            row.value("a._label"),
-            row.value("a.id")
-        );
-        eprintln!(
-            "  b._vid={:?}, b._label={:?}, b.id={:?}",
-            row.value("b._vid"),
-            row.value("b._label"),
-            row.value("b.id")
-        );
-        eprintln!("  ---");
-    }
-
     // Test label predicate in WHERE with edge pattern
     let result = db
         .query("MATCH (a)-[:ADMIN]-(b) WHERE a:A RETURN a.id, b.id")

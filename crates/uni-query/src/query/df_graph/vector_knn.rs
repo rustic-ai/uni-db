@@ -16,6 +16,7 @@
 
 use crate::query::df_graph::GraphExecutionContext;
 use crate::query::df_graph::common::compute_plan_properties;
+use crate::query::df_graph::scan::resolve_property_type;
 use arrow_array::builder::{Float32Builder, StringBuilder, UInt64Builder};
 use arrow_array::{ArrayRef, RecordBatch};
 use arrow_schema::{DataType, Field, Schema, SchemaRef};
@@ -66,6 +67,9 @@ pub struct GraphVectorKnnExec {
     /// Query parameters for expression evaluation.
     params: HashMap<String, Value>,
 
+    /// Target vertex properties to materialize.
+    target_properties: Vec<String>,
+
     /// Output schema.
     schema: SchemaRef,
 
@@ -113,12 +117,17 @@ impl GraphVectorKnnExec {
         k: usize,
         threshold: Option<f32>,
         params: HashMap<String, Value>,
+        target_properties: Vec<String>,
     ) -> Self {
         let variable = variable.into();
         let property = property.into();
         let label_name = label_name.into();
 
-        let schema = Self::build_schema(&variable);
+        // Resolve property types from schema
+        let uni_schema = graph_ctx.storage().schema_manager().schema();
+        let label_props = uni_schema.properties.get(label_name.as_str());
+
+        let schema = Self::build_schema(&variable, &target_properties, label_props);
         let properties = compute_plan_properties(schema.clone());
 
         Self {
@@ -131,6 +140,7 @@ impl GraphVectorKnnExec {
             k,
             threshold,
             params,
+            target_properties,
             schema,
             properties,
             metrics: ExecutionPlanMetricsSet::new(),
@@ -140,15 +150,30 @@ impl GraphVectorKnnExec {
     /// Build the output schema.
     ///
     /// Schema contains:
-    /// - `_vid` - Vertex ID
+    /// - `{variable}._vid` - Vertex ID
     /// - `{variable}` - Variable identifier (as string for now)
-    /// - `_score` - Similarity score
-    fn build_schema(variable: &str) -> SchemaRef {
-        let fields = vec![
+    /// - `{variable}._score` - Similarity score
+    /// - `{variable}.{prop}` - Property columns
+    fn build_schema(
+        variable: &str,
+        target_properties: &[String],
+        label_props: Option<
+            &std::collections::HashMap<String, uni_common::core::schema::PropertyMeta>,
+        >,
+    ) -> SchemaRef {
+        let mut fields = vec![
             Field::new(format!("{}._vid", variable), DataType::UInt64, false),
             Field::new(variable, DataType::Utf8, false),
             Field::new(format!("{}._score", variable), DataType::Float32, true),
         ];
+
+        // Add property columns
+        for prop_name in target_properties {
+            let col_name = format!("{}.{}", variable, prop_name);
+            let arrow_type = resolve_property_type(prop_name, label_props);
+            fields.push(Field::new(&col_name, arrow_type, true));
+        }
+
         Arc::new(Schema::new(fields))
     }
 
@@ -157,6 +182,7 @@ impl GraphVectorKnnExec {
         let value = evaluate_simple_expr(&self.query_expr, &self.params)?;
 
         match value {
+            Value::Vector(vec) => Ok(vec),
             Value::List(arr) => {
                 let mut vec = Vec::with_capacity(arr.len());
                 for v in arr {
@@ -171,7 +197,7 @@ impl GraphVectorKnnExec {
                 Ok(vec)
             }
             _ => Err(datafusion::error::DataFusionError::Execution(
-                "Query vector must be a list".to_string(),
+                "Query vector must be a list or vector".to_string(),
             )),
         }
     }
@@ -244,6 +270,7 @@ impl ExecutionPlan for GraphVectorKnnExec {
             query_vector,
             self.k,
             self.threshold,
+            self.target_properties.clone(),
             self.schema.clone(),
             metrics,
         )))
@@ -287,6 +314,9 @@ struct VectorKnnStream {
     /// Similarity threshold.
     threshold: Option<f32>,
 
+    /// Target vertex properties to materialize.
+    target_properties: Vec<String>,
+
     /// Output schema.
     schema: SchemaRef,
 
@@ -307,6 +337,7 @@ impl VectorKnnStream {
         query_vector: Vec<f32>,
         k: usize,
         threshold: Option<f32>,
+        target_properties: Vec<String>,
         schema: SchemaRef,
         metrics: BaselineMetrics,
     ) -> Self {
@@ -318,6 +349,7 @@ impl VectorKnnStream {
             query_vector,
             k,
             threshold,
+            target_properties,
             schema,
             state: VectorKnnState::Init,
             metrics,
@@ -342,6 +374,7 @@ impl Stream for VectorKnnStream {
                     let query_vector = self.query_vector.clone();
                     let k = self.k;
                     let threshold = self.threshold;
+                    let target_properties = self.target_properties.clone();
                     let schema = self.schema.clone();
 
                     let fut = async move {
@@ -358,6 +391,7 @@ impl Stream for VectorKnnStream {
                             &query_vector,
                             k,
                             threshold,
+                            &target_properties,
                             &schema,
                         )
                         .await
@@ -406,6 +440,7 @@ async fn execute_vector_search(
     query_vector: &[f32],
     k: usize,
     threshold: Option<f32>,
+    target_properties: &[String],
     schema: &SchemaRef,
 ) -> DFResult<Option<RecordBatch>> {
     let storage = graph_ctx.storage();
@@ -446,16 +481,28 @@ async fn execute_vector_search(
         return Ok(Some(RecordBatch::new_empty(schema.clone())));
     }
 
-    // Build the record batch
-    let batch = build_result_batch(&vids, &scores, variable, schema)?;
+    // Build the base record batch (VID, variable, score)
+    let batch = build_result_batch(
+        &vids,
+        &scores,
+        variable,
+        target_properties,
+        label_name,
+        graph_ctx,
+        schema,
+    )
+    .await?;
     Ok(Some(batch))
 }
 
-/// Build a result batch from VIDs and scores.
-fn build_result_batch(
+/// Build a result batch from VIDs and scores, including hydrated properties.
+async fn build_result_batch(
     vids: &[Vid],
     scores: &[f32],
     _variable: &str,
+    target_properties: &[String],
+    label_name: &str,
+    graph_ctx: &GraphExecutionContext,
     schema: &SchemaRef,
 ) -> DFResult<RecordBatch> {
     let num_rows = vids.len();
@@ -478,11 +525,33 @@ fn build_result_batch(
         score_builder.append_value(score);
     }
 
-    let columns: Vec<ArrayRef> = vec![
+    let mut columns: Vec<ArrayRef> = vec![
         Arc::new(vid_builder.finish()),
         Arc::new(var_builder.finish()),
         Arc::new(score_builder.finish()),
     ];
+
+    // Hydrate property columns
+    if !target_properties.is_empty() {
+        let property_manager = graph_ctx.property_manager();
+        let query_ctx = graph_ctx.query_context();
+
+        let props_map = property_manager
+            .get_batch_vertex_props_for_label(vids, label_name, Some(&query_ctx))
+            .await
+            .map_err(|e| datafusion::error::DataFusionError::Execution(e.to_string()))?;
+
+        let uni_schema = graph_ctx.storage().schema_manager().schema();
+        let label_props = uni_schema.properties.get(label_name);
+
+        for prop_name in target_properties {
+            let data_type = resolve_property_type(prop_name, label_props);
+            let column = crate::query::df_graph::scan::build_property_column_static(
+                vids, &props_map, prop_name, &data_type,
+            )?;
+            columns.push(column);
+        }
+    }
 
     RecordBatch::try_new(schema.clone(), columns)
         .map_err(|e| datafusion::error::DataFusionError::ArrowError(Box::new(e), None))
@@ -524,7 +593,7 @@ mod tests {
 
     #[test]
     fn test_build_schema() {
-        let schema = GraphVectorKnnExec::build_schema("n");
+        let schema = GraphVectorKnnExec::build_schema("n", &[], None);
 
         assert_eq!(schema.fields().len(), 3);
         assert_eq!(schema.field(0).name(), "n._vid");

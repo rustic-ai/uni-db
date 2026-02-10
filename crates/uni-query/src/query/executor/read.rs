@@ -561,10 +561,7 @@ impl Executor {
                 // Here we merge those system fields into the map and remove the helpers.
                 let bare_vars: Vec<String> = row
                     .keys()
-                    .filter(|k| {
-                        !k.contains('.')
-                            && matches!(row.get(*k), Some(Value::Map(_)))
-                    })
+                    .filter(|k| !k.contains('.') && matches!(row.get(*k), Some(Value::Map(_))))
                     .cloned()
                     .collect();
 

@@ -1017,19 +1017,9 @@ fn translate_function_call(
         }
         "SIZE" | "LENGTH" => {
             require_arg(&df_args, name)?;
-            // Polymorphic: use array_length for lists, character_length for strings.
-            // At expression translation time we don't know the type, so wrap in a
-            // CASE on whether array_length returns non-null. If the argument is a
-            // string, array_length returns null, so we fall back to character_length.
-            let arg = first_arg(&df_args);
-            let arr_len = datafusion::functions_nested::expr_fn::array_length(arg.clone());
-            Ok(datafusion::functions::expr_fn::coalesce(vec![
-                arr_len,
-                cast_expr(
-                    datafusion::functions::unicode::expr_fn::character_length(arg),
-                    datafusion::arrow::datatypes::DataType::Int64,
-                ),
-            ]))
+            // Use our custom _cypher_size UDF that dispatches at runtime based
+            // on whether the argument is a list, string, JSONB blob, or map.
+            Ok(dummy_udf_expr("_cypher_size", df_args))
         }
 
         // Single-argument math functions
@@ -1199,20 +1189,55 @@ fn translate_function_call(
         // Graph-specific functions (registered as UDFs)
         "ID" => {
             // When called with a bare variable (ID(n)), rewrite to the internal
-            // _vid column reference. The IdUdf is just a pass-through, so we can
-            // skip it entirely and return the column directly.
-            // For edge variables, _vid won't exist and will fall back to legacy.
+            // identity column reference (_vid for nodes, _eid for edges).
             if let Some(Expr::Variable(var)) = args.first() {
-                Ok(DfExpr::Column(Column::from_name(format!("{}._vid", var))))
+                let id_suffix = if let Some(ctx) = context
+                    && ctx.variable_kinds.get(var) == Some(&VariableKind::Edge)
+                {
+                    "_eid"
+                } else {
+                    "_vid"
+                };
+                Ok(DfExpr::Column(Column::from_name(format!(
+                    "{}.{}",
+                    var, id_suffix
+                ))))
             } else {
                 Ok(dummy_udf_expr("id", df_args))
             }
         }
-        "TYPE" | "LABELS" | "KEYS" | "PROPERTIES" | "UNI.TEMPORAL.VALIDAT" => {
-            // Rewrite bare variable arg to _vid column reference
+        "LABELS" | "KEYS" => {
+            // labels(n)/keys(n) expect the struct column representing the whole entity.
+            // The struct is built by add_structural_projection() and exposed as Column("n").
+            // df_args already has the correct resolution via the Variable case which
+            // returns Column("n") when variable_kinds context is present.
+            Ok(dummy_udf_expr(name, df_args))
+        }
+        "TYPE" => {
+            // type(r) returns the edge type name as a string.
+            // When context provides the edge type via variable_labels, emit a string literal.
+            if let Some(Expr::Variable(var)) = args.first()
+                && let Some(ctx) = context
+                && let Some(label) = ctx.variable_labels.get(var)
+            {
+                return Ok(lit(label.clone()));
+            }
+            // Fallback: pass through df_args
+            Ok(dummy_udf_expr("type", df_args))
+        }
+        "PROPERTIES" => {
+            // properties() needs the identity column reference
             let rewritten_args = if let Some(Expr::Variable(var)) = args.first() {
-                let vid_col = DfExpr::Column(Column::from_name(format!("{}._vid", var)));
-                let mut new_args = vec![vid_col];
+                let id_suffix = if let Some(ctx) = context
+                    && ctx.variable_kinds.get(var) == Some(&VariableKind::Edge)
+                {
+                    "_eid"
+                } else {
+                    "_vid"
+                };
+                let id_col =
+                    DfExpr::Column(Column::from_name(format!("{}.{}", var, id_suffix)));
+                let mut new_args = vec![id_col];
                 new_args.extend(df_args.into_iter().skip(1));
                 new_args
             } else {
@@ -1220,17 +1245,50 @@ fn translate_function_call(
             };
             Ok(dummy_udf_expr(name, rewritten_args))
         }
+        "UNI.TEMPORAL.VALIDAT" => {
+            // Expand uni.temporal.validAt(entity, start_prop, end_prop, timestamp)
+            // into: entity.start_prop <= timestamp AND (entity.end_prop IS NULL OR entity.end_prop > timestamp)
+            if let (
+                Some(Expr::Variable(var)),
+                Some(Expr::Literal(CypherLiteral::String(start_prop))),
+                Some(Expr::Literal(CypherLiteral::String(end_prop))),
+                Some(ts_expr),
+            ) = (args.first(), args.get(1), args.get(2), args.get(3))
+            {
+                let start_col =
+                    DfExpr::Column(Column::from_name(format!("{}.{}", var, start_prop)));
+                let end_col =
+                    DfExpr::Column(Column::from_name(format!("{}.{}", var, end_prop)));
+                let ts = cypher_expr_to_df(ts_expr, context)?;
+
+                // start_prop <= timestamp
+                let start_check = start_col.lt_eq(ts.clone());
+                // end_prop IS NULL OR end_prop > timestamp
+                let end_null = DfExpr::IsNull(Box::new(end_col.clone()));
+                let end_after = end_col.gt(ts);
+                let end_check = end_null.or(end_after);
+
+                Ok(start_check.and(end_check))
+            } else {
+                // Fallback: pass through as dummy UDF
+                Ok(dummy_udf_expr(name, df_args))
+            }
+        }
         "NODES" | "RELATIONSHIPS" => Ok(dummy_udf_expr(name, df_args)),
 
-        // Label predicate: hasLabel(n, 'Label') translates to n._label = 'Label'
+        // Label predicate: hasLabel(n, 'Label') translates to array_has(n._labels, 'Label')
         "HASLABEL" => {
             require_args(&df_args, 2, "hasLabel")?;
             // First arg should be a variable, second should be the label string
             if let Some(Expr::Variable(var)) = args.first() {
                 if let Some(Expr::Literal(CypherLiteral::String(label))) = args.get(1) {
-                    // Translate to: {var}._label = '{label}'
-                    let label_col = DfExpr::Column(Column::from_name(format!("{}._label", var)));
-                    Ok(label_col.eq(lit(label.clone())))
+                    // Translate to: array_has({var}._labels, '{label}')
+                    let labels_col =
+                        DfExpr::Column(Column::from_name(format!("{}._labels", var)));
+                    Ok(datafusion::functions_nested::expr_fn::array_has(
+                        labels_col,
+                        lit(label.clone()),
+                    ))
                 } else {
                     // Can't translate with non-string label - force fallback
                     Err(anyhow::anyhow!(
@@ -1366,10 +1424,16 @@ pub fn rewrite_overflow_filters_with_source(
             // For AND/OR, recurse into both sides
             if matches!(binary.op, Operator::And | Operator::Or) {
                 let left = rewrite_overflow_filters_with_source(
-                    *binary.left, variable, label_props, source_col_suffix,
+                    *binary.left,
+                    variable,
+                    label_props,
+                    source_col_suffix,
                 )?;
                 let right = rewrite_overflow_filters_with_source(
-                    *binary.right, variable, label_props, source_col_suffix,
+                    *binary.right,
+                    variable,
+                    label_props,
+                    source_col_suffix,
                 )?;
                 return Ok(DfExpr::BinaryExpr(
                     datafusion::logical_expr::expr::BinaryExpr::new(
@@ -1392,7 +1456,11 @@ pub fn rewrite_overflow_filters_with_source(
             ) {
                 // Try column on left, literal on right
                 if let Some((prop, rewritten)) = try_rewrite_column_literal_with_source(
-                    &binary.left, &binary.right, variable, label_props, source_col_suffix,
+                    &binary.left,
+                    &binary.right,
+                    variable,
+                    label_props,
+                    source_col_suffix,
                 ) {
                     let _ = prop;
                     return Ok(DfExpr::BinaryExpr(
@@ -1405,7 +1473,11 @@ pub fn rewrite_overflow_filters_with_source(
                 }
                 // Try column on right, literal on left
                 if let Some((prop, rewritten)) = try_rewrite_column_literal_with_source(
-                    &binary.right, &binary.left, variable, label_props, source_col_suffix,
+                    &binary.right,
+                    &binary.left,
+                    variable,
+                    label_props,
+                    source_col_suffix,
                 ) {
                     let _ = prop;
                     return Ok(DfExpr::BinaryExpr(
@@ -1422,13 +1494,20 @@ pub fn rewrite_overflow_filters_with_source(
         }
         DfExpr::Not(inner) => {
             let rewritten = rewrite_overflow_filters_with_source(
-                *inner, variable, label_props, source_col_suffix,
+                *inner,
+                variable,
+                label_props,
+                source_col_suffix,
             )?;
             Ok(DfExpr::Not(Box::new(rewritten)))
         }
         DfExpr::IsNull(inner) => {
             if let Some(rewritten) = try_rewrite_overflow_column_with_source(
-                &inner, variable, label_props, "json_get_string", source_col_suffix,
+                &inner,
+                variable,
+                label_props,
+                "json_get_string",
+                source_col_suffix,
             ) {
                 Ok(DfExpr::IsNull(Box::new(rewritten)))
             } else {
@@ -1437,7 +1516,11 @@ pub fn rewrite_overflow_filters_with_source(
         }
         DfExpr::IsNotNull(inner) => {
             if let Some(rewritten) = try_rewrite_overflow_column_with_source(
-                &inner, variable, label_props, "json_get_string", source_col_suffix,
+                &inner,
+                variable,
+                label_props,
+                "json_get_string",
+                source_col_suffix,
             ) {
                 Ok(DfExpr::IsNotNull(Box::new(rewritten)))
             } else {

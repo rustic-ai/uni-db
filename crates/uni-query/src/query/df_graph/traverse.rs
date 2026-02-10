@@ -625,8 +625,6 @@ async fn build_traverse_output_batch(
         return build_optional_null_batch(&input, &schema);
     }
 
-    let num_rows = expansions.len();
-
     // Build index array for take operation
     let indices: Vec<u64> = expansions.iter().map(|(idx, _, _)| *idx as u64).collect();
     let indices_array = UInt64Array::from(indices);
@@ -665,20 +663,25 @@ async fn build_traverse_output_batch(
                 columns.push(column);
             }
         } else {
-            // No label name — emit null columns for target properties
-            for field in schema.fields().iter() {
-                // Skip fields we've already added
-                if columns.len() >= schema.fields().len() {
-                    break;
-                }
-                // Only add nulls for remaining target property fields
-                if columns.len() > input.num_columns() {
-                    let null_col = arrow_array::new_null_array(field.data_type(), num_rows);
-                    columns.push(null_col);
-                    if columns.len() >= input.num_columns() + 1 + target_properties.len() {
-                        break;
-                    }
-                }
+            // No label name — use label-agnostic property lookup.
+            // This scans all label datasets, slower but correct for label-less traversals.
+            let prop_refs: Vec<&str> = target_properties.iter().map(|s| s.as_str()).collect();
+            let property_manager = graph_ctx.property_manager();
+            let query_ctx = graph_ctx.query_context();
+
+            let props_map = property_manager
+                .get_batch_vertex_props(&target_vids, &prop_refs, Some(&query_ctx))
+                .await
+                .map_err(|e| datafusion::error::DataFusionError::Execution(e.to_string()))?;
+
+            for prop_name in &target_properties {
+                let column = build_property_column_static(
+                    &target_vids,
+                    &props_map,
+                    prop_name,
+                    &arrow::datatypes::DataType::LargeBinary,
+                )?;
+                columns.push(column);
             }
         }
     }
@@ -723,6 +726,26 @@ async fn build_traverse_output_batch(
         // even when edge variable is not explicitly bound.
         let eid_u64s: Vec<u64> = expansions.iter().map(|(_, _, eid)| *eid).collect();
         columns.push(Arc::new(UInt64Array::from(eid_u64s)));
+    }
+
+    // DEBUG: Check for column type mismatches before creating the batch
+    if columns.len() != schema.fields().len() {
+        eprintln!(
+            "TRAVERSE: column count mismatch: {} columns vs {} schema fields",
+            columns.len(),
+            schema.fields().len()
+        );
+    }
+    for (i, (col, field)) in columns.iter().zip(schema.fields().iter()).enumerate() {
+        if col.data_type() != field.data_type() {
+            eprintln!(
+                "TRAVERSE: col[{}] '{}' type mismatch: actual={:?} expected={:?}",
+                i,
+                field.name(),
+                col.data_type(),
+                field.data_type()
+            );
+        }
     }
 
     let expanded_batch = RecordBatch::try_new(schema.clone(), columns)
@@ -1712,6 +1735,12 @@ pub struct GraphVariableLengthTraverseExec {
     /// Variable name for path (if path is bound).
     path_variable: Option<String>,
 
+    /// Target vertex properties to materialize.
+    target_properties: Vec<String>,
+
+    /// Target label name for property type resolution.
+    target_label_name: Option<String>,
+
     /// Whether this is an optional match (LEFT JOIN semantics).
     is_optional: bool,
 
@@ -1753,14 +1782,28 @@ impl GraphVariableLengthTraverseExec {
         max_hops: usize,
         target_variable: impl Into<String>,
         path_variable: Option<String>,
+        target_properties: Vec<String>,
+        target_label_name: Option<String>,
         graph_ctx: Arc<GraphExecutionContext>,
         is_optional: bool,
     ) -> Self {
         let source_column = source_column.into();
         let target_variable = target_variable.into();
 
+        // Resolve target property Arrow types from the schema
+        let uni_schema = graph_ctx.storage().schema_manager().schema();
+        let label_props = target_label_name
+            .as_deref()
+            .and_then(|ln| uni_schema.properties.get(ln));
+
         // Build output schema
-        let schema = Self::build_schema(input.schema(), &target_variable, path_variable.as_deref());
+        let schema = Self::build_schema(
+            input.schema(),
+            &target_variable,
+            path_variable.as_deref(),
+            &target_properties,
+            label_props,
+        );
         let properties = compute_plan_properties(schema.clone());
 
         Self {
@@ -1772,6 +1815,8 @@ impl GraphVariableLengthTraverseExec {
             max_hops,
             target_variable,
             path_variable,
+            target_properties,
+            target_label_name,
             is_optional,
             graph_ctx,
             schema,
@@ -1785,6 +1830,10 @@ impl GraphVariableLengthTraverseExec {
         input_schema: SchemaRef,
         target_variable: &str,
         path_variable: Option<&str>,
+        target_properties: &[String],
+        label_props: Option<
+            &std::collections::HashMap<String, uni_common::core::schema::PropertyMeta>,
+        >,
     ) -> SchemaRef {
         let mut fields: Vec<Field> = input_schema
             .fields()
@@ -1798,6 +1847,13 @@ impl GraphVariableLengthTraverseExec {
             DataType::UInt64,
             false,
         ));
+
+        // Add target vertex property columns
+        for prop_name in target_properties {
+            let col_name = format!("{}.{}", target_variable, prop_name);
+            let arrow_type = resolve_property_type(prop_name, label_props);
+            fields.push(Field::new(&col_name, arrow_type, true));
+        }
 
         // Add hop count
         fields.push(Field::new("_hop_count", DataType::UInt64, false));
@@ -1867,6 +1923,8 @@ impl ExecutionPlan for GraphVariableLengthTraverseExec {
             self.max_hops,
             self.target_variable.clone(),
             self.path_variable.clone(),
+            self.target_properties.clone(),
+            self.target_label_name.clone(),
             self.graph_ctx.clone(),
             self.is_optional,
         )))
@@ -1908,7 +1966,10 @@ impl GraphVariableLengthTraverseExec {
             direction: self.direction,
             min_hops: self.min_hops,
             max_hops: self.max_hops,
+            target_variable: self.target_variable.clone(),
             path_variable: self.path_variable.clone(),
+            target_properties: self.target_properties.clone(),
+            target_label_name: self.target_label_name.clone(),
             is_optional: self.is_optional,
             graph_ctx: self.graph_ctx.clone(),
         }
@@ -1922,7 +1983,10 @@ struct GraphVariableLengthTraverseExecData {
     direction: Direction,
     min_hops: usize,
     max_hops: usize,
+    target_variable: String,
     path_variable: Option<String>,
+    target_properties: Vec<String>,
+    target_label_name: Option<String>,
     is_optional: bool,
     graph_ctx: Arc<GraphExecutionContext>,
 }
@@ -1991,6 +2055,8 @@ enum VarLengthStreamState {
     Warming(Pin<Box<dyn std::future::Future<Output = DFResult<()>> + Send>>),
     /// Processing input batches.
     Reading,
+    /// Materializing target vertex properties asynchronously.
+    Materializing(Pin<Box<dyn std::future::Future<Output = DFResult<RecordBatch>> + Send>>),
     /// Stream is done.
     Done,
 }
@@ -2036,9 +2102,40 @@ impl Stream for GraphVariableLengthTraverseStream {
 
                     match self.input.poll_next_unpin(cx) {
                         Poll::Ready(Some(Ok(batch))) => {
-                            let result = self.process_batch(batch);
-                            self.state = VarLengthStreamState::Reading;
-                            return Poll::Ready(Some(result));
+                            // Build base batch synchronously (BFS + expand)
+                            let base_result = self.process_batch_base(batch);
+                            let base_batch = match base_result {
+                                Ok(b) => b,
+                                Err(e) => {
+                                    self.state = VarLengthStreamState::Reading;
+                                    return Poll::Ready(Some(Err(e)));
+                                }
+                            };
+
+                            // If no properties need async hydration, return directly
+                            if self.exec.target_properties.is_empty() {
+                                self.state = VarLengthStreamState::Reading;
+                                return Poll::Ready(Some(Ok(base_batch)));
+                            }
+
+                            // Properties needed — create async future for hydration
+                            let schema = self.schema.clone();
+                            let target_variable = self.exec.target_variable.clone();
+                            let target_properties = self.exec.target_properties.clone();
+                            let target_label_name = self.exec.target_label_name.clone();
+                            let graph_ctx = self.exec.graph_ctx.clone();
+
+                            let fut = hydrate_vlp_target_properties(
+                                base_batch,
+                                schema,
+                                target_variable,
+                                target_properties,
+                                target_label_name,
+                                graph_ctx,
+                            );
+
+                            self.state = VarLengthStreamState::Materializing(Box::pin(fut));
+                            // Continue loop to poll the future
                         }
                         Poll::Ready(Some(Err(e))) => {
                             self.state = VarLengthStreamState::Done;
@@ -2054,6 +2151,21 @@ impl Stream for GraphVariableLengthTraverseStream {
                         }
                     }
                 }
+                VarLengthStreamState::Materializing(mut fut) => match fut.as_mut().poll(cx) {
+                    Poll::Ready(Ok(batch)) => {
+                        self.state = VarLengthStreamState::Reading;
+                        self.metrics.record_output(batch.num_rows());
+                        return Poll::Ready(Some(Ok(batch)));
+                    }
+                    Poll::Ready(Err(e)) => {
+                        self.state = VarLengthStreamState::Done;
+                        return Poll::Ready(Some(Err(e)));
+                    }
+                    Poll::Pending => {
+                        self.state = VarLengthStreamState::Materializing(fut);
+                        return Poll::Pending;
+                    }
+                },
                 VarLengthStreamState::Done => {
                     return Poll::Ready(None);
                 }
@@ -2063,7 +2175,7 @@ impl Stream for GraphVariableLengthTraverseStream {
 }
 
 impl GraphVariableLengthTraverseStream {
-    fn process_batch(&self, batch: RecordBatch) -> DFResult<RecordBatch> {
+    fn process_batch_base(&self, batch: RecordBatch) -> DFResult<RecordBatch> {
         let source_col = batch
             .column_by_name(&self.exec.source_column)
             .ok_or_else(|| {
@@ -2132,6 +2244,15 @@ impl GraphVariableLengthTraverseStream {
             .map(|(_, vid, _, _, _)| vid.as_u64())
             .collect();
         columns.push(Arc::new(UInt64Array::from(target_vids)));
+
+        // Add null placeholder columns for target properties (hydrated async if needed)
+        for _ in &self.exec.target_properties {
+            let col_idx = columns.len();
+            if col_idx < self.schema.fields().len() {
+                let field = self.schema.field(col_idx);
+                columns.push(arrow_array::new_null_array(field.data_type(), num_rows));
+            }
+        }
 
         // Add hop count column
         let hop_counts: Vec<u64> = expansions
@@ -2299,6 +2420,97 @@ impl RecordBatchStream for GraphVariableLengthTraverseStream {
     fn schema(&self) -> SchemaRef {
         self.schema.clone()
     }
+}
+
+/// Hydrate target vertex properties into a VLP batch.
+///
+/// The base batch already has null placeholder columns for target properties.
+/// This function replaces them with actual property values fetched from storage.
+async fn hydrate_vlp_target_properties(
+    base_batch: RecordBatch,
+    schema: SchemaRef,
+    target_variable: String,
+    target_properties: Vec<String>,
+    target_label_name: Option<String>,
+    graph_ctx: Arc<GraphExecutionContext>,
+) -> DFResult<RecordBatch> {
+    if base_batch.num_rows() == 0 || target_properties.is_empty() {
+        return Ok(base_batch);
+    }
+
+    // Find the target VID column by exact name.
+    // Schema layout: [input cols..., target._vid, target.prop1..., _hop_count, path?]
+    let target_vid_col_name = format!("{}._vid", target_variable);
+    let target_vid_idx = schema.column_with_name(&target_vid_col_name);
+
+    let Some((vid_col_idx, _)) = target_vid_idx else {
+        return Ok(base_batch);
+    };
+
+    let vid_col = base_batch.column(vid_col_idx);
+    let target_vid_array = vid_col
+        .as_any()
+        .downcast_ref::<UInt64Array>()
+        .ok_or_else(|| {
+            datafusion::error::DataFusionError::Execution(
+                "Target VID column is not UInt64".to_string(),
+            )
+        })?;
+
+    let target_vids: Vec<Vid> = target_vid_array
+        .iter()
+        .map(|v| Vid::from(v.unwrap_or(0)))
+        .collect();
+
+    // Fetch properties from storage
+    let mut property_columns: Vec<ArrayRef> = Vec::new();
+
+    if let Some(ref label_name) = target_label_name {
+        let property_manager = graph_ctx.property_manager();
+        let query_ctx = graph_ctx.query_context();
+
+        let props_map = property_manager
+            .get_batch_vertex_props_for_label(&target_vids, label_name, Some(&query_ctx))
+            .await
+            .map_err(|e| datafusion::error::DataFusionError::Execution(e.to_string()))?;
+
+        let uni_schema = graph_ctx.storage().schema_manager().schema();
+        let label_props = uni_schema.properties.get(label_name.as_str());
+
+        for prop_name in &target_properties {
+            let data_type = resolve_property_type(prop_name, label_props);
+            let column =
+                build_property_column_static(&target_vids, &props_map, prop_name, &data_type)?;
+            property_columns.push(column);
+        }
+    } else {
+        // No label — emit null columns
+        for prop_name in &target_properties {
+            let _ = prop_name;
+            let null_col =
+                arrow_array::new_null_array(&arrow_schema::DataType::LargeBinary, target_vids.len());
+            property_columns.push(null_col);
+        }
+    }
+
+    // Rebuild batch replacing the null placeholder property columns with hydrated ones
+    let mut new_columns: Vec<ArrayRef> = Vec::with_capacity(schema.fields().len());
+    let mut prop_idx = 0;
+    for (col_idx, _field) in schema.fields().iter().enumerate() {
+        // Property columns start right after the target VID column
+        if col_idx > vid_col_idx
+            && col_idx <= vid_col_idx + target_properties.len()
+            && prop_idx < property_columns.len()
+        {
+            new_columns.push(property_columns[prop_idx].clone());
+            prop_idx += 1;
+        } else {
+            new_columns.push(base_batch.column(col_idx).clone());
+        }
+    }
+
+    RecordBatch::try_new(schema, new_columns)
+        .map_err(|e| datafusion::error::DataFusionError::ArrowError(Box::new(e), None))
 }
 
 // ============================================================================
@@ -3093,8 +3305,13 @@ mod tests {
             false,
         )]));
 
-        let output_schema =
-            GraphVariableLengthTraverseExec::build_schema(input_schema, "b", Some("p"));
+        let output_schema = GraphVariableLengthTraverseExec::build_schema(
+            input_schema,
+            "b",
+            Some("p"),
+            &[],
+            None,
+        );
 
         assert_eq!(output_schema.fields().len(), 4);
         assert_eq!(output_schema.field(0).name(), "a._vid");

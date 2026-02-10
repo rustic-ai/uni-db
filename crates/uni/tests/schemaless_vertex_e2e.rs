@@ -56,9 +56,7 @@ async fn test_schemaless_vertex_basic_return() -> Result<()> {
         .await?;
 
     // L0 read
-    let rows = db
-        .query("MATCH (g:Gadget) RETURN g.name, g.weight")
-        .await?;
+    let rows = db.query("MATCH (g:Gadget) RETURN g.name, g.weight").await?;
     assert_eq!(rows.len(), 1, "should find 1 vertex in L0");
     assert_eq!(rows.rows()[0].get::<String>("g.name")?, "Wrench");
 
@@ -73,9 +71,7 @@ async fn test_schemaless_vertex_basic_return() -> Result<()> {
     db.flush().await?;
 
     // Post-flush read
-    let rows = db
-        .query("MATCH (g:Gadget) RETURN g.name, g.weight")
-        .await?;
+    let rows = db.query("MATCH (g:Gadget) RETURN g.name, g.weight").await?;
     assert_eq!(rows.len(), 1, "should find 1 vertex after flush");
     assert_eq!(rows.rows()[0].get::<String>("g.name")?, "Wrench");
 
@@ -244,8 +240,14 @@ async fn test_schemaless_vertex_mixed_types() -> Result<()> {
             assert_eq!(items[1], Value::String("eu-west".to_string()));
         }
         Value::String(s) => {
-            assert!(s.contains("us-east"), "regions string should contain us-east");
-            assert!(s.contains("eu-west"), "regions string should contain eu-west");
+            assert!(
+                s.contains("us-east"),
+                "regions string should contain us-east"
+            );
+            assert!(
+                s.contains("eu-west"),
+                "regions string should contain eu-west"
+            );
         }
         other => panic!("unexpected regions type: {other:?}"),
     }
@@ -268,8 +270,7 @@ async fn test_schemaless_vertex_null_handling() -> Result<()> {
         .await?;
     db.execute("CREATE (:Reading {sensor: 'humidity', value: null})")
         .await?;
-    db.execute("CREATE (:Reading {sensor: 'pressure'})")
-        .await?; // value omitted entirely
+    db.execute("CREATE (:Reading {sensor: 'pressure'})").await?; // value omitted entirely
 
     db.flush().await?;
 

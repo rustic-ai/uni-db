@@ -172,21 +172,34 @@ impl HybridPhysicalPlanner {
             .get(variable)
             .map(|props| {
                 if props.contains("*") {
-                    let mut schema_props: Vec<String> = self
+                    let schema_props: Vec<String> = self
                         .schema
                         .properties
                         .get(schema_name)
                         .map(|p| p.keys().cloned().collect())
                         .unwrap_or_default();
-                    if schema_props.is_empty() {
-                        println!(
-                            "WARNING: No properties found in schema for {}, falling back to *",
-                            schema_name
-                        );
+
+                    // Collect explicit property names (non-wildcard, non-internal)
+                    let explicit: Vec<String> = props
+                        .iter()
+                        .filter(|p| *p != "*" && !p.starts_with('_'))
+                        .cloned()
+                        .collect();
+
+                    if schema_props.is_empty() && explicit.is_empty() {
+                        // Structural-only access, no specific properties needed
                         return vec!["*".to_string()];
                     }
-                    schema_props.sort();
-                    schema_props
+
+                    // Merge schema props + explicit props, dedup
+                    let mut combined: Vec<String> = schema_props;
+                    for p in explicit {
+                        if !combined.contains(&p) {
+                            combined.push(p);
+                        }
+                    }
+                    combined.sort();
+                    combined
                 } else {
                     let mut explicit_props: Vec<String> =
                         props.iter().filter(|p| *p != "*").cloned().collect();
@@ -228,11 +241,113 @@ impl HybridPhysicalPlanner {
     /// where bare variable references need to resolve to identity columns.
     fn translation_context_for_plan(&self, plan: &LogicalPlan) -> TranslationContext {
         let mut variable_kinds = HashMap::new();
+        let mut variable_labels = HashMap::new();
         collect_variable_kinds(plan, &mut variable_kinds);
+        self.collect_variable_labels(plan, &mut variable_labels);
         TranslationContext {
             parameters: self.params.clone(),
-            variable_labels: HashMap::new(),
+            variable_labels,
             variable_kinds,
+        }
+    }
+
+    /// Recursively collect variable-to-label/type mappings from a `LogicalPlan`.
+    ///
+    /// For node variables, maps to the first label name. For edge variables, maps
+    /// to the edge type name (when a single type is known). This is used by
+    /// `type(r)` to resolve the edge type as a string literal.
+    fn collect_variable_labels(
+        &self,
+        plan: &LogicalPlan,
+        labels: &mut HashMap<String, String>,
+    ) {
+        match plan {
+            LogicalPlan::Scan {
+                variable,
+                labels: scan_labels,
+                ..
+            } => {
+                if let Some(first) = scan_labels.first() {
+                    labels.insert(variable.clone(), first.clone());
+                }
+            }
+            LogicalPlan::ScanMainByLabels {
+                variable,
+                labels: scan_labels,
+                ..
+            } => {
+                if let Some(first) = scan_labels.first() {
+                    labels.insert(variable.clone(), first.clone());
+                }
+            }
+            LogicalPlan::Traverse {
+                input,
+                step_variable,
+                edge_type_ids,
+                target_variable,
+                target_label_id,
+                ..
+            } => {
+                self.collect_variable_labels(input, labels);
+                if let Some(sv) = step_variable
+                    && edge_type_ids.len() == 1
+                    && let Some(name) = self.schema.edge_type_name_by_id(edge_type_ids[0])
+                {
+                    labels.insert(sv.clone(), name.to_string());
+                }
+                if *target_label_id != 0
+                    && let Some(name) = self.schema.label_name_by_id(*target_label_id)
+                {
+                    labels.insert(target_variable.clone(), name.to_string());
+                }
+            }
+            LogicalPlan::TraverseMainByType {
+                input,
+                step_variable,
+                type_names,
+                ..
+            } => {
+                self.collect_variable_labels(input, labels);
+                if let Some(sv) = step_variable
+                    && type_names.len() == 1
+                {
+                    labels.insert(sv.clone(), type_names[0].clone());
+                }
+            }
+            // Wrapper nodes: recurse into input(s)
+            LogicalPlan::Filter { input, .. }
+            | LogicalPlan::Project { input, .. }
+            | LogicalPlan::Sort { input, .. }
+            | LogicalPlan::Limit { input, .. }
+            | LogicalPlan::Aggregate { input, .. }
+            | LogicalPlan::Distinct { input, .. }
+            | LogicalPlan::Window { input, .. }
+            | LogicalPlan::Unwind { input, .. }
+            | LogicalPlan::Create { input, .. }
+            | LogicalPlan::CreateBatch { input, .. }
+            | LogicalPlan::Merge { input, .. }
+            | LogicalPlan::Set { input, .. }
+            | LogicalPlan::Remove { input, .. }
+            | LogicalPlan::Delete { input, .. }
+            | LogicalPlan::Foreach { input, .. }
+            | LogicalPlan::SubqueryCall { input, .. } => {
+                self.collect_variable_labels(input, labels);
+            }
+            LogicalPlan::Union { left, right, .. }
+            | LogicalPlan::CrossJoin { left, right, .. } => {
+                self.collect_variable_labels(left, labels);
+                self.collect_variable_labels(right, labels);
+            }
+            LogicalPlan::Apply {
+                input, subquery, ..
+            } => {
+                self.collect_variable_labels(input, labels);
+                self.collect_variable_labels(subquery, labels);
+            }
+            LogicalPlan::Explain { plan } => {
+                self.collect_variable_labels(plan, labels);
+            }
+            _ => {}
         }
     }
 
@@ -598,7 +713,15 @@ impl HybridPhysicalPlanner {
                 query,
                 k,
                 threshold,
-            } => self.plan_vector_knn(*label_id, variable, property, query.clone(), *k, *threshold),
+            } => self.plan_vector_knn(
+                *label_id,
+                variable,
+                property,
+                query.clone(),
+                *k,
+                *threshold,
+                all_properties,
+            ),
 
             LogicalPlan::InvertedIndexLookup { .. } => Err(anyhow!(
                 "Full-text search not yet supported in DataFusion engine"
@@ -737,9 +860,13 @@ impl HybridPhysicalPlanner {
 
         let mut variable_kinds = HashMap::new();
         variable_kinds.insert(variable.to_string(), VariableKind::Node);
+        let mut variable_labels = HashMap::new();
+        if let Some(label) = label_name {
+            variable_labels.insert(variable.to_string(), label.to_string());
+        }
         let ctx = TranslationContext {
             parameters: self.params.clone(),
-            variable_labels: HashMap::new(),
+            variable_labels,
             variable_kinds,
         };
         let mut df_filter = cypher_expr_to_df(filter_expr, Some(&ctx))?;
@@ -825,6 +952,7 @@ impl HybridPhysicalPlanner {
     }
 
     /// Plan a vector KNN search.
+    #[expect(clippy::too_many_arguments)]
     fn plan_vector_knn(
         &self,
         label_id: u16,
@@ -833,11 +961,15 @@ impl HybridPhysicalPlanner {
         query_expr: Expr,
         k: usize,
         threshold: Option<f32>,
+        all_properties: &HashMap<String, HashSet<String>>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
         let label_name = self
             .schema
             .label_name_by_id(label_id)
             .ok_or_else(|| anyhow!("Unknown label ID: {}", label_id))?;
+
+        let target_properties =
+            self.resolve_properties(variable, label_name, all_properties);
 
         let knn = GraphVectorKnnExec::new(
             self.graph_ctx.clone(),
@@ -849,6 +981,7 @@ impl HybridPhysicalPlanner {
             k,
             threshold,
             self.params.clone(),
+            target_properties,
         );
 
         Ok(Arc::new(knn))
@@ -871,16 +1004,25 @@ impl HybridPhysicalPlanner {
         // Resolve properties collected from the entire plan tree, expanding "*" wildcards
         let mut properties = self.resolve_properties(variable, label_name, all_properties);
 
+        // Check if any projected property is NOT in the schema (needs overflow_json)
+        let label_props = self.schema.properties.get(label_name);
+        let has_projection_overflow = properties.iter().any(|p| {
+            p != "overflow_json"
+                && !p.starts_with('_')
+                && !label_props.is_some_and(|lp| lp.contains_key(p.as_str()))
+        });
+        if has_projection_overflow && !properties.iter().any(|p| p == "overflow_json") {
+            properties.push("overflow_json".to_string());
+        }
+
         // If the filter references overflow properties (not in schema), ensure
         // `overflow_json` is projected so the DataFusion FilterExec can read it.
         if let Some(filter_expr) = filter {
-            let label_props = self.schema.properties.get(label_name);
             let filter_props = crate::query::df_expr::collect_properties(filter_expr);
             let has_overflow = filter_props.iter().any(|(var, prop)| {
                 var == variable
                     && !prop.starts_with('_')
-                    && label_props
-                        .is_none_or(|props| !props.contains_key(prop.as_str()))
+                    && label_props.is_none_or(|props| !props.contains_key(prop.as_str()))
             });
             if has_overflow && !properties.iter().any(|p| p == "overflow_json") {
                 properties.push("overflow_json".to_string());
@@ -900,7 +1042,14 @@ impl HybridPhysicalPlanner {
             .get(variable)
             .is_some_and(|p| p.contains("*"))
         {
-            scan_plan = self.add_structural_projection(scan_plan, variable, &properties)?;
+            // Filter overflow_json from the structural projection — it's an internal
+            // column, not a user-visible property for the struct.
+            let struct_props: Vec<String> = properties
+                .iter()
+                .filter(|p| *p != "overflow_json")
+                .cloned()
+                .collect();
+            scan_plan = self.add_structural_projection(scan_plan, variable, &struct_props)?;
         }
 
         let filtered_plan =
@@ -929,8 +1078,9 @@ impl HybridPhysicalPlanner {
             .get(variable)
             .is_some_and(|p| p.contains("*"));
 
-        let has_filter = filter.is_some();
-        if (need_full || has_filter) && !properties.iter().any(|p| p == "_all_props") {
+        // Always include _all_props for schemaless scans so that downstream
+        // plan_filter can rewrite property accesses to json_get_* calls.
+        if !properties.iter().any(|p| p == "_all_props") {
             properties.push("_all_props".to_string());
         }
 
@@ -943,10 +1093,15 @@ impl HybridPhysicalPlanner {
                 None, // Filter will be applied as FilterExec on top
             ));
 
-        // If we need the full object (structural access), project _all_props (JSONB) as the variable
+        // If we need the full object (structural access), build a struct with _labels + properties.
+        // This enables labels(n)/keys(n) UDFs which expect a Struct column with a _labels field.
         if need_full {
-            let col_name = format!("{}.{}", variable, "_all_props");
-            scan_plan = self.add_alias_projection(scan_plan, variable, &col_name)?;
+            let struct_props: Vec<String> = properties
+                .iter()
+                .filter(|p| *p != "_all_props")
+                .cloned()
+                .collect();
+            scan_plan = self.add_structural_projection(scan_plan, variable, &struct_props)?;
         }
 
         let filtered_plan =
@@ -974,8 +1129,9 @@ impl HybridPhysicalPlanner {
             .get(variable)
             .is_some_and(|p| p.contains("*"));
 
-        let has_filter = filter.is_some();
-        if (need_full || has_filter) && !properties.iter().any(|p| p == "_all_props") {
+        // Always include _all_props for schemaless scans so that downstream
+        // plan_filter can rewrite property accesses to json_get_* calls.
+        if !properties.iter().any(|p| p == "_all_props") {
             properties.push("_all_props".to_string());
         }
 
@@ -988,10 +1144,15 @@ impl HybridPhysicalPlanner {
                 None,
             ));
 
-        // If we need the full object (structural access), project _all_props (JSONB) as the variable
+        // If we need the full object (structural access), build a struct with _labels + properties.
+        // This enables labels(n)/keys(n) UDFs which expect a Struct column with a _labels field.
         if need_full {
-            let col_name = format!("{}.{}", variable, "_all_props");
-            scan_plan = self.add_alias_projection(scan_plan, variable, &col_name)?;
+            let struct_props: Vec<String> = properties
+                .iter()
+                .filter(|p| *p != "_all_props")
+                .cloned()
+                .collect();
+            scan_plan = self.add_structural_projection(scan_plan, variable, &struct_props)?;
         }
 
         let filtered_plan =
@@ -1019,11 +1180,9 @@ impl HybridPhysicalPlanner {
             .get(variable)
             .is_some_and(|p| p.contains("*"));
 
-        // Always include _all_props for schemaless scans — needed for:
-        // - bare variable projection (need_full)
-        // - filter rewriting (json_get_* against _all_props)
-        let has_filter = filter.is_some();
-        if (need_full || has_filter) && !properties.iter().any(|p| p == "_all_props") {
+        // Always include _all_props for schemaless scans so that downstream
+        // plan_filter can rewrite property accesses to json_get_* calls.
+        if !properties.iter().any(|p| p == "_all_props") {
             properties.push("_all_props".to_string());
         }
 
@@ -1035,10 +1194,15 @@ impl HybridPhysicalPlanner {
                 None, // Filter will be applied as FilterExec on top
             ));
 
-        // If we need the full object (structural access), project _all_props (JSONB) as the variable
+        // If we need the full object (structural access), build a struct with _labels + properties.
+        // This enables labels(n)/keys(n) UDFs which expect a Struct column with a _labels field.
         if need_full {
-            let col_name = format!("{}.{}", variable, "_all_props");
-            scan_plan = self.add_alias_projection(scan_plan, variable, &col_name)?;
+            let struct_props: Vec<String> = properties
+                .iter()
+                .filter(|p| *p != "_all_props")
+                .cloned()
+                .collect();
+            scan_plan = self.add_structural_projection(scan_plan, variable, &struct_props)?;
         }
 
         let filtered_plan =
@@ -1075,13 +1239,13 @@ impl HybridPhysicalPlanner {
 
         let traverse_plan: Arc<dyn ExecutionPlan> = if !is_variable_length {
             // Extract edge properties for pushdown hydration, expanding "*" wildcards
-            let edge_properties: Vec<String> = if let Some(edge_var) = step_variable {
+            let mut edge_properties: Vec<String> = if let Some(edge_var) = step_variable {
                 let has_wildcard = all_properties
                     .get(edge_var)
                     .is_some_and(|props| props.contains("*"));
                 if has_wildcard {
-                    // Expand to all properties across all matching edge types
-                    edge_type_ids
+                    // Expand to all schema-defined properties across all matching edge types
+                    let mut schema_props: Vec<String> = edge_type_ids
                         .iter()
                         .filter_map(|eid| self.schema.edge_type_name_by_id(*eid))
                         .flat_map(|name| {
@@ -1091,7 +1255,18 @@ impl HybridPhysicalPlanner {
                                 .map(|p| p.keys().cloned().collect::<Vec<_>>())
                                 .unwrap_or_default()
                         })
-                        .collect()
+                        .collect();
+
+                    // Also include explicitly referenced properties (non-wildcard, non-internal)
+                    // that may be overflow properties not in the schema
+                    if let Some(props) = all_properties.get(edge_var) {
+                        for p in props {
+                            if p != "*" && !p.starts_with('_') && !schema_props.contains(p) {
+                                schema_props.push(p.clone());
+                            }
+                        }
+                    }
+                    schema_props
                 } else {
                     all_properties
                         .get(edge_var)
@@ -1102,10 +1277,59 @@ impl HybridPhysicalPlanner {
                 Vec::new()
             };
 
+            // Check if any edge property is NOT in the schema (needs overflow_json)
+            if let Some(edge_var) = step_variable {
+                let edge_type_name = edge_type_ids
+                    .first()
+                    .and_then(|&id| self.schema.edge_type_name_by_id(id));
+                let edge_type_props =
+                    edge_type_name.and_then(|name| self.schema.properties.get(name));
+                let has_overflow_edge_props = edge_properties.iter().any(|p| {
+                    p != "overflow_json"
+                        && !p.starts_with('_')
+                        && !edge_type_props.is_some_and(|tp| tp.contains_key(p.as_str()))
+                });
+                if has_overflow_edge_props && !edge_properties.iter().any(|p| p == "overflow_json")
+                {
+                    edge_properties.push("overflow_json".to_string());
+                }
+                let _ = edge_var; // suppress unused warning
+            }
+
             // Extract target vertex properties, expanding "*" wildcards
             let target_label_name_str = self.schema.label_name_by_id(target_label_id).unwrap_or("");
-            let target_properties =
+            let mut target_properties =
                 self.resolve_properties(target_variable, target_label_name_str, all_properties);
+
+            // Check if any target vertex property is NOT in the schema (needs overflow_json)
+            if !target_label_name_str.is_empty() {
+                let target_label_props = self.schema.properties.get(target_label_name_str);
+                let has_overflow_target_props = target_properties.iter().any(|p| {
+                    p != "overflow_json"
+                        && !p.starts_with('_')
+                        && !target_label_props.is_some_and(|lp| lp.contains_key(p.as_str()))
+                });
+                if has_overflow_target_props
+                    && !target_properties.iter().any(|p| p == "overflow_json")
+                {
+                    target_properties.push("overflow_json".to_string());
+                }
+            }
+            // Also add overflow_json for target if the filter references overflow target properties
+            if let Some(filter_expr) = target_filter
+                && !target_label_name_str.is_empty()
+            {
+                let filter_props = crate::query::df_expr::collect_properties(filter_expr);
+                let target_label_props = self.schema.properties.get(target_label_name_str);
+                let has_overflow = filter_props.iter().any(|(var, prop)| {
+                    var == target_variable
+                        && !prop.starts_with('_')
+                        && target_label_props.is_none_or(|props| !props.contains_key(prop.as_str()))
+                });
+                if has_overflow && !target_properties.iter().any(|p| p == "overflow_json") {
+                    target_properties.push("overflow_json".to_string());
+                }
+            }
 
             // Resolve target label name for property type lookups
             let target_label_name = if target_label_name_str.is_empty() {
@@ -1193,18 +1417,36 @@ impl HybridPhysicalPlanner {
                 ));
             }
 
-            Arc::new(GraphVariableLengthTraverseExec::new(
-                input_plan,
-                source_col,
-                edge_type_ids[0],
-                adj_direction,
-                min_hops,
-                max_hops,
-                target_variable.to_string(),
-                path_variable.map(|s| s.to_string()),
-                self.graph_ctx.clone(),
-                optional,
-            ))
+            {
+                // Resolve target properties for VLP (same logic as single-hop above)
+                let vlp_target_label_name_str =
+                    self.schema.label_name_by_id(target_label_id).unwrap_or("");
+                let vlp_target_properties = self.resolve_properties(
+                    target_variable,
+                    vlp_target_label_name_str,
+                    all_properties,
+                );
+                let vlp_target_label_name = if vlp_target_label_name_str.is_empty() {
+                    None
+                } else {
+                    Some(vlp_target_label_name_str.to_string())
+                };
+
+                Arc::new(GraphVariableLengthTraverseExec::new(
+                    input_plan,
+                    source_col,
+                    edge_type_ids[0],
+                    adj_direction,
+                    min_hops,
+                    max_hops,
+                    target_variable.to_string(),
+                    path_variable.map(|s| s.to_string()),
+                    vlp_target_properties,
+                    vlp_target_label_name,
+                    self.graph_ctx.clone(),
+                    optional,
+                ))
+            }
         };
 
         // Apply target filter if present
@@ -1219,12 +1461,59 @@ impl HybridPhysicalPlanner {
             if let Some(pv) = path_variable {
                 variable_kinds.insert(pv.to_string(), VariableKind::Path);
             }
+            let mut variable_labels = HashMap::new();
+            if let Some(sv) = step_variable
+                && edge_type_ids.len() == 1
+                && let Some(name) = self.schema.edge_type_name_by_id(edge_type_ids[0])
+            {
+                variable_labels.insert(sv.to_string(), name.to_string());
+            }
+            let target_label_name_str =
+                self.schema.label_name_by_id(target_label_id).unwrap_or("");
+            if !target_label_name_str.is_empty() {
+                variable_labels
+                    .insert(target_variable.to_string(), target_label_name_str.to_string());
+            }
             let ctx = TranslationContext {
                 parameters: self.params.clone(),
-                variable_labels: HashMap::new(),
+                variable_labels,
                 variable_kinds,
             };
-            let df_filter = cypher_expr_to_df(filter_expr, Some(&ctx))?;
+            let mut df_filter = cypher_expr_to_df(filter_expr, Some(&ctx))?;
+
+            // Rewrite overflow property references in the filter to json_get_* UDF calls.
+            // Target vertex: rewrite against overflow_json using target label schema
+            {
+                if !target_label_name_str.is_empty() {
+                    let empty_props = HashMap::new();
+                    let label_props = self
+                        .schema
+                        .properties
+                        .get(target_label_name_str)
+                        .unwrap_or(&empty_props);
+                    df_filter = crate::query::df_expr::rewrite_overflow_filters(
+                        df_filter,
+                        target_variable,
+                        Some(label_props),
+                    )?;
+                }
+            }
+            // Step edge: rewrite against overflow_json using edge type schema
+            if let Some(sv) = step_variable {
+                let edge_type_name = edge_type_ids
+                    .first()
+                    .and_then(|&id| self.schema.edge_type_name_by_id(id));
+                let empty_props = HashMap::new();
+                let edge_type_props = edge_type_name
+                    .and_then(|name| self.schema.properties.get(name))
+                    .unwrap_or(&empty_props);
+                df_filter = crate::query::df_expr::rewrite_overflow_filters(
+                    df_filter,
+                    sv,
+                    Some(edge_type_props),
+                )?;
+            }
+
             let final_filter = if optional {
                 // For OPTIONAL MATCH, allow NULL rows through (unmatched rows have NULL target VID)
                 let target_vid_col = format!("{}._vid", target_variable);
@@ -1284,10 +1573,16 @@ impl HybridPhysicalPlanner {
         };
 
         // Extract target vertex properties
-        let target_properties: Vec<String> = all_properties
+        let mut target_properties: Vec<String> = all_properties
             .get(target_variable)
             .map(|props| props.iter().filter(|p| *p != "*").cloned().collect())
             .unwrap_or_default();
+
+        // Always include _all_props so post-traverse filters can rewrite
+        // property accesses to json_get_* calls against the JSONB blob.
+        if !target_properties.is_empty() && !target_properties.iter().any(|p| p == "_all_props") {
+            target_properties.push("_all_props".to_string());
+        }
 
         // Create the schemaless traversal execution plan
         let traverse_plan = Arc::new(GraphTraverseMainExec::new(
@@ -1331,10 +1626,16 @@ impl HybridPhysicalPlanner {
         let source_col = format!("{}._vid", source_variable);
 
         // Extract target vertex properties
-        let target_properties: Vec<String> = all_properties
+        let mut target_properties: Vec<String> = all_properties
             .get(target_variable)
             .map(|props| props.iter().filter(|p| *p != "*").cloned().collect())
             .unwrap_or_default();
+
+        // Always include _all_props so post-traverse filters can rewrite
+        // property accesses to json_get_* calls against the JSONB blob.
+        if !target_properties.is_empty() && !target_properties.iter().any(|p| p == "_all_props") {
+            target_properties.push("_all_props".to_string());
+        }
 
         let traverse_plan = Arc::new(GraphVariableLengthTraverseMainExec::new(
             input_plan,
@@ -1404,22 +1705,57 @@ impl HybridPhysicalPlanner {
         if has_schemaless_cols {
             // Use logical-level rewriting: convert to DfExpr, rewrite, then compile
             let ctx = self.translation_context_for_plan(input);
-            let mut df_filter =
-                crate::query::df_expr::cypher_expr_to_df(predicate, Some(&ctx))?;
+            let mut df_filter = crate::query::df_expr::cypher_expr_to_df(predicate, Some(&ctx))?;
 
-            // Rewrite for each variable that has _all_props
+            // Rewrite for each variable that has _all_props (schemaless columns)
             let empty_props = HashMap::new();
             for field in schema.fields() {
-                if field.name().ends_with("._all_props") {
-                    if let Some(var) = field.name().strip_suffix("._all_props") {
-                        df_filter =
-                            crate::query::df_expr::rewrite_overflow_filters_with_source(
-                                df_filter,
-                                var,
-                                Some(&empty_props),
-                                "_all_props",
-                            )?;
-                    }
+                if field.name().ends_with("._all_props")
+                    && let Some(var) = field.name().strip_suffix("._all_props")
+                {
+                    df_filter = crate::query::df_expr::rewrite_overflow_filters_with_source(
+                        df_filter,
+                        var,
+                        Some(&empty_props),
+                        "_all_props",
+                    )?;
+                }
+            }
+
+            // Rewrite for each variable that has overflow_json (known-label with overflow)
+            for field in schema.fields() {
+                if field.name().ends_with(".overflow_json")
+                    && let Some(var) = field.name().strip_suffix(".overflow_json")
+                {
+                    // Build schema props for this variable from the output schema:
+                    // non-LargeBinary property columns are schema-defined
+                    let prefix = format!("{}.", var);
+                    let dummy_meta = uni_common::core::schema::PropertyMeta {
+                        r#type: uni_common::core::schema::DataType::String,
+                        nullable: true,
+                        added_in: 1,
+                        state: uni_common::core::schema::SchemaElementState::Active,
+                        generation_expression: None,
+                    };
+                    let schema_props: HashMap<String, uni_common::core::schema::PropertyMeta> =
+                        schema
+                            .fields()
+                            .iter()
+                            .filter(|f| {
+                                f.name().starts_with(&prefix)
+                                    && f.data_type() != &arrow::datatypes::DataType::LargeBinary
+                            })
+                            .filter_map(|f| {
+                                f.name()
+                                    .strip_prefix(&prefix)
+                                    .map(|prop| (prop.to_string(), dummy_meta.clone()))
+                            })
+                            .collect();
+                    df_filter = crate::query::df_expr::rewrite_overflow_filters(
+                        df_filter,
+                        var,
+                        Some(&schema_props),
+                    )?;
                 }
             }
 
@@ -1501,13 +1837,31 @@ impl HybridPhysicalPlanner {
                         let ve: Arc<dyn datafusion::physical_expr::PhysicalExpr> = Arc::new(
                             datafusion::physical_expr::expressions::Column::new(&vid_col, vi),
                         );
-                        exprs.push((ve, vid_col));
+                        exprs.push((ve, vid_col.clone()));
                     }
                     if let Some((li, _)) = schema.column_with_name(&labels_col) {
                         let le: Arc<dyn datafusion::physical_expr::PhysicalExpr> = Arc::new(
                             datafusion::physical_expr::expressions::Column::new(&labels_col, li),
                         );
-                        exprs.push((le, labels_col));
+                        exprs.push((le, labels_col.clone()));
+                    }
+
+                    // Carry through all {var}.{prop} columns so downstream
+                    // operators (e.g. RETURN n.name after WITH n) can find them.
+                    let prefix = format!("{}.", var_name);
+                    for (idx, field) in schema.fields().iter().enumerate() {
+                        let fname = field.name();
+                        if fname.starts_with(&prefix)
+                            && fname != &vid_col
+                            && fname != &labels_col
+                            && !exprs.iter().any(|(_, n)| n == fname)
+                        {
+                            let prop_expr: Arc<dyn datafusion::physical_expr::PhysicalExpr> =
+                                Arc::new(
+                                    datafusion::physical_expr::expressions::Column::new(fname, idx),
+                                );
+                            exprs.push((prop_expr, fname.clone()));
+                        }
                     }
                     continue;
                 }
@@ -1533,15 +1887,14 @@ impl HybridPhysicalPlanner {
                         let prop_name = &field_name[prefix.len()..];
                         struct_args.push(lit(prop_name.to_string()));
                         // Use Column::from_name to avoid dot-parsing (b._vid != table b, col _vid)
-                        struct_args.push(DfExpr::Column(
-                            datafusion::common::Column::from_name(field_name.as_str()),
-                        ));
+                        struct_args.push(DfExpr::Column(datafusion::common::Column::from_name(
+                            field_name.as_str(),
+                        )));
                     }
 
                     let struct_expr = named_struct(struct_args);
-                    let df_schema = datafusion::common::DFSchema::try_from(
-                        schema.as_ref().clone(),
-                    )?;
+                    let df_schema =
+                        datafusion::common::DFSchema::try_from(schema.as_ref().clone())?;
                     let session = self.session_ctx.read();
                     let state_ref = session.state();
                     let resolved_expr = Self::resolve_udfs(&struct_expr, &state_ref)?;
@@ -1565,13 +1918,30 @@ impl HybridPhysicalPlanner {
                         let ve: Arc<dyn datafusion::physical_expr::PhysicalExpr> = Arc::new(
                             datafusion::physical_expr::expressions::Column::new(&vid_col, vi),
                         );
-                        exprs.push((ve, vid_col));
+                        exprs.push((ve, vid_col.clone()));
                     }
                     if let Some((li, _)) = schema.column_with_name(&labels_col) {
                         let le: Arc<dyn datafusion::physical_expr::PhysicalExpr> = Arc::new(
                             datafusion::physical_expr::expressions::Column::new(&labels_col, li),
                         );
-                        exprs.push((le, labels_col));
+                        exprs.push((le, labels_col.clone()));
+                    }
+
+                    // Carry through remaining {var}.{prop} columns not already
+                    // included by the struct projection above.
+                    for (idx, field) in schema.fields().iter().enumerate() {
+                        let fname = field.name();
+                        if fname.starts_with(&prefix)
+                            && fname != &vid_col
+                            && fname != &labels_col
+                            && !exprs.iter().any(|(_, n)| n == fname)
+                        {
+                            let prop_expr: Arc<dyn datafusion::physical_expr::PhysicalExpr> =
+                                Arc::new(
+                                    datafusion::physical_expr::expressions::Column::new(fname, idx),
+                                );
+                            exprs.push((prop_expr, fname.clone()));
+                        }
                     }
                     continue;
                 }
@@ -2316,46 +2686,6 @@ impl HybridPhysicalPlanner {
             planner.create_physical_expr(&resolved_expr, &df_schema, &state)?;
 
         proj_exprs.push((physical_struct_expr, variable.to_string()));
-
-        Ok(Arc::new(ProjectionExec::try_new(proj_exprs, input)?))
-    }
-
-    /// Add an alias projection: existing columns + col_name AS alias.
-    fn add_alias_projection(
-        &self,
-        input: Arc<dyn ExecutionPlan>,
-        alias: &str,
-        col_name: &str,
-    ) -> Result<Arc<dyn ExecutionPlan>> {
-        use datafusion::physical_plan::projection::ProjectionExec;
-
-        let input_schema = input.schema();
-        let mut proj_exprs: Vec<(Arc<dyn datafusion::physical_expr::PhysicalExpr>, String)> =
-            Vec::new();
-
-        // 1. Keep all existing columns
-        for (i, field) in input_schema.fields().iter().enumerate() {
-            let col_expr = Arc::new(datafusion::physical_expr::expressions::Column::new(
-                field.name(),
-                i,
-            ));
-            proj_exprs.push((col_expr, field.name().clone()));
-        }
-
-        // 2. Add alias
-        if let Some((i, f)) = input_schema.column_with_name(col_name) {
-            let col_expr = Arc::new(datafusion::physical_expr::expressions::Column::new(
-                f.name(),
-                i,
-            ));
-            proj_exprs.push((col_expr, alias.to_string()));
-        } else {
-            return Err(anyhow!(
-                "Column {} not found for aliasing to {}",
-                col_name,
-                alias
-            ));
-        }
 
         Ok(Arc::new(ProjectionExec::try_new(proj_exprs, input)?))
     }
