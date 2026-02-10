@@ -2658,7 +2658,7 @@ pub(crate) fn get_property_value(
 /// Uses `jsonb::parse_value` (JSON text parsing) instead of `jsonb::to_owned_jsonb`
 /// (serde serialization) because `serde_json::Number` does not serialize correctly
 /// through serde — it produces a tagged struct string instead of a JSONB number.
-fn serde_json_to_jsonb(val: &serde_json::Value) -> Result<Vec<u8>, String> {
+pub(crate) fn serde_json_to_jsonb(val: &serde_json::Value) -> Result<Vec<u8>, String> {
     let json_str =
         serde_json::to_string(val).map_err(|e| format!("JSON serialization failed: {e}"))?;
     let jsonb_bytes =

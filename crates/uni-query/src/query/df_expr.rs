@@ -1222,7 +1222,10 @@ fn translate_function_call(
             {
                 return Ok(lit(label.clone()));
             }
-            // Fallback: pass through df_args
+            // Fallback: use _type column from traverse output (schemaless edges)
+            if let Some(Expr::Variable(var)) = args.first() {
+                return Ok(DfExpr::Column(Column::from_name(format!("{}._type", var))));
+            }
             Ok(dummy_udf_expr("type", df_args))
         }
         "PROPERTIES" => {

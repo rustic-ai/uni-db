@@ -284,6 +284,13 @@ impl GraphTraverseExec {
         let target_vid_name = format!("{}._vid", target_variable);
         fields.push(Field::new(&target_vid_name, DataType::UInt64, optional));
 
+        // Add target ._labels column (List(Utf8)) for labels() and structural projection support
+        fields.push(Field::new(
+            format!("{}._labels", target_variable),
+            DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
+            true,
+        ));
+
         // Add target vertex property columns
         for prop_name in target_properties {
             let col_name = format!("{}.{}", target_variable, prop_name);
@@ -295,6 +302,13 @@ impl GraphTraverseExec {
         if let Some(edge_var) = edge_variable {
             let edge_id_name = format!("{}._eid", edge_var);
             fields.push(Field::new(&edge_id_name, DataType::UInt64, optional));
+
+            // Add edge _type column for type(r) support
+            fields.push(Field::new(
+                format!("{}._type", edge_var),
+                DataType::Utf8,
+                true,
+            ));
 
             // Add edge property columns with types resolved from schema
             for prop_name in edge_properties {
@@ -486,7 +500,8 @@ struct GraphTraverseStream {
 
 impl GraphTraverseStream {
     /// Expand neighbors synchronously and return expansions.
-    fn expand_neighbors(&self, batch: &RecordBatch) -> DFResult<Vec<(usize, Vid, u64)>> {
+    /// Returns (row_idx, target_vid, eid_u64, edge_type_id).
+    fn expand_neighbors(&self, batch: &RecordBatch) -> DFResult<Vec<(usize, Vid, u64, u32)>> {
         let source_col = batch.column_by_name(&self.source_column).ok_or_else(|| {
             datafusion::error::DataFusionError::Execution(format!(
                 "Source column '{}' not found",
@@ -523,7 +538,7 @@ impl GraphTraverseStream {
             })
             .collect();
 
-        let mut expanded_rows: Vec<(usize, Vid, u64)> = Vec::new();
+        let mut expanded_rows: Vec<(usize, Vid, u64, u32)> = Vec::new();
         let is_undirected = matches!(self.direction, Direction::Both);
 
         for (row_idx, source_vid) in source_vids.iter().enumerate() {
@@ -589,7 +604,7 @@ impl GraphTraverseStream {
                         }
                     }
 
-                    expanded_rows.push((row_idx, target_vid, eid_u64));
+                    expanded_rows.push((row_idx, target_vid, eid_u64, edge_type));
                 }
             }
         }
@@ -608,7 +623,7 @@ impl GraphTraverseStream {
 )]
 async fn build_traverse_output_batch(
     input: RecordBatch,
-    expansions: Vec<(usize, Vid, u64)>,
+    expansions: Vec<(usize, Vid, u64, u32)>,
     schema: SchemaRef,
     edge_variable: Option<String>,
     edge_properties: Vec<String>,
@@ -626,7 +641,7 @@ async fn build_traverse_output_batch(
     }
 
     // Build index array for take operation
-    let indices: Vec<u64> = expansions.iter().map(|(idx, _, _)| *idx as u64).collect();
+    let indices: Vec<u64> = expansions.iter().map(|(idx, _, _, _)| *idx as u64).collect();
     let indices_array = UInt64Array::from(indices);
 
     // Expand input columns
@@ -637,9 +652,40 @@ async fn build_traverse_output_batch(
     }
 
     // Add target VID column
-    let target_vids: Vec<Vid> = expansions.iter().map(|(_, vid, _)| *vid).collect();
+    let target_vids: Vec<Vid> = expansions.iter().map(|(_, vid, _, _)| *vid).collect();
     let target_vid_u64s: Vec<u64> = target_vids.iter().map(|v| v.as_u64()).collect();
     columns.push(Arc::new(UInt64Array::from(target_vid_u64s)));
+
+    // Add target ._labels column (from L0 buffers)
+    {
+        use arrow_array::builder::{ListBuilder, StringBuilder};
+        let l0_ctx = graph_ctx.l0_context();
+        let mut labels_builder = ListBuilder::new(StringBuilder::new());
+        for vid in &target_vids {
+            let mut row_labels: Vec<String> = Vec::new();
+            // If we have a target_label_name from the schema, include it
+            if let Some(ref label_name) = target_label_name {
+                row_labels.push(label_name.clone());
+            }
+            // Overlay L0 labels
+            for l0 in l0_ctx.iter_l0_buffers() {
+                let guard = l0.read();
+                if let Some(l0_labels) = guard.vertex_labels.get(vid) {
+                    for lbl in l0_labels {
+                        if !row_labels.contains(lbl) {
+                            row_labels.push(lbl.clone());
+                        }
+                    }
+                }
+            }
+            let values = labels_builder.values();
+            for lbl in &row_labels {
+                values.append_value(lbl);
+            }
+            labels_builder.append(true);
+        }
+        columns.push(Arc::new(labels_builder.finish()));
+    }
 
     // Add target vertex property columns (async)
     if !target_properties.is_empty() {
@@ -665,23 +711,70 @@ async fn build_traverse_output_batch(
         } else {
             // No label name — use label-agnostic property lookup.
             // This scans all label datasets, slower but correct for label-less traversals.
-            let prop_refs: Vec<&str> = target_properties.iter().map(|s| s.as_str()).collect();
+            let non_internal_props: Vec<&str> = target_properties
+                .iter()
+                .filter(|p| *p != "_all_props")
+                .map(|s| s.as_str())
+                .collect();
             let property_manager = graph_ctx.property_manager();
             let query_ctx = graph_ctx.query_context();
 
-            let props_map = property_manager
-                .get_batch_vertex_props(&target_vids, &prop_refs, Some(&query_ctx))
-                .await
-                .map_err(|e| datafusion::error::DataFusionError::Execution(e.to_string()))?;
+            let props_map = if !non_internal_props.is_empty() {
+                property_manager
+                    .get_batch_vertex_props(&target_vids, &non_internal_props, Some(&query_ctx))
+                    .await
+                    .map_err(|e| datafusion::error::DataFusionError::Execution(e.to_string()))?
+            } else {
+                std::collections::HashMap::new()
+            };
 
             for prop_name in &target_properties {
-                let column = build_property_column_static(
-                    &target_vids,
-                    &props_map,
-                    prop_name,
-                    &arrow::datatypes::DataType::LargeBinary,
-                )?;
-                columns.push(column);
+                if prop_name == "_all_props" {
+                    // Build JSONB blob from all vertex properties (L0 + storage)
+                    use arrow_array::builder::LargeBinaryBuilder;
+                    use crate::query::df_graph::scan::serde_json_to_jsonb;
+
+                    let mut builder = LargeBinaryBuilder::new();
+                    let l0_ctx = graph_ctx.l0_context();
+                    for vid in &target_vids {
+                        let mut merged_props = serde_json::Map::new();
+                        // Collect from storage-hydrated props
+                        if let Some(vid_props) = props_map.get(vid) {
+                            for (k, v) in vid_props.iter() {
+                                let json_val: serde_json::Value = v.clone().into();
+                                merged_props.insert(k.to_string(), json_val);
+                            }
+                        }
+                        // Overlay L0 properties
+                        for l0 in l0_ctx.iter_l0_buffers() {
+                            let guard = l0.read();
+                            if let Some(l0_props) = guard.vertex_properties.get(vid) {
+                                for (k, v) in l0_props.iter() {
+                                    let json_val: serde_json::Value = v.clone().into();
+                                    merged_props.insert(k.to_string(), json_val);
+                                }
+                            }
+                        }
+                        if merged_props.is_empty() {
+                            builder.append_null();
+                        } else {
+                            let json = serde_json::Value::Object(merged_props);
+                            match serde_json_to_jsonb(&json) {
+                                Ok(bytes) => builder.append_value(bytes),
+                                Err(_) => builder.append_null(),
+                            }
+                        }
+                    }
+                    columns.push(Arc::new(builder.finish()));
+                } else {
+                    let column = build_property_column_static(
+                        &target_vids,
+                        &props_map,
+                        prop_name,
+                        &arrow::datatypes::DataType::LargeBinary,
+                    )?;
+                    columns.push(column);
+                }
             }
         }
     }
@@ -690,10 +783,24 @@ async fn build_traverse_output_batch(
     if edge_variable.is_some() {
         let eids: Vec<Eid> = expansions
             .iter()
-            .map(|(_, _, eid)| Eid::from(*eid))
+            .map(|(_, _, eid, _)| Eid::from(*eid))
             .collect();
         let eid_u64s: Vec<u64> = eids.iter().map(|e| e.as_u64()).collect();
         columns.push(Arc::new(UInt64Array::from(eid_u64s)));
+
+        // Add edge _type column
+        {
+            let uni_schema = graph_ctx.storage().schema_manager().schema();
+            let mut type_builder = arrow_array::builder::StringBuilder::new();
+            for (_, _, _, edge_type_id) in &expansions {
+                if let Some(name) = uni_schema.edge_type_name_by_id(*edge_type_id) {
+                    type_builder.append_value(name);
+                } else {
+                    type_builder.append_null();
+                }
+            }
+            columns.push(Arc::new(type_builder.finish()));
+        }
 
         if !edge_properties.is_empty() {
             let prop_name_refs: Vec<&str> = edge_properties.iter().map(|s| s.as_str()).collect();
@@ -724,7 +831,7 @@ async fn build_traverse_output_batch(
     } else {
         // Add internal edge ID column for relationship uniqueness tracking
         // even when edge variable is not explicitly bound.
-        let eid_u64s: Vec<u64> = expansions.iter().map(|(_, _, eid)| *eid).collect();
+        let eid_u64s: Vec<u64> = expansions.iter().map(|(_, _, eid, _)| *eid).collect();
         columns.push(Arc::new(UInt64Array::from(eid_u64s)));
     }
 
@@ -753,7 +860,7 @@ async fn build_traverse_output_batch(
 
     if optional {
         // Identify source rows that had no expansions and append null rows for them
-        let expanded_indices: HashSet<usize> = expansions.iter().map(|(idx, _, _)| *idx).collect();
+        let expanded_indices: HashSet<usize> = expansions.iter().map(|(idx, _, _, _)| *idx).collect();
         let unmatched: Vec<usize> = (0..input.num_rows())
             .filter(|idx| !expanded_indices.contains(idx))
             .collect();
@@ -856,6 +963,7 @@ impl Stream for GraphTraverseStream {
                                     &expansions,
                                     &self.schema,
                                     self.edge_variable.as_ref(),
+                                    &self.graph_ctx,
                                     self.optional,
                                 );
                                 self.state = TraverseStreamState::Reading;
@@ -935,9 +1043,10 @@ impl Stream for GraphTraverseStream {
 /// so no property columns need to be materialized.
 fn build_traverse_output_batch_sync(
     input: &RecordBatch,
-    expansions: &[(usize, Vid, u64)],
+    expansions: &[(usize, Vid, u64, u32)],
     schema: &SchemaRef,
     edge_variable: Option<&String>,
+    graph_ctx: &GraphExecutionContext,
     optional: bool,
 ) -> DFResult<RecordBatch> {
     if expansions.is_empty() {
@@ -947,7 +1056,7 @@ fn build_traverse_output_batch_sync(
         return build_optional_null_batch(input, schema);
     }
 
-    let indices: Vec<u64> = expansions.iter().map(|(idx, _, _)| *idx as u64).collect();
+    let indices: Vec<u64> = expansions.iter().map(|(idx, _, _, _)| *idx as u64).collect();
     let indices_array = UInt64Array::from(indices);
 
     let mut columns: Vec<ArrayRef> = Vec::new();
@@ -957,12 +1066,57 @@ fn build_traverse_output_batch_sync(
     }
 
     // Add target VID column
-    let target_vids: Vec<u64> = expansions.iter().map(|(_, vid, _)| vid.as_u64()).collect();
+    let target_vids: Vec<u64> = expansions
+        .iter()
+        .map(|(_, vid, _, _)| vid.as_u64())
+        .collect();
     columns.push(Arc::new(UInt64Array::from(target_vids)));
 
-    // Add edge ID column if edge is bound (no properties in sync path)
+    // Add target ._labels column (from L0 buffers)
+    {
+        use arrow_array::builder::{ListBuilder, StringBuilder};
+        let l0_ctx = graph_ctx.l0_context();
+        let mut labels_builder = ListBuilder::new(StringBuilder::new());
+        for (_, vid, _, _) in expansions {
+            let mut row_labels: Vec<String> = Vec::new();
+            for l0 in l0_ctx.iter_l0_buffers() {
+                let guard = l0.read();
+                if let Some(l0_labels) = guard.vertex_labels.get(vid) {
+                    for lbl in l0_labels {
+                        if !row_labels.contains(lbl) {
+                            row_labels.push(lbl.clone());
+                        }
+                    }
+                }
+            }
+            let values = labels_builder.values();
+            for lbl in &row_labels {
+                values.append_value(lbl);
+            }
+            labels_builder.append(true);
+        }
+        columns.push(Arc::new(labels_builder.finish()));
+    }
+
+    // Add edge columns if edge is bound (no properties in sync path)
     if edge_variable.is_some() {
-        let edge_ids: Vec<u64> = expansions.iter().map(|(_, _, eid)| *eid).collect();
+        let edge_ids: Vec<u64> = expansions.iter().map(|(_, _, eid, _)| *eid).collect();
+        columns.push(Arc::new(UInt64Array::from(edge_ids)));
+
+        // Add edge _type column
+        let uni_schema = graph_ctx.storage().schema_manager().schema();
+        let mut type_builder = arrow_array::builder::StringBuilder::new();
+        for (_, _, _, edge_type_id) in expansions {
+            if let Some(name) = uni_schema.edge_type_name_by_id(*edge_type_id) {
+                type_builder.append_value(name);
+            } else {
+                type_builder.append_null();
+            }
+        }
+        columns.push(Arc::new(type_builder.finish()));
+    } else {
+        // Internal EID column for relationship uniqueness tracking (matches schema)
+        let edge_ids: Vec<u64> = expansions.iter().map(|(_, _, eid, _)| *eid).collect();
         columns.push(Arc::new(UInt64Array::from(edge_ids)));
     }
 
@@ -970,7 +1124,8 @@ fn build_traverse_output_batch_sync(
         .map_err(|e| datafusion::error::DataFusionError::ArrowError(Box::new(e), None))?;
 
     if optional {
-        let expanded_indices: HashSet<usize> = expansions.iter().map(|(idx, _, _)| *idx).collect();
+        let expanded_indices: HashSet<usize> =
+            expansions.iter().map(|(idx, _, _, _)| *idx).collect();
         let unmatched: Vec<usize> = (0..input.num_rows())
             .filter(|idx| !expanded_indices.contains(idx))
             .collect();
@@ -994,8 +1149,8 @@ impl RecordBatchStream for GraphTraverseStream {
     }
 }
 
-/// Adjacency map type: maps source VID to list of (target_vid, eid, properties).
-type EdgeAdjacencyMap = HashMap<Vid, Vec<(Vid, Eid, uni_common::Properties)>>;
+/// Adjacency map type: maps source VID to list of (target_vid, eid, edge_type_name, properties).
+type EdgeAdjacencyMap = HashMap<Vid, Vec<(Vid, Eid, String, uni_common::Properties)>>;
 
 /// Graph traversal execution plan for schemaless edge types (TraverseMainByType).
 ///
@@ -1139,12 +1294,26 @@ impl GraphTraverseMainExec {
             true,
         ));
 
+        // Add target ._labels column (List(Utf8)) for labels() support
+        fields.push(Field::new(
+            format!("{}._labels", target_variable),
+            DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
+            true,
+        ));
+
         // Add edge columns if edge variable is bound
         if let Some(edge_var) = edge_variable {
             fields.push(Field::new(
                 format!("{}._eid", edge_var),
                 DataType::UInt64,
                 false,
+            ));
+
+            // Add edge ._type column for type(r) support
+            fields.push(Field::new(
+                format!("{}._type", edge_var),
+                DataType::Utf8,
+                true,
             ));
 
             // Edge properties: all as Utf8 (JSON strings from main table)
@@ -1386,8 +1555,8 @@ impl GraphTraverseMainStream {
                 )
             })?;
 
-        // Build expansions: (input_row_idx, target_vid, eid, edge_props)
-        type Expansion = (usize, Vid, Eid, uni_common::Properties);
+        // Build expansions: (input_row_idx, target_vid, eid, edge_type, edge_props)
+        type Expansion = (usize, Vid, Eid, String, uni_common::Properties);
         let mut expansions: Vec<Expansion> = Vec::new();
 
         for (row_idx, src_u64) in source_vids.iter().enumerate() {
@@ -1395,8 +1564,14 @@ impl GraphTraverseMainStream {
                 let src_vid = Vid::from(src_u64);
 
                 if let Some(neighbors) = adjacency.get(&src_vid) {
-                    for (target_vid, eid, props) in neighbors {
-                        expansions.push((row_idx, *target_vid, *eid, props.clone()));
+                    for (target_vid, eid, edge_type, props) in neighbors {
+                        expansions.push((
+                            row_idx,
+                            *target_vid,
+                            *eid,
+                            edge_type.clone(),
+                            props.clone(),
+                        ));
                     }
                 }
             }
@@ -1416,7 +1591,7 @@ impl GraphTraverseMainStream {
 
         // Track matched rows for OPTIONAL handling
         let matched_rows: HashSet<usize> = if self.optional {
-            expansions.iter().map(|(idx, _, _, _)| *idx).collect()
+            expansions.iter().map(|(idx, _, _, _, _)| *idx).collect()
         } else {
             HashSet::new()
         };
@@ -1425,7 +1600,7 @@ impl GraphTraverseMainStream {
         let mut columns: Vec<ArrayRef> = Vec::new();
         let indices: Vec<u64> = expansions
             .iter()
-            .map(|(idx, _, _, _)| *idx as u64)
+            .map(|(idx, _, _, _, _)| *idx as u64)
             .collect();
         let indices_array = UInt64Array::from(indices);
 
@@ -1437,23 +1612,58 @@ impl GraphTraverseMainStream {
         // Add target ._vid column
         let target_vids: Vec<u64> = expansions
             .iter()
-            .map(|(_, vid, _, _)| vid.as_u64())
+            .map(|(_, vid, _, _, _)| vid.as_u64())
             .collect();
         columns.push(Arc::new(UInt64Array::from(target_vids)));
+
+        // Add target ._labels column (from L0 buffers)
+        {
+            use arrow_array::builder::{ListBuilder, StringBuilder};
+            let l0_ctx = self.graph_ctx.l0_context();
+            let mut labels_builder = ListBuilder::new(StringBuilder::new());
+            for (_, target_vid, _, _, _) in &expansions {
+                let mut row_labels: Vec<String> = Vec::new();
+                for l0 in l0_ctx.iter_l0_buffers() {
+                    let guard = l0.read();
+                    if let Some(l0_labels) = guard.vertex_labels.get(target_vid) {
+                        for lbl in l0_labels {
+                            if !row_labels.contains(lbl) {
+                                row_labels.push(lbl.clone());
+                            }
+                        }
+                    }
+                }
+                let values = labels_builder.values();
+                for lbl in &row_labels {
+                    values.append_value(lbl);
+                }
+                labels_builder.append(true);
+            }
+            columns.push(Arc::new(labels_builder.finish()));
+        }
 
         // Add edge columns if edge variable is bound
         if self.edge_variable.is_some() {
             // Add edge ._eid column
             let eids: Vec<u64> = expansions
                 .iter()
-                .map(|(_, _, eid, _)| eid.as_u64())
+                .map(|(_, _, eid, _, _)| eid.as_u64())
                 .collect();
             columns.push(Arc::new(UInt64Array::from(eids)));
+
+            // Add edge ._type column
+            {
+                let mut type_builder = arrow_array::builder::StringBuilder::new();
+                for (_, _, _, edge_type, _) in &expansions {
+                    type_builder.append_value(edge_type);
+                }
+                columns.push(Arc::new(type_builder.finish()));
+            }
 
             // Add edge property columns (all as Utf8 from JSON)
             for prop_name in &self.edge_properties {
                 let mut builder = arrow_array::builder::StringBuilder::new();
-                for (_, _, _, props) in &expansions {
+                for (_, _, _, _, props) in &expansions {
                     match props.get(prop_name) {
                         Some(uni_common::Value::String(s)) => builder.append_value(s),
                         Some(uni_common::Value::Null) | None => builder.append_null(),
@@ -1464,13 +1674,67 @@ impl GraphTraverseMainStream {
             }
         }
 
-        // Add target property columns (stub as NULL for now - need async hydration)
-        // TODO: Implement async property hydration via PropertyManager
-        for _prop_name in &self.target_properties {
-            columns.push(arrow_array::new_null_array(
-                &DataType::LargeBinary,
-                expansions.len(),
-            ));
+        // Add target property columns (hydrate from L0 buffers)
+        {
+            use crate::query::df_graph::scan::serde_json_to_jsonb;
+            let l0_ctx = self.graph_ctx.l0_context();
+
+            for prop_name in &self.target_properties {
+                if prop_name == "_all_props" {
+                    // Build full JSONB blob from all L0 vertex properties
+                    let mut builder = arrow_array::builder::LargeBinaryBuilder::new();
+                    for (_, target_vid, _, _, _) in &expansions {
+                        let mut merged_props = serde_json::Map::new();
+                        for l0 in l0_ctx.iter_l0_buffers() {
+                            let guard = l0.read();
+                            if let Some(props) = guard.vertex_properties.get(target_vid) {
+                                for (k, v) in props.iter() {
+                                    let json_val: serde_json::Value = v.clone().into();
+                                    merged_props.insert(k.to_string(), json_val);
+                                }
+                            }
+                        }
+                        if merged_props.is_empty() {
+                            builder.append_null();
+                        } else {
+                            let json = serde_json::Value::Object(merged_props);
+                            match serde_json_to_jsonb(&json) {
+                                Ok(bytes) => builder.append_value(bytes),
+                                Err(_) => builder.append_null(),
+                            }
+                        }
+                    }
+                    columns.push(Arc::new(builder.finish()));
+                } else {
+                    // Extract individual property from L0 and encode as JSONB
+                    let mut builder = arrow_array::builder::LargeBinaryBuilder::new();
+                    for (_, target_vid, _, _, _) in &expansions {
+                        let mut found = false;
+                        for l0 in l0_ctx.iter_l0_buffers() {
+                            let guard = l0.read();
+                            if let Some(props) = guard.vertex_properties.get(target_vid) {
+                                if let Some(val) = props.get(prop_name.as_str()) {
+                                    if !val.is_null() {
+                                        let json_val: serde_json::Value = val.clone().into();
+                                        match serde_json_to_jsonb(&json_val) {
+                                            Ok(bytes) => {
+                                                builder.append_value(bytes);
+                                                found = true;
+                                                break;
+                                            }
+                                            Err(_) => {}
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if !found {
+                            builder.append_null();
+                        }
+                    }
+                    columns.push(Arc::new(builder.finish()));
+                }
+            }
         }
 
         let matched_batch = RecordBatch::try_new(self.schema.clone(), columns)
@@ -1521,15 +1785,16 @@ async fn build_edge_adjacency_map(
         .await
         .map_err(|e| datafusion::error::DataFusionError::Execution(e.to_string()))?;
 
-    // Convert to the format without edge type (we don't need it in the adjacency map)
+    // Preserve edge type name in the adjacency map for type(r) support
     let mut edges: Vec<(
         uni_common::Eid,
         uni_common::Vid,
         uni_common::Vid,
+        String,
         uni_common::Properties,
     )> = edges_with_type
         .into_iter()
-        .map(|(eid, src, dst, _edge_type, props)| (eid, src, dst, props))
+        .map(|(eid, src, dst, edge_type, props)| (eid, src, dst, edge_type, props))
         .collect();
 
     // Step 2: Overlay L0 buffers for all type names
@@ -1552,7 +1817,7 @@ async fn build_edge_adjacency_map(
                         .cloned()
                         .unwrap_or_default();
 
-                    edges.push((eid, src_vid, dst_vid, props));
+                    edges.push((eid, src_vid, dst_vid, type_name.clone(), props));
                 }
             }
         }
@@ -1571,29 +1836,29 @@ async fn build_edge_adjacency_map(
     // Step 4: Build adjacency map based on direction
     let mut adjacency: EdgeAdjacencyMap = HashMap::new();
 
-    for (eid, src_vid, dst_vid, props) in unique_edges {
+    for (eid, src_vid, dst_vid, edge_type, props) in unique_edges {
         match direction {
             Direction::Outgoing => {
                 adjacency
                     .entry(src_vid)
                     .or_default()
-                    .push((dst_vid, eid, props));
+                    .push((dst_vid, eid, edge_type, props));
             }
             Direction::Incoming => {
                 adjacency
                     .entry(dst_vid)
                     .or_default()
-                    .push((src_vid, eid, props));
+                    .push((src_vid, eid, edge_type, props));
             }
             Direction::Both => {
                 adjacency
                     .entry(src_vid)
                     .or_default()
-                    .push((dst_vid, eid, props.clone()));
+                    .push((dst_vid, eid, edge_type.clone(), props.clone()));
                 adjacency
                     .entry(dst_vid)
                     .or_default()
-                    .push((src_vid, eid, props));
+                    .push((src_vid, eid, edge_type, props));
             }
         }
     }
@@ -2846,7 +3111,7 @@ impl GraphVariableLengthTraverseMainStream {
                 let is_undirected = matches!(self.direction, Direction::Both);
                 let mut seen_edges_at_hop: HashSet<u64> = HashSet::new();
 
-                for (neighbor, eid, _props) in neighbors {
+                for (neighbor, eid, _edge_type, _props) in neighbors {
                     // Deduplicate edges for undirected patterns
                     if is_undirected && !seen_edges_at_hop.insert(eid.as_u64()) {
                         continue;
@@ -3236,11 +3501,12 @@ mod tests {
         let output_schema =
             GraphTraverseExec::build_schema(input_schema, "m", None, &[], &[], None, None, false);
 
-        // Schema includes: input columns + target VID + internal edge ID for uniqueness
-        assert_eq!(output_schema.fields().len(), 3);
+        // Schema: input + target VID + target _labels + internal edge ID
+        assert_eq!(output_schema.fields().len(), 4);
         assert_eq!(output_schema.field(0).name(), "a._vid");
         assert_eq!(output_schema.field(1).name(), "m._vid");
-        assert_eq!(output_schema.field(2).name(), "__eid_to_m");
+        assert_eq!(output_schema.field(2).name(), "m._labels");
+        assert_eq!(output_schema.field(3).name(), "__eid_to_m");
     }
 
     #[test]
@@ -3262,10 +3528,13 @@ mod tests {
             false,
         );
 
-        assert_eq!(output_schema.fields().len(), 3);
+        // Schema: input + target VID + target _labels + edge EID + edge _type
+        assert_eq!(output_schema.fields().len(), 5);
         assert_eq!(output_schema.field(0).name(), "a._vid");
         assert_eq!(output_schema.field(1).name(), "m._vid");
-        assert_eq!(output_schema.field(2).name(), "r._eid");
+        assert_eq!(output_schema.field(2).name(), "m._labels");
+        assert_eq!(output_schema.field(3).name(), "r._eid");
+        assert_eq!(output_schema.field(4).name(), "r._type");
     }
 
     #[test]
@@ -3288,13 +3557,15 @@ mod tests {
             false,
         );
 
-        // a._vid, m._vid, m.name, m.age, r._eid
-        assert_eq!(output_schema.fields().len(), 5);
+        // a._vid, m._vid, m._labels, m.name, m.age, r._eid, r._type
+        assert_eq!(output_schema.fields().len(), 7);
         assert_eq!(output_schema.field(0).name(), "a._vid");
         assert_eq!(output_schema.field(1).name(), "m._vid");
-        assert_eq!(output_schema.field(2).name(), "m.name");
-        assert_eq!(output_schema.field(3).name(), "m.age");
-        assert_eq!(output_schema.field(4).name(), "r._eid");
+        assert_eq!(output_schema.field(2).name(), "m._labels");
+        assert_eq!(output_schema.field(3).name(), "m.name");
+        assert_eq!(output_schema.field(4).name(), "m.age");
+        assert_eq!(output_schema.field(5).name(), "r._eid");
+        assert_eq!(output_schema.field(6).name(), "r._type");
     }
 
     #[test]
@@ -3331,9 +3602,11 @@ mod tests {
         let output_schema =
             GraphTraverseMainExec::build_schema(&input_schema, "m", &None, &[], &[]);
 
-        assert_eq!(output_schema.fields().len(), 2);
+        // a._vid, m._vid, m._labels
+        assert_eq!(output_schema.fields().len(), 3);
         assert_eq!(output_schema.field(0).name(), "a._vid");
         assert_eq!(output_schema.field(1).name(), "m._vid");
+        assert_eq!(output_schema.field(2).name(), "m._labels");
     }
 
     #[test]
@@ -3352,10 +3625,13 @@ mod tests {
             &[],
         );
 
-        assert_eq!(output_schema.fields().len(), 3);
+        // a._vid, m._vid, m._labels, r._eid, r._type
+        assert_eq!(output_schema.fields().len(), 5);
         assert_eq!(output_schema.field(0).name(), "a._vid");
         assert_eq!(output_schema.field(1).name(), "m._vid");
-        assert_eq!(output_schema.field(2).name(), "r._eid");
+        assert_eq!(output_schema.field(2).name(), "m._labels");
+        assert_eq!(output_schema.field(3).name(), "r._eid");
+        assert_eq!(output_schema.field(4).name(), "r._type");
     }
 
     #[test]
@@ -3375,15 +3651,17 @@ mod tests {
             &[],
         );
 
-        // a._vid, m._vid, r._eid, r.weight, r.since
-        assert_eq!(output_schema.fields().len(), 5);
+        // a._vid, m._vid, m._labels, r._eid, r._type, r.weight, r.since
+        assert_eq!(output_schema.fields().len(), 7);
         assert_eq!(output_schema.field(0).name(), "a._vid");
         assert_eq!(output_schema.field(1).name(), "m._vid");
-        assert_eq!(output_schema.field(2).name(), "r._eid");
-        assert_eq!(output_schema.field(3).name(), "r.weight");
-        assert_eq!(output_schema.field(3).data_type(), &DataType::Utf8); // Schemaless properties are Utf8
-        assert_eq!(output_schema.field(4).name(), "r.since");
-        assert_eq!(output_schema.field(4).data_type(), &DataType::Utf8);
+        assert_eq!(output_schema.field(2).name(), "m._labels");
+        assert_eq!(output_schema.field(3).name(), "r._eid");
+        assert_eq!(output_schema.field(4).name(), "r._type");
+        assert_eq!(output_schema.field(5).name(), "r.weight");
+        assert_eq!(output_schema.field(5).data_type(), &DataType::Utf8);
+        assert_eq!(output_schema.field(6).name(), "r.since");
+        assert_eq!(output_schema.field(6).data_type(), &DataType::Utf8);
     }
 
     #[test]
@@ -3403,14 +3681,16 @@ mod tests {
             &target_props,
         );
 
-        // a._vid, m._vid, r._eid, m.name, m.age
-        assert_eq!(output_schema.fields().len(), 5);
+        // a._vid, m._vid, m._labels, r._eid, r._type, m.name, m.age
+        assert_eq!(output_schema.fields().len(), 7);
         assert_eq!(output_schema.field(0).name(), "a._vid");
         assert_eq!(output_schema.field(1).name(), "m._vid");
-        assert_eq!(output_schema.field(2).name(), "r._eid");
-        assert_eq!(output_schema.field(3).name(), "m.name");
-        assert_eq!(output_schema.field(3).data_type(), &DataType::LargeBinary); // Target properties are LargeBinary
-        assert_eq!(output_schema.field(4).name(), "m.age");
-        assert_eq!(output_schema.field(4).data_type(), &DataType::LargeBinary);
+        assert_eq!(output_schema.field(2).name(), "m._labels");
+        assert_eq!(output_schema.field(3).name(), "r._eid");
+        assert_eq!(output_schema.field(4).name(), "r._type");
+        assert_eq!(output_schema.field(5).name(), "m.name");
+        assert_eq!(output_schema.field(5).data_type(), &DataType::LargeBinary);
+        assert_eq!(output_schema.field(6).name(), "m.age");
+        assert_eq!(output_schema.field(6).data_type(), &DataType::LargeBinary);
     }
 }

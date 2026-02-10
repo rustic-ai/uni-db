@@ -41,6 +41,7 @@ pub mod common;
 pub mod comprehension;
 pub mod expr_compiler;
 pub mod ext_id_lookup;
+pub mod optional_filter;
 pub mod reduce;
 pub mod scan;
 pub mod shortest_path;
@@ -60,6 +61,7 @@ use uni_store::storage::direction::Direction;
 use uni_store::storage::manager::StorageManager;
 
 pub use ext_id_lookup::GraphExtIdLookupExec;
+pub use optional_filter::OptionalFilterExec;
 pub use scan::GraphScanExec;
 pub use shortest_path::GraphShortestPathExec;
 pub use traverse::{GraphTraverseExec, GraphTraverseMainExec};
