@@ -247,7 +247,7 @@ impl GraphScanExec {
         }
     }
 
-    /// Build schema for schemaless vertex scan (all properties as Utf8).
+    /// Build schema for schemaless vertex scan (all properties as LargeBinary/JSONB).
     fn build_schemaless_vertex_schema(variable: &str, properties: &[String]) -> SchemaRef {
         let mut fields = vec![
             Field::new(format!("{}._vid", variable), DataType::UInt64, false),
@@ -260,8 +260,8 @@ impl GraphScanExec {
 
         for prop in properties {
             let col_name = format!("{}.{}", variable, prop);
-            // All schemaless properties are treated as Utf8 (JSON strings)
-            fields.push(Field::new(&col_name, DataType::Utf8, true));
+            // Schemaless properties use LargeBinary with JSONB encoding to preserve types
+            fields.push(Field::new(&col_name, DataType::LargeBinary, true));
         }
 
         Arc::new(Schema::new(fields))
@@ -492,7 +492,8 @@ impl GraphScanStream {
 
 /// Resolve the Arrow data type for a property, handling system columns like `overflow_json`.
 ///
-/// Falls back to `Utf8` if the property is not found in the schema.
+/// Falls back to `LargeBinary` (JSONB) if the property is not found in the schema,
+/// preserving original value types for overflow/unknown properties.
 pub(crate) fn resolve_property_type(
     prop: &str,
     schema_props: Option<
@@ -505,7 +506,7 @@ pub(crate) fn resolve_property_type(
         schema_props
             .and_then(|props| props.get(prop))
             .map(|meta| meta.r#type.to_arrow())
-            .unwrap_or(DataType::Utf8)
+            .unwrap_or(DataType::LargeBinary)
     }
 }
 
@@ -747,7 +748,7 @@ fn accumulate_l0_vertex_props(
 
 /// Build a RecordBatch from schemaless VIDs and their properties.
 ///
-/// All property values are converted to Utf8 (JSON strings).
+/// Property values are encoded as LargeBinary (JSONB) to preserve types.
 fn build_schemaless_vertex_record_batch(
     schema: &SchemaRef,
     vids: &[Vid],
@@ -779,17 +780,21 @@ fn build_schemaless_vertex_record_batch(
     }
     columns.push(Arc::new(labels_builder.finish()));
 
-    // 3. Build property columns (all as Utf8)
+    // 3. Build property columns (as LargeBinary / JSONB)
     for field in schema.fields().iter().skip(2) {
-        // Extract property name from field name (e.g., "n.name" -> "name")
         let prop_name = field.name().split('.').nth(1).unwrap_or(field.name());
 
-        let mut builder = StringBuilder::new();
+        let mut builder = arrow_array::builder::LargeBinaryBuilder::new();
         for vid in vids {
             match get_property_value(vid, props_map, prop_name) {
-                Some(Value::String(s)) => builder.append_value(s),
                 Some(Value::Null) | None => builder.append_null(),
-                Some(other) => builder.append_value(other.to_string()),
+                Some(val) => {
+                    let json_val: serde_json::Value = val.into();
+                    match jsonb::to_owned_jsonb(&json_val) {
+                        Ok(jsonb_bytes) => builder.append_value(jsonb_bytes.to_vec()),
+                        Err(_) => builder.append_null(),
+                    }
+                }
             }
         }
         columns.push(Arc::new(builder.finish()));
@@ -1788,9 +1793,9 @@ mod tests {
         assert_eq!(schema.field(0).data_type(), &DataType::UInt64);
         assert_eq!(schema.field(1).name(), "n._labels");
         assert_eq!(schema.field(2).name(), "n.name");
-        assert_eq!(schema.field(2).data_type(), &DataType::Utf8);
+        assert_eq!(schema.field(2).data_type(), &DataType::LargeBinary);
         assert_eq!(schema.field(3).name(), "n.age");
-        assert_eq!(schema.field(3).data_type(), &DataType::Utf8);
+        assert_eq!(schema.field(3).data_type(), &DataType::LargeBinary);
     }
 
     #[test]
