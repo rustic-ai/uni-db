@@ -710,11 +710,26 @@ impl HybridPhysicalPlanner {
     /// Wraps the input plan with a `FilterExec` if `filter` is `Some`.
     /// Builds a `TranslationContext` marking `variable` as `VariableKind::Node`
     /// for correct expression translation.
+    ///
+    /// When `label_name` is provided, overflow property references in the filter
+    /// are rewritten to `json_get_*` UDF calls against the `overflow_json` column.
     fn apply_scan_filter(
         &self,
         plan: Arc<dyn ExecutionPlan>,
         variable: &str,
         filter: Option<&Expr>,
+        label_name: Option<&str>,
+    ) -> Result<Arc<dyn ExecutionPlan>> {
+        self.apply_scan_filter_inner(plan, variable, filter, label_name, false)
+    }
+
+    fn apply_scan_filter_inner(
+        &self,
+        plan: Arc<dyn ExecutionPlan>,
+        variable: &str,
+        filter: Option<&Expr>,
+        label_name: Option<&str>,
+        schemaless: bool,
     ) -> Result<Arc<dyn ExecutionPlan>> {
         let Some(filter_expr) = filter else {
             return Ok(plan);
@@ -727,7 +742,32 @@ impl HybridPhysicalPlanner {
             variable_labels: HashMap::new(),
             variable_kinds,
         };
-        let df_filter = cypher_expr_to_df(filter_expr, Some(&ctx))?;
+        let mut df_filter = cypher_expr_to_df(filter_expr, Some(&ctx))?;
+
+        // Rewrite overflow property references to json_get_* UDF calls.
+        // For labels with no registered properties (schemaless), use an empty map
+        // so all non-system properties are recognized as overflow.
+        if let Some(label) = label_name {
+            let empty_props = HashMap::new();
+            let label_props = self.schema.properties.get(label).unwrap_or(&empty_props);
+            df_filter = crate::query::df_expr::rewrite_overflow_filters(
+                df_filter,
+                variable,
+                Some(label_props),
+            )?;
+        } else if schemaless {
+            // For schemaless scans (scan_all, schemaless_scan, multi_label_scan),
+            // all non-system properties are stored as JSONB in _all_props.
+            // Rewrite filters to use json_get_* against the _all_props column.
+            let empty_props = HashMap::new();
+            df_filter = crate::query::df_expr::rewrite_overflow_filters_with_source(
+                df_filter,
+                variable,
+                Some(&empty_props),
+                "_all_props",
+            )?;
+        }
+
         let schema = plan.schema();
 
         let session = self.session_ctx.read();
@@ -763,7 +803,7 @@ impl HybridPhysicalPlanner {
             optional,
         ));
 
-        self.apply_scan_filter(lookup_plan, variable, filter)
+        self.apply_scan_filter(lookup_plan, variable, filter, None)
     }
 
     /// Plan an UNWIND operation.
@@ -829,7 +869,23 @@ impl HybridPhysicalPlanner {
             .ok_or_else(|| anyhow!("Unknown label ID: {}", label_id))?;
 
         // Resolve properties collected from the entire plan tree, expanding "*" wildcards
-        let properties = self.resolve_properties(variable, label_name, all_properties);
+        let mut properties = self.resolve_properties(variable, label_name, all_properties);
+
+        // If the filter references overflow properties (not in schema), ensure
+        // `overflow_json` is projected so the DataFusion FilterExec can read it.
+        if let Some(filter_expr) = filter {
+            let label_props = self.schema.properties.get(label_name);
+            let filter_props = crate::query::df_expr::collect_properties(filter_expr);
+            let has_overflow = filter_props.iter().any(|(var, prop)| {
+                var == variable
+                    && !prop.starts_with('_')
+                    && label_props
+                        .is_none_or(|props| !props.contains_key(prop.as_str()))
+            });
+            if has_overflow && !properties.iter().any(|p| p == "overflow_json") {
+                properties.push("overflow_json".to_string());
+            }
+        }
 
         let mut scan_plan: Arc<dyn ExecutionPlan> = Arc::new(GraphScanExec::new_vertex_scan(
             self.graph_ctx.clone(),
@@ -847,7 +903,8 @@ impl HybridPhysicalPlanner {
             scan_plan = self.add_structural_projection(scan_plan, variable, &properties)?;
         }
 
-        let filtered_plan = self.apply_scan_filter(scan_plan, variable, filter)?;
+        let filtered_plan =
+            self.apply_scan_filter(scan_plan, variable, filter, Some(label_name))?;
         self.wrap_optional(filtered_plan, optional)
     }
 
@@ -865,14 +922,15 @@ impl HybridPhysicalPlanner {
     ) -> Result<Arc<dyn ExecutionPlan>> {
         let mut properties: Vec<String> = all_properties
             .get(variable)
-            .map(|s| s.iter().cloned().collect())
+            .map(|s| s.iter().filter(|p| *p != "*").cloned().collect())
             .unwrap_or_default();
 
         let need_full = all_properties
             .get(variable)
             .is_some_and(|p| p.contains("*"));
 
-        if need_full && !properties.iter().any(|p| p == "_all_props") {
+        let has_filter = filter.is_some();
+        if (need_full || has_filter) && !properties.iter().any(|p| p == "_all_props") {
             properties.push("_all_props".to_string());
         }
 
@@ -891,7 +949,8 @@ impl HybridPhysicalPlanner {
             scan_plan = self.add_alias_projection(scan_plan, variable, &col_name)?;
         }
 
-        let filtered_plan = self.apply_scan_filter(scan_plan, variable, filter)?;
+        let filtered_plan =
+            self.apply_scan_filter_inner(scan_plan, variable, filter, None, true)?;
         self.wrap_optional(filtered_plan, optional)
     }
 
@@ -908,14 +967,15 @@ impl HybridPhysicalPlanner {
     ) -> Result<Arc<dyn ExecutionPlan>> {
         let mut properties: Vec<String> = all_properties
             .get(variable)
-            .map(|s| s.iter().cloned().collect())
+            .map(|s| s.iter().filter(|p| *p != "*").cloned().collect())
             .unwrap_or_default();
 
         let need_full = all_properties
             .get(variable)
             .is_some_and(|p| p.contains("*"));
 
-        if need_full && !properties.iter().any(|p| p == "_all_props") {
+        let has_filter = filter.is_some();
+        if (need_full || has_filter) && !properties.iter().any(|p| p == "_all_props") {
             properties.push("_all_props".to_string());
         }
 
@@ -934,7 +994,8 @@ impl HybridPhysicalPlanner {
             scan_plan = self.add_alias_projection(scan_plan, variable, &col_name)?;
         }
 
-        let filtered_plan = self.apply_scan_filter(scan_plan, variable, filter)?;
+        let filtered_plan =
+            self.apply_scan_filter_inner(scan_plan, variable, filter, None, true)?;
         self.wrap_optional(filtered_plan, optional)
     }
 
@@ -951,14 +1012,18 @@ impl HybridPhysicalPlanner {
     ) -> Result<Arc<dyn ExecutionPlan>> {
         let mut properties: Vec<String> = all_properties
             .get(variable)
-            .map(|s| s.iter().cloned().collect())
+            .map(|s| s.iter().filter(|p| *p != "*").cloned().collect())
             .unwrap_or_default();
 
         let need_full = all_properties
             .get(variable)
             .is_some_and(|p| p.contains("*"));
 
-        if need_full && !properties.iter().any(|p| p == "_all_props") {
+        // Always include _all_props for schemaless scans — needed for:
+        // - bare variable projection (need_full)
+        // - filter rewriting (json_get_* against _all_props)
+        let has_filter = filter.is_some();
+        if (need_full || has_filter) && !properties.iter().any(|p| p == "_all_props") {
             properties.push("_all_props".to_string());
         }
 
@@ -976,7 +1041,8 @@ impl HybridPhysicalPlanner {
             scan_plan = self.add_alias_projection(scan_plan, variable, &col_name)?;
         }
 
-        let filtered_plan = self.apply_scan_filter(scan_plan, variable, filter)?;
+        let filtered_plan =
+            self.apply_scan_filter_inner(scan_plan, variable, filter, None, true)?;
         self.wrap_optional(filtered_plan, optional)
     }
 
@@ -1327,6 +1393,46 @@ impl HybridPhysicalPlanner {
         let input_plan = self.plan_internal(input, all_properties)?;
         let schema = input_plan.schema();
 
+        // Check if any referenced columns are LargeBinary (schemaless JSONB).
+        // If so, rewrite the filter to use json_get_* UDFs against _all_props.
+        let has_schemaless_cols = schema.fields().iter().any(|f| {
+            f.data_type() == &arrow::datatypes::DataType::LargeBinary
+                && f.name().contains('.')
+                && !f.name().ends_with("._all_props")
+        });
+
+        if has_schemaless_cols {
+            // Use logical-level rewriting: convert to DfExpr, rewrite, then compile
+            let ctx = self.translation_context_for_plan(input);
+            let mut df_filter =
+                crate::query::df_expr::cypher_expr_to_df(predicate, Some(&ctx))?;
+
+            // Rewrite for each variable that has _all_props
+            let empty_props = HashMap::new();
+            for field in schema.fields() {
+                if field.name().ends_with("._all_props") {
+                    if let Some(var) = field.name().strip_suffix("._all_props") {
+                        df_filter =
+                            crate::query::df_expr::rewrite_overflow_filters_with_source(
+                                df_filter,
+                                var,
+                                Some(&empty_props),
+                                "_all_props",
+                            )?;
+                    }
+                }
+            }
+
+            let session = self.session_ctx.read();
+            let physical_predicate =
+                self.create_physical_filter_expr(&df_filter, &schema, &session)?;
+
+            return Ok(Arc::new(FilterExec::try_new(
+                physical_predicate,
+                input_plan,
+            )?));
+        }
+
         let ctx = self.translation_context_for_plan(input);
 
         let session = self.session_ctx.read();
@@ -1375,27 +1481,101 @@ impl HybridPhysicalPlanner {
 
         for (expr, alias) in projections {
             // Handle whole-node/relationship projection: RETURN n
-            // Always trigger fallback for bare variable projections.
-            // The execute_subplan path properly materializes full Node/Edge objects,
-            // while DataFusion expansion returns individual columns which breaks
-            // the type system (user expects Value::Node, not individual properties).
+            // The scan layer materializes the variable as either:
+            //   - A Struct column (registered labels via add_structural_projection)
+            //   - A LargeBinary/JSONB column aliased as the variable (schemaless via add_alias_projection)
+            // Project that column directly, plus _vid/_labels helpers for post-processing.
             if let Expr::Variable(var_name) = expr {
+                if schema.column_with_name(var_name).is_some() {
+                    let (col_idx, _) = schema.column_with_name(var_name).unwrap();
+                    let col_expr: Arc<dyn datafusion::physical_expr::PhysicalExpr> = Arc::new(
+                        datafusion::physical_expr::expressions::Column::new(var_name, col_idx),
+                    );
+                    let name = alias.clone().unwrap_or_else(|| var_name.clone());
+                    exprs.push((col_expr, name));
+
+                    // Include _vid and _labels as helper columns for post-processing
+                    let vid_col = format!("{}._vid", var_name);
+                    let labels_col = format!("{}._labels", var_name);
+                    if let Some((vi, _)) = schema.column_with_name(&vid_col) {
+                        let ve: Arc<dyn datafusion::physical_expr::PhysicalExpr> = Arc::new(
+                            datafusion::physical_expr::expressions::Column::new(&vid_col, vi),
+                        );
+                        exprs.push((ve, vid_col));
+                    }
+                    if let Some((li, _)) = schema.column_with_name(&labels_col) {
+                        let le: Arc<dyn datafusion::physical_expr::PhysicalExpr> = Arc::new(
+                            datafusion::physical_expr::expressions::Column::new(&labels_col, li),
+                        );
+                        exprs.push((le, labels_col));
+                    }
+                    continue;
+                }
+
+                // No materialized column — build a struct from expanded dot-columns
+                // This handles traversal targets that have b._vid, b.name, etc. but no b column
                 let prefix = format!("{}.", var_name);
-                let matching_fields: Vec<_> = schema
+                let expanded_fields: Vec<(usize, String)> = schema
                     .fields()
                     .iter()
-                    .filter(|f| f.name().starts_with(&prefix))
+                    .enumerate()
+                    .filter(|(_, f)| f.name().starts_with(&prefix))
+                    .map(|(i, f)| (i, f.name().clone()))
                     .collect();
 
-                // If there are any matching columns, fallback to execute_subplan
-                // which materializes full Node/Edge objects.
-                if !matching_fields.is_empty() {
-                    return Err(anyhow::anyhow!(
-                        "Bare variable '{}' requires fallback to materialize full node/edge object",
-                        var_name
-                    ));
+                if !expanded_fields.is_empty() {
+                    use datafusion::functions::expr_fn::named_struct;
+                    use datafusion::logical_expr::lit;
+
+                    // Build named_struct args: pairs of (field_name_literal, column_ref)
+                    let mut struct_args = Vec::new();
+                    for (_, field_name) in &expanded_fields {
+                        let prop_name = &field_name[prefix.len()..];
+                        struct_args.push(lit(prop_name.to_string()));
+                        // Use Column::from_name to avoid dot-parsing (b._vid != table b, col _vid)
+                        struct_args.push(DfExpr::Column(
+                            datafusion::common::Column::from_name(field_name.as_str()),
+                        ));
+                    }
+
+                    let struct_expr = named_struct(struct_args);
+                    let df_schema = datafusion::common::DFSchema::try_from(
+                        schema.as_ref().clone(),
+                    )?;
+                    let session = self.session_ctx.read();
+                    let state_ref = session.state();
+                    let resolved_expr = Self::resolve_udfs(&struct_expr, &state_ref)?;
+
+                    use datafusion::physical_planner::PhysicalPlanner;
+                    let phys_planner =
+                        datafusion::physical_planner::DefaultPhysicalPlanner::default();
+                    let physical_struct_expr = phys_planner.create_physical_expr(
+                        &resolved_expr,
+                        &df_schema,
+                        &state_ref,
+                    )?;
+
+                    let name = alias.clone().unwrap_or_else(|| var_name.clone());
+                    exprs.push((physical_struct_expr, name));
+
+                    // Also include _vid and _labels helpers
+                    let vid_col = format!("{}._vid", var_name);
+                    let labels_col = format!("{}._labels", var_name);
+                    if let Some((vi, _)) = schema.column_with_name(&vid_col) {
+                        let ve: Arc<dyn datafusion::physical_expr::PhysicalExpr> = Arc::new(
+                            datafusion::physical_expr::expressions::Column::new(&vid_col, vi),
+                        );
+                        exprs.push((ve, vid_col));
+                    }
+                    if let Some((li, _)) = schema.column_with_name(&labels_col) {
+                        let le: Arc<dyn datafusion::physical_expr::PhysicalExpr> = Arc::new(
+                            datafusion::physical_expr::expressions::Column::new(&labels_col, li),
+                        );
+                        exprs.push((le, labels_col));
+                    }
+                    continue;
                 }
-                // Fall through to normal translation if no matching columns at all
+                // Fall through to normal expression compilation if no matching columns at all
             }
 
             // Handle RETURN * (wildcard) — expand to all input columns

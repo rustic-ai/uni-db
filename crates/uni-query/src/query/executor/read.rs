@@ -175,10 +175,18 @@ impl Executor {
 
                 let mut query = table.query();
 
-                // Apply filter if provided
+                // Apply filter if provided, with schema awareness
+                // to skip overflow properties that aren't physical Lance columns.
+                // For labels with no registered properties (schemaless), use an empty
+                // map so all non-system properties are recognized as overflow.
+                let empty_props = std::collections::HashMap::new();
+                let label_props = schema.properties.get(label_name).unwrap_or(&empty_props);
                 if let Some(expr) = filter
-                    && let Some(sql) =
-                        LanceFilterGenerator::generate(std::slice::from_ref(expr), variable)
+                    && let Some(sql) = LanceFilterGenerator::generate(
+                        std::slice::from_ref(expr),
+                        variable,
+                        Some(label_props),
+                    )
                 {
                     query = query.only_if(sql);
                 }
@@ -547,6 +555,36 @@ impl Executor {
                     row.insert(field.name().clone(), value);
                 }
 
+                // Merge system fields (_vid, _labels) into bare variable maps.
+                // The projection step emits helper columns like "n._vid" and "n._labels"
+                // alongside the materialized "n" column (a Map of user properties).
+                // Here we merge those system fields into the map and remove the helpers.
+                let bare_vars: Vec<String> = row
+                    .keys()
+                    .filter(|k| {
+                        !k.contains('.')
+                            && matches!(row.get(*k), Some(Value::Map(_)))
+                    })
+                    .cloned()
+                    .collect();
+
+                for var in &bare_vars {
+                    let vid_key = format!("{}._vid", var);
+                    let labels_key = format!("{}._labels", var);
+
+                    let vid_val = row.remove(&vid_key);
+                    let labels_val = row.remove(&labels_key);
+
+                    if let Some(Value::Map(map)) = row.get_mut(var) {
+                        if let Some(v) = vid_val {
+                            map.insert("_vid".to_string(), v);
+                        }
+                        if let Some(v) = labels_val {
+                            map.insert("_labels".to_string(), v);
+                        }
+                    }
+                }
+
                 rows.push(row);
             }
         }
@@ -736,42 +774,52 @@ impl Executor {
                             .await
                     }
                 } else {
-                    // No window functions found - try DataFusion with fallback
-                    match self
+                    // No window functions found - use DataFusion (no fallback)
+                    let batches = self
                         .execute_datafusion(plan.clone(), prop_manager, params)
-                        .await
-                    {
-                        Ok(batches) => self.record_batches_to_rows(batches),
-                        Err(e) => {
-                            log::debug!("DataFusion execution failed (falling back): {}", e);
-                            if e.to_string().contains("Query timed out")
-                                || e.to_string().contains("Query exceeded memory limit")
-                            {
-                                return Err(e);
-                            }
-                            self.execute_subplan(plan, prop_manager, params, ctx.as_ref())
-                                .await
-                        }
-                    }
+                        .await?;
+                    self.record_batches_to_rows(batches)
+                    // DISABLED: legacy executor fallback
+                    // match self
+                    //     .execute_datafusion(plan.clone(), prop_manager, params)
+                    //     .await
+                    // {
+                    //     Ok(batches) => self.record_batches_to_rows(batches),
+                    //     Err(e) => {
+                    //         log::debug!("DataFusion execution failed (falling back): {}", e);
+                    //         if e.to_string().contains("Query timed out")
+                    //             || e.to_string().contains("Query exceeded memory limit")
+                    //         {
+                    //             return Err(e);
+                    //         }
+                    //         self.execute_subplan(plan, prop_manager, params, ctx.as_ref())
+                    //             .await
+                    //     }
+                    // }
                 }
             } else {
-                // Execute using DataFusion engine with fallback
-                match self
+                // Execute using DataFusion engine (no fallback)
+                let batches = self
                     .execute_datafusion(plan.clone(), prop_manager, params)
-                    .await
-                {
-                    Ok(batches) => self.record_batches_to_rows(batches),
-                    Err(e) => {
-                        log::debug!("DataFusion execution failed (falling back): {}", e);
-                        if e.to_string().contains("Query timed out")
-                            || e.to_string().contains("Query exceeded memory limit")
-                        {
-                            return Err(e);
-                        }
-                        self.execute_subplan(plan, prop_manager, params, ctx.as_ref())
-                            .await
-                    }
-                }
+                    .await?;
+                self.record_batches_to_rows(batches)
+                // DISABLED: legacy executor fallback
+                // match self
+                //     .execute_datafusion(plan.clone(), prop_manager, params)
+                //     .await
+                // {
+                //     Ok(batches) => self.record_batches_to_rows(batches),
+                //     Err(e) => {
+                //         log::debug!("DataFusion execution failed (falling back): {}", e);
+                //         if e.to_string().contains("Query timed out")
+                //             || e.to_string().contains("Query exceeded memory limit")
+                //         {
+                //             return Err(e);
+                //         }
+                //         self.execute_subplan(plan, prop_manager, params, ctx.as_ref())
+                //             .await
+                //     }
+                // }
             };
 
             let duration = start.elapsed();

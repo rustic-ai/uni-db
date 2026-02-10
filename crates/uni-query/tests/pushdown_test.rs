@@ -17,7 +17,7 @@ fn test_lance_filter_generation() {
         right: Box::new(Expr::Literal(CypherLiteral::String("foo".to_string()))),
     };
 
-    let filter = LanceFilterGenerator::generate(&[expr], "n").unwrap();
+    let filter = LanceFilterGenerator::generate(&[expr], "n", None).unwrap();
     assert_eq!(filter, "name LIKE '%foo%'");
 
     // n.title STARTS WITH 'Intro'
@@ -30,7 +30,7 @@ fn test_lance_filter_generation() {
         right: Box::new(Expr::Literal(CypherLiteral::String("Intro".to_string()))),
     };
 
-    let filter = LanceFilterGenerator::generate(&[expr], "n").unwrap();
+    let filter = LanceFilterGenerator::generate(&[expr], "n", None).unwrap();
     assert_eq!(filter, "title LIKE 'Intro%'");
 }
 
@@ -76,7 +76,7 @@ fn test_or_to_in_conversion() {
     }
 
     // Verify SQL generation
-    let sql = LanceFilterGenerator::generate(&analysis.pushable, "n").unwrap();
+    let sql = LanceFilterGenerator::generate(&analysis.pushable, "n", None).unwrap();
     // order might vary? No, vec insertion order.
     assert!(sql == "status IN ('a', 'b')" || sql == "status IN ('b', 'a')");
 }
@@ -94,7 +94,7 @@ fn test_is_null_pushdown() {
     assert_eq!(analysis.pushable.len(), 1);
     assert!(analysis.residual.is_empty());
 
-    let sql = LanceFilterGenerator::generate(&analysis.pushable, "n").unwrap();
+    let sql = LanceFilterGenerator::generate(&analysis.pushable, "n", None).unwrap();
     assert_eq!(sql, "email IS NULL");
 }
 
@@ -110,7 +110,7 @@ fn test_is_not_null_pushdown() {
 
     assert_eq!(analysis.pushable.len(), 1);
 
-    let sql = LanceFilterGenerator::generate(&analysis.pushable, "n").unwrap();
+    let sql = LanceFilterGenerator::generate(&analysis.pushable, "n", None).unwrap();
     assert_eq!(sql, "email IS NOT NULL");
 }
 
@@ -143,7 +143,7 @@ fn test_predicate_flattening() {
 
     assert_eq!(analysis.pushable.len(), 2);
 
-    let sql = LanceFilterGenerator::generate(&analysis.pushable, "n").unwrap();
+    let sql = LanceFilterGenerator::generate(&analysis.pushable, "n", None).unwrap();
     assert_eq!(sql, "a = 1 AND b = 2");
 }
 

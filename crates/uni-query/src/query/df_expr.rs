@@ -35,10 +35,12 @@ use anyhow::{Result, anyhow};
 use datafusion::common::{Column, ScalarValue};
 use datafusion::logical_expr::{ColumnarValue, Expr as DfExpr, ScalarFunctionArgs, col, lit};
 use datafusion::prelude::ExprFunctionExt;
+use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::ops::Not;
 use std::sync::Arc;
 use uni_common::Value;
+use uni_common::core::schema::PropertyMeta;
 use uni_cypher::ast::{BinaryOp, CypherLiteral, Expr, UnaryOp};
 
 /// Type of a variable in the query context.
@@ -1323,6 +1325,226 @@ impl datafusion::logical_expr::ScalarUDFImpl for DummyUdf {
             self.name
         )))
     }
+}
+
+/// Rewrite overflow property references in a DataFusion filter expression.
+///
+/// Properties that are NOT in the label's schema are "overflow" properties stored
+/// in the `overflow_json` LargeBinary (JSONB) column. This function rewrites
+/// column references like `{var}.{prop}` to `json_get_*(var.overflow_json, 'prop')`
+/// calls so DataFusion can evaluate the filter against the JSONB data.
+///
+/// The appropriate `json_get_*` UDF is chosen based on the literal type being compared:
+/// - `ScalarValue::Utf8` → `json_get_string`
+/// - `ScalarValue::Int64` → `json_get_int`
+/// - `ScalarValue::Float64` → `json_get_float`
+/// - `ScalarValue::Boolean` → `json_get_bool`
+///
+/// For IS NULL / IS NOT NULL and string operations, `json_get_string` is used.
+pub fn rewrite_overflow_filters(
+    expr: DfExpr,
+    variable: &str,
+    label_props: Option<&HashMap<String, PropertyMeta>>,
+) -> Result<DfExpr> {
+    rewrite_overflow_filters_with_source(expr, variable, label_props, "overflow_json")
+}
+
+/// Like `rewrite_overflow_filters`, but with a custom source column suffix.
+///
+/// For registered labels, the source column is `overflow_json`.
+/// For schemaless scans, the source column is `_all_props`.
+pub fn rewrite_overflow_filters_with_source(
+    expr: DfExpr,
+    variable: &str,
+    label_props: Option<&HashMap<String, PropertyMeta>>,
+    source_col_suffix: &str,
+) -> Result<DfExpr> {
+    match expr {
+        DfExpr::BinaryExpr(binary) => {
+            use datafusion::logical_expr::Operator;
+
+            // For AND/OR, recurse into both sides
+            if matches!(binary.op, Operator::And | Operator::Or) {
+                let left = rewrite_overflow_filters_with_source(
+                    *binary.left, variable, label_props, source_col_suffix,
+                )?;
+                let right = rewrite_overflow_filters_with_source(
+                    *binary.right, variable, label_props, source_col_suffix,
+                )?;
+                return Ok(DfExpr::BinaryExpr(
+                    datafusion::logical_expr::expr::BinaryExpr::new(
+                        Box::new(left),
+                        binary.op,
+                        Box::new(right),
+                    ),
+                ));
+            }
+
+            // For comparison operators, check if one side is an overflow column
+            if matches!(
+                binary.op,
+                Operator::Eq
+                    | Operator::NotEq
+                    | Operator::Lt
+                    | Operator::Gt
+                    | Operator::LtEq
+                    | Operator::GtEq
+            ) {
+                // Try column on left, literal on right
+                if let Some((prop, rewritten)) = try_rewrite_column_literal_with_source(
+                    &binary.left, &binary.right, variable, label_props, source_col_suffix,
+                ) {
+                    let _ = prop;
+                    return Ok(DfExpr::BinaryExpr(
+                        datafusion::logical_expr::expr::BinaryExpr::new(
+                            Box::new(rewritten),
+                            binary.op,
+                            binary.right,
+                        ),
+                    ));
+                }
+                // Try column on right, literal on left
+                if let Some((prop, rewritten)) = try_rewrite_column_literal_with_source(
+                    &binary.right, &binary.left, variable, label_props, source_col_suffix,
+                ) {
+                    let _ = prop;
+                    return Ok(DfExpr::BinaryExpr(
+                        datafusion::logical_expr::expr::BinaryExpr::new(
+                            binary.left,
+                            binary.op,
+                            Box::new(rewritten),
+                        ),
+                    ));
+                }
+            }
+
+            Ok(DfExpr::BinaryExpr(binary))
+        }
+        DfExpr::Not(inner) => {
+            let rewritten = rewrite_overflow_filters_with_source(
+                *inner, variable, label_props, source_col_suffix,
+            )?;
+            Ok(DfExpr::Not(Box::new(rewritten)))
+        }
+        DfExpr::IsNull(inner) => {
+            if let Some(rewritten) = try_rewrite_overflow_column_with_source(
+                &inner, variable, label_props, "json_get_string", source_col_suffix,
+            ) {
+                Ok(DfExpr::IsNull(Box::new(rewritten)))
+            } else {
+                Ok(DfExpr::IsNull(inner))
+            }
+        }
+        DfExpr::IsNotNull(inner) => {
+            if let Some(rewritten) = try_rewrite_overflow_column_with_source(
+                &inner, variable, label_props, "json_get_string", source_col_suffix,
+            ) {
+                Ok(DfExpr::IsNotNull(Box::new(rewritten)))
+            } else {
+                Ok(DfExpr::IsNotNull(inner))
+            }
+        }
+        DfExpr::ScalarFunction(func) => {
+            // For string operations like _cypher_contains, _cypher_starts_with, _cypher_ends_with,
+            // rewrite overflow column args to json_get_string
+            let func_name = func.func.name();
+            if matches!(
+                func_name,
+                "_cypher_contains" | "_cypher_starts_with" | "_cypher_ends_with"
+            ) && !func.args.is_empty()
+            {
+                let mut new_args = func.args;
+                if let Some(rewritten) = try_rewrite_overflow_column_with_source(
+                    &new_args[0],
+                    variable,
+                    label_props,
+                    "json_get_string",
+                    source_col_suffix,
+                ) {
+                    new_args[0] = rewritten;
+                }
+                return Ok(DfExpr::ScalarFunction(
+                    datafusion::logical_expr::expr::ScalarFunction {
+                        func: func.func,
+                        args: new_args,
+                    },
+                ));
+            }
+            Ok(DfExpr::ScalarFunction(func))
+        }
+        other => Ok(other),
+    }
+}
+
+/// Check if a DfExpr is a column reference to an overflow property for the given variable.
+///
+/// Returns the property name if this is `{variable}.{prop}` where `prop` is NOT in the
+/// label schema (i.e., it's an overflow property).
+fn is_overflow_column(
+    expr: &DfExpr,
+    variable: &str,
+    label_props: Option<&HashMap<String, PropertyMeta>>,
+) -> Option<String> {
+    if let DfExpr::Column(col) = expr {
+        let col_name = &col.name;
+        let prefix = format!("{}.", variable);
+        if let Some(prop) = col_name.strip_prefix(&prefix) {
+            // System columns are never overflow
+            if prop.starts_with('_') {
+                return None;
+            }
+            // If no label_props, we can't determine overflow
+            let props = label_props?;
+            if !props.contains_key(prop) {
+                return Some(prop.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Try to rewrite a column reference to a json_get_* UDF call if it's an overflow property.
+fn try_rewrite_overflow_column_with_source(
+    expr: &DfExpr,
+    variable: &str,
+    label_props: Option<&HashMap<String, PropertyMeta>>,
+    udf_name: &str,
+    source_col_suffix: &str,
+) -> Option<DfExpr> {
+    let prop = is_overflow_column(expr, variable, label_props)?;
+    let overflow_col = DfExpr::Column(Column::from_name(format!(
+        "{}.{}",
+        variable, source_col_suffix
+    )));
+    Some(dummy_udf_expr(udf_name, vec![overflow_col, lit(prop)]))
+}
+
+/// Try to rewrite (column, literal) pair where column is an overflow property.
+fn try_rewrite_column_literal_with_source(
+    col_expr: &DfExpr,
+    lit_expr: &DfExpr,
+    variable: &str,
+    label_props: Option<&HashMap<String, PropertyMeta>>,
+    source_col_suffix: &str,
+) -> Option<(String, DfExpr)> {
+    let prop = is_overflow_column(col_expr, variable, label_props)?;
+
+    // Choose UDF based on the literal type
+    let udf_name = match lit_expr {
+        DfExpr::Literal(ScalarValue::Utf8(_), _) => "json_get_string",
+        DfExpr::Literal(ScalarValue::Int64(_), _) => "json_get_int",
+        DfExpr::Literal(ScalarValue::Float64(_), _) => "json_get_float",
+        DfExpr::Literal(ScalarValue::Boolean(_), _) => "json_get_bool",
+        // Default to string for other/unknown types
+        _ => "json_get_string",
+    };
+
+    let overflow_col = DfExpr::Column(Column::from_name(format!(
+        "{}.{}",
+        variable, source_col_suffix
+    )));
+    let rewritten = dummy_udf_expr(udf_name, vec![overflow_col, lit(prop.clone())]);
+    Some((prop, rewritten))
 }
 
 /// Collect all property accesses from an expression tree.

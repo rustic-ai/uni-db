@@ -5253,6 +5253,12 @@ fn collect_properties_from_expr_into(
                     .entry(var.to_string())
                     .or_default()
                     .insert(prop.to_string());
+            } else {
+                // Bare variable (e.g., RETURN n) — needs all properties materialized
+                properties
+                    .entry(name.clone())
+                    .or_default()
+                    .insert("*".to_string());
             }
         }
         Expr::Property(base, name) => {

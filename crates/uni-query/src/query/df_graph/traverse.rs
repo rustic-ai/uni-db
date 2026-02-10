@@ -1109,11 +1109,11 @@ impl GraphTraverseMainExec {
             .map(|f| f.as_ref().clone())
             .collect();
 
-        // Add target ._vid column
+        // Add target ._vid column (nullable for OPTIONAL MATCH)
         fields.push(Field::new(
             format!("{}._vid", target_variable),
             DataType::UInt64,
-            false,
+            true,
         ));
 
         // Add edge columns if edge variable is bound

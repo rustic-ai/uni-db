@@ -412,6 +412,7 @@ impl ExecutionPlan for GraphScanExec {
         Ok(Box::pin(GraphScanStream::new(
             self.graph_ctx.clone(),
             self.label.clone(),
+            self.variable.clone(),
             self.projected_properties.clone(),
             self.is_edge_scan,
             self.is_schemaless,
@@ -437,15 +438,18 @@ enum GraphScanState {
 
 /// Stream that scans vertices or edges and materializes properties.
 ///
-/// Performs a two-phase scan:
-/// 1. Collects all VIDs/EIDs from storage and L0 buffers
-/// 2. Batch-loads properties using PropertyManager
+/// For known-label vertex scans, uses a single columnar Lance query with
+/// MVCC dedup and L0 overlay. For edge and schemaless scans, falls back
+/// to the two-phase VID-scan + property-materialize flow.
 struct GraphScanStream {
     /// Graph execution context.
     graph_ctx: Arc<GraphExecutionContext>,
 
     /// Label (vertex) or edge type name.
     label: String,
+
+    /// Variable name for column prefixing (e.g., "n" in `n.name`).
+    variable: String,
 
     /// Properties to materialize.
     properties: Vec<String>,
@@ -471,6 +475,7 @@ impl GraphScanStream {
     fn new(
         graph_ctx: Arc<GraphExecutionContext>,
         label: String,
+        variable: String,
         properties: Vec<String>,
         is_edge_scan: bool,
         is_schemaless: bool,
@@ -480,6 +485,7 @@ impl GraphScanStream {
         Self {
             graph_ctx,
             label,
+            variable,
             properties,
             is_edge_scan,
             is_schemaless,
@@ -511,6 +517,10 @@ pub(crate) fn resolve_property_type(
 }
 
 /// Scan vertex VIDs from storage and L0 buffers (static version for async).
+///
+/// Superseded by `columnar_scan_vertex_batch_static` for known-label scans.
+/// Kept for potential fallback use.
+#[allow(dead_code)]
 async fn scan_vertex_vids_static(
     graph_ctx: &GraphExecutionContext,
     label: &str,
@@ -790,8 +800,8 @@ fn build_schemaless_vertex_record_batch(
                 Some(Value::Null) | None => builder.append_null(),
                 Some(val) => {
                     let json_val: serde_json::Value = val.into();
-                    match jsonb::to_owned_jsonb(&json_val) {
-                        Ok(jsonb_bytes) => builder.append_value(jsonb_bytes.to_vec()),
+                    match serde_json_to_jsonb(&json_val) {
+                        Ok(bytes) => builder.append_value(bytes),
                         Err(_) => builder.append_null(),
                     }
                 }
@@ -847,6 +857,10 @@ async fn scan_edge_eids_static(
 }
 
 /// Materialize a batch of vertices with their properties (static version for async).
+///
+/// Superseded by `columnar_scan_vertex_batch_static` for known-label scans.
+/// Kept for potential fallback use.
+#[allow(dead_code)]
 pub(crate) async fn materialize_vertex_batch_static(
     graph_ctx: &GraphExecutionContext,
     label: &str,
@@ -884,6 +898,10 @@ pub(crate) async fn materialize_vertex_batch_static(
 }
 
 /// Build a RecordBatch from VIDs and their properties (static version).
+///
+/// Superseded by `columnar_scan_vertex_batch_static` for known-label scans.
+/// Kept for potential fallback use.
+#[allow(dead_code)]
 pub(crate) fn build_vertex_record_batch_static(
     schema: &SchemaRef,
     vids: &[Vid],
@@ -920,12 +938,622 @@ pub(crate) fn build_vertex_record_batch_static(
         // Extract property name from field name (e.g., "n.name" -> "name")
         let prop_name = field.name().split('.').nth(1).unwrap_or(field.name());
 
-        let column = build_property_column_static(vids, props_map, prop_name, field.data_type())?;
-        columns.push(column);
+        if prop_name == "overflow_json" {
+            // Reconstruct the overflow_json JSONB blob from all non-system properties.
+            // The PropertyManager already decoded overflow_json into individual properties,
+            // so we re-encode them as a JSON object for filter expressions like
+            // json_get_string(overflow_json, 'key').
+            let column = build_overflow_json_column(vids, props_map)?;
+            columns.push(column);
+        } else {
+            let column =
+                build_property_column_static(vids, props_map, prop_name, field.data_type())?;
+            columns.push(column);
+        }
     }
 
     RecordBatch::try_new(schema.clone(), columns)
         .map_err(|e| datafusion::error::DataFusionError::ArrowError(Box::new(e), None))
+}
+
+/// Build the `overflow_json` column by reconstructing a JSONB object from all
+/// non-system properties in the props map.
+#[allow(dead_code)]
+fn build_overflow_json_column(
+    vids: &[Vid],
+    props_map: &HashMap<Vid, Properties>,
+) -> DFResult<ArrayRef> {
+    use arrow_array::builder::LargeBinaryBuilder;
+
+    let mut builder = LargeBinaryBuilder::new();
+    for vid in vids {
+        if let Some(props) = props_map.get(vid) {
+            // Build a JSON object from all non-system properties
+            let mut obj = serde_json::Map::new();
+            for (k, v) in props {
+                if !k.starts_with('_') {
+                    let json_val: serde_json::Value = v.clone().into();
+                    obj.insert(k.clone(), json_val);
+                }
+            }
+            if obj.is_empty() {
+                builder.append_null();
+            } else {
+                let json_val = serde_json::Value::Object(obj);
+                match serde_json_to_jsonb(&json_val) {
+                    Ok(bytes) => builder.append_value(bytes),
+                    Err(_) => builder.append_null(),
+                }
+            }
+        } else {
+            builder.append_null();
+        }
+    }
+    Ok(Arc::new(builder.finish()))
+}
+
+// ============================================================================
+// Columnar-first scan helpers
+// ============================================================================
+
+/// MVCC deduplication: keep only the highest-version row for each `_vid`.
+///
+/// Sorts by (_vid ASC, _version DESC), then keeps the first occurrence of each
+/// _vid (= the highest version). This is a pure Arrow-compute operation.
+fn mvcc_dedup_batch(batch: &RecordBatch) -> DFResult<RecordBatch> {
+    if batch.num_rows() == 0 {
+        return Ok(batch.clone());
+    }
+
+    let vid_col = batch
+        .column_by_name("_vid")
+        .ok_or_else(|| {
+            datafusion::error::DataFusionError::Internal("Missing _vid column".to_string())
+        })?
+        .clone();
+    let version_col = batch
+        .column_by_name("_version")
+        .ok_or_else(|| {
+            datafusion::error::DataFusionError::Internal("Missing _version column".to_string())
+        })?
+        .clone();
+
+    // Sort by (_vid ASC, _version DESC)
+    let sort_columns = vec![
+        arrow::compute::SortColumn {
+            values: vid_col,
+            options: Some(arrow::compute::SortOptions {
+                descending: false,
+                nulls_first: false,
+            }),
+        },
+        arrow::compute::SortColumn {
+            values: version_col,
+            options: Some(arrow::compute::SortOptions {
+                descending: true,
+                nulls_first: false,
+            }),
+        },
+    ];
+    let indices = arrow::compute::lexsort_to_indices(&sort_columns, None)
+        .map_err(|e| datafusion::error::DataFusionError::ArrowError(Box::new(e), None))?;
+
+    // Reorder all columns by sorted indices
+    let sorted_columns: Vec<ArrayRef> = batch
+        .columns()
+        .iter()
+        .map(|col| arrow::compute::take(col.as_ref(), &indices, None))
+        .collect::<Result<_, _>>()
+        .map_err(|e| datafusion::error::DataFusionError::ArrowError(Box::new(e), None))?;
+    let sorted =
+        RecordBatch::try_new(batch.schema(), sorted_columns)
+            .map_err(|e| datafusion::error::DataFusionError::ArrowError(Box::new(e), None))?;
+
+    // Build dedup mask: keep first occurrence of each _vid
+    let sorted_vid = sorted
+        .column_by_name("_vid")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<UInt64Array>()
+        .unwrap();
+
+    let mut keep = vec![false; sorted.num_rows()];
+    if !keep.is_empty() {
+        keep[0] = true;
+        for (i, flag) in keep.iter_mut().enumerate().skip(1) {
+            if sorted_vid.value(i) != sorted_vid.value(i - 1) {
+                *flag = true;
+            }
+        }
+    }
+
+    let mask = arrow_array::BooleanArray::from(keep);
+    arrow::compute::filter_record_batch(&sorted, &mask)
+        .map_err(|e| datafusion::error::DataFusionError::ArrowError(Box::new(e), None))
+}
+
+/// Filter out rows whose `_vid` appears in L0 tombstones.
+fn filter_l0_tombstones(
+    batch: &RecordBatch,
+    l0_ctx: &crate::query::df_graph::L0Context,
+) -> DFResult<RecordBatch> {
+    if batch.num_rows() == 0 {
+        return Ok(batch.clone());
+    }
+
+    let mut tombstones: HashSet<u64> = HashSet::new();
+    for l0 in l0_ctx.iter_l0_buffers() {
+        let guard = l0.read();
+        for vid in guard.vertex_tombstones.iter() {
+            tombstones.insert(vid.as_u64());
+        }
+    }
+
+    if tombstones.is_empty() {
+        return Ok(batch.clone());
+    }
+
+    let vid_col = batch
+        .column_by_name("_vid")
+        .ok_or_else(|| {
+            datafusion::error::DataFusionError::Internal("Missing _vid column".to_string())
+        })?
+        .as_any()
+        .downcast_ref::<UInt64Array>()
+        .unwrap();
+
+    let keep: Vec<bool> = (0..vid_col.len())
+        .map(|i| !tombstones.contains(&vid_col.value(i)))
+        .collect();
+    let mask = arrow_array::BooleanArray::from(keep);
+    arrow::compute::filter_record_batch(batch, &mask)
+        .map_err(|e| datafusion::error::DataFusionError::ArrowError(Box::new(e), None))
+}
+
+/// Build a RecordBatch from L0 buffer data for a given label, matching the
+/// Lance query's column set.
+///
+/// Merges L0 buffers in visibility order (pending_flush → current → transaction),
+/// with later buffers overwriting earlier ones for the same VID.
+fn build_l0_vertex_batch(
+    l0_ctx: &crate::query::df_graph::L0Context,
+    label: &str,
+    lance_schema: &SchemaRef,
+    label_props: Option<&HashMap<String, uni_common::core::schema::PropertyMeta>>,
+) -> DFResult<RecordBatch> {
+    // Collect all L0 vertex data, merging in visibility order
+    let mut vid_data: HashMap<u64, (Properties, u64)> = HashMap::new(); // vid -> (props, version)
+    let mut tombstones: HashSet<u64> = HashSet::new();
+
+    for l0 in l0_ctx.iter_l0_buffers() {
+        let guard = l0.read();
+        // Collect tombstones
+        for vid in guard.vertex_tombstones.iter() {
+            tombstones.insert(vid.as_u64());
+        }
+        // Collect vertices for this label
+        for vid in guard.vids_for_label(label) {
+            let vid_u64 = vid.as_u64();
+            if tombstones.contains(&vid_u64) {
+                continue;
+            }
+            let version = guard.vertex_versions.get(&vid).copied().unwrap_or(0);
+            let entry = vid_data
+                .entry(vid_u64)
+                .or_insert_with(|| (Properties::new(), 0));
+            // Merge properties (later L0 overwrites)
+            if let Some(props) = guard.vertex_properties.get(&vid) {
+                for (k, v) in props {
+                    entry.0.insert(k.clone(), v.clone());
+                }
+            }
+            // Take the highest version
+            if version > entry.1 {
+                entry.1 = version;
+            }
+        }
+    }
+
+    // Remove tombstoned VIDs
+    for t in &tombstones {
+        vid_data.remove(t);
+    }
+
+    if vid_data.is_empty() {
+        return Ok(RecordBatch::new_empty(lance_schema.clone()));
+    }
+
+    // Sort VIDs for deterministic output
+    let mut vids: Vec<u64> = vid_data.keys().copied().collect();
+    vids.sort_unstable();
+
+    let num_rows = vids.len();
+    let mut columns: Vec<ArrayRef> = Vec::with_capacity(lance_schema.fields().len());
+
+    // Determine which schema property names exist
+    let schema_prop_names: HashSet<&str> = label_props
+        .map(|lp| lp.keys().map(|k| k.as_str()).collect())
+        .unwrap_or_default();
+
+    for field in lance_schema.fields() {
+        let col_name = field.name().as_str();
+        match col_name {
+            "_vid" => {
+                columns.push(Arc::new(UInt64Array::from(vids.clone())));
+            }
+            "_deleted" => {
+                // L0 vertices are always live (tombstoned ones are already excluded)
+                let vals = vec![false; num_rows];
+                columns.push(Arc::new(arrow_array::BooleanArray::from(vals)));
+            }
+            "_version" => {
+                let vals: Vec<u64> = vids.iter().map(|v| vid_data[v].1).collect();
+                columns.push(Arc::new(UInt64Array::from(vals)));
+            }
+            "overflow_json" => {
+                // Collect non-schema properties as JSONB
+                let mut builder = arrow_array::builder::LargeBinaryBuilder::new();
+                for vid_u64 in &vids {
+                    let (props, _) = &vid_data[vid_u64];
+                    let mut overflow = serde_json::Map::new();
+                    for (k, v) in props {
+                        if k == "ext_id" || k.starts_with('_') {
+                            continue;
+                        }
+                        if !schema_prop_names.contains(k.as_str()) {
+                            let json_val: serde_json::Value = v.clone().into();
+                            overflow.insert(k.clone(), json_val);
+                        }
+                    }
+                    if overflow.is_empty() {
+                        builder.append_null();
+                    } else {
+                        let json_val = serde_json::Value::Object(overflow);
+                        match serde_json_to_jsonb(&json_val) {
+                            Ok(bytes) => builder.append_value(bytes),
+                            Err(_) => builder.append_null(),
+                        }
+                    }
+                }
+                columns.push(Arc::new(builder.finish()));
+            }
+            _ => {
+                // Schema property column: convert L0 Value → Arrow typed value
+                let col = build_l0_property_column(
+                    &vids,
+                    &vid_data,
+                    col_name,
+                    field.data_type(),
+                )?;
+                columns.push(col);
+            }
+        }
+    }
+
+    RecordBatch::try_new(lance_schema.clone(), columns)
+        .map_err(|e| datafusion::error::DataFusionError::ArrowError(Box::new(e), None))
+}
+
+/// Build a single Arrow column from L0 property values.
+///
+/// Operates on the `vid_data` map produced by `build_l0_vertex_batch`.
+fn build_l0_property_column(
+    vids: &[u64],
+    vid_data: &HashMap<u64, (Properties, u64)>,
+    prop_name: &str,
+    data_type: &DataType,
+) -> DFResult<ArrayRef> {
+    // Convert to Vid keys for reuse of existing build_property_column_static
+    let vid_keys: Vec<Vid> = vids.iter().map(|v| Vid::from(*v)).collect();
+    let props_map: HashMap<Vid, Properties> = vid_data
+        .iter()
+        .map(|(k, (props, _))| (Vid::from(*k), props.clone()))
+        .collect();
+
+    build_property_column_static(&vid_keys, &props_map, prop_name, data_type)
+}
+
+/// Synthesize the `_labels` column for known-label vertices.
+///
+/// Each vertex gets at minimum `[label]`. Additional labels from L0 buffers
+/// are merged in.
+fn build_labels_column_for_known_label(
+    vid_arr: &UInt64Array,
+    label: &str,
+    l0_ctx: &crate::query::df_graph::L0Context,
+) -> DFResult<ArrayRef> {
+    let mut labels_builder = ListBuilder::new(StringBuilder::new());
+
+    for i in 0..vid_arr.len() {
+        let vid_u64 = vid_arr.value(i);
+        let vid = Vid::from(vid_u64);
+
+        let mut labels = vec![label.to_string()];
+
+        // Check L0 buffers for additional labels
+        for l0 in l0_ctx.iter_l0_buffers() {
+            let guard = l0.read();
+            if let Some(l0_labels) = guard.vertex_labels.get(&vid) {
+                for lbl in l0_labels {
+                    if lbl != label && !labels.contains(lbl) {
+                        labels.push(lbl.clone());
+                    }
+                }
+            }
+        }
+
+        let values = labels_builder.values();
+        for lbl in &labels {
+            values.append_value(lbl);
+        }
+        labels_builder.append(true);
+    }
+
+    Ok(Arc::new(labels_builder.finish()))
+}
+
+/// Map a Lance-schema batch to the DataFusion output schema.
+///
+/// The output schema has `{variable}.{property}` column names, while Lance
+/// uses bare property names. This function performs the positional mapping,
+/// adds the `_labels` column, and drops internal columns like `_deleted`/`_version`.
+fn map_to_output_schema(
+    batch: &RecordBatch,
+    label: &str,
+    variable: &str,
+    projected_properties: &[String],
+    output_schema: &SchemaRef,
+    l0_ctx: &crate::query::df_graph::L0Context,
+) -> DFResult<RecordBatch> {
+    if batch.num_rows() == 0 {
+        return Ok(RecordBatch::new_empty(output_schema.clone()));
+    }
+
+    let mut columns: Vec<ArrayRef> = Vec::with_capacity(output_schema.fields().len());
+
+    // 1. {var}._vid
+    let vid_col = batch
+        .column_by_name("_vid")
+        .ok_or_else(|| {
+            datafusion::error::DataFusionError::Internal("Missing _vid column".to_string())
+        })?
+        .clone();
+    let vid_arr = vid_col
+        .as_any()
+        .downcast_ref::<UInt64Array>()
+        .ok_or_else(|| {
+            datafusion::error::DataFusionError::Internal("_vid not UInt64".to_string())
+        })?;
+
+    // 2. {var}._labels — must build before moving vid_col
+    let labels_col = build_labels_column_for_known_label(vid_arr, label, l0_ctx)?;
+    columns.push(vid_col);
+    columns.push(labels_col);
+
+    // 3. Projected properties
+    for prop in projected_properties {
+        if prop == "overflow_json" {
+            match batch.column_by_name("overflow_json") {
+                Some(col) => columns.push(col.clone()),
+                None => {
+                    // No overflow_json in Lance — return null column
+                    columns.push(arrow_array::new_null_array(
+                        &DataType::LargeBinary,
+                        batch.num_rows(),
+                    ));
+                }
+            }
+        } else {
+            match batch.column_by_name(prop) {
+                Some(col) => columns.push(col.clone()),
+                None => {
+                    // Column missing in Lance (schema evolution) — return null column
+                    let target_field = output_schema
+                        .fields()
+                        .iter()
+                        .find(|f| {
+                            f.name() == &format!("{}.{}", variable, prop)
+                        });
+                    let dt = target_field
+                        .map(|f| f.data_type().clone())
+                        .unwrap_or(DataType::LargeBinary);
+                    columns.push(arrow_array::new_null_array(&dt, batch.num_rows()));
+                }
+            }
+        }
+    }
+
+    RecordBatch::try_new(output_schema.clone(), columns)
+        .map_err(|e| datafusion::error::DataFusionError::ArrowError(Box::new(e), None))
+}
+
+/// Columnar-first vertex scan: single Lance query with MVCC dedup and L0 overlay.
+///
+/// Replaces the two-phase `scan_vertex_vids_static()` + `materialize_vertex_batch_static()`
+/// for known-label vertex scans. Reads all needed columns in a single Lance query,
+/// performs MVCC dedup via Arrow compute, merges L0 buffer data, filters tombstones,
+/// and maps to the output schema.
+async fn columnar_scan_vertex_batch_static(
+    graph_ctx: &GraphExecutionContext,
+    label: &str,
+    variable: &str,
+    projected_properties: &[String],
+    output_schema: &SchemaRef,
+) -> DFResult<RecordBatch> {
+    let storage = graph_ctx.storage();
+    let l0_ctx = graph_ctx.l0_context();
+    let uni_schema = storage.schema_manager().schema();
+    let label_props = uni_schema.properties.get(label);
+
+    // Build the list of columns to request from Lance
+    let mut lance_columns: Vec<String> = vec![
+        "_vid".to_string(),
+        "_deleted".to_string(),
+        "_version".to_string(),
+    ];
+    for prop in projected_properties {
+        if prop == "overflow_json" {
+            if !lance_columns.contains(&"overflow_json".to_string()) {
+                lance_columns.push("overflow_json".to_string());
+            }
+        } else {
+            // Only include columns that exist in the schema
+            let exists_in_schema = label_props.is_some_and(|lp| lp.contains_key(prop));
+            if exists_in_schema && !lance_columns.contains(prop) {
+                lance_columns.push(prop.clone());
+            }
+        }
+    }
+
+    // Check if any projected property is not in schema (needs overflow_json)
+    let needs_overflow = projected_properties.iter().any(|p| {
+        p == "overflow_json"
+            || !label_props.is_some_and(|lp| lp.contains_key(p))
+    });
+    if needs_overflow && !lance_columns.contains(&"overflow_json".to_string()) {
+        lance_columns.push("overflow_json".to_string());
+    }
+
+    // Try to query Lance
+    let ds = storage
+        .vertex_dataset(label)
+        .map_err(|e| datafusion::error::DataFusionError::Execution(e.to_string()))?;
+    let lancedb_store = storage.lancedb_store();
+
+    let lance_batch = match ds.open_lancedb(lancedb_store).await {
+        Ok(table) => {
+            use lancedb::query::{ExecutableQuery, QueryBase, Select};
+
+            // Check which columns actually exist in the Lance table
+            let table_schema = table.schema().await
+                .map_err(|e| datafusion::error::DataFusionError::Execution(e.to_string()))?;
+            let table_field_names: HashSet<&str> = table_schema
+                .fields()
+                .iter()
+                .map(|f| f.name().as_str())
+                .collect();
+
+            let actual_columns: Vec<&str> = lance_columns
+                .iter()
+                .filter(|c| table_field_names.contains(c.as_str()))
+                .map(|c| c.as_str())
+                .collect();
+
+            let query = table
+                .query()
+                .select(Select::columns(&actual_columns));
+            let query = match storage.version_high_water_mark() {
+                Some(hwm) => query.only_if(format!("_deleted = false AND _version <= {}", hwm)),
+                None => query.only_if("_deleted = false"),
+            };
+
+            match query.execute().await {
+                Ok(stream) => {
+                    use futures::TryStreamExt;
+                    let batches: Vec<RecordBatch> =
+                        stream.try_collect().await.unwrap_or_default();
+                    if batches.is_empty() {
+                        None
+                    } else {
+                        Some(
+                            arrow::compute::concat_batches(&batches[0].schema(), &batches)
+                                .map_err(|e| {
+                                    datafusion::error::DataFusionError::ArrowError(
+                                        Box::new(e),
+                                        None,
+                                    )
+                                })?,
+                        )
+                    }
+                }
+                Err(_) => None,
+            }
+        }
+        Err(_) => None, // Table doesn't exist yet — only L0 data
+    };
+
+    // MVCC dedup the Lance batch
+    let lance_deduped = match lance_batch {
+        Some(batch) => {
+            let deduped = mvcc_dedup_batch(&batch)?;
+            if deduped.num_rows() > 0 {
+                Some(deduped)
+            } else {
+                None
+            }
+        }
+        None => None,
+    };
+
+    // Build the internal Lance schema for L0 batch construction.
+    // Use the Lance batch schema if available, otherwise build from scratch.
+    let internal_schema = match &lance_deduped {
+        Some(batch) => batch.schema(),
+        None => {
+            // Build schema from column list + type info
+            let mut fields = vec![
+                Field::new("_vid", DataType::UInt64, false),
+                Field::new("_deleted", DataType::Boolean, false),
+                Field::new("_version", DataType::UInt64, false),
+            ];
+            for col in &lance_columns {
+                if col == "_vid" || col == "_deleted" || col == "_version" {
+                    continue;
+                }
+                if col == "overflow_json" {
+                    fields.push(Field::new("overflow_json", DataType::LargeBinary, true));
+                } else {
+                    let arrow_type = label_props
+                        .and_then(|lp| lp.get(col.as_str()))
+                        .map(|meta| meta.r#type.to_arrow())
+                        .unwrap_or(DataType::LargeBinary);
+                    fields.push(Field::new(col, arrow_type, true));
+                }
+            }
+            Arc::new(Schema::new(fields))
+        }
+    };
+
+    // Build L0 batch
+    let l0_batch = build_l0_vertex_batch(l0_ctx, label, &internal_schema, label_props)?;
+
+    // Merge Lance + L0
+    let merged = match (lance_deduped, l0_batch.num_rows() > 0) {
+        (Some(lance), true) => {
+            // Need to align L0 batch schema to match Lance batch schema
+            let combined = arrow::compute::concat_batches(
+                &internal_schema,
+                &[lance, l0_batch],
+            )
+            .map_err(|e| {
+                datafusion::error::DataFusionError::ArrowError(Box::new(e), None)
+            })?;
+            // Re-dedup: L0 versions are higher so they win
+            mvcc_dedup_batch(&combined)?
+        }
+        (Some(lance), false) => lance,
+        (None, true) => l0_batch,
+        (None, false) => {
+            return Ok(RecordBatch::new_empty(output_schema.clone()));
+        }
+    };
+
+    // Filter tombstones
+    let filtered = filter_l0_tombstones(&merged, l0_ctx)?;
+
+    if filtered.num_rows() == 0 {
+        return Ok(RecordBatch::new_empty(output_schema.clone()));
+    }
+
+    // Map to output schema
+    map_to_output_schema(
+        &filtered,
+        label,
+        variable,
+        projected_properties,
+        output_schema,
+        l0_ctx,
+    )
 }
 
 /// Materialize a batch of edges with their properties (static version for async).
@@ -1028,6 +1656,19 @@ pub(crate) fn get_property_value(
         .cloned()
 }
 
+/// Encode a `serde_json::Value` as JSONB binary.
+///
+/// Uses `jsonb::parse_value` (JSON text parsing) instead of `jsonb::to_owned_jsonb`
+/// (serde serialization) because `serde_json::Number` does not serialize correctly
+/// through serde — it produces a tagged struct string instead of a JSONB number.
+fn serde_json_to_jsonb(val: &serde_json::Value) -> Result<Vec<u8>, String> {
+    let json_str =
+        serde_json::to_string(val).map_err(|e| format!("JSON serialization failed: {e}"))?;
+    let jsonb_bytes = jsonb::parse_value(json_str.as_bytes())
+        .map_err(|e| format!("JSONB parse failed: {e}"))?;
+    Ok(jsonb_bytes.to_vec())
+}
+
 /// Build a numeric column from property values using the specified builder and extractor.
 macro_rules! build_numeric_column {
     ($vids:expr, $props_map:expr, $prop_name:expr, $builder_ty:ty, $extractor:expr, $cast:expr) => {{
@@ -1078,8 +1719,8 @@ pub(crate) fn build_property_column_static(
                     Some(val) => {
                         // Value from PropertyManager — convert to serde_json and re-encode to JSONB binary
                         let json_val: serde_json::Value = val.into();
-                        match jsonb::to_owned_jsonb(&json_val) {
-                            Ok(jsonb_bytes) => builder.append_value(jsonb_bytes.to_vec()),
+                        match serde_json_to_jsonb(&json_val) {
+                            Ok(bytes) => builder.append_value(bytes),
                             Err(_) => builder.append_null(),
                         }
                     }
@@ -1661,6 +2302,7 @@ impl Stream for GraphScanStream {
                     // Create the future with cloned data for ownership
                     let graph_ctx = self.graph_ctx.clone();
                     let label = self.label.clone();
+                    let variable = self.variable.clone();
                     let properties = self.properties.clone();
                     let is_edge_scan = self.is_edge_scan;
                     let is_schemaless = self.is_schemaless;
@@ -1704,12 +2346,15 @@ impl Stream for GraphScanStream {
                             .await?;
                             Ok(Some(batch))
                         } else {
-                            // Known label vertex scan - use per-label table
-                            let vids = scan_vertex_vids_static(&graph_ctx, &label).await?;
-                            // Materialize batch
-                            let batch =
-                                materialize_vertex_batch_static(&graph_ctx, &label, &schema, vids)
-                                    .await?;
+                            // Known label vertex scan — columnar-first single query
+                            let batch = columnar_scan_vertex_batch_static(
+                                &graph_ctx,
+                                &label,
+                                &variable,
+                                &properties,
+                                &schema,
+                            )
+                            .await?;
                             Ok(Some(batch))
                         }
                     };
@@ -1810,5 +2455,225 @@ mod tests {
         assert_eq!(schema.fields().len(), 2);
         assert_eq!(schema.field(0).name(), "n._vid");
         assert_eq!(schema.field(1).name(), "n._labels");
+    }
+
+    #[test]
+    fn test_jsonb_all_props_extraction() {
+        // Simulate _all_props encoding using serde_json_to_jsonb helper
+        let json_obj = serde_json::json!({"age": 30, "name": "Alice"});
+        let jsonb_bytes = serde_json_to_jsonb(&json_obj).unwrap();
+        let raw = jsonb::RawJsonb::new(&jsonb_bytes);
+
+        // Extract "age" value (this is what json_get_int does)
+        let val = raw.get_by_name("age", false).unwrap().unwrap();
+        let val_raw = jsonb::RawJsonb::new(val.as_ref());
+        let result = val_raw.to_i64();
+
+        assert!(result.is_ok(), "to_i64 failed: {:?}", result.err());
+        assert_eq!(result.unwrap(), 30);
+
+        // Also test single value encoding
+        let single_val = serde_json::json!(30);
+        let single_bytes = serde_json_to_jsonb(&single_val).unwrap();
+        let single_raw = jsonb::RawJsonb::new(&single_bytes);
+        assert_eq!(single_raw.to_i64().unwrap(), 30);
+    }
+
+    /// Helper to build a RecordBatch with _vid, _deleted, _version columns for testing.
+    fn make_mvcc_batch(
+        vids: &[u64],
+        versions: &[u64],
+        deleted: &[bool],
+    ) -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("_vid", DataType::UInt64, false),
+            Field::new("_deleted", DataType::Boolean, false),
+            Field::new("_version", DataType::UInt64, false),
+            Field::new("name", DataType::Utf8, true),
+        ]));
+        // Generate name values like "v{vid}_ver{version}" for tracking which row wins
+        let names: Vec<String> = vids
+            .iter()
+            .zip(versions.iter())
+            .map(|(v, ver)| format!("v{}_ver{}", v, ver))
+            .collect();
+        let name_arr: arrow_array::StringArray = names.iter().map(|s| Some(s.as_str())).collect();
+
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(UInt64Array::from(vids.to_vec())),
+                Arc::new(arrow_array::BooleanArray::from(deleted.to_vec())),
+                Arc::new(UInt64Array::from(versions.to_vec())),
+                Arc::new(name_arr),
+            ],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn test_mvcc_dedup_multiple_versions() {
+        // VID 1 at versions 3, 1, 5 — should keep version 5
+        // VID 2 at versions 2, 4 — should keep version 4
+        let batch = make_mvcc_batch(
+            &[1, 1, 1, 2, 2],
+            &[3, 1, 5, 2, 4],
+            &[false, false, false, false, false],
+        );
+
+        let result = mvcc_dedup_batch(&batch).unwrap();
+        assert_eq!(result.num_rows(), 2);
+
+        let vid_col = result
+            .column_by_name("_vid")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .unwrap();
+        let ver_col = result
+            .column_by_name("_version")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .unwrap();
+        let name_col = result
+            .column_by_name("name")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<arrow_array::StringArray>()
+            .unwrap();
+
+        // VID 1 → version 5, VID 2 → version 4
+        assert_eq!(vid_col.value(0), 1);
+        assert_eq!(ver_col.value(0), 5);
+        assert_eq!(name_col.value(0), "v1_ver5");
+
+        assert_eq!(vid_col.value(1), 2);
+        assert_eq!(ver_col.value(1), 4);
+        assert_eq!(name_col.value(1), "v2_ver4");
+    }
+
+    #[test]
+    fn test_mvcc_dedup_single_rows() {
+        // Each VID appears once — nothing should change
+        let batch = make_mvcc_batch(&[1, 2, 3], &[1, 1, 1], &[false, false, false]);
+        let result = mvcc_dedup_batch(&batch).unwrap();
+        assert_eq!(result.num_rows(), 3);
+    }
+
+    #[test]
+    fn test_mvcc_dedup_empty() {
+        let batch = make_mvcc_batch(&[], &[], &[]);
+        let result = mvcc_dedup_batch(&batch).unwrap();
+        assert_eq!(result.num_rows(), 0);
+    }
+
+    #[test]
+    fn test_filter_l0_tombstones_removes_tombstoned() {
+        use crate::query::df_graph::L0Context;
+
+        // Create a batch with VIDs 1, 2, 3
+        let batch = make_mvcc_batch(&[1, 2, 3], &[1, 1, 1], &[false, false, false]);
+
+        // Create L0 context with VID 2 tombstoned
+        let l0 = uni_store::runtime::l0::L0Buffer::new(1, None);
+        {
+            // We need to insert a tombstone — L0Buffer has pub vertex_tombstones
+            // But we can't easily create one with tombstones through the constructor.
+            // Use a direct approach.
+        }
+        let l0_buf = std::sync::Arc::new(parking_lot::RwLock::new(l0));
+        l0_buf.write().vertex_tombstones.insert(Vid::from(2u64));
+
+        let l0_ctx = L0Context {
+            current_l0: Some(l0_buf),
+            transaction_l0: None,
+            pending_flush_l0s: vec![],
+        };
+
+        let result = filter_l0_tombstones(&batch, &l0_ctx).unwrap();
+        assert_eq!(result.num_rows(), 2);
+
+        let vid_col = result
+            .column_by_name("_vid")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .unwrap();
+        assert_eq!(vid_col.value(0), 1);
+        assert_eq!(vid_col.value(1), 3);
+    }
+
+    #[test]
+    fn test_filter_l0_tombstones_none() {
+        use crate::query::df_graph::L0Context;
+
+        let batch = make_mvcc_batch(&[1, 2, 3], &[1, 1, 1], &[false, false, false]);
+        let l0_ctx = L0Context::default();
+
+        let result = filter_l0_tombstones(&batch, &l0_ctx).unwrap();
+        assert_eq!(result.num_rows(), 3);
+    }
+
+    #[test]
+    fn test_map_to_output_schema_basic() {
+        use crate::query::df_graph::L0Context;
+
+        // Input: Lance-schema batch with _vid, _deleted, _version, name columns
+        let lance_schema = Arc::new(Schema::new(vec![
+            Field::new("_vid", DataType::UInt64, false),
+            Field::new("_deleted", DataType::Boolean, false),
+            Field::new("_version", DataType::UInt64, false),
+            Field::new("name", DataType::Utf8, true),
+        ]));
+        let name_arr: arrow_array::StringArray =
+            vec![Some("Alice"), Some("Bob")].into_iter().collect();
+        let batch = RecordBatch::try_new(
+            lance_schema,
+            vec![
+                Arc::new(UInt64Array::from(vec![1u64, 2])),
+                Arc::new(arrow_array::BooleanArray::from(vec![false, false])),
+                Arc::new(UInt64Array::from(vec![1u64, 1])),
+                Arc::new(name_arr),
+            ],
+        )
+        .unwrap();
+
+        // Output schema: n._vid, n._labels, n.name
+        let output_schema = Arc::new(Schema::new(vec![
+            Field::new("n._vid", DataType::UInt64, false),
+            Field::new(
+                "n._labels",
+                DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
+                true,
+            ),
+            Field::new("n.name", DataType::Utf8, true),
+        ]));
+
+        let l0_ctx = L0Context::default();
+        let result = map_to_output_schema(
+            &batch,
+            "Person",
+            "n",
+            &["name".to_string()],
+            &output_schema,
+            &l0_ctx,
+        )
+        .unwrap();
+
+        assert_eq!(result.num_rows(), 2);
+        assert_eq!(result.schema().fields().len(), 3);
+        assert_eq!(result.schema().field(0).name(), "n._vid");
+        assert_eq!(result.schema().field(1).name(), "n._labels");
+        assert_eq!(result.schema().field(2).name(), "n.name");
+
+        // Check name values carried through
+        let name_col = result
+            .column(2)
+            .as_any()
+            .downcast_ref::<arrow_array::StringArray>()
+            .unwrap();
+        assert_eq!(name_col.value(0), "Alice");
+        assert_eq!(name_col.value(1), "Bob");
     }
 }

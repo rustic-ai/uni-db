@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2024-2026 Dragonscale Team
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use uni_cypher::ast::{BinaryOp, CypherLiteral, Expr, UnaryOp};
 
 use uni_common::core::id::UniId;
-use uni_common::core::schema::{IndexDefinition, Schema};
+use uni_common::core::schema::{IndexDefinition, PropertyMeta, Schema};
 
 /// Categorized pushdown strategy for predicates with index awareness.
 ///
@@ -574,7 +574,14 @@ impl LanceFilterGenerator {
     }
 
     /// Converts pushable predicates to Lance SQL filter string.
-    pub fn generate(predicates: &[Expr], variable: &str) -> Option<String> {
+    ///
+    /// When `schema_props` is provided, properties not in the schema (overflow properties)
+    /// are skipped since they don't exist as physical columns in Lance.
+    pub fn generate(
+        predicates: &[Expr],
+        variable: &str,
+        schema_props: Option<&HashMap<String, PropertyMeta>>,
+    ) -> Option<String> {
         if predicates.is_empty() {
             return None;
         }
@@ -590,7 +597,7 @@ impl LanceFilterGenerator {
             std::collections::HashSet::new();
 
         for expr in flattened.iter() {
-            if let Some(col) = Self::extract_column_from_range(expr, variable) {
+            if let Some(col) = Self::extract_column_from_range(expr, variable, schema_props) {
                 by_column.entry(col).or_default().push(expr);
             }
         }
@@ -650,7 +657,7 @@ impl LanceFilterGenerator {
             if used_expressions.contains(&(expr as *const Expr)) {
                 continue;
             }
-            if let Some(s) = Self::expr_to_lance(expr, variable) {
+            if let Some(s) = Self::expr_to_lance(expr, variable, schema_props) {
                 filters.push(s);
             }
         }
@@ -662,14 +669,18 @@ impl LanceFilterGenerator {
         }
     }
 
-    fn extract_column_from_range(expr: &Expr, variable: &str) -> Option<String> {
+    fn extract_column_from_range(
+        expr: &Expr,
+        variable: &str,
+        schema_props: Option<&HashMap<String, PropertyMeta>>,
+    ) -> Option<String> {
         match expr {
             Expr::BinaryOp { left, op, .. } => {
                 if matches!(
                     op,
                     BinaryOp::Gt | BinaryOp::GtEq | BinaryOp::Lt | BinaryOp::LtEq
                 ) {
-                    return Self::extract_column(left, variable);
+                    return Self::extract_column(left, variable, schema_props);
                 }
                 None
             }
@@ -677,18 +688,22 @@ impl LanceFilterGenerator {
         }
     }
 
-    fn expr_to_lance(expr: &Expr, variable: &str) -> Option<String> {
+    fn expr_to_lance(
+        expr: &Expr,
+        variable: &str,
+        schema_props: Option<&HashMap<String, PropertyMeta>>,
+    ) -> Option<String> {
         match expr {
             Expr::In {
                 expr: left,
                 list: right,
             } => {
-                let column = Self::extract_column(left, variable)?;
+                let column = Self::extract_column(left, variable, schema_props)?;
                 let value = Self::value_to_lance(right)?;
                 Some(format!("{} IN {}", column, value))
             }
             Expr::BinaryOp { left, op, right } => {
-                let column = Self::extract_column(left, variable)?;
+                let column = Self::extract_column(left, variable, schema_props)?;
 
                 // Special handling for string operators
                 // Security: CWE-89 - Prevent SQL wildcard injection
@@ -730,27 +745,47 @@ impl LanceFilterGenerator {
                 op: UnaryOp::Not,
                 expr,
             } => {
-                let inner = Self::expr_to_lance(expr, variable)?;
+                let inner = Self::expr_to_lance(expr, variable, schema_props)?;
                 Some(format!("NOT ({})", inner))
             }
             Expr::IsNull(inner) => {
-                let column = Self::extract_column(inner, variable)?;
+                let column = Self::extract_column(inner, variable, schema_props)?;
                 Some(format!("{} IS NULL", column))
             }
             Expr::IsNotNull(inner) => {
-                let column = Self::extract_column(inner, variable)?;
+                let column = Self::extract_column(inner, variable, schema_props)?;
                 Some(format!("{} IS NOT NULL", column))
             }
             _ => None,
         }
     }
 
-    fn extract_column(expr: &Expr, variable: &str) -> Option<String> {
+    fn extract_column(
+        expr: &Expr,
+        variable: &str,
+        schema_props: Option<&HashMap<String, PropertyMeta>>,
+    ) -> Option<String> {
         match expr {
             Expr::Property(box_expr, prop) => {
                 if let Expr::Variable(var) = box_expr.as_ref()
                     && var == variable
                 {
+                    // System columns (starting with _) are always physical Lance columns
+                    if prop.starts_with('_') {
+                        return Some(prop.clone());
+                    }
+                    // If schema_props is provided, only allow properties that are
+                    // physical columns in Lance. Overflow properties (not in schema)
+                    // don't exist as Lance columns.
+                    // If schema_props is Some but empty (schemaless label), ALL
+                    // non-system properties are overflow.
+                    // If schema_props is None, no filtering is applied (caller
+                    // doesn't have schema info).
+                    if let Some(props) = schema_props
+                        && !props.contains_key(prop.as_str())
+                    {
+                        return None;
+                    }
                     return Some(prop.clone());
                 }
                 None
@@ -846,7 +881,7 @@ mod security_tests {
                 right: Box::new(Expr::Literal(CypherLiteral::String("admin%".to_string()))),
             };
 
-            let filter = LanceFilterGenerator::generate(&[expr], "n");
+            let filter = LanceFilterGenerator::generate(&[expr], "n", None);
             assert!(
                 filter.is_none(),
                 "CONTAINS with wildcard should not be pushed to storage"
@@ -865,7 +900,7 @@ mod security_tests {
                 right: Box::new(Expr::Literal(CypherLiteral::String("user_".to_string()))),
             };
 
-            let filter = LanceFilterGenerator::generate(&[expr], "n");
+            let filter = LanceFilterGenerator::generate(&[expr], "n", None);
             assert!(
                 filter.is_none(),
                 "STARTSWITH with underscore should not be pushed to storage"
@@ -884,7 +919,7 @@ mod security_tests {
                 right: Box::new(Expr::Literal(CypherLiteral::String("admin".to_string()))),
             };
 
-            let filter = LanceFilterGenerator::generate(&[expr], "n");
+            let filter = LanceFilterGenerator::generate(&[expr], "n", None);
             assert!(filter.is_some(), "Safe CONTAINS should be pushed down");
             assert!(
                 filter.as_ref().unwrap().contains("LIKE '%admin%'"),
@@ -905,7 +940,7 @@ mod security_tests {
                 right: Box::new(Expr::Literal(CypherLiteral::String("O'Brien".to_string()))),
             };
 
-            let filter = LanceFilterGenerator::generate(&[expr], "n").unwrap();
+            let filter = LanceFilterGenerator::generate(&[expr], "n", None).unwrap();
             assert!(
                 filter.contains("O''Brien"),
                 "Single quotes should be doubled: {}",
@@ -929,7 +964,7 @@ mod security_tests {
                 right: Box::new(Expr::Parameter("userInput".to_string())),
             };
 
-            let filter = LanceFilterGenerator::generate(&[expr], "n");
+            let filter = LanceFilterGenerator::generate(&[expr], "n", None);
             assert!(
                 filter.is_none(),
                 "Parameterized predicates should not be pushed to storage"
