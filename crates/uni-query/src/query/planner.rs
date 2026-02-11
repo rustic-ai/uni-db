@@ -5484,8 +5484,24 @@ fn collect_properties_from_expr_into(
         Expr::MapProjection { base, items } => {
             collect_properties_from_expr_into(base, properties);
             for item in items {
-                if let uni_cypher::ast::MapProjectionItem::LiteralEntry(_, expr) = item {
-                    collect_properties_from_expr_into(expr, properties);
+                match item {
+                    uni_cypher::ast::MapProjectionItem::Property(prop) => {
+                        if let Expr::Variable(var) = base.as_ref() {
+                            properties.entry(var.clone()).or_default().insert(prop.clone());
+                        }
+                    }
+                    uni_cypher::ast::MapProjectionItem::AllProperties => {
+                        if let Expr::Variable(var) = base.as_ref() {
+                            properties
+                                .entry(var.clone())
+                                .or_default()
+                                .insert("*".to_string());
+                        }
+                    }
+                    uni_cypher::ast::MapProjectionItem::LiteralEntry(_, expr) => {
+                        collect_properties_from_expr_into(expr, properties);
+                    }
+                    uni_cypher::ast::MapProjectionItem::Variable(_) => {}
                 }
             }
         }

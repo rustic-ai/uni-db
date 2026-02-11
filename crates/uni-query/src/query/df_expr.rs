@@ -41,7 +41,7 @@ use std::ops::Not;
 use std::sync::Arc;
 use uni_common::Value;
 use uni_common::core::schema::PropertyMeta;
-use uni_cypher::ast::{BinaryOp, CypherLiteral, Expr, UnaryOp};
+use uni_cypher::ast::{BinaryOp, CypherLiteral, Expr, MapProjectionItem, UnaryOp};
 
 /// Type of a variable in the query context.
 ///
@@ -150,8 +150,9 @@ pub fn cypher_expr_to_df(expr: &Expr, context: Option<&TranslationContext>) -> R
                 let col_name = format!("{}.{}", var_name, prop);
                 Ok(DfExpr::Column(Column::from_name(col_name)))
             } else {
-                // Base is a complex expression (e.g., function call result).
-                // Try duration accessor first, otherwise fall back to column.
+                // Base is a complex expression (e.g., function call result,
+                // array index, parameter).
+                // Try duration accessor first.
                 if crate::query::datetime::is_duration_accessor(prop) {
                     let base_expr = cypher_expr_to_df(base, context)?;
                     return Ok(dummy_udf_expr(
@@ -159,9 +160,26 @@ pub fn cypher_expr_to_df(expr: &Expr, context: Option<&TranslationContext>) -> R
                         vec![base_expr, lit(prop.to_string())],
                     ));
                 }
-                let var_name = extract_variable_name(base)?;
-                let col_name = format!("{}.{}", var_name, prop);
-                Ok(DfExpr::Column(Column::from_name(col_name)))
+
+                // Special case: Parameter base (e.g., $session.tenant_id).
+                // Resolve at compile time for correct typing.
+                if let Expr::Parameter(param_name) = base.as_ref() {
+                    if let Some(ctx) = context
+                        && let Some(value) = ctx.parameters.get(param_name)
+                    {
+                        if let Value::Map(map) = value {
+                            let extracted =
+                                map.get(prop).cloned().unwrap_or(Value::Null);
+                            return value_to_scalar(&extracted).map(lit);
+                        }
+                        return Ok(lit(ScalarValue::Null));
+                    }
+                    return Err(anyhow!("Unresolved parameter: ${}", param_name));
+                }
+
+                // General fallback: evaluate base, use index UDF for property access.
+                let base_expr = cypher_expr_to_df(base, context)?;
+                Ok(dummy_udf_expr("index", vec![base_expr, lit(prop.clone())]))
             }
         }
 
@@ -538,11 +556,33 @@ pub fn cypher_expr_to_df(expr: &Expr, context: Option<&TranslationContext>) -> R
             ))
         }
 
-        Expr::MapProjection { .. } => {
-            // Map projection is evaluated in the executor, not pushed down to DataFusion
-            Err(anyhow!(
-                "Map projection cannot be pushed down to DataFusion"
-            ))
+        Expr::MapProjection { base, items } => {
+            let mut args = Vec::new();
+            for item in items {
+                match item {
+                    MapProjectionItem::Property(prop) => {
+                        args.push(lit(prop.clone()));
+                        let prop_expr = cypher_expr_to_df(
+                            &Expr::Property(base.clone(), prop.clone()),
+                            context,
+                        )?;
+                        args.push(prop_expr);
+                    }
+                    MapProjectionItem::LiteralEntry(key, expr) => {
+                        args.push(lit(key.clone()));
+                        args.push(cypher_expr_to_df(expr, context)?);
+                    }
+                    MapProjectionItem::Variable(var) => {
+                        args.push(lit(var.clone()));
+                        args.push(DfExpr::Column(Column::from_name(var)));
+                    }
+                    MapProjectionItem::AllProperties => {
+                        args.push(lit("__all__"));
+                        args.push(cypher_expr_to_df(base, context)?);
+                    }
+                }
+            }
+            Ok(dummy_udf_expr("_map_project", args))
         }
     }
 }
@@ -1741,8 +1781,21 @@ fn collect_properties_recursive(expr: &Expr, properties: &mut Vec<(String, Strin
         Expr::MapProjection { base, items } => {
             collect_properties_recursive(base, properties);
             for item in items {
-                if let uni_cypher::ast::MapProjectionItem::LiteralEntry(_, expr) = item {
-                    collect_properties_recursive(expr, properties);
+                match item {
+                    uni_cypher::ast::MapProjectionItem::Property(prop) => {
+                        if let Ok(var_name) = extract_variable_name(base) {
+                            properties.push((var_name, prop.clone()));
+                        }
+                    }
+                    uni_cypher::ast::MapProjectionItem::AllProperties => {
+                        if let Ok(var_name) = extract_variable_name(base) {
+                            properties.push((var_name, "*".to_string()));
+                        }
+                    }
+                    uni_cypher::ast::MapProjectionItem::LiteralEntry(_, expr) => {
+                        collect_properties_recursive(expr, properties);
+                    }
+                    uni_cypher::ast::MapProjectionItem::Variable(_) => {}
                 }
             }
         }

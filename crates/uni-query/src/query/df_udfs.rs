@@ -162,6 +162,9 @@ pub fn register_cypher_udfs(ctx: &SessionContext) -> DFResult<()> {
     // List comparison UDF for lexicographic ordering
     ctx.register_udf(create_cypher_list_compare_udf());
 
+    // Map projection UDF
+    ctx.register_udf(create_map_project_udf());
+
     // Temporal extraction UDFs (year, month, day, etc.)
     for name in &["year", "month", "day", "hour", "minute", "second"] {
         ctx.register_udf(create_temporal_udf(name));
@@ -521,7 +524,15 @@ impl ScalarUDFImpl for IndexUdf {
                 }
                 Value::Map(map) => {
                     if let Some(key) = index.as_str() {
-                        map.get(key).cloned().unwrap_or(Value::Null)
+                        // Check top-level first
+                        if let Some(val) = map.get(key) {
+                            val.clone()
+                        } else if let Some(Value::Map(props)) = map.get("properties") {
+                            // Serialized Node/Edge: properties are nested under "properties"
+                            props.get(key).cloned().unwrap_or(Value::Null)
+                        } else {
+                            Value::Null
+                        }
                     } else if !index.is_null() {
                         return Err(datafusion::error::DataFusionError::Execution(
                             "InvalidArgumentValue: Map index must be a string".to_string(),
@@ -2545,6 +2556,88 @@ impl ScalarUDFImpl for CypherListCompareUdf {
             };
 
             Ok(result)
+        })
+    }
+}
+
+// ============================================================================
+// _map_project(key1, val1, key2, val2, ...) -> LargeBinary (JSONB)
+// ============================================================================
+
+pub fn create_map_project_udf() -> ScalarUDF {
+    ScalarUDF::new_from_impl(MapProjectUdf::new())
+}
+
+#[derive(Debug)]
+struct MapProjectUdf {
+    signature: Signature,
+}
+
+impl MapProjectUdf {
+    fn new() -> Self {
+        Self {
+            signature: Signature::new(TypeSignature::VariadicAny, Volatility::Immutable),
+        }
+    }
+}
+
+impl_udf_eq_hash!(MapProjectUdf);
+
+impl ScalarUDFImpl for MapProjectUdf {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn name(&self) -> &str {
+        "_map_project"
+    }
+
+    fn signature(&self) -> &Signature {
+        &self.signature
+    }
+
+    fn return_type(&self, _arg_types: &[DataType]) -> DFResult<DataType> {
+        Ok(DataType::LargeBinary)
+    }
+
+    fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DFResult<ColumnarValue> {
+        let output_type = self.return_type(&[])?;
+        invoke_cypher_udf(args, &output_type, |val_args| {
+            let mut result_map = std::collections::HashMap::new();
+            let mut i = 0;
+            while i + 1 < val_args.len() {
+                let key = &val_args[i];
+                let value = &val_args[i + 1];
+                if let Some(k) = key.as_str() {
+                    if k == "__all__" {
+                        // AllProperties: expand entity map, skip _-prefixed keys
+                        match value {
+                            Value::Map(map) => {
+                                for (mk, mv) in map {
+                                    if !mk.starts_with('_') {
+                                        result_map.insert(mk.clone(), mv.clone());
+                                    }
+                                }
+                            }
+                            Value::Node(node) => {
+                                for (pk, pv) in &node.properties {
+                                    result_map.insert(pk.clone(), pv.clone());
+                                }
+                            }
+                            Value::Edge(edge) => {
+                                for (pk, pv) in &edge.properties {
+                                    result_map.insert(pk.clone(), pv.clone());
+                                }
+                            }
+                            _ => {}
+                        }
+                    } else {
+                        result_map.insert(k.to_string(), value.clone());
+                    }
+                }
+                i += 2;
+            }
+            Ok(Value::Map(result_map))
         })
     }
 }
