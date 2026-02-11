@@ -480,4 +480,3 @@ fn infer_jsonb_array_element_type(array: &dyn Array) -> DataType {
 
     DataType::LargeBinary
 }
-

@@ -2,7 +2,11 @@
 // Copyright 2024-2026 Dragonscale Team
 
 use crate::query::df_expr::{TranslationContext, cypher_expr_to_df};
+use crate::query::df_graph::GraphExecutionContext;
 use crate::query::df_graph::comprehension::ListComprehensionExecExpr;
+use crate::query::df_graph::pattern_comprehension::{
+    PatternComprehensionExecExpr, analyze_pattern, build_inner_schema, collect_inner_properties,
+};
 use crate::query::df_graph::quantifier::{QuantifierExecExpr, QuantifierType};
 use crate::query::df_graph::reduce::ReduceExecExpr;
 use anyhow::{Result, anyhow};
@@ -13,12 +17,15 @@ use datafusion::physical_expr::expressions::binary;
 use datafusion::physical_plan::PhysicalExpr;
 use datafusion::physical_planner::PhysicalPlanner;
 use std::sync::Arc;
+use uni_common::core::schema::Schema as UniSchema;
 use uni_cypher::ast::{BinaryOp, CypherLiteral, Expr, UnaryOp};
 
 /// Compiler for converting Cypher expressions directly to DataFusion Physical Expressions.
 pub struct CypherPhysicalExprCompiler<'a> {
     state: &'a SessionState,
     translation_ctx: Option<&'a TranslationContext>,
+    graph_ctx: Option<Arc<GraphExecutionContext>>,
+    uni_schema: Option<Arc<UniSchema>>,
 }
 
 impl<'a> CypherPhysicalExprCompiler<'a> {
@@ -26,7 +33,20 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
         Self {
             state,
             translation_ctx,
+            graph_ctx: None,
+            uni_schema: None,
         }
+    }
+
+    /// Attach graph context and schema for pattern comprehension support.
+    pub fn with_graph_ctx(
+        mut self,
+        graph_ctx: Arc<GraphExecutionContext>,
+        uni_schema: Arc<UniSchema>,
+    ) -> Self {
+        self.graph_ctx = Some(graph_ctx);
+        self.uni_schema = Some(uni_schema);
+        self
     }
 
     /// Compile a Cypher expression into a DataFusion PhysicalExpr.
@@ -214,6 +234,20 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
                 self.compile_standard(expr, input_schema)
             }
 
+            // Pattern comprehension: [(a)-[:REL]->(b) WHERE pred | expr]
+            Expr::PatternComprehension {
+                path_variable,
+                pattern,
+                where_clause,
+                map_expr,
+            } => self.compile_pattern_comprehension(
+                path_variable,
+                pattern,
+                where_clause.as_deref(),
+                map_expr,
+                input_schema,
+            ),
+
             // Default to standard compilation for leaf nodes or non-custom trees
             _ => self.compile_standard(expr, input_schema),
         }
@@ -225,6 +259,7 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
             Expr::ListComprehension { .. } => true,
             Expr::Quantifier { .. } => true,
             Expr::Reduce { .. } => true,
+            Expr::PatternComprehension { .. } => true,
             Expr::BinaryOp { left, right, .. } => {
                 Self::contains_custom_expr(left) || Self::contains_custom_expr(right)
             }
@@ -483,6 +518,61 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
         )))
     }
 
+    fn compile_pattern_comprehension(
+        &self,
+        path_variable: &Option<String>,
+        pattern: &uni_cypher::ast::Pattern,
+        where_clause: Option<&Expr>,
+        map_expr: &Expr,
+        input_schema: &Schema,
+    ) -> Result<Arc<dyn PhysicalExpr>> {
+        let graph_ctx = self
+            .graph_ctx
+            .as_ref()
+            .ok_or_else(|| anyhow!("Pattern comprehension requires GraphExecutionContext"))?;
+        let uni_schema = self
+            .uni_schema
+            .as_ref()
+            .ok_or_else(|| anyhow!("Pattern comprehension requires UniSchema"))?;
+
+        // 1. Analyze pattern to get anchor column and traversal steps
+        let (anchor_col, steps) = analyze_pattern(pattern, input_schema, uni_schema)?;
+
+        // 2. Collect needed properties from where_clause and map_expr
+        let (vertex_props, edge_props) = collect_inner_properties(where_clause, map_expr, &steps);
+
+        // 3. Build inner schema
+        let inner_schema = build_inner_schema(
+            input_schema,
+            &steps,
+            &vertex_props,
+            &edge_props,
+            path_variable.as_deref(),
+        );
+
+        // 4. Compile predicate and map_expr against inner schema
+        let pred_phy = where_clause
+            .map(|p| self.compile(p, &inner_schema))
+            .transpose()?;
+        let map_phy = self.compile(map_expr, &inner_schema)?;
+        let output_type = map_phy.data_type(&inner_schema)?;
+
+        // 5. Return expression
+        Ok(Arc::new(PatternComprehensionExecExpr::new(
+            graph_ctx.clone(),
+            anchor_col,
+            steps,
+            path_variable.clone(),
+            pred_phy,
+            map_phy,
+            Arc::new(input_schema.clone()),
+            Arc::new(inner_schema),
+            output_type,
+            vertex_props,
+            edge_props,
+        )))
+    }
+
     fn compile_binary_op(
         &self,
         op: &BinaryOp,
@@ -573,16 +663,12 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
             if let Some(name) = udf_name
                 && let Some(udf) = self.state.scalar_functions().get(name)
             {
-                let df_left =
-                    datafusion::logical_expr::Expr::Column(datafusion::common::Column::new(
-                        None::<String>,
-                        "__left__",
-                    ));
-                let df_right =
-                    datafusion::logical_expr::Expr::Column(datafusion::common::Column::new(
-                        None::<String>,
-                        "__right__",
-                    ));
+                let df_left = datafusion::logical_expr::Expr::Column(
+                    datafusion::common::Column::new(None::<String>, "__left__"),
+                );
+                let df_right = datafusion::logical_expr::Expr::Column(
+                    datafusion::common::Column::new(None::<String>, "__right__"),
+                );
                 let udf_expr = datafusion::logical_expr::Expr::ScalarFunction(
                     datafusion::logical_expr::expr::ScalarFunction {
                         func: udf.clone(),
@@ -596,21 +682,15 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
                     Arc::new(arrow_schema::Field::new("__left__", left_dt, true)),
                     Arc::new(arrow_schema::Field::new("__right__", right_dt, true)),
                 ]);
-                let df_schema =
-                    datafusion::common::DFSchema::try_from(tmp_schema.clone())?;
-                let planner =
-                    datafusion::physical_planner::DefaultPhysicalPlanner::default();
+                let df_schema = datafusion::common::DFSchema::try_from(tmp_schema.clone())?;
+                let planner = datafusion::physical_planner::DefaultPhysicalPlanner::default();
                 let udf_phy = planner
                     .create_physical_expr(&udf_expr, &df_schema, self.state)
-                    .map_err(|e| {
-                        anyhow!("Failed to create JSONB comparison expr: {}", e)
-                    })?;
+                    .map_err(|e| anyhow!("Failed to create JSONB comparison expr: {}", e))?;
                 // Replace the dummy columns with the actual physical expressions
                 let udf_phy = udf_phy
                     .with_new_children(vec![left, right])
-                    .map_err(|e| {
-                        anyhow!("Failed to rebind JSONB comparison children: {}", e)
-                    })?;
+                    .map_err(|e| anyhow!("Failed to rebind JSONB comparison children: {}", e))?;
                 return Ok(udf_phy);
             }
         }

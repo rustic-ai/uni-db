@@ -187,15 +187,20 @@ fn node(input: &str) -> IResult<&str, Node> {
     ))
 }
 
+/// Parse a bracketed edge `[:TYPE {props}]`.
+///
+/// Requires at least an edge type or properties to disambiguate from empty
+/// list `[]`. In TCK result tables, `[]` is always an empty list.
 fn edge(input: &str) -> IResult<&str, Edge> {
-    let (input, _) = multispace0(input)?;
-    let (input, _) = char('[')(input)?;
-    let (input, _) = multispace0(input)?;
-    let (input, edge_type) = opt(preceded(char(':'), identifier))(input)?;
-    let (input, _) = multispace0(input)?;
-    let (input, properties) = opt(map_parser)(input)?;
-    let (input, _) = multispace0(input)?;
-    let (input, _) = char(']')(input)?;
+    let (input, (edge_type, properties)) = parse_edge_brackets(input)?;
+
+    // Require at least an edge type or properties to disambiguate from `[]`.
+    if edge_type.is_none() && properties.is_none() {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Verify,
+        )));
+    }
 
     Ok((
         input,
@@ -207,6 +212,36 @@ fn edge(input: &str) -> IResult<&str, Edge> {
             properties: properties.unwrap_or_default(),
         },
     ))
+}
+
+/// Parse a bracketed edge within a path, allowing empty `[]` for untyped edges.
+fn edge_in_path(input: &str) -> IResult<&str, Edge> {
+    let (input, (edge_type, properties)) = parse_edge_brackets(input)?;
+    Ok((
+        input,
+        Edge {
+            eid: Eid::from(0),
+            edge_type: edge_type.unwrap_or_default().to_string(),
+            src: Vid::from(0),
+            dst: Vid::from(0),
+            properties: properties.unwrap_or_default(),
+        },
+    ))
+}
+
+/// Shared bracket parsing for edge functions.
+fn parse_edge_brackets(
+    input: &str,
+) -> IResult<&str, (Option<&str>, Option<HashMap<String, Value>>)> {
+    let (input, _) = multispace0(input)?;
+    let (input, _) = char('[')(input)?;
+    let (input, _) = multispace0(input)?;
+    let (input, edge_type) = opt(preceded(char(':'), identifier))(input)?;
+    let (input, _) = multispace0(input)?;
+    let (input, properties) = opt(map_parser)(input)?;
+    let (input, _) = multispace0(input)?;
+    let (input, _) = char(']')(input)?;
+    Ok((input, (edge_type, properties)))
 }
 
 /// Parse a path `<node-edge-node-edge-node>` with proper direction handling
@@ -226,7 +261,14 @@ fn path(input: &str) -> IResult<&str, Path> {
         let (input, _) = multispace0(remaining)?;
 
         // Try to parse edge: <-[edge]- or -[edge]->
-        match tuple((opt(char('<')), char('-'), edge, char('-'), opt(char('>'))))(input) {
+        match tuple((
+            opt(char('<')),
+            char('-'),
+            edge_in_path,
+            char('-'),
+            opt(char('>')),
+        ))(input)
+        {
             Ok((input, (left_arrow, _, mut edge_val, _, right_arrow))) => {
                 // Determine direction: -> is outgoing, <- is incoming
                 let outgoing = left_arrow.is_none() && right_arrow.is_some();
@@ -354,6 +396,57 @@ mod tests {
             assert_eq!(node.label, "");
         } else {
             panic!("Expected node");
+        }
+    }
+
+    #[test]
+    fn test_parse_empty_list() {
+        if let Value::List(items) = parse_value("[]").unwrap() {
+            assert!(items.is_empty());
+        } else {
+            panic!("Expected empty list, not edge");
+        }
+    }
+
+    #[test]
+    fn test_parse_list_with_null() {
+        if let Value::List(items) = parse_value("[null]").unwrap() {
+            assert_eq!(items.len(), 1);
+            assert_eq!(items[0], Value::Null);
+        } else {
+            panic!("Expected list");
+        }
+    }
+
+    #[test]
+    fn test_parse_list_with_string() {
+        if let Value::List(items) = parse_value("['val']").unwrap() {
+            assert_eq!(items.len(), 1);
+            assert_eq!(items[0], Value::String("val".to_string()));
+        } else {
+            panic!("Expected list");
+        }
+    }
+
+    #[test]
+    fn test_parse_standalone_edge() {
+        if let Value::Edge(e) = parse_value("[:KNOWS]").unwrap() {
+            assert_eq!(e.edge_type, "KNOWS");
+        } else {
+            panic!("Expected edge");
+        }
+    }
+
+    #[test]
+    fn test_parse_edge_with_properties() {
+        if let Value::Edge(e) = parse_value("[:T {name: 'bar'}]").unwrap() {
+            assert_eq!(e.edge_type, "T");
+            assert_eq!(
+                e.properties.get("name"),
+                Some(&Value::String("bar".to_string()))
+            );
+        } else {
+            panic!("Expected edge");
         }
     }
 

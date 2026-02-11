@@ -20,8 +20,8 @@ use tracing::instrument;
 use uni_common::core::id::{Eid, Vid};
 use uni_common::core::schema::{ConstraintTarget, ConstraintType, DataType, SchemaManager};
 use uni_cypher::ast::{
-    BinaryOp, Clause, ConstraintTarget as AstConstraintTarget, Direction, Expr, MapProjectionItem,
-    MatchClause, Quantifier, Query, ReturnClause, ReturnItem, ShowConstraints, Statement, UnaryOp,
+    BinaryOp, ConstraintTarget as AstConstraintTarget, Direction, Expr, MapProjectionItem,
+    Quantifier, ShowConstraints, UnaryOp,
 };
 use uni_store::QueryContext;
 use uni_store::cloud::{build_store_from_url, copy_store_prefix, is_cloud_url};
@@ -1054,95 +1054,11 @@ impl Executor {
             }
 
             match expr {
-                Expr::PatternComprehension {
-                    path_variable,
-                    pattern,
-                    where_clause,
-                    map_expr,
-                } => {
-                    // Pattern comprehension: [(path) = pattern WHERE pred | expr]
-                    // Execute the pattern as a subquery, then evaluate map_expr for each result.
-
-                    // Create a MATCH query from the pattern
-                    let match_clause = MatchClause {
-                        optional: false,
-                        pattern: pattern.clone(),
-                        where_clause: where_clause.as_ref().map(|e| (**e).clone()),
-                    };
-
-                    // Create RETURN * to get all bound variables
-                    let return_clause = ReturnClause {
-                        distinct: false,
-                        items: vec![ReturnItem::All],
-                        order_by: None,
-                        skip: None,
-                        limit: None,
-                    };
-
-                    let query = Query::Single(Statement {
-                        clauses: vec![Clause::Match(match_clause), Clause::Return(return_clause)],
-                    });
-
-                    // Plan the subquery with current scope
-                    let planner =
-                        QueryPlanner::new(Arc::new(this.storage.schema_manager().schema().clone()));
-                    let vars_in_scope: Vec<String> = row.keys().cloned().collect();
-
-                    match planner.plan_with_scope(query, vars_in_scope) {
-                        Ok(plan) => {
-                            // Merge row into params for subquery execution
-                            let mut sub_params = params.clone();
-                            sub_params.extend(row.clone());
-
-                            match this.execute(plan, prop_manager, &sub_params).await {
-                                Ok(results) => {
-                                    // For each result, evaluate the map expression
-                                    let mut mapped_values = Vec::new();
-                                    for mut result_row in results {
-                                        // Merge current row context into result
-                                        for (k, v) in row.iter() {
-                                            result_row
-                                                .entry(k.clone())
-                                                .or_insert_with(|| v.clone());
-                                        }
-
-                                        // If path_variable is specified, bind the path
-                                        if let Some(path_var) = path_variable {
-                                            // Create a path object from the matched pattern
-                                            // For now, just bind the nodes/edges from the pattern
-                                            let path_obj = Value::Path(crate::types::Path {
-                                                nodes: vec![],
-                                                edges: vec![],
-                                            });
-                                            result_row.insert(path_var.clone(), path_obj);
-                                        }
-
-                                        // Evaluate the map expression
-                                        let mapped_val = this
-                                            .evaluate_expr(
-                                                map_expr,
-                                                &result_row,
-                                                prop_manager,
-                                                params,
-                                                ctx,
-                                            )
-                                            .await?;
-                                        mapped_values.push(mapped_val);
-                                    }
-                                    Ok(Value::List(mapped_values))
-                                }
-                                Err(e) => {
-                                    // Pattern didn't match - return empty list
-                                    log::debug!("Pattern comprehension execution failed: {}", e);
-                                    Ok(Value::List(vec![]))
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            log::debug!("Pattern comprehension planning failed: {}", e);
-                            Ok(Value::List(vec![]))
-                        }
-                    }
+                Expr::PatternComprehension { .. } => {
+                    // Handled by DataFusion path via PatternComprehensionExecExpr
+                    Err(anyhow::anyhow!(
+                        "Pattern comprehensions are handled by DataFusion executor"
+                    ))
                 }
                 Expr::CollectSubquery(_) => Err(anyhow::anyhow!(
                     "COLLECT subqueries not yet supported in executor"

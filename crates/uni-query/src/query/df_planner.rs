@@ -1929,7 +1929,8 @@ impl HybridPhysicalPlanner {
                 let compiler = crate::query::df_graph::expr_compiler::CypherPhysicalExprCompiler::new(
                     &state,
                     Some(&ctx),
-                );
+                )
+                .with_graph_ctx(self.graph_ctx.clone(), self.schema.clone());
                 let physical_predicate = compiler.compile(predicate, &schema)?;
 
                 if !optional_variables.is_empty() {
@@ -2034,7 +2035,8 @@ impl HybridPhysicalPlanner {
         let compiler = crate::query::df_graph::expr_compiler::CypherPhysicalExprCompiler::new(
             &state,
             Some(&ctx),
-        );
+        )
+        .with_graph_ctx(self.graph_ctx.clone(), self.schema.clone());
         let physical_predicate = compiler.compile(predicate, &schema)?;
 
         // For OPTIONAL MATCH: use OptionalFilterExec for proper NULL row preservation.
@@ -2266,7 +2268,8 @@ impl HybridPhysicalPlanner {
             let compiler = crate::query::df_graph::expr_compiler::CypherPhysicalExprCompiler::new(
                 &state,
                 ctx.as_ref(),
-            );
+            )
+            .with_graph_ctx(self.graph_ctx.clone(), self.schema.clone());
             let physical_expr = compiler.compile(expr, &schema)?;
 
             let name = alias.clone().unwrap_or_else(|| expr.to_string_repr());
@@ -2299,7 +2302,8 @@ impl HybridPhysicalPlanner {
         let compiler = crate::query::df_graph::expr_compiler::CypherPhysicalExprCompiler::new(
             &state,
             Some(&ctx),
-        );
+        )
+        .with_graph_ctx(self.graph_ctx.clone(), self.schema.clone());
         for expr in group_by {
             let physical_expr = compiler.compile(expr, &schema)?;
             let name = expr.to_string_repr();

@@ -248,6 +248,14 @@ impl SchemalessEdgeTypeRegistry {
         self.name_to_id.contains_key(type_name)
     }
 
+    /// Looks up the edge type ID for `type_name` with case-insensitive matching.
+    pub fn id_by_name_case_insensitive(&self, type_name: &str) -> Option<u32> {
+        self.name_to_id
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(type_name))
+            .map(|(_, &id)| id)
+    }
+
     /// Returns all registered schemaless type IDs.
     pub fn all_type_ids(&self) -> Vec<u32> {
         self.id_to_name.keys().copied().collect()
@@ -375,10 +383,20 @@ impl Schema {
             .map(|(_, v)| v)
     }
 
-    /// Get edge type ID with case-insensitive lookup.
+    /// Get edge type ID with case-insensitive lookup (schema-defined types only).
     pub fn edge_type_id_by_name_case_insensitive(&self, type_name: &str) -> Option<u32> {
         self.get_edge_type_case_insensitive(type_name)
             .map(|meta| meta.id)
+    }
+
+    /// Get edge type ID with case-insensitive lookup, checking both
+    /// schema-defined and schemaless registries.
+    pub fn edge_type_id_unified_case_insensitive(&self, type_name: &str) -> Option<u32> {
+        self.edge_type_id_by_name_case_insensitive(type_name)
+            .or_else(|| {
+                self.schemaless_registry
+                    .id_by_name_case_insensitive(type_name)
+            })
     }
 
     /// Returns the edge type ID for `type_name`, checking the schema first
