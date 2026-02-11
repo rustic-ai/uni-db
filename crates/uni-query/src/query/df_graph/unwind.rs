@@ -458,7 +458,7 @@ impl RecordBatchStream for GraphUnwindStream {
 }
 
 /// Convert an Arrow array value at a specific row to `uni_common::Value`.
-fn arrow_to_json_value(array: &dyn Array, row: usize) -> Value {
+pub(crate) fn arrow_to_json_value(array: &dyn Array, row: usize) -> Value {
     use arrow_array::{
         BooleanArray, Float32Array, Float64Array, Int8Array, Int16Array, Int32Array, Int64Array,
         LargeStringArray, ListArray, StringArray, UInt8Array, UInt16Array, UInt32Array,

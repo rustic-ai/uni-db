@@ -43,6 +43,7 @@ pub mod comprehension;
 pub mod expr_compiler;
 pub mod ext_id_lookup;
 pub mod optional_filter;
+pub mod recursive_cte;
 pub mod reduce;
 pub mod scan;
 pub mod shortest_path;

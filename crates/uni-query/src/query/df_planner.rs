@@ -36,6 +36,7 @@
 use crate::query::df_expr::{TranslationContext, VariableKind, cypher_expr_to_df};
 use crate::query::df_graph::bind_fixed_path::BindFixedPathExec;
 use crate::query::df_graph::bind_zero_length_path::BindZeroLengthPathExec;
+use crate::query::df_graph::recursive_cte::RecursiveCTEExec;
 use crate::query::df_graph::traverse::{
     GraphVariableLengthTraverseExec, GraphVariableLengthTraverseMainExec,
 };
@@ -258,11 +259,7 @@ impl HybridPhysicalPlanner {
     /// For node variables, maps to the first label name. For edge variables, maps
     /// to the edge type name (when a single type is known). This is used by
     /// `type(r)` to resolve the edge type as a string literal.
-    fn collect_variable_labels(
-        &self,
-        plan: &LogicalPlan,
-        labels: &mut HashMap<String, String>,
-    ) {
+    fn collect_variable_labels(&self, plan: &LogicalPlan, labels: &mut HashMap<String, String>) {
         match plan {
             LogicalPlan::Scan {
                 variable,
@@ -335,8 +332,7 @@ impl HybridPhysicalPlanner {
             | LogicalPlan::SubqueryCall { input, .. } => {
                 self.collect_variable_labels(input, labels);
             }
-            LogicalPlan::Union { left, right, .. }
-            | LogicalPlan::CrossJoin { left, right, .. } => {
+            LogicalPlan::Union { left, right, .. } | LogicalPlan::CrossJoin { left, right, .. } => {
                 self.collect_variable_labels(left, labels);
                 self.collect_variable_labels(right, labels);
             }
@@ -656,15 +652,13 @@ impl HybridPhysicalPlanner {
                 node_variables,
                 edge_variables,
                 path_variable,
-            } => {
-                self.plan_bind_path(
-                    input,
-                    node_variables,
-                    edge_variables,
-                    path_variable,
-                    all_properties,
-                )
-            }
+            } => self.plan_bind_path(
+                input,
+                node_variables,
+                edge_variables,
+                path_variable,
+                all_properties,
+            ),
 
             // === Unsupported (for now) ===
             LogicalPlan::Create { .. }
@@ -754,9 +748,11 @@ impl HybridPhysicalPlanner {
                 "Quantified patterns not yet supported in DataFusion engine"
             )),
 
-            LogicalPlan::RecursiveCTE { .. } => Err(anyhow!(
-                "Recursive CTEs not yet supported in DataFusion engine"
-            )),
+            LogicalPlan::RecursiveCTE {
+                cte_name,
+                initial,
+                recursive,
+            } => self.plan_recursive_cte(cte_name, initial, recursive, all_properties),
 
             LogicalPlan::ProcedureCall { .. } => Err(anyhow!(
                 "Procedure calls not yet supported in DataFusion engine"
@@ -970,6 +966,29 @@ impl HybridPhysicalPlanner {
         Ok(Arc::new(unwind))
     }
 
+    /// Plan a recursive CTE (`WITH RECURSIVE`).
+    ///
+    /// Creates a [`RecursiveCTEExec`] that stores the logical plans and
+    /// re-plans/executes them iteratively at execution time.
+    fn plan_recursive_cte(
+        &self,
+        cte_name: &str,
+        initial: &LogicalPlan,
+        recursive: &LogicalPlan,
+        _all_properties: &HashMap<String, HashSet<String>>,
+    ) -> Result<Arc<dyn ExecutionPlan>> {
+        Ok(Arc::new(RecursiveCTEExec::new(
+            cte_name.to_string(),
+            initial.clone(),
+            recursive.clone(),
+            self.graph_ctx.clone(),
+            self.session_ctx.clone(),
+            self._storage.clone(),
+            self.schema.clone(),
+            self.params.clone(),
+        )))
+    }
+
     /// Plan a vector KNN search.
     #[expect(clippy::too_many_arguments)]
     fn plan_vector_knn(
@@ -987,8 +1006,7 @@ impl HybridPhysicalPlanner {
             .label_name_by_id(label_id)
             .ok_or_else(|| anyhow!("Unknown label ID: {}", label_id))?;
 
-        let target_properties =
-            self.resolve_properties(variable, label_name, all_properties);
+        let target_properties = self.resolve_properties(variable, label_name, all_properties);
 
         let knn = GraphVectorKnnExec::new(
             self.graph_ctx.clone(),
@@ -1118,11 +1136,8 @@ impl HybridPhysicalPlanner {
             // Filter out "*" (wildcard marker) from struct_props.
             // Keep "_all_props" so that keys()/properties() UDFs can extract
             // property names at runtime from the JSONB blob.
-            let struct_props: Vec<String> = properties
-                .iter()
-                .filter(|p| *p != "*")
-                .cloned()
-                .collect();
+            let struct_props: Vec<String> =
+                properties.iter().filter(|p| *p != "*").cloned().collect();
             scan_plan = self.add_structural_projection(scan_plan, variable, &struct_props)?;
         }
 
@@ -1172,11 +1187,8 @@ impl HybridPhysicalPlanner {
             // Filter out "*" (wildcard marker) from struct_props.
             // Keep "_all_props" so that keys()/properties() UDFs can extract
             // property names at runtime from the JSONB blob.
-            let struct_props: Vec<String> = properties
-                .iter()
-                .filter(|p| *p != "*")
-                .cloned()
-                .collect();
+            let struct_props: Vec<String> =
+                properties.iter().filter(|p| *p != "*").cloned().collect();
             scan_plan = self.add_structural_projection(scan_plan, variable, &struct_props)?;
         }
 
@@ -1225,11 +1237,8 @@ impl HybridPhysicalPlanner {
             // Filter out "*" (wildcard marker) from struct_props.
             // Keep "_all_props" so that keys()/properties() UDFs can extract
             // property names at runtime from the JSONB blob.
-            let struct_props: Vec<String> = properties
-                .iter()
-                .filter(|p| *p != "*")
-                .cloned()
-                .collect();
+            let struct_props: Vec<String> =
+                properties.iter().filter(|p| *p != "*").cloned().collect();
             scan_plan = self.add_structural_projection(scan_plan, variable, &struct_props)?;
         }
 
@@ -1567,11 +1576,12 @@ impl HybridPhysicalPlanner {
             {
                 variable_labels.insert(sv.to_string(), name.to_string());
             }
-            let target_label_name_str =
-                self.schema.label_name_by_id(target_label_id).unwrap_or("");
+            let target_label_name_str = self.schema.label_name_by_id(target_label_id).unwrap_or("");
             if !target_label_name_str.is_empty() {
-                variable_labels
-                    .insert(target_variable.to_string(), target_label_name_str.to_string());
+                variable_labels.insert(
+                    target_variable.to_string(),
+                    target_label_name_str.to_string(),
+                );
             }
             let ctx = TranslationContext {
                 parameters: self.params.clone(),
@@ -1954,8 +1964,7 @@ impl HybridPhysicalPlanner {
         if !optional_variables.is_empty() {
             // Re-create filter as DfExpr (without null guard) for the OptionalFilterExec
             let ctx2 = self.translation_context_for_plan(input);
-            let df_filter =
-                crate::query::df_expr::cypher_expr_to_df(predicate, Some(&ctx2))?;
+            let df_filter = crate::query::df_expr::cypher_expr_to_df(predicate, Some(&ctx2))?;
             let physical_predicate =
                 self.create_physical_filter_expr(&df_filter, &schema, &session)?;
             return Ok(Arc::new(OptionalFilterExec::new(
@@ -2077,9 +2086,9 @@ impl HybridPhysicalPlanner {
                             && !exprs.iter().any(|(_, n)| n == fname)
                         {
                             let prop_expr: Arc<dyn datafusion::physical_expr::PhysicalExpr> =
-                                Arc::new(
-                                    datafusion::physical_expr::expressions::Column::new(fname, idx),
-                                );
+                                Arc::new(datafusion::physical_expr::expressions::Column::new(
+                                    fname, idx,
+                                ));
                             exprs.push((prop_expr, fname.clone()));
                         }
                     }
@@ -2157,9 +2166,9 @@ impl HybridPhysicalPlanner {
                             && !exprs.iter().any(|(_, n)| n == fname)
                         {
                             let prop_expr: Arc<dyn datafusion::physical_expr::PhysicalExpr> =
-                                Arc::new(
-                                    datafusion::physical_expr::expressions::Column::new(fname, idx),
-                                );
+                                Arc::new(datafusion::physical_expr::expressions::Column::new(
+                                    fname, idx,
+                                ));
                             exprs.push((prop_expr, fname.clone()));
                         }
                     }
@@ -2829,20 +2838,23 @@ impl HybridPhysicalPlanner {
         use datafusion::common::tree_node::{Transformed, TreeNode};
         use datafusion::logical_expr::Expr as DfExpr;
 
-        let result = expr.clone().transform_up(|node| {
-            if let DfExpr::ScalarFunction(ref func) = node {
-                let udf_name = func.func.name();
-                if let Some(registered_udf) = state.scalar_functions().get(udf_name) {
-                    return Ok(Transformed::yes(DfExpr::ScalarFunction(
-                        datafusion::logical_expr::expr::ScalarFunction {
-                            func: registered_udf.clone(),
-                            args: func.args.clone(),
-                        },
-                    )));
+        let result = expr
+            .clone()
+            .transform_up(|node| {
+                if let DfExpr::ScalarFunction(ref func) = node {
+                    let udf_name = func.func.name();
+                    if let Some(registered_udf) = state.scalar_functions().get(udf_name) {
+                        return Ok(Transformed::yes(DfExpr::ScalarFunction(
+                            datafusion::logical_expr::expr::ScalarFunction {
+                                func: registered_udf.clone(),
+                                args: func.args.clone(),
+                            },
+                        )));
+                    }
                 }
-            }
-            Ok(Transformed::no(node))
-        }).map_err(|e| anyhow::anyhow!("Failed to resolve UDFs: {}", e))?;
+                Ok(Transformed::no(node))
+            })
+            .map_err(|e| anyhow::anyhow!("Failed to resolve UDFs: {}", e))?;
 
         Ok(result.data)
     }

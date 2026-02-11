@@ -641,7 +641,10 @@ async fn build_traverse_output_batch(
     }
 
     // Build index array for take operation
-    let indices: Vec<u64> = expansions.iter().map(|(idx, _, _, _)| *idx as u64).collect();
+    let indices: Vec<u64> = expansions
+        .iter()
+        .map(|(idx, _, _, _)| *idx as u64)
+        .collect();
     let indices_array = UInt64Array::from(indices);
 
     // Expand input columns
@@ -731,8 +734,8 @@ async fn build_traverse_output_batch(
             for prop_name in &target_properties {
                 if prop_name == "_all_props" {
                     // Build JSONB blob from all vertex properties (L0 + storage)
-                    use arrow_array::builder::LargeBinaryBuilder;
                     use crate::query::df_graph::scan::serde_json_to_jsonb;
+                    use arrow_array::builder::LargeBinaryBuilder;
 
                     let mut builder = LargeBinaryBuilder::new();
                     let l0_ctx = graph_ctx.l0_context();
@@ -840,7 +843,8 @@ async fn build_traverse_output_batch(
 
     if optional {
         // Identify source rows that had no expansions and append null rows for them
-        let expanded_indices: HashSet<usize> = expansions.iter().map(|(idx, _, _, _)| *idx).collect();
+        let expanded_indices: HashSet<usize> =
+            expansions.iter().map(|(idx, _, _, _)| *idx).collect();
         let unmatched: Vec<usize> = (0..input.num_rows())
             .filter(|idx| !expanded_indices.contains(idx))
             .collect();
@@ -1036,7 +1040,10 @@ fn build_traverse_output_batch_sync(
         return build_optional_null_batch(input, schema);
     }
 
-    let indices: Vec<u64> = expansions.iter().map(|(idx, _, _, _)| *idx as u64).collect();
+    let indices: Vec<u64> = expansions
+        .iter()
+        .map(|(idx, _, _, _)| *idx as u64)
+        .collect();
     let indices_array = UInt64Array::from(indices);
 
     let mut columns: Vec<ArrayRef> = Vec::new();
@@ -1692,19 +1699,15 @@ impl GraphTraverseMainStream {
                         let mut found = false;
                         for l0 in l0_ctx.iter_l0_buffers() {
                             let guard = l0.read();
-                            if let Some(props) = guard.vertex_properties.get(target_vid) {
-                                if let Some(val) = props.get(prop_name.as_str()) {
-                                    if !val.is_null() {
-                                        let json_val: serde_json::Value = val.clone().into();
-                                        match serde_json_to_jsonb(&json_val) {
-                                            Ok(bytes) => {
-                                                builder.append_value(bytes);
-                                                found = true;
-                                                break;
-                                            }
-                                            Err(_) => {}
-                                        }
-                                    }
+                            if let Some(props) = guard.vertex_properties.get(target_vid)
+                                && let Some(val) = props.get(prop_name.as_str())
+                                && !val.is_null()
+                            {
+                                let json_val: serde_json::Value = val.clone().into();
+                                if let Ok(bytes) = serde_json_to_jsonb(&json_val) {
+                                    builder.append_value(bytes);
+                                    found = true;
+                                    break;
                                 }
                             }
                         }
@@ -1774,7 +1777,6 @@ async fn build_edge_adjacency_map(
         uni_common::Properties,
     )> = edges_with_type
         .into_iter()
-        .map(|(eid, src, dst, edge_type, props)| (eid, src, dst, edge_type, props))
         .collect();
 
     // Step 2: Overlay L0 buffers for all type names
@@ -1831,10 +1833,12 @@ async fn build_edge_adjacency_map(
                     .push((src_vid, eid, edge_type, props));
             }
             Direction::Both => {
-                adjacency
-                    .entry(src_vid)
-                    .or_default()
-                    .push((dst_vid, eid, edge_type.clone(), props.clone()));
+                adjacency.entry(src_vid).or_default().push((
+                    dst_vid,
+                    eid,
+                    edge_type.clone(),
+                    props.clone(),
+                ));
                 adjacency
                     .entry(dst_vid)
                     .or_default()
@@ -2262,8 +2266,7 @@ impl GraphVariableLengthTraverseExecData {
                 // Only the final target node is constrained, not intermediate nodes.
                 let label_ok = if let Some(ref label_name) = self.target_label_name {
                     let query_ctx = self.graph_ctx.query_context();
-                    let vertex_labels =
-                        l0_visibility::get_vertex_labels(current, &query_ctx);
+                    let vertex_labels = l0_visibility::get_vertex_labels(current, &query_ctx);
                     vertex_labels.is_empty() || vertex_labels.contains(label_name)
                 } else {
                     true
@@ -2792,8 +2795,10 @@ async fn hydrate_vlp_target_properties(
         // No label — emit null columns
         for prop_name in &target_properties {
             let _ = prop_name;
-            let null_col =
-                arrow_array::new_null_array(&arrow_schema::DataType::LargeBinary, target_vids.len());
+            let null_col = arrow_array::new_null_array(
+                &arrow_schema::DataType::LargeBinary,
+                target_vids.len(),
+            );
             property_columns.push(null_col);
         }
     }
@@ -3251,7 +3256,8 @@ impl GraphVariableLengthTraverseMainStream {
             let mut labels_builder = ListBuilder::new(StringBuilder::new());
             for (_, vid, _, _, _) in expansions.iter() {
                 let mut row_labels: Vec<String> = Vec::new();
-                let labels = l0_visibility::get_vertex_labels(*vid, &self.graph_ctx.query_context());
+                let labels =
+                    l0_visibility::get_vertex_labels(*vid, &self.graph_ctx.query_context());
                 for lbl in &labels {
                     if !row_labels.contains(lbl) {
                         row_labels.push(lbl.clone());
@@ -3646,13 +3652,8 @@ mod tests {
             false,
         )]));
 
-        let output_schema = GraphVariableLengthTraverseExec::build_schema(
-            input_schema,
-            "b",
-            Some("p"),
-            &[],
-            None,
-        );
+        let output_schema =
+            GraphVariableLengthTraverseExec::build_schema(input_schema, "b", Some("p"), &[], None);
 
         assert_eq!(output_schema.fields().len(), 5);
         assert_eq!(output_schema.field(0).name(), "a._vid");

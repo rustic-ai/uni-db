@@ -1420,7 +1420,9 @@ fn scalar_to_value(scalar: &ScalarValue) -> DFResult<Value> {
             let secs = *micros / 1_000_000;
             let nsecs = ((*micros % 1_000_000) * 1000) as u32;
             if let Some(dt) = chrono::DateTime::from_timestamp(secs, nsecs) {
-                Ok(Value::String(dt.format("%Y-%m-%dT%H:%M:%S%.6fZ").to_string()))
+                Ok(Value::String(
+                    dt.format("%Y-%m-%dT%H:%M:%S%.6fZ").to_string(),
+                ))
             } else {
                 Ok(Value::String(format!("{}us", micros)))
             }
@@ -1429,7 +1431,9 @@ fn scalar_to_value(scalar: &ScalarValue) -> DFResult<Value> {
             let secs = *millis / 1000;
             let nsecs = ((*millis % 1000) * 1_000_000) as u32;
             if let Some(dt) = chrono::DateTime::from_timestamp(secs, nsecs) {
-                Ok(Value::String(dt.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string()))
+                Ok(Value::String(
+                    dt.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string(),
+                ))
             } else {
                 Ok(Value::String(format!("{}ms", millis)))
             }
@@ -1445,7 +1449,9 @@ fn scalar_to_value(scalar: &ScalarValue) -> DFResult<Value> {
             let secs = *nanos / 1_000_000_000;
             let nsecs = (*nanos % 1_000_000_000) as u32;
             if let Some(dt) = chrono::DateTime::from_timestamp(secs, nsecs) {
-                Ok(Value::String(dt.format("%Y-%m-%dT%H:%M:%S%.9fZ").to_string()))
+                Ok(Value::String(
+                    dt.format("%Y-%m-%dT%H:%M:%S%.9fZ").to_string(),
+                ))
             } else {
                 Ok(Value::String(format!("{}ns", nanos)))
             }
@@ -1456,7 +1462,10 @@ fn scalar_to_value(scalar: &ScalarValue) -> DFResult<Value> {
             let m = (total_secs % 3600) / 60;
             let s = total_secs % 60;
             let frac = *micros % 1_000_000;
-            Ok(Value::String(format!("{:02}:{:02}:{:02}.{:06}", h, m, s, frac)))
+            Ok(Value::String(format!(
+                "{:02}:{:02}:{:02}.{:06}",
+                h, m, s, frac
+            )))
         }
         ScalarValue::Time64Nanosecond(Some(nanos)) => {
             let total_secs = *nanos / 1_000_000_000;
@@ -1464,7 +1473,10 @@ fn scalar_to_value(scalar: &ScalarValue) -> DFResult<Value> {
             let m = (total_secs % 3600) / 60;
             let s = total_secs % 60;
             let frac = *nanos % 1_000_000_000;
-            Ok(Value::String(format!("{:02}:{:02}:{:02}.{:09}", h, m, s, frac)))
+            Ok(Value::String(format!(
+                "{:02}:{:02}:{:02}.{:09}",
+                h, m, s, frac
+            )))
         }
         ScalarValue::DurationMicrosecond(Some(micros)) => Ok(Value::Int(*micros)),
         ScalarValue::DurationMillisecond(Some(millis)) => Ok(Value::Int(*millis)),
@@ -1867,12 +1879,10 @@ impl ScalarUDFImpl for ToBooleanUdf {
                 Value::Int(i) => Value::Bool(*i != 0),
                 Value::Float(_) => Value::Null,
                 Value::List(_) | Value::Map(_) => {
-                    return Err(datafusion::error::DataFusionError::Execution(
-                        format!(
-                            "InvalidArgumentValue: toBoolean() cannot convert {:?} to Boolean",
-                            val
-                        ),
-                    ));
+                    return Err(datafusion::error::DataFusionError::Execution(format!(
+                        "InvalidArgumentValue: toBoolean() cannot convert {:?} to Boolean",
+                        val
+                    )));
                 }
                 _ => Value::Null,
             };
@@ -2405,15 +2415,11 @@ fn cypher_size_scalar(scalar: &ScalarValue) -> DFResult<ScalarValue> {
             let json_str = raw.to_string();
             if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&json_str) {
                 match parsed {
-                    serde_json::Value::Array(arr) => {
-                        Ok(ScalarValue::Int64(Some(arr.len() as i64)))
-                    }
+                    serde_json::Value::Array(arr) => Ok(ScalarValue::Int64(Some(arr.len() as i64))),
                     serde_json::Value::String(s) => {
                         Ok(ScalarValue::Int64(Some(s.chars().count() as i64)))
                     }
-                    serde_json::Value::Object(m) => {
-                        Ok(ScalarValue::Int64(Some(m.len() as i64)))
-                    }
+                    serde_json::Value::Object(m) => Ok(ScalarValue::Int64(Some(m.len() as i64))),
                     _ => Ok(ScalarValue::Int64(None)),
                 }
             } else {
@@ -2436,12 +2442,15 @@ fn cypher_size_scalar(scalar: &ScalarValue) -> DFResult<ScalarValue> {
             } else {
                 // Check if this is a path struct (has "relationships" field)
                 let schema = arr.fields();
-                if let Some((rels_idx, _)) =
-                    schema.iter().enumerate().find(|(_, f)| f.name() == "relationships")
+                if let Some((rels_idx, _)) = schema
+                    .iter()
+                    .enumerate()
+                    .find(|(_, f)| f.name() == "relationships")
                 {
                     // Path struct: length = number of relationships
                     let rels_col = arr.column(rels_idx);
-                    if let Some(list_arr) = rels_col.as_any().downcast_ref::<arrow_array::ListArray>()
+                    if let Some(list_arr) =
+                        rels_col.as_any().downcast_ref::<arrow_array::ListArray>()
                     {
                         if list_arr.is_null(0) {
                             Ok(ScalarValue::Int64(Some(0)))

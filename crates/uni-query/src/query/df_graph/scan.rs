@@ -472,6 +472,7 @@ struct GraphScanStream {
 
 impl GraphScanStream {
     /// Create a new graph scan stream.
+    #[expect(clippy::too_many_arguments)]
     fn new(
         graph_ctx: Arc<GraphExecutionContext>,
         label: String,
@@ -2036,9 +2037,7 @@ async fn columnar_scan_edge_batch_static(
             // Do NOT filter op here — MVCC dedup must see DELETE ops
             // (op != 0) to pick the highest version. Deleted edges are
             // filtered out after dedup.
-            let query = table
-                .query()
-                .select(Select::columns(&actual_columns));
+            let query = table.query().select(Select::columns(&actual_columns));
             let query = match storage.version_high_water_mark() {
                 Some(hwm) => query.only_if(format!("_version <= {}", hwm)),
                 None => query,
@@ -2202,15 +2201,13 @@ async fn columnar_scan_schemaless_vertex_batch_static(
         Ok(table) => {
             use lancedb::query::{ExecutableQuery, QueryBase, Select};
 
-            let query = table
-                .query()
-                .select(Select::columns(&[
-                    "_vid",
-                    "_deleted",
-                    "labels",
-                    "props_json",
-                    "_version",
-                ]));
+            let query = table.query().select(Select::columns(&[
+                "_vid",
+                "_deleted",
+                "labels",
+                "props_json",
+                "_version",
+            ]));
             let query = match filter {
                 Some(f) => query.only_if(f),
                 None => query,

@@ -23,7 +23,6 @@ use arrow_array::builder::{
 };
 use arrow_array::{Array, ArrayRef, RecordBatch, StructArray, UInt64Array};
 use arrow_schema::{DataType, Field, Fields, Schema, SchemaRef};
-use uni_store::runtime::l0_visibility;
 use datafusion::common::Result as DFResult;
 use datafusion::execution::{RecordBatchStream, SendableRecordBatchStream, TaskContext};
 use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
@@ -36,6 +35,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 use uni_common::core::id::Vid;
+use uni_store::runtime::l0_visibility;
 use uni_store::storage::direction::Direction;
 
 /// Shortest path execution plan.
@@ -154,9 +154,8 @@ impl GraphShortestPathExec {
             .collect();
 
         // Add the proper path struct column (nodes + relationships)
-        fields.push(
-            crate::query::df_graph::bind_fixed_path::build_path_struct_field(path_variable),
-        );
+        fields
+            .push(crate::query::df_graph::bind_fixed_path::build_path_struct_field(path_variable));
 
         // Add path column (raw VID list for internal use)
         let path_col_name = format!("{}._path", path_variable);
@@ -545,13 +544,11 @@ impl GraphShortestPathStream {
     fn find_edge(&self, src: Vid, dst: Vid) -> (u64, String, Option<Vec<u8>>) {
         let query_ctx = self.graph_ctx.query_context();
         for &edge_type in &self.edge_type_ids {
-            let neighbors = self
-                .graph_ctx
-                .get_neighbors(src, edge_type, self.direction);
+            let neighbors = self.graph_ctx.get_neighbors(src, edge_type, self.direction);
             for (neighbor, eid) in neighbors {
                 if neighbor == dst {
-                    let type_name = l0_visibility::get_edge_type(eid, &query_ctx)
-                        .unwrap_or_default();
+                    let type_name =
+                        l0_visibility::get_edge_type(eid, &query_ctx).unwrap_or_default();
                     let props = l0_visibility::get_edge_properties(eid, &query_ctx)
                         .and_then(|p| serde_json::to_vec(&p).ok());
                     return (eid.as_u64(), type_name, props);

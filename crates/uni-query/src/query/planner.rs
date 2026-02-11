@@ -2505,11 +2505,8 @@ impl QueryPlanner {
                                     // For VLP traversals, pass path_variable through
                                     // For fixed-length, we use BindPath instead
                                     let is_vlp = r.range.is_some();
-                                    let traverse_path_var = if is_vlp {
-                                        path_variable.clone()
-                                    } else {
-                                        None
-                                    };
+                                    let traverse_path_var =
+                                        if is_vlp { path_variable.clone() } else { None };
 
                                     // Plan the traverse from the current source node
                                     let (new_plan, target_var) = self.plan_traverse_with_source(
@@ -2536,10 +2533,7 @@ impl QueryPlanner {
                                         } else {
                                             // Anonymous edge: GraphTraverseExec creates
                                             // __eid_to_{target} tracking column
-                                            path_edge_vars.push(format!(
-                                                "__eid_to_{}",
-                                                target_var
-                                            ));
+                                            path_edge_vars.push(format!("__eid_to_{}", target_var));
                                         }
                                         path_node_vars.push(target_var.clone());
                                     }
@@ -5487,7 +5481,10 @@ fn collect_properties_from_expr_into(
                 match item {
                     uni_cypher::ast::MapProjectionItem::Property(prop) => {
                         if let Expr::Variable(var) = base.as_ref() {
-                            properties.entry(var.clone()).or_default().insert(prop.clone());
+                            properties
+                                .entry(var.clone())
+                                .or_default()
+                                .insert(prop.clone());
                         }
                     }
                     uni_cypher::ast::MapProjectionItem::AllProperties => {

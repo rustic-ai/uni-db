@@ -124,38 +124,34 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
 
             // Property access on a struct column — e.g. `x.a` where `x` is Struct
             Expr::Property(base, prop) => {
-                if let Expr::Variable(var_name) = base.as_ref() {
-                    if let Ok(col_idx) = input_schema.index_of(var_name) {
-                        let col_type = input_schema.field(col_idx).data_type();
-                        if let arrow_schema::DataType::Struct(struct_fields) = col_type {
-                            // Find the struct field by name
-                            let field_idx = struct_fields
-                                .iter()
-                                .position(|f| f.name() == prop)
-                                .ok_or_else(|| {
-                                    anyhow!(
-                                        "Struct field '{}' not found in column '{}'. \
-                                         Available: {:?}",
-                                        prop,
-                                        var_name,
-                                        struct_fields
-                                            .iter()
-                                            .map(|f| f.name())
-                                            .collect::<Vec<_>>()
-                                    )
-                                })?;
-                            let output_type =
-                                struct_fields[field_idx].data_type().clone();
-                            let col_expr: Arc<dyn PhysicalExpr> = Arc::new(
-                                datafusion::physical_expr::expressions::Column::new(
-                                    var_name, col_idx,
-                                ),
-                            );
-                            return Ok(Arc::new(StructFieldAccessExpr::new(
-                                col_expr, field_idx, output_type,
-                            )));
-                        }
-                    }
+                if let Expr::Variable(var_name) = base.as_ref()
+                    && let Ok(col_idx) = input_schema.index_of(var_name)
+                    && let arrow_schema::DataType::Struct(struct_fields) =
+                        input_schema.field(col_idx).data_type()
+                {
+                    // Find the struct field by name
+                    let field_idx = struct_fields
+                        .iter()
+                        .position(|f| f.name() == prop)
+                        .ok_or_else(|| {
+                            anyhow!(
+                                "Struct field '{}' not found in column '{}'. \
+                                 Available: {:?}",
+                                prop,
+                                var_name,
+                                struct_fields.iter().map(|f| f.name()).collect::<Vec<_>>()
+                            )
+                        })?;
+                    let output_type = struct_fields[field_idx].data_type().clone();
+                    let col_expr: Arc<dyn PhysicalExpr> =
+                        Arc::new(datafusion::physical_expr::expressions::Column::new(
+                            var_name, col_idx,
+                        ));
+                    return Ok(Arc::new(StructFieldAccessExpr::new(
+                        col_expr,
+                        field_idx,
+                        output_type,
+                    )));
                 }
                 self.compile_standard(expr, input_schema)
             }
@@ -177,21 +173,17 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
                                      Available: {:?}",
                                     prop,
                                     var_name,
-                                    struct_fields
-                                        .iter()
-                                        .map(|f| f.name())
-                                        .collect::<Vec<_>>()
+                                    struct_fields.iter().map(|f| f.name()).collect::<Vec<_>>()
                                 )
                             })?;
-                        let output_type =
-                            struct_fields[field_idx].data_type().clone();
+                        let output_type = struct_fields[field_idx].data_type().clone();
                         let col_expr: Arc<dyn PhysicalExpr> = Arc::new(
-                            datafusion::physical_expr::expressions::Column::new(
-                                var_name, col_idx,
-                            ),
+                            datafusion::physical_expr::expressions::Column::new(var_name, col_idx),
                         );
                         return Ok(Arc::new(StructFieldAccessExpr::new(
-                            col_expr, field_idx, output_type,
+                            col_expr,
+                            field_idx,
+                            output_type,
                         )));
                     }
                 }
@@ -653,7 +645,8 @@ struct StructFieldAccessExpr {
 
 impl PartialEq for StructFieldAccessExpr {
     fn eq(&self, other: &Self) -> bool {
-        self.field_idx == other.field_idx && self.input.eq(&other.input)
+        self.field_idx == other.field_idx
+            && self.input.eq(&other.input)
             && self.output_type == other.output_type
     }
 }

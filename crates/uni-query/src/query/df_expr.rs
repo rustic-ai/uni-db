@@ -125,6 +125,16 @@ pub fn cypher_expr_to_df(expr: &Expr, context: Option<&TranslationContext>) -> R
                     VariableKind::Path => Ok(DfExpr::Column(Column::from_name(name))),
                 };
             }
+
+            // Check if the variable name matches a parameter (e.g., CTE working table
+            // injected as a parameter). This allows `WHERE x IN hierarchy` to resolve
+            // `hierarchy` from params when it's not a schema column.
+            if let Some(ctx) = context
+                && let Some(value) = ctx.parameters.get(name)
+            {
+                return value_to_scalar(value).map(lit);
+            }
+
             // Fallback for unknown variables
             Ok(DfExpr::Column(Column::from_name(name)))
         }
@@ -168,8 +178,7 @@ pub fn cypher_expr_to_df(expr: &Expr, context: Option<&TranslationContext>) -> R
                         && let Some(value) = ctx.parameters.get(param_name)
                     {
                         if let Value::Map(map) = value {
-                            let extracted =
-                                map.get(prop).cloned().unwrap_or(Value::Null);
+                            let extracted = map.get(prop).cloned().unwrap_or(Value::Null);
                             return value_to_scalar(&extracted).map(lit);
                         }
                         return Ok(lit(ScalarValue::Null));
@@ -372,7 +381,34 @@ pub fn cypher_expr_to_df(expr: &Expr, context: Option<&TranslationContext>) -> R
         }
 
         Expr::In { expr, list } => {
-            let left_expr = cypher_expr_to_df(expr, context)?;
+            // When the left side is a node/edge variable and the right side is a
+            // dynamic array (e.g., CTE variable), rewrite to compare by identity
+            // column (_vid for nodes, _eid for edges). Cast to Int64 to match the
+            // list element type from parameter injection.
+            let left_expr = if let Expr::Variable(var) = expr.as_ref()
+                && let Some(ctx) = context
+                && let Some(kind) = ctx.variable_kinds.get(var)
+            {
+                match kind {
+                    VariableKind::Node => {
+                        use datafusion::logical_expr::Cast;
+                        DfExpr::Cast(Cast::new(
+                            Box::new(DfExpr::Column(Column::from_name(format!("{}._vid", var)))),
+                            datafusion::arrow::datatypes::DataType::Int64,
+                        ))
+                    }
+                    VariableKind::Edge => {
+                        use datafusion::logical_expr::Cast;
+                        DfExpr::Cast(Cast::new(
+                            Box::new(DfExpr::Column(Column::from_name(format!("{}._eid", var)))),
+                            datafusion::arrow::datatypes::DataType::Int64,
+                        ))
+                    }
+                    _ => cypher_expr_to_df(expr, context)?,
+                }
+            } else {
+                cypher_expr_to_df(expr, context)?
+            };
 
             // When the right side is a literal list, expand to individual items
             // for IN-list. Otherwise, use array_has for array column membership.
@@ -1291,8 +1327,7 @@ fn translate_function_call(
             {
                 let start_col =
                     DfExpr::Column(Column::from_name(format!("{}.{}", var, start_prop)));
-                let end_col =
-                    DfExpr::Column(Column::from_name(format!("{}.{}", var, end_prop)));
+                let end_col = DfExpr::Column(Column::from_name(format!("{}.{}", var, end_prop)));
                 let ts = cypher_expr_to_df(ts_expr, context)?;
 
                 // start_prop <= timestamp
@@ -1317,8 +1352,7 @@ fn translate_function_call(
             if let Some(Expr::Variable(var)) = args.first() {
                 if let Some(Expr::Literal(CypherLiteral::String(label))) = args.get(1) {
                     // Translate to: array_has({var}._labels, '{label}')
-                    let labels_col =
-                        DfExpr::Column(Column::from_name(format!("{}._labels", var)));
+                    let labels_col = DfExpr::Column(Column::from_name(format!("{}._labels", var)));
                     Ok(datafusion::functions_nested::expr_fn::array_has(
                         labels_col,
                         lit(label.clone()),
@@ -1918,7 +1952,10 @@ pub fn apply_type_coercion(expr: &DfExpr, schema: &datafusion::common::DFSchema)
                     // 2. Timestamp vs Utf8: cast Utf8 side to the Timestamp type
                     if is_comparison {
                         match (lt, rt) {
-                            (ts @ DataType::Timestamp(..), DataType::Utf8 | DataType::LargeUtf8) => {
+                            (
+                                ts @ DataType::Timestamp(..),
+                                DataType::Utf8 | DataType::LargeUtf8,
+                            ) => {
                                 return Ok(DfExpr::BinaryExpr(
                                     datafusion::logical_expr::expr::BinaryExpr::new(
                                         Box::new(left),
@@ -1927,7 +1964,10 @@ pub fn apply_type_coercion(expr: &DfExpr, schema: &datafusion::common::DFSchema)
                                     ),
                                 ));
                             }
-                            (DataType::Utf8 | DataType::LargeUtf8, ts @ DataType::Timestamp(..)) => {
+                            (
+                                DataType::Utf8 | DataType::LargeUtf8,
+                                ts @ DataType::Timestamp(..),
+                            ) => {
                                 return Ok(DfExpr::BinaryExpr(
                                     datafusion::logical_expr::expr::BinaryExpr::new(
                                         Box::new(datafusion::logical_expr::cast(left, ts.clone())),
@@ -1948,10 +1988,14 @@ pub fn apply_type_coercion(expr: &DfExpr, schema: &datafusion::common::DFSchema)
                         let r_inner = r_field.data_type();
                         if l_inner.is_numeric() && r_inner.is_numeric() && l_inner != r_inner {
                             let target_inner = wider_numeric_type(l_inner, r_inner);
-                            let target_type = DataType::List(Arc::new(
-                                datafusion::arrow::datatypes::Field::new("item", target_inner, true),
-                            ));
-                            let coerced_left = datafusion::logical_expr::cast(left, target_type.clone());
+                            let target_type =
+                                DataType::List(Arc::new(datafusion::arrow::datatypes::Field::new(
+                                    "item",
+                                    target_inner,
+                                    true,
+                                )));
+                            let coerced_left =
+                                datafusion::logical_expr::cast(left, target_type.clone());
                             let coerced_right = datafusion::logical_expr::cast(right, target_type);
                             return Ok(DfExpr::BinaryExpr(
                                 datafusion::logical_expr::expr::BinaryExpr::new(
@@ -1999,8 +2043,13 @@ pub fn apply_type_coercion(expr: &DfExpr, schema: &datafusion::common::DFSchema)
                             && !matches!(rt, DataType::LargeBinary)
                             && !matches!(
                                 (lt, rt),
-                                (DataType::Timestamp(..), DataType::Utf8 | DataType::LargeUtf8)
-                                    | (DataType::Utf8 | DataType::LargeUtf8, DataType::Timestamp(..))
+                                (
+                                    DataType::Timestamp(..),
+                                    DataType::Utf8 | DataType::LargeUtf8
+                                ) | (
+                                    DataType::Utf8 | DataType::LargeUtf8,
+                                    DataType::Timestamp(..)
+                                )
                             )
                         {
                             match binary.op {
@@ -2015,7 +2064,10 @@ pub fn apply_type_coercion(expr: &DfExpr, schema: &datafusion::common::DFSchema)
                 // 5. List ordering: rewrite Lt/LtEq/Gt/GtEq on lists to _cypher_list_compare UDF
                 if is_comparison
                     && let (Some(lt), Some(rt)) = (&left_type, &right_type)
-                    && matches!(binary.op, Operator::Lt | Operator::LtEq | Operator::Gt | Operator::GtEq)
+                    && matches!(
+                        binary.op,
+                        Operator::Lt | Operator::LtEq | Operator::Gt | Operator::GtEq
+                    )
                     && matches!(lt, DataType::List(_) | DataType::LargeList(_))
                     && matches!(rt, DataType::List(_) | DataType::LargeList(_))
                 {
@@ -2026,7 +2078,10 @@ pub fn apply_type_coercion(expr: &DfExpr, schema: &datafusion::common::DFSchema)
                         Operator::GtEq => "gteq",
                         _ => unreachable!(),
                     };
-                    return Ok(dummy_udf_expr("_cypher_list_compare", vec![left, right, lit(op_str)]));
+                    return Ok(dummy_udf_expr(
+                        "_cypher_list_compare",
+                        vec![left, right, lit(op_str)],
+                    ));
                 }
             }
 

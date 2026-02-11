@@ -1340,7 +1340,10 @@ mod tests {
             arrow_to_value(&arr, 0),
             Value::String("10:30:45".to_string())
         );
-        assert_eq!(arrow_to_value(&arr, 1), Value::String("00:00:00".to_string()));
+        assert_eq!(
+            arrow_to_value(&arr, 1),
+            Value::String("00:00:00".to_string())
+        );
         assert_eq!(
             arrow_to_value(&arr, 2),
             Value::String("23:59:59.123456".to_string())

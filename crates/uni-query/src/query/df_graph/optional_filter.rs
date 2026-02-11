@@ -322,8 +322,8 @@ impl OptionalFilterStream {
                 // Optional column: passed rows get real values, null rows get NULL.
                 let passed_array = take_indices(col, &passed_indices)?;
                 let null_array = new_null_array(field.data_type(), null_row_indices.len());
-                let combined = arrow::compute::concat(&[&*passed_array, &*null_array])
-                    .map_err(|e| {
+                let combined =
+                    arrow::compute::concat(&[&*passed_array, &*null_array]).map_err(|e| {
                         datafusion::error::DataFusionError::ArrowError(Box::new(e), None)
                     })?;
                 columns.push(combined);
@@ -370,9 +370,8 @@ impl OptionalFilterStream {
 
 /// Take elements from an array at the given indices.
 fn take_indices(array: &ArrayRef, indices: &[usize]) -> DFResult<ArrayRef> {
-    let idx_array = arrow_array::UInt64Array::from(
-        indices.iter().map(|&i| i as u64).collect::<Vec<_>>(),
-    );
+    let idx_array =
+        arrow_array::UInt64Array::from(indices.iter().map(|&i| i as u64).collect::<Vec<_>>());
     arrow::compute::take(array.as_ref(), &idx_array, None)
         .map_err(|e| datafusion::error::DataFusionError::ArrowError(Box::new(e), None))
 }

@@ -129,11 +129,7 @@ pub fn build_path_struct_field(path_variable: &str) -> Field {
         Field::new("relationships", DataType::List(Arc::new(edge_item)), false);
 
     let path_struct_fields = Fields::from(vec![nodes_field, relationships_field]);
-    Field::new(
-        path_variable,
-        DataType::Struct(path_struct_fields),
-        false,
-    )
+    Field::new(path_variable, DataType::Struct(path_struct_fields), false)
 }
 
 impl DisplayAs for BindFixedPathExec {
@@ -308,18 +304,32 @@ impl BindFixedPathStream {
                 );
 
                 // Get src/dst VIDs from adjacent node variables
-                let src_vid = self.node_variables.get(edge_idx).and_then(|nv| {
-                    let col = format!("{}._vid", nv);
-                    extract_column_value::<arrow_array::UInt64Array, u64>(
-                        &batch, &col, row_idx, |arr, i| arr.value(i),
-                    )
-                }).unwrap_or(0);
-                let dst_vid = self.node_variables.get(edge_idx + 1).and_then(|nv| {
-                    let col = format!("{}._vid", nv);
-                    extract_column_value::<arrow_array::UInt64Array, u64>(
-                        &batch, &col, row_idx, |arr, i| arr.value(i),
-                    )
-                }).unwrap_or(0);
+                let src_vid = self
+                    .node_variables
+                    .get(edge_idx)
+                    .and_then(|nv| {
+                        let col = format!("{}._vid", nv);
+                        extract_column_value::<arrow_array::UInt64Array, u64>(
+                            &batch,
+                            &col,
+                            row_idx,
+                            |arr, i| arr.value(i),
+                        )
+                    })
+                    .unwrap_or(0);
+                let dst_vid = self
+                    .node_variables
+                    .get(edge_idx + 1)
+                    .and_then(|nv| {
+                        let col = format!("{}._vid", nv);
+                        extract_column_value::<arrow_array::UInt64Array, u64>(
+                            &batch,
+                            &col,
+                            row_idx,
+                            |arr, i| arr.value(i),
+                        )
+                    })
+                    .unwrap_or(0);
 
                 self.append_edge(&mut rels_builder, eid, src_vid, dst_vid, &query_ctx);
             }
@@ -404,8 +414,7 @@ impl BindFixedPathStream {
 
         let (eid_value, type_name, props_json) = match eid {
             Some(e) => {
-                let type_name = l0_visibility::get_edge_type(e, query_ctx)
-                    .unwrap_or_default();
+                let type_name = l0_visibility::get_edge_type(e, query_ctx).unwrap_or_default();
                 let props = l0_visibility::get_edge_properties(e, query_ctx)
                     .and_then(|p| serde_json::to_vec(&p).ok());
                 (e.as_u64(), type_name, props)
