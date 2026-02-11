@@ -9,9 +9,13 @@
 
 use arrow_schema::{DataType, Field, SchemaRef};
 use datafusion::arrow::array::Array;
+use datafusion::common::Result as DFResult;
 use datafusion::physical_expr::{EquivalenceProperties, Partitioning};
 use datafusion::physical_plan::PlanProperties;
+use std::collections::HashMap;
 use std::sync::Arc;
+use uni_common::Value;
+use uni_cypher::ast::Expr;
 
 /// Compute standard plan properties for graph operators.
 ///
@@ -239,4 +243,36 @@ pub fn jsonb_array_to_large_list(
     );
 
     Ok(Arc::new(large_list))
+}
+
+/// Evaluate a simple expression to get a `uni_common::Value`.
+///
+/// Supports:
+/// - Literal values
+/// - Parameter references ($param)
+/// - Literal lists
+pub(crate) fn evaluate_simple_expr(
+    expr: &Expr,
+    params: &HashMap<String, Value>,
+) -> DFResult<Value> {
+    match expr {
+        Expr::Literal(lit) => Ok(lit.to_value()),
+
+        Expr::Parameter(name) => params.get(name).cloned().ok_or_else(|| {
+            datafusion::error::DataFusionError::Execution(format!("Parameter '{}' not found", name))
+        }),
+
+        Expr::List(items) => {
+            let mut values = Vec::with_capacity(items.len());
+            for item in items {
+                values.push(evaluate_simple_expr(item, params)?);
+            }
+            Ok(Value::List(values))
+        }
+
+        _ => Err(datafusion::error::DataFusionError::Execution(format!(
+            "Unsupported expression type for procedure argument: {:?}",
+            expr
+        ))),
+    }
 }

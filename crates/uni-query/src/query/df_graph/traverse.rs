@@ -1775,9 +1775,7 @@ async fn build_edge_adjacency_map(
         uni_common::Vid,
         String,
         uni_common::Properties,
-    )> = edges_with_type
-        .into_iter()
-        .collect();
+    )> = edges_with_type.into_iter().collect();
 
     // Step 2: Overlay L0 buffers for all type names
     for l0 in l0_ctx.iter_l0_buffers() {

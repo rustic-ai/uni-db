@@ -143,10 +143,9 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
                             )
                         })?;
                     let output_type = struct_fields[field_idx].data_type().clone();
-                    let col_expr: Arc<dyn PhysicalExpr> =
-                        Arc::new(datafusion::physical_expr::expressions::Column::new(
-                            var_name, col_idx,
-                        ));
+                    let col_expr: Arc<dyn PhysicalExpr> = Arc::new(
+                        datafusion::physical_expr::expressions::Column::new(var_name, col_idx),
+                    );
                     return Ok(Arc::new(StructFieldAccessExpr::new(
                         col_expr,
                         field_idx,

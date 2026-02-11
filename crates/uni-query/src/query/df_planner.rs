@@ -41,9 +41,9 @@ use crate::query::df_graph::traverse::{
     GraphVariableLengthTraverseExec, GraphVariableLengthTraverseMainExec,
 };
 use crate::query::df_graph::{
-    GraphExecutionContext, GraphExtIdLookupExec, GraphScanExec, GraphShortestPathExec,
-    GraphTraverseExec, GraphTraverseMainExec, GraphUnwindExec, GraphVectorKnnExec, L0Context,
-    OptionalFilterExec,
+    GraphExecutionContext, GraphExtIdLookupExec, GraphProcedureCallExec, GraphScanExec,
+    GraphShortestPathExec, GraphTraverseExec, GraphTraverseMainExec, GraphUnwindExec,
+    GraphVectorKnnExec, L0Context, OptionalFilterExec,
 };
 use crate::query::planner::{
     LogicalPlan, aggregate_column_name, classify_window_expressions, collect_properties_from_plan,
@@ -754,9 +754,11 @@ impl HybridPhysicalPlanner {
                 recursive,
             } => self.plan_recursive_cte(cte_name, initial, recursive, all_properties),
 
-            LogicalPlan::ProcedureCall { .. } => Err(anyhow!(
-                "Procedure calls not yet supported in DataFusion engine"
-            )),
+            LogicalPlan::ProcedureCall {
+                procedure_name,
+                arguments,
+                yield_items,
+            } => self.plan_procedure_call(procedure_name, arguments, yield_items, all_properties),
 
             LogicalPlan::SubqueryCall { .. } => Err(anyhow!(
                 "CALL subqueries not yet supported in DataFusion engine"
@@ -1022,6 +1024,52 @@ impl HybridPhysicalPlanner {
         );
 
         Ok(Arc::new(knn))
+    }
+
+    /// Plan a procedure call.
+    fn plan_procedure_call(
+        &self,
+        procedure_name: &str,
+        arguments: &[Expr],
+        yield_items: &[(String, Option<String>)],
+        all_properties: &HashMap<String, HashSet<String>>,
+    ) -> Result<Arc<dyn ExecutionPlan>> {
+        use crate::query::df_graph::procedure_call::map_yield_to_canonical;
+
+        // Build target_properties map for node-like yields in search procedures
+        let mut target_properties: HashMap<String, Vec<String>> = HashMap::new();
+
+        if matches!(
+            procedure_name,
+            "uni.vector.query" | "uni.fts.query" | "uni.search"
+        ) {
+            for (name, alias) in yield_items {
+                let output_name = alias.as_ref().unwrap_or(name);
+                let canonical = map_yield_to_canonical(name);
+                if canonical == "node" {
+                    // Collect properties requested for this node variable
+                    if let Some(props) = all_properties.get(output_name.as_str()) {
+                        let prop_list: Vec<String> = props
+                            .iter()
+                            .filter(|p| *p != "*" && !p.starts_with('_'))
+                            .cloned()
+                            .collect();
+                        target_properties.insert(output_name.clone(), prop_list);
+                    }
+                }
+            }
+        }
+
+        let exec = GraphProcedureCallExec::new(
+            self.graph_ctx.clone(),
+            procedure_name.to_string(),
+            arguments.to_vec(),
+            yield_items.to_vec(),
+            self.params.clone(),
+            target_properties,
+        );
+
+        Ok(Arc::new(exec))
     }
 
     /// Plan a vertex scan.
@@ -3188,10 +3236,30 @@ fn collect_variable_kinds(plan: &LogicalPlan, kinds: &mut HashMap<String, Variab
         LogicalPlan::Explain { plan } => {
             collect_variable_kinds(plan, kinds);
         }
+        LogicalPlan::ProcedureCall {
+            procedure_name,
+            yield_items,
+            ..
+        } => {
+            use crate::query::df_graph::procedure_call::map_yield_to_canonical;
+            for (name, alias) in yield_items {
+                let var = alias.as_ref().unwrap_or(name);
+                if matches!(
+                    procedure_name.as_str(),
+                    "uni.vector.query" | "uni.fts.query" | "uni.search"
+                ) {
+                    let canonical = map_yield_to_canonical(name);
+                    if canonical == "node" {
+                        kinds.insert(var.clone(), VariableKind::Node);
+                    }
+                    // Scalar yields (distance, score, vid) don't need VariableKind
+                }
+                // For schema procedures, yields are all scalars — no entry needed
+            }
+        }
         // Leaf nodes with no variables or not applicable
         LogicalPlan::Empty
         | LogicalPlan::LoadCsv { .. }
-        | LogicalPlan::ProcedureCall { .. }
         | LogicalPlan::CreateVectorIndex { .. }
         | LogicalPlan::CreateFullTextIndex { .. }
         | LogicalPlan::CreateScalarIndex { .. }

@@ -15,7 +15,7 @@
 //! ```
 
 use crate::query::df_graph::GraphExecutionContext;
-use crate::query::df_graph::common::compute_plan_properties;
+use crate::query::df_graph::common::{compute_plan_properties, evaluate_simple_expr};
 use crate::query::df_graph::scan::resolve_property_type;
 use arrow_array::builder::{Float32Builder, StringBuilder, UInt64Builder};
 use arrow_array::{ArrayRef, RecordBatch};
@@ -555,35 +555,6 @@ async fn build_result_batch(
 
     RecordBatch::try_new(schema.clone(), columns)
         .map_err(|e| datafusion::error::DataFusionError::ArrowError(Box::new(e), None))
-}
-
-/// Evaluate a simple expression to get a `uni_common::Value`.
-///
-/// Supports:
-/// - Literal values
-/// - Parameter references ($param)
-/// - Literal lists
-fn evaluate_simple_expr(expr: &Expr, params: &HashMap<String, Value>) -> DFResult<Value> {
-    match expr {
-        Expr::Literal(lit) => Ok(lit.to_value()),
-
-        Expr::Parameter(name) => params.get(name).cloned().ok_or_else(|| {
-            datafusion::error::DataFusionError::Execution(format!("Parameter '{}' not found", name))
-        }),
-
-        Expr::List(items) => {
-            let mut values = Vec::with_capacity(items.len());
-            for item in items {
-                values.push(evaluate_simple_expr(item, params)?);
-            }
-            Ok(Value::List(values))
-        }
-
-        _ => Err(datafusion::error::DataFusionError::Execution(format!(
-            "Unsupported expression type for vector query: {:?}",
-            expr
-        ))),
-    }
 }
 
 #[cfg(test)]
