@@ -162,6 +162,14 @@ pub fn register_cypher_udfs(ctx: &SessionContext) -> DFResult<()> {
     // List comparison UDF for lexicographic ordering
     ctx.register_udf(create_cypher_list_compare_udf());
 
+    // JSONB-aware comparison UDFs (decode LargeBinary values before comparing)
+    ctx.register_udf(create_cypher_equal_udf());
+    ctx.register_udf(create_cypher_not_equal_udf());
+    ctx.register_udf(create_cypher_gt_udf());
+    ctx.register_udf(create_cypher_gt_eq_udf());
+    ctx.register_udf(create_cypher_lt_udf());
+    ctx.register_udf(create_cypher_lt_eq_udf());
+
     // Map projection UDF
     ctx.register_udf(create_map_project_udf());
 

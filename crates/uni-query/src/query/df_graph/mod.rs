@@ -41,6 +41,7 @@ pub mod bind_zero_length_path;
 pub mod common;
 pub mod comprehension;
 pub mod expr_compiler;
+pub mod quantifier;
 pub mod ext_id_lookup;
 pub mod optional_filter;
 pub mod procedure_call;

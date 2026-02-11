@@ -1917,6 +1917,35 @@ impl HybridPhysicalPlanner {
         });
 
         if has_schemaless_cols {
+            // If the predicate contains custom expressions (quantifiers, comprehensions,
+            // reduce), bypass the logical-level rewriting path and use the physical
+            // compiler directly. Custom expressions cannot be translated to DfExpr.
+            // The physical compiler handles JSONB-encoded lists natively (JSONB decode
+            // in QuantifierExecExpr/ListComprehensionExecExpr).
+            if crate::query::df_graph::expr_compiler::CypherPhysicalExprCompiler::contains_custom_expr(predicate) {
+                let ctx = self.translation_context_for_plan(input);
+                let session = self.session_ctx.read();
+                let state = session.state();
+                let compiler = crate::query::df_graph::expr_compiler::CypherPhysicalExprCompiler::new(
+                    &state,
+                    Some(&ctx),
+                );
+                let physical_predicate = compiler.compile(predicate, &schema)?;
+
+                if !optional_variables.is_empty() {
+                    return Ok(Arc::new(OptionalFilterExec::new(
+                        input_plan,
+                        physical_predicate,
+                        optional_variables.clone(),
+                    )));
+                }
+
+                return Ok(Arc::new(FilterExec::try_new(
+                    physical_predicate,
+                    input_plan,
+                )?));
+            }
+
             // Use logical-level rewriting: convert to DfExpr, rewrite, then compile
             let ctx = self.translation_context_for_plan(input);
             let mut df_filter = crate::query::df_expr::cypher_expr_to_df(predicate, Some(&ctx))?;
@@ -2009,12 +2038,10 @@ impl HybridPhysicalPlanner {
         let physical_predicate = compiler.compile(predicate, &schema)?;
 
         // For OPTIONAL MATCH: use OptionalFilterExec for proper NULL row preservation.
+        // Reuse the already-compiled physical_predicate (from CypherPhysicalExprCompiler)
+        // instead of re-creating via cypher_expr_to_df, which cannot handle quantifiers
+        // and other custom expressions.
         if !optional_variables.is_empty() {
-            // Re-create filter as DfExpr (without null guard) for the OptionalFilterExec
-            let ctx2 = self.translation_context_for_plan(input);
-            let df_filter = crate::query::df_expr::cypher_expr_to_df(predicate, Some(&ctx2))?;
-            let physical_predicate =
-                self.create_physical_filter_expr(&df_filter, &schema, &session)?;
             return Ok(Arc::new(OptionalFilterExec::new(
                 input_plan,
                 physical_predicate,

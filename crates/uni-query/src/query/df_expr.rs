@@ -543,27 +543,13 @@ pub fn cypher_expr_to_df(expr: &Expr, context: Option<&TranslationContext>) -> R
         )),
 
         Expr::Quantifier { .. } => {
-            // Quantifier expressions require lambda/higher-order functions which DataFusion
-            // does not yet support (tracked in https://github.com/apache/datafusion/issues/14205).
-            //
-            // Example: ALL(x IN list WHERE x > 0) requires:
-            //   1. Iterating over array elements
-            //   2. Binding each element to variable 'x'
-            //   3. Evaluating predicate 'x > 0' with that binding
-            //
-            // This is equivalent to: list_filter(list, x -> x > 0).length() == list.length()
-            //
-            // DataFusion v50.3.0 has:
-            //   ✅ bool_and/bool_or aggregates
-            //   ✅ unnest() for expanding arrays
-            //   ✅ array_element, array_slice, array_length
-            //   ❌ Lambda functions for predicates
-            //
-            // DESIGN DECISION: Intentionally fail here and let execution fall back to the
-            // fallback executor, which has full quantifier support (see read.rs:663-713).
-            // This is the correct behavior until DataFusion adds lambda support.
+            // Quantifier expressions (ALL/ANY/SINGLE/NONE) cannot be translated to
+            // DataFusion logical expressions because they require lambda iteration.
+            // They are handled via CypherPhysicalExprCompiler → QuantifierExecExpr.
+            // This path is only hit from the schemaless filter fallback.
             Err(anyhow!(
-                "Quantifier expressions (ALL/ANY/SINGLE/NONE) not supported - requires DataFusion lambda functions (Issue #14205)"
+                "Quantifier expressions (ALL/ANY/SINGLE/NONE) require physical compilation \
+                 via CypherPhysicalExprCompiler"
             ))
         }
 
