@@ -3602,6 +3602,9 @@ impl Executor {
                     }
                     Ok(result)
                 }
+                LogicalPlan::BindPath { .. } => Err(anyhow!(
+                    "Fixed-length path binding is only supported in the DataFusion engine"
+                )),
                 LogicalPlan::QuantifiedPattern { .. } => Err(anyhow!(
                     "Quantified patterns are not supported in the fallback executor"
                 )),

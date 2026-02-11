@@ -78,6 +78,7 @@ pub fn register_cypher_udfs(ctx: &SessionContext) -> DFResult<()> {
     ctx.register_udf(create_id_udf());
     ctx.register_udf(create_type_udf());
     ctx.register_udf(create_keys_udf());
+    ctx.register_udf(create_properties_udf());
     ctx.register_udf(create_labels_udf());
     ctx.register_udf(create_nodes_udf());
     ctx.register_udf(create_relationships_udf());
@@ -157,6 +158,9 @@ pub fn register_cypher_udfs(ctx: &SessionContext) -> DFResult<()> {
     ctx.register_udf(create_cypher_starts_with_udf());
     ctx.register_udf(create_cypher_ends_with_udf());
     ctx.register_udf(create_cypher_contains_udf());
+
+    // List comparison UDF for lexicographic ordering
+    ctx.register_udf(create_cypher_list_compare_udf());
 
     // Temporal extraction UDFs (year, month, day, etc.)
     for name in &["year", "month", "day", "hour", "minute", "second"] {
@@ -359,6 +363,74 @@ impl ScalarUDFImpl for KeysUdf {
             };
 
             Ok(Value::List(keys))
+        })
+    }
+}
+
+// ============================================================================
+// properties(entity) -> Map (all user-visible properties as a map)
+// ============================================================================
+
+pub fn create_properties_udf() -> ScalarUDF {
+    ScalarUDF::new_from_impl(PropertiesUdf::new())
+}
+
+#[derive(Debug)]
+struct PropertiesUdf {
+    signature: Signature,
+}
+
+impl PropertiesUdf {
+    fn new() -> Self {
+        Self {
+            signature: Signature::new(TypeSignature::Any(1), Volatility::Immutable),
+        }
+    }
+}
+
+impl_udf_eq_hash!(PropertiesUdf);
+
+impl ScalarUDFImpl for PropertiesUdf {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn name(&self) -> &str {
+        "properties"
+    }
+
+    fn signature(&self) -> &Signature {
+        &self.signature
+    }
+
+    fn return_type(&self, _arg_types: &[DataType]) -> DFResult<DataType> {
+        // Return as LargeBinary (JSONB-encoded map)
+        Ok(DataType::LargeBinary)
+    }
+
+    fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DFResult<ColumnarValue> {
+        let output_type = self.return_type(&[])?;
+        invoke_cypher_udf(args, &output_type, |val_args| {
+            if val_args.is_empty() {
+                return Err(datafusion::error::DataFusionError::Execution(
+                    "properties() requires 1 argument".to_string(),
+                ));
+            }
+
+            let arg = &val_args[0];
+            match arg {
+                Value::Map(map) => {
+                    // Filter out internal properties (those starting with '_')
+                    let filtered: std::collections::HashMap<String, Value> = map
+                        .iter()
+                        .filter(|(k, _)| !k.starts_with('_'))
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect();
+                    Ok(Value::Map(filtered))
+                }
+                Value::Null => Ok(Value::Null),
+                _ => Ok(Value::Null),
+            }
         })
     }
 }
@@ -1223,6 +1295,12 @@ where
     {
         let row_args = get_value_args_for_row(&args.args, 0)?;
         let res = f(&row_args)?;
+        if matches!(output_type, DataType::LargeBinary) {
+            // Encode through array path to match UDF's declared LargeBinary return type
+            let arr = values_to_array(&[res], output_type)
+                .map_err(|e| datafusion::error::DataFusionError::Execution(e.to_string()))?;
+            return Ok(ColumnarValue::Scalar(ScalarValue::try_from_array(&arr, 0)?));
+        }
         return value_to_columnar(&res);
     }
 
@@ -1584,7 +1662,7 @@ impl ScalarUDFImpl for ToIntegerUdf {
     }
 
     fn name(&self) -> &str {
-        "toInteger"
+        "tointeger"
     }
 
     fn signature(&self) -> &Signature {
@@ -1657,7 +1735,7 @@ impl ScalarUDFImpl for ToFloatUdf {
     }
 
     fn name(&self) -> &str {
-        "toFloat"
+        "tofloat"
     }
 
     fn signature(&self) -> &Signature {
@@ -1728,7 +1806,7 @@ impl ScalarUDFImpl for ToBooleanUdf {
     }
 
     fn name(&self) -> &str {
-        "toBoolean"
+        "toboolean"
     }
 
     fn signature(&self) -> &Signature {
@@ -1762,10 +1840,17 @@ impl ScalarUDFImpl for ToBooleanUdf {
                     }
                 }
                 Value::Null => Value::Null,
-                _ => {
-                    // Cypher: return null if cannot convert
-                    Value::Null
+                Value::Int(i) => Value::Bool(*i != 0),
+                Value::Float(_) => Value::Null,
+                Value::List(_) | Value::Map(_) => {
+                    return Err(datafusion::error::DataFusionError::Execution(
+                        format!(
+                            "InvalidArgumentValue: toBoolean() cannot convert {:?} to Boolean",
+                            val
+                        ),
+                    ));
                 }
+                _ => Value::Null,
             };
             Ok(result)
         })
@@ -2320,12 +2405,31 @@ fn cypher_size_scalar(scalar: &ScalarValue) -> DFResult<ScalarValue> {
                 Ok(ScalarValue::Int64(Some(arr.value(0).len() as i64)))
             }
         }
-        // Struct — count fields (for node/relationship objects)
+        // Struct — for path structs (nodes + relationships), return edge count
         ScalarValue::Struct(arr) => {
             if arr.is_null(0) {
                 Ok(ScalarValue::Int64(None))
             } else {
-                Ok(ScalarValue::Int64(Some(arr.num_columns() as i64)))
+                // Check if this is a path struct (has "relationships" field)
+                let schema = arr.fields();
+                if let Some((rels_idx, _)) =
+                    schema.iter().enumerate().find(|(_, f)| f.name() == "relationships")
+                {
+                    // Path struct: length = number of relationships
+                    let rels_col = arr.column(rels_idx);
+                    if let Some(list_arr) = rels_col.as_any().downcast_ref::<arrow_array::ListArray>()
+                    {
+                        if list_arr.is_null(0) {
+                            Ok(ScalarValue::Int64(Some(0)))
+                        } else {
+                            Ok(ScalarValue::Int64(Some(list_arr.value(0).len() as i64)))
+                        }
+                    } else {
+                        Ok(ScalarValue::Int64(Some(arr.num_columns() as i64)))
+                    }
+                } else {
+                    Ok(ScalarValue::Int64(Some(arr.num_columns() as i64)))
+                }
             }
         }
         // Null
@@ -2336,6 +2440,130 @@ fn cypher_size_scalar(scalar: &ScalarValue) -> DFResult<ScalarValue> {
         other => Err(datafusion::error::DataFusionError::Execution(format!(
             "_cypher_size: unsupported type {other:?}"
         ))),
+    }
+}
+
+// ============================================================================
+// _cypher_list_compare(left_list, right_list, op_string) -> Boolean
+// Lexicographic list ordering for Cypher comparison semantics
+// ============================================================================
+
+pub fn create_cypher_list_compare_udf() -> ScalarUDF {
+    ScalarUDF::new_from_impl(CypherListCompareUdf::new())
+}
+
+#[derive(Debug)]
+struct CypherListCompareUdf {
+    signature: Signature,
+}
+
+impl CypherListCompareUdf {
+    fn new() -> Self {
+        Self {
+            signature: Signature::any(3, Volatility::Immutable),
+        }
+    }
+}
+
+impl_udf_eq_hash!(CypherListCompareUdf);
+
+impl ScalarUDFImpl for CypherListCompareUdf {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn name(&self) -> &str {
+        "_cypher_list_compare"
+    }
+
+    fn signature(&self) -> &Signature {
+        &self.signature
+    }
+
+    fn return_type(&self, _arg_types: &[DataType]) -> DFResult<DataType> {
+        Ok(DataType::Boolean)
+    }
+
+    fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DFResult<ColumnarValue> {
+        let output_type = DataType::Boolean;
+        invoke_cypher_udf(args, &output_type, |val_args| {
+            if val_args.len() != 3 {
+                return Err(datafusion::error::DataFusionError::Execution(
+                    "_cypher_list_compare requires 3 arguments (left, right, op)".to_string(),
+                ));
+            }
+
+            let left = &val_args[0];
+            let right = &val_args[1];
+            let op_str = match &val_args[2] {
+                Value::String(s) => s.as_str(),
+                _ => {
+                    return Err(datafusion::error::DataFusionError::Execution(
+                        "_cypher_list_compare: op must be a string".to_string(),
+                    ));
+                }
+            };
+
+            let (left_items, right_items) = match (left, right) {
+                (Value::List(l), Value::List(r)) => (l, r),
+                (Value::Null, _) | (_, Value::Null) => return Ok(Value::Null),
+                _ => {
+                    return Err(datafusion::error::DataFusionError::Execution(
+                        "_cypher_list_compare: both arguments must be lists".to_string(),
+                    ));
+                }
+            };
+
+            // Element-wise comparison using Cypher ordering semantics
+            let cmp = cypher_list_cmp(left_items, right_items);
+
+            let result = match (op_str, cmp) {
+                (_, None) => Value::Null,
+                ("lt", Some(ord)) => Value::Bool(ord == std::cmp::Ordering::Less),
+                ("lteq", Some(ord)) => Value::Bool(ord != std::cmp::Ordering::Greater),
+                ("gt", Some(ord)) => Value::Bool(ord == std::cmp::Ordering::Greater),
+                ("gteq", Some(ord)) => Value::Bool(ord != std::cmp::Ordering::Less),
+                _ => {
+                    return Err(datafusion::error::DataFusionError::Execution(format!(
+                        "_cypher_list_compare: unknown op '{}'",
+                        op_str
+                    )));
+                }
+            };
+
+            Ok(result)
+        })
+    }
+}
+
+/// Compare two lists element-wise using Cypher ordering semantics.
+/// Returns None if comparison is undefined (incompatible types).
+fn cypher_list_cmp(left: &[Value], right: &[Value]) -> Option<std::cmp::Ordering> {
+    let min_len = left.len().min(right.len());
+    for i in 0..min_len {
+        let cmp = cypher_value_cmp(&left[i], &right[i])?;
+        if cmp != std::cmp::Ordering::Equal {
+            return Some(cmp);
+        }
+    }
+    // All compared elements are equal; shorter list is "less"
+    Some(left.len().cmp(&right.len()))
+}
+
+/// Compare two Cypher values for ordering.
+/// Returns None if types are incomparable.
+fn cypher_value_cmp(a: &Value, b: &Value) -> Option<std::cmp::Ordering> {
+    match (a, b) {
+        (Value::Null, Value::Null) => Some(std::cmp::Ordering::Equal),
+        (Value::Null, _) | (_, Value::Null) => None,
+        (Value::Int(l), Value::Int(r)) => Some(l.cmp(r)),
+        (Value::Float(l), Value::Float(r)) => l.partial_cmp(r),
+        (Value::Int(l), Value::Float(r)) => (*l as f64).partial_cmp(r),
+        (Value::Float(l), Value::Int(r)) => l.partial_cmp(&(*r as f64)),
+        (Value::String(l), Value::String(r)) => Some(l.cmp(r)),
+        (Value::Bool(l), Value::Bool(r)) => Some(l.cmp(r)),
+        (Value::List(l), Value::List(r)) => cypher_list_cmp(l, r),
+        _ => None, // Incomparable types
     }
 }
 

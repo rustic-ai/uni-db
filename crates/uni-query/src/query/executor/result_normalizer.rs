@@ -198,6 +198,20 @@ impl ResultNormalizer {
             .get("_label")
             .or_else(|| map.get("label"))
             .and_then(Self::value_to_string)
+            .or_else(|| {
+                // Handle _labels (List<String>) from structural projection — use first label
+                if let Some(Value::List(labels)) = map.get("_labels") {
+                    labels.first().and_then(|v| {
+                        if let Value::String(s) = v {
+                            Some(s.clone())
+                        } else {
+                            None
+                        }
+                    })
+                } else {
+                    None
+                }
+            })
             .unwrap_or_default();
 
         // Try to extract properties from a dedicated "properties" field (LargeBinary/JSON)

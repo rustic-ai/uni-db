@@ -34,6 +34,7 @@
 //! [`cypher_expr_to_df`] from the `df_expr` module.
 
 use crate::query::df_expr::{TranslationContext, VariableKind, cypher_expr_to_df};
+use crate::query::df_graph::bind_fixed_path::BindFixedPathExec;
 use crate::query::df_graph::bind_zero_length_path::BindZeroLengthPathExec;
 use crate::query::df_graph::traverse::{
     GraphVariableLengthTraverseExec, GraphVariableLengthTraverseMainExec,
@@ -648,6 +649,21 @@ impl HybridPhysicalPlanner {
                 path_variable,
             } => {
                 self.plan_bind_zero_length_path(input, node_variable, path_variable, all_properties)
+            }
+
+            LogicalPlan::BindPath {
+                input,
+                node_variables,
+                edge_variables,
+                path_variable,
+            } => {
+                self.plan_bind_path(
+                    input,
+                    node_variables,
+                    edge_variables,
+                    path_variable,
+                    all_properties,
+                )
             }
 
             // === Unsupported (for now) ===
@@ -2322,6 +2338,7 @@ impl HybridPhysicalPlanner {
             }
 
             let df_expr = cypher_expr_to_df(&sort_expr, Some(&ctx))?;
+            let df_expr = Self::resolve_udfs(&df_expr, &session.state())?;
             let asc = item.ascending;
             let nulls_first = !asc; // Standard SQL behavior: nulls last for ASC, first for DESC
 
@@ -2709,6 +2726,26 @@ impl HybridPhysicalPlanner {
         )))
     }
 
+    /// Plan a fixed-length path binding.
+    /// Synthesizes a path struct from existing node and edge columns.
+    fn plan_bind_path(
+        &self,
+        input: &LogicalPlan,
+        node_variables: &[String],
+        edge_variables: &[String],
+        path_variable: &str,
+        all_properties: &HashMap<String, HashSet<String>>,
+    ) -> Result<Arc<dyn ExecutionPlan>> {
+        let input_plan = self.plan_internal(input, all_properties)?;
+        Ok(Arc::new(BindFixedPathExec::new(
+            input_plan,
+            node_variables.to_vec(),
+            edge_variables.to_vec(),
+            path_variable.to_string(),
+            self.graph_ctx.clone(),
+        )))
+    }
+
     /// Create a physical filter expression.
     ///
     /// Applies type coercion to resolve mismatches like Int32 vs Int64
@@ -2728,6 +2765,9 @@ impl HybridPhysicalPlanner {
         // Apply type coercion to resolve Int32/Int64, Float32/Float64 mismatches
         let coerced_expr = crate::query::df_expr::apply_type_coercion(&resolved_expr, &df_schema)?;
 
+        // Re-resolve UDFs after coercion (coercion may introduce new dummy UDF calls)
+        let coerced_expr = Self::resolve_udfs(&coerced_expr, &state)?;
+
         // Use SessionState's create_physical_expr to properly resolve UDFs
         use datafusion::physical_planner::PhysicalPlanner;
         let planner = datafusion::physical_planner::DefaultPhysicalPlanner::default();
@@ -2737,55 +2777,29 @@ impl HybridPhysicalPlanner {
     }
 
     /// Resolve DummyUdf placeholders to actual registered UDFs from SessionState.
+    ///
+    /// Uses DataFusion's TreeNode API to traverse the entire expression tree,
+    /// replacing any ScalarFunction nodes whose UDF name matches a registered UDF.
     fn resolve_udfs(expr: &DfExpr, state: &datafusion::execution::SessionState) -> Result<DfExpr> {
+        use datafusion::common::tree_node::{Transformed, TreeNode};
         use datafusion::logical_expr::Expr as DfExpr;
 
-        match expr {
-            DfExpr::ScalarFunction(func) => {
-                // Check if this is a DummyUdf that needs to be resolved
+        let result = expr.clone().transform_up(|node| {
+            if let DfExpr::ScalarFunction(ref func) = node {
                 let udf_name = func.func.name();
-
-                // Resolve args recursively regardless of registration status
-                let resolved_args: Vec<DfExpr> = func
-                    .args
-                    .iter()
-                    .map(|arg| Self::resolve_udfs(arg, state))
-                    .collect::<Result<Vec<_>>>()?;
-
-                // Use registered UDF if available, otherwise keep original
-                let func_ref = match state.scalar_functions().get(udf_name) {
-                    Some(registered_udf) => registered_udf.clone(),
-                    None => func.func.clone(),
-                };
-
-                Ok(DfExpr::ScalarFunction(
-                    datafusion::logical_expr::expr::ScalarFunction {
-                        func: func_ref,
-                        args: resolved_args,
-                    },
-                ))
+                if let Some(registered_udf) = state.scalar_functions().get(udf_name) {
+                    return Ok(Transformed::yes(DfExpr::ScalarFunction(
+                        datafusion::logical_expr::expr::ScalarFunction {
+                            func: registered_udf.clone(),
+                            args: func.args.clone(),
+                        },
+                    )));
+                }
             }
-            // Recursively resolve UDFs in other expression types
-            DfExpr::BinaryExpr(binary) => {
-                Ok(DfExpr::BinaryExpr(datafusion::logical_expr::BinaryExpr {
-                    left: Box::new(Self::resolve_udfs(&binary.left, state)?),
-                    op: binary.op,
-                    right: Box::new(Self::resolve_udfs(&binary.right, state)?),
-                }))
-            }
-            DfExpr::Not(inner) => Ok(DfExpr::Not(Box::new(Self::resolve_udfs(inner, state)?))),
-            DfExpr::IsNull(inner) => {
-                Ok(DfExpr::IsNull(Box::new(Self::resolve_udfs(inner, state)?)))
-            }
-            DfExpr::IsNotNull(inner) => Ok(DfExpr::IsNotNull(Box::new(Self::resolve_udfs(
-                inner, state,
-            )?))),
-            DfExpr::Negative(inner) => Ok(DfExpr::Negative(Box::new(Self::resolve_udfs(
-                inner, state,
-            )?))),
-            // For other expression types, return as-is
-            _ => Ok(expr.clone()),
-        }
+            Ok(Transformed::no(node))
+        }).map_err(|e| anyhow::anyhow!("Failed to resolve UDFs: {}", e))?;
+
+        Ok(result.data)
     }
 
     /// Add a structural projection on top of an execution plan to create a Struct column
@@ -2814,7 +2828,13 @@ impl HybridPhysicalPlanner {
         }
 
         // 2. Add the named_struct AS variable
-        let mut struct_args = Vec::with_capacity(properties.len() * 2 + 2);
+        let mut struct_args = Vec::with_capacity(properties.len() * 2 + 4);
+
+        // Add _vid field for identity access
+        struct_args.push(lit("_vid"));
+        struct_args.push(DfExpr::Column(datafusion::common::Column::from_name(
+            format!("{}._vid", variable),
+        )));
 
         // Add _labels field for labels() function support
         struct_args.push(lit("_labels"));
@@ -2874,7 +2894,13 @@ impl HybridPhysicalPlanner {
         }
 
         // 2. Build named_struct with _type field (edges don't have _labels)
-        let mut struct_args = Vec::with_capacity(properties.len() * 2 + 2);
+        let mut struct_args = Vec::with_capacity(properties.len() * 2 + 4);
+
+        // Add _eid field for identity access
+        struct_args.push(lit("_eid"));
+        struct_args.push(DfExpr::Column(datafusion::common::Column::from_name(
+            format!("{}._eid", variable),
+        )));
 
         struct_args.push(lit("_type"));
         struct_args.push(DfExpr::Column(datafusion::common::Column::from_name(
@@ -3036,6 +3062,21 @@ fn collect_variable_kinds(plan: &LogicalPlan, kinds: &mut HashMap<String, Variab
         } => {
             collect_variable_kinds(input, kinds);
             kinds.insert(node_variable.clone(), VariableKind::Node);
+            kinds.insert(path_variable.clone(), VariableKind::Path);
+        }
+        LogicalPlan::BindPath {
+            input,
+            node_variables,
+            edge_variables,
+            path_variable,
+        } => {
+            collect_variable_kinds(input, kinds);
+            for nv in node_variables {
+                kinds.insert(nv.clone(), VariableKind::Node);
+            }
+            for ev in edge_variables {
+                kinds.insert(ev.clone(), VariableKind::Edge);
+            }
             kinds.insert(path_variable.clone(), VariableKind::Path);
         }
         // Wrapper nodes: recurse into input(s)

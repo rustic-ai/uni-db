@@ -18,9 +18,12 @@
 
 use crate::query::df_graph::GraphExecutionContext;
 use crate::query::df_graph::common::compute_plan_properties;
-use arrow_array::builder::{ListBuilder, UInt64Builder};
-use arrow_array::{Array, ArrayRef, RecordBatch, UInt64Array};
-use arrow_schema::{DataType, Field, Schema, SchemaRef};
+use arrow_array::builder::{
+    LargeBinaryBuilder, ListBuilder, StringBuilder, StructBuilder, UInt64Builder,
+};
+use arrow_array::{Array, ArrayRef, RecordBatch, StructArray, UInt64Array};
+use arrow_schema::{DataType, Field, Fields, Schema, SchemaRef};
+use uni_store::runtime::l0_visibility;
 use datafusion::common::Result as DFResult;
 use datafusion::execution::{RecordBatchStream, SendableRecordBatchStream, TaskContext};
 use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
@@ -150,7 +153,12 @@ impl GraphShortestPathExec {
             .map(|f| f.as_ref().clone())
             .collect();
 
-        // Add path column
+        // Add the proper path struct column (nodes + relationships)
+        fields.push(
+            crate::query::df_graph::bind_fixed_path::build_path_struct_field(path_variable),
+        );
+
+        // Add path column (raw VID list for internal use)
         let path_col_name = format!("{}._path", path_variable);
         fields.push(Field::new(
             &path_col_name,
@@ -395,11 +403,115 @@ impl GraphShortestPathStream {
         paths: &[Option<Vec<Vid>>],
     ) -> DFResult<RecordBatch> {
         let num_rows = paths.len();
+        let query_ctx = self.graph_ctx.query_context();
 
         // Copy input columns
         let mut columns: Vec<ArrayRef> = input.columns().to_vec();
 
-        // Build path list column
+        // Build the path struct column (nodes + relationships)
+        let node_struct_fields = Fields::from(vec![
+            Field::new("_vid", DataType::UInt64, false),
+            Field::new("_label", DataType::Utf8, true),
+            Field::new("properties", DataType::LargeBinary, true),
+        ]);
+        let edge_struct_fields = Fields::from(vec![
+            Field::new("_eid", DataType::UInt64, false),
+            Field::new("_type_name", DataType::Utf8, false),
+            Field::new("_src", DataType::UInt64, false),
+            Field::new("_dst", DataType::UInt64, false),
+            Field::new("properties", DataType::LargeBinary, true),
+        ]);
+
+        let mut nodes_builder =
+            ListBuilder::new(StructBuilder::from_fields(node_struct_fields, num_rows));
+        let mut rels_builder =
+            ListBuilder::new(StructBuilder::from_fields(edge_struct_fields, num_rows));
+
+        for path in paths {
+            match path {
+                Some(vids) => {
+                    // Add all nodes
+                    for &vid in vids {
+                        let label = l0_visibility::get_vertex_labels(vid, &query_ctx)
+                            .first()
+                            .cloned();
+                        let props = l0_visibility::get_vertex_properties(vid, &query_ctx)
+                            .and_then(|p| serde_json::to_vec(&p).ok());
+
+                        let ns = nodes_builder.values();
+                        ns.field_builder::<UInt64Builder>(0)
+                            .unwrap()
+                            .append_value(vid.as_u64());
+                        let lb = ns.field_builder::<StringBuilder>(1).unwrap();
+                        match &label {
+                            Some(l) => lb.append_value(l),
+                            None => lb.append_null(),
+                        }
+                        let pb = ns.field_builder::<LargeBinaryBuilder>(2).unwrap();
+                        match &props {
+                            Some(json) => pb.append_value(json),
+                            None => pb.append_null(),
+                        }
+                        ns.append(true);
+                    }
+                    nodes_builder.append(true);
+
+                    // Add edges between consecutive nodes
+                    // BFS returns node VIDs; edges are between consecutive pairs
+                    for window in vids.windows(2) {
+                        let src = window[0];
+                        let dst = window[1];
+                        // Find the edge connecting src to dst
+                        let edge_info = self.find_edge(src, dst);
+                        let rs = rels_builder.values();
+
+                        rs.field_builder::<UInt64Builder>(0)
+                            .unwrap()
+                            .append_value(edge_info.0); // eid
+                        rs.field_builder::<StringBuilder>(1)
+                            .unwrap()
+                            .append_value(&edge_info.1); // type_name
+                        rs.field_builder::<UInt64Builder>(2)
+                            .unwrap()
+                            .append_value(src.as_u64());
+                        rs.field_builder::<UInt64Builder>(3)
+                            .unwrap()
+                            .append_value(dst.as_u64());
+                        let pb = rs.field_builder::<LargeBinaryBuilder>(4).unwrap();
+                        match &edge_info.2 {
+                            Some(json) => pb.append_value(json),
+                            None => pb.append_null(),
+                        }
+                        rs.append(true);
+                    }
+                    rels_builder.append(true);
+                }
+                None => {
+                    // Null path
+                    nodes_builder.append(false);
+                    rels_builder.append(false);
+                }
+            }
+        }
+
+        let nodes_array = Arc::new(nodes_builder.finish()) as ArrayRef;
+        let rels_array = Arc::new(rels_builder.finish()) as ArrayRef;
+
+        let path_struct = StructArray::try_new(
+            Fields::from(vec![
+                Arc::new(Field::new("nodes", nodes_array.data_type().clone(), false)),
+                Arc::new(Field::new(
+                    "relationships",
+                    rels_array.data_type().clone(),
+                    false,
+                )),
+            ]),
+            vec![nodes_array, rels_array],
+            None,
+        )?;
+        columns.push(Arc::new(path_struct));
+
+        // Build raw path list column (VID list for internal use)
         let mut list_builder = ListBuilder::new(UInt64Builder::new());
         for path in paths {
             match path {
@@ -426,6 +538,27 @@ impl GraphShortestPathStream {
 
         RecordBatch::try_new(self.schema.clone(), columns)
             .map_err(|e| datafusion::error::DataFusionError::ArrowError(Box::new(e), None))
+    }
+
+    /// Find an edge connecting src to dst.
+    /// Returns (eid, type_name, properties_json).
+    fn find_edge(&self, src: Vid, dst: Vid) -> (u64, String, Option<Vec<u8>>) {
+        let query_ctx = self.graph_ctx.query_context();
+        for &edge_type in &self.edge_type_ids {
+            let neighbors = self
+                .graph_ctx
+                .get_neighbors(src, edge_type, self.direction);
+            for (neighbor, eid) in neighbors {
+                if neighbor == dst {
+                    let type_name = l0_visibility::get_edge_type(eid, &query_ctx)
+                        .unwrap_or_default();
+                    let props = l0_visibility::get_edge_properties(eid, &query_ctx)
+                        .and_then(|p| serde_json::to_vec(&p).ok());
+                    return (eid.as_u64(), type_name, props);
+                }
+            }
+        }
+        (0, String::new(), None)
     }
 }
 
@@ -506,10 +639,11 @@ mod tests {
 
         let output_schema = GraphShortestPathExec::build_schema(input_schema, "p");
 
-        assert_eq!(output_schema.fields().len(), 4);
+        assert_eq!(output_schema.fields().len(), 5);
         assert_eq!(output_schema.field(0).name(), "_source_vid");
         assert_eq!(output_schema.field(1).name(), "_target_vid");
-        assert_eq!(output_schema.field(2).name(), "p._path");
-        assert_eq!(output_schema.field(3).name(), "p._length");
+        assert_eq!(output_schema.field(2).name(), "p");
+        assert_eq!(output_schema.field(3).name(), "p._path");
+        assert_eq!(output_schema.field(4).name(), "p._length");
     }
 }

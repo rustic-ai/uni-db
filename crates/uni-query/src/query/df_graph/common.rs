@@ -8,6 +8,7 @@
 //! the df_graph module's execution plan implementations.
 
 use arrow_schema::{DataType, Field, SchemaRef};
+use datafusion::arrow::array::Array;
 use datafusion::physical_expr::{EquivalenceProperties, Partitioning};
 use datafusion::physical_plan::PlanProperties;
 use std::sync::Arc;
@@ -81,4 +82,161 @@ pub fn build_path_struct_field(path_var: &str) -> Field {
         ])),
         false,
     )
+}
+
+/// Convert a `LargeBinaryArray` of JSONB-encoded arrays into a `LargeListArray`.
+///
+/// Each element in the input array is a JSONB blob encoding a JSON array (e.g. `[1,2,3]`).
+/// Elements are converted to the specified `element_type`. For example, if `element_type`
+/// is `Int64`, JSONB numbers are parsed as i64 values.
+///
+/// Non-array JSONB values and nulls produce empty lists.
+pub fn jsonb_array_to_large_list(
+    array: &dyn datafusion::arrow::array::Array,
+    element_type: &DataType,
+) -> datafusion::error::Result<Arc<dyn datafusion::arrow::array::Array>> {
+    use datafusion::arrow::array::LargeBinaryArray;
+    use datafusion::arrow::buffer::{OffsetBuffer, ScalarBuffer};
+
+    let binary_arr = array
+        .as_any()
+        .downcast_ref::<LargeBinaryArray>()
+        .ok_or_else(|| {
+            datafusion::error::DataFusionError::Execution(
+                "jsonb_array_to_large_list: expected LargeBinaryArray".to_string(),
+            )
+        })?;
+
+    // Collect all JSON elements across all rows
+    let num_rows = binary_arr.len();
+    let mut all_elements: Vec<Vec<serde_json::Value>> = Vec::with_capacity(num_rows);
+    let mut nulls = Vec::with_capacity(num_rows);
+
+    for i in 0..num_rows {
+        if binary_arr.is_null(i) {
+            all_elements.push(Vec::new());
+            nulls.push(false);
+            continue;
+        }
+
+        let blob = binary_arr.value(i);
+        let raw = jsonb::RawJsonb::new(blob);
+        let json_str = raw.to_string();
+
+        match serde_json::from_str::<serde_json::Value>(&json_str) {
+            Ok(serde_json::Value::Array(elements)) => {
+                all_elements.push(elements);
+                nulls.push(true);
+            }
+            _ => {
+                all_elements.push(Vec::new());
+                nulls.push(true);
+            }
+        }
+    }
+
+    // Build typed values array and offsets
+    let mut offsets: Vec<i64> = Vec::with_capacity(num_rows + 1);
+    offsets.push(0);
+
+    let values_array: Arc<dyn datafusion::arrow::array::Array> = match element_type {
+        DataType::Int64 => {
+            let mut builder = datafusion::arrow::array::builder::Int64Builder::new();
+            for elems in &all_elements {
+                for elem in elems {
+                    match elem {
+                        serde_json::Value::Number(n) => {
+                            if let Some(i) = n.as_i64() {
+                                builder.append_value(i);
+                            } else if let Some(f) = n.as_f64() {
+                                builder.append_value(f as i64);
+                            } else {
+                                builder.append_null();
+                            }
+                        }
+                        serde_json::Value::Null => builder.append_null(),
+                        _ => builder.append_null(),
+                    }
+                }
+                offsets.push(offsets.last().unwrap() + elems.len() as i64);
+            }
+            Arc::new(builder.finish())
+        }
+        DataType::Float64 => {
+            let mut builder = datafusion::arrow::array::builder::Float64Builder::new();
+            for elems in &all_elements {
+                for elem in elems {
+                    match elem {
+                        serde_json::Value::Number(n) => {
+                            if let Some(f) = n.as_f64() {
+                                builder.append_value(f);
+                            } else {
+                                builder.append_null();
+                            }
+                        }
+                        serde_json::Value::Null => builder.append_null(),
+                        _ => builder.append_null(),
+                    }
+                }
+                offsets.push(offsets.last().unwrap() + elems.len() as i64);
+            }
+            Arc::new(builder.finish())
+        }
+        DataType::Utf8 | DataType::LargeUtf8 => {
+            let mut builder = datafusion::arrow::array::builder::StringBuilder::new();
+            for elems in &all_elements {
+                for elem in elems {
+                    match elem {
+                        serde_json::Value::String(s) => builder.append_value(s),
+                        serde_json::Value::Null => builder.append_null(),
+                        other => builder.append_value(other.to_string()),
+                    }
+                }
+                offsets.push(offsets.last().unwrap() + elems.len() as i64);
+            }
+            Arc::new(builder.finish())
+        }
+        DataType::Boolean => {
+            let mut builder = datafusion::arrow::array::builder::BooleanBuilder::new();
+            for elems in &all_elements {
+                for elem in elems {
+                    match elem {
+                        serde_json::Value::Bool(b) => builder.append_value(*b),
+                        serde_json::Value::Null => builder.append_null(),
+                        _ => builder.append_null(),
+                    }
+                }
+                offsets.push(offsets.last().unwrap() + elems.len() as i64);
+            }
+            Arc::new(builder.finish())
+        }
+        // Fallback: keep as JSONB LargeBinary blobs
+        _ => {
+            let mut builder = datafusion::arrow::array::builder::LargeBinaryBuilder::new();
+            for elems in &all_elements {
+                for elem in elems {
+                    let elem_str = serde_json::to_string(elem).unwrap_or_default();
+                    match jsonb::parse_value(elem_str.as_bytes()) {
+                        Ok(owned) => builder.append_value(owned.to_vec()),
+                        Err(_) => builder.append_null(),
+                    }
+                }
+                offsets.push(offsets.last().unwrap() + elems.len() as i64);
+            }
+            Arc::new(builder.finish())
+        }
+    };
+
+    let field = Arc::new(Field::new("item", element_type.clone(), true));
+    let offset_buffer = OffsetBuffer::new(ScalarBuffer::from(offsets));
+    let null_buffer = datafusion::arrow::buffer::NullBuffer::from(nulls);
+
+    let large_list = datafusion::arrow::array::LargeListArray::new(
+        field,
+        offset_buffer,
+        values_array,
+        Some(null_buffer),
+    );
+
+    Ok(Arc::new(large_list))
 }

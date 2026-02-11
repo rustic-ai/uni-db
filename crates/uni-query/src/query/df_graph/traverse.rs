@@ -835,26 +835,6 @@ async fn build_traverse_output_batch(
         columns.push(Arc::new(UInt64Array::from(eid_u64s)));
     }
 
-    // DEBUG: Check for column type mismatches before creating the batch
-    if columns.len() != schema.fields().len() {
-        eprintln!(
-            "TRAVERSE: column count mismatch: {} columns vs {} schema fields",
-            columns.len(),
-            schema.fields().len()
-        );
-    }
-    for (i, (col, field)) in columns.iter().zip(schema.fields().iter()).enumerate() {
-        if col.data_type() != field.data_type() {
-            eprintln!(
-                "TRAVERSE: col[{}] '{}' type mismatch: actual={:?} expected={:?}",
-                i,
-                field.name(),
-                col.data_type(),
-                field.data_type()
-            );
-        }
-    }
-
     let expanded_batch = RecordBatch::try_new(schema.clone(), columns)
         .map_err(|e| datafusion::error::DataFusionError::ArrowError(Box::new(e), None))?;
 
@@ -2113,6 +2093,13 @@ impl GraphVariableLengthTraverseExec {
             false,
         ));
 
+        // Add target ._labels column (List(Utf8)) for labels() and structural projection support
+        fields.push(Field::new(
+            format!("{}._labels", target_variable),
+            DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
+            true,
+        ));
+
         // Add target vertex property columns
         for prop_name in target_properties {
             let col_name = format!("{}.{}", target_variable, prop_name);
@@ -2508,7 +2495,37 @@ impl GraphVariableLengthTraverseStream {
             .iter()
             .map(|(_, vid, _, _, _)| vid.as_u64())
             .collect();
-        columns.push(Arc::new(UInt64Array::from(target_vids)));
+        columns.push(Arc::new(UInt64Array::from(target_vids.clone())));
+
+        // Add target ._labels column (from L0 buffers)
+        {
+            use arrow_array::builder::{ListBuilder, StringBuilder};
+            let l0_ctx = self.exec.graph_ctx.l0_context();
+            let mut labels_builder = ListBuilder::new(StringBuilder::new());
+            for vid_u64 in &target_vids {
+                let vid = Vid::from(*vid_u64);
+                let mut row_labels: Vec<String> = Vec::new();
+                if let Some(ref label_name) = self.exec.target_label_name {
+                    row_labels.push(label_name.clone());
+                }
+                for l0 in l0_ctx.iter_l0_buffers() {
+                    let guard = l0.read();
+                    if let Some(l0_labels) = guard.vertex_labels.get(&vid) {
+                        for lbl in l0_labels {
+                            if !row_labels.contains(lbl) {
+                                row_labels.push(lbl.clone());
+                            }
+                        }
+                    }
+                }
+                let values = labels_builder.values();
+                for lbl in &row_labels {
+                    values.append_value(lbl);
+                }
+                labels_builder.append(true);
+            }
+            columns.push(Arc::new(labels_builder.finish()));
+        }
 
         // Add null placeholder columns for target properties (hydrated async if needed)
         for _ in &self.exec.target_properties {
@@ -2705,10 +2722,20 @@ async fn hydrate_vlp_target_properties(
 
     // Find the target VID column by exact name.
     // Schema layout: [input cols..., target._vid, target.prop1..., _hop_count, path?]
+    //
+    // IMPORTANT: When the target variable is already bound in the input (e.g., two MATCH
+    // clauses referencing the same variable), there may be duplicate column names. We need
+    // the LAST occurrence of target._vid, which is the one added by the VLP.
     let target_vid_col_name = format!("{}._vid", target_variable);
-    let target_vid_idx = schema.column_with_name(&target_vid_col_name);
+    let vid_col_idx = schema
+        .fields()
+        .iter()
+        .enumerate()
+        .rev()
+        .find(|(_, f)| f.name() == &target_vid_col_name)
+        .map(|(i, _)| i);
 
-    let Some((vid_col_idx, _)) = target_vid_idx else {
+    let Some(vid_col_idx) = vid_col_idx else {
         return Ok(base_batch);
     };
 
@@ -2758,13 +2785,15 @@ async fn hydrate_vlp_target_properties(
         }
     }
 
-    // Rebuild batch replacing the null placeholder property columns with hydrated ones
+    // Rebuild batch replacing the null placeholder property columns with hydrated ones.
+    // Schema layout after VID: [target._vid, target._labels, target.prop1..., _hop_count, path?]
+    // Property columns start 2 positions after VID (skip _labels).
+    let prop_start = vid_col_idx + 2; // +1 for _labels
     let mut new_columns: Vec<ArrayRef> = Vec::with_capacity(schema.fields().len());
     let mut prop_idx = 0;
     for (col_idx, _field) in schema.fields().iter().enumerate() {
-        // Property columns start right after the target VID column
-        if col_idx > vid_col_idx
-            && col_idx <= vid_col_idx + target_properties.len()
+        if col_idx >= prop_start
+            && col_idx < prop_start + target_properties.len()
             && prop_idx < property_columns.len()
         {
             new_columns.push(property_columns[prop_idx].clone());
@@ -2915,6 +2944,13 @@ impl GraphVariableLengthTraverseMainExec {
             format!("{}._vid", target_variable),
             DataType::UInt64,
             false,
+        ));
+
+        // Add target ._labels column (List(Utf8)) for labels() and structural projection support
+        fields.push(Field::new(
+            format!("{}._labels", target_variable),
+            DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
+            true,
         ));
 
         // Add hop count
@@ -3195,6 +3231,27 @@ impl GraphVariableLengthTraverseMainStream {
             .map(|(_, vid, _, _, _)| vid.as_u64())
             .collect();
         columns.push(Arc::new(UInt64Array::from(target_vids)));
+
+        // Add target ._labels column (from L0 buffers)
+        {
+            use arrow_array::builder::{ListBuilder, StringBuilder};
+            let mut labels_builder = ListBuilder::new(StringBuilder::new());
+            for (_, vid, _, _, _) in expansions.iter() {
+                let mut row_labels: Vec<String> = Vec::new();
+                let labels = l0_visibility::get_vertex_labels(*vid, &self.graph_ctx.query_context());
+                for lbl in &labels {
+                    if !row_labels.contains(lbl) {
+                        row_labels.push(lbl.clone());
+                    }
+                }
+                let values = labels_builder.values();
+                for lbl in &row_labels {
+                    values.append_value(lbl);
+                }
+                labels_builder.append(true);
+            }
+            columns.push(Arc::new(labels_builder.finish()));
+        }
 
         // Add hop count column
         let hop_counts: Vec<u64> = expansions
@@ -3584,11 +3641,12 @@ mod tests {
             None,
         );
 
-        assert_eq!(output_schema.fields().len(), 4);
+        assert_eq!(output_schema.fields().len(), 5);
         assert_eq!(output_schema.field(0).name(), "a._vid");
         assert_eq!(output_schema.field(1).name(), "b._vid");
-        assert_eq!(output_schema.field(2).name(), "_hop_count");
-        assert_eq!(output_schema.field(3).name(), "p");
+        assert_eq!(output_schema.field(2).name(), "b._labels");
+        assert_eq!(output_schema.field(3).name(), "_hop_count");
+        assert_eq!(output_schema.field(4).name(), "p");
     }
 
     #[test]

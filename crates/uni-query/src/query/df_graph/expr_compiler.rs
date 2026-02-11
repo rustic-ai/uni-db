@@ -12,7 +12,7 @@ use datafusion::physical_expr::expressions::binary;
 use datafusion::physical_plan::PhysicalExpr;
 use datafusion::physical_planner::PhysicalPlanner;
 use std::sync::Arc;
-use uni_cypher::ast::{BinaryOp, Expr, UnaryOp};
+use uni_cypher::ast::{BinaryOp, CypherLiteral, Expr, UnaryOp};
 
 /// Compiler for converting Cypher expressions directly to DataFusion Physical Expressions.
 pub struct CypherPhysicalExprCompiler<'a> {
@@ -160,6 +160,44 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
                 self.compile_standard(expr, input_schema)
             }
 
+            // Bracket access on a struct column — e.g. `x['a']` where `x` is Struct
+            Expr::ArrayIndex { array, index } => {
+                if let Expr::Variable(var_name) = array.as_ref()
+                    && let Expr::Literal(CypherLiteral::String(prop)) = index.as_ref()
+                    && let Ok(col_idx) = input_schema.index_of(var_name)
+                {
+                    let col_type = input_schema.field(col_idx).data_type();
+                    if let arrow_schema::DataType::Struct(struct_fields) = col_type {
+                        let field_idx = struct_fields
+                            .iter()
+                            .position(|f| f.name() == prop)
+                            .ok_or_else(|| {
+                                anyhow!(
+                                    "Struct field '{}' not found in column '{}'. \
+                                     Available: {:?}",
+                                    prop,
+                                    var_name,
+                                    struct_fields
+                                        .iter()
+                                        .map(|f| f.name())
+                                        .collect::<Vec<_>>()
+                                )
+                            })?;
+                        let output_type =
+                            struct_fields[field_idx].data_type().clone();
+                        let col_expr: Arc<dyn PhysicalExpr> = Arc::new(
+                            datafusion::physical_expr::expressions::Column::new(
+                                var_name, col_idx,
+                            ),
+                        );
+                        return Ok(Arc::new(StructFieldAccessExpr::new(
+                            col_expr, field_idx, output_type,
+                        )));
+                    }
+                }
+                self.compile_standard(expr, input_schema)
+            }
+
             // Default to standard compilation for leaf nodes or non-custom trees
             _ => self.compile_standard(expr, input_schema),
         }
@@ -210,6 +248,9 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
 
         // Apply type coercion to resolve type mismatches
         let coerced_expr = crate::query::df_expr::apply_type_coercion(&resolved_expr, &df_schema)?;
+
+        // Re-resolve UDFs after coercion (coercion may introduce new dummy UDF calls)
+        let coerced_expr = self.resolve_udfs(coerced_expr)?;
 
         let planner = datafusion::physical_planner::DefaultPhysicalPlanner::default();
         planner
@@ -289,6 +330,8 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
                 field.data_type().clone()
             }
             arrow_schema::DataType::Null => arrow_schema::DataType::Null,
+            // LargeBinary may contain JSONB-encoded arrays; elements will be LargeBinary JSONB scalars
+            arrow_schema::DataType::LargeBinary => arrow_schema::DataType::LargeBinary,
             _ => {
                 return Err(anyhow!(
                     "List comprehension input must be a list, got {:?}",
@@ -342,6 +385,11 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
                 field.data_type().clone()
             }
             arrow_schema::DataType::Null => arrow_schema::DataType::Null,
+            // LargeBinary may contain JSONB-encoded arrays. Use the accumulator type as
+            // the element type so that the reduce body expression compiles correctly
+            // (e.g. acc + x where both are Int64). At evaluation time, JSONB elements
+            // are decoded and cast to this type.
+            arrow_schema::DataType::LargeBinary => acc_type.clone(),
             _ => {
                 return Err(anyhow!(
                     "Reduce input must be a list, got {:?}",

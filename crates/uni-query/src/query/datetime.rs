@@ -1627,10 +1627,8 @@ pub fn parse_datetime_with_tz(s: &str) -> Result<(NaiveDate, NaiveTime, Option<T
 }
 
 /// Select the chrono format string for the time portion based on nanosecond precision.
-fn nanos_precision_format(nanos: u32, seconds: u32) -> &'static str {
-    if nanos == 0 && seconds == 0 {
-        "%Y-%m-%dT%H:%M"
-    } else if nanos == 0 {
+fn nanos_precision_format(nanos: u32, _seconds: u32) -> &'static str {
+    if nanos == 0 {
         "%Y-%m-%dT%H:%M:%S"
     } else if nanos.is_multiple_of(1_000_000) {
         "%Y-%m-%dT%H:%M:%S%.3f"
@@ -3188,7 +3186,7 @@ mod tests {
             ("week", Value::Int(1)),
         ])])
         .unwrap();
-        assert_eq!(result, Value::String("1816-01-01T00:00".to_string()));
+        assert_eq!(result, Value::String("1816-01-01T00:00:00".to_string()));
 
         // Week 52 of 1816
         let result = eval_localdatetime(&[map_val(vec![
@@ -3196,7 +3194,7 @@ mod tests {
             ("week", Value::Int(52)),
         ])])
         .unwrap();
-        assert_eq!(result, Value::String("1816-12-23T00:00".to_string()));
+        assert_eq!(result, Value::String("1816-12-23T00:00:00".to_string()));
 
         // Week 1 of 1817 (starts in 1816!)
         let result = eval_localdatetime(&[map_val(vec![
@@ -3204,7 +3202,7 @@ mod tests {
             ("week", Value::Int(1)),
         ])])
         .unwrap();
-        assert_eq!(result, Value::String("1816-12-30T00:00".to_string()));
+        assert_eq!(result, Value::String("1816-12-30T00:00:00".to_string()));
     }
 
     #[test]
@@ -3225,13 +3223,13 @@ mod tests {
     #[test]
     fn test_datetime_fromepoch() {
         let result = eval_datetime_fromepoch(&[Value::Int(0)]).unwrap();
-        assert_eq!(result, Value::String("1970-01-01T00:00Z".to_string()));
+        assert_eq!(result, Value::String("1970-01-01T00:00:00Z".to_string()));
     }
 
     #[test]
     fn test_datetime_fromepochmillis() {
         let result = eval_datetime_fromepochmillis(&[Value::Int(0)]).unwrap();
-        assert_eq!(result, Value::String("1970-01-01T00:00Z".to_string()));
+        assert_eq!(result, Value::String("1970-01-01T00:00:00Z".to_string()));
     }
 
     #[test]

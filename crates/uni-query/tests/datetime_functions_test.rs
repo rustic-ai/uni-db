@@ -36,11 +36,11 @@ fn test_time_function() {
 fn test_datetime_function() {
     // Standard Cypher datetime uses T separator (not space).
     let res = eval_scalar_function("DATETIME", &[unival!("2023-01-15T10:30:00Z")]).unwrap();
-    assert_eq!(res.as_str().unwrap(), "2023-01-15T10:30Z");
+    assert_eq!(res.as_str().unwrap(), "2023-01-15T10:30:00Z");
 
     // Datetime with explicit timezone.
     let res = eval_scalar_function("DATETIME", &[unival!("2023-01-15T10:30:00+05:00")]).unwrap();
-    assert_eq!(res.as_str().unwrap(), "2023-01-15T10:30+05:00");
+    assert_eq!(res.as_str().unwrap(), "2023-01-15T10:30:00+05:00");
 }
 
 #[test]
@@ -102,8 +102,7 @@ fn test_localdatetime_function() {
 
     // Should work with string argument too
     let res = eval_scalar_function("LOCALDATETIME", &[unival!("2023-01-15T10:30:00")]).unwrap();
-    // Format omits seconds when they are zero
-    assert_eq!(res.as_str().unwrap(), "2023-01-15T10:30");
+    assert_eq!(res.as_str().unwrap(), "2023-01-15T10:30:00");
 }
 
 #[test]

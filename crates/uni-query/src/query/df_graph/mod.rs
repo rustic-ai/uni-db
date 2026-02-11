@@ -36,6 +36,7 @@
 //! - L0 buffers for uncommitted edge visibility
 //! - Property manager for lazy property loading
 
+pub mod bind_fixed_path;
 pub mod bind_zero_length_path;
 pub mod common;
 pub mod comprehension;

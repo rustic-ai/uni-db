@@ -128,7 +128,17 @@ impl PhysicalExpr for ListComprehensionExecExpr {
         let list_val = self.input_list.evaluate(batch)?;
         let list_array = list_val.into_array(batch.num_rows())?;
 
-        // 2. Normalize to LargeListArray
+        // 2. Decode JSONB-encoded arrays (LargeBinary → LargeList<LargeBinary>)
+        let list_array = if let DataType::LargeBinary = list_array.data_type() {
+            crate::query::df_graph::common::jsonb_array_to_large_list(
+                list_array.as_ref(),
+                &DataType::LargeBinary,
+            )?
+        } else {
+            list_array
+        };
+
+        // Normalize to LargeListArray
         let list_array = if let DataType::List(field) = list_array.data_type() {
             let target_type = DataType::LargeList(field.clone());
             cast(&list_array, &target_type).map_err(|e| {

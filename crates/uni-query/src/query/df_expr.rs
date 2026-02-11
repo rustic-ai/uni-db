@@ -201,8 +201,11 @@ pub fn cypher_expr_to_df(expr: &Expr, context: Option<&TranslationContext>) -> R
                 // So we don't need to adjust (Cypher's exclusive end == DataFusion's inclusive end - 1 + 1)
                 cypher_expr_to_df(e, context)?
             } else {
-                // Slice to end - use array_length
-                datafusion::functions_nested::expr_fn::array_length(array_expr.clone())
+                // Slice to end - use array_length (cast UInt64 → Int64 for array_slice compatibility)
+                cast_expr(
+                    datafusion::functions_nested::expr_fn::array_length(array_expr.clone()),
+                    datafusion::arrow::datatypes::DataType::Int64,
+                )
             };
 
             Ok(datafusion::functions_nested::expr_fn::array_slice(
@@ -1173,7 +1176,10 @@ fn translate_function_call(
         "TAIL" => {
             require_arg(&df_args, "tail")?;
             let arr = first_arg(&df_args);
-            let len = datafusion::functions_nested::expr_fn::array_length(arr.clone());
+            let len = cast_expr(
+                datafusion::functions_nested::expr_fn::array_length(arr.clone()),
+                datafusion::arrow::datatypes::DataType::Int64,
+            );
             Ok(datafusion::functions_nested::expr_fn::array_slice(
                 arr,
                 lit(2i64),
@@ -1229,24 +1235,9 @@ fn translate_function_call(
             Ok(dummy_udf_expr("type", df_args))
         }
         "PROPERTIES" => {
-            // properties() needs the identity column reference
-            let rewritten_args = if let Some(Expr::Variable(var)) = args.first() {
-                let id_suffix = if let Some(ctx) = context
-                    && ctx.variable_kinds.get(var) == Some(&VariableKind::Edge)
-                {
-                    "_eid"
-                } else {
-                    "_vid"
-                };
-                let id_col =
-                    DfExpr::Column(Column::from_name(format!("{}.{}", var, id_suffix)));
-                let mut new_args = vec![id_col];
-                new_args.extend(df_args.into_iter().skip(1));
-                new_args
-            } else {
-                df_args
-            };
-            Ok(dummy_udf_expr(name, rewritten_args))
+            // properties(n) receives the struct column representing the entity,
+            // same as keys(n). The struct is built by add_structural_projection().
+            Ok(dummy_udf_expr(name, df_args))
         }
         "UNI.TEMPORAL.VALIDAT" => {
             // Expand uni.temporal.validAt(entity, start_prop, end_prop, timestamp)
@@ -1654,6 +1645,11 @@ fn collect_properties_recursive(expr: &Expr, properties: &mut Vec<(String, Strin
             collect_properties_recursive(base, properties);
         }
         Expr::ArrayIndex { array, index } => {
+            if let Ok(var_name) = extract_variable_name(array)
+                && let Expr::Literal(CypherLiteral::String(prop_name)) = index.as_ref()
+            {
+                properties.push((var_name, prop_name.clone()));
+            }
             collect_properties_recursive(array, properties);
             collect_properties_recursive(index, properties);
         }
@@ -1794,6 +1790,7 @@ pub fn wider_numeric_type(
 /// by inserting explicit CAST nodes. This is needed because our schema may
 /// declare properties as one numeric type while literals are a different type.
 pub fn apply_type_coercion(expr: &DfExpr, schema: &datafusion::common::DFSchema) -> Result<DfExpr> {
+    use datafusion::arrow::datatypes::DataType;
     use datafusion::logical_expr::ExprSchemable;
     use datafusion::logical_expr::Operator;
 
@@ -1826,6 +1823,19 @@ pub fn apply_type_coercion(expr: &DfExpr, schema: &datafusion::common::DFSchema)
                 let left_type = left.get_type(schema).ok();
                 let right_type = right.get_type(schema).ok();
 
+                // String + anything → concat (Cypher uses + for concatenation)
+                if binary.op == Operator::Plus
+                    && let (Some(lt), Some(rt)) = (&left_type, &right_type)
+                {
+                    let left_is_string = matches!(lt, DataType::Utf8 | DataType::LargeUtf8);
+                    let right_is_string = matches!(rt, DataType::Utf8 | DataType::LargeUtf8);
+                    if left_is_string || right_is_string {
+                        return Ok(datafusion::functions::string::expr_fn::concat(vec![
+                            left, right,
+                        ]));
+                    }
+                }
+
                 if let (Some(lt), Some(rt)) = (&left_type, &right_type)
                     && lt != rt
                 {
@@ -1852,33 +1862,69 @@ pub fn apply_type_coercion(expr: &DfExpr, schema: &datafusion::common::DFSchema)
                         ));
                     }
 
-                    // 2. Cross-Type Comparison -> Null
-                    // If types are different and not both numeric, Cypher says comparison yields NULL.
-                    // However, we only strictly enforce this for Lists to avoid panics in DataFusion's array kernels.
-                    // For scalars (e.g. schemaless Int vs Utf8), we let DataFusion attempt coercion to maintain backward compatibility.
+                    // 2. Timestamp vs Utf8: cast Utf8 side to the Timestamp type
+                    if is_comparison {
+                        match (lt, rt) {
+                            (ts @ DataType::Timestamp(..), DataType::Utf8 | DataType::LargeUtf8) => {
+                                return Ok(DfExpr::BinaryExpr(
+                                    datafusion::logical_expr::expr::BinaryExpr::new(
+                                        Box::new(left),
+                                        binary.op,
+                                        Box::new(datafusion::logical_expr::cast(right, ts.clone())),
+                                    ),
+                                ));
+                            }
+                            (DataType::Utf8 | DataType::LargeUtf8, ts @ DataType::Timestamp(..)) => {
+                                return Ok(DfExpr::BinaryExpr(
+                                    datafusion::logical_expr::expr::BinaryExpr::new(
+                                        Box::new(datafusion::logical_expr::cast(left, ts.clone())),
+                                        binary.op,
+                                        Box::new(right),
+                                    ),
+                                ));
+                            }
+                            _ => {}
+                        }
+                    }
+
+                    // 3. List comparison with different numeric inner types: coerce to wider
+                    if is_comparison
+                        && let (DataType::List(l_field), DataType::List(r_field)) = (lt, rt)
+                    {
+                        let l_inner = l_field.data_type();
+                        let r_inner = r_field.data_type();
+                        if l_inner.is_numeric() && r_inner.is_numeric() && l_inner != r_inner {
+                            let target_inner = wider_numeric_type(l_inner, r_inner);
+                            let target_type = DataType::List(Arc::new(
+                                datafusion::arrow::datatypes::Field::new("item", target_inner, true),
+                            ));
+                            let coerced_left = datafusion::logical_expr::cast(left, target_type.clone());
+                            let coerced_right = datafusion::logical_expr::cast(right, target_type);
+                            return Ok(DfExpr::BinaryExpr(
+                                datafusion::logical_expr::expr::BinaryExpr::new(
+                                    Box::new(coerced_left),
+                                    binary.op,
+                                    Box::new(coerced_right),
+                                ),
+                            ));
+                        }
+                    }
+
+                    // 4. Cross-Type Comparison
                     if is_comparison && !lt.is_null() && !rt.is_null() {
-                        use datafusion::arrow::datatypes::DataType;
                         let is_list_mismatch = match (lt, rt) {
                             (DataType::List(l_field), DataType::List(r_field))
                             | (DataType::LargeList(l_field), DataType::LargeList(r_field))
                             | (DataType::List(l_field), DataType::LargeList(r_field))
                             | (DataType::LargeList(l_field), DataType::List(r_field)) => {
-                                // Check inner types
                                 let l_inner = l_field.data_type();
                                 let r_inner = r_field.data_type();
-
-                                // If inner types are incompatible (and not just null), it's a mismatch
-                                // Allow Null vs Any (coercible to Nullable Any)
-                                // Allow Int vs Float (numeric coercion)
-                                // Disallow String vs Int, etc.
                                 let compatible = l_inner == r_inner
                                     || l_inner == &DataType::Null
                                     || r_inner == &DataType::Null
                                     || (l_inner.is_numeric() && r_inner.is_numeric());
-
                                 !compatible
                             }
-                            // One is list, other is not -> mismatch (e.g. List vs Int)
                             (DataType::List(_), _)
                             | (DataType::LargeList(_), _)
                             | (_, DataType::List(_))
@@ -1887,13 +1933,47 @@ pub fn apply_type_coercion(expr: &DfExpr, schema: &datafusion::common::DFSchema)
                         };
 
                         if is_list_mismatch {
-                            // Mismatching types involving Lists (e.g. List<Int> vs List<String>)
-                            // Return NULL (Boolean)
                             return Ok(datafusion::logical_expr::lit(
                                 datafusion::common::ScalarValue::Boolean(None),
                             ));
                         }
+
+                        // Scalar cross-type comparison: incompatible types yield false/true/null.
+                        // Skip LargeBinary (JSONB, handled by overflow rewriting) and
+                        // Timestamp/Utf8 (handled above).
+                        if !is_list_mismatch
+                            && !matches!(lt, DataType::LargeBinary)
+                            && !matches!(rt, DataType::LargeBinary)
+                            && !matches!(
+                                (lt, rt),
+                                (DataType::Timestamp(..), DataType::Utf8 | DataType::LargeUtf8)
+                                    | (DataType::Utf8 | DataType::LargeUtf8, DataType::Timestamp(..))
+                            )
+                        {
+                            match binary.op {
+                                Operator::Eq => return Ok(lit(false)),
+                                Operator::NotEq => return Ok(lit(true)),
+                                _ => return Ok(lit(ScalarValue::Boolean(None))),
+                            }
+                        }
                     }
+                }
+
+                // 5. List ordering: rewrite Lt/LtEq/Gt/GtEq on lists to _cypher_list_compare UDF
+                if is_comparison
+                    && let (Some(lt), Some(rt)) = (&left_type, &right_type)
+                    && matches!(binary.op, Operator::Lt | Operator::LtEq | Operator::Gt | Operator::GtEq)
+                    && matches!(lt, DataType::List(_) | DataType::LargeList(_))
+                    && matches!(rt, DataType::List(_) | DataType::LargeList(_))
+                {
+                    let op_str = match binary.op {
+                        Operator::Lt => "lt",
+                        Operator::LtEq => "lteq",
+                        Operator::Gt => "gt",
+                        Operator::GtEq => "gteq",
+                        _ => unreachable!(),
+                    };
+                    return Ok(dummy_udf_expr("_cypher_list_compare", vec![left, right, lit(op_str)]));
                 }
             }
 
@@ -1903,6 +1983,42 @@ pub fn apply_type_coercion(expr: &DfExpr, schema: &datafusion::common::DFSchema)
                     binary.op,
                     Box::new(right),
                 ),
+            ))
+        }
+        DfExpr::ScalarFunction(func) => {
+            // Recursively coerce arguments
+            let coerced_args: Vec<DfExpr> = func
+                .args
+                .iter()
+                .map(|a| apply_type_coercion(a, schema))
+                .collect::<Result<Vec<_>>>()?;
+
+            if func.func.name().eq_ignore_ascii_case("coalesce") && coerced_args.len() > 1 {
+                use datafusion::logical_expr::ExprSchemable;
+                let types: Vec<_> = coerced_args
+                    .iter()
+                    .filter_map(|a| a.get_type(schema).ok())
+                    .collect();
+                let has_mixed_types = types.windows(2).any(|w| w[0] != w[1]);
+                if has_mixed_types {
+                    let unified_args = coerced_args
+                        .into_iter()
+                        .map(|a| datafusion::logical_expr::cast(a, DataType::Utf8))
+                        .collect();
+                    return Ok(DfExpr::ScalarFunction(
+                        datafusion::logical_expr::expr::ScalarFunction {
+                            func: func.func.clone(),
+                            args: unified_args,
+                        },
+                    ));
+                }
+            }
+
+            Ok(DfExpr::ScalarFunction(
+                datafusion::logical_expr::expr::ScalarFunction {
+                    func: func.func.clone(),
+                    args: coerced_args,
+                },
             ))
         }
         // For other expression types, return as-is

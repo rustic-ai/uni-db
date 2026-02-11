@@ -858,6 +858,14 @@ pub enum LogicalPlan {
         node_variable: String,
         path_variable: String,
     },
+    /// Bind a fixed-length path from already-computed node and edge columns.
+    /// E.g., `p = (a)-[r]->(b)` or `p = (a)-[r1]->(b)-[r2]->(c)`.
+    BindPath {
+        input: Box<LogicalPlan>,
+        node_variables: Vec<String>,
+        edge_variables: Vec<String>,
+        path_variable: String,
+    },
 }
 
 /// Result of extracting ANY IN predicate
@@ -2435,6 +2443,9 @@ impl QueryPlanner {
         let mut had_traverses = false;
         // Track the node variable for zero-length path binding
         let mut single_node_variable: Option<String> = None;
+        // Collect node/edge variables for BindPath (fixed-length path binding)
+        let mut path_node_vars: Vec<String> = Vec::new();
+        let mut path_edge_vars: Vec<String> = Vec::new();
 
         // Multi-hop path variables are now supported - path is accumulated across hops
         while i < elements.len() {
@@ -2478,6 +2489,11 @@ impl QueryPlanner {
                         }
                     }
 
+                    // Track source node for BindPath
+                    if path_variable.is_some() && path_node_vars.is_empty() {
+                        path_node_vars.push(variable.clone());
+                    }
+
                     // Look ahead for relationships
                     let mut current_source_var = variable;
                     i += 1;
@@ -2486,6 +2502,15 @@ impl QueryPlanner {
                             if i + 1 < elements.len() {
                                 let target_node_part = &elements[i + 1];
                                 if let PatternElement::Node(n_target) = target_node_part {
+                                    // For VLP traversals, pass path_variable through
+                                    // For fixed-length, we use BindPath instead
+                                    let is_vlp = r.range.is_some();
+                                    let traverse_path_var = if is_vlp {
+                                        path_variable.clone()
+                                    } else {
+                                        None
+                                    };
+
                                     // Plan the traverse from the current source node
                                     let (new_plan, target_var) = self.plan_traverse_with_source(
                                         plan,
@@ -2495,12 +2520,30 @@ impl QueryPlanner {
                                             target_node: n_target,
                                             _source_part: element,
                                             optional,
-                                            path_variable: path_variable.clone(),
+                                            path_variable: traverse_path_var,
                                             optional_pattern_vars: optional_pattern_vars.clone(),
                                         },
                                         &current_source_var,
                                     )?;
                                     plan = new_plan;
+
+                                    // Track edge/target node for BindPath
+                                    if path_variable.is_some() && !is_vlp {
+                                        // Use the edge variable if given, otherwise use
+                                        // the internal tracking column pattern
+                                        if let Some(ev) = &r.variable {
+                                            path_edge_vars.push(ev.clone());
+                                        } else {
+                                            // Anonymous edge: GraphTraverseExec creates
+                                            // __eid_to_{target} tracking column
+                                            path_edge_vars.push(format!(
+                                                "__eid_to_{}",
+                                                target_var
+                                            ));
+                                        }
+                                        path_node_vars.push(target_var.clone());
+                                    }
+
                                     current_source_var = target_var;
                                     had_traverses = true;
                                     i += 2;
@@ -2603,7 +2646,7 @@ impl QueryPlanner {
 
         // If this is a single-node pattern with a path variable, bind the zero-length path
         // E.g., `p = (a)` should create a Path with one node and zero edges
-        if let Some(path_var) = path_variable
+        if let Some(ref path_var) = path_variable
             && !path_var.is_empty()
             && !had_traverses
             && let Some(node_var) = single_node_variable
@@ -2613,7 +2656,23 @@ impl QueryPlanner {
                 node_variable: node_var,
                 path_variable: path_var.clone(),
             };
-            add_var_to_scope(vars_in_scope, &path_var, VariableType::Path)?;
+            add_var_to_scope(vars_in_scope, path_var, VariableType::Path)?;
+        }
+
+        // Bind fixed-length path from collected node/edge variables
+        if let Some(ref path_var) = path_variable
+            && !path_var.is_empty()
+            && had_traverses
+            && !path_node_vars.is_empty()
+            && !is_var_in_scope(vars_in_scope, path_var)
+        {
+            plan = LogicalPlan::BindPath {
+                input: Box::new(plan),
+                node_variables: path_node_vars,
+                edge_variables: path_edge_vars,
+                path_variable: path_var.clone(),
+            };
+            add_var_to_scope(vars_in_scope, path_var, VariableType::Path)?;
         }
 
         Ok(plan)
@@ -5222,6 +5281,12 @@ fn collect_properties_recursive(
             collect_properties_recursive(input, properties);
             collect_properties_recursive(pattern_plan, properties);
         }
+        LogicalPlan::BindZeroLengthPath { input, .. } => {
+            collect_properties_recursive(input, properties);
+        }
+        LogicalPlan::BindPath { input, .. } => {
+            collect_properties_recursive(input, properties);
+        }
         // DDL and other plans don't reference properties
         _ => {}
     }
@@ -5365,12 +5430,20 @@ fn collect_properties_from_expr_into(
             collect_properties_from_expr_into(list, properties);
         }
         Expr::ArrayIndex { array, index } => {
-            // Dynamic property access: e[prop] → need all properties
             if let Expr::Variable(var) = array.as_ref() {
-                properties
-                    .entry(var.clone())
-                    .or_default()
-                    .insert("*".to_string());
+                if let Expr::Literal(CypherLiteral::String(prop_name)) = index.as_ref() {
+                    // Static string key: e['name'] → only need that specific property
+                    properties
+                        .entry(var.clone())
+                        .or_default()
+                        .insert(prop_name.clone());
+                } else {
+                    // Dynamic property access: e[prop] → need all properties
+                    properties
+                        .entry(var.clone())
+                        .or_default()
+                        .insert("*".to_string());
+                }
             }
             collect_properties_from_expr_into(array, properties);
             collect_properties_from_expr_into(index, properties);
