@@ -341,7 +341,15 @@ impl ScalarUDFImpl for KeysUdf {
             let arg = &val_args[0];
             let keys = match arg {
                 Value::Map(map) => {
-                    let mut key_strings: Vec<String> = map
+                    // For schemaless entities, properties are stored in the
+                    // _all_props JSONB blob.  If the map contains an _all_props
+                    // sub-map, extract property names from it instead of from
+                    // the top-level map (which only has system fields).
+                    let source = match map.get("_all_props") {
+                        Some(Value::Map(all)) => all,
+                        _ => map,
+                    };
+                    let mut key_strings: Vec<String> = source
                         .iter()
                         .filter(|(k, v)| !v.is_null() && !k.starts_with('_'))
                         .map(|(k, _)| k.clone())
@@ -420,8 +428,13 @@ impl ScalarUDFImpl for PropertiesUdf {
             let arg = &val_args[0];
             match arg {
                 Value::Map(map) => {
+                    // For schemaless entities, properties are in _all_props.
+                    let source = match map.get("_all_props") {
+                        Some(Value::Map(all)) => all,
+                        _ => map,
+                    };
                     // Filter out internal properties (those starting with '_')
-                    let filtered: std::collections::HashMap<String, Value> = map
+                    let filtered: std::collections::HashMap<String, Value> = source
                         .iter()
                         .filter(|(k, _)| !k.starts_with('_'))
                         .map(|(k, v)| (k.clone(), v.clone()))

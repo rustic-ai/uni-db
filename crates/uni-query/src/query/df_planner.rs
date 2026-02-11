@@ -1115,9 +1115,12 @@ impl HybridPhysicalPlanner {
         // If we need the full object (structural access), build a struct with _labels + properties.
         // This enables labels(n)/keys(n) UDFs which expect a Struct column with a _labels field.
         if need_full {
+            // Filter out "*" (wildcard marker) from struct_props.
+            // Keep "_all_props" so that keys()/properties() UDFs can extract
+            // property names at runtime from the JSONB blob.
             let struct_props: Vec<String> = properties
                 .iter()
-                .filter(|p| *p != "_all_props")
+                .filter(|p| *p != "*")
                 .cloned()
                 .collect();
             scan_plan = self.add_structural_projection(scan_plan, variable, &struct_props)?;
@@ -1166,9 +1169,12 @@ impl HybridPhysicalPlanner {
         // If we need the full object (structural access), build a struct with _labels + properties.
         // This enables labels(n)/keys(n) UDFs which expect a Struct column with a _labels field.
         if need_full {
+            // Filter out "*" (wildcard marker) from struct_props.
+            // Keep "_all_props" so that keys()/properties() UDFs can extract
+            // property names at runtime from the JSONB blob.
             let struct_props: Vec<String> = properties
                 .iter()
-                .filter(|p| *p != "_all_props")
+                .filter(|p| *p != "*")
                 .cloned()
                 .collect();
             scan_plan = self.add_structural_projection(scan_plan, variable, &struct_props)?;
@@ -1216,9 +1222,12 @@ impl HybridPhysicalPlanner {
         // If we need the full object (structural access), build a struct with _labels + properties.
         // This enables labels(n)/keys(n) UDFs which expect a Struct column with a _labels field.
         if need_full {
+            // Filter out "*" (wildcard marker) from struct_props.
+            // Keep "_all_props" so that keys()/properties() UDFs can extract
+            // property names at runtime from the JSONB blob.
             let struct_props: Vec<String> = properties
                 .iter()
-                .filter(|p| *p != "_all_props")
+                .filter(|p| *p != "*")
                 .cloned()
                 .collect();
             scan_plan = self.add_structural_projection(scan_plan, variable, &struct_props)?;
@@ -1490,16 +1499,21 @@ impl HybridPhysicalPlanner {
             .get(target_variable)
             .is_some_and(|p| p.contains("*"))
         {
-            let struct_props: Vec<String> = all_properties
-                .get(target_variable)
-                .map(|props| {
-                    props
-                        .iter()
-                        .filter(|p| *p != "*" && *p != "_all_props")
-                        .cloned()
-                        .collect()
+            // Derive target properties from the traverse plan's output schema.
+            // The traverse exec materializes columns like `b.name` from resolved
+            // properties, but all_properties may only contain {"*"}.
+            let prefix = format!("{}.", target_variable);
+            let struct_props: Vec<String> = traverse_plan
+                .schema()
+                .fields()
+                .iter()
+                .filter_map(|f| {
+                    f.name()
+                        .strip_prefix(&prefix)
+                        .filter(|prop| !prop.starts_with('_'))
+                        .map(|prop| prop.to_string())
                 })
-                .unwrap_or_default();
+                .collect();
             traverse_plan =
                 self.add_structural_projection(traverse_plan, target_variable, &struct_props)?;
         }
@@ -1510,18 +1524,28 @@ impl HybridPhysicalPlanner {
                 .get(edge_var)
                 .is_some_and(|p| p.contains("*"))
         {
-            let edge_props: Vec<String> = all_properties
-                .get(edge_var)
-                .map(|props| {
-                    props
-                        .iter()
-                        .filter(|p| *p != "*" && !p.starts_with('_'))
-                        .cloned()
-                        .collect()
+            // Derive edge properties from the traverse plan's output schema
+            // instead of from all_properties (which may only contain {"*"}).
+            // The traverse exec already materialized columns like `r.since`.
+            let prefix = format!("{}.", edge_var);
+            let edge_props: Vec<String> = traverse_plan
+                .schema()
+                .fields()
+                .iter()
+                .filter_map(|f| {
+                    f.name()
+                        .strip_prefix(&prefix)
+                        .filter(|prop| !prop.starts_with('_'))
+                        .map(|prop| prop.to_string())
                 })
-                .unwrap_or_default();
-            traverse_plan =
-                self.add_edge_structural_projection(traverse_plan, edge_var, &edge_props)?;
+                .collect();
+            traverse_plan = self.add_edge_structural_projection(
+                traverse_plan,
+                edge_var,
+                &edge_props,
+                source_variable,
+                target_variable,
+            )?;
         }
 
         // Apply target filter if present
@@ -1681,16 +1705,19 @@ impl HybridPhysicalPlanner {
             .get(target_variable)
             .is_some_and(|p| p.contains("*"))
         {
-            let struct_props: Vec<String> = all_properties
-                .get(target_variable)
-                .map(|props| {
-                    props
-                        .iter()
-                        .filter(|p| *p != "*" && *p != "_all_props")
-                        .cloned()
-                        .collect()
+            // Derive target properties from the plan's output schema.
+            let prefix = format!("{}.", target_variable);
+            let struct_props: Vec<String> = result_plan
+                .schema()
+                .fields()
+                .iter()
+                .filter_map(|f| {
+                    f.name()
+                        .strip_prefix(&prefix)
+                        .filter(|prop| !prop.starts_with('_'))
+                        .map(|prop| prop.to_string())
                 })
-                .unwrap_or_default();
+                .collect();
             result_plan =
                 self.add_structural_projection(result_plan, target_variable, &struct_props)?;
         }
@@ -1701,8 +1728,26 @@ impl HybridPhysicalPlanner {
                 .get(edge_var)
                 .is_some_and(|p| p.contains("*"))
         {
-            result_plan =
-                self.add_edge_structural_projection(result_plan, edge_var, &edge_properties)?;
+            // Derive edge properties from the plan's output schema
+            let prefix = format!("{}.", edge_var);
+            let actual_edge_props: Vec<String> = result_plan
+                .schema()
+                .fields()
+                .iter()
+                .filter_map(|f| {
+                    f.name()
+                        .strip_prefix(&prefix)
+                        .filter(|prop| !prop.starts_with('_'))
+                        .map(|prop| prop.to_string())
+                })
+                .collect();
+            result_plan = self.add_edge_structural_projection(
+                result_plan,
+                edge_var,
+                &actual_edge_props,
+                source_variable,
+                target_variable,
+            )?;
         }
 
         Ok(result_plan)
@@ -2869,12 +2914,14 @@ impl HybridPhysicalPlanner {
         Ok(Arc::new(ProjectionExec::try_new(proj_exprs, input)?))
     }
 
-    /// Add a structural projection for an edge variable (builds a Struct with _type + properties).
+    /// Add a structural projection for an edge variable (builds a Struct with _eid, _type, _src, _dst + properties).
     fn add_edge_structural_projection(
         &self,
         input: Arc<dyn ExecutionPlan>,
         variable: &str,
         properties: &[String],
+        source_variable: &str,
+        target_variable: &str,
     ) -> Result<Arc<dyn ExecutionPlan>> {
         use datafusion::functions::expr_fn::named_struct;
         use datafusion::logical_expr::lit;
@@ -2893,8 +2940,8 @@ impl HybridPhysicalPlanner {
             proj_exprs.push((col_expr, field.name().clone()));
         }
 
-        // 2. Build named_struct with _type field (edges don't have _labels)
-        let mut struct_args = Vec::with_capacity(properties.len() * 2 + 4);
+        // 2. Build named_struct with system fields + properties
+        let mut struct_args = Vec::with_capacity(properties.len() * 2 + 10);
 
         // Add _eid field for identity access
         struct_args.push(lit("_eid"));
@@ -2905,6 +2952,18 @@ impl HybridPhysicalPlanner {
         struct_args.push(lit("_type"));
         struct_args.push(DfExpr::Column(datafusion::common::Column::from_name(
             format!("{}._type", variable),
+        )));
+
+        // Add _src and _dst from source/target variable VIDs so the result
+        // normalizer can detect this as an edge.
+        struct_args.push(lit("_src"));
+        struct_args.push(DfExpr::Column(datafusion::common::Column::from_name(
+            format!("{}._vid", source_variable),
+        )));
+
+        struct_args.push(lit("_dst"));
+        struct_args.push(DfExpr::Column(datafusion::common::Column::from_name(
+            format!("{}._vid", target_variable),
         )));
 
         for prop in properties {

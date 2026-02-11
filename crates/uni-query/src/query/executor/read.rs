@@ -188,7 +188,9 @@ impl Executor {
                         Some(label_props),
                     )
                 {
-                    query = query.only_if(sql);
+                    query = query.only_if(format!("_deleted = false AND ({})", sql));
+                } else {
+                    query = query.only_if("_deleted = false");
                 }
 
                 // Project to only _vid
@@ -555,7 +557,7 @@ impl Executor {
                     row.insert(field.name().clone(), value);
                 }
 
-                // Merge system fields (_vid, _labels) into bare variable maps.
+                // Merge system fields into bare variable maps.
                 // The projection step emits helper columns like "n._vid" and "n._labels"
                 // alongside the materialized "n" column (a Map of user properties).
                 // Here we merge those system fields into the map and remove the helpers.
@@ -566,6 +568,7 @@ impl Executor {
                     .collect();
 
                 for var in &bare_vars {
+                    // Merge node system fields (_vid, _labels)
                     let vid_key = format!("{}._vid", var);
                     let labels_key = format!("{}._labels", var);
 
@@ -578,6 +581,27 @@ impl Executor {
                         }
                         if let Some(v) = labels_val {
                             map.insert("_labels".to_string(), v);
+                        }
+                    }
+
+                    // Merge edge system fields (_eid, _type, _src_vid, _dst_vid).
+                    // These are emitted as helper columns by the traverse exec.
+                    // The structural projection already includes them in the struct,
+                    // but we still need to remove the dotted helper columns.
+                    let eid_key = format!("{}._eid", var);
+                    let type_key = format!("{}._type", var);
+
+                    let eid_val = row.remove(&eid_key);
+                    let type_val = row.remove(&type_key);
+
+                    if (eid_val.is_some() || type_val.is_some())
+                        && let Some(Value::Map(map)) = row.get_mut(var)
+                    {
+                        if let Some(v) = eid_val {
+                            map.entry("_eid".to_string()).or_insert(v);
+                        }
+                        if let Some(v) = type_val {
+                            map.entry("_type".to_string()).or_insert(v);
                         }
                     }
                 }

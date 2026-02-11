@@ -1099,6 +1099,44 @@ fn mvcc_dedup_batch_by(batch: &RecordBatch, id_column: &str) -> DFResult<RecordB
         .map_err(|e| datafusion::error::DataFusionError::ArrowError(Box::new(e), None))
 }
 
+/// Filter out edge rows where `op != 0` (non-INSERT) after MVCC dedup.
+fn filter_deleted_edge_ops(batch: &RecordBatch) -> DFResult<RecordBatch> {
+    if batch.num_rows() == 0 {
+        return Ok(batch.clone());
+    }
+    let op_col = match batch.column_by_name("op") {
+        Some(col) => col
+            .as_any()
+            .downcast_ref::<arrow_array::UInt8Array>()
+            .unwrap(),
+        None => return Ok(batch.clone()),
+    };
+    let keep: Vec<bool> = (0..op_col.len()).map(|i| op_col.value(i) == 0).collect();
+    let mask = arrow_array::BooleanArray::from(keep);
+    arrow::compute::filter_record_batch(batch, &mask)
+        .map_err(|e| datafusion::error::DataFusionError::ArrowError(Box::new(e), None))
+}
+
+/// Filter out rows where `_deleted = true` after MVCC dedup.
+fn filter_deleted_rows(batch: &RecordBatch) -> DFResult<RecordBatch> {
+    if batch.num_rows() == 0 {
+        return Ok(batch.clone());
+    }
+    let deleted_col = match batch.column_by_name("_deleted") {
+        Some(col) => col
+            .as_any()
+            .downcast_ref::<arrow_array::BooleanArray>()
+            .unwrap(),
+        None => return Ok(batch.clone()),
+    };
+    let keep: Vec<bool> = (0..deleted_col.len())
+        .map(|i| !deleted_col.value(i))
+        .collect();
+    let mask = arrow_array::BooleanArray::from(keep);
+    arrow::compute::filter_record_batch(batch, &mask)
+        .map_err(|e| datafusion::error::DataFusionError::ArrowError(Box::new(e), None))
+}
+
 /// Filter out rows whose `_vid` appears in L0 tombstones.
 fn filter_l0_tombstones(
     batch: &RecordBatch,
@@ -1804,9 +1842,12 @@ async fn columnar_scan_vertex_batch_static(
                 .collect();
 
             let query = table.query().select(Select::columns(&actual_columns));
+            // Do NOT filter _deleted here — MVCC dedup must see the
+            // highest-version row first (which may be a deletion tombstone).
+            // Deleted rows are filtered out after dedup.
             let query = match storage.version_high_water_mark() {
-                Some(hwm) => query.only_if(format!("_deleted = false AND _version <= {}", hwm)),
-                None => query.only_if("_deleted = false"),
+                Some(hwm) => query.only_if(format!("_version <= {}", hwm)),
+                None => query,
             };
 
             match query.execute().await {
@@ -1894,7 +1935,13 @@ async fn columnar_scan_vertex_batch_static(
         }
     };
 
-    // Filter tombstones
+    // Filter out MVCC deletion tombstones (_deleted = true)
+    let merged = filter_deleted_rows(&merged)?;
+    if merged.num_rows() == 0 {
+        return Ok(RecordBatch::new_empty(output_schema.clone()));
+    }
+
+    // Filter L0 tombstones
     let filtered = filter_l0_tombstones(&merged, l0_ctx)?;
 
     if filtered.num_rows() == 0 {
@@ -1986,16 +2033,16 @@ async fn columnar_scan_edge_batch_static(
                 .map(|c| c.as_str())
                 .collect();
 
-            // Build filter: op == 0 (INSERT only) with optional version filter
-            let filter = match storage.version_high_water_mark() {
-                Some(hwm) => format!("op = 0 AND _version <= {}", hwm),
-                None => "op = 0".to_string(),
-            };
-
+            // Do NOT filter op here — MVCC dedup must see DELETE ops
+            // (op != 0) to pick the highest version. Deleted edges are
+            // filtered out after dedup.
             let query = table
                 .query()
-                .select(Select::columns(&actual_columns))
-                .only_if(filter);
+                .select(Select::columns(&actual_columns));
+            let query = match storage.version_high_water_mark() {
+                Some(hwm) => query.only_if(format!("_version <= {}", hwm)),
+                None => query,
+            };
 
             match query.execute().await {
                 Ok(stream) => {
@@ -2085,7 +2132,13 @@ async fn columnar_scan_edge_batch_static(
         }
     };
 
-    // Filter edge tombstones
+    // Filter out MVCC deletion ops (op != 0) after dedup
+    let merged = filter_deleted_edge_ops(&merged)?;
+    if merged.num_rows() == 0 {
+        return Ok(RecordBatch::new_empty(output_schema.clone()));
+    }
+
+    // Filter L0 edge tombstones
     let filtered = filter_l0_edge_tombstones(&merged, l0_ctx)?;
 
     if filtered.num_rows() == 0 {
@@ -2115,9 +2168,10 @@ async fn columnar_scan_schemaless_vertex_batch_static(
     let l0_ctx = graph_ctx.l0_context();
     let lancedb_store = storage.lancedb_store();
 
-    // Build the Lance filter expression
+    // Build the Lance filter expression — do NOT filter _deleted here;
+    // MVCC dedup must see deletion tombstones to pick the highest version.
     let filter = {
-        let mut parts = vec!["_deleted = false".to_string()];
+        let mut parts = Vec::new();
 
         // Label filter
         if !label.is_empty() {
@@ -2136,10 +2190,14 @@ async fn columnar_scan_schemaless_vertex_batch_static(
             parts.push(format!("_version <= {}", hwm));
         }
 
-        parts.join(" AND ")
+        if parts.is_empty() {
+            None
+        } else {
+            Some(parts.join(" AND "))
+        }
     };
 
-    // Single Lance query: SELECT _vid, labels, props_json, _version WHERE <filter>
+    // Single Lance query: SELECT _vid, _deleted, labels, props_json, _version WHERE <filter>
     let lance_batch = match MainVertexDataset::open_table(lancedb_store).await {
         Ok(table) => {
             use lancedb::query::{ExecutableQuery, QueryBase, Select};
@@ -2148,11 +2206,15 @@ async fn columnar_scan_schemaless_vertex_batch_static(
                 .query()
                 .select(Select::columns(&[
                     "_vid",
+                    "_deleted",
                     "labels",
                     "props_json",
                     "_version",
-                ]))
-                .only_if(filter);
+                ]));
+            let query = match filter {
+                Some(f) => query.only_if(f),
+                None => query,
+            };
 
             match query.execute().await {
                 Ok(stream) => {
@@ -2197,6 +2259,7 @@ async fn columnar_scan_schemaless_vertex_batch_static(
         Some(batch) => batch.schema(),
         None => Arc::new(Schema::new(vec![
             Field::new("_vid", DataType::UInt64, false),
+            Field::new("_deleted", DataType::Boolean, false),
             Field::new(
                 "labels",
                 DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
@@ -2225,7 +2288,13 @@ async fn columnar_scan_schemaless_vertex_batch_static(
         }
     };
 
-    // Filter tombstones
+    // Filter out MVCC deletion tombstones (_deleted = true)
+    let merged = filter_deleted_rows(&merged)?;
+    if merged.num_rows() == 0 {
+        return Ok(RecordBatch::new_empty(output_schema.clone()));
+    }
+
+    // Filter L0 tombstones
     let filtered = filter_l0_tombstones(&merged, l0_ctx)?;
 
     if filtered.num_rows() == 0 {
