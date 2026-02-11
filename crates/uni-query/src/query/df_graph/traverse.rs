@@ -2258,11 +2258,24 @@ impl GraphVariableLengthTraverseExecData {
         while let Some((current, depth, node_path, edge_path)) = queue.pop_front() {
             // Emit result if within hop range (including zero-length patterns)
             if depth >= self.min_hops && depth <= self.max_hops {
-                results.push((current, depth, node_path.clone(), edge_path.clone()));
+                // Filter by target label (same logic as fixed-length traversal).
+                // Only the final target node is constrained, not intermediate nodes.
+                let label_ok = if let Some(ref label_name) = self.target_label_name {
+                    let query_ctx = self.graph_ctx.query_context();
+                    let vertex_labels =
+                        l0_visibility::get_vertex_labels(current, &query_ctx);
+                    vertex_labels.is_empty() || vertex_labels.contains(label_name)
+                } else {
+                    true
+                };
 
-                // For OPTIONAL MATCH, stop after first match to avoid Cartesian product
-                if self.is_optional && !results.is_empty() {
-                    return results;
+                if label_ok {
+                    results.push((current, depth, node_path.clone(), edge_path.clone()));
+
+                    // For OPTIONAL MATCH, stop after first match to avoid Cartesian product
+                    if self.is_optional && !results.is_empty() {
+                        return results;
+                    }
                 }
             }
 
