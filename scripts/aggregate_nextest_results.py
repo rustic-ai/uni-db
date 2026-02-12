@@ -13,6 +13,7 @@ Writes to: target/cucumber/results_YYYYMMDD_HHMMSS.json
 Prints the output path to stdout (last line) for use by calling scripts.
 """
 
+import argparse
 import json
 import sys
 from collections import defaultdict
@@ -21,9 +22,20 @@ from pathlib import Path
 
 
 def main():
+    parser = argparse.ArgumentParser(description="Aggregate nextest results into cucumber JSON")
+    parser.add_argument(
+        "--output-dir",
+        help="Override the output directory for the results JSON (default: target/cucumber)",
+    )
+    args = parser.parse_args()
+
     repo_root = Path(__file__).parent.parent
     results_dir = repo_root / "target" / "cucumber" / "nextest"
-    output_dir = repo_root / "target" / "cucumber"
+
+    if args.output_dir:
+        output_dir = repo_root / args.output_dir
+    else:
+        output_dir = repo_root / "target" / "cucumber"
 
     if not results_dir.exists():
         print(f"❌ No results directory found at {results_dir}", file=sys.stderr)
@@ -57,7 +69,11 @@ def main():
             status = sc["status"]
             step_result = {"status": status}
             if status == "failed":
-                step_result["error_message"] = f"Scenario failed: {sc['scenario_name']}"
+                # Use actual error message from the test runner if available
+                step_result["error_message"] = sc.get(
+                    "error_message",
+                    f"Scenario failed: {sc['scenario_name']}",
+                )
 
             elements.append({
                 "type": "scenario",

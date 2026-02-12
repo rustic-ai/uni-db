@@ -9,12 +9,39 @@
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
-use cucumber::{writer::Stats, World};
+use cucumber::writer::{self, Stats};
+use cucumber::{World, WriterExt};
 use gherkin::GherkinEnv;
 use libtest_mimic::{Arguments, Failed, Trial};
 use regex::Regex;
 use uni_tck::UniWorld;
+
+/// Thread-safe in-memory buffer that implements [`std::io::Write`].
+///
+/// Used to capture cucumber writer output so error details can be
+/// included in per-scenario result JSONs.
+#[derive(Clone, Default)]
+struct SharedBuffer(Arc<Mutex<Vec<u8>>>);
+
+impl std::io::Write for SharedBuffer {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().expect("buffer lock poisoned").write(buf)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl SharedBuffer {
+    /// Extract captured output as a UTF-8 string, lossy-converting if needed.
+    fn contents(&self) -> String {
+        let bytes = self.0.lock().expect("buffer lock poisoned").clone();
+        String::from_utf8_lossy(&bytes).into_owned()
+    }
+}
 
 fn main() {
     let args = Arguments::from_args();
@@ -196,6 +223,10 @@ fn make_test_name(feature_dir: &Path, feature_path: &Path, scenario_name: &str) 
 }
 
 /// Run a single scenario through the cucumber framework.
+///
+/// Captures the cucumber writer output into a buffer so that actual
+/// error details (panic messages, result mismatches) are available in
+/// the per-scenario result JSON and the test failure message.
 fn run_single_scenario(
     feature_path: PathBuf,
     scenario_name: String,
@@ -210,10 +241,20 @@ fn run_single_scenario(
     let rt =
         tokio::runtime::Runtime::new().map_err(|e| format!("Failed to create runtime: {e}"))?;
 
+    let buffer = SharedBuffer::default();
     let fp = feature_path.clone();
     let sn = scenario_name.clone();
+    let buf_clone = buffer.clone();
     let failed = rt.block_on(async move {
-        let writer = UniWorld::cucumber()
+        let cucumber_writer = writer::Basic::new(
+            buf_clone,
+            writer::Coloring::Never,
+            writer::Verbosity::Default,
+        )
+        .summarized();
+
+        let w = UniWorld::cucumber()
+            .with_writer(cucumber_writer)
             .with_default_cli()
             .fail_on_skipped()
             .max_concurrent_scenarios(Some(1))
@@ -222,25 +263,89 @@ fn run_single_scenario(
             })
             .await;
 
-        writer.execution_has_failed()
+        w.execution_has_failed()
     });
 
-    let status = if failed { "failed" } else { "passed" };
-    write_result_json(&feature_path, &scenario_name, scenario_line, status);
+    let output = buffer.contents();
+
+    let (status, error_message) = if failed {
+        let error_detail = extract_error_from_output(&output);
+        ("failed", Some(error_detail))
+    } else {
+        ("passed", None)
+    };
+
+    write_result_json(
+        &feature_path,
+        &scenario_name,
+        scenario_line,
+        status,
+        error_message.as_deref(),
+    );
 
     if failed {
-        Err(format!("Scenario failed: {scenario_name}").into())
+        let msg = error_message.unwrap_or_else(|| format!("Scenario failed: {scenario_name}"));
+        Err(msg.into())
     } else {
         Ok(())
     }
 }
 
+/// Extract meaningful error details from cucumber writer output.
+///
+/// Looks for panic messages, assertion failures, and result mismatches
+/// in the captured output. Falls back to returning the full output
+/// (truncated) if no specific pattern is found.
+fn extract_error_from_output(output: &str) -> String {
+    // Look for common failure patterns from the step handlers
+    let patterns = [
+        "panicked at",
+        "Result mismatch",
+        "Query returned error",
+        "No result found",
+        "Error mismatch",
+        "Expected empty result",
+        "assertion `left == right` failed",
+        "Step failed:",
+    ];
+
+    for line in output.lines() {
+        let trimmed = line.trim();
+        if patterns.iter().any(|p| trimmed.contains(p)) {
+            // Return this line and any subsequent indented/continuation lines
+            let start_idx = output.find(trimmed).unwrap_or(0);
+            let relevant = &output[start_idx..];
+            // Take up to 2000 chars to keep it reasonable
+            let truncated = if relevant.len() > 2000 {
+                format!("{}...", &relevant[..2000])
+            } else {
+                relevant.to_string()
+            };
+            return truncated;
+        }
+    }
+
+    // Fall back to the full output, truncated
+    if output.len() > 2000 {
+        format!("{}...", &output[..2000])
+    } else {
+        output.to_string()
+    }
+}
+
 /// Write a per-scenario result JSON to `target/cucumber/nextest/`.
 ///
-/// Each file is named `{line}_{hash}.json` where hash is derived from
-/// the feature path and scenario line to ensure uniqueness across
-/// concurrent processes.
-fn write_result_json(feature_path: &Path, scenario_name: &str, scenario_line: usize, status: &str) {
+/// Each file is named `{feature_stem}_{line}.json` to ensure uniqueness
+/// across concurrent processes. When `error_message` is provided, it is
+/// included in the JSON so downstream report tooling can surface the
+/// actual failure reason.
+fn write_result_json(
+    feature_path: &Path,
+    scenario_name: &str,
+    scenario_line: usize,
+    status: &str,
+    error_message: Option<&str>,
+) {
     let results_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .unwrap()
@@ -258,12 +363,15 @@ fn write_result_json(feature_path: &Path, scenario_name: &str, scenario_line: us
         .to_string_lossy();
     let filename = format!("{}_{}.json", feature_stem, scenario_line);
 
-    let result = serde_json::json!({
+    let mut result = serde_json::json!({
         "feature_path": feature_path.to_string_lossy(),
         "scenario_name": scenario_name,
         "line": scenario_line,
         "status": status,
     });
+    if let Some(msg) = error_message {
+        result["error_message"] = serde_json::Value::String(msg.to_string());
+    }
 
     if let Ok(mut f) = std::fs::File::create(results_dir.join(&filename)) {
         let _ = f.write_all(result.to_string().as_bytes());

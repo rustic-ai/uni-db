@@ -2383,11 +2383,10 @@ impl HybridPhysicalPlanner {
 
         let physical_group_by = PhysicalGroupBy::new_single(group_exprs);
 
-        // Translate aggregates
-        let aggr_exprs = self.translate_aggregates(aggregates, &schema, &state, &ctx)?;
-
-        // Filter expressions must match aggregate expressions in length.
-        let filter_exprs = vec![None; aggr_exprs.len()];
+        // Translate aggregates and their associated filter expressions
+        // (e.g. collect() uses a filter to exclude null values per Cypher spec)
+        let (aggr_exprs, filter_exprs) =
+            self.translate_aggregates(aggregates, &schema, &state, &ctx)?;
 
         let agg_exec = Arc::new(AggregateExec::try_new(
             AggregateMode::Single,
@@ -2429,10 +2428,14 @@ impl HybridPhysicalPlanner {
         schema: &SchemaRef,
         state: &SessionState,
         ctx: &TranslationContext,
-    ) -> Result<Vec<Arc<AggregateFunctionExpr>>> {
+    ) -> Result<(
+        Vec<Arc<AggregateFunctionExpr>>,
+        Vec<Option<Arc<dyn datafusion::physical_expr::PhysicalExpr>>>,
+    )> {
         use datafusion::functions_aggregate::expr_fn::{avg, count, max, min, sum};
 
         let mut result = Vec::new();
+        let mut filters = Vec::new();
 
         for agg_expr in aggregates {
             let Expr::FunctionCall {
@@ -2481,7 +2484,17 @@ impl HybridPhysicalPlanner {
                 )),
                 "min" => min(get_arg()?),
                 "max" => max(get_arg()?),
-                "collect" => datafusion::functions_aggregate::array_agg::array_agg(get_arg()?),
+                "collect" => {
+                    // Cypher collect() must skip null values per the OpenCypher spec:
+                    // "the list of aggregated values is the list of candidate values
+                    // with all null values removed"
+                    use datafusion::prelude::ExprFunctionExt;
+                    let arg = get_arg()?;
+                    datafusion::functions_aggregate::array_agg::array_agg(arg.clone())
+                        .filter(arg.is_not_null())
+                        .build()
+                        .map_err(|e| anyhow!("{}", e))?
+                }
                 _ => return Err(anyhow!("Unsupported aggregate function: {}", name)),
             };
 
@@ -2493,12 +2506,19 @@ impl HybridPhysicalPlanner {
                 df_agg
             };
 
+            // Resolve UDFs and apply type coercion inside aggregate arguments
+            let df_schema = datafusion::common::DFSchema::try_from(schema.as_ref().clone())?;
+            let df_agg = Self::resolve_udfs(&df_agg, state)?;
+            let df_agg = crate::query::df_expr::apply_type_coercion(&df_agg, &df_schema)?;
+            let df_agg = Self::resolve_udfs(&df_agg, state)?;
+
             // Convert to physical aggregate
-            let physical_agg = self.create_physical_aggregate(&df_agg, schema, state)?;
+            let (physical_agg, filter) = self.create_physical_aggregate(&df_agg, schema, state)?;
             result.push(physical_agg);
+            filters.push(filter);
         }
 
-        Ok(result)
+        Ok((result, filters))
     }
 
     /// Plan a sort operation.
@@ -3159,20 +3179,23 @@ impl HybridPhysicalPlanner {
         expr: &DfExpr,
         schema: &SchemaRef,
         state: &SessionState,
-    ) -> Result<Arc<AggregateFunctionExpr>> {
+    ) -> Result<(
+        Arc<AggregateFunctionExpr>,
+        Option<Arc<dyn datafusion::physical_expr::PhysicalExpr>>,
+    )> {
         use datafusion::physical_planner::create_aggregate_expr_and_maybe_filter;
 
         // Build a DFSchema from the Arrow schema for the function call
         let df_schema = datafusion::common::DFSchema::try_from(schema.as_ref().clone())?;
 
         // The function returns (AggregateFunctionExpr, Option<filter>, Vec<ordering>)
-        let (agg_expr, _filter, _ordering) = create_aggregate_expr_and_maybe_filter(
+        let (agg_expr, filter, _ordering) = create_aggregate_expr_and_maybe_filter(
             expr,
             &df_schema,
             schema.as_ref(),
             state.execution_props(),
         )?;
-        Ok(agg_expr)
+        Ok((agg_expr, filter))
     }
 }
 

@@ -3662,6 +3662,34 @@ impl QueryPlanner {
             }
         }
 
+        // Collect extra variables referenced by the WHERE clause that are
+        // not already part of the WITH projection.  These must be carried
+        // through the initial Project so the Filter can reference them, then
+        // stripped by a second Project afterwards.
+        let where_extras: Vec<String> = if let Some(predicate) = &with_clause.where_clause {
+            let referenced = collect_expr_variables(predicate);
+            let projected_names: std::collections::HashSet<&str> =
+                new_vars.iter().map(|v| v.name.as_str()).collect();
+            referenced
+                .into_iter()
+                .filter(|name| {
+                    !projected_names.contains(name.as_str())
+                        && find_var_in_scope(vars_in_scope, name).is_some()
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+
+        // If the WHERE clause references pre-projection variables, temporarily
+        // include them in the projection so the filter can see them.
+        let needs_cleanup = !where_extras.is_empty();
+        if !where_extras.is_empty() {
+            for extra in &where_extras {
+                projections.push((Expr::Variable(extra.clone()), Some(extra.clone())));
+            }
+        }
+
         if has_agg {
             plan = LogicalPlan::Aggregate {
                 input: Box::new(plan),
@@ -3690,6 +3718,27 @@ impl QueryPlanner {
             plan = LogicalPlan::Project {
                 input: Box::new(plan),
                 projections,
+            };
+        }
+
+        // Apply the WHERE filter (post-projection, with extras still visible).
+        if let Some(predicate) = &with_clause.where_clause {
+            plan = LogicalPlan::Filter {
+                input: Box::new(plan),
+                predicate: predicate.clone(),
+                optional_variables: std::collections::HashSet::new(),
+            };
+        }
+
+        // Strip the extra variables that were only needed by the WHERE clause.
+        if needs_cleanup {
+            let cleanup_projections: Vec<(Expr, Option<String>)> = new_vars
+                .iter()
+                .map(|v| (Expr::Variable(v.name.clone()), Some(v.name.clone())))
+                .collect();
+            plan = LogicalPlan::Project {
+                input: Box::new(plan),
+                projections: cleanup_projections,
             };
         }
 
@@ -3741,14 +3790,6 @@ impl QueryPlanner {
                 input: Box::new(plan),
                 skip,
                 fetch,
-            };
-        }
-
-        if let Some(predicate) = &with_clause.where_clause {
-            plan = LogicalPlan::Filter {
-                input: Box::new(plan),
-                predicate: predicate.clone(),
-                optional_variables: std::collections::HashSet::new(),
             };
         }
 

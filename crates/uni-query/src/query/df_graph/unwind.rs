@@ -26,7 +26,7 @@
 
 use crate::query::df_graph::common::compute_plan_properties;
 use arrow::compute::take;
-use arrow_array::builder::StringBuilder;
+use arrow_array::builder::{BooleanBuilder, Float64Builder, Int64Builder, StringBuilder};
 use arrow_array::{Array, ArrayRef, RecordBatch, UInt64Array};
 use arrow_schema::{DataType, Field, Schema, SchemaRef};
 use datafusion::common::Result as DFResult;
@@ -41,7 +41,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 use uni_common::Value;
-use uni_cypher::ast::Expr;
+use uni_cypher::ast::{CypherLiteral, Expr};
 
 /// UNWIND execution plan that expands list values into multiple rows.
 ///
@@ -99,7 +99,7 @@ impl GraphUnwindExec {
         let variable = variable.into();
 
         // Build output schema: input schema + new variable column
-        let schema = Self::build_schema(input.schema(), &variable);
+        let schema = Self::build_schema(input.schema(), &variable, &expr);
         let properties = compute_plan_properties(schema.clone());
 
         Self {
@@ -113,23 +113,92 @@ impl GraphUnwindExec {
         }
     }
 
+    /// Infer the native Arrow `DataType` for the elements of an UNWIND expression.
+    ///
+    /// For literal lists with homogeneous element types (ignoring nulls), returns
+    /// the native type and `false` for `json_encoded`. For heterogeneous or
+    /// non-inferrable expressions, falls back to `Utf8` with `json_encoded = true`.
+    ///
+    /// Returns `(DataType, needs_json_encoded_metadata)`.
+    fn infer_element_type(expr: &Expr) -> (DataType, bool) {
+        if let Expr::List(items) = expr {
+            // Classify each literal item, ignoring nulls
+            let mut seen_bool = false;
+            let mut seen_int = false;
+            let mut seen_float = false;
+            let mut seen_string = false;
+            let mut seen_other = false;
+
+            for item in items {
+                match item {
+                    Expr::Literal(CypherLiteral::Null) => { /* nulls are compatible with any type */
+                    }
+                    Expr::Literal(CypherLiteral::Bool(_)) => seen_bool = true,
+                    Expr::Literal(CypherLiteral::Integer(_)) => seen_int = true,
+                    Expr::Literal(CypherLiteral::Float(_)) => seen_float = true,
+                    Expr::Literal(CypherLiteral::String(_)) => seen_string = true,
+                    _ => seen_other = true, // variable refs, function calls, etc.
+                }
+            }
+
+            // If any non-literal item, fall back to JSON
+            if seen_other {
+                return (DataType::Utf8, true);
+            }
+
+            // Count how many distinct types we saw (excluding null)
+            let type_count =
+                seen_bool as u8 + seen_int as u8 + seen_float as u8 + seen_string as u8;
+
+            match type_count {
+                0 => {
+                    // All nulls or empty list — use Utf8 with json_encoded as safe default
+                    (DataType::Utf8, true)
+                }
+                1 => {
+                    // Homogeneous type
+                    if seen_bool {
+                        (DataType::Boolean, false)
+                    } else if seen_int {
+                        (DataType::Int64, false)
+                    } else if seen_float {
+                        (DataType::Float64, false)
+                    } else {
+                        // seen_string — plain Utf8 without json_encoded
+                        (DataType::Utf8, false)
+                    }
+                }
+                _ => {
+                    // Mixed types — fall back to JSON-encoded Utf8
+                    (DataType::Utf8, true)
+                }
+            }
+        } else {
+            // Not a literal list (variable reference, function call, etc.)
+            (DataType::Utf8, true)
+        }
+    }
+
     /// Build output schema by adding the unwind variable column.
     ///
-    /// The UNWIND variable column stores JSON-encoded values and is marked
-    /// with metadata `{"json_encoded": "true"}` so that result conversion
-    /// can properly parse them back to their original types.
-    fn build_schema(input_schema: SchemaRef, variable: &str) -> SchemaRef {
+    /// Uses type inference on the UNWIND expression to emit natively-typed
+    /// columns when possible. Falls back to JSON-encoded `Utf8` for
+    /// heterogeneous or non-inferrable expressions.
+    fn build_schema(input_schema: SchemaRef, variable: &str, expr: &Expr) -> SchemaRef {
         let mut fields: Vec<Field> = input_schema
             .fields()
             .iter()
             .map(|f| f.as_ref().clone())
             .collect();
 
-        // Add variable column as Utf8 with JSON-encoded metadata
-        // This signals to result conversion that values should be parsed as JSON
-        let mut metadata = std::collections::HashMap::new();
-        metadata.insert("json_encoded".to_string(), "true".to_string());
-        let field = Field::new(variable, DataType::Utf8, true).with_metadata(metadata);
+        let (data_type, needs_json_metadata) = Self::infer_element_type(expr);
+
+        let mut field = Field::new(variable, data_type, true);
+        if needs_json_metadata {
+            let mut metadata = std::collections::HashMap::new();
+            metadata.insert("json_encoded".to_string(), "true".to_string());
+            field = field.with_metadata(metadata);
+        }
         fields.push(field);
 
         Arc::new(Schema::new(fields))
@@ -360,11 +429,32 @@ impl GraphUnwindStream {
                         }
                         Ok(Value::List(vec![]))
                     }
+                    "size" | "length" => {
+                        if args.len() == 1 {
+                            let val = self.evaluate_expr_impl(&args[0], batch, row_idx)?;
+                            let sz = match &val {
+                                Value::List(arr) => arr.len() as i64,
+                                Value::String(s) => s.len() as i64,
+                                Value::Map(m) => m.len() as i64,
+                                _ => 0,
+                            };
+                            return Ok(Value::Int(sz));
+                        }
+                        Ok(Value::Null)
+                    }
                     _ => {
                         // Unsupported function - return empty list
                         Ok(Value::List(vec![]))
                     }
                 }
+            }
+
+            // Binary operations: e.g. size(types) - 1
+            Expr::BinaryOp { left, op, right } => {
+                let l = self.evaluate_expr_impl(left, batch, row_idx)?;
+                let r = self.evaluate_expr_impl(right, batch, row_idx)?;
+                crate::query::expr_eval::eval_binary_op(&l, op, &r)
+                    .map_err(|e| datafusion::error::DataFusionError::Execution(e.to_string()))
             }
 
             // Unsupported expressions return null
@@ -412,21 +502,76 @@ impl GraphUnwindStream {
             columns.push(expanded);
         }
 
-        // Add the unwind variable column
-        // Values are JSON-encoded to preserve type information (numbers, booleans, etc.)
-        let mut builder = StringBuilder::new();
-        for (_, value) in expansions {
-            if value.is_null() {
-                builder.append_null();
-            } else {
-                // Serialize as JSON to preserve type (numbers stay as "1", strings as "\"hello\"")
-                let json_val: serde_json::Value = value.clone().into();
-                let json_str =
-                    serde_json::to_string(&json_val).unwrap_or_else(|_| "null".to_string());
-                builder.append_value(&json_str);
+        // Add the unwind variable column using the appropriate typed builder
+        let unwind_field = self.schema.field(self.schema.fields().len() - 1);
+        let is_json_encoded = unwind_field
+            .metadata()
+            .get("json_encoded")
+            .is_some_and(|v| v == "true");
+
+        let unwind_col: ArrayRef = match (unwind_field.data_type(), is_json_encoded) {
+            (DataType::Boolean, false) => {
+                let mut builder = BooleanBuilder::with_capacity(num_rows);
+                for (_, value) in expansions {
+                    match value {
+                        Value::Bool(b) => builder.append_value(*b),
+                        Value::Null => builder.append_null(),
+                        _ => builder.append_null(),
+                    }
+                }
+                Arc::new(builder.finish())
             }
-        }
-        columns.push(Arc::new(builder.finish()));
+            (DataType::Int64, false) => {
+                let mut builder = Int64Builder::with_capacity(num_rows);
+                for (_, value) in expansions {
+                    match value {
+                        Value::Int(i) => builder.append_value(*i),
+                        Value::Null => builder.append_null(),
+                        _ => builder.append_null(),
+                    }
+                }
+                Arc::new(builder.finish())
+            }
+            (DataType::Float64, false) => {
+                let mut builder = Float64Builder::with_capacity(num_rows);
+                for (_, value) in expansions {
+                    match value {
+                        Value::Float(f) => builder.append_value(*f),
+                        Value::Null => builder.append_null(),
+                        _ => builder.append_null(),
+                    }
+                }
+                Arc::new(builder.finish())
+            }
+            (DataType::Utf8, false) => {
+                // Plain string values (no JSON encoding)
+                let mut builder = StringBuilder::new();
+                for (_, value) in expansions {
+                    match value {
+                        Value::String(s) => builder.append_value(s),
+                        Value::Null => builder.append_null(),
+                        _ => builder.append_null(),
+                    }
+                }
+                Arc::new(builder.finish())
+            }
+            _ => {
+                // Fallback: JSON-encoded Utf8 (heterogeneous or non-inferrable types)
+                let mut builder = StringBuilder::new();
+                for (_, value) in expansions {
+                    if value.is_null() {
+                        builder.append_null();
+                    } else {
+                        let json_val: serde_json::Value = value.clone().into();
+                        let json_str =
+                            serde_json::to_string(&json_val).unwrap_or_else(|_| "null".to_string());
+                        builder.append_value(&json_str);
+                    }
+                }
+                Arc::new(builder.finish())
+            }
+        };
+        columns.push(unwind_col);
 
         self.metrics.record_output(num_rows);
 
@@ -522,6 +667,21 @@ pub(crate) fn arrow_to_json_value(array: &dyn Array, row: usize) -> Value {
         return Value::List(result);
     }
 
+    // LargeBinary (JSONB) — decode to Value
+    if let Some(arr) = any.downcast_ref::<arrow_array::LargeBinaryArray>() {
+        let bytes = arr.value(row);
+        let raw = jsonb::RawJsonb::new(bytes);
+        let jsonb_str = raw.to_string();
+        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&jsonb_str) {
+            return Value::from(parsed);
+        }
+        // Fallback: try plain JSON text
+        if let Ok(parsed) = serde_json::from_slice::<serde_json::Value>(bytes) {
+            return Value::from(parsed);
+        }
+        return Value::Null;
+    }
+
     // Fallback
     Value::Null
 }
@@ -538,12 +698,125 @@ mod tests {
             Field::new("n.name", DataType::Utf8, true),
         ]));
 
-        let output_schema = GraphUnwindExec::build_schema(input_schema, "item");
+        // Variable reference -> falls back to JSON-encoded Utf8
+        let expr = Expr::Variable("some_list".to_string());
+        let output_schema = GraphUnwindExec::build_schema(input_schema, "item", &expr);
 
         assert_eq!(output_schema.fields().len(), 3);
         assert_eq!(output_schema.field(0).name(), "n._vid");
         assert_eq!(output_schema.field(1).name(), "n.name");
         assert_eq!(output_schema.field(2).name(), "item");
+        assert_eq!(output_schema.field(2).data_type(), &DataType::Utf8);
+        assert_eq!(
+            output_schema.field(2).metadata().get("json_encoded"),
+            Some(&"true".to_string())
+        );
+    }
+
+    #[test]
+    fn test_build_schema_boolean_list() {
+        let input_schema = Arc::new(Schema::new(vec![Field::new(
+            "n._vid",
+            DataType::UInt64,
+            false,
+        )]));
+
+        let expr = Expr::List(vec![
+            Expr::Literal(CypherLiteral::Bool(true)),
+            Expr::Literal(CypherLiteral::Bool(false)),
+            Expr::Literal(CypherLiteral::Null),
+        ]);
+        let output_schema = GraphUnwindExec::build_schema(input_schema, "a", &expr);
+
+        let field = output_schema.field(1);
+        assert_eq!(field.name(), "a");
+        assert_eq!(field.data_type(), &DataType::Boolean);
+        assert!(field.metadata().is_empty());
+    }
+
+    #[test]
+    fn test_build_schema_integer_list() {
+        let input_schema = Arc::new(Schema::new(vec![Field::new(
+            "n._vid",
+            DataType::UInt64,
+            false,
+        )]));
+
+        let expr = Expr::List(vec![
+            Expr::Literal(CypherLiteral::Integer(1)),
+            Expr::Literal(CypherLiteral::Integer(2)),
+            Expr::Literal(CypherLiteral::Integer(3)),
+        ]);
+        let output_schema = GraphUnwindExec::build_schema(input_schema, "x", &expr);
+
+        let field = output_schema.field(1);
+        assert_eq!(field.name(), "x");
+        assert_eq!(field.data_type(), &DataType::Int64);
+        assert!(field.metadata().is_empty());
+    }
+
+    #[test]
+    fn test_build_schema_float_list() {
+        let input_schema = Arc::new(Schema::new(vec![Field::new(
+            "n._vid",
+            DataType::UInt64,
+            false,
+        )]));
+
+        let expr = Expr::List(vec![
+            Expr::Literal(CypherLiteral::Float(1.5)),
+            Expr::Literal(CypherLiteral::Float(2.5)),
+        ]);
+        let output_schema = GraphUnwindExec::build_schema(input_schema, "x", &expr);
+
+        let field = output_schema.field(1);
+        assert_eq!(field.name(), "x");
+        assert_eq!(field.data_type(), &DataType::Float64);
+        assert!(field.metadata().is_empty());
+    }
+
+    #[test]
+    fn test_build_schema_string_list() {
+        let input_schema = Arc::new(Schema::new(vec![Field::new(
+            "n._vid",
+            DataType::UInt64,
+            false,
+        )]));
+
+        let expr = Expr::List(vec![
+            Expr::Literal(CypherLiteral::String("hello".to_string())),
+            Expr::Literal(CypherLiteral::String("world".to_string())),
+        ]);
+        let output_schema = GraphUnwindExec::build_schema(input_schema, "x", &expr);
+
+        let field = output_schema.field(1);
+        assert_eq!(field.name(), "x");
+        assert_eq!(field.data_type(), &DataType::Utf8);
+        // Plain string, no json_encoded metadata
+        assert!(field.metadata().is_empty());
+    }
+
+    #[test]
+    fn test_build_schema_mixed_list() {
+        let input_schema = Arc::new(Schema::new(vec![Field::new(
+            "n._vid",
+            DataType::UInt64,
+            false,
+        )]));
+
+        let expr = Expr::List(vec![
+            Expr::Literal(CypherLiteral::Integer(1)),
+            Expr::Literal(CypherLiteral::String("hello".to_string())),
+        ]);
+        let output_schema = GraphUnwindExec::build_schema(input_schema, "x", &expr);
+
+        let field = output_schema.field(1);
+        assert_eq!(field.name(), "x");
+        assert_eq!(field.data_type(), &DataType::Utf8);
+        assert_eq!(
+            field.metadata().get("json_encoded"),
+            Some(&"true".to_string())
+        );
     }
 
     #[test]

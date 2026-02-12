@@ -167,7 +167,16 @@ pub fn cypher_expr_to_df(expr: &Expr, context: Option<&TranslationContext>) -> R
                     return value_to_scalar(value).map(lit);
                 }
 
-                Ok(DfExpr::Column(Column::from_name(col_name)))
+                if is_graph_entity {
+                    // Graph entity: use flat column reference "{variable}.{property}".
+                    // Scans/traversals materialize node/edge props as separate columns.
+                    Ok(DfExpr::Column(Column::from_name(col_name)))
+                } else {
+                    // Non-graph variable (map from WITH, UNWIND element, aliased value):
+                    // use index UDF for dynamic field access at runtime.
+                    let base_expr = DfExpr::Column(Column::from_name(var_name));
+                    Ok(dummy_udf_expr("index", vec![base_expr, lit(prop.clone())]))
+                }
             } else {
                 // Base is a complex expression (e.g., function call result,
                 // array index, parameter).
@@ -244,9 +253,23 @@ pub fn cypher_expr_to_df(expr: &Expr, context: Option<&TranslationContext>) -> R
                 )
             };
 
-            Ok(datafusion::functions_nested::expr_fn::array_slice(
-                array_expr, start_expr, end_expr, None,
-            ))
+            // If the array is JSONB-encoded (LargeBinary), use _cypher_list_slice UDF
+            // instead of DataFusion's array_slice which rejects LargeBinary input
+            let is_jsonb = matches!(&array_expr, DfExpr::Literal(ScalarValue::LargeBinary(_), _))
+                || matches!(&array_expr, DfExpr::ScalarFunction(f) if f.func.name() == "_make_cypher_list"
+                    || f.func.name() == "_cypher_list_concat"
+                    || f.func.name() == "_cypher_list_append");
+
+            if is_jsonb {
+                Ok(dummy_udf_expr(
+                    "_cypher_list_slice",
+                    vec![array_expr, start_expr, end_expr],
+                ))
+            } else {
+                Ok(datafusion::functions_nested::expr_fn::array_slice(
+                    array_expr, start_expr, end_expr, None,
+                ))
+            }
         }
 
         Expr::Parameter(name) => {
@@ -300,10 +323,12 @@ pub fn cypher_expr_to_df(expr: &Expr, context: Option<&TranslationContext>) -> R
                         .unwrap_or_default();
                     return Ok(lit(ScalarValue::LargeBinary(Some(jsonb_bytes))));
                 }
-                // Non-literal items in mixed/nested lists: fall back to error
-                return Err(anyhow!(
-                    "Mixed/nested lists with non-literal items not supported in DataFusion translation"
-                ));
+                // Non-literal items (e.g. variables): delegate to _make_cypher_list UDF
+                let mut df_args = Vec::with_capacity(items.len());
+                for item in items {
+                    df_args.push(cypher_expr_to_df(item, context)?);
+                }
+                return Ok(dummy_udf_expr("_make_cypher_list", df_args));
             }
 
             // Use make_array to create a List type in DataFusion.
@@ -423,75 +448,40 @@ pub fn cypher_expr_to_df(expr: &Expr, context: Option<&TranslationContext>) -> R
                 cypher_expr_to_df(expr, context)?
             };
 
-            // When the right side is a literal list, expand to individual items
-            // for IN-list. Otherwise, use array_has for array column membership.
+            // When the right side is a literal list, route through _cypher_in UDF
+            // which handles mixed-type comparisons and Cypher null semantics correctly.
+            // DataFusion's native in_list() requires homogeneous types and would fail
+            // for cases like `1 IN ['1', 2]`.
             if let Expr::List(items) = list.as_ref() {
-                let expanded: Vec<DfExpr> = items
-                    .iter()
-                    .map(|item| cypher_expr_to_df(item, context))
-                    .collect::<Result<Vec<_>>>()?;
-                Ok(datafusion::prelude::in_list(left_expr, expanded, false))
+                if let Some(json_array) = try_items_to_json(items) {
+                    // All-literal list → encode as JSONB and pass to _cypher_in
+                    let json_str = serde_json::Value::Array(json_array).to_string();
+                    let jsonb_bytes = jsonb::parse_value(json_str.as_bytes())
+                        .map_err(|e| anyhow!("Failed to encode IN list as JSONB: {e}"))?
+                        .to_vec();
+                    let list_literal = lit(ScalarValue::LargeBinary(Some(jsonb_bytes)));
+                    Ok(dummy_udf_expr("_cypher_in", vec![left_expr, list_literal]))
+                } else {
+                    // Has variables → build list at runtime via _make_cypher_list
+                    let expanded: Vec<DfExpr> = items
+                        .iter()
+                        .map(|item| cypher_expr_to_df(item, context))
+                        .collect::<Result<Vec<_>>>()?;
+                    let list_expr = dummy_udf_expr("_make_cypher_list", expanded);
+                    Ok(dummy_udf_expr("_cypher_in", vec![left_expr, list_expr]))
+                }
             } else {
                 let right_expr = cypher_expr_to_df(list, context)?;
 
-                // Implement Cypher IN semantics for dynamic arrays (e.g. variables/parameters)
-                // 1. If rhs IS NULL -> NULL
-                // 2. If lhs IS NULL:
-                //    - If rhs is empty -> FALSE
-                //    - Else -> NULL
-                // 3. If lhs IS NOT NULL:
-                //    - If array_has(rhs, lhs) -> TRUE
-                //    - If array_has(rhs, NULL) -> NULL
-                //    - Else -> FALSE
-
-                use datafusion::arrow::datatypes::DataType;
-                use datafusion::functions_nested::expr_fn::{array_has, array_length};
-                use datafusion::logical_expr::{Cast, when};
-
-                // If rhs is literal null, return null immediately to avoid type errors in array functions
+                // Use _cypher_in UDF for dynamic arrays. This handles all list
+                // representations (native List, Utf8 json-encoded, LargeBinary JSONB)
+                // uniformly via Value-level conversion, and implements full Cypher
+                // 3-valued IN semantics (null propagation).
                 if matches!(right_expr, DfExpr::Literal(ScalarValue::Null, _)) {
                     return Ok(lit(ScalarValue::Boolean(None)));
                 }
 
-                let rhs_is_null = right_expr.clone().is_null();
-                let lhs_is_null = left_expr.clone().is_null();
-
-                // Ensure rhs is a list for array_length/array_has to satisfy planner
-                // If it's Null type, cast to List(Null)
-                // Note: This cast might only be needed if type inference fails, but good for safety
-                // We use the original expr for logic, but maybe we need a "typed" version
-
-                let len = array_length(right_expr.clone());
-                // Check if 0 (handle UInt64 return type of array_length)
-                // We use cast to Int64 to compare with 0 safely
-                let len_i64 = DfExpr::Cast(Cast::new(Box::new(len), DataType::Int64));
-                let rhs_empty = len_i64.eq(lit(0i64));
-
-                // Check if array contains null using our custom UDF which handles it robustly
-                // Use real UDF directly since this is created post-resolution
-                let has_null_udf = crate::query::df_udfs::create_has_null_udf();
-                let has_null_expr =
-                    DfExpr::ScalarFunction(datafusion::logical_expr::expr::ScalarFunction {
-                        func: std::sync::Arc::new(has_null_udf),
-                        args: vec![right_expr.clone()],
-                    });
-
-                let branch_lhs_null =
-                    when(rhs_empty, lit(false)).otherwise(lit(ScalarValue::Boolean(None)))?;
-
-                // If lhs is NOT null:
-                // 1. Found exact match -> true
-                // 2. Found null in list -> null
-                // 3. Not found and no nulls -> false
-
-                let branch_lhs_not_null =
-                    when(array_has(right_expr.clone(), left_expr.clone()), lit(true))
-                        .when(has_null_expr, lit(ScalarValue::Boolean(None)))
-                        .otherwise(lit(false))?;
-
-                Ok(when(rhs_is_null, lit(ScalarValue::Boolean(None)))
-                    .when(lhs_is_null, branch_lhs_null)
-                    .otherwise(branch_lhs_not_null)?)
+                Ok(dummy_udf_expr("_cypher_in", vec![left_expr, right_expr]))
             }
         }
 
@@ -856,10 +846,23 @@ fn translate_binary_op(left: DfExpr, op: &BinaryOp, right: DfExpr) -> Result<DfE
         BinaryOp::Add => {
             // Check if either operand is a string literal — use concat instead
             let is_string_lit = |e: &DfExpr| matches!(e, DfExpr::Literal(ScalarValue::Utf8(_), _));
+            let is_list_like = |e: &DfExpr| {
+                matches!(e, DfExpr::Literal(ScalarValue::LargeBinary(_), _))
+                    || matches!(e, DfExpr::ScalarFunction(f) if f.func.name() == "make_array"
+                        || f.func.name() == "_make_cypher_list"
+                        || f.func.name() == "_cypher_list_concat"
+                        || f.func.name() == "_cypher_list_append")
+                    || matches!(e, DfExpr::Literal(ScalarValue::List(_), _))
+            };
+
             if is_string_lit(&left) || is_string_lit(&right) {
                 Ok(datafusion::functions::string::expr_fn::concat(vec![
                     left, right,
                 ]))
+            } else if is_list_like(&left) || is_list_like(&right) {
+                // Route to _cypher_list_concat UDF which handles:
+                // list+list, list+scalar, scalar+list
+                Ok(dummy_udf_expr("_cypher_list_concat", vec![left, right]))
             } else {
                 Ok(left + right)
             }
@@ -868,7 +871,19 @@ fn translate_binary_op(left: DfExpr, op: &BinaryOp, right: DfExpr) -> Result<DfE
         BinaryOp::Mul => Ok(left * right),
         BinaryOp::Div => Ok(left / right),
         BinaryOp::Mod => Ok(left % right),
-        BinaryOp::Pow => Ok(datafusion::functions::math::expr_fn::power(left, right)),
+        BinaryOp::Pow => {
+            // Cast operands to Float64 to prevent integer overflow panics
+            // and ensure Float return type per Cypher semantics.
+            let left_f = datafusion::logical_expr::cast(
+                left,
+                datafusion::arrow::datatypes::DataType::Float64,
+            );
+            let right_f = datafusion::logical_expr::cast(
+                right,
+                datafusion::arrow::datatypes::DataType::Float64,
+            );
+            Ok(datafusion::functions::math::expr_fn::power(left_f, right_f))
+        }
 
         // String operators
         BinaryOp::Contains => {
@@ -1955,12 +1970,12 @@ pub fn apply_type_coercion(expr: &DfExpr, schema: &datafusion::common::DFSchema)
             if matches!(binary.op, Operator::And | Operator::Or) {
                 let left_type = left.get_type(schema).ok();
                 let right_type = right.get_type(schema).ok();
-                let left_needs_cast = left_type
-                    .as_ref()
-                    .is_some_and(|t| t.is_null() || matches!(t, DataType::Utf8 | DataType::LargeUtf8));
-                let right_needs_cast = right_type
-                    .as_ref()
-                    .is_some_and(|t| t.is_null() || matches!(t, DataType::Utf8 | DataType::LargeUtf8));
+                let left_needs_cast = left_type.as_ref().is_some_and(|t| {
+                    t.is_null() || matches!(t, DataType::Utf8 | DataType::LargeUtf8)
+                });
+                let right_needs_cast = right_type.as_ref().is_some_and(|t| {
+                    t.is_null() || matches!(t, DataType::Utf8 | DataType::LargeUtf8)
+                });
                 if left_needs_cast || right_needs_cast {
                     let coerced_left = if left_needs_cast {
                         datafusion::logical_expr::cast(left, DataType::Boolean)
@@ -1999,11 +2014,63 @@ pub fn apply_type_coercion(expr: &DfExpr, schema: &datafusion::common::DFSchema)
                     }
                 }
 
+                // Handle Null-typed operands: cast the null side to match the
+                // other operand's type so Arrow doesn't reject the type pair.
+                if let (Some(lt), Some(rt)) = (&left_type, &right_type) {
+                    let left_is_null = lt.is_null();
+                    let right_is_null = rt.is_null();
+                    if left_is_null && right_is_null {
+                        // Both null: result is always null for comparisons
+                        return Ok(lit(ScalarValue::Boolean(None)));
+                    }
+                    if left_is_null || right_is_null {
+                        let target = if left_is_null { rt } else { lt };
+                        let coerced_left = if left_is_null {
+                            datafusion::logical_expr::cast(left, target.clone())
+                        } else {
+                            left
+                        };
+                        let coerced_right = if right_is_null {
+                            datafusion::logical_expr::cast(right, target.clone())
+                        } else {
+                            right
+                        };
+                        return Ok(DfExpr::BinaryExpr(
+                            datafusion::logical_expr::expr::BinaryExpr::new(
+                                Box::new(coerced_left),
+                                binary.op,
+                                Box::new(coerced_right),
+                            ),
+                        ));
+                    }
+                }
+
                 // 0. LargeBinary (JSONB) handling — before type-mismatch check since
                 //    both-LB is same-type but still needs special handling
                 if let (Some(lt), Some(rt)) = (&left_type, &right_type) {
                     let left_is_lb = matches!(lt, DataType::LargeBinary);
                     let right_is_lb = matches!(rt, DataType::LargeBinary);
+
+                    // List concatenation / append via Plus operator
+                    if binary.op == Operator::Plus {
+                        // Both JSONB → list concat (both could be JSONB lists)
+                        if left_is_lb && right_is_lb {
+                            return Ok(dummy_udf_expr("_cypher_list_concat", vec![left, right]));
+                        }
+                        // Native List types → list concat or append
+                        let left_is_native_list =
+                            matches!(lt, DataType::List(_) | DataType::LargeList(_));
+                        let right_is_native_list =
+                            matches!(rt, DataType::List(_) | DataType::LargeList(_));
+                        if left_is_native_list && right_is_native_list {
+                            return Ok(dummy_udf_expr("_cypher_list_concat", vec![left, right]));
+                        }
+                        if left_is_native_list || right_is_native_list {
+                            return Ok(dummy_udf_expr("_cypher_list_append", vec![left, right]));
+                        }
+                        // LB + typed scalar (e.g., LB + Int64) falls through
+                        // to the JSONB decode path below
+                    }
 
                     if left_is_lb && right_is_lb && is_comparison {
                         // Both LargeBinary: route comparison to _cypher_* UDFs
@@ -2066,8 +2133,10 @@ pub fn apply_type_coercion(expr: &DfExpr, schema: &datafusion::common::DFSchema)
                     // LargeBinary vs Struct comparison: route to _cypher_equal for
                     // cross-format map equality (e.g., {} encoded as JSONB vs {k: null} as Struct)
                     if is_comparison
-                        && ((matches!(lt, DataType::LargeBinary) && matches!(rt, DataType::Struct(_)))
-                            || (matches!(lt, DataType::Struct(_)) && matches!(rt, DataType::LargeBinary)))
+                        && ((matches!(lt, DataType::LargeBinary)
+                            && matches!(rt, DataType::Struct(_)))
+                            || (matches!(lt, DataType::Struct(_))
+                                && matches!(rt, DataType::LargeBinary)))
                     {
                         let udf_name = match binary.op {
                             Operator::Eq => "_cypher_equal",
@@ -2082,9 +2151,7 @@ pub fn apply_type_coercion(expr: &DfExpr, schema: &datafusion::common::DFSchema)
 
                 // NaN-aware comparisons: when a division expression is involved,
                 // route to _cypher_* UDFs which handle NaN correctly (NaN != NaN, NaN not ordered).
-                if is_comparison
-                    && (contains_division(&left) || contains_division(&right))
-                {
+                if is_comparison && (contains_division(&left) || contains_division(&right)) {
                     let udf_name = match binary.op {
                         Operator::Eq => "_cypher_equal",
                         Operator::NotEq => "_cypher_not_equal",
@@ -2187,10 +2254,7 @@ pub fn apply_type_coercion(expr: &DfExpr, schema: &datafusion::common::DFSchema)
                             // List vs non-list is always incompatible
                             (DataType::List(_) | DataType::LargeList(_), other)
                             | (other, DataType::List(_) | DataType::LargeList(_))
-                                if !matches!(
-                                    other,
-                                    DataType::List(_) | DataType::LargeList(_)
-                                ) =>
+                                if !matches!(other, DataType::List(_) | DataType::LargeList(_)) =>
                             {
                                 true
                             }
@@ -2433,13 +2497,15 @@ mod tests {
     }
 
     #[test]
-    fn test_property_access() {
+    fn test_property_access_no_context_uses_index() {
+        // Without context, variable is not a known graph entity → index UDF
         let expr = Expr::Property(Box::new(Expr::Variable("n".to_string())), "age".to_string());
         let result = cypher_expr_to_df(&expr, None).unwrap();
-        let s = format!("{:?}", result);
-        // DataFusion interprets "n.age" as table="n", name="age"
-        assert!(s.contains("Column"));
-        assert!(s.contains("age"));
+        let s = format!("{}", result);
+        assert!(
+            s.contains("index"),
+            "expected index UDF for non-graph variable, got: {s}"
+        );
     }
 
     #[test]
@@ -2926,6 +2992,204 @@ mod tests {
         assert!(
             !s.contains("_jsonb"),
             "should not contain jsonb decode: {s}"
+        );
+    }
+
+    #[test]
+    fn test_coercion_both_lb_plus() {
+        // LB + LB → _cypher_list_concat
+        let schema = make_schema(&[
+            ("lb1", DataType::LargeBinary),
+            ("lb2", DataType::LargeBinary),
+        ]);
+        let expr = DfExpr::BinaryExpr(datafusion::logical_expr::expr::BinaryExpr::new(
+            Box::new(col("lb1")),
+            Operator::Plus,
+            Box::new(col("lb2")),
+        ));
+        let result = apply_type_coercion(&expr, &schema).unwrap();
+        assert!(
+            contains_udf(&result, "_cypher_list_concat"),
+            "expected _cypher_list_concat, got: {result}"
+        );
+    }
+
+    #[test]
+    fn test_coercion_native_list_plus_scalar() {
+        // List<Int32> + Int32 → _cypher_list_append
+        let schema = make_schema(&[
+            (
+                "lst",
+                DataType::List(Arc::new(Field::new("item", DataType::Int32, true))),
+            ),
+            ("i", DataType::Int32),
+        ]);
+        let expr = DfExpr::BinaryExpr(datafusion::logical_expr::expr::BinaryExpr::new(
+            Box::new(col("lst")),
+            Operator::Plus,
+            Box::new(col("i")),
+        ));
+        let result = apply_type_coercion(&expr, &schema).unwrap();
+        assert!(
+            contains_udf(&result, "_cypher_list_append"),
+            "expected _cypher_list_append, got: {result}"
+        );
+    }
+
+    #[test]
+    fn test_coercion_lb_plus_int64_unchanged() {
+        // Regression: LB + Int64 should still go through _jsonb_to_int64 decode, NOT list append
+        let schema = make_schema(&[("lb", DataType::LargeBinary), ("i", DataType::Int64)]);
+        let expr = DfExpr::BinaryExpr(datafusion::logical_expr::expr::BinaryExpr::new(
+            Box::new(col("lb")),
+            Operator::Plus,
+            Box::new(col("i")),
+        ));
+        let result = apply_type_coercion(&expr, &schema).unwrap();
+        assert!(
+            contains_udf(&result, "_jsonb_to_int64"),
+            "expected _jsonb_to_int64 decode, got: {result}"
+        );
+        assert!(
+            is_binary_op(&result, Operator::Plus),
+            "expected binary Plus after decode, got: {result}"
+        );
+    }
+
+    // ====================================================================
+    // Mixed-list compilation tests
+    // ====================================================================
+
+    #[test]
+    fn test_mixed_list_with_variables_compiles() {
+        // A list containing a variable and mixed literals should compile via _make_cypher_list UDF
+        let expr = Expr::List(vec![
+            Expr::Variable("n".to_string()),
+            Expr::Literal(CypherLiteral::Integer(1)),
+            Expr::Literal(CypherLiteral::String("hello".to_string())),
+        ]);
+        let result = cypher_expr_to_df(&expr, None).unwrap();
+        let s = format!("{}", result);
+        assert!(
+            s.contains("_make_cypher_list"),
+            "expected _make_cypher_list UDF call, got: {s}"
+        );
+    }
+
+    #[test]
+    fn test_literal_only_mixed_list_uses_jsonb_fastpath() {
+        // A list of only mixed-type literals should use the JSONB fast path (Literal, not UDF)
+        let expr = Expr::List(vec![
+            Expr::Literal(CypherLiteral::Integer(1)),
+            Expr::Literal(CypherLiteral::String("hi".to_string())),
+            Expr::Literal(CypherLiteral::Bool(true)),
+        ]);
+        let result = cypher_expr_to_df(&expr, None).unwrap();
+        assert!(
+            matches!(result, DfExpr::Literal(..)),
+            "expected Literal (JSONB fast path), got: {result}"
+        );
+    }
+
+    // ====================================================================
+    // IN operator routing tests
+    // ====================================================================
+
+    #[test]
+    fn test_in_mixed_literal_list_uses_cypher_in() {
+        // `1 IN ['1', 2]` should route through _cypher_in UDF, not in_list
+        let expr = Expr::In {
+            expr: Box::new(Expr::Literal(CypherLiteral::Integer(1))),
+            list: Box::new(Expr::List(vec![
+                Expr::Literal(CypherLiteral::String("1".to_string())),
+                Expr::Literal(CypherLiteral::Integer(2)),
+            ])),
+        };
+        let result = cypher_expr_to_df(&expr, None).unwrap();
+        let s = format!("{}", result);
+        assert!(
+            s.contains("_cypher_in"),
+            "expected _cypher_in UDF for mixed-type IN list, got: {s}"
+        );
+    }
+
+    #[test]
+    fn test_in_homogeneous_literal_list_uses_cypher_in() {
+        // `1 IN [2, 3]` should also route through _cypher_in UDF
+        let expr = Expr::In {
+            expr: Box::new(Expr::Literal(CypherLiteral::Integer(1))),
+            list: Box::new(Expr::List(vec![
+                Expr::Literal(CypherLiteral::Integer(2)),
+                Expr::Literal(CypherLiteral::Integer(3)),
+            ])),
+        };
+        let result = cypher_expr_to_df(&expr, None).unwrap();
+        let s = format!("{}", result);
+        assert!(
+            s.contains("_cypher_in"),
+            "expected _cypher_in UDF for homogeneous IN list, got: {s}"
+        );
+    }
+
+    #[test]
+    fn test_in_list_with_variables_uses_make_cypher_list() {
+        // `1 IN [x, 2]` should use _make_cypher_list + _cypher_in
+        let expr = Expr::In {
+            expr: Box::new(Expr::Literal(CypherLiteral::Integer(1))),
+            list: Box::new(Expr::List(vec![
+                Expr::Variable("x".to_string()),
+                Expr::Literal(CypherLiteral::Integer(2)),
+            ])),
+        };
+        let result = cypher_expr_to_df(&expr, None).unwrap();
+        let s = format!("{}", result);
+        assert!(
+            s.contains("_cypher_in"),
+            "expected _cypher_in UDF, got: {s}"
+        );
+        assert!(
+            s.contains("_make_cypher_list"),
+            "expected _make_cypher_list for variable-containing list, got: {s}"
+        );
+    }
+
+    // ====================================================================
+    // Property access routing tests
+    // ====================================================================
+
+    #[test]
+    fn test_property_on_graph_entity_uses_column() {
+        // When context marks `n` as a Node, property access should use flat column
+        let mut ctx = TranslationContext::new();
+        ctx.variable_kinds
+            .insert("n".to_string(), VariableKind::Node);
+
+        let expr = Expr::Property(
+            Box::new(Expr::Variable("n".to_string())),
+            "name".to_string(),
+        );
+        let result = cypher_expr_to_df(&expr, Some(&ctx)).unwrap();
+        let s = format!("{:?}", result);
+        assert!(
+            s.contains("Column") && s.contains("n.name"),
+            "expected flat column 'n.name' for graph entity, got: {s}"
+        );
+    }
+
+    #[test]
+    fn test_property_on_non_graph_var_uses_index() {
+        // When variable is not in variable_kinds (e.g., map from WITH), use index UDF
+        let ctx = TranslationContext::new();
+
+        let expr = Expr::Property(
+            Box::new(Expr::Variable("map".to_string())),
+            "name".to_string(),
+        );
+        let result = cypher_expr_to_df(&expr, Some(&ctx)).unwrap();
+        let s = format!("{}", result);
+        assert!(
+            s.contains("index"),
+            "expected index UDF for non-graph variable, got: {s}"
         );
     }
 }

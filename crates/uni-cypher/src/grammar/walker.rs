@@ -631,7 +631,7 @@ pub fn build_expression(pair: Pair<Rule>) -> Result<Expr, ParseError> {
         Rule::comparison_expression => build_comparison_expression(pair),
         Rule::additive_expression => build_additive_expression(pair),
         Rule::multiplicative_expression => build_multiplicative_expression(pair),
-        Rule::power_expression => build_binary_right_assoc(pair, BinaryOp::Pow),
+        Rule::power_expression => build_binary_left_assoc(pair, BinaryOp::Pow),
         Rule::unary_expression => build_unary_expression(pair),
         Rule::postfix_expression => build_postfix_expression(pair),
         Rule::primary_expression => build_primary_expression(pair),
@@ -657,6 +657,7 @@ fn build_binary_left_assoc(pair: Pair<Rule>, op: BinaryOp) -> Result<Expr, Parse
     Ok(left)
 }
 
+#[allow(dead_code)]
 fn build_binary_right_assoc(pair: Pair<Rule>, op: BinaryOp) -> Result<Expr, ParseError> {
     let inner: Vec<_> = pair.into_inner().collect();
     if inner.len() == 1 {
