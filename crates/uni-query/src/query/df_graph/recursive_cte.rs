@@ -19,9 +19,8 @@
 //! 3. Output all accumulated rows as a single-column list
 
 use crate::query::df_graph::GraphExecutionContext;
-use crate::query::df_graph::common::compute_plan_properties;
+use crate::query::df_graph::common::{compute_plan_properties, execute_subplan};
 use crate::query::df_graph::unwind::arrow_to_json_value;
-use crate::query::df_planner::HybridPhysicalPlanner;
 use crate::query::planner::LogicalPlan;
 use arrow_array::RecordBatch;
 use arrow_array::builder::{Int64Builder, LargeListBuilder};
@@ -31,7 +30,7 @@ use datafusion::execution::{RecordBatchStream, SendableRecordBatchStream, TaskCo
 use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties};
 use datafusion::prelude::SessionContext;
-use futures::{Stream, TryStreamExt};
+use futures::Stream;
 use parking_lot::RwLock;
 use std::any::Any;
 use std::collections::{HashMap, HashSet};
@@ -226,47 +225,6 @@ impl ExecutionPlan for RecursiveCTEExec {
 // ---------------------------------------------------------------------------
 // Free functions for the CTE iteration loop
 // ---------------------------------------------------------------------------
-
-/// Execute a logical plan using a fresh HybridPhysicalPlanner with the given params.
-async fn execute_subplan(
-    plan: &LogicalPlan,
-    params: &HashMap<String, Value>,
-    graph_ctx: &Arc<GraphExecutionContext>,
-    session_ctx: &Arc<RwLock<SessionContext>>,
-    storage: &Arc<StorageManager>,
-    schema_info: &Arc<UniSchema>,
-) -> DFResult<Vec<RecordBatch>> {
-    let l0_context = graph_ctx.l0_context().clone();
-    let prop_manager = graph_ctx.property_manager().clone();
-
-    let planner = HybridPhysicalPlanner::with_l0_context(
-        session_ctx.clone(),
-        storage.clone(),
-        l0_context,
-        prop_manager,
-        schema_info.clone(),
-        params.clone(),
-    );
-
-    let execution_plan = planner.plan(plan).map_err(|e| {
-        datafusion::error::DataFusionError::Execution(format!("RecursiveCTE sub-plan error: {}", e))
-    })?;
-
-    let task_ctx = session_ctx.read().task_ctx();
-    let partition_count = execution_plan
-        .properties()
-        .output_partitioning()
-        .partition_count();
-
-    let mut all_batches = Vec::new();
-    for partition in 0..partition_count {
-        let stream = execution_plan.execute(partition, task_ctx.clone())?;
-        let batches: Vec<RecordBatch> = stream.try_collect().await?;
-        all_batches.extend(batches);
-    }
-
-    Ok(all_batches)
-}
 
 /// Extract values from record batches into a flat list of `Value`.
 ///

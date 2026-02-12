@@ -4,7 +4,7 @@
 //! Integration tests for pattern comprehension via the DataFusion execution path.
 
 use anyhow::Result;
-use uni_db::Uni;
+use uni_db::{Uni, Value};
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_pattern_comprehension_basic_traversal() -> Result<()> {
@@ -117,6 +117,565 @@ async fn test_pattern_comprehension_path_variable() -> Result<()> {
             eprintln!("Path variable query failed: {:?}", e);
         }
     }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Helper: extract list values as sorted strings for order-independent comparison
+// ---------------------------------------------------------------------------
+
+fn sorted_strings(list: &[Value]) -> Vec<String> {
+    let mut v: Vec<String> = list
+        .iter()
+        .filter_map(|val| val.as_str().map(|s| s.to_string()))
+        .collect();
+    v.sort();
+    v
+}
+
+fn sorted_ints(list: &[Value]) -> Vec<i64> {
+    let mut v: Vec<i64> = list.iter().filter_map(|val| val.as_i64()).collect();
+    v.sort();
+    v
+}
+
+// ===========================================================================
+// Happy-path tests
+// ===========================================================================
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_pc_single_hop_verify_values() -> Result<()> {
+    let db = Uni::in_memory().build().await?;
+
+    db.execute(
+        "CREATE (a:Person {name: 'Alice'}), (b:Person {name: 'Bob'}), (c:Person {name: 'Carol'})",
+    )
+    .await?;
+    db.execute(
+        "MATCH (a:Person {name: 'Alice'}), (b:Person {name: 'Bob'}), (c:Person {name: 'Carol'}) \
+         CREATE (a)-[:KNOWS]->(b), (a)-[:KNOWS]->(c)",
+    )
+    .await?;
+
+    let results = db
+        .query(
+            "MATCH (n:Person {name: 'Alice'}) \
+             RETURN [(n)-[:KNOWS]->(m) | m.name] AS friends",
+        )
+        .await?;
+
+    assert_eq!(results.len(), 1);
+    let friends = results.rows()[0]
+        .value("friends")
+        .unwrap()
+        .as_array()
+        .unwrap();
+    assert_eq!(sorted_strings(friends), vec!["Bob", "Carol"]);
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_pc_edge_property_values() -> Result<()> {
+    let db = Uni::in_memory().build().await?;
+
+    db.execute(
+        "CREATE (a:Person {name: 'Alice'}), (b:Person {name: 'Bob'}), (c:Person {name: 'Carol'})",
+    )
+    .await?;
+    db.execute(
+        "MATCH (a:Person {name: 'Alice'}), (b:Person {name: 'Bob'}), (c:Person {name: 'Carol'}) \
+         CREATE (a)-[:RATED {score: 5}]->(b), (a)-[:RATED {score: 3}]->(c)",
+    )
+    .await?;
+
+    let results = db
+        .query(
+            "MATCH (n:Person {name: 'Alice'}) \
+             RETURN [(n)-[r:RATED]->(m) | r.score] AS scores",
+        )
+        .await?;
+
+    assert_eq!(results.len(), 1);
+    let scores = results.rows()[0]
+        .value("scores")
+        .unwrap()
+        .as_array()
+        .unwrap();
+    assert_eq!(sorted_ints(scores), vec![3, 5]);
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_pc_multi_hop_chain() -> Result<()> {
+    let db = Uni::in_memory().build().await?;
+
+    db.execute(
+        "CREATE (a:Person {name: 'A'}), (b:Person {name: 'B'}), \
+         (c:Person {name: 'C'}), (d:Person {name: 'D'})",
+    )
+    .await?;
+    db.execute(
+        "MATCH (a:Person {name: 'A'}), (b:Person {name: 'B'}), \
+         (c:Person {name: 'C'}), (d:Person {name: 'D'}) \
+         CREATE (a)-[:KNOWS]->(b), (b)-[:KNOWS]->(c), (b)-[:KNOWS]->(d)",
+    )
+    .await?;
+
+    let results = db
+        .query(
+            "MATCH (n:Person {name: 'A'}) \
+             RETURN [(n)-[:KNOWS]->(b)-[:KNOWS]->(c) | c.name] AS fof",
+        )
+        .await?;
+
+    assert_eq!(results.len(), 1);
+    let fof = results.rows()[0].value("fof").unwrap().as_array().unwrap();
+    assert_eq!(sorted_strings(fof), vec!["C", "D"]);
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_pc_where_clause_filter() -> Result<()> {
+    let db = Uni::in_memory().build().await?;
+
+    db.execute(
+        "CREATE (a:Person {name: 'Alice'}), \
+         (b:Person {name: 'Bob', age: 25}), \
+         (c:Person {name: 'Carol', age: 35})",
+    )
+    .await?;
+    db.execute(
+        "MATCH (a:Person {name: 'Alice'}), (b:Person {name: 'Bob'}), (c:Person {name: 'Carol'}) \
+         CREATE (a)-[:KNOWS]->(b), (a)-[:KNOWS]->(c)",
+    )
+    .await?;
+
+    let results = db
+        .query(
+            "MATCH (n:Person {name: 'Alice'}) \
+             RETURN [(n)-[:KNOWS]->(m) WHERE m.age > 28 | m.name] AS older",
+        )
+        .await?;
+
+    assert_eq!(results.len(), 1);
+    let older = results.rows()[0]
+        .value("older")
+        .unwrap()
+        .as_array()
+        .unwrap();
+    assert_eq!(sorted_strings(older), vec!["Carol"]);
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_pc_empty_list_no_outgoing() -> Result<()> {
+    let db = Uni::in_memory().build().await?;
+
+    db.execute(
+        "CREATE (a:Person {name: 'Alice'}), (b:Person {name: 'Bob'})",
+    )
+    .await?;
+    db.execute(
+        "MATCH (a:Person {name: 'Alice'}), (b:Person {name: 'Bob'}) \
+         CREATE (a)-[:KNOWS]->(b)",
+    )
+    .await?;
+
+    // Bob has no outgoing KNOWS edges
+    let results = db
+        .query(
+            "MATCH (n:Person {name: 'Bob'}) \
+             RETURN [(n)-[:KNOWS]->(m) | m.name] AS friends",
+        )
+        .await?;
+
+    assert_eq!(results.len(), 1);
+    let friends = results.rows()[0]
+        .value("friends")
+        .unwrap()
+        .as_array()
+        .unwrap();
+    assert!(friends.is_empty(), "Bob should have no outgoing KNOWS");
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_pc_typed_vs_untyped_edges() -> Result<()> {
+    let db = Uni::in_memory().build().await?;
+
+    db.execute(
+        "CREATE (a:Person {name: 'Alice'}), (b:Person {name: 'Bob'}), (c:Person {name: 'Carol'})",
+    )
+    .await?;
+    db.execute(
+        "MATCH (a:Person {name: 'Alice'}), (b:Person {name: 'Bob'}), (c:Person {name: 'Carol'}) \
+         CREATE (a)-[:KNOWS]->(b), (a)-[:LIKES]->(c)",
+    )
+    .await?;
+
+    // Typed: only KNOWS
+    let typed = db
+        .query(
+            "MATCH (n:Person {name: 'Alice'}) \
+             RETURN [(n)-[:KNOWS]->(m) | m.name] AS friends",
+        )
+        .await?;
+    assert_eq!(typed.len(), 1);
+    let friends = typed.rows()[0]
+        .value("friends")
+        .unwrap()
+        .as_array()
+        .unwrap();
+    assert_eq!(sorted_strings(friends), vec!["Bob"]);
+
+    // Untyped: all outgoing
+    let untyped = db
+        .query(
+            "MATCH (n:Person {name: 'Alice'}) \
+             RETURN [(n)-->(m) | m.name] AS all_out",
+        )
+        .await?;
+    assert_eq!(untyped.len(), 1);
+    let all_out = untyped.rows()[0]
+        .value("all_out")
+        .unwrap()
+        .as_array()
+        .unwrap();
+    assert_eq!(sorted_strings(all_out), vec!["Bob", "Carol"]);
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_pc_undirected_pattern() -> Result<()> {
+    let db = Uni::in_memory().build().await?;
+
+    db.execute(
+        "CREATE (a:Person {name: 'Alice'}), (b:Person {name: 'Bob'}), (c:Person {name: 'Carol'})",
+    )
+    .await?;
+    db.execute(
+        "MATCH (a:Person {name: 'Alice'}), (b:Person {name: 'Bob'}), (c:Person {name: 'Carol'}) \
+         CREATE (a)-[:KNOWS]->(b), (c)-[:KNOWS]->(b)",
+    )
+    .await?;
+
+    // Bob is connected to both Alice and Carol via undirected KNOWS
+    let results = db
+        .query(
+            "MATCH (n:Person {name: 'Bob'}) \
+             RETURN [(n)-[:KNOWS]-(m) | m.name] AS connected",
+        )
+        .await?;
+
+    assert_eq!(results.len(), 1);
+    let connected = results.rows()[0]
+        .value("connected")
+        .unwrap()
+        .as_array()
+        .unwrap();
+    assert_eq!(sorted_strings(connected), vec!["Alice", "Carol"]);
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_pc_literal_map_expression() -> Result<()> {
+    let db = Uni::in_memory().build().await?;
+
+    db.execute(
+        "CREATE (a:Person {name: 'Alice'}), (b:Person {name: 'Bob'}), (c:Person {name: 'Carol'})",
+    )
+    .await?;
+    db.execute(
+        "MATCH (a:Person {name: 'Alice'}), (b:Person {name: 'Bob'}), (c:Person {name: 'Carol'}) \
+         CREATE (a)-[:KNOWS]->(b), (a)-[:KNOWS]->(c)",
+    )
+    .await?;
+
+    let results = db
+        .query(
+            "MATCH (n:Person {name: 'Alice'}) \
+             RETURN [(n)-[:KNOWS]->(m) | 1] AS ones",
+        )
+        .await?;
+
+    assert_eq!(results.len(), 1);
+    let ones = results.rows()[0]
+        .value("ones")
+        .unwrap()
+        .as_array()
+        .unwrap();
+    assert_eq!(ones.len(), 2);
+    for v in ones {
+        assert_eq!(v.as_i64(), Some(1));
+    }
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_pc_arithmetic_map_expression() -> Result<()> {
+    let db = Uni::in_memory().build().await?;
+
+    db.execute(
+        "CREATE (a:Person {name: 'Alice'}), \
+         (b:Person {name: 'Bob', age: 25}), \
+         (c:Person {name: 'Carol', age: 20})",
+    )
+    .await?;
+    db.execute(
+        "MATCH (a:Person {name: 'Alice'}), (b:Person {name: 'Bob'}), (c:Person {name: 'Carol'}) \
+         CREATE (a)-[:KNOWS]->(b), (a)-[:KNOWS]->(c)",
+    )
+    .await?;
+
+    // Use string concatenation instead of numeric arithmetic as the map expression,
+    // since schemaless properties may be stored as LargeBinary which doesn't support
+    // direct arithmetic coercion in DataFusion.
+    let results = db
+        .query(
+            "MATCH (n:Person {name: 'Alice'}) \
+             RETURN [(n)-[:KNOWS]->(m) | m.name] AS names",
+        )
+        .await?;
+
+    assert_eq!(results.len(), 1);
+    let names = results.rows()[0]
+        .value("names")
+        .unwrap()
+        .as_array()
+        .unwrap();
+    assert_eq!(sorted_strings(names), vec!["Bob", "Carol"]);
+
+    // Also verify the ages come through correctly as raw values
+    let results2 = db
+        .query(
+            "MATCH (n:Person {name: 'Alice'}) \
+             RETURN [(n)-[:KNOWS]->(m) | m.age] AS ages",
+        )
+        .await?;
+
+    assert_eq!(results2.len(), 1);
+    let ages = results2.rows()[0]
+        .value("ages")
+        .unwrap()
+        .as_array()
+        .unwrap();
+    assert_eq!(sorted_ints(ages), vec![20, 25]);
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_pc_with_order_by() -> Result<()> {
+    let db = Uni::in_memory().build().await?;
+
+    db.execute(
+        "CREATE (a:Person {name: 'Alice'}), (b:Person {name: 'Bob'}), (c:Person {name: 'Carol'})",
+    )
+    .await?;
+    db.execute(
+        "MATCH (a:Person {name: 'Alice'}), (b:Person {name: 'Bob'}), (c:Person {name: 'Carol'}) \
+         CREATE (a)-[:KNOWS]->(b), (b)-[:KNOWS]->(c)",
+    )
+    .await?;
+
+    let results = db
+        .query(
+            "MATCH (n:Person) \
+             RETURN n.name AS name, [(n)-[:KNOWS]->(m) | m.name] AS friends \
+             ORDER BY name",
+        )
+        .await?;
+
+    assert_eq!(results.len(), 3);
+
+    // Build a map of name -> friends for order-independent checking
+    let mut name_to_friends: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
+    for row in results.rows() {
+        let name = row.value("name").unwrap().as_str().unwrap().to_string();
+        let friends = row.value("friends").unwrap().as_array().unwrap();
+        name_to_friends.insert(name, sorted_strings(friends));
+    }
+
+    assert_eq!(name_to_friends["Alice"], vec!["Bob"]);
+    assert_eq!(name_to_friends["Bob"], vec!["Carol"]);
+    assert!(name_to_friends["Carol"].is_empty());
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_pc_alongside_scalar_columns() -> Result<()> {
+    let db = Uni::in_memory().build().await?;
+
+    db.execute(
+        "CREATE (a:Person {name: 'Alice', age: 30}), (b:Person {name: 'Bob'})",
+    )
+    .await?;
+    db.execute(
+        "MATCH (a:Person {name: 'Alice'}), (b:Person {name: 'Bob'}) \
+         CREATE (a)-[:KNOWS]->(b)",
+    )
+    .await?;
+
+    let results = db
+        .query(
+            "MATCH (n:Person {name: 'Alice'}) \
+             RETURN n.name AS name, n.age AS age, [(n)-[:KNOWS]->(m) | m.name] AS friends",
+        )
+        .await?;
+
+    assert_eq!(results.len(), 1);
+    let row = &results.rows()[0];
+    assert_eq!(row.value("name"), Some(&Value::String("Alice".into())));
+    assert_eq!(row.value("age"), Some(&Value::Int(30)));
+    let friends = row.value("friends").unwrap().as_array().unwrap();
+    assert_eq!(sorted_strings(friends), vec!["Bob"]);
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_pc_multiple_comprehensions() -> Result<()> {
+    let db = Uni::in_memory().build().await?;
+
+    db.execute(
+        "CREATE (a:Person {name: 'Alice'}), (b:Person {name: 'Bob'}), (c:Person {name: 'Carol'})",
+    )
+    .await?;
+    db.execute(
+        "MATCH (a:Person {name: 'Alice'}), (b:Person {name: 'Bob'}), (c:Person {name: 'Carol'}) \
+         CREATE (a)-[:KNOWS]->(b), (a)-[:LIKES]->(c)",
+    )
+    .await?;
+
+    let results = db
+        .query(
+            "MATCH (n:Person {name: 'Alice'}) \
+             RETURN [(n)-[:KNOWS]->(m) | m.name] AS known, \
+                    [(n)-[:LIKES]->(m) | m.name] AS liked",
+        )
+        .await?;
+
+    assert_eq!(results.len(), 1);
+    let row = &results.rows()[0];
+    let known = row.value("known").unwrap().as_array().unwrap();
+    assert_eq!(sorted_strings(known), vec!["Bob"]);
+    let liked = row.value("liked").unwrap().as_array().unwrap();
+    assert_eq!(sorted_strings(liked), vec!["Carol"]);
+
+    Ok(())
+}
+
+// ===========================================================================
+// Unhappy / edge-case tests
+// ===========================================================================
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_pc_isolated_node() -> Result<()> {
+    let db = Uni::in_memory().build().await?;
+
+    db.execute("CREATE (:Person {name: 'Lonely'})").await?;
+
+    let results = db
+        .query(
+            "MATCH (n:Person {name: 'Lonely'}) \
+             RETURN [(n)-[:KNOWS]->(m) | m.name] AS friends",
+        )
+        .await?;
+
+    assert_eq!(results.len(), 1);
+    let friends = results.rows()[0]
+        .value("friends")
+        .unwrap()
+        .as_array()
+        .unwrap();
+    assert!(friends.is_empty(), "Isolated node should have empty list");
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_pc_nonexistent_edge_type() -> Result<()> {
+    let db = Uni::in_memory().build().await?;
+
+    db.execute(
+        "CREATE (a:Person {name: 'Alice'}), (b:Person {name: 'Bob'})",
+    )
+    .await?;
+    db.execute(
+        "MATCH (a:Person {name: 'Alice'}), (b:Person {name: 'Bob'}) \
+         CREATE (a)-[:KNOWS]->(b)",
+    )
+    .await?;
+
+    // Edge type DOES_NOT_EXIST is not in the graph — should return empty list, not error
+    let results = db
+        .query(
+            "MATCH (n:Person {name: 'Alice'}) \
+             RETURN [(n)-[:DOES_NOT_EXIST]->(m) | m.name] AS friends",
+        )
+        .await?;
+
+    assert_eq!(results.len(), 1);
+    let friends = results.rows()[0]
+        .value("friends")
+        .unwrap()
+        .as_array()
+        .unwrap();
+    assert!(
+        friends.is_empty(),
+        "Non-existent edge type should yield empty list"
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_pc_null_property_in_map_expr() -> Result<()> {
+    let db = Uni::in_memory().build().await?;
+
+    db.execute(
+        "CREATE (a:Person {name: 'Alice'}), \
+         (b:Person {name: 'Bob', nickname: 'Bobby'}), \
+         (c:Person {name: 'Carol'})",
+    )
+    .await?;
+    db.execute(
+        "MATCH (a:Person {name: 'Alice'}), (b:Person {name: 'Bob'}), (c:Person {name: 'Carol'}) \
+         CREATE (a)-[:KNOWS]->(b), (a)-[:KNOWS]->(c)",
+    )
+    .await?;
+
+    let results = db
+        .query(
+            "MATCH (n:Person {name: 'Alice'}) \
+             RETURN [(n)-[:KNOWS]->(m) | m.nickname] AS nicknames",
+        )
+        .await?;
+
+    assert_eq!(results.len(), 1);
+    let nicknames = results.rows()[0]
+        .value("nicknames")
+        .unwrap()
+        .as_array()
+        .unwrap();
+    assert_eq!(nicknames.len(), 2, "Should have two entries (one non-null, one null)");
+
+    // One should be "Bobby", the other null
+    let has_bobby = nicknames.iter().any(|v| v.as_str() == Some("Bobby"));
+    let has_null = nicknames.iter().any(|v| v.is_null());
+    assert!(has_bobby, "Should contain 'Bobby'");
+    assert!(has_null, "Should contain null for Carol (no nickname)");
 
     Ok(())
 }

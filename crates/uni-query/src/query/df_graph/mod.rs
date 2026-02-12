@@ -36,6 +36,7 @@
 //! - L0 buffers for uncommitted edge visibility
 //! - Property manager for lazy property loading
 
+pub mod apply;
 pub mod bind_fixed_path;
 pub mod bind_zero_length_path;
 pub mod common;
@@ -65,6 +66,7 @@ use uni_store::storage::adjacency_manager::AdjacencyManager;
 use uni_store::storage::direction::Direction;
 use uni_store::storage::manager::StorageManager;
 
+pub use apply::GraphApplyExec;
 pub use ext_id_lookup::GraphExtIdLookupExec;
 pub use optional_filter::OptionalFilterExec;
 pub use procedure_call::GraphProcedureCallExec;

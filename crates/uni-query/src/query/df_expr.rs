@@ -158,6 +158,15 @@ pub fn cypher_expr_to_df(expr: &Expr, context: Option<&TranslationContext>) -> R
 
                 // Standard property access: "{variable}.{property}" column reference.
                 let col_name = format!("{}.{}", var_name, prop);
+
+                // Check if this property is available as a correlated parameter
+                // (e.g., in CALL subqueries where outer columns are injected as params).
+                if let Some(ctx) = context
+                    && let Some(value) = ctx.parameters.get(&col_name)
+                {
+                    return value_to_scalar(value).map(lit);
+                }
+
                 Ok(DfExpr::Column(Column::from_name(col_name)))
             } else {
                 // Base is a complex expression (e.g., function call result,

@@ -17,7 +17,7 @@
 //! Falls back to single-direction BFS when bidirectional is not applicable.
 
 use crate::query::df_graph::GraphExecutionContext;
-use crate::query::df_graph::common::compute_plan_properties;
+use crate::query::df_graph::common::{column_as_vid_array, compute_plan_properties};
 use arrow_array::builder::{
     LargeBinaryBuilder, ListBuilder, StringBuilder, StructBuilder, UInt64Builder,
 };
@@ -360,23 +360,11 @@ impl GraphShortestPathStream {
             ))
         })?;
 
-        let source_vids = source_col
-            .as_any()
-            .downcast_ref::<UInt64Array>()
-            .ok_or_else(|| {
-                datafusion::error::DataFusionError::Execution(
-                    "Source column is not UInt64".to_string(),
-                )
-            })?;
+        let source_vid_cow = column_as_vid_array(source_col.as_ref())?;
+        let source_vids: &UInt64Array = &source_vid_cow;
 
-        let target_vids = target_col
-            .as_any()
-            .downcast_ref::<UInt64Array>()
-            .ok_or_else(|| {
-                datafusion::error::DataFusionError::Execution(
-                    "Target column is not UInt64".to_string(),
-                )
-            })?;
+        let target_vid_cow = column_as_vid_array(target_col.as_ref())?;
+        let target_vids: &UInt64Array = &target_vid_cow;
 
         // Compute shortest paths
         let mut paths: Vec<Option<Vec<Vid>>> = Vec::with_capacity(batch.num_rows());

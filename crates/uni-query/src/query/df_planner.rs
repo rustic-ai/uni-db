@@ -41,9 +41,9 @@ use crate::query::df_graph::traverse::{
     GraphVariableLengthTraverseExec, GraphVariableLengthTraverseMainExec,
 };
 use crate::query::df_graph::{
-    GraphExecutionContext, GraphExtIdLookupExec, GraphProcedureCallExec, GraphScanExec,
-    GraphShortestPathExec, GraphTraverseExec, GraphTraverseMainExec, GraphUnwindExec,
-    GraphVectorKnnExec, L0Context, OptionalFilterExec,
+    GraphApplyExec, GraphExecutionContext, GraphExtIdLookupExec, GraphProcedureCallExec,
+    GraphScanExec, GraphShortestPathExec, GraphTraverseExec, GraphTraverseMainExec,
+    GraphUnwindExec, GraphVectorKnnExec, L0Context, OptionalFilterExec,
 };
 use crate::query::planner::{
     LogicalPlan, aggregate_column_name, classify_window_expressions, collect_properties_from_plan,
@@ -704,9 +704,11 @@ impl HybridPhysicalPlanner {
                 ))
             }
 
-            LogicalPlan::Apply { .. } => Err(anyhow!(
-                "Apply (correlated subquery) not yet supported in DataFusion engine"
-            )),
+            LogicalPlan::Apply {
+                input,
+                subquery,
+                input_filter,
+            } => self.plan_apply(input, subquery, input_filter.as_ref(), all_properties),
 
             LogicalPlan::Unwind {
                 input,
@@ -760,9 +762,9 @@ impl HybridPhysicalPlanner {
                 yield_items,
             } => self.plan_procedure_call(procedure_name, arguments, yield_items, all_properties),
 
-            LogicalPlan::SubqueryCall { .. } => Err(anyhow!(
-                "CALL subqueries not yet supported in DataFusion engine"
-            )),
+            LogicalPlan::SubqueryCall { input, subquery } => {
+                self.plan_apply(input, subquery, None, all_properties)
+            }
 
             LogicalPlan::LoadCsv { .. } => {
                 Err(anyhow!("LOAD CSV not yet supported in DataFusion engine"))
@@ -988,6 +990,46 @@ impl HybridPhysicalPlanner {
             self._storage.clone(),
             self.schema.clone(),
             self.params.clone(),
+        )))
+    }
+
+    /// Plan an Apply (correlated subquery) or SubqueryCall.
+    fn plan_apply(
+        &self,
+        input: &LogicalPlan,
+        subquery: &LogicalPlan,
+        input_filter: Option<&Expr>,
+        all_properties: &HashMap<String, HashSet<String>>,
+    ) -> Result<Arc<dyn ExecutionPlan>> {
+        use crate::query::df_graph::common::infer_logical_plan_schema;
+
+        // 1. Plan input physically
+        let input_exec = self.plan_internal(input, all_properties)?;
+        let input_schema = input_exec.schema();
+
+        // 2. Infer subquery output schema from logical plan + UniSchema metadata
+        let sub_schema = infer_logical_plan_schema(subquery, &self.schema);
+
+        // 3. Merge schemas: input fields + subquery fields (skip duplicates by name)
+        let mut fields: Vec<Arc<arrow_schema::Field>> = input_schema.fields().iter().cloned().collect();
+        let input_field_names: HashSet<&str> = input_schema.fields().iter().map(|f| f.name().as_str()).collect();
+        for field in sub_schema.fields() {
+            if !input_field_names.contains(field.name().as_str()) {
+                fields.push(field.clone());
+            }
+        }
+        let output_schema: SchemaRef = Arc::new(Schema::new(fields));
+
+        Ok(Arc::new(GraphApplyExec::new(
+            input_exec,
+            subquery.clone(),
+            input_filter.cloned(),
+            self.graph_ctx.clone(),
+            self.session_ctx.clone(),
+            self._storage.clone(),
+            self.schema.clone(),
+            self.params.clone(),
+            output_schema,
         )))
     }
 
@@ -1930,7 +1972,13 @@ impl HybridPhysicalPlanner {
                     &state,
                     Some(&ctx),
                 )
-                .with_graph_ctx(self.graph_ctx.clone(), self.schema.clone());
+                .with_subquery_ctx(
+                    self.graph_ctx.clone(),
+                    self.schema.clone(),
+                    self.session_ctx.clone(),
+                    self._storage.clone(),
+                    self.params.clone(),
+                );
                 let physical_predicate = compiler.compile(predicate, &schema)?;
 
                 if !optional_variables.is_empty() {
@@ -2036,7 +2084,13 @@ impl HybridPhysicalPlanner {
             &state,
             Some(&ctx),
         )
-        .with_graph_ctx(self.graph_ctx.clone(), self.schema.clone());
+        .with_subquery_ctx(
+            self.graph_ctx.clone(),
+            self.schema.clone(),
+            self.session_ctx.clone(),
+            self._storage.clone(),
+            self.params.clone(),
+        );
         let physical_predicate = compiler.compile(predicate, &schema)?;
 
         // For OPTIONAL MATCH: use OptionalFilterExec for proper NULL row preservation.
@@ -2269,7 +2323,13 @@ impl HybridPhysicalPlanner {
                 &state,
                 ctx.as_ref(),
             )
-            .with_graph_ctx(self.graph_ctx.clone(), self.schema.clone());
+            .with_subquery_ctx(
+                self.graph_ctx.clone(),
+                self.schema.clone(),
+                self.session_ctx.clone(),
+                self._storage.clone(),
+                self.params.clone(),
+            );
             let physical_expr = compiler.compile(expr, &schema)?;
 
             let name = alias.clone().unwrap_or_else(|| expr.to_string_repr());
@@ -2303,7 +2363,13 @@ impl HybridPhysicalPlanner {
             &state,
             Some(&ctx),
         )
-        .with_graph_ctx(self.graph_ctx.clone(), self.schema.clone());
+        .with_subquery_ctx(
+            self.graph_ctx.clone(),
+            self.schema.clone(),
+            self.session_ctx.clone(),
+            self._storage.clone(),
+            self.params.clone(),
+        );
         for expr in group_by {
             let physical_expr = compiler.compile(expr, &schema)?;
             let name = expr.to_string_repr();

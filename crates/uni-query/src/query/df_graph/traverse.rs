@@ -32,7 +32,7 @@
 
 use crate::query::df_graph::GraphExecutionContext;
 use crate::query::df_graph::common::{
-    build_edge_list_field, build_path_struct_field, compute_plan_properties,
+    build_edge_list_field, build_path_struct_field, column_as_vid_array, compute_plan_properties,
 };
 use crate::query::df_graph::scan::{build_property_column_static, resolve_property_type};
 use arrow::compute::take;
@@ -509,23 +509,18 @@ impl GraphTraverseStream {
             ))
         })?;
 
-        let source_vids = source_col
-            .as_any()
-            .downcast_ref::<UInt64Array>()
-            .ok_or_else(|| {
-                datafusion::error::DataFusionError::Execution(
-                    "Source column is not UInt64".to_string(),
-                )
-            })?;
+        let source_vid_cow = column_as_vid_array(source_col.as_ref())?;
+        let source_vids: &UInt64Array = &source_vid_cow;
 
         // If bound_target_column is set, get the expected target VIDs for each row.
         // This is used for cycle patterns like n-->k<--n where the target must match.
-        let bound_target_vids: Option<&UInt64Array> =
-            self.bound_target_column.as_ref().and_then(|col| {
-                batch
-                    .column_by_name(col)
-                    .and_then(|c| c.as_any().downcast_ref::<UInt64Array>())
-            });
+        let bound_target_cow = self
+            .bound_target_column
+            .as_ref()
+            .and_then(|col| batch.column_by_name(col))
+            .map(|c| column_as_vid_array(c.as_ref()))
+            .transpose()?;
+        let bound_target_vids: Option<&UInt64Array> = bound_target_cow.as_deref();
 
         // Collect edge ID arrays from previous hops for relationship uniqueness filtering.
         let used_edge_arrays: Vec<&UInt64Array> = self
@@ -1533,14 +1528,8 @@ impl GraphTraverseMainStream {
             ))
         })?;
 
-        let source_vids = source_col
-            .as_any()
-            .downcast_ref::<UInt64Array>()
-            .ok_or_else(|| {
-                datafusion::error::DataFusionError::Execution(
-                    "Source column is not UInt64".to_string(),
-                )
-            })?;
+        let source_vid_cow = column_as_vid_array(source_col.as_ref())?;
+        let source_vids: &UInt64Array = &source_vid_cow;
 
         // Build expansions: (input_row_idx, target_vid, eid, edge_type, edge_props)
         type Expansion = (usize, Vid, Eid, String, uni_common::Properties);
@@ -2451,14 +2440,8 @@ impl GraphVariableLengthTraverseStream {
                 ))
             })?;
 
-        let source_vids = source_col
-            .as_any()
-            .downcast_ref::<UInt64Array>()
-            .ok_or_else(|| {
-                datafusion::error::DataFusionError::Execution(
-                    "Source column is not UInt64".to_string(),
-                )
-            })?;
+        let source_vid_cow = column_as_vid_array(source_col.as_ref())?;
+        let source_vids: &UInt64Array = &source_vid_cow;
 
         // Collect all BFS results
         let mut expansions: Vec<VarLengthExpansion> = Vec::new();
@@ -3197,14 +3180,8 @@ impl GraphVariableLengthTraverseMainStream {
             ))
         })?;
 
-        let source_vids = source_col
-            .as_any()
-            .downcast_ref::<UInt64Array>()
-            .ok_or_else(|| {
-                datafusion::error::DataFusionError::Execution(
-                    "Source column is not UInt64".to_string(),
-                )
-            })?;
+        let source_vid_cow = column_as_vid_array(source_col.as_ref())?;
+        let source_vids: &UInt64Array = &source_vid_cow;
 
         // Collect BFS results: (original_row_idx, target_vid, hop_count, node_path, edge_path)
         let mut expansions: Vec<ExpansionRecord> = Vec::new();

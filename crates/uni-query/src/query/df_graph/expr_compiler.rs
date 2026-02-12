@@ -3,22 +3,30 @@
 
 use crate::query::df_expr::{TranslationContext, cypher_expr_to_df};
 use crate::query::df_graph::GraphExecutionContext;
+use crate::query::df_graph::common::{execute_subplan, extract_row_params};
 use crate::query::df_graph::comprehension::ListComprehensionExecExpr;
 use crate::query::df_graph::pattern_comprehension::{
     PatternComprehensionExecExpr, analyze_pattern, build_inner_schema, collect_inner_properties,
 };
 use crate::query::df_graph::quantifier::{QuantifierExecExpr, QuantifierType};
 use crate::query::df_graph::reduce::ReduceExecExpr;
+use crate::query::planner::QueryPlanner;
 use anyhow::{Result, anyhow};
-use arrow_schema::{Field, Schema};
+use arrow_array::builder::BooleanBuilder;
+use arrow_schema::{DataType, Field, Schema};
 use datafusion::execution::context::SessionState;
 use datafusion::logical_expr::expr::Alias;
 use datafusion::physical_expr::expressions::binary;
 use datafusion::physical_plan::PhysicalExpr;
 use datafusion::physical_planner::PhysicalPlanner;
+use datafusion::prelude::SessionContext;
+use parking_lot::RwLock;
+use std::collections::HashMap;
 use std::sync::Arc;
+use uni_common::Value;
 use uni_common::core::schema::Schema as UniSchema;
-use uni_cypher::ast::{BinaryOp, CypherLiteral, Expr, UnaryOp};
+use uni_cypher::ast::{BinaryOp, CypherLiteral, Expr, Query, UnaryOp};
+use uni_store::storage::manager::StorageManager;
 
 /// Compiler for converting Cypher expressions directly to DataFusion Physical Expressions.
 pub struct CypherPhysicalExprCompiler<'a> {
@@ -26,6 +34,12 @@ pub struct CypherPhysicalExprCompiler<'a> {
     translation_ctx: Option<&'a TranslationContext>,
     graph_ctx: Option<Arc<GraphExecutionContext>>,
     uni_schema: Option<Arc<UniSchema>>,
+    /// Session context for EXISTS subquery execution.
+    session_ctx: Option<Arc<RwLock<SessionContext>>>,
+    /// Storage manager for EXISTS subquery execution.
+    storage: Option<Arc<StorageManager>>,
+    /// Query parameters for EXISTS subquery execution.
+    params: HashMap<String, Value>,
 }
 
 impl<'a> CypherPhysicalExprCompiler<'a> {
@@ -35,6 +49,9 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
             translation_ctx,
             graph_ctx: None,
             uni_schema: None,
+            session_ctx: None,
+            storage: None,
+            params: HashMap::new(),
         }
     }
 
@@ -46,6 +63,23 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
     ) -> Self {
         self.graph_ctx = Some(graph_ctx);
         self.uni_schema = Some(uni_schema);
+        self
+    }
+
+    /// Attach full subquery context for EXISTS support.
+    pub fn with_subquery_ctx(
+        mut self,
+        graph_ctx: Arc<GraphExecutionContext>,
+        uni_schema: Arc<UniSchema>,
+        session_ctx: Arc<RwLock<SessionContext>>,
+        storage: Arc<StorageManager>,
+        params: HashMap<String, Value>,
+    ) -> Self {
+        self.graph_ctx = Some(graph_ctx);
+        self.uni_schema = Some(uni_schema);
+        self.session_ctx = Some(session_ctx);
+        self.storage = Some(storage);
+        self.params = params;
         self
     }
 
@@ -248,6 +282,39 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
                 input_schema,
             ),
 
+            // EXISTS subquery: plan + execute per row, return boolean
+            Expr::Exists(query) => {
+                let graph_ctx = self
+                    .graph_ctx
+                    .as_ref()
+                    .ok_or_else(|| anyhow!("EXISTS requires GraphExecutionContext"))?
+                    .clone();
+                let uni_schema = self
+                    .uni_schema
+                    .as_ref()
+                    .ok_or_else(|| anyhow!("EXISTS requires UniSchema"))?
+                    .clone();
+                let session_ctx = self
+                    .session_ctx
+                    .as_ref()
+                    .ok_or_else(|| anyhow!("EXISTS requires SessionContext"))?
+                    .clone();
+                let storage = self
+                    .storage
+                    .as_ref()
+                    .ok_or_else(|| anyhow!("EXISTS requires StorageManager"))?
+                    .clone();
+
+                Ok(Arc::new(ExistsExecExpr::new(
+                    *query.clone(),
+                    graph_ctx,
+                    session_ctx,
+                    storage,
+                    uni_schema,
+                    self.params.clone(),
+                )))
+            }
+
             // Default to standard compilation for leaf nodes or non-custom trees
             _ => self.compile_standard(expr, input_schema),
         }
@@ -284,6 +351,7 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
             Expr::In { expr: l, list: r } => {
                 Self::contains_custom_expr(l) || Self::contains_custom_expr(r)
             }
+            Expr::Exists(_) => true,
             _ => false,
         }
     }
@@ -966,6 +1034,199 @@ impl PhysicalExpr for StructFieldAccessExpr {
             self.field_idx,
             self.output_type.clone(),
         )))
+    }
+
+    fn fmt_sql(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// EXISTS subquery physical expression
+// ---------------------------------------------------------------------------
+
+/// Physical expression that evaluates an EXISTS subquery per row.
+///
+/// For each input row, plans and executes the subquery with the row's columns
+/// injected as parameters. Returns `true` if the subquery produces any rows.
+///
+/// NOT EXISTS is handled by the caller wrapping this in a NOT expression.
+/// Nested EXISTS works because `execute_subplan` creates a full planner that
+/// handles nested EXISTS recursively.
+struct ExistsExecExpr {
+    query: Query,
+    graph_ctx: Arc<GraphExecutionContext>,
+    session_ctx: Arc<RwLock<SessionContext>>,
+    storage: Arc<StorageManager>,
+    uni_schema: Arc<UniSchema>,
+    params: HashMap<String, Value>,
+}
+
+impl std::fmt::Debug for ExistsExecExpr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExistsExecExpr").finish_non_exhaustive()
+    }
+}
+
+impl ExistsExecExpr {
+    fn new(
+        query: Query,
+        graph_ctx: Arc<GraphExecutionContext>,
+        session_ctx: Arc<RwLock<SessionContext>>,
+        storage: Arc<StorageManager>,
+        uni_schema: Arc<UniSchema>,
+        params: HashMap<String, Value>,
+    ) -> Self {
+        Self {
+            query,
+            graph_ctx,
+            session_ctx,
+            storage,
+            uni_schema,
+            params,
+        }
+    }
+}
+
+impl std::fmt::Display for ExistsExecExpr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "EXISTS(<subquery>)")
+    }
+}
+
+impl PartialEq<dyn PhysicalExpr> for ExistsExecExpr {
+    fn eq(&self, _other: &dyn PhysicalExpr) -> bool {
+        false
+    }
+}
+
+impl PartialEq for ExistsExecExpr {
+    fn eq(&self, _other: &Self) -> bool {
+        false
+    }
+}
+
+impl Eq for ExistsExecExpr {}
+
+impl std::hash::Hash for ExistsExecExpr {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        "ExistsExecExpr".hash(state);
+    }
+}
+
+impl DisplayAs for ExistsExecExpr {
+    fn fmt_as(&self, _t: DisplayFormatType, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "{}", self)
+    }
+}
+
+impl PhysicalExpr for ExistsExecExpr {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn data_type(
+        &self,
+        _input_schema: &Schema,
+    ) -> datafusion::error::Result<arrow_schema::DataType> {
+        Ok(DataType::Boolean)
+    }
+
+    fn nullable(&self, _input_schema: &Schema) -> datafusion::error::Result<bool> {
+        Ok(true)
+    }
+
+    fn evaluate(
+        &self,
+        batch: &arrow_array::RecordBatch,
+    ) -> datafusion::error::Result<datafusion::physical_plan::ColumnarValue> {
+        let num_rows = batch.num_rows();
+        let mut builder = BooleanBuilder::with_capacity(num_rows);
+
+        for row_idx in 0..num_rows {
+            let row_params = extract_row_params(batch, row_idx);
+            let mut sub_params = self.params.clone();
+            sub_params.extend(row_params.clone());
+
+            // Collect variable names in scope for the subquery planner
+            let vars_in_scope: Vec<String> = row_params.keys().cloned().collect();
+
+            // Plan the subquery with correlated variables in scope
+            let planner = QueryPlanner::new(self.uni_schema.clone());
+            let logical_plan = match planner.plan_with_scope(self.query.clone(), vars_in_scope) {
+                Ok(plan) => plan,
+                Err(_) => {
+                    builder.append_value(false);
+                    continue;
+                }
+            };
+
+            // Execute the subquery synchronously (we're inside a sync evaluate call).
+            // Spawn the async work on a dedicated thread with its own runtime to
+            // avoid conflicts with both single-threaded and multi-threaded runtimes.
+            let graph_ctx = self.graph_ctx.clone();
+            let session_ctx = self.session_ctx.clone();
+            let storage = self.storage.clone();
+            let uni_schema = self.uni_schema.clone();
+
+            let result = std::thread::scope(|s| {
+                s.spawn(|| {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .map_err(|e| {
+                            datafusion::error::DataFusionError::Execution(format!(
+                                "Failed to create runtime for EXISTS: {}",
+                                e
+                            ))
+                        })?;
+                    rt.block_on(execute_subplan(
+                        &logical_plan,
+                        &sub_params,
+                        &graph_ctx,
+                        &session_ctx,
+                        &storage,
+                        &uni_schema,
+                    ))
+                })
+                .join()
+                .unwrap_or_else(|_| {
+                    Err(datafusion::error::DataFusionError::Execution(
+                        "EXISTS subquery thread panicked".to_string(),
+                    ))
+                })
+            });
+
+            match result {
+                Ok(batches) => {
+                    let has_rows = batches.iter().any(|b| b.num_rows() > 0);
+                    builder.append_value(has_rows);
+                }
+                Err(_) => {
+                    builder.append_value(false);
+                }
+            }
+        }
+
+        Ok(datafusion::physical_plan::ColumnarValue::Array(Arc::new(
+            builder.finish(),
+        )))
+    }
+
+    fn children(&self) -> Vec<&Arc<dyn PhysicalExpr>> {
+        vec![]
+    }
+
+    fn with_new_children(
+        self: Arc<Self>,
+        children: Vec<Arc<dyn PhysicalExpr>>,
+    ) -> datafusion::error::Result<Arc<dyn PhysicalExpr>> {
+        if !children.is_empty() {
+            return Err(datafusion::error::DataFusionError::Plan(
+                "ExistsExecExpr has no children".to_string(),
+            ));
+        }
+        Ok(self)
     }
 
     fn fmt_sql(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
