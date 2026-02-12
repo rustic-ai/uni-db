@@ -1005,6 +1005,15 @@ fn translate_aggregate_function(
     df_args: &[DfExpr],
     distinct: bool,
 ) -> Option<Result<DfExpr>> {
+    // Helper macro: check arg count, return Some(Err) on failure
+    macro_rules! check1 {
+        ($name:expr) => {
+            if let Err(e) = require_arg(df_args, $name) {
+                return Some(Err(e));
+            }
+        };
+    }
+
     match name_upper {
         "COUNT" => {
             let expr = if df_args.is_empty() {
@@ -1015,25 +1024,25 @@ fn translate_aggregate_function(
             Some(maybe_distinct(expr, distinct, "COUNT"))
         }
         "SUM" => {
-            require_arg(df_args, "SUM").err().map(Some)?;
+            check1!("SUM");
             let expr = datafusion::functions_aggregate::sum::sum(first_arg(df_args));
             Some(maybe_distinct(expr, distinct, "SUM"))
         }
         "AVG" => {
-            require_arg(df_args, "AVG").err().map(Some)?;
+            check1!("AVG");
             let expr = datafusion::functions_aggregate::average::avg(first_arg(df_args));
             Some(maybe_distinct(expr, distinct, "AVG"))
         }
         "MIN" => {
-            require_arg(df_args, "MIN").err().map(Some)?;
+            check1!("MIN");
             Some(Ok(datafusion::functions_aggregate::min_max::min(first_arg(df_args))))
         }
         "MAX" => {
-            require_arg(df_args, "MAX").err().map(Some)?;
+            check1!("MAX");
             Some(Ok(datafusion::functions_aggregate::min_max::max(first_arg(df_args))))
         }
         "COLLECT" => {
-            require_arg(df_args, "COLLECT").err().map(Some)?;
+            check1!("COLLECT");
             Some(Ok(datafusion::functions_aggregate::array_agg::array_agg(first_arg(df_args))))
         }
         _ => None,
@@ -1043,116 +1052,82 @@ fn translate_aggregate_function(
 /// Try to translate a string function.
 /// Returns `Some(result)` if the function name matches, `None` otherwise.
 fn translate_string_function(name_upper: &str, df_args: Vec<DfExpr>) -> Option<Result<DfExpr>> {
+    // Helper macros to reduce boilerplate in argument validation
+    macro_rules! check1 {
+        ($name:expr) => {
+            if let Err(e) = require_arg(&df_args, $name) {
+                return Some(Err(e));
+            }
+        };
+    }
+    macro_rules! check_n {
+        ($n:expr, $name:expr) => {
+            if let Err(e) = require_args(&df_args, $n, $name) {
+                return Some(Err(e));
+            }
+        };
+    }
+
     match name_upper {
         "TOSTRING" => {
-            if let Err(e) = require_arg(&df_args, "toString") {
-                return Some(Err(e));
-            }
-            Some(Ok(cast_expr(
-                first_arg(&df_args),
-                datafusion::arrow::datatypes::DataType::Utf8,
-            )))
+            check1!("toString");
+            Some(Ok(cast_expr(first_arg(&df_args), datafusion::arrow::datatypes::DataType::Utf8)))
         }
         "TOINTEGER" | "TOINT" => {
-            if let Err(e) = require_arg(&df_args, "toInteger") {
-                return Some(Err(e));
-            }
+            check1!("toInteger");
             Some(Ok(dummy_udf_expr("toInteger", df_args)))
         }
         "TOFLOAT" => {
-            if let Err(e) = require_arg(&df_args, "toFloat") {
-                return Some(Err(e));
-            }
+            check1!("toFloat");
             Some(Ok(dummy_udf_expr("toFloat", df_args)))
         }
         "TOBOOLEAN" | "TOBOOL" => {
-            if let Err(e) = require_arg(&df_args, "toBoolean") {
-                return Some(Err(e));
-            }
+            check1!("toBoolean");
             Some(Ok(dummy_udf_expr("toBoolean", df_args)))
         }
         "UPPER" | "TOUPPER" => {
-            if let Err(e) = require_arg(&df_args, "upper") {
-                return Some(Err(e));
-            }
-            Some(Ok(datafusion::functions::string::expr_fn::upper(
-                first_arg(&df_args),
-            )))
+            check1!("upper");
+            Some(Ok(datafusion::functions::string::expr_fn::upper(first_arg(&df_args))))
         }
         "LOWER" | "TOLOWER" => {
-            if let Err(e) = require_arg(&df_args, "lower") {
-                return Some(Err(e));
-            }
-            Some(Ok(datafusion::functions::string::expr_fn::lower(
-                first_arg(&df_args),
-            )))
+            check1!("lower");
+            Some(Ok(datafusion::functions::string::expr_fn::lower(first_arg(&df_args))))
         }
         "SUBSTRING" => {
-            if let Err(e) = require_args(&df_args, 2, "substring") {
-                return Some(Err(e));
-            }
-            // substring(str, start, length?)
-            // Cypher is 0-based, DataFusion substr is 1-based.
-            let str_expr = df_args[0].clone();
-            let start_expr = df_args[1].clone() + lit(1i64);
-
-            let substr_expr = datafusion::functions::unicode::expr_fn::substr(str_expr, start_expr);
-
+            check_n!(2, "substring");
+            // Cypher is 0-based, DataFusion substr is 1-based
+            let substr_expr = datafusion::functions::unicode::expr_fn::substr(
+                df_args[0].clone(),
+                df_args[1].clone() + lit(1i64),
+            );
             if df_args.len() == 3 {
-                Some(Ok(datafusion::functions::unicode::expr_fn::left(
-                    substr_expr,
-                    df_args[2].clone(),
-                )))
+                Some(Ok(datafusion::functions::unicode::expr_fn::left(substr_expr, df_args[2].clone())))
             } else {
                 Some(Ok(substr_expr))
             }
         }
         "TRIM" => {
-            if let Err(e) = require_arg(&df_args, "TRIM") {
-                return Some(Err(e));
-            }
-            Some(Ok(datafusion::functions::string::expr_fn::btrim(vec![
-                first_arg(&df_args),
-            ])))
+            check1!("TRIM");
+            Some(Ok(datafusion::functions::string::expr_fn::btrim(vec![first_arg(&df_args)])))
         }
         "LTRIM" => {
-            if let Err(e) = require_arg(&df_args, "LTRIM") {
-                return Some(Err(e));
-            }
-            Some(Ok(datafusion::functions::string::expr_fn::ltrim(vec![
-                first_arg(&df_args),
-            ])))
+            check1!("LTRIM");
+            Some(Ok(datafusion::functions::string::expr_fn::ltrim(vec![first_arg(&df_args)])))
         }
         "RTRIM" => {
-            if let Err(e) = require_arg(&df_args, "RTRIM") {
-                return Some(Err(e));
-            }
-            Some(Ok(datafusion::functions::string::expr_fn::rtrim(vec![
-                first_arg(&df_args),
-            ])))
+            check1!("RTRIM");
+            Some(Ok(datafusion::functions::string::expr_fn::rtrim(vec![first_arg(&df_args)])))
         }
         "LEFT" => {
-            if let Err(e) = require_args(&df_args, 2, "left") {
-                return Some(Err(e));
-            }
-            Some(Ok(datafusion::functions::unicode::expr_fn::left(
-                df_args[0].clone(),
-                df_args[1].clone(),
-            )))
+            check_n!(2, "left");
+            Some(Ok(datafusion::functions::unicode::expr_fn::left(df_args[0].clone(), df_args[1].clone())))
         }
         "RIGHT" => {
-            if let Err(e) = require_args(&df_args, 2, "right") {
-                return Some(Err(e));
-            }
-            Some(Ok(datafusion::functions::unicode::expr_fn::right(
-                df_args[0].clone(),
-                df_args[1].clone(),
-            )))
+            check_n!(2, "right");
+            Some(Ok(datafusion::functions::unicode::expr_fn::right(df_args[0].clone(), df_args[1].clone())))
         }
         "REPLACE" => {
-            if let Err(e) = require_args(&df_args, 3, "replace") {
-                return Some(Err(e));
-            }
+            check_n!(3, "replace");
             Some(Ok(datafusion::functions::string::expr_fn::replace(
                 df_args[0].clone(),
                 df_args[1].clone(),
@@ -1160,31 +1135,19 @@ fn translate_string_function(name_upper: &str, df_args: Vec<DfExpr>) -> Option<R
             )))
         }
         "REVERSE" => {
-            if let Err(e) = require_arg(&df_args, "reverse") {
-                return Some(Err(e));
-            }
-            Some(Ok(datafusion::functions::unicode::expr_fn::reverse(
-                first_arg(&df_args),
-            )))
+            check1!("reverse");
+            Some(Ok(datafusion::functions::unicode::expr_fn::reverse(first_arg(&df_args))))
         }
         "SPLIT" => {
-            if let Err(e) = require_args(&df_args, 2, "split") {
-                return Some(Err(e));
-            }
-            // Use DataFusion's string_to_array function
-            // Third argument is optional null_value string (we don't need it for Cypher)
+            check_n!(2, "split");
             Some(Ok(datafusion::functions_nested::expr_fn::string_to_array(
                 df_args[0].clone(),
                 df_args[1].clone(),
-                lit(datafusion::common::ScalarValue::Utf8(None)), // No special null handling
+                lit(datafusion::common::ScalarValue::Utf8(None)),
             )))
         }
         "SIZE" | "LENGTH" => {
-            if let Err(e) = require_arg(&df_args, name_upper) {
-                return Some(Err(e));
-            }
-            // Use our custom _cypher_size UDF that dispatches at runtime based
-            // on whether the argument is a list, string, JSONB blob, or map.
+            check1!(name_upper);
             Some(Ok(dummy_udf_expr("_cypher_size", df_args)))
         }
         _ => None,
@@ -1194,113 +1157,68 @@ fn translate_string_function(name_upper: &str, df_args: Vec<DfExpr>) -> Option<R
 /// Try to translate a math function.
 /// Returns `Some(result)` if the function name matches, `None` otherwise.
 fn translate_math_function(name_upper: &str, df_args: &[DfExpr]) -> Option<Result<DfExpr>> {
+    use datafusion::functions::math::expr_fn;
+
+    // Helper macros for argument validation
+    macro_rules! check1 {
+        ($name:expr) => {
+            if let Err(e) = require_arg(df_args, $name) {
+                return Some(Err(e));
+            }
+        };
+    }
+    macro_rules! check_n {
+        ($n:expr, $name:expr) => {
+            if let Err(e) = require_args(df_args, $n, $name) {
+                return Some(Err(e));
+            }
+        };
+    }
+
+    // Helper: apply a unary math function that takes a single Float64 arg
+    let unary_f64 = |name: &str, f: fn(DfExpr) -> DfExpr| {
+        Some(apply_unary_math_f64(df_args, name, f))
+    };
+
     match name_upper {
         "ABS" => {
-            if let Err(e) = require_arg(df_args, "abs") {
-                return Some(Err(e));
-            }
-            Some(Ok(datafusion::functions::math::expr_fn::abs(first_arg(
-                df_args,
-            ))))
+            check1!("abs");
+            Some(Ok(expr_fn::abs(first_arg(df_args))))
         }
         "CEIL" | "CEILING" => {
-            if let Err(e) = require_arg(df_args, "ceil") {
-                return Some(Err(e));
-            }
-            Some(Ok(datafusion::functions::math::expr_fn::ceil(first_arg(
-                df_args,
-            ))))
+            check1!("ceil");
+            Some(Ok(expr_fn::ceil(first_arg(df_args))))
         }
         "FLOOR" => {
-            if let Err(e) = require_arg(df_args, "floor") {
-                return Some(Err(e));
-            }
-            Some(Ok(datafusion::functions::math::expr_fn::floor(first_arg(
-                df_args,
-            ))))
+            check1!("floor");
+            Some(Ok(expr_fn::floor(first_arg(df_args))))
         }
         "ROUND" => {
-            if let Err(e) = require_arg(df_args, "round") {
-                return Some(Err(e));
-            }
+            check1!("round");
             let args = if df_args.len() == 1 {
                 vec![first_arg(df_args)]
             } else {
                 vec![df_args[0].clone(), df_args[1].clone()]
             };
-            Some(Ok(datafusion::functions::math::expr_fn::round(args)))
+            Some(Ok(expr_fn::round(args)))
         }
-        "SIGN" => Some(apply_unary_math_f64(
-            df_args,
-            "sign",
-            datafusion::functions::math::expr_fn::signum,
-        )),
-        "SQRT" => Some(apply_unary_math_f64(
-            df_args,
-            "sqrt",
-            datafusion::functions::math::expr_fn::sqrt,
-        )),
-        "LOG" | "LN" => Some(apply_unary_math_f64(
-            df_args,
-            "log",
-            datafusion::functions::math::expr_fn::ln,
-        )),
-        "LOG10" => Some(apply_unary_math_f64(
-            df_args,
-            "log10",
-            datafusion::functions::math::expr_fn::log10,
-        )),
-        "EXP" => Some(apply_unary_math_f64(
-            df_args,
-            "exp",
-            datafusion::functions::math::expr_fn::exp,
-        )),
-        "SIN" => Some(apply_unary_math_f64(
-            df_args,
-            "sin",
-            datafusion::functions::math::expr_fn::sin,
-        )),
-        "COS" => Some(apply_unary_math_f64(
-            df_args,
-            "cos",
-            datafusion::functions::math::expr_fn::cos,
-        )),
-        "TAN" => Some(apply_unary_math_f64(
-            df_args,
-            "tan",
-            datafusion::functions::math::expr_fn::tan,
-        )),
-        "ASIN" => Some(apply_unary_math_f64(
-            df_args,
-            "asin",
-            datafusion::functions::math::expr_fn::asin,
-        )),
-        "ACOS" => Some(apply_unary_math_f64(
-            df_args,
-            "acos",
-            datafusion::functions::math::expr_fn::acos,
-        )),
-        "ATAN" => Some(apply_unary_math_f64(
-            df_args,
-            "atan",
-            datafusion::functions::math::expr_fn::atan,
-        )),
+        "SIGN" => unary_f64("sign", expr_fn::signum),
+        "SQRT" => unary_f64("sqrt", expr_fn::sqrt),
+        "LOG" | "LN" => unary_f64("log", expr_fn::ln),
+        "LOG10" => unary_f64("log10", expr_fn::log10),
+        "EXP" => unary_f64("exp", expr_fn::exp),
+        "SIN" => unary_f64("sin", expr_fn::sin),
+        "COS" => unary_f64("cos", expr_fn::cos),
+        "TAN" => unary_f64("tan", expr_fn::tan),
+        "ASIN" => unary_f64("asin", expr_fn::asin),
+        "ACOS" => unary_f64("acos", expr_fn::acos),
+        "ATAN" => unary_f64("atan", expr_fn::atan),
         "ATAN2" => {
-            if let Err(e) = require_args(df_args, 2, "atan2") {
-                return Some(Err(e));
-            }
-            Some(Ok(datafusion::functions::math::expr_fn::atan2(
-                cast_expr(
-                    df_args[0].clone(),
-                    datafusion::arrow::datatypes::DataType::Float64,
-                ),
-                cast_expr(
-                    df_args[1].clone(),
-                    datafusion::arrow::datatypes::DataType::Float64,
-                ),
-            )))
+            check_n!(2, "atan2");
+            let cast_f64 = |e: DfExpr| cast_expr(e, datafusion::arrow::datatypes::DataType::Float64);
+            Some(Ok(expr_fn::atan2(cast_f64(df_args[0].clone()), cast_f64(df_args[1].clone()))))
         }
-        "RAND" | "RANDOM" => Some(Ok(datafusion::functions::math::expr_fn::random())),
+        "RAND" | "RANDOM" => Some(Ok(expr_fn::random())),
         "E" if df_args.is_empty() => Some(Ok(lit(std::f64::consts::E))),
         "PI" if df_args.is_empty() => Some(Ok(lit(std::f64::consts::PI))),
         _ => None,
