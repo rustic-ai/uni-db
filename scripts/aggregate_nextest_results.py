@@ -1,0 +1,105 @@
+#!/usr/bin/env python3
+"""
+Aggregate per-scenario nextest result JSONs into cucumber-compatible JSON.
+
+Reads individual result files from target/cucumber/nextest/ and produces
+a timestamped results file in the same format as cucumber's JSON writer,
+so analyze_tck_json.py can consume it.
+
+Usage:
+    python scripts/aggregate_nextest_results.py
+
+Writes to: target/cucumber/results_YYYYMMDD_HHMMSS.json
+Prints the output path to stdout (last line) for use by calling scripts.
+"""
+
+import json
+import sys
+from collections import defaultdict
+from datetime import datetime
+from pathlib import Path
+
+
+def main():
+    repo_root = Path(__file__).parent.parent
+    results_dir = repo_root / "target" / "cucumber" / "nextest"
+    output_dir = repo_root / "target" / "cucumber"
+
+    if not results_dir.exists():
+        print(f"❌ No results directory found at {results_dir}", file=sys.stderr)
+        sys.exit(1)
+
+    result_files = sorted(results_dir.glob("*.json"))
+    if not result_files:
+        print(f"❌ No result files found in {results_dir}", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"📊 Aggregating {len(result_files)} scenario results...", file=sys.stderr)
+
+    # Group scenarios by feature file
+    features = defaultdict(list)
+    for path in result_files:
+        try:
+            with open(path) as f:
+                data = json.load(f)
+            features[data["feature_path"]].append(data)
+        except (json.JSONDecodeError, KeyError) as e:
+            print(f"  ⚠ Skipping {path.name}: {e}", file=sys.stderr)
+
+    # Build cucumber JSON format
+    cucumber_json = []
+    for feature_path, scenarios in sorted(features.items()):
+        fp = Path(feature_path)
+        feature_name = fp.stem
+
+        elements = []
+        for sc in sorted(scenarios, key=lambda s: s["line"]):
+            status = sc["status"]
+            step_result = {"status": status}
+            if status == "failed":
+                step_result["error_message"] = f"Scenario failed: {sc['scenario_name']}"
+
+            elements.append({
+                "type": "scenario",
+                "name": sc["scenario_name"],
+                "line": sc["line"],
+                "steps": [
+                    {
+                        "keyword": "Scenario ",
+                        "name": sc["scenario_name"],
+                        "result": step_result,
+                    }
+                ],
+            })
+
+        cucumber_json.append({
+            "name": feature_name,
+            "uri": feature_path,
+            "elements": elements,
+        })
+
+    # Write timestamped JSON
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    output_path = output_dir / f"results_{timestamp}.json"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    with open(output_path, "w") as f:
+        json.dump(cucumber_json, f, indent=2)
+
+    total = sum(len(f["elements"]) for f in cucumber_json)
+    passed = sum(
+        1
+        for f in cucumber_json
+        for el in f["elements"]
+        if el["steps"][0]["result"]["status"] == "passed"
+    )
+    failed = total - passed
+
+    print(f"✅ Wrote {output_path} ({len(cucumber_json)} features, {total} scenarios)", file=sys.stderr)
+    print(f"   Passed: {passed}, Failed: {failed}", file=sys.stderr)
+
+    # Print path to stdout for scripts to capture
+    print(output_path)
+
+
+if __name__ == "__main__":
+    main()

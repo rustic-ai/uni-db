@@ -1,21 +1,21 @@
 #!/usr/bin/env python3
 """
-Analyze Cucumber JSON test results and generate markdown reports.
+Analyze TCK results and generate a comparative markdown report.
+
+Automatically finds the previous results file in the same directory to
+show progress, regressions, and deltas between runs.
 
 Usage:
-    python scripts/analyze_tck_json.py target/cucumber/results.json
+    python scripts/analyze_tck_json.py target/cucumber/results_20260211_180000.json
 
 Output:
-    - target/cucumber/report.md (main report)
-    - target/cucumber/match-report.md (Match features)
-    - target/cucumber/where-report.md (Where features)
-    - target/cucumber/return-report.md (Return features)
+    - target/cucumber/report.md
 """
 
 import json
+import re
 import sys
 from pathlib import Path
-from collections import defaultdict
 from datetime import datetime
 
 
@@ -25,229 +25,333 @@ def load_json_results(json_path):
         return json.load(f)
 
 
-def analyze_feature(feature):
-    """Analyze a single feature and return statistics."""
-    stats = {
-        'name': feature.get('name', 'Unknown'),
-        'uri': feature.get('uri', ''),
-        'total_scenarios': 0,
-        'passed_scenarios': 0,
-        'failed_scenarios': 0,
-        'skipped_scenarios': 0,
-        'scenarios': []
-    }
-
-    for element in feature.get('elements', []):
-        if element.get('type') == 'scenario':
-            stats['total_scenarios'] += 1
-
-            scenario_info = {
-                'name': element.get('name', 'Unknown'),
-                'line': element.get('line', 0),
-                'steps': []
-            }
-
-            # Check scenario status based on steps
-            scenario_passed = True
-            scenario_failed = False
-            scenario_skipped = False
-
-            for step in element.get('steps', []):
-                step_result = step.get('result', {})
-                status = step_result.get('status', 'undefined')
-
-                step_info = {
-                    'keyword': step.get('keyword', ''),
-                    'name': step.get('name', ''),
-                    'status': status,
-                    'error': step_result.get('error_message', '')
-                }
-                scenario_info['steps'].append(step_info)
-
-                if status == 'failed':
-                    scenario_passed = False
-                    scenario_failed = True
-                elif status == 'skipped':
-                    scenario_skipped = True
-                elif status != 'passed':
-                    scenario_passed = False
-
-            scenario_info['status'] = 'failed' if scenario_failed else ('skipped' if scenario_skipped else ('passed' if scenario_passed else 'undefined'))
-
-            if scenario_info['status'] == 'passed':
-                stats['passed_scenarios'] += 1
-            elif scenario_info['status'] == 'failed':
-                stats['failed_scenarios'] += 1
+def build_scenario_index(results):
+    """Build a dict of (feature_name, scenario_name, line) -> status."""
+    index = {}
+    for feature in results:
+        fname = feature.get('name', 'Unknown')
+        for el in feature.get('elements', []):
+            if el.get('type') != 'scenario':
+                continue
+            sname = el.get('name', 'Unknown')
+            line = el.get('line', 0)
+            # Determine status from steps
+            failed = any(
+                s.get('result', {}).get('status') == 'failed'
+                for s in el.get('steps', [])
+            )
+            skipped = any(
+                s.get('result', {}).get('status') == 'skipped'
+                for s in el.get('steps', [])
+            )
+            if failed:
+                status = 'failed'
+            elif skipped:
+                status = 'skipped'
             else:
-                stats['skipped_scenarios'] += 1
-
-            stats['scenarios'].append(scenario_info)
-
-    return stats
+                status = 'passed'
+            index[(fname, sname, line)] = status
+    return index
 
 
-def filter_features_by_name(features, prefixes):
-    """Filter features by name prefix."""
-    return [f for f in features if any(f.get('name', '').startswith(prefix) for prefix in prefixes)]
+def analyze_features(results):
+    """Analyze all features and return per-feature stats."""
+    stats_list = []
+    for feature in results:
+        stats = {
+            'name': feature.get('name', 'Unknown'),
+            'uri': feature.get('uri', ''),
+            'total': 0,
+            'passed': 0,
+            'failed': 0,
+            'skipped': 0,
+            'scenarios': [],
+        }
+        for el in feature.get('elements', []):
+            if el.get('type') != 'scenario':
+                continue
+            stats['total'] += 1
+            sname = el.get('name', 'Unknown')
+            line = el.get('line', 0)
+
+            failed = any(
+                s.get('result', {}).get('status') == 'failed'
+                for s in el.get('steps', [])
+            )
+            skipped = any(
+                s.get('result', {}).get('status') == 'skipped'
+                for s in el.get('steps', [])
+            )
+            if failed:
+                status = 'failed'
+                stats['failed'] += 1
+            elif skipped:
+                status = 'skipped'
+                stats['skipped'] += 1
+            else:
+                status = 'passed'
+                stats['passed'] += 1
+
+            error = ''
+            for s in el.get('steps', []):
+                if s.get('result', {}).get('status') == 'failed':
+                    error = s.get('result', {}).get('error_message', '')
+                    break
+
+            stats['scenarios'].append({
+                'name': sname,
+                'line': line,
+                'status': status,
+                'error': error,
+            })
+        stats_list.append(stats)
+    return stats_list
 
 
-def generate_summary_stats(all_stats):
-    """Generate summary statistics."""
-    summary = {
-        'total_features': len(all_stats),
-        'total_scenarios': sum(s['total_scenarios'] for s in all_stats),
-        'passed_scenarios': sum(s['passed_scenarios'] for s in all_stats),
-        'failed_scenarios': sum(s['failed_scenarios'] for s in all_stats),
-        'skipped_scenarios': sum(s['skipped_scenarios'] for s in all_stats),
-    }
+def find_previous_results(current_path):
+    """Find the most recent results_*.json before the current one."""
+    directory = current_path.parent
+    current_name = current_path.name
 
-    if summary['total_scenarios'] > 0:
-        summary['pass_rate'] = (summary['passed_scenarios'] / summary['total_scenarios']) * 100
-    else:
-        summary['pass_rate'] = 0.0
-
-    return summary
+    # Match results_YYYYMMDD_HHMMSS.json
+    pattern = re.compile(r'^results_\d{8}_\d{6}\.json$')
+    candidates = sorted(
+        p for p in directory.glob("results_*.json")
+        if pattern.match(p.name) and p.name < current_name
+    )
+    return candidates[-1] if candidates else None
 
 
-def generate_markdown_report(stats_list, title, output_path):
-    """Generate a markdown report from statistics."""
-    summary = generate_summary_stats(stats_list)
+def delta_str(current, previous):
+    """Format a delta like +5 or -3 or (unchanged)."""
+    d = current - previous
+    if d > 0:
+        return f"+{d}"
+    elif d < 0:
+        return str(d)
+    return ""
 
+
+def generate_report(current_stats, prev_index, current_path, prev_path, output_path):
+    """Generate the comparative markdown report."""
     md = []
-    md.append(f"# {title}")
-    md.append(f"\nGenerated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-
-    # Summary section
-    md.append("## Summary")
-    md.append(f"- **Total Features**: {summary['total_features']}")
-    md.append(f"- **Total Scenarios**: {summary['total_scenarios']}")
-    md.append(f"- **Passed**: {summary['passed_scenarios']} ({summary['pass_rate']:.1f}%)")
-    md.append(f"- **Failed**: {summary['failed_scenarios']}")
-    md.append(f"- **Skipped**: {summary['skipped_scenarios']}")
+    md.append("# TCK Compliance Report")
+    md.append("")
+    md.append(f"**Generated:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    md.append(f"**Results:** `{current_path.name}`")
+    if prev_path:
+        md.append(f"**Compared to:** `{prev_path.name}`")
     md.append("")
 
-    # Feature breakdown
+    # --- Summary ---
+    total = sum(s['total'] for s in current_stats)
+    passed = sum(s['passed'] for s in current_stats)
+    failed = sum(s['failed'] for s in current_stats)
+    skipped = sum(s['skipped'] for s in current_stats)
+    rate = (passed / total * 100) if total > 0 else 0.0
+
+    md.append("## Summary")
+    md.append("")
+
+    if prev_index is not None:
+        prev_total = len(prev_index)
+        prev_passed = sum(1 for v in prev_index.values() if v == 'passed')
+        prev_failed = sum(1 for v in prev_index.values() if v == 'failed')
+        prev_rate = (prev_passed / prev_total * 100) if prev_total > 0 else 0.0
+
+        # Compute regressions / fixes
+        current_index = {}
+        for s in current_stats:
+            for sc in s['scenarios']:
+                current_index[(s['name'], sc['name'], sc['line'])] = sc['status']
+
+        regressions = []  # were passing, now failing
+        fixes = []        # were failing, now passing
+        for key in current_index:
+            cur = current_index[key]
+            prev = prev_index.get(key)
+            if prev == 'passed' and cur == 'failed':
+                regressions.append(key)
+            elif prev == 'failed' and cur == 'passed':
+                fixes.append(key)
+
+        new_scenarios = [k for k in current_index if k not in prev_index]
+
+        rate_delta = rate - prev_rate
+        rate_arrow = "📈" if rate_delta > 0 else ("📉" if rate_delta < 0 else "➡️")
+
+        md.append(f"| Metric | Current | Previous | Delta |")
+        md.append(f"|--------|---------|----------|-------|")
+        md.append(f"| Scenarios | {total} | {prev_total} | {delta_str(total, prev_total)} |")
+        md.append(f"| Passed | {passed} | {prev_passed} | {delta_str(passed, prev_passed)} |")
+        md.append(f"| Failed | {failed} | {prev_failed} | {delta_str(failed, prev_failed)} |")
+        md.append(f"| Pass Rate | {rate:.1f}% | {prev_rate:.1f}% | {rate_arrow} {rate_delta:+.1f}pp |")
+        md.append("")
+
+        if fixes:
+            md.append(f"**🟢 Fixed:** {len(fixes)} scenarios now passing")
+            md.append("")
+        if regressions:
+            md.append(f"**🔴 Regressions:** {len(regressions)} scenarios now failing")
+            md.append("")
+        if new_scenarios:
+            md.append(f"**🆕 New:** {len(new_scenarios)} scenarios added")
+            md.append("")
+    else:
+        md.append(f"| Metric | Value |")
+        md.append(f"|--------|-------|")
+        md.append(f"| Total Scenarios | {total} |")
+        md.append(f"| Passed | {passed} ({rate:.1f}%) |")
+        md.append(f"| Failed | {failed} |")
+        md.append(f"| Skipped | {skipped} |")
+        md.append("")
+        md.append("*No previous run found for comparison.*")
+        md.append("")
+
+    # --- Feature Breakdown ---
     md.append("## Feature Breakdown")
     md.append("")
-    md.append("| Feature | Scenarios | Passed | Failed | Pass Rate |")
-    md.append("|---------|-----------|--------|--------|-----------|")
 
-    for stats in sorted(stats_list, key=lambda x: x['name']):
-        total = stats['total_scenarios']
-        passed = stats['passed_scenarios']
-        failed = stats['failed_scenarios']
-        pass_rate = (passed / total * 100) if total > 0 else 0
+    if prev_index is not None:
+        # Build previous per-feature stats
+        prev_by_feature = {}
+        for (fname, _, _), status in prev_index.items():
+            if fname not in prev_by_feature:
+                prev_by_feature[fname] = {'passed': 0, 'failed': 0, 'total': 0}
+            prev_by_feature[fname]['total'] += 1
+            if status == 'passed':
+                prev_by_feature[fname]['passed'] += 1
+            elif status == 'failed':
+                prev_by_feature[fname]['failed'] += 1
 
-        status_icon = "✅" if pass_rate >= 80 else ("⚠️" if pass_rate >= 50 else "❌")
+        md.append("| Feature | Scenarios | Passed | Failed | Rate | Delta |")
+        md.append("|---------|-----------|--------|--------|------|-------|")
 
-        md.append(f"| {status_icon} {stats['name']} | {total} | {passed} | {failed} | {pass_rate:.0f}% |")
+        for stats in sorted(current_stats, key=lambda x: x['name']):
+            t, p, f = stats['total'], stats['passed'], stats['failed']
+            r = (p / t * 100) if t > 0 else 0
+            icon = "✅" if r >= 80 else ("⚠️" if r >= 50 else "❌")
+
+            prev_f = prev_by_feature.get(stats['name'])
+            if prev_f:
+                prev_r = (prev_f['passed'] / prev_f['total'] * 100) if prev_f['total'] > 0 else 0
+                d = r - prev_r
+                delta_col = f"{d:+.0f}pp" if d != 0 else ""
+            else:
+                delta_col = "🆕"
+
+            md.append(f"| {icon} {stats['name']} | {t} | {p} | {f} | {r:.0f}% | {delta_col} |")
+    else:
+        md.append("| Feature | Scenarios | Passed | Failed | Rate |")
+        md.append("|---------|-----------|--------|--------|------|")
+
+        for stats in sorted(current_stats, key=lambda x: x['name']):
+            t, p, f = stats['total'], stats['passed'], stats['failed']
+            r = (p / t * 100) if t > 0 else 0
+            icon = "✅" if r >= 80 else ("⚠️" if r >= 50 else "❌")
+            md.append(f"| {icon} {stats['name']} | {t} | {p} | {f} | {r:.0f}% |")
 
     md.append("")
 
-    # Failed scenarios detail
+    # --- Regressions (if comparative) ---
+    if prev_index is not None and regressions:
+        md.append("## 🔴 Regressions")
+        md.append("")
+        md.append("Scenarios that were passing but are now failing:")
+        md.append("")
+        for fname, sname, line in sorted(regressions):
+            md.append(f"- **{fname}** — {sname} (line {line})")
+        md.append("")
+
+    # --- Fixes (if comparative) ---
+    if prev_index is not None and fixes:
+        md.append("## 🟢 Newly Passing")
+        md.append("")
+        md.append("Scenarios that were failing but are now passing:")
+        md.append("")
+        for fname, sname, line in sorted(fixes):
+            md.append(f"- **{fname}** — {sname} (line {line})")
+        md.append("")
+
+    # --- Failed Scenarios ---
     md.append("## Failed Scenarios")
     md.append("")
 
     has_failures = False
-    for stats in sorted(stats_list, key=lambda x: x['name']):
+    for stats in sorted(current_stats, key=lambda x: x['name']):
         failed_scenarios = [s for s in stats['scenarios'] if s['status'] == 'failed']
-
-        if failed_scenarios:
-            has_failures = True
-            md.append(f"### {stats['name']}")
-            md.append("")
-
-            for scenario in failed_scenarios:
-                md.append(f"#### ❌ {scenario['name']}")
-                md.append("")
-
-                # Show failed steps
-                for step in scenario['steps']:
-                    if step['status'] == 'failed':
-                        md.append(f"- **{step['keyword']}{step['name']}**")
-                        if step['error']:
-                            # Truncate long error messages
-                            error = step['error'][:500]
-                            md.append(f"  ```")
-                            md.append(f"  {error}")
-                            if len(step['error']) > 500:
-                                md.append(f"  ... (truncated)")
-                            md.append(f"  ```")
-                md.append("")
+        if not failed_scenarios:
+            continue
+        has_failures = True
+        md.append(f"### {stats['name']}")
+        md.append("")
+        for sc in failed_scenarios:
+            md.append(f"- **{sc['name']}** (line {sc['line']})")
+            if sc['error']:
+                error = sc['error'][:300]
+                md.append(f"  ```")
+                md.append(f"  {error}")
+                if len(sc['error']) > 300:
+                    md.append(f"  ... (truncated)")
+                md.append(f"  ```")
+        md.append("")
 
     if not has_failures:
         md.append("🎉 No failed scenarios!")
         md.append("")
 
-    # Write to file
-    with open(output_path, 'w') as f:
-        f.write('\n'.join(md))
+    with open(output_path, 'w') as f_out:
+        f_out.write('\n'.join(md))
 
     print(f"✅ Generated: {output_path}")
 
 
 def main():
     if len(sys.argv) < 2:
-        print("Usage: python analyze_tck_json.py <json-file>")
+        print("Usage: python analyze_tck_json.py <results-json>")
         sys.exit(1)
 
-    json_path = Path(sys.argv[1])
-    if not json_path.exists():
-        print(f"Error: File not found: {json_path}")
+    current_path = Path(sys.argv[1])
+    if not current_path.exists():
+        print(f"Error: File not found: {current_path}")
         sys.exit(1)
 
-    print(f"📊 Analyzing {json_path}...")
+    print(f"📊 Analyzing {current_path.name}...")
 
-    # Load JSON results
-    results = load_json_results(json_path)
+    current_results = load_json_results(current_path)
+    current_stats = analyze_features(current_results)
 
-    # Analyze all features
-    all_stats = [analyze_feature(feature) for feature in results]
+    # Find and load previous results
+    prev_path = find_previous_results(current_path)
+    prev_index = None
+    if prev_path:
+        print(f"📊 Comparing against {prev_path.name}...")
+        prev_results = load_json_results(prev_path)
+        prev_index = build_scenario_index(prev_results)
+    else:
+        print("   No previous results found — generating baseline report.")
 
-    # Generate overall report
-    output_dir = json_path.parent
-    generate_markdown_report(
-        all_stats,
-        "TCK Test Results - All Features",
-        output_dir / "report.md"
-    )
+    output_path = current_path.parent / "report.md"
+    generate_report(current_stats, prev_index, current_path, prev_path, output_path)
 
-    # Filter and generate Match report
-    match_stats = [s for s in all_stats if s['name'].startswith('Match') and not s['name'].startswith('MatchWhere')]
-    if match_stats:
-        generate_markdown_report(
-            match_stats,
-            "TCK Test Results - Match Features",
-            output_dir / "match-report.md"
-        )
-
-    # Filter and generate MatchWhere report
-    matchwhere_stats = [s for s in all_stats if s['name'].startswith('MatchWhere')]
-    if matchwhere_stats:
-        generate_markdown_report(
-            matchwhere_stats,
-            "TCK Test Results - Match-Where Features",
-            output_dir / "where-report.md"
-        )
-
-    # Filter and generate Return report
-    return_stats = [s for s in all_stats if s['name'].startswith('Return')]
-    if return_stats:
-        generate_markdown_report(
-            return_stats,
-            "TCK Test Results - Return Features",
-            output_dir / "return-report.md"
-        )
+    # Print summary
+    total = sum(s['total'] for s in current_stats)
+    passed = sum(s['passed'] for s in current_stats)
+    failed = sum(s['failed'] for s in current_stats)
+    rate = (passed / total * 100) if total > 0 else 0.0
 
     print("")
-    print("📈 Summary:")
-    summary = generate_summary_stats(all_stats)
-    print(f"  Total Features: {summary['total_features']}")
-    print(f"  Total Scenarios: {summary['total_scenarios']}")
-    print(f"  Passed: {summary['passed_scenarios']} ({summary['pass_rate']:.1f}%)")
-    print(f"  Failed: {summary['failed_scenarios']}")
+    print(f"📈 Summary: {passed}/{total} passed ({rate:.1f}%), {failed} failed")
+    if prev_index is not None:
+        prev_passed = sum(1 for v in prev_index.values() if v == 'passed')
+        d = passed - prev_passed
+        if d > 0:
+            print(f"   📈 +{d} scenarios passing vs previous run")
+        elif d < 0:
+            print(f"   📉 {d} scenarios passing vs previous run")
+        else:
+            print(f"   ➡️  No change vs previous run")
     print("")
-    print("✨ Done!")
 
 
 if __name__ == '__main__':

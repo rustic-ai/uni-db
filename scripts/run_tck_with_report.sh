@@ -1,33 +1,43 @@
 #!/bin/bash
-# Run TCK tests and generate markdown reports
+# Run TCK tests via nextest (parallel, filterable) and generate markdown reports
+#
+# Usage:
+#   scripts/run_tck_with_report.sh              # Run all scenarios
+#   scripts/run_tck_with_report.sh "~Match1"    # Filter by pattern
 
 set -e
 
 cd "$(dirname "$0")/.."
 
-echo "🚀 Running TCK tests..."
-echo ""
+# Clean previous per-scenario results
+rm -rf target/cucumber/nextest
 
-# Run the tests
-cargo test --package uni-tck --test cucumber
-
-# Check if JSON was generated
-if [ ! -f "target/cucumber/results.json" ]; then
-    echo "❌ Error: JSON results not found at target/cucumber/results.json"
-    exit 1
+FILTER_EXPR=""
+if [ -n "$1" ]; then
+    FILTER_EXPR="-E test($1)"
+    echo "🚀 Running TCK tests (filter: $1)..."
+else
+    echo "🚀 Running TCK tests..."
 fi
 
 echo ""
-echo "📊 Generating markdown reports..."
+
+# Run tests via nextest (--no-fail-fast to collect all results)
+# shellcheck disable=SC2086
+cargo nextest run -p uni-tck --test tck --no-fail-fast $FILTER_EXPR || true
+
+# Aggregate per-scenario results into timestamped cucumber JSON
+echo ""
+echo "📊 Aggregating results..."
+RESULTS_JSON=$(python3 scripts/aggregate_nextest_results.py)
+
+echo ""
+echo "📊 Generating report..."
 echo ""
 
-# Generate reports
-python3 scripts/analyze_tck_json.py target/cucumber/results.json
+# Generate comparative report (auto-finds previous results)
+python3 scripts/analyze_tck_json.py "$RESULTS_JSON"
 
 echo ""
-echo "📁 Reports available at:"
-echo "  - target/cucumber/report.md (all features)"
-echo "  - target/cucumber/match-report.md (if Match features were run)"
-echo "  - target/cucumber/where-report.md (if Where features were run)"
-echo "  - target/cucumber/return-report.md (if Return features were run)"
+echo "📁 Report available at: target/cucumber/report.md"
 echo ""
