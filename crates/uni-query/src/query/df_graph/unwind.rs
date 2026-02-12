@@ -43,6 +43,14 @@ use std::task::{Context, Poll};
 use uni_common::Value;
 use uni_cypher::ast::{CypherLiteral, Expr};
 
+/// Result of UNWIND element type inference.
+struct ElementTypeInfo {
+    /// Arrow data type for the unwind variable column.
+    data_type: DataType,
+    /// Whether values need JSON encoding metadata.
+    is_json_encoded: bool,
+}
+
 /// UNWIND execution plan that expands list values into multiple rows.
 ///
 /// Takes an input plan and an expression that evaluates to a list. For each
@@ -116,66 +124,46 @@ impl GraphUnwindExec {
     /// Infer the native Arrow `DataType` for the elements of an UNWIND expression.
     ///
     /// For literal lists with homogeneous element types (ignoring nulls), returns
-    /// the native type and `false` for `json_encoded`. For heterogeneous or
-    /// non-inferrable expressions, falls back to `Utf8` with `json_encoded = true`.
-    ///
-    /// Returns `(DataType, needs_json_encoded_metadata)`.
-    fn infer_element_type(expr: &Expr) -> (DataType, bool) {
-        if let Expr::List(items) = expr {
-            // Classify each literal item, ignoring nulls
-            let mut seen_bool = false;
-            let mut seen_int = false;
-            let mut seen_float = false;
-            let mut seen_string = false;
-            let mut seen_other = false;
+    /// the native type. For heterogeneous or non-inferrable expressions, falls back
+    /// to JSON-encoded Utf8.
+    fn infer_element_type(expr: &Expr) -> ElementTypeInfo {
+        let json_fallback = || ElementTypeInfo {
+            data_type: DataType::Utf8,
+            is_json_encoded: true,
+        };
 
-            for item in items {
-                match item {
-                    Expr::Literal(CypherLiteral::Null) => { /* nulls are compatible with any type */
-                    }
-                    Expr::Literal(CypherLiteral::Bool(_)) => seen_bool = true,
-                    Expr::Literal(CypherLiteral::Integer(_)) => seen_int = true,
-                    Expr::Literal(CypherLiteral::Float(_)) => seen_float = true,
-                    Expr::Literal(CypherLiteral::String(_)) => seen_string = true,
-                    _ => seen_other = true, // variable refs, function calls, etc.
-                }
-            }
+        let Expr::List(items) = expr else {
+            return json_fallback();
+        };
 
-            // If any non-literal item, fall back to JSON
-            if seen_other {
-                return (DataType::Utf8, true);
-            }
+        // Infer type from first non-null literal
+        let first_type = items.iter().find_map(|item| match item {
+            Expr::Literal(CypherLiteral::Null) => None,
+            Expr::Literal(CypherLiteral::Bool(_)) => Some(DataType::Boolean),
+            Expr::Literal(CypherLiteral::Integer(_)) => Some(DataType::Int64),
+            Expr::Literal(CypherLiteral::Float(_)) => Some(DataType::Float64),
+            Expr::Literal(CypherLiteral::String(_)) => Some(DataType::Utf8),
+            _ => Some(DataType::Utf8), // Sentinel for non-literal: forces fallback
+        });
 
-            // Count how many distinct types we saw (excluding null)
-            let type_count =
-                seen_bool as u8 + seen_int as u8 + seen_float as u8 + seen_string as u8;
+        let Some(expected) = first_type else {
+            return json_fallback(); // All nulls or empty
+        };
 
-            match type_count {
-                0 => {
-                    // All nulls or empty list — use Utf8 with json_encoded as safe default
-                    (DataType::Utf8, true)
-                }
-                1 => {
-                    // Homogeneous type
-                    if seen_bool {
-                        (DataType::Boolean, false)
-                    } else if seen_int {
-                        (DataType::Int64, false)
-                    } else if seen_float {
-                        (DataType::Float64, false)
-                    } else {
-                        // seen_string — plain Utf8 without json_encoded
-                        (DataType::Utf8, false)
-                    }
-                }
-                _ => {
-                    // Mixed types — fall back to JSON-encoded Utf8
-                    (DataType::Utf8, true)
-                }
-            }
+        // Verify all remaining non-null items match the expected type
+        let all_match = items.iter().all(|item| match item {
+            Expr::Literal(CypherLiteral::Null) => true,
+            Expr::Literal(CypherLiteral::Bool(_)) => expected == DataType::Boolean,
+            Expr::Literal(CypherLiteral::Integer(_)) => expected == DataType::Int64,
+            Expr::Literal(CypherLiteral::Float(_)) => expected == DataType::Float64,
+            Expr::Literal(CypherLiteral::String(_)) => expected == DataType::Utf8,
+            _ => false, // Non-literal
+        });
+
+        if all_match {
+            ElementTypeInfo { data_type: expected, is_json_encoded: false }
         } else {
-            // Not a literal list (variable reference, function call, etc.)
-            (DataType::Utf8, true)
+            json_fallback()
         }
     }
 
@@ -191,10 +179,10 @@ impl GraphUnwindExec {
             .map(|f| f.as_ref().clone())
             .collect();
 
-        let (data_type, needs_json_metadata) = Self::infer_element_type(expr);
+        let type_info = Self::infer_element_type(expr);
 
-        let mut field = Field::new(variable, data_type, true);
-        if needs_json_metadata {
+        let mut field = Field::new(variable, type_info.data_type, true);
+        if type_info.is_json_encoded {
             let mut metadata = std::collections::HashMap::new();
             metadata.insert("json_encoded".to_string(), "true".to_string());
             field = field.with_metadata(metadata);
@@ -272,7 +260,6 @@ impl ExecutionPlan for GraphUnwindExec {
         Ok(Box::pin(GraphUnwindStream {
             input: input_stream,
             expr: self.expr.clone(),
-            _variable: self.variable.clone(),
             params: self.params.clone(),
             schema: self.schema.clone(),
             metrics,
@@ -291,9 +278,6 @@ struct GraphUnwindStream {
 
     /// Expression to evaluate.
     expr: Expr,
-
-    /// Variable name for list elements (used in schema).
-    _variable: String,
 
     /// Query parameters.
     params: HashMap<String, Value>,
@@ -372,21 +356,20 @@ impl GraphUnwindStream {
 
             // Property access: n.prop
             Expr::Property(base_expr, prop_name) => {
-                // Get the base value (should be a map)
-                let base_value = self.evaluate_expr_impl(base_expr, batch, row_idx)?;
-
-                match base_value {
-                    Value::Map(map) => Ok(map.get(prop_name).cloned().unwrap_or(Value::Null)),
-                    _ => {
-                        // Try looking up as column name: var.prop
-                        if let Expr::Variable(var_name) = base_expr.as_ref() {
-                            let col_name = format!("{}.{}", var_name, prop_name);
-                            if batch.schema().column_with_name(&col_name).is_some() {
-                                return self.get_column_value(batch, &col_name, row_idx);
-                            }
-                        }
-                        Ok(Value::Null)
+                // Try looking up as column name first: var.prop
+                if let Expr::Variable(var_name) = base_expr.as_ref() {
+                    let col_name = format!("{}.{}", var_name, prop_name);
+                    if batch.schema().column_with_name(&col_name).is_some() {
+                        return self.get_column_value(batch, &col_name, row_idx);
                     }
+                }
+
+                // Fall back to evaluating base as a map
+                let base_value = self.evaluate_expr_impl(base_expr, batch, row_idx)?;
+                if let Value::Map(map) = base_value {
+                    Ok(map.get(prop_name).cloned().unwrap_or(Value::Null))
+                } else {
+                    Ok(Value::Null)
                 }
             }
 
@@ -636,14 +619,10 @@ pub(crate) fn arrow_to_json_value(array: &dyn Array, row: usize) -> Value {
     try_int!(Int32Array);
     try_int!(Int16Array);
     try_int!(Int8Array);
+    try_int!(UInt64Array);
     try_int!(UInt32Array);
     try_int!(UInt16Array);
     try_int!(UInt8Array);
-
-    // UInt64 needs special handling to avoid overflow
-    if let Some(arr) = any.downcast_ref::<UInt64Array>() {
-        return Value::Int(arr.value(row) as i64);
-    }
 
     // Float types
     if let Some(arr) = any.downcast_ref::<Float64Array>() {
@@ -856,7 +835,6 @@ mod tests {
                 Expr::Literal(CypherLiteral::Integer(2)),
                 Expr::Literal(CypherLiteral::Integer(3)),
             ]),
-            _variable: "x".to_string(),
             params: HashMap::new(),
             schema: Arc::new(Schema::new(vec![
                 Field::new("n._vid", DataType::UInt64, false),

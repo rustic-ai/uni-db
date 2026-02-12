@@ -27,6 +27,37 @@ use uni_common::core::schema::Schema as UniSchema;
 use uni_cypher::ast::{BinaryOp, CypherLiteral, Expr, Query, UnaryOp};
 use uni_store::storage::manager::StorageManager;
 
+/// Check if a data type represents JSONB (LargeBinary).
+fn is_jsonb_type(dt: Option<&DataType>) -> bool {
+    dt.is_some_and(|t| *t == DataType::LargeBinary)
+}
+
+/// Resolve the element type for a list expression.
+///
+/// Extracts the element type from List/LargeList/Null/LargeBinary data types.
+/// Falls back to the provided fallback type for LargeBinary, and returns an
+/// error with the provided context for unsupported types.
+///
+/// # Errors
+///
+/// Returns an error if the data type is not a recognized list type.
+fn resolve_list_element_type(
+    list_data_type: &DataType,
+    large_binary_fallback: DataType,
+    context: &str,
+) -> Result<DataType> {
+    match list_data_type {
+        DataType::List(field) | DataType::LargeList(field) => Ok(field.data_type().clone()),
+        DataType::Null => Ok(DataType::Null),
+        DataType::LargeBinary => Ok(large_binary_fallback),
+        _ => Err(anyhow!(
+            "{} input must be a list, got {:?}",
+            context,
+            list_data_type
+        )),
+    }
+}
+
 /// Compiler for converting Cypher expressions directly to DataFusion Physical Expressions.
 pub struct CypherPhysicalExprCompiler<'a> {
     state: &'a SessionState,
@@ -112,40 +143,7 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
             } => self.compile_reduce(accumulator, init, variable, list, expression, input_schema),
             // For BinaryOp, check if children contain custom expressions or JSONB types
             Expr::BinaryOp { left, op, right } => {
-                if Self::contains_custom_expr(left) || Self::contains_custom_expr(right) {
-                    let left_phy = self.compile(left, input_schema)?;
-                    let right_phy = self.compile(right, input_schema)?;
-                    self.compile_binary_op(op, left_phy, right_phy, input_schema)
-                } else {
-                    // For Add with a list-producing operand (AST-level detection),
-                    // compile through the standard path which uses cypher_expr_to_df
-                    // to correctly route list + scalar to _cypher_list_concat.
-                    if *op == BinaryOp::Add
-                        && (Self::is_list_producing(left) || Self::is_list_producing(right))
-                    {
-                        return self.compile_standard(expr, input_schema);
-                    }
-
-                    // Compile sub-expressions to check their types. If either operand
-                    // produces LargeBinary (JSONB), standard Arrow kernels will fail at
-                    // runtime for comparisons. Route through compile_binary_op which
-                    // dispatches to Cypher comparison UDFs.
-                    let left_phy = self.compile(left, input_schema)?;
-                    let right_phy = self.compile(right, input_schema)?;
-                    let left_dt = left_phy.data_type(input_schema).ok();
-                    let right_dt = right_phy.data_type(input_schema).ok();
-                    let has_jsonb = left_dt
-                        .as_ref()
-                        .is_some_and(|t| *t == arrow_schema::DataType::LargeBinary)
-                        || right_dt
-                            .as_ref()
-                            .is_some_and(|t| *t == arrow_schema::DataType::LargeBinary);
-                    if has_jsonb {
-                        self.compile_binary_op(op, left_phy, right_phy, input_schema)
-                    } else {
-                        self.compile_standard(expr, input_schema)
-                    }
-                }
+                self.compile_binary_op_dispatch(left, op, right, input_schema)
             }
             Expr::UnaryOp { op, expr: inner } => {
                 if Self::contains_custom_expr(inner) {
@@ -190,87 +188,21 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
             }
 
             // Recursively check other composite types if necessary.
-            Expr::List(items) => {
-                if items.iter().any(Self::contains_custom_expr) {
-                    Err(anyhow!(
-                        "List literals containing comprehensions not yet supported in compiler"
-                    ))
-                } else {
-                    self.compile_standard(expr, input_schema)
-                }
-            }
-            Expr::Map(entries) => {
-                if entries.iter().any(|(_, v)| Self::contains_custom_expr(v)) {
-                    Err(anyhow!(
-                        "Map literals containing comprehensions not yet supported in compiler"
-                    ))
-                } else {
-                    self.compile_standard(expr, input_schema)
-                }
+            Expr::List(items) if items.iter().any(Self::contains_custom_expr) => Err(anyhow!(
+                "List literals containing comprehensions not yet supported in compiler"
+            )),
+            Expr::Map(entries) if entries.iter().any(|(_, v)| Self::contains_custom_expr(v)) => {
+                Err(anyhow!(
+                    "Map literals containing comprehensions not yet supported in compiler"
+                ))
             }
 
             // Property access on a struct column — e.g. `x.a` where `x` is Struct
-            Expr::Property(base, prop) => {
-                if let Expr::Variable(var_name) = base.as_ref()
-                    && let Ok(col_idx) = input_schema.index_of(var_name)
-                    && let arrow_schema::DataType::Struct(struct_fields) =
-                        input_schema.field(col_idx).data_type()
-                {
-                    // Find the struct field by name.
-                    // Cypher semantics: accessing a missing key on a map returns null.
-                    if let Some(field_idx) = struct_fields.iter().position(|f| f.name() == prop) {
-                        let output_type = struct_fields[field_idx].data_type().clone();
-                        let col_expr: Arc<dyn PhysicalExpr> = Arc::new(
-                            datafusion::physical_expr::expressions::Column::new(var_name, col_idx),
-                        );
-                        return Ok(Arc::new(StructFieldAccessExpr::new(
-                            col_expr,
-                            field_idx,
-                            output_type,
-                        )));
-                    } else {
-                        // Field not found in struct → return null (Cypher semantics)
-                        return Ok(Arc::new(
-                            datafusion::physical_expr::expressions::Literal::new(
-                                datafusion::common::ScalarValue::Null,
-                            ),
-                        ));
-                    }
-                }
-                self.compile_standard(expr, input_schema)
-            }
+            Expr::Property(base, prop) => self.compile_property_access(base, prop, input_schema),
 
             // Bracket access on a struct column — e.g. `x['a']` where `x` is Struct
             Expr::ArrayIndex { array, index } => {
-                if let Expr::Variable(var_name) = array.as_ref()
-                    && let Expr::Literal(CypherLiteral::String(prop)) = index.as_ref()
-                    && let Ok(col_idx) = input_schema.index_of(var_name)
-                {
-                    let col_type = input_schema.field(col_idx).data_type();
-                    if let arrow_schema::DataType::Struct(struct_fields) = col_type {
-                        if let Some(field_idx) = struct_fields.iter().position(|f| f.name() == prop)
-                        {
-                            let output_type = struct_fields[field_idx].data_type().clone();
-                            let col_expr: Arc<dyn PhysicalExpr> =
-                                Arc::new(datafusion::physical_expr::expressions::Column::new(
-                                    var_name, col_idx,
-                                ));
-                            return Ok(Arc::new(StructFieldAccessExpr::new(
-                                col_expr,
-                                field_idx,
-                                output_type,
-                            )));
-                        } else {
-                            // Field not found in struct → return null (Cypher semantics)
-                            return Ok(Arc::new(
-                                datafusion::physical_expr::expressions::Literal::new(
-                                    datafusion::common::ScalarValue::Null,
-                                ),
-                            ));
-                        }
-                    }
-                }
-                self.compile_standard(expr, input_schema)
+                self.compile_array_index(array, index, input_schema)
             }
 
             // Pattern comprehension: [(a)-[:REL]->(b) WHERE pred | expr]
@@ -288,41 +220,149 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
             ),
 
             // EXISTS subquery: plan + execute per row, return boolean
-            Expr::Exists(query) => {
-                let graph_ctx = self
-                    .graph_ctx
-                    .as_ref()
-                    .ok_or_else(|| anyhow!("EXISTS requires GraphExecutionContext"))?
-                    .clone();
-                let uni_schema = self
-                    .uni_schema
-                    .as_ref()
-                    .ok_or_else(|| anyhow!("EXISTS requires UniSchema"))?
-                    .clone();
-                let session_ctx = self
-                    .session_ctx
-                    .as_ref()
-                    .ok_or_else(|| anyhow!("EXISTS requires SessionContext"))?
-                    .clone();
-                let storage = self
-                    .storage
-                    .as_ref()
-                    .ok_or_else(|| anyhow!("EXISTS requires StorageManager"))?
-                    .clone();
-
-                Ok(Arc::new(ExistsExecExpr::new(
-                    *query.clone(),
-                    graph_ctx,
-                    session_ctx,
-                    storage,
-                    uni_schema,
-                    self.params.clone(),
-                )))
-            }
+            Expr::Exists(query) => self.compile_exists(query),
 
             // Default to standard compilation for leaf nodes or non-custom trees
             _ => self.compile_standard(expr, input_schema),
         }
+    }
+
+    /// Dispatch binary op compilation, checking for custom expressions and JSONB types.
+    fn compile_binary_op_dispatch(
+        &self,
+        left: &Expr,
+        op: &BinaryOp,
+        right: &Expr,
+        input_schema: &Schema,
+    ) -> Result<Arc<dyn PhysicalExpr>> {
+        if Self::contains_custom_expr(left) || Self::contains_custom_expr(right) {
+            let left_phy = self.compile(left, input_schema)?;
+            let right_phy = self.compile(right, input_schema)?;
+            return self.compile_binary_op(op, left_phy, right_phy, input_schema);
+        }
+
+        // For Add with a list-producing operand (AST-level detection),
+        // compile through the standard path which uses cypher_expr_to_df
+        // to correctly route list + scalar to _cypher_list_concat.
+        if *op == BinaryOp::Add
+            && (Self::is_list_producing(left) || Self::is_list_producing(right))
+        {
+            return self.compile_standard(
+                &Expr::BinaryOp {
+                    left: Box::new(left.clone()),
+                    op: *op,
+                    right: Box::new(right.clone()),
+                },
+                input_schema,
+            );
+        }
+
+        // Compile sub-expressions to check their types. If either operand
+        // produces LargeBinary (JSONB), standard Arrow kernels will fail at
+        // runtime for comparisons. Route through compile_binary_op which
+        // dispatches to Cypher comparison UDFs.
+        let left_phy = self.compile(left, input_schema)?;
+        let right_phy = self.compile(right, input_schema)?;
+        let left_dt = left_phy.data_type(input_schema).ok();
+        let right_dt = right_phy.data_type(input_schema).ok();
+        let has_jsonb = is_jsonb_type(left_dt.as_ref()) || is_jsonb_type(right_dt.as_ref());
+        if has_jsonb {
+            self.compile_binary_op(op, left_phy, right_phy, input_schema)
+        } else {
+            self.compile_standard(
+                &Expr::BinaryOp {
+                    left: Box::new(left.clone()),
+                    op: *op,
+                    right: Box::new(right.clone()),
+                },
+                input_schema,
+            )
+        }
+    }
+
+    /// Try to compile struct field access for a variable.
+    ///
+    /// Returns `Some(expr)` if the variable is a Struct column and can be accessed,
+    /// `None` if fallback to standard compilation is needed.
+    fn try_compile_struct_field(
+        &self,
+        var_name: &str,
+        field_name: &str,
+        input_schema: &Schema,
+    ) -> Option<Arc<dyn PhysicalExpr>> {
+        let col_idx = input_schema.index_of(var_name).ok()?;
+        let DataType::Struct(struct_fields) = input_schema.field(col_idx).data_type() else {
+            return None;
+        };
+
+        // Cypher semantics: accessing a missing key returns null
+        if let Some(field_idx) = struct_fields.iter().position(|f| f.name() == field_name) {
+            let output_type = struct_fields[field_idx].data_type().clone();
+            let col_expr: Arc<dyn PhysicalExpr> = Arc::new(
+                datafusion::physical_expr::expressions::Column::new(var_name, col_idx),
+            );
+            Some(Arc::new(StructFieldAccessExpr::new(col_expr, field_idx, output_type)))
+        } else {
+            Some(Arc::new(datafusion::physical_expr::expressions::Literal::new(
+                datafusion::common::ScalarValue::Null,
+            )))
+        }
+    }
+
+    /// Compile property access on a struct column (e.g. `x.a` where `x` is Struct).
+    fn compile_property_access(
+        &self,
+        base: &Expr,
+        prop: &str,
+        input_schema: &Schema,
+    ) -> Result<Arc<dyn PhysicalExpr>> {
+        if let Expr::Variable(var_name) = base
+            && let Some(expr) = self.try_compile_struct_field(var_name, prop, input_schema)
+        {
+            return Ok(expr);
+        }
+        self.compile_standard(&Expr::Property(Box::new(base.clone()), prop.to_string()), input_schema)
+    }
+
+    /// Compile bracket access on a struct column (e.g. `x['a']` where `x` is Struct).
+    fn compile_array_index(
+        &self,
+        array: &Expr,
+        index: &Expr,
+        input_schema: &Schema,
+    ) -> Result<Arc<dyn PhysicalExpr>> {
+        if let Expr::Variable(var_name) = array
+            && let Expr::Literal(CypherLiteral::String(prop)) = index
+            && let Some(expr) = self.try_compile_struct_field(var_name, prop, input_schema)
+        {
+            return Ok(expr);
+        }
+        self.compile_standard(
+            &Expr::ArrayIndex {
+                array: Box::new(array.clone()),
+                index: Box::new(index.clone()),
+            },
+            input_schema,
+        )
+    }
+
+    /// Compile EXISTS subquery expression.
+    fn compile_exists(&self, query: &Query) -> Result<Arc<dyn PhysicalExpr>> {
+        let err = |dep: &str| anyhow!("EXISTS requires {}", dep);
+
+        let graph_ctx = self.graph_ctx.clone().ok_or_else(|| err("GraphExecutionContext"))?;
+        let uni_schema = self.uni_schema.clone().ok_or_else(|| err("UniSchema"))?;
+        let session_ctx = self.session_ctx.clone().ok_or_else(|| err("SessionContext"))?;
+        let storage = self.storage.clone().ok_or_else(|| err("StorageManager"))?;
+
+        Ok(Arc::new(ExistsExecExpr::new(
+            query.clone(),
+            graph_ctx,
+            session_ctx,
+            storage,
+            uni_schema,
+            self.params.clone(),
+        )))
     }
 
     /// Check if an expression tree contains nodes that require custom compilation.
@@ -345,10 +385,7 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
                 when_then
                     .iter()
                     .any(|(w, t)| Self::contains_custom_expr(w) || Self::contains_custom_expr(t))
-                    || else_expr
-                        .as_ref()
-                        .map(|e| Self::contains_custom_expr(e))
-                        .unwrap_or(false)
+                    || else_expr.as_deref().is_some_and(Self::contains_custom_expr)
             }
             Expr::List(items) => items.iter().any(Self::contains_custom_expr),
             Expr::Map(entries) => entries.iter().any(|(_, v)| Self::contains_custom_expr(v)),
@@ -456,20 +493,8 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
 
         // Resolve input list type
         let list_data_type = input_list_phy.data_type(input_schema)?;
-        let inner_data_type = match list_data_type {
-            arrow_schema::DataType::List(field) | arrow_schema::DataType::LargeList(field) => {
-                field.data_type().clone()
-            }
-            arrow_schema::DataType::Null => arrow_schema::DataType::Null,
-            // LargeBinary may contain JSONB-encoded arrays; elements will be LargeBinary JSONB scalars
-            arrow_schema::DataType::LargeBinary => arrow_schema::DataType::LargeBinary,
-            _ => {
-                return Err(anyhow!(
-                    "List comprehension input must be a list, got {:?}",
-                    list_data_type
-                ));
-            }
-        };
+        let inner_data_type =
+            resolve_list_element_type(&list_data_type, DataType::LargeBinary, "List comprehension")?;
 
         // Create inner schema with loop variable
         let mut fields = input_schema.fields().to_vec();
@@ -511,23 +536,9 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
         let acc_type = initial_phy.data_type(input_schema)?;
 
         let list_data_type = list_phy.data_type(input_schema)?;
-        let inner_data_type = match list_data_type {
-            arrow_schema::DataType::List(field) | arrow_schema::DataType::LargeList(field) => {
-                field.data_type().clone()
-            }
-            arrow_schema::DataType::Null => arrow_schema::DataType::Null,
-            // LargeBinary may contain JSONB-encoded arrays. Use the accumulator type as
-            // the element type so that the reduce body expression compiles correctly
-            // (e.g. acc + x where both are Int64). At evaluation time, JSONB elements
-            // are decoded and cast to this type.
-            arrow_schema::DataType::LargeBinary => acc_type.clone(),
-            _ => {
-                return Err(anyhow!(
-                    "Reduce input must be a list, got {:?}",
-                    list_data_type
-                ));
-            }
-        };
+        // For LargeBinary (JSONB arrays), use the accumulator type as element type so the
+        // reduce body expression compiles correctly (e.g. acc + x where both are Int64).
+        let inner_data_type = resolve_list_element_type(&list_data_type, acc_type.clone(), "Reduce")?;
 
         let mut fields = input_schema.fields().to_vec();
         fields.push(Arc::new(Field::new(accumulator, acc_type.clone(), true)));
@@ -560,19 +571,8 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
 
         // Resolve element type from list type
         let list_data_type = input_list_phy.data_type(input_schema)?;
-        let inner_data_type = match list_data_type {
-            arrow_schema::DataType::List(field) | arrow_schema::DataType::LargeList(field) => {
-                field.data_type().clone()
-            }
-            arrow_schema::DataType::Null => arrow_schema::DataType::Null,
-            arrow_schema::DataType::LargeBinary => arrow_schema::DataType::LargeBinary,
-            _ => {
-                return Err(anyhow!(
-                    "Quantifier input must be a list, got {:?}",
-                    list_data_type
-                ));
-            }
-        };
+        let inner_data_type =
+            resolve_list_element_type(&list_data_type, DataType::LargeBinary, "Quantifier")?;
 
         // Create inner schema with loop variable
         let mut fields = input_schema.fields().to_vec();
@@ -605,14 +605,10 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
         map_expr: &Expr,
         input_schema: &Schema,
     ) -> Result<Arc<dyn PhysicalExpr>> {
-        let graph_ctx = self
-            .graph_ctx
-            .as_ref()
-            .ok_or_else(|| anyhow!("Pattern comprehension requires GraphExecutionContext"))?;
-        let uni_schema = self
-            .uni_schema
-            .as_ref()
-            .ok_or_else(|| anyhow!("Pattern comprehension requires UniSchema"))?;
+        let err = |dep: &str| anyhow!("Pattern comprehension requires {}", dep);
+
+        let graph_ctx = self.graph_ctx.as_ref().ok_or_else(|| err("GraphExecutionContext"))?;
+        let uni_schema = self.uni_schema.as_ref().ok_or_else(|| err("UniSchema"))?;
 
         // 1. Analyze pattern to get anchor column and traversal steps
         let (anchor_col, steps) = analyze_pattern(pattern, input_schema, uni_schema)?;
@@ -659,33 +655,17 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
         right: Arc<dyn PhysicalExpr>,
         input_schema: &Schema,
     ) -> Result<Arc<dyn PhysicalExpr>> {
-        // Map Cypher BinaryOp to DataFusion Operator
         use datafusion::logical_expr::Operator;
 
-        // String operators mapping (using custom physical expr for safe type handling)
-        match op {
-            BinaryOp::StartsWith => {
-                return Ok(Arc::new(CypherStringMatchExpr::new(
-                    left,
-                    right,
-                    StringOp::StartsWith,
-                )));
-            }
-            BinaryOp::EndsWith => {
-                return Ok(Arc::new(CypherStringMatchExpr::new(
-                    left,
-                    right,
-                    StringOp::EndsWith,
-                )));
-            }
-            BinaryOp::Contains => {
-                return Ok(Arc::new(CypherStringMatchExpr::new(
-                    left,
-                    right,
-                    StringOp::Contains,
-                )));
-            }
-            _ => {}
+        // String operators use custom physical expr for safe type handling
+        let string_op = match op {
+            BinaryOp::StartsWith => Some(StringOp::StartsWith),
+            BinaryOp::EndsWith => Some(StringOp::EndsWith),
+            BinaryOp::Contains => Some(StringOp::Contains),
+            _ => None,
+        };
+        if let Some(sop) = string_op {
+            return Ok(Arc::new(CypherStringMatchExpr::new(left, right, sop)));
         }
 
         let df_op = match op {
@@ -722,204 +702,248 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
         // UDFs which decode JSONB to Value for comparison.
         let left_type = left.data_type(input_schema).ok();
         let right_type = right.data_type(input_schema).ok();
-        let has_jsonb = left_type
-            .as_ref()
-            .is_some_and(|t| *t == arrow_schema::DataType::LargeBinary)
-            || right_type
-                .as_ref()
-                .is_some_and(|t| *t == arrow_schema::DataType::LargeBinary);
+        let has_jsonb = is_jsonb_type(left_type.as_ref()) || is_jsonb_type(right_type.as_ref());
 
         if has_jsonb {
-            let udf_name = match df_op {
-                Operator::Eq => Some("_cypher_equal"),
-                Operator::NotEq => Some("_cypher_not_equal"),
-                Operator::Gt => Some("_cypher_gt"),
-                Operator::GtEq => Some("_cypher_gt_eq"),
-                Operator::Lt => Some("_cypher_lt"),
-                Operator::LtEq => Some("_cypher_lt_eq"),
-                _ => None,
-            };
-            if let Some(name) = udf_name
-                && let Some(udf) = self.state.scalar_functions().get(name)
+            if let Some(result) =
+                self.compile_jsonb_comparison(df_op, left.clone(), right.clone(), &left_type, &right_type)?
             {
-                let df_left = datafusion::logical_expr::Expr::Column(
-                    datafusion::common::Column::new(None::<String>, "__left__"),
-                );
-                let df_right = datafusion::logical_expr::Expr::Column(
-                    datafusion::common::Column::new(None::<String>, "__right__"),
-                );
-                let udf_expr = datafusion::logical_expr::Expr::ScalarFunction(
-                    datafusion::logical_expr::expr::ScalarFunction {
-                        func: udf.clone(),
-                        args: vec![df_left, df_right],
-                    },
-                );
-                // Build a temporary schema with the two operand types
-                let left_dt = left_type.unwrap_or(arrow_schema::DataType::LargeBinary);
-                let right_dt = right_type.unwrap_or(arrow_schema::DataType::LargeBinary);
-                let tmp_schema = arrow_schema::Schema::new(vec![
-                    Arc::new(arrow_schema::Field::new("__left__", left_dt, true)),
-                    Arc::new(arrow_schema::Field::new("__right__", right_dt, true)),
-                ]);
-                let df_schema = datafusion::common::DFSchema::try_from(tmp_schema.clone())?;
-                let planner = datafusion::physical_planner::DefaultPhysicalPlanner::default();
-                let udf_phy = planner
-                    .create_physical_expr(&udf_expr, &df_schema, self.state)
-                    .map_err(|e| anyhow!("Failed to create JSONB comparison expr: {}", e))?;
-                // Replace the dummy columns with the actual physical expressions
-                let udf_phy = udf_phy
-                    .with_new_children(vec![left, right])
-                    .map_err(|e| anyhow!("Failed to rebind JSONB comparison children: {}", e))?;
-                return Ok(udf_phy);
+                return Ok(result);
             }
-
-            // List concat/append via Plus when at least one side is a list.
-            // - Both LargeBinary: could be list+list (original case)
-            // - At least one Arrow List type: definitely a list from make_array
-            // Note: a single LargeBinary may be a JSONB scalar (e.g. from property access),
-            // so we only treat it as list when both sides are LargeBinary or when paired
-            // with an Arrow List type.
-            let left_is_lb = left_type
-                .as_ref()
-                .is_some_and(|t| *t == arrow_schema::DataType::LargeBinary);
-            let right_is_lb = right_type
-                .as_ref()
-                .is_some_and(|t| *t == arrow_schema::DataType::LargeBinary);
-            let left_is_arrow_list = left_type
-                .as_ref()
-                .is_some_and(|t| matches!(t, arrow_schema::DataType::List(_)));
-            let right_is_arrow_list = right_type
-                .as_ref()
-                .is_some_and(|t| matches!(t, arrow_schema::DataType::List(_)));
-            let is_list_plus = df_op == Operator::Plus
-                && ((left_is_lb && right_is_lb) || left_is_arrow_list || right_is_arrow_list);
-            if is_list_plus
-                && let Some(udf) = self.state.scalar_functions().get("_cypher_list_concat")
+            if let Some(result) =
+                self.compile_jsonb_list_concat(left.clone(), right.clone(), &left_type, &right_type, df_op)?
             {
-                let df_left = datafusion::logical_expr::Expr::Column(
-                    datafusion::common::Column::new(None::<String>, "__left__"),
-                );
-                let df_right = datafusion::logical_expr::Expr::Column(
-                    datafusion::common::Column::new(None::<String>, "__right__"),
-                );
-                let udf_expr = datafusion::logical_expr::Expr::ScalarFunction(
-                    datafusion::logical_expr::expr::ScalarFunction {
-                        func: udf.clone(),
-                        args: vec![df_left, df_right],
-                    },
-                );
-                let left_dt = left_type
-                    .clone()
-                    .unwrap_or(arrow_schema::DataType::LargeBinary);
-                let right_dt = right_type
-                    .clone()
-                    .unwrap_or(arrow_schema::DataType::LargeBinary);
-                let tmp_schema = arrow_schema::Schema::new(vec![
-                    Arc::new(arrow_schema::Field::new("__left__", left_dt, true)),
-                    Arc::new(arrow_schema::Field::new("__right__", right_dt, true)),
-                ]);
-                let df_schema = datafusion::common::DFSchema::try_from(tmp_schema.clone())?;
-                let planner = datafusion::physical_planner::DefaultPhysicalPlanner::default();
-                let udf_phy = planner
-                    .create_physical_expr(&udf_expr, &df_schema, self.state)
-                    .map_err(|e| anyhow!("Failed to create JSONB list concat expr: {}", e))?;
-                let udf_phy = udf_phy
-                    .with_new_children(vec![left, right])
-                    .map_err(|e| anyhow!("Failed to rebind JSONB list concat children: {}", e))?;
-                return Ok(udf_phy);
+                return Ok(result);
             }
-
-            // Arithmetic with JSONB: decode LargeBinary side to match the typed side
-            let left_is_lb = left_type
-                .as_ref()
-                .is_some_and(|t| *t == arrow_schema::DataType::LargeBinary);
-            let right_is_lb = right_type
-                .as_ref()
-                .is_some_and(|t| *t == arrow_schema::DataType::LargeBinary);
-            if left_is_lb != right_is_lb {
-                // One side is LB, other is typed — decode LB to match
-                let target = if left_is_lb {
-                    right_type.as_ref()
-                } else {
-                    left_type.as_ref()
-                };
-                if let Some(target_dt) = target {
-                    let decode_udf_name = match target_dt {
-                        arrow_schema::DataType::Int8
-                        | arrow_schema::DataType::Int16
-                        | arrow_schema::DataType::Int32
-                        | arrow_schema::DataType::Int64
-                        | arrow_schema::DataType::UInt8
-                        | arrow_schema::DataType::UInt16
-                        | arrow_schema::DataType::UInt32
-                        | arrow_schema::DataType::UInt64 => Some("_jsonb_to_int64"),
-                        arrow_schema::DataType::Float16
-                        | arrow_schema::DataType::Float32
-                        | arrow_schema::DataType::Float64 => Some("_jsonb_to_float64"),
-                        arrow_schema::DataType::Utf8 | arrow_schema::DataType::LargeUtf8 => {
-                            Some("_jsonb_to_utf8")
-                        }
-                        arrow_schema::DataType::Boolean => Some("_jsonb_to_bool"),
-                        _ => None,
-                    };
-                    if let Some(udf_name) = decode_udf_name
-                        && let Some(udf) = self.state.scalar_functions().get(udf_name)
-                    {
-                        let decode_side =
-                            |phy_expr: Arc<dyn PhysicalExpr>,
-                             is_lb: bool|
-                             -> Result<Arc<dyn PhysicalExpr>> {
-                                if !is_lb {
-                                    return Ok(phy_expr);
-                                }
-                                let dummy_col = datafusion::logical_expr::Expr::Column(
-                                    datafusion::common::Column::new(None::<String>, "__lb__"),
-                                );
-                                let udf_expr = datafusion::logical_expr::Expr::ScalarFunction(
-                                    datafusion::logical_expr::expr::ScalarFunction {
-                                        func: udf.clone(),
-                                        args: vec![dummy_col],
-                                    },
-                                );
-                                let tmp_schema = arrow_schema::Schema::new(vec![Arc::new(
-                                    arrow_schema::Field::new(
-                                        "__lb__",
-                                        arrow_schema::DataType::LargeBinary,
-                                        true,
-                                    ),
-                                )]);
-                                let df_schema =
-                                    datafusion::common::DFSchema::try_from(tmp_schema.clone())?;
-                                let planner =
-                                    datafusion::physical_planner::DefaultPhysicalPlanner::default();
-                                let udf_phy = planner
-                                    .create_physical_expr(&udf_expr, &df_schema, self.state)
-                                    .map_err(|e| {
-                                        anyhow!("Failed to create JSONB decode expr: {}", e)
-                                    })?;
-                                udf_phy.with_new_children(vec![phy_expr]).map_err(|e| {
-                                    anyhow!("Failed to rebind JSONB decode children: {}", e)
-                                })
-                            };
-
-                        let decoded_left = decode_side(left, left_is_lb)?;
-                        let decoded_right = decode_side(right, right_is_lb)?;
-                        return binary(decoded_left, df_op, decoded_right, input_schema).map_err(
-                            |e| {
-                                anyhow!(
-                                    "Failed to create binary expression after JSONB decode: {}",
-                                    e
-                                )
-                            },
-                        );
-                    }
-                }
+            if let Some(result) = self.compile_jsonb_arithmetic(
+                df_op,
+                left.clone(),
+                right.clone(),
+                &left_type,
+                &right_type,
+                input_schema,
+            )? {
+                return Ok(result);
             }
         }
 
         // Use DataFusion's binary physical expression creator which handles coercion
         binary(left, df_op, right, input_schema)
             .map_err(|e| anyhow!("Failed to create binary expression: {}", e))
+    }
+
+    /// Compile JSONB comparison using Cypher UDFs.
+    fn compile_jsonb_comparison(
+        &self,
+        df_op: datafusion::logical_expr::Operator,
+        left: Arc<dyn PhysicalExpr>,
+        right: Arc<dyn PhysicalExpr>,
+        left_type: &Option<DataType>,
+        right_type: &Option<DataType>,
+    ) -> Result<Option<Arc<dyn PhysicalExpr>>> {
+        use datafusion::logical_expr::Operator;
+
+        let udf_name = match df_op {
+            Operator::Eq => "_cypher_equal",
+            Operator::NotEq => "_cypher_not_equal",
+            Operator::Gt => "_cypher_gt",
+            Operator::GtEq => "_cypher_gt_eq",
+            Operator::Lt => "_cypher_lt",
+            Operator::LtEq => "_cypher_lt_eq",
+            _ => return Ok(None),
+        };
+
+        self.plan_binary_udf(
+            udf_name,
+            left,
+            right,
+            left_type.clone().unwrap_or(DataType::LargeBinary),
+            right_type.clone().unwrap_or(DataType::LargeBinary),
+        )
+    }
+
+    /// Compile JSONB list concatenation.
+    fn compile_jsonb_list_concat(
+        &self,
+        left: Arc<dyn PhysicalExpr>,
+        right: Arc<dyn PhysicalExpr>,
+        left_type: &Option<DataType>,
+        right_type: &Option<DataType>,
+        df_op: datafusion::logical_expr::Operator,
+    ) -> Result<Option<Arc<dyn PhysicalExpr>>> {
+        use datafusion::logical_expr::Operator;
+
+        if df_op != Operator::Plus {
+            return Ok(None);
+        }
+
+        // List concat when at least one side is a list (JSONB or Arrow List)
+        let is_list = |t: &Option<DataType>| {
+            t.as_ref()
+                .is_some_and(|dt| matches!(dt, DataType::LargeBinary | DataType::List(_)))
+        };
+
+        if !is_list(left_type) && !is_list(right_type) {
+            return Ok(None);
+        }
+
+        self.plan_binary_udf(
+            "_cypher_list_concat",
+            left,
+            right,
+            left_type.clone().unwrap_or(DataType::LargeBinary),
+            right_type.clone().unwrap_or(DataType::LargeBinary),
+        )
+    }
+
+    /// Compile JSONB arithmetic by decoding the LargeBinary side to match the typed side.
+    ///
+    /// Returns `Some(expr)` if the operation was handled,
+    /// `None` to fall through to standard binary handling.
+    fn compile_jsonb_arithmetic(
+        &self,
+        df_op: datafusion::logical_expr::Operator,
+        left: Arc<dyn PhysicalExpr>,
+        right: Arc<dyn PhysicalExpr>,
+        left_type: &Option<DataType>,
+        right_type: &Option<DataType>,
+        input_schema: &Schema,
+    ) -> Result<Option<Arc<dyn PhysicalExpr>>> {
+        let left_is_lb = is_jsonb_type(left_type.as_ref());
+        let right_is_lb = is_jsonb_type(right_type.as_ref());
+
+        // Only handle mixed types (one LB, one typed)
+        if left_is_lb == right_is_lb {
+            return Ok(None);
+        }
+
+        // One side is LB, other is typed — decode LB to match
+        let target = if left_is_lb {
+            right_type.as_ref()
+        } else {
+            left_type.as_ref()
+        };
+        let Some(target_dt) = target else {
+            return Ok(None);
+        };
+
+        let decode_udf_name = match target_dt {
+            DataType::Int8
+            | DataType::Int16
+            | DataType::Int32
+            | DataType::Int64
+            | DataType::UInt8
+            | DataType::UInt16
+            | DataType::UInt32
+            | DataType::UInt64 => Some("_jsonb_to_int64"),
+            DataType::Float16 | DataType::Float32 | DataType::Float64 => Some("_jsonb_to_float64"),
+            DataType::Utf8 | DataType::LargeUtf8 => Some("_jsonb_to_utf8"),
+            DataType::Boolean => Some("_jsonb_to_bool"),
+            _ => None,
+        };
+        let Some(udf_name) = decode_udf_name else {
+            return Ok(None);
+        };
+        let Some(udf) = self.state.scalar_functions().get(udf_name) else {
+            return Ok(None);
+        };
+
+        let dummy_col = datafusion::logical_expr::Expr::Column(
+            datafusion::common::Column::new(None::<String>, "__lb__"),
+        );
+        let udf_expr = datafusion::logical_expr::Expr::ScalarFunction(
+            datafusion::logical_expr::expr::ScalarFunction {
+                func: udf.clone(),
+                args: vec![dummy_col],
+            },
+        );
+
+        let decoded_left = if left_is_lb {
+            self.plan_udf_physical_expr(
+                &udf_expr,
+                &[("__lb__", DataType::LargeBinary)],
+                vec![left],
+                "JSONB decode",
+            )?
+        } else {
+            left
+        };
+        let decoded_right = if right_is_lb {
+            self.plan_udf_physical_expr(
+                &udf_expr,
+                &[("__lb__", DataType::LargeBinary)],
+                vec![right],
+                "JSONB decode",
+            )?
+        } else {
+            right
+        };
+
+        let result = binary(decoded_left, df_op, decoded_right, input_schema).map_err(|e| {
+            anyhow!(
+                "Failed to create binary expression after JSONB decode: {}",
+                e
+            )
+        })?;
+        Ok(Some(result))
+    }
+
+    /// Plan a UDF expression with dummy schema columns, then rebind to actual physical expressions.
+    fn plan_udf_physical_expr(
+        &self,
+        udf_expr: &datafusion::logical_expr::Expr,
+        operand_types: &[(&str, DataType)],
+        children: Vec<Arc<dyn PhysicalExpr>>,
+        error_context: &str,
+    ) -> Result<Arc<dyn PhysicalExpr>> {
+        let tmp_schema = Schema::new(
+            operand_types
+                .iter()
+                .map(|(name, dt)| Arc::new(Field::new(*name, dt.clone(), true)))
+                .collect::<Vec<_>>(),
+        );
+        let df_schema = datafusion::common::DFSchema::try_from(tmp_schema)?;
+        let planner = datafusion::physical_planner::DefaultPhysicalPlanner::default();
+        let udf_phy = planner
+            .create_physical_expr(udf_expr, &df_schema, self.state)
+            .map_err(|e| anyhow!("Failed to create {} expr: {}", error_context, e))?;
+        udf_phy
+            .with_new_children(children)
+            .map_err(|e| anyhow!("Failed to rebind {} children: {}", error_context, e))
+    }
+
+    /// Plan a binary UDF with the given name and operand types.
+    fn plan_binary_udf(
+        &self,
+        udf_name: &str,
+        left: Arc<dyn PhysicalExpr>,
+        right: Arc<dyn PhysicalExpr>,
+        left_type: DataType,
+        right_type: DataType,
+    ) -> Result<Option<Arc<dyn PhysicalExpr>>> {
+        let Some(udf) = self.state.scalar_functions().get(udf_name) else {
+            return Ok(None);
+        };
+        let udf_expr = datafusion::logical_expr::Expr::ScalarFunction(
+            datafusion::logical_expr::expr::ScalarFunction {
+                func: udf.clone(),
+                args: vec![
+                    datafusion::logical_expr::Expr::Column(
+                        datafusion::common::Column::new(None::<String>, "__left__"),
+                    ),
+                    datafusion::logical_expr::Expr::Column(
+                        datafusion::common::Column::new(None::<String>, "__right__"),
+                    ),
+                ],
+            },
+        );
+        let result = self.plan_udf_physical_expr(
+            &udf_expr,
+            &[("__left__", left_type), ("__right__", right_type)],
+            vec![left, right],
+            udf_name,
+        )?;
+        Ok(Some(result))
     }
 
     fn compile_unary_op(

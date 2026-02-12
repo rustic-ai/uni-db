@@ -868,64 +868,6 @@ pub enum LogicalPlan {
     },
 }
 
-/// Result of extracting ANY IN predicate
-struct AnyInExtraction {
-    predicate: AnyInPredicate,
-    residual: Option<Expr>,
-}
-
-struct AnyInPredicate {
-    variable: String,
-    property: String,
-    terms: Expr,
-}
-
-fn extract_any_in_predicate(expr: &Expr) -> Option<AnyInExtraction> {
-    match expr {
-        Expr::BinaryOp { left, op, right } => {
-            if matches!(op, BinaryOp::And) {
-                if let Some(mut extraction) = extract_any_in_predicate(left) {
-                    extraction.residual = Some(combine_with_and(
-                        extraction.residual,
-                        right.as_ref().clone(),
-                    ));
-                    return Some(extraction);
-                }
-                if let Some(mut extraction) = extract_any_in_predicate(right) {
-                    extraction.residual =
-                        Some(combine_with_and(extraction.residual, left.as_ref().clone()));
-                    return Some(extraction);
-                }
-                return None;
-            }
-            // Check direct match
-            if let Some(pred) = extract_simple_any_in(expr) {
-                return Some(AnyInExtraction {
-                    predicate: pred,
-                    residual: None,
-                });
-            }
-            None
-        }
-        _ => {
-            if let Some(pred) = extract_simple_any_in(expr) {
-                return Some(AnyInExtraction {
-                    predicate: pred,
-                    residual: None,
-                });
-            }
-            None
-        }
-    }
-}
-
-fn extract_simple_any_in(expr: &Expr) -> Option<AnyInPredicate> {
-    // List comprehensions are not supported, so this optimization cannot be applied
-    // TODO: Re-enable when list comprehensions are re-implemented
-    let _ = expr; // Suppress unused parameter warning
-    None
-}
-
 /// Extracted vector similarity predicate info for optimization
 struct VectorSimilarityPredicate {
     variable: String,
@@ -3116,41 +3058,6 @@ impl QueryPlanner {
         let mut current_predicate =
             self.rewrite_predicates_using_indexes(&transformed_predicate, &plan, vars_in_scope)?;
 
-        // 0. Try to extract ANY IN predicate for Inverted Index optimization
-        if let Some(extraction) = extract_any_in_predicate(&current_predicate) {
-            let any_pred = &extraction.predicate;
-            // Check if index exists
-            if let Some(label_id) = Self::find_scan_label_id(&plan, &any_pred.variable) {
-                let label_name = self.schema.label_name_by_id(label_id);
-                if let Some(label) = label_name {
-                    // Verify index exists in schema
-                    let has_index = self.schema.indexes.iter().any(|idx| match idx {
-                        IndexDefinition::Inverted(cfg) => {
-                            cfg.label == label && cfg.property == any_pred.property
-                        }
-                        _ => false,
-                    });
-
-                    if has_index {
-                        // Replace Scan with InvertedIndexLookup
-                        plan = Self::replace_scan_with_inverted_lookup(
-                            plan,
-                            &any_pred.variable,
-                            label_id,
-                            &any_pred.property,
-                            any_pred.terms.clone(),
-                        );
-
-                        if let Some(residual) = extraction.residual {
-                            current_predicate = residual;
-                        } else {
-                            current_predicate = Expr::TRUE;
-                        }
-                    }
-                }
-            }
-        }
-
         // 1. Try to extract vector_similarity predicate for optimization
         if let Some(extraction) = extract_vector_similarity(&current_predicate) {
             let vs = &extraction.predicate;
@@ -4057,55 +3964,6 @@ impl QueryPlanner {
                 .or_else(|| Self::find_scan_label_id(right, variable)),
             LogicalPlan::Traverse { input, .. } => Self::find_scan_label_id(input, variable),
             _ => None,
-        }
-    }
-
-    fn replace_scan_with_inverted_lookup(
-        plan: LogicalPlan,
-        variable: &str,
-        label_id: u16,
-        property: &str,
-        terms: Expr,
-    ) -> LogicalPlan {
-        match plan {
-            LogicalPlan::Scan { variable: v, .. } if v == variable => {
-                LogicalPlan::InvertedIndexLookup {
-                    label_id,
-                    variable: v,
-                    property: property.to_string(),
-                    terms,
-                }
-            }
-            LogicalPlan::Project { input, projections } => LogicalPlan::Project {
-                input: Box::new(Self::replace_scan_with_inverted_lookup(
-                    *input, variable, label_id, property, terms,
-                )),
-                projections,
-            },
-            LogicalPlan::Filter {
-                input,
-                predicate,
-                optional_variables,
-            } => LogicalPlan::Filter {
-                input: Box::new(Self::replace_scan_with_inverted_lookup(
-                    *input, variable, label_id, property, terms,
-                )),
-                predicate,
-                optional_variables,
-            },
-            LogicalPlan::CrossJoin { left, right } => LogicalPlan::CrossJoin {
-                left: Box::new(Self::replace_scan_with_inverted_lookup(
-                    *left,
-                    variable,
-                    label_id,
-                    property,
-                    terms.clone(),
-                )),
-                right: Box::new(Self::replace_scan_with_inverted_lookup(
-                    *right, variable, label_id, property, terms,
-                )),
-            },
-            _ => plan,
         }
     }
 

@@ -76,6 +76,12 @@ use uni_store::runtime::property_manager::PropertyManager;
 use uni_store::storage::direction::Direction;
 use uni_store::storage::manager::StorageManager;
 
+/// An aggregate function expression paired with its optional filter.
+type PhysicalAggregate = (
+    Arc<AggregateFunctionExpr>,
+    Option<Arc<dyn datafusion::physical_expr::PhysicalExpr>>,
+);
+
 /// Hybrid physical planner that produces DataFusion ExecutionPlan trees.
 ///
 /// Routes graph operations to custom `ExecutionPlan` implementations
@@ -100,7 +106,7 @@ pub struct HybridPhysicalPlanner {
     session_ctx: Arc<RwLock<SessionContext>>,
 
     /// Storage manager for dataset access.
-    _storage: Arc<StorageManager>,
+    storage: Arc<StorageManager>,
 
     /// Graph execution context for custom operators.
     graph_ctx: Arc<GraphExecutionContext>,
@@ -152,7 +158,7 @@ impl HybridPhysicalPlanner {
 
         Self {
             session_ctx,
-            _storage: storage,
+            storage,
             graph_ctx,
             schema,
             last_flush_version: AtomicU64::new(0),
@@ -230,7 +236,7 @@ impl HybridPhysicalPlanner {
 
         Self {
             session_ctx,
-            _storage: storage,
+            storage,
             graph_ctx,
             schema,
             last_flush_version: AtomicU64::new(0),
@@ -987,7 +993,7 @@ impl HybridPhysicalPlanner {
             recursive.clone(),
             self.graph_ctx.clone(),
             self.session_ctx.clone(),
-            self._storage.clone(),
+            self.storage.clone(),
             self.schema.clone(),
             self.params.clone(),
         )))
@@ -1031,7 +1037,7 @@ impl HybridPhysicalPlanner {
             input_filter.cloned(),
             self.graph_ctx.clone(),
             self.session_ctx.clone(),
-            self._storage.clone(),
+            self.storage.clone(),
             self.schema.clone(),
             self.params.clone(),
             output_schema,
@@ -1981,7 +1987,7 @@ impl HybridPhysicalPlanner {
                     self.graph_ctx.clone(),
                     self.schema.clone(),
                     self.session_ctx.clone(),
-                    self._storage.clone(),
+                    self.storage.clone(),
                     self.params.clone(),
                 );
                 let physical_predicate = compiler.compile(predicate, &schema)?;
@@ -2093,7 +2099,7 @@ impl HybridPhysicalPlanner {
             self.graph_ctx.clone(),
             self.schema.clone(),
             self.session_ctx.clone(),
-            self._storage.clone(),
+            self.storage.clone(),
             self.params.clone(),
         );
         let physical_predicate = compiler.compile(predicate, &schema)?;
@@ -2332,7 +2338,7 @@ impl HybridPhysicalPlanner {
                 self.graph_ctx.clone(),
                 self.schema.clone(),
                 self.session_ctx.clone(),
-                self._storage.clone(),
+                self.storage.clone(),
                 self.params.clone(),
             );
             let physical_expr = compiler.compile(expr, &schema)?;
@@ -2372,7 +2378,7 @@ impl HybridPhysicalPlanner {
             self.graph_ctx.clone(),
             self.schema.clone(),
             self.session_ctx.clone(),
-            self._storage.clone(),
+            self.storage.clone(),
             self.params.clone(),
         );
         for expr in group_by {
@@ -2385,8 +2391,10 @@ impl HybridPhysicalPlanner {
 
         // Translate aggregates and their associated filter expressions
         // (e.g. collect() uses a filter to exclude null values per Cypher spec)
-        let (aggr_exprs, filter_exprs) =
-            self.translate_aggregates(aggregates, &schema, &state, &ctx)?;
+        let (aggr_exprs, filter_exprs): (Vec<_>, Vec<_>) = self
+            .translate_aggregates(aggregates, &schema, &state, &ctx)?
+            .into_iter()
+            .unzip();
 
         let agg_exec = Arc::new(AggregateExec::try_new(
             AggregateMode::Single,
@@ -2428,14 +2436,10 @@ impl HybridPhysicalPlanner {
         schema: &SchemaRef,
         state: &SessionState,
         ctx: &TranslationContext,
-    ) -> Result<(
-        Vec<Arc<AggregateFunctionExpr>>,
-        Vec<Option<Arc<dyn datafusion::physical_expr::PhysicalExpr>>>,
-    )> {
+    ) -> Result<Vec<PhysicalAggregate>> {
         use datafusion::functions_aggregate::expr_fn::{avg, count, max, min, sum};
 
-        let mut result = Vec::new();
-        let mut filters = Vec::new();
+        let mut result: Vec<PhysicalAggregate> = Vec::new();
 
         for agg_expr in aggregates {
             let Expr::FunctionCall {
@@ -2513,12 +2517,11 @@ impl HybridPhysicalPlanner {
             let df_agg = Self::resolve_udfs(&df_agg, state)?;
 
             // Convert to physical aggregate
-            let (physical_agg, filter) = self.create_physical_aggregate(&df_agg, schema, state)?;
-            result.push(physical_agg);
-            filters.push(filter);
+            let agg_and_filter = self.create_physical_aggregate(&df_agg, schema, state)?;
+            result.push(agg_and_filter);
         }
 
-        Ok((result, filters))
+        Ok(result)
     }
 
     /// Plan a sort operation.
@@ -3179,10 +3182,7 @@ impl HybridPhysicalPlanner {
         expr: &DfExpr,
         schema: &SchemaRef,
         state: &SessionState,
-    ) -> Result<(
-        Arc<AggregateFunctionExpr>,
-        Option<Arc<dyn datafusion::physical_expr::PhysicalExpr>>,
-    )> {
+    ) -> Result<PhysicalAggregate> {
         use datafusion::physical_planner::create_aggregate_expr_and_maybe_filter;
 
         // Build a DFSchema from the Arrow schema for the function call

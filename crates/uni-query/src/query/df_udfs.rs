@@ -251,7 +251,7 @@ impl ScalarUDFImpl for IdUdf {
         // id() is a pass-through - the VID/EID is already stored as UInt64
         if args.args.is_empty() {
             return Err(datafusion::error::DataFusionError::Execution(
-                "id() requires 1 argument".to_string(),
+                "id(): requires 1 argument".to_string(),
             ));
         }
         Ok(args.args[0].clone())
@@ -308,7 +308,7 @@ impl ScalarUDFImpl for TypeUdf {
         // type() is a pass-through - the edge type is already stored as a string column
         if args.args.is_empty() {
             return Err(datafusion::error::DataFusionError::Execution(
-                "type() requires 1 argument".to_string(),
+                "type(): requires 1 argument".to_string(),
             ));
         }
         Ok(args.args[0].clone())
@@ -365,7 +365,7 @@ impl ScalarUDFImpl for KeysUdf {
         invoke_cypher_udf(args, &output_type, |val_args| {
             if val_args.is_empty() {
                 return Err(datafusion::error::DataFusionError::Execution(
-                    "keys() requires 1 argument".to_string(),
+                    "keys(): requires 1 argument".to_string(),
                 ));
             }
 
@@ -452,7 +452,7 @@ impl ScalarUDFImpl for PropertiesUdf {
         invoke_cypher_udf(args, &output_type, |val_args| {
             if val_args.is_empty() {
                 return Err(datafusion::error::DataFusionError::Execution(
-                    "properties() requires 1 argument".to_string(),
+                    "properties(): requires 1 argument".to_string(),
                 ));
             }
 
@@ -525,7 +525,7 @@ impl ScalarUDFImpl for IndexUdf {
         invoke_cypher_udf(args, &output_type, |val_args| {
             if val_args.len() != 2 {
                 return Err(datafusion::error::DataFusionError::Execution(
-                    "index() requires 2 arguments".to_string(),
+                    "index(): requires 2 arguments".to_string(),
                 ));
             }
 
@@ -575,7 +575,7 @@ impl ScalarUDFImpl for IndexUdf {
                         }
                     } else if !index.is_null() {
                         return Err(datafusion::error::DataFusionError::Execution(
-                            "InvalidArgumentValue: Map index must be a string".to_string(),
+                            "index(): map index must be a string".to_string(),
                         ));
                     } else {
                         Value::Null
@@ -586,7 +586,7 @@ impl ScalarUDFImpl for IndexUdf {
                         node.properties.get(key).cloned().unwrap_or(Value::Null)
                     } else if !index.is_null() {
                         return Err(datafusion::error::DataFusionError::Execution(
-                            "InvalidArgumentValue: Node index must be a string".to_string(),
+                            "index(): node index must be a string".to_string(),
                         ));
                     } else {
                         Value::Null
@@ -597,7 +597,7 @@ impl ScalarUDFImpl for IndexUdf {
                         edge.properties.get(key).cloned().unwrap_or(Value::Null)
                     } else if !index.is_null() {
                         return Err(datafusion::error::DataFusionError::Execution(
-                            "InvalidArgumentValue: Edge index must be a string".to_string(),
+                            "index(): edge index must be a string".to_string(),
                         ));
                     } else {
                         Value::Null
@@ -659,7 +659,7 @@ impl ScalarUDFImpl for LabelsUdf {
         invoke_cypher_udf(args, &output_type, |val_args| {
             if val_args.is_empty() {
                 return Err(datafusion::error::DataFusionError::Execution(
-                    "labels() requires 1 argument".to_string(),
+                    "labels(): requires 1 argument".to_string(),
                 ));
             }
 
@@ -720,7 +720,7 @@ impl ScalarUDFImpl for NodesUdf {
         invoke_cypher_udf(args, &output_type, |val_args| {
             if val_args.is_empty() {
                 return Err(datafusion::error::DataFusionError::Execution(
-                    "nodes() requires 1 argument".to_string(),
+                    "nodes(): requires 1 argument".to_string(),
                 ));
             }
 
@@ -780,7 +780,7 @@ impl ScalarUDFImpl for RelationshipsUdf {
         invoke_cypher_udf(args, &output_type, |val_args| {
             if val_args.is_empty() {
                 return Err(datafusion::error::DataFusionError::Execution(
-                    "relationships() requires 1 argument".to_string(),
+                    "relationships(): requires 1 argument".to_string(),
                 ));
             }
 
@@ -847,7 +847,7 @@ impl ScalarUDFImpl for RangeUdf {
     fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DFResult<ColumnarValue> {
         if args.args.len() < 2 || args.args.len() > 3 {
             return Err(datafusion::error::DataFusionError::Execution(
-                "range() requires 2 or 3 arguments".to_string(),
+                "range(): requires 2 or 3 arguments".to_string(),
             ));
         }
 
@@ -859,7 +859,7 @@ impl ScalarUDFImpl for RangeUdf {
             ColumnarValue::Scalar(datafusion::common::ScalarValue::Int64(Some(v))) => *v,
             _ => {
                 return Err(datafusion::error::DataFusionError::Execution(
-                    "range() start must be an integer".to_string(),
+                    "range(): start must be an integer".to_string(),
                 ));
             }
         };
@@ -868,7 +868,7 @@ impl ScalarUDFImpl for RangeUdf {
             ColumnarValue::Scalar(datafusion::common::ScalarValue::Int64(Some(v))) => *v,
             _ => {
                 return Err(datafusion::error::DataFusionError::Execution(
-                    "range() end must be an integer".to_string(),
+                    "range(): end must be an integer".to_string(),
                 ));
             }
         };
@@ -878,7 +878,7 @@ impl ScalarUDFImpl for RangeUdf {
                 ColumnarValue::Scalar(datafusion::common::ScalarValue::Int64(Some(v))) => *v,
                 _ => {
                     return Err(datafusion::error::DataFusionError::Execution(
-                        "range() step must be an integer".to_string(),
+                        "range(): step must be an integer".to_string(),
                     ));
                 }
             }
@@ -888,7 +888,7 @@ impl ScalarUDFImpl for RangeUdf {
 
         if step == 0 {
             return Err(datafusion::error::DataFusionError::Execution(
-                "range() step cannot be zero".to_string(),
+                "range(): step cannot be zero".to_string(),
             ));
         }
 
@@ -936,7 +936,7 @@ where
 
     if args.args.len() != 2 {
         return Err(DataFusionError::Execution(format!(
-            "{} requires exactly 2 arguments",
+            "{}(): requires exactly 2 arguments",
             name
         )));
     }
@@ -951,10 +951,10 @@ where
         ) => Ok(ColumnarValue::Scalar(ScalarValue::Int64(Some(op(*l, *r))))),
         (ColumnarValue::Array(l_arr), ColumnarValue::Array(r_arr)) => {
             let l_arr = l_arr.as_any().downcast_ref::<Int64Array>().ok_or_else(|| {
-                DataFusionError::Execution("Left array must be Int64".to_string())
+                DataFusionError::Execution(format!("{}(): left array must be Int64", name))
             })?;
             let r_arr = r_arr.as_any().downcast_ref::<Int64Array>().ok_or_else(|| {
-                DataFusionError::Execution("Right array must be Int64".to_string())
+                DataFusionError::Execution(format!("{}(): right array must be Int64", name))
             })?;
 
             let result: Int64Array = l_arr
@@ -969,7 +969,7 @@ where
             Ok(ColumnarValue::Array(Arc::new(result)))
         }
         _ => Err(DataFusionError::Execution(format!(
-            "Mixed scalar/array not supported for {}",
+            "{}(): mixed scalar/array not supported",
             name
         ))),
     }
@@ -992,7 +992,7 @@ where
 
     if args.args.len() != 1 {
         return Err(DataFusionError::Execution(format!(
-            "{} requires exactly 1 argument",
+            "{}(): requires exactly 1 argument",
             name
         )));
     }
@@ -1007,14 +1007,14 @@ where
             let arr = arr
                 .as_any()
                 .downcast_ref::<Int64Array>()
-                .ok_or_else(|| DataFusionError::Execution("Array must be Int64".to_string()))?;
+                .ok_or_else(|| DataFusionError::Execution(format!("{}(): array must be Int64", name)))?;
 
             let result: Int64Array = arr.iter().map(|v| v.map(&op)).collect();
 
             Ok(ColumnarValue::Array(Arc::new(result)))
         }
         _ => Err(DataFusionError::Execution(format!(
-            "Invalid argument type for {}",
+            "{}(): invalid argument type",
             name
         ))),
     }
@@ -1283,7 +1283,7 @@ impl ScalarUDFImpl for DurationPropertyUdf {
         invoke_cypher_udf(args, &output_type, |val_args| {
             if val_args.len() != 2 {
                 return Err(datafusion::error::DataFusionError::Execution(
-                    "_duration_property requires 2 arguments (duration_string, component)"
+                    "_duration_property(): requires 2 arguments (duration_string, component)"
                         .to_string(),
                 ));
             }
@@ -1292,7 +1292,7 @@ impl ScalarUDFImpl for DurationPropertyUdf {
                 Value::String(s) => s,
                 _ => {
                     return Err(datafusion::error::DataFusionError::Execution(
-                        "Duration must be string".to_string(),
+                        "_duration_property(): duration must be a string".to_string(),
                     ));
                 }
             };
@@ -1300,7 +1300,7 @@ impl ScalarUDFImpl for DurationPropertyUdf {
                 Value::String(s) => s,
                 _ => {
                     return Err(datafusion::error::DataFusionError::Execution(
-                        "Component must be string".to_string(),
+                        "_duration_property(): component must be a string".to_string(),
                     ));
                 }
             };
@@ -1558,23 +1558,26 @@ fn scalar_to_value(scalar: &ScalarValue) -> DFResult<Value> {
         | ScalarValue::DurationSecond(None)
         | ScalarValue::DurationNanosecond(None) => Ok(Value::Null),
         other => Err(datafusion::error::DataFusionError::Execution(format!(
-            "Unsupported scalar type for UDF: {other:?}"
+            "scalar_to_value(): unsupported scalar type {other:?}"
         ))),
     }
 }
 
 /// Convert a `uni_common::Value` result back to `ColumnarValue`.
 fn value_to_columnar(val: &Value) -> DFResult<ColumnarValue> {
-    match val {
-        Value::String(s) => Ok(ColumnarValue::Scalar(ScalarValue::Utf8(Some(s.clone())))),
-        Value::Int(i) => Ok(ColumnarValue::Scalar(ScalarValue::Int64(Some(*i)))),
-        Value::Float(f) => Ok(ColumnarValue::Scalar(ScalarValue::Float64(Some(*f)))),
-        Value::Bool(b) => Ok(ColumnarValue::Scalar(ScalarValue::Boolean(Some(*b)))),
-        Value::Null => Ok(ColumnarValue::Scalar(ScalarValue::Utf8(None))),
-        other => Err(datafusion::error::DataFusionError::Execution(format!(
-            "UDF returned unsupported type: {other:?}"
-        ))),
-    }
+    let scalar = match val {
+        Value::String(s) => ScalarValue::Utf8(Some(s.clone())),
+        Value::Int(i) => ScalarValue::Int64(Some(*i)),
+        Value::Float(f) => ScalarValue::Float64(Some(*f)),
+        Value::Bool(b) => ScalarValue::Boolean(Some(*b)),
+        Value::Null => ScalarValue::Utf8(None),
+        other => {
+            return Err(datafusion::error::DataFusionError::Execution(format!(
+                "value_to_columnar(): unsupported type {other:?}"
+            )))
+        }
+    };
+    Ok(ColumnarValue::Scalar(scalar))
 }
 
 // ============================================================================
@@ -1621,94 +1624,70 @@ impl ScalarUDFImpl for HasNullUdf {
     fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DFResult<ColumnarValue> {
         if args.args.len() != 1 {
             return Err(datafusion::error::DataFusionError::Execution(
-                "_has_null requires 1 argument".to_string(),
+                "_has_null(): requires 1 argument".to_string(),
             ));
         }
 
-        let arg = &args.args[0];
+        /// Check if a list array element at index has any nulls
+        fn check_list_nulls<T: arrow_array::OffsetSizeTrait>(
+            arr: &arrow_array::GenericListArray<T>,
+            idx: usize,
+        ) -> bool {
+            if arr.is_null(idx) || arr.is_empty() {
+                false
+            } else {
+                arr.value(idx).null_count() > 0
+            }
+        }
 
-        match arg {
+        match &args.args[0] {
             ColumnarValue::Scalar(scalar) => {
-                match scalar {
+                let has_null = match scalar {
                     ScalarValue::List(arr) => {
-                        // Try downcasting to ListArray (GenericListArray<i32>)
-                        if let Some(list_arr) =
-                            arr.as_any().downcast_ref::<arrow::array::ListArray>()
-                        {
-                            if list_arr.is_empty() {
-                                Ok(ColumnarValue::Scalar(ScalarValue::Boolean(Some(false))))
-                            } else {
-                                let values = list_arr.value(0);
-                                let null_count = values.null_count();
-                                Ok(ColumnarValue::Scalar(ScalarValue::Boolean(Some(
-                                    null_count > 0,
-                                ))))
-                            }
-                        } else {
-                            // Fallback: check array itself
-                            let null_count = arr.null_count();
-                            Ok(ColumnarValue::Scalar(ScalarValue::Boolean(Some(
-                                null_count > 0,
-                            ))))
-                        }
+                        arr.as_any()
+                            .downcast_ref::<arrow::array::ListArray>()
+                            .map(|a| !a.is_empty() && a.value(0).null_count() > 0)
+                            .unwrap_or(arr.null_count() > 0)
                     }
-                    ScalarValue::LargeList(arr) => {
-                        if arr.len() == 0 {
-                            Ok(ColumnarValue::Scalar(ScalarValue::Boolean(Some(false))))
-                        } else {
-                            let values = arr.value(0);
-                            let null_count = values.null_count();
-                            Ok(ColumnarValue::Scalar(ScalarValue::Boolean(Some(
-                                null_count > 0,
-                            ))))
-                        }
-                    }
+                    ScalarValue::LargeList(arr) => arr.len() > 0 && arr.value(0).null_count() > 0,
                     ScalarValue::FixedSizeList(arr) => {
-                        if arr.len() == 0 {
-                            Ok(ColumnarValue::Scalar(ScalarValue::Boolean(Some(false))))
-                        } else {
-                            let values = arr.value(0);
-                            let null_count = values.null_count();
-                            Ok(ColumnarValue::Scalar(ScalarValue::Boolean(Some(
-                                null_count > 0,
-                            ))))
-                        }
+                        arr.len() > 0 && arr.value(0).null_count() > 0
                     }
-                    _ => Ok(ColumnarValue::Scalar(ScalarValue::Boolean(Some(false)))),
-                }
+                    _ => false,
+                };
+                Ok(ColumnarValue::Scalar(ScalarValue::Boolean(Some(has_null))))
             }
             ColumnarValue::Array(arr) => {
                 use arrow_array::{LargeListArray, ListArray};
 
-                if let Some(list_arr) = arr.as_any().downcast_ref::<ListArray>() {
-                    let mut builder = arrow::array::BooleanBuilder::with_capacity(list_arr.len());
-                    for i in 0..list_arr.len() {
-                        if list_arr.is_null(i) {
-                            builder.append_null();
-                        } else {
-                            let value_slice = list_arr.value(i);
-                            builder.append_value(value_slice.null_count() > 0);
-                        }
-                    }
-                    Ok(ColumnarValue::Array(Arc::new(builder.finish()) as ArrayRef))
-                } else if let Some(large_list_arr) = arr.as_any().downcast_ref::<LargeListArray>() {
-                    let mut builder =
-                        arrow::array::BooleanBuilder::with_capacity(large_list_arr.len());
-                    for i in 0..large_list_arr.len() {
-                        if large_list_arr.is_null(i) {
-                            builder.append_null();
-                        } else {
-                            let value_slice = large_list_arr.value(i);
-                            builder.append_value(value_slice.null_count() > 0);
-                        }
-                    }
-                    Ok(ColumnarValue::Array(Arc::new(builder.finish()) as ArrayRef))
+                let results: arrow::array::BooleanArray = if let Some(list_arr) =
+                    arr.as_any().downcast_ref::<ListArray>()
+                {
+                    (0..list_arr.len())
+                        .map(|i| {
+                            if list_arr.is_null(i) {
+                                None
+                            } else {
+                                Some(check_list_nulls(list_arr, i))
+                            }
+                        })
+                        .collect()
+                } else if let Some(large) = arr.as_any().downcast_ref::<LargeListArray>() {
+                    (0..large.len())
+                        .map(|i| {
+                            if large.is_null(i) {
+                                None
+                            } else {
+                                Some(check_list_nulls(large, i))
+                            }
+                        })
+                        .collect()
                 } else {
-                    // Not a list array?
-                    Err(datafusion::error::DataFusionError::Execution(
-                        "_has_null requires List array".to_string(),
-                    ))
-                }
+                    return Err(datafusion::error::DataFusionError::Execution(
+                        "_has_null(): requires list array".to_string(),
+                    ));
+                };
+                Ok(ColumnarValue::Array(Arc::new(results)))
             }
         }
     }
@@ -1759,7 +1738,7 @@ impl ScalarUDFImpl for ToIntegerUdf {
         invoke_cypher_udf(args, &output_type, |val_args| {
             if val_args.is_empty() {
                 return Err(datafusion::error::DataFusionError::Execution(
-                    "toInteger() requires 1 argument".to_string(),
+                    "tointeger(): requires 1 argument".to_string(),
                 ));
             }
 
@@ -1832,7 +1811,7 @@ impl ScalarUDFImpl for ToFloatUdf {
         invoke_cypher_udf(args, &output_type, |val_args| {
             if val_args.is_empty() {
                 return Err(datafusion::error::DataFusionError::Execution(
-                    "toFloat() requires 1 argument".to_string(),
+                    "tofloat(): requires 1 argument".to_string(),
                 ));
             }
 
@@ -1903,7 +1882,7 @@ impl ScalarUDFImpl for ToBooleanUdf {
         invoke_cypher_udf(args, &output_type, |val_args| {
             if val_args.is_empty() {
                 return Err(datafusion::error::DataFusionError::Execution(
-                    "toBoolean() requires 1 argument".to_string(),
+                    "toboolean(): requires 1 argument".to_string(),
                 ));
             }
 
@@ -1925,7 +1904,7 @@ impl ScalarUDFImpl for ToBooleanUdf {
                 Value::Float(_) => Value::Null,
                 Value::List(_) | Value::Map(_) => {
                     return Err(datafusion::error::DataFusionError::Execution(format!(
-                        "InvalidArgumentValue: toBoolean() cannot convert {:?} to Boolean",
+                        "toboolean(): cannot convert {:?} to boolean",
                         val
                     )));
                 }
@@ -1980,7 +1959,7 @@ impl ScalarUDFImpl for TypeRankUdf {
     fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DFResult<ColumnarValue> {
         if args.args.len() != 1 {
             return Err(datafusion::error::DataFusionError::Execution(
-                "_cypher_type_rank requires 1 argument".to_string(),
+                "_cypher_type_rank(): requires 1 argument".to_string(),
             ));
         }
 
@@ -2080,7 +2059,7 @@ where
 
     if args.args.len() != 2 {
         return Err(DataFusionError::Execution(format!(
-            "{} requires exactly 2 arguments",
+            "{}(): requires exactly 2 arguments",
             name
         )));
     }
@@ -2177,9 +2156,10 @@ where
         (ColumnarValue::Array(l_arr), ColumnarValue::Array(r_arr)) => {
             // Both arrays.
             if l_arr.len() != r_arr.len() {
-                return Err(DataFusionError::Execution(
-                    "Array lengths must match".to_string(),
-                ));
+                return Err(DataFusionError::Execution(format!(
+                    "{}(): array lengths must match",
+                    name
+                )));
             }
 
             // We need to iterate both. Since we can't easily zip different types (String vs LargeString vs Other),
@@ -2347,11 +2327,13 @@ impl ScalarUDFImpl for CypherCompareUdf {
 
     fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DFResult<ColumnarValue> {
         let output_type = DataType::Boolean;
+        let name = self.name.clone();
         invoke_cypher_udf(args, &output_type, |val_args| {
             if val_args.len() != 2 {
-                return Err(datafusion::error::DataFusionError::Execution(
-                    "comparison UDF requires 2 arguments".to_string(),
-                ));
+                return Err(datafusion::error::DataFusionError::Execution(format!(
+                    "{}(): requires 2 arguments",
+                    name
+                )));
             }
             crate::query::expr_eval::eval_binary_op(&val_args[0], &self.op, &val_args[1])
                 .map_err(|e| datafusion::error::DataFusionError::Execution(e.to_string()))
@@ -2401,7 +2383,7 @@ impl ScalarUDFImpl for CypherXorUdf {
         invoke_cypher_udf(args, &output_type, |val_args| {
             if val_args.len() != 2 {
                 return Err(datafusion::error::DataFusionError::Execution(
-                    "_cypher_xor requires 2 arguments".to_string(),
+                    "_cypher_xor(): requires 2 arguments".to_string(),
                 ));
             }
             // Coerce string-encoded booleans from UNWIND (Utf8 "true"/"false")
@@ -2528,7 +2510,7 @@ impl ScalarUDFImpl for JsonbDecodeUdf {
     fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DFResult<ColumnarValue> {
         if args.args.len() != 1 {
             return Err(datafusion::error::DataFusionError::Execution(format!(
-                "{} requires exactly 1 argument",
+                "{}(): requires exactly 1 argument",
                 self.name
             )));
         }
@@ -2565,7 +2547,7 @@ impl JsonbDecodeUdf {
             .downcast_ref::<arrow_array::LargeBinaryArray>()
             .ok_or_else(|| {
                 datafusion::error::DataFusionError::Execution(format!(
-                    "{}: expected LargeBinaryArray, got {:?}",
+                    "{}(): expected LargeBinary array, got {:?}",
                     self.name,
                     arr.data_type()
                 ))
@@ -2636,7 +2618,7 @@ impl JsonbDecodeUdf {
                 Ok(Arc::new(builder.finish()) as ArrayRef)
             }
             other => Err(datafusion::error::DataFusionError::Execution(format!(
-                "{}: unsupported return type {:?}",
+                "{}(): unsupported return type {:?}",
                 self.name, other
             ))),
         }
@@ -2820,7 +2802,7 @@ fn cypher_size_scalar(scalar: &ScalarValue) -> DFResult<ScalarValue> {
         | ScalarValue::LargeUtf8(None)
         | ScalarValue::LargeBinary(None) => Ok(ScalarValue::Int64(None)),
         other => Err(datafusion::error::DataFusionError::Execution(format!(
-            "_cypher_size: unsupported type {other:?}"
+            "_cypher_size(): unsupported type {other:?}"
         ))),
     }
 }
@@ -2871,7 +2853,7 @@ impl ScalarUDFImpl for CypherListCompareUdf {
         invoke_cypher_udf(args, &output_type, |val_args| {
             if val_args.len() != 3 {
                 return Err(datafusion::error::DataFusionError::Execution(
-                    "_cypher_list_compare requires 3 arguments (left, right, op)".to_string(),
+                    "_cypher_list_compare(): requires 3 arguments (left, right, op)".to_string(),
                 ));
             }
 
@@ -2881,7 +2863,7 @@ impl ScalarUDFImpl for CypherListCompareUdf {
                 Value::String(s) => s.as_str(),
                 _ => {
                     return Err(datafusion::error::DataFusionError::Execution(
-                        "_cypher_list_compare: op must be a string".to_string(),
+                        "_cypher_list_compare(): op must be a string".to_string(),
                     ));
                 }
             };
@@ -2891,7 +2873,7 @@ impl ScalarUDFImpl for CypherListCompareUdf {
                 (Value::Null, _) | (_, Value::Null) => return Ok(Value::Null),
                 _ => {
                     return Err(datafusion::error::DataFusionError::Execution(
-                        "_cypher_list_compare: both arguments must be lists".to_string(),
+                        "_cypher_list_compare(): both arguments must be lists".to_string(),
                     ));
                 }
             };
@@ -2907,7 +2889,7 @@ impl ScalarUDFImpl for CypherListCompareUdf {
                 ("gteq", Some(ord)) => Value::Bool(ord != std::cmp::Ordering::Less),
                 _ => {
                     return Err(datafusion::error::DataFusionError::Execution(format!(
-                        "_cypher_list_compare: unknown op '{}'",
+                        "_cypher_list_compare(): unknown op '{}'",
                         op_str
                     )));
                 }
@@ -3104,7 +3086,7 @@ impl ScalarUDFImpl for CypherInUdf {
         invoke_cypher_udf(args, &DataType::Boolean, |vals| {
             if vals.len() != 2 {
                 return Err(datafusion::error::DataFusionError::Execution(
-                    "_cypher_in requires 2 arguments".to_string(),
+                    "_cypher_in(): requires 2 arguments".to_string(),
                 ));
             }
             let element = &vals[0];
@@ -3120,7 +3102,7 @@ impl ScalarUDFImpl for CypherInUdf {
                 Value::List(items) => items.as_slice(),
                 _ => {
                     return Err(datafusion::error::DataFusionError::Execution(format!(
-                        "_cypher_in: second argument must be a list, got {:?}",
+                        "_cypher_in(): second argument must be a list, got {:?}",
                         list_val
                     )));
                 }
@@ -3210,7 +3192,7 @@ impl ScalarUDFImpl for CypherListConcatUdf {
         invoke_cypher_udf(args, &DataType::LargeBinary, |vals| {
             if vals.len() != 2 {
                 return Err(datafusion::error::DataFusionError::Execution(
-                    "_cypher_list_concat requires 2 arguments".to_string(),
+                    "_cypher_list_concat(): requires 2 arguments".to_string(),
                 ));
             }
             // If either is null, result is null
@@ -3236,7 +3218,7 @@ impl ScalarUDFImpl for CypherListConcatUdf {
                     Ok(Value::List(result))
                 }
                 _ => Err(datafusion::error::DataFusionError::Execution(format!(
-                    "_cypher_list_concat: at least one argument must be a list, got {:?} and {:?}",
+                    "_cypher_list_concat(): at least one argument must be a list, got {:?} and {:?}",
                     vals[0], vals[1]
                 ))),
             }
@@ -3289,7 +3271,7 @@ impl ScalarUDFImpl for CypherListAppendUdf {
         invoke_cypher_udf(args, &DataType::LargeBinary, |vals| {
             if vals.len() != 2 {
                 return Err(datafusion::error::DataFusionError::Execution(
-                    "_cypher_list_append requires 2 arguments".to_string(),
+                    "_cypher_list_append(): requires 2 arguments".to_string(),
                 ));
             }
             let left = &vals[0];
@@ -3314,7 +3296,7 @@ impl ScalarUDFImpl for CypherListAppendUdf {
                     Ok(Value::List(result))
                 }
                 _ => Err(datafusion::error::DataFusionError::Execution(format!(
-                    "_cypher_list_append: at least one argument must be a list, got {:?} and {:?}",
+                    "_cypher_list_append(): at least one argument must be a list, got {:?} and {:?}",
                     left, right
                 ))),
             }
@@ -3367,7 +3349,7 @@ impl ScalarUDFImpl for CypherListSliceUdf {
         invoke_cypher_udf(args, &DataType::LargeBinary, |vals| {
             if vals.len() != 3 {
                 return Err(datafusion::error::DataFusionError::Execution(
-                    "_cypher_list_slice requires 3 arguments (list, start, end)".to_string(),
+                    "_cypher_list_slice(): requires 3 arguments (list, start, end)".to_string(),
                 ));
             }
             if vals[0].is_null() {
@@ -3377,7 +3359,7 @@ impl ScalarUDFImpl for CypherListSliceUdf {
                 Value::List(l) => l,
                 _ => {
                     return Err(datafusion::error::DataFusionError::Execution(format!(
-                        "_cypher_list_slice: first argument must be a list, got {:?}",
+                        "_cypher_list_slice(): first argument must be a list, got {:?}",
                         vals[0]
                     )));
                 }
