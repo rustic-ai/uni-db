@@ -20,7 +20,9 @@
 //! with the base parameters (standalone CALL support).
 
 use crate::query::df_graph::GraphExecutionContext;
-use crate::query::df_graph::common::{compute_plan_properties, execute_subplan, extract_row_params};
+use crate::query::df_graph::common::{
+    compute_plan_properties, execute_subplan, extract_row_params,
+};
 use crate::query::df_graph::unwind::arrow_to_json_value;
 use crate::query::planner::LogicalPlan;
 use arrow_array::builder::{
@@ -265,16 +267,30 @@ fn evaluate_filter(filter: &Expr, row: &HashMap<String, Value>) -> bool {
                     match op {
                         BinaryOp::Eq => left_val == right_val,
                         BinaryOp::NotEq => left_val != right_val,
-                        BinaryOp::Lt => compare_values(&left_val, &right_val) == Some(std::cmp::Ordering::Less),
-                        BinaryOp::LtEq => matches!(compare_values(&left_val, &right_val), Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal)),
-                        BinaryOp::Gt => compare_values(&left_val, &right_val) == Some(std::cmp::Ordering::Greater),
-                        BinaryOp::GtEq => matches!(compare_values(&left_val, &right_val), Some(std::cmp::Ordering::Greater | std::cmp::Ordering::Equal)),
+                        BinaryOp::Lt => {
+                            compare_values(&left_val, &right_val) == Some(std::cmp::Ordering::Less)
+                        }
+                        BinaryOp::LtEq => matches!(
+                            compare_values(&left_val, &right_val),
+                            Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal)
+                        ),
+                        BinaryOp::Gt => {
+                            compare_values(&left_val, &right_val)
+                                == Some(std::cmp::Ordering::Greater)
+                        }
+                        BinaryOp::GtEq => matches!(
+                            compare_values(&left_val, &right_val),
+                            Some(std::cmp::Ordering::Greater | std::cmp::Ordering::Equal)
+                        ),
                         _ => false,
                     }
                 }
             }
         }
-        Expr::UnaryOp { op: UnaryOp::Not, expr } => !evaluate_filter(expr, row),
+        Expr::UnaryOp {
+            op: UnaryOp::Not,
+            expr,
+        } => !evaluate_filter(expr, row),
         _ => {
             // Treat any other expression as a truth test on its resolved value
             let val = resolve_expr_value(filter, row);
@@ -314,10 +330,7 @@ fn compare_values(a: &Value, b: &Value) -> Option<std::cmp::Ordering> {
 }
 
 /// Build a RecordBatch from merged row maps using the output schema.
-fn rows_to_batch(
-    rows: &[HashMap<String, Value>],
-    schema: &SchemaRef,
-) -> DFResult<RecordBatch> {
+fn rows_to_batch(rows: &[HashMap<String, Value>], schema: &SchemaRef) -> DFResult<RecordBatch> {
     if rows.is_empty() {
         return Ok(RecordBatch::new_empty(schema.clone()));
     }
@@ -406,8 +419,10 @@ fn rows_to_batch(
                 columns.push(Arc::new(builder.finish()));
             }
             DataType::LargeBinary => {
-                let mut builder =
-                    arrow_array::builder::LargeBinaryBuilder::with_capacity(num_rows, num_rows * 64);
+                let mut builder = arrow_array::builder::LargeBinaryBuilder::with_capacity(
+                    num_rows,
+                    num_rows * 64,
+                );
                 for row in rows {
                     if let Some(val) = row.get(col_name) {
                         if val.is_null() {
@@ -429,8 +444,7 @@ fn rows_to_batch(
             }
             DataType::List(inner_field) if inner_field.data_type() == &DataType::Utf8 => {
                 let inner = Arc::new(arrow_schema::Field::new("item", DataType::Utf8, true));
-                let mut builder =
-                    arrow_array::builder::ListBuilder::new(StringBuilder::new());
+                let mut builder = arrow_array::builder::ListBuilder::new(StringBuilder::new());
                 for row in rows {
                     if let Some(val) = row.get(col_name) {
                         match val {
@@ -439,7 +453,9 @@ fn rows_to_batch(
                                     match item {
                                         Value::String(s) => builder.values().append_value(s),
                                         Value::Null => builder.values().append_null(),
-                                        other => builder.values().append_value(format!("{}", other)),
+                                        other => {
+                                            builder.values().append_value(format!("{}", other))
+                                        }
                                     }
                                 }
                                 builder.append(true);

@@ -1011,8 +1011,13 @@ impl HybridPhysicalPlanner {
         let sub_schema = infer_logical_plan_schema(subquery, &self.schema);
 
         // 3. Merge schemas: input fields + subquery fields (skip duplicates by name)
-        let mut fields: Vec<Arc<arrow_schema::Field>> = input_schema.fields().iter().cloned().collect();
-        let input_field_names: HashSet<&str> = input_schema.fields().iter().map(|f| f.name().as_str()).collect();
+        let mut fields: Vec<Arc<arrow_schema::Field>> =
+            input_schema.fields().iter().cloned().collect();
+        let input_field_names: HashSet<&str> = input_schema
+            .fields()
+            .iter()
+            .map(|f| f.name().as_str())
+            .collect();
         for field in sub_schema.fields() {
             if !input_field_names.contains(field.name().as_str()) {
                 fields.push(field.clone());

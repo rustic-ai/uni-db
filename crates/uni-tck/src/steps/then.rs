@@ -16,7 +16,13 @@ async fn result_should_be_empty(world: &mut UniWorld) {
 
 #[then(regex = r"^the result should be, in any order:$")]
 async fn result_should_be_in_any_order(world: &mut UniWorld, step: &cucumber::gherkin::Step) {
-    let result = world.result().expect("No result found");
+    if world.result().is_none() {
+        if let Some(err) = world.error() {
+            panic!("Query returned error instead of result: {:?}", err);
+        }
+        panic!("No result found (and no error captured)");
+    }
+    let result = world.result().unwrap();
     let table = step.table().expect("Step is missing a data table");
     let expected_rows = parse_table(table).expect("Failed to parse expected table");
 

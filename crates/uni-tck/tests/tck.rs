@@ -38,20 +38,22 @@ fn main() {
     let tests: Vec<Trial> = scenarios
         .into_iter()
         .zip(base_names)
-        .map(|((feature_path, scenario_name, scenario_line), base_name)| {
-            let test_name = if name_counts[&base_name] > 1 {
-                let idx = name_index.entry(base_name.clone()).or_default();
-                *idx += 1;
-                format!("{base_name} @L{scenario_line}")
-            } else {
-                base_name
-            };
-            let fp = feature_path.clone();
-            let sn = scenario_name.clone();
-            Trial::test(test_name, move || {
-                run_single_scenario(fp, sn, scenario_line)
-            })
-        })
+        .map(
+            |((feature_path, scenario_name, scenario_line), base_name)| {
+                let test_name = if name_counts[&base_name] > 1 {
+                    let idx = name_index.entry(base_name.clone()).or_default();
+                    *idx += 1;
+                    format!("{base_name} @L{scenario_line}")
+                } else {
+                    base_name
+                };
+                let fp = feature_path.clone();
+                let sn = scenario_name.clone();
+                Trial::test(test_name, move || {
+                    run_single_scenario(fp, sn, scenario_line)
+                })
+            },
+        )
         .collect();
 
     libtest_mimic::run(&args, tests).exit();
@@ -142,21 +144,20 @@ fn collect_expanded_scenarios(
 
                     // Expand template placeholders in the scenario name
                     let expanded_name =
-                        template_re
-                            .replace_all(&scenario.name, |cap: &regex::Captures<'_>| {
-                                let placeholder = cap.get(1).unwrap().as_str();
-                                header
-                                    .iter()
-                                    .zip(row.iter())
-                                    .find_map(|(h, v)| {
-                                        if h == placeholder {
-                                            Some(v.as_str())
-                                        } else {
-                                            None
-                                        }
-                                    })
-                                    .unwrap_or("")
-                            });
+                        template_re.replace_all(&scenario.name, |cap: &regex::Captures<'_>| {
+                            let placeholder = cap.get(1).unwrap().as_str();
+                            header
+                                .iter()
+                                .zip(row.iter())
+                                .find_map(|(h, v)| {
+                                    if h == placeholder {
+                                        Some(v.as_str())
+                                    } else {
+                                        None
+                                    }
+                                })
+                                .unwrap_or("")
+                        });
 
                     out.push((
                         feature_path.to_path_buf(),
@@ -206,7 +207,8 @@ fn run_single_scenario(
         .with_test_writer()
         .try_init();
 
-    let rt = tokio::runtime::Runtime::new().map_err(|e| format!("Failed to create runtime: {e}"))?;
+    let rt =
+        tokio::runtime::Runtime::new().map_err(|e| format!("Failed to create runtime: {e}"))?;
 
     let fp = feature_path.clone();
     let sn = scenario_name.clone();
@@ -238,12 +240,7 @@ fn run_single_scenario(
 /// Each file is named `{line}_{hash}.json` where hash is derived from
 /// the feature path and scenario line to ensure uniqueness across
 /// concurrent processes.
-fn write_result_json(
-    feature_path: &Path,
-    scenario_name: &str,
-    scenario_line: usize,
-    status: &str,
-) {
+fn write_result_json(feature_path: &Path, scenario_name: &str, scenario_line: usize, status: &str) {
     let results_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .unwrap()

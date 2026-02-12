@@ -761,6 +761,93 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
                     .map_err(|e| anyhow!("Failed to rebind JSONB comparison children: {}", e))?;
                 return Ok(udf_phy);
             }
+
+            // Arithmetic with JSONB: decode LargeBinary side to match the typed side
+            let left_is_lb = left_type
+                .as_ref()
+                .is_some_and(|t| *t == arrow_schema::DataType::LargeBinary);
+            let right_is_lb = right_type
+                .as_ref()
+                .is_some_and(|t| *t == arrow_schema::DataType::LargeBinary);
+            if left_is_lb != right_is_lb {
+                // One side is LB, other is typed — decode LB to match
+                let target = if left_is_lb {
+                    right_type.as_ref()
+                } else {
+                    left_type.as_ref()
+                };
+                if let Some(target_dt) = target {
+                    let decode_udf_name = match target_dt {
+                        arrow_schema::DataType::Int8
+                        | arrow_schema::DataType::Int16
+                        | arrow_schema::DataType::Int32
+                        | arrow_schema::DataType::Int64
+                        | arrow_schema::DataType::UInt8
+                        | arrow_schema::DataType::UInt16
+                        | arrow_schema::DataType::UInt32
+                        | arrow_schema::DataType::UInt64 => Some("_jsonb_to_int64"),
+                        arrow_schema::DataType::Float16
+                        | arrow_schema::DataType::Float32
+                        | arrow_schema::DataType::Float64 => Some("_jsonb_to_float64"),
+                        arrow_schema::DataType::Utf8 | arrow_schema::DataType::LargeUtf8 => {
+                            Some("_jsonb_to_utf8")
+                        }
+                        arrow_schema::DataType::Boolean => Some("_jsonb_to_bool"),
+                        _ => None,
+                    };
+                    if let Some(udf_name) = decode_udf_name
+                        && let Some(udf) = self.state.scalar_functions().get(udf_name)
+                    {
+                        let decode_side =
+                            |phy_expr: Arc<dyn PhysicalExpr>,
+                             is_lb: bool|
+                             -> Result<Arc<dyn PhysicalExpr>> {
+                                if !is_lb {
+                                    return Ok(phy_expr);
+                                }
+                                let dummy_col = datafusion::logical_expr::Expr::Column(
+                                    datafusion::common::Column::new(None::<String>, "__lb__"),
+                                );
+                                let udf_expr = datafusion::logical_expr::Expr::ScalarFunction(
+                                    datafusion::logical_expr::expr::ScalarFunction {
+                                        func: udf.clone(),
+                                        args: vec![dummy_col],
+                                    },
+                                );
+                                let tmp_schema = arrow_schema::Schema::new(vec![Arc::new(
+                                    arrow_schema::Field::new(
+                                        "__lb__",
+                                        arrow_schema::DataType::LargeBinary,
+                                        true,
+                                    ),
+                                )]);
+                                let df_schema =
+                                    datafusion::common::DFSchema::try_from(tmp_schema.clone())?;
+                                let planner =
+                                    datafusion::physical_planner::DefaultPhysicalPlanner::default();
+                                let udf_phy = planner
+                                    .create_physical_expr(&udf_expr, &df_schema, self.state)
+                                    .map_err(|e| {
+                                        anyhow!("Failed to create JSONB decode expr: {}", e)
+                                    })?;
+                                udf_phy.with_new_children(vec![phy_expr]).map_err(|e| {
+                                    anyhow!("Failed to rebind JSONB decode children: {}", e)
+                                })
+                            };
+
+                        let decoded_left = decode_side(left, left_is_lb)?;
+                        let decoded_right = decode_side(right, right_is_lb)?;
+                        return binary(decoded_left, df_op, decoded_right, input_schema).map_err(
+                            |e| {
+                                anyhow!(
+                                    "Failed to create binary expression after JSONB decode: {}",
+                                    e
+                                )
+                            },
+                        );
+                    }
+                }
+            }
         }
 
         // Use DataFusion's binary physical expression creator which handles coercion

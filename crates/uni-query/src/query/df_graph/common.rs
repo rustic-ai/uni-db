@@ -355,9 +355,7 @@ pub fn infer_logical_plan_schema(plan: &LogicalPlan, schema_info: &UniSchema) ->
         let fields: Vec<Field> = projections
             .iter()
             .map(|(expr, alias)| {
-                let name = alias
-                    .clone()
-                    .unwrap_or_else(|| expr.to_string_repr());
+                let name = alias.clone().unwrap_or_else(|| expr.to_string_repr());
                 let dt = infer_expr_type(expr, schema_info);
                 Field::new(name, dt, true)
             })
@@ -394,20 +392,22 @@ fn infer_expr_type(expr: &Expr, schema_info: &UniSchema) -> DataType {
                 DataType::LargeBinary
             }
         }
-        Expr::BinaryOp { left, op, right } => {
-            match op {
-                BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Mod => {
-                    let lt = infer_expr_type(left, schema_info);
-                    let rt = infer_expr_type(right, schema_info);
-                    numeric_promotion(&lt, &rt)
-                }
-                BinaryOp::Eq | BinaryOp::NotEq | BinaryOp::Lt | BinaryOp::LtEq
-                | BinaryOp::Gt | BinaryOp::GtEq | BinaryOp::And | BinaryOp::Or => {
-                    DataType::Boolean
-                }
-                _ => DataType::LargeBinary,
+        Expr::BinaryOp { left, op, right } => match op {
+            BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Mod => {
+                let lt = infer_expr_type(left, schema_info);
+                let rt = infer_expr_type(right, schema_info);
+                numeric_promotion(&lt, &rt)
             }
-        }
+            BinaryOp::Eq
+            | BinaryOp::NotEq
+            | BinaryOp::Lt
+            | BinaryOp::LtEq
+            | BinaryOp::Gt
+            | BinaryOp::GtEq
+            | BinaryOp::And
+            | BinaryOp::Or => DataType::Boolean,
+            _ => DataType::LargeBinary,
+        },
         Expr::Literal(lit) => match lit {
             CypherLiteral::Integer(_) => DataType::Int64,
             CypherLiteral::Float(_) => DataType::Float64,
@@ -416,36 +416,34 @@ fn infer_expr_type(expr: &Expr, schema_info: &UniSchema) -> DataType {
             CypherLiteral::Null => DataType::Null,
         },
         Expr::Variable(_) => DataType::LargeBinary,
-        Expr::FunctionCall { name, args, .. } => {
-            match name.to_lowercase().as_str() {
-                "count" => DataType::Int64,
-                "sum" | "avg" => {
-                    if let Some(arg) = args.first() {
-                        let arg_type = infer_expr_type(arg, schema_info);
-                        if matches!(arg_type, DataType::Float32 | DataType::Float64) {
-                            DataType::Float64
-                        } else {
-                            DataType::Int64
-                        }
+        Expr::FunctionCall { name, args, .. } => match name.to_lowercase().as_str() {
+            "count" => DataType::Int64,
+            "sum" | "avg" => {
+                if let Some(arg) = args.first() {
+                    let arg_type = infer_expr_type(arg, schema_info);
+                    if matches!(arg_type, DataType::Float32 | DataType::Float64) {
+                        DataType::Float64
                     } else {
                         DataType::Int64
                     }
+                } else {
+                    DataType::Int64
                 }
-                "min" | "max" => {
-                    if let Some(arg) = args.first() {
-                        infer_expr_type(arg, schema_info)
-                    } else {
-                        DataType::LargeBinary
-                    }
-                }
-                "tostring" | "trim" | "ltrim" | "rtrim" | "tolower" | "toupper"
-                | "left" | "right" | "substring" | "replace" | "reverse" | "type" => DataType::Utf8,
-                "tointeger" | "toint" | "size" | "length" | "id" => DataType::Int64,
-                "tofloat" => DataType::Float64,
-                "toboolean" => DataType::Boolean,
-                _ => DataType::LargeBinary,
             }
-        }
+            "min" | "max" => {
+                if let Some(arg) = args.first() {
+                    infer_expr_type(arg, schema_info)
+                } else {
+                    DataType::LargeBinary
+                }
+            }
+            "tostring" | "trim" | "ltrim" | "rtrim" | "tolower" | "toupper" | "left" | "right"
+            | "substring" | "replace" | "reverse" | "type" => DataType::Utf8,
+            "tointeger" | "toint" | "size" | "length" | "id" => DataType::Int64,
+            "tofloat" => DataType::Float64,
+            "toboolean" => DataType::Boolean,
+            _ => DataType::LargeBinary,
+        },
         _ => DataType::LargeBinary,
     }
 }

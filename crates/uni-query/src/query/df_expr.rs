@@ -286,24 +286,23 @@ pub fn cypher_expr_to_df(expr: &Expr, context: Option<&TranslationContext>) -> R
                 }
             }
 
-            // Reject mixed types that can't be coerced (e.g. String + Numeric)
-            // Nested lists are problematic in general for make_array if types differ
-            if has_list {
-                // For now, reject lists of lists to force fallback, as verifying inner types is hard
-                return Err(anyhow!(
-                    "Nested lists not supported in DataFusion translation"
-                ));
-            }
-
             // Check distinct non-null types count
             let types_count = (if has_numeric { 1 } else { 0 })
                 + (if has_string { 1 } else { 0 })
                 + (if has_bool { 1 } else { 0 })
                 + (if has_map { 1 } else { 0 });
 
-            if types_count > 1 {
+            // Mixed types or nested lists: encode as LargeBinary JSONB
+            if has_list || types_count > 1 {
+                // Try to convert all items to JSON values for JSONB encoding
+                if let Some(json_array) = try_items_to_json(items) {
+                    let jsonb_bytes = serde_json::to_vec(&serde_json::Value::Array(json_array))
+                        .unwrap_or_default();
+                    return Ok(lit(ScalarValue::LargeBinary(Some(jsonb_bytes))));
+                }
+                // Non-literal items in mixed/nested lists: fall back to error
                 return Err(anyhow!(
-                    "Mixed type lists (e.g. [1, 'a']) not supported in DataFusion translation"
+                    "Mixed/nested lists with non-literal items not supported in DataFusion translation"
                 ));
             }
 
@@ -345,6 +344,11 @@ pub fn cypher_expr_to_df(expr: &Expr, context: Option<&TranslationContext>) -> R
         }
 
         Expr::Map(entries) => {
+            if entries.is_empty() {
+                // Empty map {} — encode as LargeBinary JSONB since named_struct() needs args
+                let empty_json = serde_json::to_vec(&serde_json::json!({})).unwrap_or_default();
+                return Ok(lit(ScalarValue::LargeBinary(Some(empty_json))));
+            }
             // Use named_struct to create a Struct type in DataFusion.
             // This supports dynamic values and correct Map return types (instead of JSON strings).
             let mut args = Vec::with_capacity(entries.len() * 2);
@@ -664,6 +668,36 @@ fn extract_variable_name(expr: &Expr) -> Result<String> {
     }
 }
 
+/// Try to convert a slice of Cypher expressions to JSON values.
+/// Returns `None` if any item is not a compile-time-evaluable literal/list/map.
+fn try_expr_to_json(expr: &Expr) -> Option<serde_json::Value> {
+    match expr {
+        Expr::Literal(CypherLiteral::Null) => Some(serde_json::Value::Null),
+        Expr::Literal(CypherLiteral::Bool(b)) => Some(serde_json::Value::Bool(*b)),
+        Expr::Literal(CypherLiteral::Integer(i)) => {
+            Some(serde_json::Value::Number(serde_json::Number::from(*i)))
+        }
+        Expr::Literal(CypherLiteral::Float(f)) => serde_json::Number::from_f64(*f)
+            .map(serde_json::Value::Number)
+            .or(Some(serde_json::Value::Null)),
+        Expr::Literal(CypherLiteral::String(s)) => Some(serde_json::Value::String(s.clone())),
+        Expr::List(items) => try_items_to_json(items).map(serde_json::Value::Array),
+        Expr::Map(entries) => {
+            let mut map = serde_json::Map::new();
+            for (k, v) in entries {
+                map.insert(k.clone(), try_expr_to_json(v)?);
+            }
+            Some(serde_json::Value::Object(map))
+        }
+        _ => None,
+    }
+}
+
+/// Try to convert a list of Cypher expressions to JSON values.
+fn try_items_to_json(items: &[Expr]) -> Option<Vec<serde_json::Value>> {
+    items.iter().map(try_expr_to_json).collect()
+}
+
 /// Convert a CypherLiteral to a DataFusion scalar value.
 fn cypher_literal_to_scalar(lit: &CypherLiteral) -> Result<ScalarValue> {
     match lit {
@@ -800,7 +834,9 @@ fn value_to_scalar(value: &Value) -> Result<ScalarValue> {
 /// Translate a binary operator expression.
 fn translate_binary_op(left: DfExpr, op: &BinaryOp, right: DfExpr) -> Result<DfExpr> {
     match op {
-        // Comparison operators
+        // Comparison operators — native DF for vectorized Arrow performance.
+        // Null-type and cross-type cases are handled by apply_type_coercion;
+        // JSONB (LargeBinary) operands are routed to UDFs by the physical compiler.
         BinaryOp::Eq => Ok(left.eq(right)),
         BinaryOp::NotEq => Ok(left.not_eq(right)),
         BinaryOp::Lt => Ok(left.lt(right)),
@@ -812,10 +848,8 @@ fn translate_binary_op(left: DfExpr, op: &BinaryOp, right: DfExpr) -> Result<DfE
         BinaryOp::And => Ok(left.and(right)),
         BinaryOp::Or => Ok(left.or(right)),
         BinaryOp::Xor => {
-            // XOR = (A OR B) AND NOT (A AND B)
-            let a_or_b = left.clone().or(right.clone());
-            let a_and_b = left.and(right);
-            Ok(a_or_b.and(a_and_b.not()))
+            // Use UDF for 3-valued XOR logic (null propagation)
+            Ok(dummy_udf_expr("_cypher_xor", vec![left, right]))
         }
 
         // Arithmetic operators
@@ -1866,6 +1900,21 @@ pub fn wider_numeric_type(
     }
 }
 
+/// Check if an expression contains a division operator anywhere in its tree.
+/// Used to detect expressions that may produce NaN (e.g., 0.0/0.0).
+fn contains_division(expr: &DfExpr) -> bool {
+    match expr {
+        DfExpr::BinaryExpr(b) => {
+            b.op == datafusion::logical_expr::Operator::Divide
+                || contains_division(&b.left)
+                || contains_division(&b.right)
+        }
+        DfExpr::Cast(c) => contains_division(&c.expr),
+        DfExpr::TryCast(c) => contains_division(&c.expr),
+        _ => false,
+    }
+}
+
 /// Apply type coercion to a DataFusion expression.
 ///
 /// Resolves numeric type mismatches (e.g., Int32 vs Int64, Boolean vs Int64)
@@ -1901,6 +1950,38 @@ pub fn apply_type_coercion(expr: &DfExpr, schema: &datafusion::common::DFSchema)
                     | Operator::Modulo
             );
 
+            // AND/OR with Null or Utf8 operands: cast to Boolean so Arrow kernel doesn't crash.
+            // UNWIND over json_encoded columns can produce Utf8 "true"/"false" values.
+            if matches!(binary.op, Operator::And | Operator::Or) {
+                let left_type = left.get_type(schema).ok();
+                let right_type = right.get_type(schema).ok();
+                let left_needs_cast = left_type
+                    .as_ref()
+                    .is_some_and(|t| t.is_null() || matches!(t, DataType::Utf8 | DataType::LargeUtf8));
+                let right_needs_cast = right_type
+                    .as_ref()
+                    .is_some_and(|t| t.is_null() || matches!(t, DataType::Utf8 | DataType::LargeUtf8));
+                if left_needs_cast || right_needs_cast {
+                    let coerced_left = if left_needs_cast {
+                        datafusion::logical_expr::cast(left, DataType::Boolean)
+                    } else {
+                        left
+                    };
+                    let coerced_right = if right_needs_cast {
+                        datafusion::logical_expr::cast(right, DataType::Boolean)
+                    } else {
+                        right
+                    };
+                    return Ok(DfExpr::BinaryExpr(
+                        datafusion::logical_expr::expr::BinaryExpr::new(
+                            Box::new(coerced_left),
+                            binary.op,
+                            Box::new(coerced_right),
+                        ),
+                    ));
+                }
+            }
+
             if is_comparison || is_arithmetic {
                 let left_type = left.get_type(schema).ok();
                 let right_type = right.get_type(schema).ok();
@@ -1916,6 +1997,104 @@ pub fn apply_type_coercion(expr: &DfExpr, schema: &datafusion::common::DFSchema)
                             left, right,
                         ]));
                     }
+                }
+
+                // 0. LargeBinary (JSONB) handling — before type-mismatch check since
+                //    both-LB is same-type but still needs special handling
+                if let (Some(lt), Some(rt)) = (&left_type, &right_type) {
+                    let left_is_lb = matches!(lt, DataType::LargeBinary);
+                    let right_is_lb = matches!(rt, DataType::LargeBinary);
+
+                    if left_is_lb && right_is_lb && is_comparison {
+                        // Both LargeBinary: route comparison to _cypher_* UDFs
+                        let udf_name = match binary.op {
+                            Operator::Eq => "_cypher_equal",
+                            Operator::NotEq => "_cypher_not_equal",
+                            Operator::Lt => "_cypher_lt",
+                            Operator::LtEq => "_cypher_lt_eq",
+                            Operator::Gt => "_cypher_gt",
+                            Operator::GtEq => "_cypher_gt_eq",
+                            _ => unreachable!(),
+                        };
+                        return Ok(dummy_udf_expr(udf_name, vec![left, right]));
+                    }
+
+                    if (left_is_lb != right_is_lb) && lt != rt {
+                        // One side LB, other is typed: decode LB to match the typed side
+                        let target = if left_is_lb { rt } else { lt };
+                        if let Some(udf_name) = jsonb_decode_udf_name(target) {
+                            let decoded_left = if left_is_lb {
+                                dummy_udf_expr(udf_name, vec![left.clone()])
+                            } else {
+                                left.clone()
+                            };
+                            let decoded_right = if right_is_lb {
+                                dummy_udf_expr(udf_name, vec![right.clone()])
+                            } else {
+                                right.clone()
+                            };
+                            // Recurse to handle any remaining coercion
+                            let rewritten = DfExpr::BinaryExpr(
+                                datafusion::logical_expr::expr::BinaryExpr::new(
+                                    Box::new(decoded_left),
+                                    binary.op,
+                                    Box::new(decoded_right),
+                                ),
+                            );
+                            return apply_type_coercion(&rewritten, schema);
+                        }
+                        // No decode UDF for target type: fall through to safety skip
+                    }
+
+                    // Struct (map/node/edge) comparisons: route to _cypher_equal UDFs
+                    // which handle identity-based comparison (_vid/_eid) and null-in-map semantics.
+                    if matches!(lt, DataType::Struct(_))
+                        && matches!(rt, DataType::Struct(_))
+                        && is_comparison
+                    {
+                        let udf_name = match binary.op {
+                            Operator::Eq => "_cypher_equal",
+                            Operator::NotEq => "_cypher_not_equal",
+                            // Cypher doesn't define ordering for maps/nodes/edges
+                            _ => {
+                                return Ok(lit(ScalarValue::Boolean(None)));
+                            }
+                        };
+                        return Ok(dummy_udf_expr(udf_name, vec![left, right]));
+                    }
+
+                    // LargeBinary vs Struct comparison: route to _cypher_equal for
+                    // cross-format map equality (e.g., {} encoded as JSONB vs {k: null} as Struct)
+                    if is_comparison
+                        && ((matches!(lt, DataType::LargeBinary) && matches!(rt, DataType::Struct(_)))
+                            || (matches!(lt, DataType::Struct(_)) && matches!(rt, DataType::LargeBinary)))
+                    {
+                        let udf_name = match binary.op {
+                            Operator::Eq => "_cypher_equal",
+                            Operator::NotEq => "_cypher_not_equal",
+                            _ => {
+                                return Ok(lit(ScalarValue::Boolean(None)));
+                            }
+                        };
+                        return Ok(dummy_udf_expr(udf_name, vec![left, right]));
+                    }
+                }
+
+                // NaN-aware comparisons: when a division expression is involved,
+                // route to _cypher_* UDFs which handle NaN correctly (NaN != NaN, NaN not ordered).
+                if is_comparison
+                    && (contains_division(&left) || contains_division(&right))
+                {
+                    let udf_name = match binary.op {
+                        Operator::Eq => "_cypher_equal",
+                        Operator::NotEq => "_cypher_not_equal",
+                        Operator::Lt => "_cypher_lt",
+                        Operator::LtEq => "_cypher_lt_eq",
+                        Operator::Gt => "_cypher_gt",
+                        Operator::GtEq => "_cypher_gt_eq",
+                        _ => unreachable!(),
+                    };
+                    return Ok(dummy_udf_expr(udf_name, vec![left, right]));
                 }
 
                 if let (Some(lt), Some(rt)) = (&left_type, &right_type)
@@ -2004,38 +2183,40 @@ pub fn apply_type_coercion(expr: &DfExpr, schema: &datafusion::common::DFSchema)
 
                     // 4. Cross-Type Comparison
                     if is_comparison && !lt.is_null() && !rt.is_null() {
-                        let is_list_mismatch = match (lt, rt) {
-                            (DataType::List(l_field), DataType::List(r_field))
-                            | (DataType::LargeList(l_field), DataType::LargeList(r_field))
-                            | (DataType::List(l_field), DataType::LargeList(r_field))
-                            | (DataType::LargeList(l_field), DataType::List(r_field)) => {
-                                let l_inner = l_field.data_type();
-                                let r_inner = r_field.data_type();
-                                let compatible = l_inner == r_inner
-                                    || l_inner == &DataType::Null
-                                    || r_inner == &DataType::Null
-                                    || (l_inner.is_numeric() && r_inner.is_numeric());
-                                !compatible
+                        let is_list_vs_nonlist = match (lt, rt) {
+                            // List vs non-list is always incompatible
+                            (DataType::List(_) | DataType::LargeList(_), other)
+                            | (other, DataType::List(_) | DataType::LargeList(_))
+                                if !matches!(
+                                    other,
+                                    DataType::List(_) | DataType::LargeList(_)
+                                ) =>
+                            {
+                                true
                             }
-                            (DataType::List(_), _)
-                            | (DataType::LargeList(_), _)
-                            | (_, DataType::List(_))
-                            | (_, DataType::LargeList(_)) => true,
                             _ => false,
                         };
 
-                        if is_list_mismatch {
-                            return Ok(datafusion::logical_expr::lit(
-                                datafusion::common::ScalarValue::Boolean(None),
-                            ));
+                        if is_list_vs_nonlist {
+                            // List vs non-list: ordering is null, equality is false
+                            match binary.op {
+                                Operator::Eq => return Ok(lit(false)),
+                                Operator::NotEq => return Ok(lit(true)),
+                                _ => {
+                                    return Ok(lit(ScalarValue::Boolean(None)));
+                                }
+                            }
                         }
 
                         // Scalar cross-type comparison: incompatible types yield false/true/null.
-                        // Skip LargeBinary (JSONB, handled by overflow rewriting) and
-                        // Timestamp/Utf8 (handled above).
-                        if !is_list_mismatch
-                            && !matches!(lt, DataType::LargeBinary)
+                        // Skip LargeBinary (JSONB, handled by overflow rewriting),
+                        // Timestamp/Utf8 (handled above), List/Struct (handled by UDF routing below).
+                        if !matches!(lt, DataType::LargeBinary)
                             && !matches!(rt, DataType::LargeBinary)
+                            && !matches!(lt, DataType::List(_) | DataType::LargeList(_))
+                            && !matches!(rt, DataType::List(_) | DataType::LargeList(_))
+                            && !matches!(lt, DataType::Struct(_))
+                            && !matches!(rt, DataType::Struct(_))
                             && !matches!(
                                 (lt, rt),
                                 (
@@ -2077,6 +2258,21 @@ pub fn apply_type_coercion(expr: &DfExpr, schema: &datafusion::common::DFSchema)
                         "_cypher_list_compare",
                         vec![left, right, lit(op_str)],
                     ));
+                }
+
+                // 6. List equality: route Eq/NotEq on lists to _cypher_equal/_cypher_not_equal
+                // for 3-valued null element comparison (e.g., [null] = [1] → null)
+                if matches!(binary.op, Operator::Eq | Operator::NotEq)
+                    && let (Some(lt), Some(rt)) = (&left_type, &right_type)
+                    && matches!(lt, DataType::List(_) | DataType::LargeList(_))
+                    && matches!(rt, DataType::List(_) | DataType::LargeList(_))
+                {
+                    let udf_name = if binary.op == Operator::Eq {
+                        "_cypher_equal"
+                    } else {
+                        "_cypher_not_equal"
+                    };
+                    return Ok(dummy_udf_expr(udf_name, vec![left, right]));
                 }
             }
 
@@ -2124,8 +2320,102 @@ pub fn apply_type_coercion(expr: &DfExpr, schema: &datafusion::common::DFSchema)
                 },
             ))
         }
+        // CASE expression: recurse into operand, when/then pairs, and else branch
+        DfExpr::Case(case) => {
+            let coerced_operand = case
+                .expr
+                .as_ref()
+                .map(|e| apply_type_coercion(e, schema).map(Box::new))
+                .transpose()?;
+            let coerced_when_then = case
+                .when_then_expr
+                .iter()
+                .map(|(w, t)| {
+                    let cw = apply_type_coercion(w, schema)?;
+                    let ct = apply_type_coercion(t, schema)?;
+                    Ok((Box::new(cw), Box::new(ct)))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            let coerced_else = case
+                .else_expr
+                .as_ref()
+                .map(|e| apply_type_coercion(e, schema).map(Box::new))
+                .transpose()?;
+            Ok(DfExpr::Case(datafusion::logical_expr::expr::Case {
+                expr: coerced_operand,
+                when_then_expr: coerced_when_then,
+                else_expr: coerced_else,
+            }))
+        }
+        // NOT: recurse into inner expression and cast Null/Utf8 to Boolean
+        DfExpr::Not(inner) => {
+            let coerced_inner = apply_type_coercion(inner, schema)?;
+            let inner_type = coerced_inner.get_type(schema).ok();
+            let final_inner = if inner_type
+                .as_ref()
+                .is_some_and(|t| t.is_null() || matches!(t, DataType::Utf8 | DataType::LargeUtf8))
+            {
+                datafusion::logical_expr::cast(coerced_inner, DataType::Boolean)
+            } else {
+                coerced_inner
+            };
+            Ok(DfExpr::Not(Box::new(final_inner)))
+        }
+        // IS NULL / IS NOT NULL: recurse into inner expression
+        DfExpr::IsNull(inner) => {
+            let coerced_inner = apply_type_coercion(inner, schema)?;
+            Ok(coerced_inner.is_null())
+        }
+        DfExpr::IsNotNull(inner) => {
+            let coerced_inner = apply_type_coercion(inner, schema)?;
+            Ok(coerced_inner.is_not_null())
+        }
+        // Negation: recurse into inner expression
+        DfExpr::Negative(inner) => {
+            let coerced_inner = apply_type_coercion(inner, schema)?;
+            Ok(DfExpr::Negative(Box::new(coerced_inner)))
+        }
+        // Cast: recurse into inner expression
+        DfExpr::Cast(cast) => {
+            let coerced_inner = apply_type_coercion(&cast.expr, schema)?;
+            Ok(DfExpr::Cast(datafusion::logical_expr::Cast::new(
+                Box::new(coerced_inner),
+                cast.data_type.clone(),
+            )))
+        }
+        DfExpr::TryCast(cast) => {
+            let coerced_inner = apply_type_coercion(&cast.expr, schema)?;
+            Ok(DfExpr::TryCast(datafusion::logical_expr::TryCast::new(
+                Box::new(coerced_inner),
+                cast.data_type.clone(),
+            )))
+        }
+        // Alias: recurse into inner expression
+        DfExpr::Alias(alias) => {
+            let coerced_inner = apply_type_coercion(&alias.expr, schema)?;
+            Ok(coerced_inner.alias(alias.name.clone()))
+        }
         // For other expression types, return as-is
         _ => Ok(expr.clone()),
+    }
+}
+
+/// Map a target DataType to the corresponding JSONB decode UDF name.
+fn jsonb_decode_udf_name(target: &datafusion::arrow::datatypes::DataType) -> Option<&'static str> {
+    use datafusion::arrow::datatypes::DataType;
+    match target {
+        DataType::Int8
+        | DataType::Int16
+        | DataType::Int32
+        | DataType::Int64
+        | DataType::UInt8
+        | DataType::UInt16
+        | DataType::UInt32
+        | DataType::UInt64 => Some("_jsonb_to_int64"),
+        DataType::Float16 | DataType::Float32 | DataType::Float64 => Some("_jsonb_to_float64"),
+        DataType::Utf8 | DataType::LargeUtf8 => Some("_jsonb_to_utf8"),
+        DataType::Boolean => Some("_jsonb_to_bool"),
+        _ => None,
     }
 }
 
@@ -2237,5 +2527,405 @@ mod tests {
         let result = cypher_expr_to_df(&expr, None).unwrap();
         let s = format!("{:?}", result);
         assert!(s.to_lowercase().contains("count"));
+    }
+
+    // ====================================================================
+    // apply_type_coercion tests
+    // ====================================================================
+
+    use datafusion::arrow::datatypes::{DataType, Field, Schema};
+    use datafusion::logical_expr::Operator;
+
+    /// Build a DFSchema with the given column names and types.
+    fn make_schema(cols: &[(&str, DataType)]) -> datafusion::common::DFSchema {
+        let fields: Vec<_> = cols
+            .iter()
+            .map(|(name, dt)| Arc::new(Field::new(*name, dt.clone(), true)))
+            .collect();
+        let schema = Schema::new(fields);
+        datafusion::common::DFSchema::try_from(schema).unwrap()
+    }
+
+    /// Check that an expression contains a specific UDF name.
+    fn contains_udf(expr: &DfExpr, name: &str) -> bool {
+        let s = format!("{}", expr);
+        s.contains(name)
+    }
+
+    /// Check that an expression is a binary expr with the given operator.
+    fn is_binary_op(expr: &DfExpr, expected_op: Operator) -> bool {
+        matches!(expr, DfExpr::BinaryExpr(b) if b.op == expected_op)
+    }
+
+    #[test]
+    fn test_coercion_lb_eq_int64() {
+        let schema = make_schema(&[("lb", DataType::LargeBinary), ("i", DataType::Int64)]);
+        let expr = DfExpr::BinaryExpr(datafusion::logical_expr::expr::BinaryExpr::new(
+            Box::new(col("lb")),
+            Operator::Eq,
+            Box::new(col("i")),
+        ));
+        let result = apply_type_coercion(&expr, &schema).unwrap();
+        assert!(
+            contains_udf(&result, "_jsonb_to_int64"),
+            "expected _jsonb_to_int64, got: {result}"
+        );
+        assert!(is_binary_op(&result, Operator::Eq));
+    }
+
+    #[test]
+    fn test_coercion_lb_noteq_int64() {
+        let schema = make_schema(&[("lb", DataType::LargeBinary), ("i", DataType::Int64)]);
+        let expr = DfExpr::BinaryExpr(datafusion::logical_expr::expr::BinaryExpr::new(
+            Box::new(col("lb")),
+            Operator::NotEq,
+            Box::new(col("i")),
+        ));
+        let result = apply_type_coercion(&expr, &schema).unwrap();
+        assert!(contains_udf(&result, "_jsonb_to_int64"));
+        assert!(is_binary_op(&result, Operator::NotEq));
+    }
+
+    #[test]
+    fn test_coercion_lb_lt_int64() {
+        let schema = make_schema(&[("lb", DataType::LargeBinary), ("i", DataType::Int64)]);
+        let expr = DfExpr::BinaryExpr(datafusion::logical_expr::expr::BinaryExpr::new(
+            Box::new(col("lb")),
+            Operator::Lt,
+            Box::new(col("i")),
+        ));
+        let result = apply_type_coercion(&expr, &schema).unwrap();
+        assert!(contains_udf(&result, "_jsonb_to_int64"));
+        assert!(is_binary_op(&result, Operator::Lt));
+    }
+
+    #[test]
+    fn test_coercion_lb_eq_float64() {
+        let schema = make_schema(&[("lb", DataType::LargeBinary), ("f", DataType::Float64)]);
+        let expr = DfExpr::BinaryExpr(datafusion::logical_expr::expr::BinaryExpr::new(
+            Box::new(col("lb")),
+            Operator::Eq,
+            Box::new(col("f")),
+        ));
+        let result = apply_type_coercion(&expr, &schema).unwrap();
+        assert!(contains_udf(&result, "_jsonb_to_float64"));
+    }
+
+    #[test]
+    fn test_coercion_lb_eq_utf8() {
+        let schema = make_schema(&[("lb", DataType::LargeBinary), ("s", DataType::Utf8)]);
+        let expr = DfExpr::BinaryExpr(datafusion::logical_expr::expr::BinaryExpr::new(
+            Box::new(col("lb")),
+            Operator::Eq,
+            Box::new(col("s")),
+        ));
+        let result = apply_type_coercion(&expr, &schema).unwrap();
+        assert!(contains_udf(&result, "_jsonb_to_utf8"));
+    }
+
+    #[test]
+    fn test_coercion_lb_eq_bool() {
+        let schema = make_schema(&[("lb", DataType::LargeBinary), ("b", DataType::Boolean)]);
+        let expr = DfExpr::BinaryExpr(datafusion::logical_expr::expr::BinaryExpr::new(
+            Box::new(col("lb")),
+            Operator::Eq,
+            Box::new(col("b")),
+        ));
+        let result = apply_type_coercion(&expr, &schema).unwrap();
+        assert!(contains_udf(&result, "_jsonb_to_bool"));
+    }
+
+    #[test]
+    fn test_coercion_int64_eq_lb() {
+        // Typed on LEFT, LB on RIGHT
+        let schema = make_schema(&[("i", DataType::Int64), ("lb", DataType::LargeBinary)]);
+        let expr = DfExpr::BinaryExpr(datafusion::logical_expr::expr::BinaryExpr::new(
+            Box::new(col("i")),
+            Operator::Eq,
+            Box::new(col("lb")),
+        ));
+        let result = apply_type_coercion(&expr, &schema).unwrap();
+        assert!(contains_udf(&result, "_jsonb_to_int64"));
+        assert!(is_binary_op(&result, Operator::Eq));
+    }
+
+    #[test]
+    fn test_coercion_float64_gt_lb() {
+        let schema = make_schema(&[("f", DataType::Float64), ("lb", DataType::LargeBinary)]);
+        let expr = DfExpr::BinaryExpr(datafusion::logical_expr::expr::BinaryExpr::new(
+            Box::new(col("f")),
+            Operator::Gt,
+            Box::new(col("lb")),
+        ));
+        let result = apply_type_coercion(&expr, &schema).unwrap();
+        assert!(contains_udf(&result, "_jsonb_to_float64"));
+    }
+
+    #[test]
+    fn test_coercion_both_lb_eq() {
+        let schema = make_schema(&[
+            ("lb1", DataType::LargeBinary),
+            ("lb2", DataType::LargeBinary),
+        ]);
+        let expr = DfExpr::BinaryExpr(datafusion::logical_expr::expr::BinaryExpr::new(
+            Box::new(col("lb1")),
+            Operator::Eq,
+            Box::new(col("lb2")),
+        ));
+        let result = apply_type_coercion(&expr, &schema).unwrap();
+        assert!(contains_udf(&result, "_cypher_equal"));
+    }
+
+    #[test]
+    fn test_coercion_both_lb_lt() {
+        let schema = make_schema(&[
+            ("lb1", DataType::LargeBinary),
+            ("lb2", DataType::LargeBinary),
+        ]);
+        let expr = DfExpr::BinaryExpr(datafusion::logical_expr::expr::BinaryExpr::new(
+            Box::new(col("lb1")),
+            Operator::Lt,
+            Box::new(col("lb2")),
+        ));
+        let result = apply_type_coercion(&expr, &schema).unwrap();
+        assert!(contains_udf(&result, "_cypher_lt"));
+    }
+
+    #[test]
+    fn test_coercion_both_lb_noteq() {
+        let schema = make_schema(&[
+            ("lb1", DataType::LargeBinary),
+            ("lb2", DataType::LargeBinary),
+        ]);
+        let expr = DfExpr::BinaryExpr(datafusion::logical_expr::expr::BinaryExpr::new(
+            Box::new(col("lb1")),
+            Operator::NotEq,
+            Box::new(col("lb2")),
+        ));
+        let result = apply_type_coercion(&expr, &schema).unwrap();
+        assert!(contains_udf(&result, "_cypher_not_equal"));
+    }
+
+    #[test]
+    fn test_coercion_lb_plus_int64() {
+        let schema = make_schema(&[("lb", DataType::LargeBinary), ("i", DataType::Int64)]);
+        let expr = DfExpr::BinaryExpr(datafusion::logical_expr::expr::BinaryExpr::new(
+            Box::new(col("lb")),
+            Operator::Plus,
+            Box::new(col("i")),
+        ));
+        let result = apply_type_coercion(&expr, &schema).unwrap();
+        assert!(contains_udf(&result, "_jsonb_to_int64"));
+        assert!(is_binary_op(&result, Operator::Plus));
+    }
+
+    #[test]
+    fn test_coercion_lb_minus_int64() {
+        let schema = make_schema(&[("lb", DataType::LargeBinary), ("i", DataType::Int64)]);
+        let expr = DfExpr::BinaryExpr(datafusion::logical_expr::expr::BinaryExpr::new(
+            Box::new(col("lb")),
+            Operator::Minus,
+            Box::new(col("i")),
+        ));
+        let result = apply_type_coercion(&expr, &schema).unwrap();
+        assert!(contains_udf(&result, "_jsonb_to_int64"));
+        assert!(is_binary_op(&result, Operator::Minus));
+    }
+
+    #[test]
+    fn test_coercion_lb_multiply_float64() {
+        let schema = make_schema(&[("lb", DataType::LargeBinary), ("f", DataType::Float64)]);
+        let expr = DfExpr::BinaryExpr(datafusion::logical_expr::expr::BinaryExpr::new(
+            Box::new(col("lb")),
+            Operator::Multiply,
+            Box::new(col("f")),
+        ));
+        let result = apply_type_coercion(&expr, &schema).unwrap();
+        assert!(contains_udf(&result, "_jsonb_to_float64"));
+        assert!(is_binary_op(&result, Operator::Multiply));
+    }
+
+    #[test]
+    fn test_coercion_int64_plus_lb() {
+        let schema = make_schema(&[("i", DataType::Int64), ("lb", DataType::LargeBinary)]);
+        let expr = DfExpr::BinaryExpr(datafusion::logical_expr::expr::BinaryExpr::new(
+            Box::new(col("i")),
+            Operator::Plus,
+            Box::new(col("lb")),
+        ));
+        let result = apply_type_coercion(&expr, &schema).unwrap();
+        assert!(contains_udf(&result, "_jsonb_to_int64"));
+        assert!(is_binary_op(&result, Operator::Plus));
+    }
+
+    #[test]
+    fn test_coercion_lb_plus_utf8() {
+        // LargeBinary + Utf8 → decode LB to utf8, then concat
+        let schema = make_schema(&[("lb", DataType::LargeBinary), ("s", DataType::Utf8)]);
+        let expr = DfExpr::BinaryExpr(datafusion::logical_expr::expr::BinaryExpr::new(
+            Box::new(col("lb")),
+            Operator::Plus,
+            Box::new(col("s")),
+        ));
+        let result = apply_type_coercion(&expr, &schema).unwrap();
+        // After JSONB decode, the recurse should trigger string concat
+        let s = format!("{}", result);
+        assert!(
+            s.contains("_jsonb_to_utf8") || s.to_lowercase().contains("concat"),
+            "expected _jsonb_to_utf8 or concat, got: {s}"
+        );
+    }
+
+    #[test]
+    fn test_coercion_and_null_bool() {
+        let schema = make_schema(&[("b", DataType::Boolean)]);
+        // Null AND Boolean
+        let expr = DfExpr::BinaryExpr(datafusion::logical_expr::expr::BinaryExpr::new(
+            Box::new(lit(ScalarValue::Null)),
+            Operator::And,
+            Box::new(col("b")),
+        ));
+        let result = apply_type_coercion(&expr, &schema).unwrap();
+        let s = format!("{}", result);
+        // Should have CAST(Null AS Boolean)
+        assert!(
+            s.contains("CAST") || s.contains("Boolean"),
+            "expected cast to Boolean, got: {s}"
+        );
+        assert!(is_binary_op(&result, Operator::And));
+    }
+
+    #[test]
+    fn test_coercion_bool_and_null() {
+        let schema = make_schema(&[("b", DataType::Boolean)]);
+        let expr = DfExpr::BinaryExpr(datafusion::logical_expr::expr::BinaryExpr::new(
+            Box::new(col("b")),
+            Operator::And,
+            Box::new(lit(ScalarValue::Null)),
+        ));
+        let result = apply_type_coercion(&expr, &schema).unwrap();
+        assert!(is_binary_op(&result, Operator::And));
+    }
+
+    #[test]
+    fn test_coercion_or_null_bool() {
+        let schema = make_schema(&[("b", DataType::Boolean)]);
+        let expr = DfExpr::BinaryExpr(datafusion::logical_expr::expr::BinaryExpr::new(
+            Box::new(lit(ScalarValue::Null)),
+            Operator::Or,
+            Box::new(col("b")),
+        ));
+        let result = apply_type_coercion(&expr, &schema).unwrap();
+        assert!(is_binary_op(&result, Operator::Or));
+    }
+
+    #[test]
+    fn test_coercion_null_and_null() {
+        let schema = make_schema(&[]);
+        let expr = DfExpr::BinaryExpr(datafusion::logical_expr::expr::BinaryExpr::new(
+            Box::new(lit(ScalarValue::Null)),
+            Operator::And,
+            Box::new(lit(ScalarValue::Null)),
+        ));
+        let result = apply_type_coercion(&expr, &schema).unwrap();
+        assert!(is_binary_op(&result, Operator::And));
+    }
+
+    #[test]
+    fn test_coercion_bool_and_bool_noop() {
+        let schema = make_schema(&[("a", DataType::Boolean), ("b", DataType::Boolean)]);
+        let expr = DfExpr::BinaryExpr(datafusion::logical_expr::expr::BinaryExpr::new(
+            Box::new(col("a")),
+            Operator::And,
+            Box::new(col("b")),
+        ));
+        let result = apply_type_coercion(&expr, &schema).unwrap();
+        // Should be unchanged — still a plain AND
+        assert!(is_binary_op(&result, Operator::And));
+        let s = format!("{}", result);
+        assert!(!s.contains("CAST"), "should not contain CAST: {s}");
+    }
+
+    #[test]
+    fn test_coercion_case_when_lb() {
+        // CASE WHEN Col(LB) = Lit(42) THEN 'a' ELSE 'b' END
+        let schema = make_schema(&[("lb", DataType::LargeBinary)]);
+        let when_cond = DfExpr::BinaryExpr(datafusion::logical_expr::expr::BinaryExpr::new(
+            Box::new(col("lb")),
+            Operator::Eq,
+            Box::new(lit(42_i64)),
+        ));
+        let case_expr = DfExpr::Case(datafusion::logical_expr::expr::Case {
+            expr: None,
+            when_then_expr: vec![(Box::new(when_cond), Box::new(lit("a")))],
+            else_expr: Some(Box::new(lit("b"))),
+        });
+        let result = apply_type_coercion(&case_expr, &schema).unwrap();
+        let s = format!("{}", result);
+        assert!(
+            s.contains("_jsonb_to_int64"),
+            "CASE WHEN should have _jsonb_to_int64, got: {s}"
+        );
+    }
+
+    #[test]
+    fn test_coercion_case_then_lb() {
+        // CASE WHEN true THEN Col(LB) + 1 ELSE 0 END
+        let schema = make_schema(&[("lb", DataType::LargeBinary)]);
+        let then_expr = DfExpr::BinaryExpr(datafusion::logical_expr::expr::BinaryExpr::new(
+            Box::new(col("lb")),
+            Operator::Plus,
+            Box::new(lit(1_i64)),
+        ));
+        let case_expr = DfExpr::Case(datafusion::logical_expr::expr::Case {
+            expr: None,
+            when_then_expr: vec![(Box::new(lit(true)), Box::new(then_expr))],
+            else_expr: Some(Box::new(lit(0_i64))),
+        });
+        let result = apply_type_coercion(&case_expr, &schema).unwrap();
+        let s = format!("{}", result);
+        assert!(
+            s.contains("_jsonb_to_int64"),
+            "CASE THEN should have _jsonb_to_int64, got: {s}"
+        );
+    }
+
+    #[test]
+    fn test_coercion_case_else_lb() {
+        // CASE WHEN true THEN 1 ELSE Col(LB) + 2 END
+        let schema = make_schema(&[("lb", DataType::LargeBinary)]);
+        let else_expr = DfExpr::BinaryExpr(datafusion::logical_expr::expr::BinaryExpr::new(
+            Box::new(col("lb")),
+            Operator::Plus,
+            Box::new(lit(2_i64)),
+        ));
+        let case_expr = DfExpr::Case(datafusion::logical_expr::expr::Case {
+            expr: None,
+            when_then_expr: vec![(Box::new(lit(true)), Box::new(lit(1_i64)))],
+            else_expr: Some(Box::new(else_expr)),
+        });
+        let result = apply_type_coercion(&case_expr, &schema).unwrap();
+        let s = format!("{}", result);
+        assert!(
+            s.contains("_jsonb_to_int64"),
+            "CASE ELSE should have _jsonb_to_int64, got: {s}"
+        );
+    }
+
+    #[test]
+    fn test_coercion_int64_eq_int64_noop() {
+        let schema = make_schema(&[("a", DataType::Int64), ("b", DataType::Int64)]);
+        let expr = DfExpr::BinaryExpr(datafusion::logical_expr::expr::BinaryExpr::new(
+            Box::new(col("a")),
+            Operator::Eq,
+            Box::new(col("b")),
+        ));
+        let result = apply_type_coercion(&expr, &schema).unwrap();
+        assert!(is_binary_op(&result, Operator::Eq));
+        let s = format!("{}", result);
+        assert!(
+            !s.contains("_jsonb"),
+            "should not contain jsonb decode: {s}"
+        );
     }
 }

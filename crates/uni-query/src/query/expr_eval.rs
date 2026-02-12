@@ -151,6 +151,10 @@ pub fn cypher_eq(left: &Value, right: &Value) -> Option<bool> {
         if let (Some(vid_l), Some(vid_r)) = (l.get("_vid"), r.get("_vid")) {
             return Some(vid_l == vid_r);
         }
+        // If both are edges (have _eid), compare by _eid ONLY
+        if let (Some(eid_l), Some(eid_r)) = (l.get("_eid"), r.get("_eid")) {
+            return Some(eid_l == eid_r);
+        }
 
         if l.len() != r.len() {
             return Some(false);

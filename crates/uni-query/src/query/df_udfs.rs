@@ -162,6 +162,9 @@ pub fn register_cypher_udfs(ctx: &SessionContext) -> DFResult<()> {
     // List comparison UDF for lexicographic ordering
     ctx.register_udf(create_cypher_list_compare_udf());
 
+    // Boolean XOR UDF (3-valued logic with null propagation)
+    ctx.register_udf(create_cypher_xor_udf());
+
     // JSONB-aware comparison UDFs (decode LargeBinary values before comparing)
     ctx.register_udf(create_cypher_equal_udf());
     ctx.register_udf(create_cypher_not_equal_udf());
@@ -169,6 +172,12 @@ pub fn register_cypher_udfs(ctx: &SessionContext) -> DFResult<()> {
     ctx.register_udf(create_cypher_gt_eq_udf());
     ctx.register_udf(create_cypher_lt_udf());
     ctx.register_udf(create_cypher_lt_eq_udf());
+
+    // JSONB decode UDFs (LargeBinary → native type, used by apply_type_coercion)
+    ctx.register_udf(create_jsonb_to_int64_udf());
+    ctx.register_udf(create_jsonb_to_float64_udf());
+    ctx.register_udf(create_jsonb_to_utf8_udf());
+    ctx.register_udf(create_jsonb_to_bool_udf());
 
     // Map projection UDF
     ctx.register_udf(create_map_project_udf());
@@ -1333,6 +1342,12 @@ where
                 .map_err(|e| datafusion::error::DataFusionError::Execution(e.to_string()))?;
             return Ok(ColumnarValue::Scalar(ScalarValue::try_from_array(&arr, 0)?));
         }
+        // For null results, return a typed null matching the UDF's declared return type
+        if res.is_null() {
+            let typed_null = ScalarValue::try_from(output_type)
+                .unwrap_or(ScalarValue::Utf8(None));
+            return Ok(ColumnarValue::Scalar(typed_null));
+        }
         return value_to_columnar(&res);
     }
 
@@ -2323,6 +2338,310 @@ impl ScalarUDFImpl for CypherCompareUdf {
 }
 
 // ============================================================================
+// _cypher_xor: 3-valued XOR with null propagation
+// ============================================================================
+
+pub fn create_cypher_xor_udf() -> ScalarUDF {
+    ScalarUDF::new_from_impl(CypherXorUdf::new())
+}
+
+#[derive(Debug)]
+struct CypherXorUdf {
+    signature: Signature,
+}
+
+impl CypherXorUdf {
+    fn new() -> Self {
+        Self {
+            signature: Signature::any(2, Volatility::Immutable),
+        }
+    }
+}
+
+impl_udf_eq_hash!(CypherXorUdf);
+
+impl ScalarUDFImpl for CypherXorUdf {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+    fn name(&self) -> &str {
+        "_cypher_xor"
+    }
+    fn signature(&self) -> &Signature {
+        &self.signature
+    }
+    fn return_type(&self, _arg_types: &[DataType]) -> DFResult<DataType> {
+        Ok(DataType::Boolean)
+    }
+
+    fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DFResult<ColumnarValue> {
+        let output_type = DataType::Boolean;
+        invoke_cypher_udf(args, &output_type, |val_args| {
+            if val_args.len() != 2 {
+                return Err(datafusion::error::DataFusionError::Execution(
+                    "_cypher_xor requires 2 arguments".to_string(),
+                ));
+            }
+            // Coerce string-encoded booleans from UNWIND (Utf8 "true"/"false")
+            let coerce_bool = |v: &Value| -> Value {
+                match v {
+                    Value::String(s) if s == "true" => Value::Bool(true),
+                    Value::String(s) if s == "false" => Value::Bool(false),
+                    other => other.clone(),
+                }
+            };
+            let left = coerce_bool(&val_args[0]);
+            let right = coerce_bool(&val_args[1]);
+            crate::query::expr_eval::eval_binary_op(&left, &BinaryOp::Xor, &right)
+                .map_err(|e| datafusion::error::DataFusionError::Execution(e.to_string()))
+        })
+    }
+}
+
+// ============================================================================
+// JSONB Decode UDFs: _jsonb_to_int64, _jsonb_to_float64, _jsonb_to_utf8, _jsonb_to_bool
+// Single-param UDFs that decode LargeBinary (JSONB) to native Arrow types.
+// Used by apply_type_coercion when LargeBinary appears in binary ops with typed values.
+// ============================================================================
+
+pub fn create_jsonb_to_int64_udf() -> ScalarUDF {
+    ScalarUDF::new_from_impl(JsonbDecodeUdf::new("_jsonb_to_int64", DataType::Int64))
+}
+pub fn create_jsonb_to_float64_udf() -> ScalarUDF {
+    ScalarUDF::new_from_impl(JsonbDecodeUdf::new("_jsonb_to_float64", DataType::Float64))
+}
+pub fn create_jsonb_to_utf8_udf() -> ScalarUDF {
+    ScalarUDF::new_from_impl(JsonbDecodeUdf::new("_jsonb_to_utf8", DataType::Utf8))
+}
+pub fn create_jsonb_to_bool_udf() -> ScalarUDF {
+    ScalarUDF::new_from_impl(JsonbDecodeUdf::new("_jsonb_to_bool", DataType::Boolean))
+}
+
+#[derive(Debug)]
+struct JsonbDecodeUdf {
+    name: String,
+    return_dt: DataType,
+    signature: Signature,
+}
+
+impl JsonbDecodeUdf {
+    fn new(name: &str, return_dt: DataType) -> Self {
+        Self {
+            name: name.to_string(),
+            return_dt,
+            signature: Signature::exact(vec![DataType::LargeBinary], Volatility::Immutable),
+        }
+    }
+}
+
+impl PartialEq for JsonbDecodeUdf {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name
+    }
+}
+impl Eq for JsonbDecodeUdf {}
+impl std::hash::Hash for JsonbDecodeUdf {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.name.hash(state);
+    }
+}
+
+/// Decode a single JSONB byte slice to a `serde_json::Value`.
+/// Tries JSONB binary first, then plain JSON text fallback.
+fn decode_jsonb_bytes(bytes: &[u8]) -> Option<serde_json::Value> {
+    let raw = jsonb::RawJsonb::new(bytes);
+    let jsonb_str = raw.to_string();
+    if (jsonb_str != "null" || bytes.is_empty())
+        && let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&jsonb_str)
+    {
+        return Some(parsed);
+    }
+    // Fallback: try plain JSON text
+    serde_json::from_slice::<serde_json::Value>(bytes).ok()
+}
+
+fn jsonb_to_int64(val: &serde_json::Value) -> Option<i64> {
+    match val {
+        serde_json::Value::Number(n) => n.as_i64().or_else(|| n.as_f64().map(|f| f as i64)),
+        _ => None,
+    }
+}
+
+fn jsonb_to_float64(val: &serde_json::Value) -> Option<f64> {
+    match val {
+        serde_json::Value::Number(n) => n.as_f64(),
+        _ => None,
+    }
+}
+
+fn jsonb_to_utf8(val: &serde_json::Value) -> Option<String> {
+    match val {
+        serde_json::Value::Null => None,
+        serde_json::Value::String(s) => Some(s.clone()),
+        other => Some(other.to_string()),
+    }
+}
+
+fn jsonb_to_bool(val: &serde_json::Value) -> Option<bool> {
+    match val {
+        serde_json::Value::Bool(b) => Some(*b),
+        _ => None,
+    }
+}
+
+impl ScalarUDFImpl for JsonbDecodeUdf {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+    fn name(&self) -> &str {
+        &self.name
+    }
+    fn signature(&self) -> &Signature {
+        &self.signature
+    }
+    fn return_type(&self, _arg_types: &[DataType]) -> DFResult<DataType> {
+        Ok(self.return_dt.clone())
+    }
+
+    fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DFResult<ColumnarValue> {
+        if args.args.len() != 1 {
+            return Err(datafusion::error::DataFusionError::Execution(format!(
+                "{} requires exactly 1 argument",
+                self.name
+            )));
+        }
+
+        match &args.args[0] {
+            ColumnarValue::Scalar(scalar) => {
+                let result = self.decode_scalar(scalar);
+                Ok(ColumnarValue::Scalar(result))
+            }
+            ColumnarValue::Array(arr) => {
+                let result = self.decode_array(arr)?;
+                Ok(ColumnarValue::Array(result))
+            }
+        }
+    }
+}
+
+impl JsonbDecodeUdf {
+    fn decode_scalar(&self, scalar: &ScalarValue) -> ScalarValue {
+        let bytes = match scalar {
+            ScalarValue::LargeBinary(Some(b)) => b,
+            _ => return self.null_scalar(),
+        };
+        let parsed = match decode_jsonb_bytes(bytes) {
+            Some(v) => v,
+            None => return self.null_scalar(),
+        };
+        self.convert_json_value(&parsed)
+    }
+
+    fn decode_array(&self, arr: &ArrayRef) -> DFResult<ArrayRef> {
+        let lb_arr = arr
+            .as_any()
+            .downcast_ref::<arrow_array::LargeBinaryArray>()
+            .ok_or_else(|| {
+                datafusion::error::DataFusionError::Execution(format!(
+                    "{}: expected LargeBinaryArray, got {:?}",
+                    self.name,
+                    arr.data_type()
+                ))
+            })?;
+
+        match &self.return_dt {
+            DataType::Int64 => {
+                let mut builder = arrow_array::builder::Int64Builder::with_capacity(lb_arr.len());
+                for i in 0..lb_arr.len() {
+                    if lb_arr.is_null(i) {
+                        builder.append_null();
+                    } else {
+                        let bytes = lb_arr.value(i);
+                        match decode_jsonb_bytes(bytes).and_then(|v| jsonb_to_int64(&v)) {
+                            Some(val) => builder.append_value(val),
+                            None => builder.append_null(),
+                        }
+                    }
+                }
+                Ok(Arc::new(builder.finish()) as ArrayRef)
+            }
+            DataType::Float64 => {
+                let mut builder = arrow_array::builder::Float64Builder::with_capacity(lb_arr.len());
+                for i in 0..lb_arr.len() {
+                    if lb_arr.is_null(i) {
+                        builder.append_null();
+                    } else {
+                        let bytes = lb_arr.value(i);
+                        match decode_jsonb_bytes(bytes).and_then(|v| jsonb_to_float64(&v)) {
+                            Some(val) => builder.append_value(val),
+                            None => builder.append_null(),
+                        }
+                    }
+                }
+                Ok(Arc::new(builder.finish()) as ArrayRef)
+            }
+            DataType::Utf8 => {
+                let mut builder = arrow_array::builder::StringBuilder::with_capacity(
+                    lb_arr.len(),
+                    lb_arr.len() * 16,
+                );
+                for i in 0..lb_arr.len() {
+                    if lb_arr.is_null(i) {
+                        builder.append_null();
+                    } else {
+                        let bytes = lb_arr.value(i);
+                        match decode_jsonb_bytes(bytes).and_then(|v| jsonb_to_utf8(&v)) {
+                            Some(val) => builder.append_value(&val),
+                            None => builder.append_null(),
+                        }
+                    }
+                }
+                Ok(Arc::new(builder.finish()) as ArrayRef)
+            }
+            DataType::Boolean => {
+                let mut builder = arrow_array::builder::BooleanBuilder::with_capacity(lb_arr.len());
+                for i in 0..lb_arr.len() {
+                    if lb_arr.is_null(i) {
+                        builder.append_null();
+                    } else {
+                        let bytes = lb_arr.value(i);
+                        match decode_jsonb_bytes(bytes).and_then(|v| jsonb_to_bool(&v)) {
+                            Some(val) => builder.append_value(val),
+                            None => builder.append_null(),
+                        }
+                    }
+                }
+                Ok(Arc::new(builder.finish()) as ArrayRef)
+            }
+            other => Err(datafusion::error::DataFusionError::Execution(format!(
+                "{}: unsupported return type {:?}",
+                self.name, other
+            ))),
+        }
+    }
+
+    fn convert_json_value(&self, val: &serde_json::Value) -> ScalarValue {
+        match &self.return_dt {
+            DataType::Int64 => ScalarValue::Int64(jsonb_to_int64(val)),
+            DataType::Float64 => ScalarValue::Float64(jsonb_to_float64(val)),
+            DataType::Utf8 => ScalarValue::Utf8(jsonb_to_utf8(val)),
+            DataType::Boolean => ScalarValue::Boolean(jsonb_to_bool(val)),
+            _ => self.null_scalar(),
+        }
+    }
+
+    fn null_scalar(&self) -> ScalarValue {
+        match &self.return_dt {
+            DataType::Int64 => ScalarValue::Int64(None),
+            DataType::Float64 => ScalarValue::Float64(None),
+            DataType::Utf8 => ScalarValue::Utf8(None),
+            DataType::Boolean => ScalarValue::Boolean(None),
+            _ => ScalarValue::Null,
+        }
+    }
+}
+
+// ============================================================================
 // _cypher_size(value) -> Int64
 // Polymorphic SIZE/LENGTH: dispatches on runtime type
 // ============================================================================
@@ -2757,6 +3076,313 @@ mod tests {
             assert!(b, "has_null should return true for list with null");
         } else {
             panic!("Unexpected result: {:?}", result);
+        }
+    }
+
+    // ====================================================================
+    // JSONB Decode UDF Tests
+    // ====================================================================
+
+    /// Encode a JSON value to JSONB binary bytes.
+    fn json_to_jsonb_bytes(val: &serde_json::Value) -> Vec<u8> {
+        let json_str = val.to_string();
+        jsonb::parse_value(json_str.as_bytes())
+            .expect("failed to encode JSONB")
+            .to_vec()
+    }
+
+    /// Create a ScalarFunctionArgs with a single LargeBinary scalar.
+    fn make_scalar_args(scalar: ScalarValue, return_dt: DataType) -> ScalarFunctionArgs {
+        use datafusion::arrow::datatypes::Field;
+        use datafusion::config::ConfigOptions;
+
+        ScalarFunctionArgs {
+            args: vec![ColumnarValue::Scalar(scalar)],
+            arg_fields: vec![Arc::new(Field::new("input", DataType::LargeBinary, true))],
+            number_rows: 1,
+            return_field: Arc::new(Field::new("result", return_dt, true)),
+            config_options: Arc::new(ConfigOptions::default()),
+        }
+    }
+
+    #[test]
+    fn test_jsonb_to_int64() {
+        let udf = create_jsonb_to_int64_udf();
+
+        let cases: Vec<(ScalarValue, Option<i64>)> = vec![
+            // Happy: integer
+            (
+                ScalarValue::LargeBinary(Some(json_to_jsonb_bytes(&serde_json::json!(42)))),
+                Some(42),
+            ),
+            // Happy: float truncation
+            (
+                ScalarValue::LargeBinary(Some(json_to_jsonb_bytes(&serde_json::json!(3.14)))),
+                Some(3),
+            ),
+            // Happy: negative
+            (
+                ScalarValue::LargeBinary(Some(json_to_jsonb_bytes(&serde_json::json!(-7)))),
+                Some(-7),
+            ),
+            // Happy: zero
+            (
+                ScalarValue::LargeBinary(Some(json_to_jsonb_bytes(&serde_json::json!(0)))),
+                Some(0),
+            ),
+            // Happy: large int
+            (
+                ScalarValue::LargeBinary(Some(json_to_jsonb_bytes(&serde_json::json!(
+                    9_999_999_999_i64
+                )))),
+                Some(9_999_999_999),
+            ),
+            // Unhappy: string
+            (
+                ScalarValue::LargeBinary(Some(json_to_jsonb_bytes(&serde_json::json!("hello")))),
+                None,
+            ),
+            // Unhappy: bool
+            (
+                ScalarValue::LargeBinary(Some(json_to_jsonb_bytes(&serde_json::json!(true)))),
+                None,
+            ),
+            // Unhappy: JSONB null
+            (
+                ScalarValue::LargeBinary(Some(json_to_jsonb_bytes(&serde_json::json!(null)))),
+                None,
+            ),
+            // Unhappy: Arrow null
+            (ScalarValue::LargeBinary(None), None),
+            // Unhappy: array
+            (
+                ScalarValue::LargeBinary(Some(json_to_jsonb_bytes(&serde_json::json!([1, 2])))),
+                None,
+            ),
+            // Unhappy: object
+            (
+                ScalarValue::LargeBinary(Some(json_to_jsonb_bytes(&serde_json::json!({"k": 1})))),
+                None,
+            ),
+        ];
+
+        for (i, (input, expected)) in cases.iter().enumerate() {
+            let args = make_scalar_args(input.clone(), DataType::Int64);
+            let result = udf.invoke_with_args(args).unwrap();
+            match result {
+                ColumnarValue::Scalar(ScalarValue::Int64(v)) => {
+                    assert_eq!(v, *expected, "case {i}: expected {expected:?}, got {v:?}");
+                }
+                other => panic!("case {i}: unexpected result type: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_jsonb_to_float64() {
+        let udf = create_jsonb_to_float64_udf();
+
+        let cases: Vec<(ScalarValue, Option<f64>)> = vec![
+            // Happy: float
+            (
+                ScalarValue::LargeBinary(Some(json_to_jsonb_bytes(&serde_json::json!(3.14)))),
+                Some(3.14),
+            ),
+            // Happy: int promotion
+            (
+                ScalarValue::LargeBinary(Some(json_to_jsonb_bytes(&serde_json::json!(42)))),
+                Some(42.0),
+            ),
+            // Happy: negative
+            (
+                ScalarValue::LargeBinary(Some(json_to_jsonb_bytes(&serde_json::json!(-0.5)))),
+                Some(-0.5),
+            ),
+            // Happy: zero
+            (
+                ScalarValue::LargeBinary(Some(json_to_jsonb_bytes(&serde_json::json!(0)))),
+                Some(0.0),
+            ),
+            // Unhappy: string
+            (
+                ScalarValue::LargeBinary(Some(json_to_jsonb_bytes(&serde_json::json!("hello")))),
+                None,
+            ),
+            // Unhappy: bool
+            (
+                ScalarValue::LargeBinary(Some(json_to_jsonb_bytes(&serde_json::json!(true)))),
+                None,
+            ),
+            // Unhappy: JSONB null
+            (
+                ScalarValue::LargeBinary(Some(json_to_jsonb_bytes(&serde_json::json!(null)))),
+                None,
+            ),
+            // Unhappy: Arrow null
+            (ScalarValue::LargeBinary(None), None),
+        ];
+
+        for (i, (input, expected)) in cases.iter().enumerate() {
+            let args = make_scalar_args(input.clone(), DataType::Float64);
+            let result = udf.invoke_with_args(args).unwrap();
+            match result {
+                ColumnarValue::Scalar(ScalarValue::Float64(v)) => {
+                    assert_eq!(v, *expected, "case {i}: expected {expected:?}, got {v:?}");
+                }
+                other => panic!("case {i}: unexpected result type: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_jsonb_to_utf8() {
+        let udf = create_jsonb_to_utf8_udf();
+
+        let cases: Vec<(ScalarValue, Option<&str>)> = vec![
+            // Happy: string
+            (
+                ScalarValue::LargeBinary(Some(json_to_jsonb_bytes(&serde_json::json!("hello")))),
+                Some("hello"),
+            ),
+            // Happy: empty string
+            (
+                ScalarValue::LargeBinary(Some(json_to_jsonb_bytes(&serde_json::json!("")))),
+                Some(""),
+            ),
+            // Happy: number stringify
+            (
+                ScalarValue::LargeBinary(Some(json_to_jsonb_bytes(&serde_json::json!(42)))),
+                Some("42"),
+            ),
+            // Happy: float stringify
+            (
+                ScalarValue::LargeBinary(Some(json_to_jsonb_bytes(&serde_json::json!(3.14)))),
+                Some("3.14"),
+            ),
+            // Happy: bool stringify
+            (
+                ScalarValue::LargeBinary(Some(json_to_jsonb_bytes(&serde_json::json!(true)))),
+                Some("true"),
+            ),
+            // Unhappy: JSONB null
+            (
+                ScalarValue::LargeBinary(Some(json_to_jsonb_bytes(&serde_json::json!(null)))),
+                None,
+            ),
+            // Unhappy: Arrow null
+            (ScalarValue::LargeBinary(None), None),
+        ];
+
+        for (i, (input, expected)) in cases.iter().enumerate() {
+            let args = make_scalar_args(input.clone(), DataType::Utf8);
+            let result = udf.invoke_with_args(args).unwrap();
+            match result {
+                ColumnarValue::Scalar(ScalarValue::Utf8(ref v)) => {
+                    assert_eq!(
+                        v.as_deref(),
+                        *expected,
+                        "case {i}: expected {expected:?}, got {v:?}"
+                    );
+                }
+                other => panic!("case {i}: unexpected result type: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_jsonb_to_bool() {
+        let udf = create_jsonb_to_bool_udf();
+
+        let cases: Vec<(ScalarValue, Option<bool>)> = vec![
+            // Happy: true
+            (
+                ScalarValue::LargeBinary(Some(json_to_jsonb_bytes(&serde_json::json!(true)))),
+                Some(true),
+            ),
+            // Happy: false
+            (
+                ScalarValue::LargeBinary(Some(json_to_jsonb_bytes(&serde_json::json!(false)))),
+                Some(false),
+            ),
+            // Unhappy: integer
+            (
+                ScalarValue::LargeBinary(Some(json_to_jsonb_bytes(&serde_json::json!(42)))),
+                None,
+            ),
+            // Unhappy: zero (not false)
+            (
+                ScalarValue::LargeBinary(Some(json_to_jsonb_bytes(&serde_json::json!(0)))),
+                None,
+            ),
+            // Unhappy: string "true"
+            (
+                ScalarValue::LargeBinary(Some(json_to_jsonb_bytes(&serde_json::json!("true")))),
+                None,
+            ),
+            // Unhappy: JSONB null
+            (
+                ScalarValue::LargeBinary(Some(json_to_jsonb_bytes(&serde_json::json!(null)))),
+                None,
+            ),
+            // Unhappy: Arrow null
+            (ScalarValue::LargeBinary(None), None),
+        ];
+
+        for (i, (input, expected)) in cases.iter().enumerate() {
+            let args = make_scalar_args(input.clone(), DataType::Boolean);
+            let result = udf.invoke_with_args(args).unwrap();
+            match result {
+                ColumnarValue::Scalar(ScalarValue::Boolean(v)) => {
+                    assert_eq!(v, *expected, "case {i}: expected {expected:?}, got {v:?}");
+                }
+                other => panic!("case {i}: unexpected result type: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_jsonb_to_int64_array() {
+        use datafusion::arrow::datatypes::Field;
+        use datafusion::config::ConfigOptions;
+
+        let udf = create_jsonb_to_int64_udf();
+
+        // Build a LargeBinaryArray: [JSONB(1), JSONB("a"), null, JSONB(3.7)]
+        let mut builder = arrow_array::builder::LargeBinaryBuilder::new();
+        builder.append_value(json_to_jsonb_bytes(&serde_json::json!(1)));
+        builder.append_value(json_to_jsonb_bytes(&serde_json::json!("a")));
+        builder.append_null();
+        builder.append_value(json_to_jsonb_bytes(&serde_json::json!(3.7)));
+        let arr: ArrayRef = Arc::new(builder.finish());
+
+        let args = ScalarFunctionArgs {
+            args: vec![ColumnarValue::Array(arr)],
+            arg_fields: vec![Arc::new(Field::new("input", DataType::LargeBinary, true))],
+            number_rows: 4,
+            return_field: Arc::new(Field::new("result", DataType::Int64, true)),
+            config_options: Arc::new(ConfigOptions::default()),
+        };
+
+        let result = udf.invoke_with_args(args).unwrap();
+        match result {
+            ColumnarValue::Array(arr) => {
+                let int_arr = arr
+                    .as_any()
+                    .downcast_ref::<arrow_array::Int64Array>()
+                    .expect("expected Int64Array");
+                assert_eq!(int_arr.len(), 4);
+                // JSONB(1) → 1
+                assert!(!int_arr.is_null(0));
+                assert_eq!(int_arr.value(0), 1);
+                // JSONB("a") → null
+                assert!(int_arr.is_null(1));
+                // Arrow null → null
+                assert!(int_arr.is_null(2));
+                // JSONB(3.7) → 3 (truncation)
+                assert!(!int_arr.is_null(3));
+                assert_eq!(int_arr.value(3), 3);
+            }
+            other => panic!("expected Array, got {other:?}"),
         }
     }
 }

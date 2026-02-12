@@ -276,10 +276,8 @@ async fn test_pc_where_clause_filter() -> Result<()> {
 async fn test_pc_empty_list_no_outgoing() -> Result<()> {
     let db = Uni::in_memory().build().await?;
 
-    db.execute(
-        "CREATE (a:Person {name: 'Alice'}), (b:Person {name: 'Bob'})",
-    )
-    .await?;
+    db.execute("CREATE (a:Person {name: 'Alice'}), (b:Person {name: 'Bob'})")
+        .await?;
     db.execute(
         "MATCH (a:Person {name: 'Alice'}), (b:Person {name: 'Bob'}) \
          CREATE (a)-[:KNOWS]->(b)",
@@ -407,11 +405,7 @@ async fn test_pc_literal_map_expression() -> Result<()> {
         .await?;
 
     assert_eq!(results.len(), 1);
-    let ones = results.rows()[0]
-        .value("ones")
-        .unwrap()
-        .as_array()
-        .unwrap();
+    let ones = results.rows()[0].value("ones").unwrap().as_array().unwrap();
     assert_eq!(ones.len(), 2);
     for v in ones {
         assert_eq!(v.as_i64(), Some(1));
@@ -517,10 +511,8 @@ async fn test_pc_with_order_by() -> Result<()> {
 async fn test_pc_alongside_scalar_columns() -> Result<()> {
     let db = Uni::in_memory().build().await?;
 
-    db.execute(
-        "CREATE (a:Person {name: 'Alice', age: 30}), (b:Person {name: 'Bob'})",
-    )
-    .await?;
+    db.execute("CREATE (a:Person {name: 'Alice', age: 30}), (b:Person {name: 'Bob'})")
+        .await?;
     db.execute(
         "MATCH (a:Person {name: 'Alice'}), (b:Person {name: 'Bob'}) \
          CREATE (a)-[:KNOWS]->(b)",
@@ -608,10 +600,8 @@ async fn test_pc_isolated_node() -> Result<()> {
 async fn test_pc_nonexistent_edge_type() -> Result<()> {
     let db = Uni::in_memory().build().await?;
 
-    db.execute(
-        "CREATE (a:Person {name: 'Alice'}), (b:Person {name: 'Bob'})",
-    )
-    .await?;
+    db.execute("CREATE (a:Person {name: 'Alice'}), (b:Person {name: 'Bob'})")
+        .await?;
     db.execute(
         "MATCH (a:Person {name: 'Alice'}), (b:Person {name: 'Bob'}) \
          CREATE (a)-[:KNOWS]->(b)",
@@ -669,7 +659,11 @@ async fn test_pc_null_property_in_map_expr() -> Result<()> {
         .unwrap()
         .as_array()
         .unwrap();
-    assert_eq!(nicknames.len(), 2, "Should have two entries (one non-null, one null)");
+    assert_eq!(
+        nicknames.len(),
+        2,
+        "Should have two entries (one non-null, one null)"
+    );
 
     // One should be "Bobby", the other null
     let has_bobby = nicknames.iter().any(|v| v.as_str() == Some("Bobby"));
