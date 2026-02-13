@@ -188,10 +188,11 @@ pub fn register_cypher_udfs(ctx: &SessionContext) -> DFResult<()> {
     // Cypher IN UDF (handles json-encoded and JSONB list types)
     ctx.register_udf(create_cypher_in_udf());
 
-    // List concatenation, append, and slice UDFs (Cypher + operator and slicing on lists)
+    // List concatenation, append, slice, and reverse UDFs
     ctx.register_udf(create_cypher_list_concat_udf());
     ctx.register_udf(create_cypher_list_append_udf());
     ctx.register_udf(create_cypher_list_slice_udf());
+    ctx.register_udf(create_cypher_reverse_udf());
 
     // Temporal extraction UDFs (year, month, day, etc.)
     for name in &["year", "month", "day", "hour", "minute", "second"] {
@@ -3376,6 +3377,76 @@ impl ScalarUDFImpl for CypherListSliceUdf {
                 return Ok(Value::List(vec![]));
             }
             Ok(Value::List(list[start..end].to_vec()))
+        })
+    }
+}
+
+// ============================================================================
+// _cypher_reverse(val) -> LargeBinary (JSONB)
+// ============================================================================
+
+/// Create the `_cypher_reverse` UDF for Cypher `reverse()`.
+///
+/// Handles both strings and lists:
+/// - `reverse("abc")` → `"cba"`
+/// - `reverse([1,2,3])` → `[3,2,1]`
+/// - `reverse(null)` → `null`
+pub fn create_cypher_reverse_udf() -> ScalarUDF {
+    ScalarUDF::new_from_impl(CypherReverseUdf::new())
+}
+
+#[derive(Debug)]
+struct CypherReverseUdf {
+    signature: Signature,
+}
+
+impl CypherReverseUdf {
+    fn new() -> Self {
+        Self {
+            signature: Signature::any(1, Volatility::Immutable),
+        }
+    }
+}
+
+impl_udf_eq_hash!(CypherReverseUdf);
+
+impl ScalarUDFImpl for CypherReverseUdf {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn name(&self) -> &str {
+        "_cypher_reverse"
+    }
+
+    fn signature(&self) -> &Signature {
+        &self.signature
+    }
+
+    fn return_type(&self, _arg_types: &[DataType]) -> DFResult<DataType> {
+        Ok(DataType::LargeBinary)
+    }
+
+    fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DFResult<ColumnarValue> {
+        invoke_cypher_udf(args, &DataType::LargeBinary, |vals| {
+            if vals.len() != 1 {
+                return Err(datafusion::error::DataFusionError::Execution(
+                    "_cypher_reverse(): requires exactly 1 argument".to_string(),
+                ));
+            }
+            match &vals[0] {
+                Value::Null => Ok(Value::Null),
+                Value::String(s) => Ok(Value::String(s.chars().rev().collect())),
+                Value::List(l) => {
+                    let mut reversed = l.clone();
+                    reversed.reverse();
+                    Ok(Value::List(reversed))
+                }
+                other => Err(datafusion::error::DataFusionError::Execution(format!(
+                    "_cypher_reverse(): expected string or list, got {:?}",
+                    other
+                ))),
+            }
         })
     }
 }

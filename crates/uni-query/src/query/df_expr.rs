@@ -1175,9 +1175,7 @@ fn translate_string_function(name_upper: &str, df_args: Vec<DfExpr>) -> Option<R
         }
         "REVERSE" => {
             check1!("reverse");
-            Some(Ok(datafusion::functions::unicode::expr_fn::reverse(
-                first_arg(&df_args),
-            )))
+            Some(Ok(dummy_udf_expr("_cypher_reverse", df_args)))
         }
         "SPLIT" => {
             check_n!(2, "split");
