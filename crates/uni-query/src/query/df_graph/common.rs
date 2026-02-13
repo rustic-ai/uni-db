@@ -129,6 +129,72 @@ pub fn build_path_struct_field(path_var: &str) -> Field {
     )
 }
 
+/// Re-encode a `LargeListArray` of JSONB elements into a `LargeBinaryArray` of JSONB arrays.
+///
+/// Each row in the input `LargeListArray` contains zero or more `LargeBinary`
+/// elements that are individually JSONB-encoded values. This function decodes
+/// each element, wraps them into a `serde_json::Value::Array`, and re-encodes
+/// the whole array as a single JSONB blob in the output `LargeBinaryArray`.
+///
+/// Null rows in the input produce null entries in the output.
+///
+/// # Errors
+///
+/// Returns a `DataFusionError::Execution` if the input is not a
+/// `LargeListArray` or if JSONB decoding fails.
+pub fn large_list_of_jsonb_to_jsonb_array(
+    list: &datafusion::arrow::array::LargeListArray,
+) -> datafusion::error::Result<Arc<dyn datafusion::arrow::array::Array>> {
+    use datafusion::arrow::array::{LargeBinaryArray, LargeBinaryBuilder};
+
+    let values = list.values();
+    let binary_values = values
+        .as_any()
+        .downcast_ref::<LargeBinaryArray>()
+        .ok_or_else(|| {
+            datafusion::error::DataFusionError::Execution(
+                "large_list_of_jsonb_to_jsonb_array: inner values must be LargeBinaryArray"
+                    .to_string(),
+            )
+        })?;
+
+    let mut builder = LargeBinaryBuilder::new();
+
+    for row_idx in 0..list.len() {
+        if list.is_null(row_idx) {
+            builder.append_null();
+            continue;
+        }
+
+        let start = list.offsets()[row_idx] as usize;
+        let end = list.offsets()[row_idx + 1] as usize;
+
+        let mut json_elements = Vec::with_capacity(end - start);
+        for elem_idx in start..end {
+            if binary_values.is_null(elem_idx) {
+                json_elements.push(serde_json::Value::Null);
+            } else {
+                let blob = binary_values.value(elem_idx);
+                let raw = jsonb::RawJsonb::new(blob);
+                let json_str = raw.to_string();
+                match serde_json::from_str::<serde_json::Value>(&json_str) {
+                    Ok(val) => json_elements.push(val),
+                    Err(_) => json_elements.push(serde_json::Value::Null),
+                }
+            }
+        }
+
+        let array_val = serde_json::Value::Array(json_elements);
+        let array_str = serde_json::to_string(&array_val).unwrap_or_else(|_| "[]".to_string());
+        match jsonb::parse_value(array_str.as_bytes()) {
+            Ok(owned) => builder.append_value(owned.to_vec()),
+            Err(_) => builder.append_null(),
+        }
+    }
+
+    Ok(Arc::new(builder.finish()))
+}
+
 /// Convert a `LargeBinaryArray` of JSONB-encoded arrays into a `LargeListArray`.
 ///
 /// Each element in the input array is a JSONB blob encoding a JSON array (e.g. `[1,2,3]`).

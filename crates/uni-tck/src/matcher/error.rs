@@ -5,6 +5,7 @@ use uni_common::UniError;
 pub enum ErrorPhase {
     CompileTime,
     Runtime,
+    AnyTime,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -45,12 +46,15 @@ pub fn match_error(
     expected_phase: ErrorPhase,
     detail_code: Option<&str>,
 ) -> Result<(), String> {
-    let actual_phase = classify_phase(actual);
-    if actual_phase != expected_phase {
-        return Err(format!(
-            "Error phase mismatch: expected {:?}, got {:?}",
-            expected_phase, actual_phase
-        ));
+    // Skip phase check when expected_phase is AnyTime
+    if expected_phase != ErrorPhase::AnyTime {
+        let actual_phase = classify_phase(actual);
+        if actual_phase != expected_phase {
+            return Err(format!(
+                "Error phase mismatch: expected {:?}, got {:?}",
+                expected_phase, actual_phase
+            ));
+        }
     }
 
     let actual_type = classify_error(actual);
@@ -62,12 +66,15 @@ pub fn match_error(
     }
 
     if let Some(detail) = detail_code {
-        let error_message = actual.to_string();
-        if !error_message.contains(detail) {
-            return Err(format!(
-                "Error detail mismatch: expected message to contain '{}', got '{}'",
-                detail, error_message
-            ));
+        // Skip detail check if wildcard '*' is used
+        if detail != "*" {
+            let error_message = actual.to_string();
+            if !error_message.contains(detail) {
+                return Err(format!(
+                    "Error detail mismatch: expected message to contain '{}', got '{}'",
+                    detail, error_message
+                ));
+            }
         }
     }
 

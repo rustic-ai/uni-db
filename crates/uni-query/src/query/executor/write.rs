@@ -44,6 +44,24 @@ impl Executor {
         None
     }
 
+    /// Resolve edge type ID from a Value, supporting both Int and String representations.
+    /// DataFusion traverse stores _type as String("KNOWS"), while write operations need u32 ID.
+    fn resolve_edge_type_id(&self, type_val: &Value) -> Result<u32> {
+        match type_val {
+            Value::Int(i) => Ok(*i as u32),
+            Value::String(name) => {
+                let schema = self.storage.schema_manager().schema();
+                schema
+                    .edge_type_id_unified_case_insensitive(name)
+                    .ok_or_else(|| anyhow!("Edge type '{}' not found in schema", name))
+            }
+            _ => Err(anyhow!(
+                "Invalid _type value: expected Int or String, got {:?}",
+                type_val
+            )),
+        }
+    }
+
     pub(crate) async fn execute_vacuum(&self) -> Result<()> {
         if let Some(writer_arc) = &self.writer {
             // Flush first while holding the lock
@@ -1257,7 +1275,7 @@ impl Executor {
                             );
                             let src = Vid::from(src_v.as_u64().ok_or(anyhow!("Invalid _src"))?);
                             let dst = Vid::from(dst_v.as_u64().ok_or(anyhow!("Invalid _dst"))?);
-                            let etype = type_v.as_u64().ok_or(anyhow!("Invalid _type"))? as u32;
+                            let etype = self.resolve_edge_type_id(type_v)?;
 
                             let mut props = prop_manager
                                 .get_all_edge_props_with_ctx(eid, ctx)
@@ -1273,6 +1291,28 @@ impl Executor {
                             if let Some(Value::Map(edge_map)) = row.get_mut(var_name) {
                                 edge_map.insert(prop_name.clone(), val);
                             } else if let Some(Value::Edge(edge)) = row.get_mut(var_name) {
+                                edge.properties.insert(prop_name.clone(), val);
+                            }
+                        } else if let Value::Edge(edge) = node_val {
+                            // Handle Value::Edge directly (when traverse returns Edge objects)
+                            let eid = edge.eid;
+                            let src = edge.src;
+                            let dst = edge.dst;
+                            let etype =
+                                self.resolve_edge_type_id(&Value::String(edge.edge_type.clone()))?;
+
+                            let mut props = prop_manager
+                                .get_all_edge_props_with_ctx(eid, ctx)
+                                .await?
+                                .unwrap_or_default();
+                            let val = self
+                                .evaluate_expr(value, row, prop_manager, params, ctx)
+                                .await?;
+                            props.insert(prop_name.clone(), val.clone());
+                            writer.insert_edge(src, dst, etype, eid, props).await?;
+
+                            // Update the row object so subsequent RETURN sees the new value
+                            if let Some(Value::Edge(edge)) = row.get_mut(var_name) {
                                 edge.properties.insert(prop_name.clone(), val);
                             }
                         }
@@ -1394,6 +1434,24 @@ impl Executor {
                 if let Some(Value::Map(edge_map)) = row.get_mut(var_name) {
                     edge_map.insert(prop_name.clone(), Value::Null);
                 }
+            } else if let Value::Edge(edge) = node_val {
+                // Remove property from Value::Edge directly
+                let eid = edge.eid;
+                let src = edge.src;
+                let dst = edge.dst;
+                let etype = self.resolve_edge_type_id(&Value::String(edge.edge_type.clone()))?;
+
+                let mut props = prop_manager
+                    .get_all_edge_props_with_ctx(eid, ctx)
+                    .await?
+                    .unwrap_or_default();
+                props.insert(prop_name.to_string(), Value::Null);
+                writer.insert_edge(src, dst, etype, eid, props).await?;
+
+                // Update the row to reflect the property removal
+                if let Some(Value::Edge(edge)) = row.get_mut(var_name) {
+                    edge.properties.insert(prop_name.to_string(), Value::Null);
+                }
             }
         }
         Ok(())
@@ -1418,7 +1476,7 @@ impl Executor {
                 uni_common::core::id::Eid::from(eid_v.as_u64().ok_or(anyhow!("Invalid _eid"))?);
             let src = Vid::from(src_v.as_u64().ok_or(anyhow!("Invalid _src"))?);
             let dst = Vid::from(dst_v.as_u64().ok_or(anyhow!("Invalid _dst"))?);
-            let etype = type_v.as_u64().ok_or(anyhow!("Invalid _type"))? as u32;
+            let etype = self.resolve_edge_type_id(type_v)?;
 
             let mut props = prop_manager
                 .get_all_edge_props_with_ctx(eid, ctx)
@@ -1487,6 +1545,13 @@ impl Executor {
                 .await?;
         } else if let Value::Map(map) = val {
             self.execute_delete_edge_from_map(map, writer).await?;
+        } else if let Value::Edge(edge) = val {
+            // Delete Value::Edge directly
+            let eid = edge.eid;
+            let src = edge.src;
+            let dst = edge.dst;
+            let etype = self.resolve_edge_type_id(&Value::String(edge.edge_type.clone()))?;
+            writer.delete_edge(eid, src, dst, etype).await?;
         }
         Ok(())
     }
@@ -1562,7 +1627,7 @@ impl Executor {
                 uni_common::core::id::Eid::from(eid_v.as_u64().ok_or(anyhow!("Invalid _eid"))?);
             let src = Vid::from(src_v.as_u64().ok_or(anyhow!("Invalid _src"))?);
             let dst = Vid::from(dst_v.as_u64().ok_or(anyhow!("Invalid _dst"))?);
-            let etype = type_v.as_u64().ok_or(anyhow!("Invalid _type"))? as u32;
+            let etype = self.resolve_edge_type_id(type_v)?;
             writer.delete_edge(eid, src, dst, etype).await?;
         }
         Ok(())

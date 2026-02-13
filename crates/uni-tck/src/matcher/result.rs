@@ -92,6 +92,108 @@ pub fn match_result_unordered(
     Ok(())
 }
 
+/// Match query result against expected rows (order-sensitive), ignoring list element order.
+pub fn match_result_ignoring_list_order(
+    actual: &QueryResult,
+    expected_rows: &[HashMap<String, Value>],
+) -> Result<(), String> {
+    if actual.len() != expected_rows.len() {
+        return Err(format!(
+            "Row count mismatch: expected {}, got {}",
+            expected_rows.len(),
+            actual.len()
+        ));
+    }
+
+    if actual.is_empty() {
+        return Ok(());
+    }
+
+    let expected_cols = validate_columns(actual, expected_rows)?;
+
+    for (i, (actual_row, expected_row)) in
+        actual.rows().iter().zip(expected_rows.iter()).enumerate()
+    {
+        for col in &expected_cols {
+            let Some(expected_val) = expected_row.get(col) else {
+                return Err(format!("Expected row {} missing column {}", i, col));
+            };
+            let Some(actual_val) = actual_row.value(col) else {
+                return Err(format!("Actual row {} missing column {}", i, col));
+            };
+            if !values_equal_ignoring_list_order(actual_val, expected_val) {
+                return Err(format!(
+                    "Row {} column {} mismatch: expected {:?}, got {:?}",
+                    i, col, expected_val, actual_val
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Match query result against expected rows (order-agnostic), ignoring list element order.
+pub fn match_result_unordered_ignoring_list_order(
+    actual: &QueryResult,
+    expected_rows: &[HashMap<String, Value>],
+) -> Result<(), String> {
+    if actual.len() != expected_rows.len() {
+        return Err(format!(
+            "Row count mismatch: expected {}, got {}",
+            expected_rows.len(),
+            actual.len()
+        ));
+    }
+
+    if actual.is_empty() {
+        return Ok(());
+    }
+
+    let expected_cols = validate_columns(actual, expected_rows)?;
+
+    let mut unmatched: Vec<&HashMap<String, Value>> = expected_rows.iter().collect();
+
+    for (i, actual_row) in actual.rows().iter().enumerate() {
+        let match_idx = unmatched.iter().position(|expected_row| {
+            expected_cols.iter().all(|col| {
+                let Some(expected_val) = expected_row.get(col) else {
+                    return false;
+                };
+                let Some(actual_val) = actual_row.value(col) else {
+                    return false;
+                };
+                values_equal_ignoring_list_order(actual_val, expected_val)
+            })
+        });
+
+        match match_idx {
+            Some(idx) => {
+                unmatched.remove(idx);
+            }
+            None => {
+                let actual_vals: Vec<_> = expected_cols
+                    .iter()
+                    .map(|col| (col.clone(), actual_row.value(col).cloned()))
+                    .collect();
+                return Err(format!(
+                    "No match found for actual row {}. Actual values: {:?}. Expected: {:?}",
+                    i, actual_vals, unmatched
+                ));
+            }
+        }
+    }
+
+    if !unmatched.is_empty() {
+        return Err(format!(
+            "{} expected rows were not matched",
+            unmatched.len()
+        ));
+    }
+
+    Ok(())
+}
+
 /// Validate that actual and expected column sets match, returning the expected column names.
 fn validate_columns(
     actual: &QueryResult,
@@ -176,6 +278,102 @@ fn floats_equal(a: f64, b: f64) -> bool {
         return a.is_sign_positive() == b.is_sign_positive();
     }
     (a - b).abs() < FLOAT_EPSILON
+}
+
+/// Generate a sort key for a value to enable deterministic list ordering.
+fn value_sort_key(v: &Value) -> String {
+    match v {
+        Value::Null => "0:null".to_string(),
+        Value::Bool(b) => format!("1:{}", b),
+        Value::Int(i) => format!("2:{:020}", i),
+        Value::Float(f) => format!("3:{:020.10}", f),
+        Value::String(s) => format!("4:{}", s),
+        Value::Bytes(b) => format!("5:{:?}", b),
+        Value::List(l) => format!("6:len={}", l.len()),
+        Value::Map(m) => format!("7:len={}", m.len()),
+        Value::Node(_) => "8:node".to_string(),
+        Value::Edge(_) => "9:edge".to_string(),
+        Value::Path(_) => "A:path".to_string(),
+        Value::Vector(v) => format!("B:len={}", v.len()),
+        _ => "Z:unknown".to_string(),
+    }
+}
+
+/// Compare two values for equality with special handling for floats, graph types,
+/// and ignoring element order within lists.
+fn values_equal_ignoring_list_order(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::Null, Value::Null) => true,
+        (Value::Bool(a), Value::Bool(b)) => a == b,
+        (Value::Int(a), Value::Int(b)) => a == b,
+        (Value::Float(a), Value::Float(b)) => floats_equal(*a, *b),
+        (Value::String(a), Value::String(b)) => a == b,
+        (Value::Bytes(a), Value::Bytes(b)) => a == b,
+        (Value::List(a), Value::List(b)) => {
+            if a.len() != b.len() {
+                return false;
+            }
+            // Sort both lists before comparison
+            let mut a_sorted: Vec<&Value> = a.iter().collect();
+            let mut b_sorted: Vec<&Value> = b.iter().collect();
+            a_sorted.sort_by_key(|v| value_sort_key(v));
+            b_sorted.sort_by_key(|v| value_sort_key(v));
+            a_sorted
+                .iter()
+                .zip(b_sorted.iter())
+                .all(|(av, bv)| values_equal_ignoring_list_order(av, bv))
+        }
+        (Value::Map(a), Value::Map(b)) => maps_equal_ignoring_list_order(a, b),
+        (Value::Node(a), Value::Node(b)) => nodes_equal_ignoring_list_order(a, b),
+        (Value::Edge(a), Value::Edge(b)) => edges_equal_ignoring_list_order(a, b),
+        (Value::Path(a), Value::Path(b)) => paths_equal_ignoring_list_order(a, b),
+        (Value::Vector(a), Value::Vector(b)) => {
+            a.len() == b.len()
+                && a.iter()
+                    .zip(b.iter())
+                    .all(|(av, bv)| (av - bv).abs() < FLOAT_EPSILON as f32)
+        }
+        _ => false,
+    }
+}
+
+/// Compare two property maps for equality (order-agnostic), ignoring list element order.
+fn maps_equal_ignoring_list_order(a: &HashMap<String, Value>, b: &HashMap<String, Value>) -> bool {
+    a.len() == b.len()
+        && a.iter().all(|(key, a_val)| {
+            b.get(key)
+                .is_some_and(|b_val| values_equal_ignoring_list_order(a_val, b_val))
+        })
+}
+
+fn nodes_equal_ignoring_list_order(a: &Node, b: &Node) -> bool {
+    let a_labels: Vec<&str> = a.label.split(':').filter(|s| !s.is_empty()).collect();
+    let b_labels: Vec<&str> = b.label.split(':').filter(|s| !s.is_empty()).collect();
+
+    let labels_match = if a_labels.is_empty() && b_labels.is_empty() {
+        true
+    } else {
+        a_labels.len() == b_labels.len() && a_labels.iter().all(|l| b_labels.contains(l))
+    };
+
+    labels_match && maps_equal_ignoring_list_order(&a.properties, &b.properties)
+}
+
+fn edges_equal_ignoring_list_order(a: &Edge, b: &Edge) -> bool {
+    a.edge_type == b.edge_type && maps_equal_ignoring_list_order(&a.properties, &b.properties)
+}
+
+fn paths_equal_ignoring_list_order(a: &Path, b: &Path) -> bool {
+    a.nodes.len() == b.nodes.len()
+        && a.edges.len() == b.edges.len()
+        && a.nodes
+            .iter()
+            .zip(&b.nodes)
+            .all(|(a, b)| nodes_equal_ignoring_list_order(a, b))
+        && a.edges
+            .iter()
+            .zip(&b.edges)
+            .all(|(a, b)| edges_equal_ignoring_list_order(a, b))
 }
 
 /// Compare two property maps for equality (order-agnostic).

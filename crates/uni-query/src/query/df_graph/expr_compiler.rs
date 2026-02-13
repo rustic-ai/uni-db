@@ -222,6 +222,40 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
             // EXISTS subquery: plan + execute per row, return boolean
             Expr::Exists(query) => self.compile_exists(query),
 
+            // FunctionCall wrapping a custom expression (e.g. size(comprehension))
+            Expr::FunctionCall {
+                name,
+                args,
+                distinct,
+                ..
+            } => {
+                if args.iter().any(Self::contains_custom_expr) {
+                    self.compile_function_with_custom_args(name, args, *distinct, input_schema)
+                } else {
+                    self.compile_standard(expr, input_schema)
+                }
+            }
+
+            // CASE expression with custom sub-expressions in branches
+            Expr::Case {
+                expr: case_operand,
+                when_then,
+                else_expr,
+            } => {
+                let has_custom = case_operand
+                    .as_deref()
+                    .is_some_and(Self::contains_custom_expr)
+                    || when_then.iter().any(|(w, t)| {
+                        Self::contains_custom_expr(w) || Self::contains_custom_expr(t)
+                    })
+                    || else_expr.as_deref().is_some_and(Self::contains_custom_expr);
+                if has_custom {
+                    self.compile_case(case_operand, when_then, else_expr, input_schema)
+                } else {
+                    self.compile_standard(expr, input_schema)
+                }
+            }
+
             // Default to standard compilation for leaf nodes or non-custom trees
             _ => self.compile_standard(expr, input_schema),
         }
@@ -675,6 +709,151 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
             vertex_props,
             edge_props,
         )))
+    }
+
+    /// Compile a function call whose arguments contain custom expressions.
+    ///
+    /// Recursively compiles each argument via `self.compile()`, then looks up
+    /// the corresponding UDF in the session registry and builds the physical
+    /// expression.
+    fn compile_function_with_custom_args(
+        &self,
+        name: &str,
+        args: &[Expr],
+        _distinct: bool,
+        input_schema: &Schema,
+    ) -> Result<Arc<dyn PhysicalExpr>> {
+        // 1. Recursively compile each argument
+        let compiled_args: Vec<Arc<dyn PhysicalExpr>> = args
+            .iter()
+            .map(|arg| self.compile(arg, input_schema))
+            .collect::<Result<Vec<_>>>()?;
+
+        // 2. Resolve UDF name and look it up in the registry
+        let udf_name = Self::cypher_fn_to_udf(name);
+        let udf = self
+            .state
+            .scalar_functions()
+            .get(udf_name.as_str())
+            .ok_or_else(|| {
+                anyhow!(
+                    "UDF '{}' not found in registry for function '{}'",
+                    udf_name,
+                    name
+                )
+            })?;
+
+        // 3. Build operand type list from compiled args
+        let operand_types: Vec<(&str, DataType)> = compiled_args
+            .iter()
+            .enumerate()
+            .map(|(i, arg)| {
+                let dt = arg.data_type(input_schema).unwrap_or(DataType::LargeBinary);
+                // Use a unique placeholder name per argument
+                let placeholder: &str = match i {
+                    0 => "__arg0__",
+                    1 => "__arg1__",
+                    2 => "__arg2__",
+                    _ => "__argN__",
+                };
+                (placeholder, dt)
+            })
+            .collect();
+
+        // 4. Build dummy column references for the UDF logical expression
+        let dummy_cols: Vec<datafusion::logical_expr::Expr> = operand_types
+            .iter()
+            .map(|(name, _)| {
+                datafusion::logical_expr::Expr::Column(datafusion::common::Column::new(
+                    None::<String>,
+                    *name,
+                ))
+            })
+            .collect();
+
+        let udf_expr = datafusion::logical_expr::Expr::ScalarFunction(
+            datafusion::logical_expr::expr::ScalarFunction {
+                func: udf.clone(),
+                args: dummy_cols,
+            },
+        );
+
+        // 5. Plan and rebind
+        self.plan_udf_physical_expr(
+            &udf_expr,
+            &operand_types
+                .iter()
+                .map(|(n, dt)| (*n, dt.clone()))
+                .collect::<Vec<_>>(),
+            compiled_args,
+            &format!("function {}", name),
+        )
+    }
+
+    /// Map a Cypher function name to the registered UDF name.
+    ///
+    /// Mirrors the mapping in `translate_function_call` from `df_expr.rs`.
+    /// The registered UDF names are always lowercase.
+    fn cypher_fn_to_udf(name: &str) -> String {
+        match name.to_uppercase().as_str() {
+            "SIZE" | "LENGTH" => "_cypher_size".to_string(),
+            "REVERSE" => "_cypher_reverse".to_string(),
+            "TOSTRING" => "tostring".to_string(),
+            "TOBOOLEAN" | "TOBOOL" | "TOBOOLEANORNULL" => "toboolean".to_string(),
+            "TOINTEGER" | "TOINT" | "TOINTEGERORNULL" => "tointeger".to_string(),
+            "TOFLOAT" | "TOFLOATORNULL" => "tofloat".to_string(),
+            "HEAD" => "head".to_string(),
+            "LAST" => "last".to_string(),
+            "TAIL" => "tail".to_string(),
+            "KEYS" => "keys".to_string(),
+            "TYPE" => "type".to_string(),
+            "PROPERTIES" => "properties".to_string(),
+            "LABELS" => "labels".to_string(),
+            "COALESCE" => "coalesce".to_string(),
+            "ID" => "id".to_string(),
+            // Fallback: lowercase the name (matches dummy_udf_expr behavior)
+            _ => name.to_lowercase(),
+        }
+    }
+
+    /// Compile a CASE expression with custom sub-expressions in branches.
+    ///
+    /// Recursively compiles the operand, each when/then pair, and the else
+    /// branch, then builds a `CaseExpr` physical expression.
+    fn compile_case(
+        &self,
+        operand: &Option<Box<Expr>>,
+        when_then: &[(Expr, Expr)],
+        else_expr: &Option<Box<Expr>>,
+        input_schema: &Schema,
+    ) -> Result<Arc<dyn PhysicalExpr>> {
+        let operand_phy = operand
+            .as_deref()
+            .map(|e| self.compile(e, input_schema))
+            .transpose()?;
+
+        let when_then_phy: Vec<(Arc<dyn PhysicalExpr>, Arc<dyn PhysicalExpr>)> = when_then
+            .iter()
+            .map(|(w, t)| {
+                let w_phy = self.compile(w, input_schema)?;
+                let t_phy = self.compile(t, input_schema)?;
+                Ok((w_phy, t_phy))
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        let else_phy = else_expr
+            .as_deref()
+            .map(|e| self.compile(e, input_schema))
+            .transpose()?;
+
+        let case_expr = datafusion::physical_expr::expressions::CaseExpr::try_new(
+            operand_phy,
+            when_then_phy,
+            else_phy,
+        )
+        .map_err(|e| anyhow!("Failed to create CASE expression: {}", e))?;
+
+        Ok(Arc::new(case_expr))
     }
 
     fn compile_binary_op(

@@ -217,8 +217,8 @@ impl GraphTraverseExec {
 
         let edge_props = edge_type_ids
             .first()
-            .and_then(|&id| uni_schema.edge_type_name_by_id(id))
-            .and_then(|name| uni_schema.properties.get(name));
+            .and_then(|&id| uni_schema.edge_type_name_by_id_unified(id))
+            .and_then(|name| uni_schema.properties.get(name.as_str()));
 
         // Build output schema: input schema + target VID + target props + optional edge ID + edge properties
         let schema = Self::build_schema(
@@ -791,8 +791,8 @@ async fn build_traverse_output_batch(
             let uni_schema = graph_ctx.storage().schema_manager().schema();
             let mut type_builder = arrow_array::builder::StringBuilder::new();
             for (_, _, _, edge_type_id) in &expansions {
-                if let Some(name) = uni_schema.edge_type_name_by_id(*edge_type_id) {
-                    type_builder.append_value(name);
+                if let Some(name) = uni_schema.edge_type_name_by_id_unified(*edge_type_id) {
+                    type_builder.append_value(&name);
                 } else {
                     type_builder.append_null();
                 }
@@ -813,8 +813,8 @@ async fn build_traverse_output_batch(
             let uni_schema = graph_ctx.storage().schema_manager().schema();
             let edge_type_props = edge_type_ids
                 .first()
-                .and_then(|&id| uni_schema.edge_type_name_by_id(id))
-                .and_then(|name| uni_schema.properties.get(name));
+                .and_then(|&id| uni_schema.edge_type_name_by_id_unified(id))
+                .and_then(|name| uni_schema.properties.get(name.as_str()));
 
             // Use Vid::from(eid) as key — matches PropertyManager's return format
             let vid_keys: Vec<Vid> = eids.iter().map(|e| Vid::from(e.as_u64())).collect();
@@ -1089,8 +1089,8 @@ fn build_traverse_output_batch_sync(
         let uni_schema = graph_ctx.storage().schema_manager().schema();
         let mut type_builder = arrow_array::builder::StringBuilder::new();
         for (_, _, _, edge_type_id) in expansions {
-            if let Some(name) = uni_schema.edge_type_name_by_id(*edge_type_id) {
-                type_builder.append_value(name);
+            if let Some(name) = uni_schema.edge_type_name_by_id_unified(*edge_type_id) {
+                type_builder.append_value(&name);
             } else {
                 type_builder.append_null();
             }

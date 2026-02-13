@@ -127,6 +127,9 @@ impl UniWorld {
     /// Run a count query and extract the integer result, returning 0 on failure.
     async fn count_by_query(&self, query: &str) -> usize {
         let Ok(result) = self.db().query(query).await else {
+            if let Err(e) = self.db().query(query).await {
+                eprintln!("[TCK] count_by_query failed for query '{}': {}", query, e);
+            }
             return 0;
         };
         result

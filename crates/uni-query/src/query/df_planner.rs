@@ -1417,6 +1417,9 @@ impl HybridPhysicalPlanner {
 
             // Check if any edge property is NOT in the schema (needs overflow_json)
             if let Some(edge_var) = step_variable {
+                let has_wildcard = all_properties
+                    .get(edge_var)
+                    .is_some_and(|props| props.contains("*"));
                 let edge_type_name = edge_type_ids
                     .first()
                     .and_then(|&id| self.schema.edge_type_name_by_id(id));
@@ -1427,8 +1430,12 @@ impl HybridPhysicalPlanner {
                         && !p.starts_with('_')
                         && !edge_type_props.is_some_and(|tp| tp.contains_key(p.as_str()))
                 });
-                if has_overflow_edge_props && !edge_properties.iter().any(|p| p == "overflow_json")
-                {
+                // Add overflow_json if:
+                // 1. Wildcard was used AND edge_properties is empty (no schema props for this edge type)
+                // 2. OR there are overflow properties explicitly referenced
+                let needs_overflow =
+                    (has_wildcard && edge_properties.is_empty()) || has_overflow_edge_props;
+                if needs_overflow && !edge_properties.contains(&"overflow_json".to_string()) {
                     edge_properties.push("overflow_json".to_string());
                 }
                 let _ = edge_var; // suppress unused warning

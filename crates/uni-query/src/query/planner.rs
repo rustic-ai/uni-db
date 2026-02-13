@@ -2079,9 +2079,16 @@ impl QueryPlanner {
 
         for path in &match_clause.pattern.paths {
             if let Some(mode) = &path.shortest_path_mode {
-                plan = self.plan_shortest_path(path, plan, vars_in_scope, mode)?;
+                plan =
+                    self.plan_shortest_path(path, plan, vars_in_scope, mode, vars_before_pattern)?;
             } else {
-                plan = self.plan_path(path, plan, vars_in_scope, match_clause.optional)?;
+                plan = self.plan_path(
+                    path,
+                    plan,
+                    vars_in_scope,
+                    match_clause.optional,
+                    vars_before_pattern,
+                )?;
             }
         }
 
@@ -2110,6 +2117,7 @@ impl QueryPlanner {
         plan: LogicalPlan,
         vars_in_scope: &mut Vec<VariableInfo>,
         mode: &ShortestPathMode,
+        _vars_before_pattern: usize,
     ) -> Result<LogicalPlan> {
         let mut plan = plan;
         let elements = &path.elements;
@@ -2275,6 +2283,7 @@ impl QueryPlanner {
         plan: LogicalPlan,
         vars_in_scope: &mut Vec<VariableInfo>,
         optional: bool,
+        vars_before_pattern: usize,
     ) -> Result<LogicalPlan> {
         let mut plan = plan;
         let elements = &path.elements;
@@ -2463,6 +2472,7 @@ impl QueryPlanner {
                                             optional_pattern_vars: optional_pattern_vars.clone(),
                                         },
                                         &current_source_var,
+                                        vars_before_pattern,
                                     )?;
                                     plan = new_plan;
 
@@ -2571,6 +2581,7 @@ impl QueryPlanner {
                             optional_pattern_vars: optional_pattern_vars.clone(),
                         },
                         &source_variable,
+                        vars_before_pattern,
                     )?;
                     plan = new_plan;
                     had_traverses = true;
@@ -2621,6 +2632,7 @@ impl QueryPlanner {
         vars_in_scope: &mut Vec<VariableInfo>,
         params: TraverseParams<'_>,
         source_variable: &str,
+        vars_before_pattern: usize,
     ) -> Result<(LogicalPlan, String)> {
         // Check for parameter used as relationship predicate
         if let Some(Expr::Parameter(_)) = &params.rel.properties {
@@ -2675,16 +2687,29 @@ impl QueryPlanner {
         // Check for VariableTypeConflict/RelationshipUniquenessViolation
         // e.g., (r)-[r]-() or r = ()-[]-(), ()-[r]-()
         // Also: (a)-[r]->()-[r]->(a) where r is reused as relationship in same pattern
+        // BUT: MATCH (a)-[r]->() WITH r MATCH ()-[r]->() is ALLOWED (r is bound from previous clause)
+        let mut bound_edge_var: Option<String> = None;
         if let Some(rel_var) = &params.rel.variable
             && !rel_var.is_empty()
             && let Some(info) = find_var_in_scope(vars_in_scope, rel_var)
         {
             if info.var_type == VariableType::Edge {
-                // Same relationship variable used twice in the same MATCH clause
-                return Err(anyhow!(
-                    "SyntaxError: RelationshipUniquenessViolation - Relationship variable '{}' is already used in this pattern",
-                    rel_var
-                ));
+                // Check if this edge variable comes from a previous clause (before this MATCH)
+                let is_from_previous_clause = vars_in_scope[..vars_before_pattern]
+                    .iter()
+                    .any(|v| v.name == *rel_var && v.var_type == VariableType::Edge);
+
+                if is_from_previous_clause {
+                    // Edge variable bound from previous clause - this is allowed
+                    // We'll filter the traversal to match this specific edge
+                    bound_edge_var = Some(rel_var.clone());
+                } else {
+                    // Same relationship variable used twice in the same MATCH clause
+                    return Err(anyhow!(
+                        "SyntaxError: RelationshipUniquenessViolation - Relationship variable '{}' is already used in this pattern",
+                        rel_var
+                    ));
+                }
             } else if !info.var_type.is_compatible_with(VariableType::Edge) {
                 return Err(anyhow!(
                     "SyntaxError: VariableTypeConflict - Variable '{}' already defined as {:?}, cannot use as relationship",
@@ -2843,6 +2868,14 @@ impl QueryPlanner {
         let step_var = params.rel.variable.clone();
         let path_var = params.path_variable.clone();
 
+        // If we have a bound edge variable from a previous clause, use a temp variable
+        // for the Traverse step, then filter to match the bound edge
+        let effective_step_var = if let Some(ref bv) = bound_edge_var {
+            Some(format!("__rebound_{}", bv))
+        } else {
+            step_var.clone()
+        };
+
         let mut plan = LogicalPlan::Traverse {
             input: Box::new(plan),
             edge_type_ids,
@@ -2850,7 +2883,7 @@ impl QueryPlanner {
             source_variable: source_variable.to_string(),
             target_variable: target_variable.clone(),
             target_label_id: target_label_meta.map(|m| m.id).unwrap_or(0),
-            step_variable: step_var.clone(),
+            step_variable: effective_step_var.clone(),
             min_hops,
             max_hops,
             optional: params.optional,
@@ -2872,8 +2905,32 @@ impl QueryPlanner {
             plan = Self::wrap_with_bound_target_filter(plan, &target_variable);
         }
 
+        // If we have a bound edge variable, add a filter to match it
+        if let Some(ref bv) = bound_edge_var {
+            let temp_var = format!("__rebound_{}", bv);
+            let bound_check = Expr::BinaryOp {
+                left: Box::new(Expr::Property(
+                    Box::new(Expr::Variable(temp_var)),
+                    "_eid".to_string(),
+                )),
+                op: BinaryOp::Eq,
+                right: Box::new(Expr::Property(
+                    Box::new(Expr::Variable(bv.clone())),
+                    "_eid".to_string(),
+                )),
+            };
+            plan = LogicalPlan::Filter {
+                input: Box::new(plan),
+                predicate: bound_check,
+                optional_variables: std::collections::HashSet::new(),
+            };
+        }
+
         // Add the bound variables to scope
-        if let Some(sv) = &step_var {
+        // Skip adding the edge variable if it's already bound from a previous clause
+        if let Some(sv) = &step_var
+            && bound_edge_var.is_none()
+        {
             add_var_to_scope(vars_in_scope, sv, VariableType::Edge)?;
         }
         if let Some(pv) = &path_var
@@ -3025,8 +3082,15 @@ impl QueryPlanner {
             PatternElement::Node(n) => n.variable.clone().unwrap_or_default(),
             _ => return Err(anyhow!("Source part must be a node")),
         };
-        let (new_plan, _) =
-            self.plan_traverse_with_source(plan, vars_in_scope, params, &source_variable)?;
+        // For callers outside plan_match_clause, no previous clause variables
+        let vars_before_pattern = vars_in_scope.len();
+        let (new_plan, _) = self.plan_traverse_with_source(
+            plan,
+            vars_in_scope,
+            params,
+            &source_variable,
+            vars_before_pattern,
+        )?;
         Ok(new_plan)
     }
 

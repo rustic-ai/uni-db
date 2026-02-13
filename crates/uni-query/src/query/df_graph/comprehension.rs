@@ -112,6 +112,13 @@ impl PhysicalExpr for ListComprehensionExecExpr {
     }
 
     fn data_type(&self, _input_schema: &Schema) -> Result<DataType> {
+        // When output elements are JSONB (LargeBinary), produce a single JSONB
+        // array blob instead of LargeList<LargeBinary>. This keeps the
+        // comprehension output in the canonical JSONB domain, consistent with
+        // reverse(), list_concat(), and other JSONB-aware operators.
+        if self.output_item_type == DataType::LargeBinary {
+            return Ok(DataType::LargeBinary);
+        }
         Ok(DataType::LargeList(Arc::new(Field::new(
             "item",
             self.output_item_type.clone(),
@@ -255,6 +262,15 @@ impl PhysicalExpr for ListComprehensionExecExpr {
             mapped_array,
             nulls.cloned(),
         );
+
+        // When output items are JSONB, re-encode the LargeList<LargeBinary>
+        // into a flat LargeBinaryArray of JSONB array blobs so that the
+        // result type matches what data_type() reports.
+        if self.output_item_type == DataType::LargeBinary {
+            let jsonb_array =
+                crate::query::df_graph::common::large_list_of_jsonb_to_jsonb_array(&new_list)?;
+            return Ok(ColumnarValue::Array(jsonb_array));
+        }
 
         Ok(ColumnarValue::Array(Arc::new(new_list)))
     }
