@@ -1,16 +1,103 @@
 #!/bin/bash
-# Run TCK tests via nextest (parallel, filterable) and generate markdown reports
+# Run TCK tests via nextest (parallel, filterable) and maintain compliance artifacts.
+#
+# Agent runbook:
+#   - This script is expensive (large TCK suite). Re-run only after code changes
+#     that can affect query/runtime behavior.
+#   - Use filtered runs during investigation; use full runs for final artifact updates.
 #
 # Usage:
-#   scripts/run_tck_with_report.sh              # Run all scenarios
-#   scripts/run_tck_with_report.sh "~Match1"    # Filter by pattern
+#   scripts/run_tck_with_report.sh
+#     Full run in default mode (schemaless).
+#
 #   UNI_TCK_SCHEMA_MODE=sidecar scripts/run_tck_with_report.sh
-#   scripts/run_tck_with_report.sh --both       # Run schemaless + sidecar
+#     Full run in schema mode (mapped from sidecar -> compliance_reports/schema).
+#
+#   scripts/run_tck_with_report.sh --both
+#     Full runs for both modes (schemaless, then sidecar).
+#
+#   scripts/run_tck_with_report.sh "~Match1"
 #   scripts/run_tck_with_report.sh --both "~Match1"
+#     Filtered runs for quick checks (no checked-in artifact updates).
+#
+# Output locations:
+#   - Raw per-scenario nextest JSON:
+#       target/cucumber/nextest/<mode>/
+#   - Aggregated run JSON (ephemeral):
+#       target/cucumber/<mode>/results_YYYYMMDD_HHMMSS.json
+#       target/cucumber/<mode>/filtered/results_YYYYMMDD_HHMMSS.json
+#   - Checked-in compliance artifacts (source of truth for latest committed state):
+#       compliance_reports/schemaless/
+#       compliance_reports/schema/
+#         - latest 2 results_*.json
+#         - report.md (latest full-run report)
+#         - last_run_results.json (stable pointer to latest full run)
+#         - last_run_report.md   (stable pointer to latest full-run report)
+#
+# Important behavior:
+#   - Filtered runs are exploratory and intentionally do NOT update
+#     compliance_reports/*, report.md, or last_run_* snapshots.
+#   - Only full runs refresh checked-in compliance artifacts.
 
 set -e
 
 cd "$(dirname "$0")/.."
+
+compliance_mode_dir() {
+    local mode="$1"
+    case "$mode" in
+        sidecar)
+            echo "schema"
+            ;;
+        schemaless)
+            echo "schemaless"
+            ;;
+        *)
+            echo "❌ Invalid mode for compliance reports: '$mode'" >&2
+            exit 1
+            ;;
+    esac
+}
+
+sync_compliance_reports() {
+    local mode="$1"
+    local results_json="$2"
+    local compliance_mode
+    local compliance_dir
+    local latest_json
+    local last_run_json
+    local last_run_report
+    local -a json_files=()
+    local remove_count
+    local i
+
+    compliance_mode=$(compliance_mode_dir "$mode")
+    compliance_dir="compliance_reports/$compliance_mode"
+    mkdir -p "$compliance_dir"
+
+    cp -f "$results_json" "$compliance_dir/$(basename "$results_json")"
+
+    mapfile -t json_files < <(find "$compliance_dir" -maxdepth 1 -type f -name 'results_*.json' | sort)
+    if [ "${#json_files[@]}" -gt 2 ]; then
+        remove_count=$(( ${#json_files[@]} - 2 ))
+        for ((i = 0; i < remove_count; i++)); do
+            rm -f "${json_files[$i]}"
+        done
+    fi
+
+    latest_json=$(find "$compliance_dir" -maxdepth 1 -type f -name 'results_*.json' | sort | tail -n 1)
+    if [ -z "$latest_json" ]; then
+        echo "❌ Could not find a results JSON in $compliance_dir" >&2
+        exit 1
+    fi
+
+    python3 scripts/analyze_tck_json.py "$latest_json"
+
+    last_run_json="$compliance_dir/last_run_results.json"
+    last_run_report="$compliance_dir/last_run_report.md"
+    cp -f "$latest_json" "$last_run_json"
+    cp -f "$compliance_dir/report.md" "$last_run_report"
+}
 
 normalize_mode() {
     local raw="${1:-schemaless}"
@@ -37,6 +124,7 @@ run_for_mode() {
     local raw_results_dir="target/cucumber/nextest/$mode"
     local output_dir="target/cucumber/$mode"
     local filter_expr=""
+    local results_json
 
     if [ -n "$filter" ]; then
         filter_expr="-E test($filter)"
@@ -58,7 +146,7 @@ run_for_mode() {
 
     echo ""
     echo "📊 Aggregating results..."
-    RESULTS_JSON=$(python3 scripts/aggregate_nextest_results.py \
+    results_json=$(python3 scripts/aggregate_nextest_results.py \
         --results-dir "$raw_results_dir" \
         --output-dir "$output_dir")
 
@@ -66,6 +154,7 @@ run_for_mode() {
         echo ""
         echo "ℹ️  Filtered run — results saved to $output_dir/"
         echo "ℹ️  Skipping report generation (only full runs update the report)"
+        echo "ℹ️  Intended: filtered runs do not update compliance_reports or last_run snapshots"
         echo ""
         return
     fi
@@ -74,11 +163,12 @@ run_for_mode() {
     echo "📊 Generating report..."
     echo ""
 
-    # Generate comparative report (auto-finds previous results)
-    python3 scripts/analyze_tck_json.py "$RESULTS_JSON"
+    # Keep checked-in compliance reports by mode.
+    sync_compliance_reports "$mode" "$results_json"
 
     echo ""
-    echo "📁 Report available at: $output_dir/report.md"
+    echo "📁 Report available at: compliance_reports/$(compliance_mode_dir "$mode")/report.md"
+    echo "📁 Last run snapshot: compliance_reports/$(compliance_mode_dir "$mode")/last_run_report.md"
     echo ""
 }
 
