@@ -1,14 +1,8 @@
 name: Deploy Documentation
 
 on:
-  push:
-    branches:
-      - main
-    paths:
-      - 'website/**'
-      - 'crates/**/*.rs'
-      - 'bindings/uni-db/**'
-      - '.github/workflows/deploy-docs.yml'
+  release:
+    types: [published]
   workflow_dispatch:
 
 permissions:
