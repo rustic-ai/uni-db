@@ -857,6 +857,15 @@ pub fn apply_suffix(expr: Expr, suffix: PostfixSuffix) -> Expr {
     }
 }
 
+/// Helper to create a binary operation expression.
+fn make_binary_op(left: Expr, op: BinaryOp, right: Expr) -> Expr {
+    Expr::BinaryOp {
+        left: Box::new(left),
+        op,
+        right: Box::new(right),
+    }
+}
+
 /// Apply a sequence of expression suffixes to build a complete expression.
 /// Example: id.prop[0] + 1 => ((id.prop)[0]) + 1
 fn apply_suffixes(mut expr: Expr, suffixes: Vec<ExprSuffix>) -> Expr {
@@ -877,8 +886,6 @@ fn apply_suffixes(mut expr: Expr, suffixes: Vec<ExprSuffix>) -> Expr {
             },
 
             ExprSuffix::FunctionCall(args) => {
-                // Extract function name from variable or property chain
-                // Supports: func(...), uni.func(...), db.idx.func(...)
                 let name = extract_dotted_name(&expr)
                     .unwrap_or_else(|| panic!("Function call suffix requires variable or property chain expression, got: {:?}", expr));
                 Expr::FunctionCall {
@@ -890,126 +897,34 @@ fn apply_suffixes(mut expr: Expr, suffixes: Vec<ExprSuffix>) -> Expr {
             }
 
             ExprSuffix::IsNull => Expr::IsNull(Box::new(expr)),
-
             ExprSuffix::IsNotNull => Expr::IsNotNull(Box::new(expr)),
 
-            // Binary operators
-            ExprSuffix::Add(right) => Expr::BinaryOp {
-                left: Box::new(expr),
-                op: BinaryOp::Add,
-                right: Box::new(right),
-            },
+            // Binary operators - arithmetic
+            ExprSuffix::Add(r) => make_binary_op(expr, BinaryOp::Add, r),
+            ExprSuffix::Sub(r) => make_binary_op(expr, BinaryOp::Sub, r),
+            ExprSuffix::Mul(r) => make_binary_op(expr, BinaryOp::Mul, r),
+            ExprSuffix::Div(r) => make_binary_op(expr, BinaryOp::Div, r),
+            ExprSuffix::Mod(r) => make_binary_op(expr, BinaryOp::Mod, r),
+            ExprSuffix::Pow(r) => make_binary_op(expr, BinaryOp::Pow, r),
 
-            ExprSuffix::Sub(right) => Expr::BinaryOp {
-                left: Box::new(expr),
-                op: BinaryOp::Sub,
-                right: Box::new(right),
-            },
+            // Binary operators - comparison
+            ExprSuffix::Eq(r) => make_binary_op(expr, BinaryOp::Eq, r),
+            ExprSuffix::NotEq(r) => make_binary_op(expr, BinaryOp::NotEq, r),
+            ExprSuffix::Lt(r) => make_binary_op(expr, BinaryOp::Lt, r),
+            ExprSuffix::LtEq(r) => make_binary_op(expr, BinaryOp::LtEq, r),
+            ExprSuffix::Gt(r) => make_binary_op(expr, BinaryOp::Gt, r),
+            ExprSuffix::GtEq(r) => make_binary_op(expr, BinaryOp::GtEq, r),
 
-            ExprSuffix::Mul(right) => Expr::BinaryOp {
-                left: Box::new(expr),
-                op: BinaryOp::Mul,
-                right: Box::new(right),
-            },
+            // Binary operators - logical
+            ExprSuffix::And(r) => make_binary_op(expr, BinaryOp::And, r),
+            ExprSuffix::Or(r) => make_binary_op(expr, BinaryOp::Or, r),
+            ExprSuffix::Xor(r) => make_binary_op(expr, BinaryOp::Xor, r),
 
-            ExprSuffix::Div(right) => Expr::BinaryOp {
-                left: Box::new(expr),
-                op: BinaryOp::Div,
-                right: Box::new(right),
-            },
-
-            ExprSuffix::Mod(right) => Expr::BinaryOp {
-                left: Box::new(expr),
-                op: BinaryOp::Mod,
-                right: Box::new(right),
-            },
-
-            ExprSuffix::Pow(right) => Expr::BinaryOp {
-                left: Box::new(expr),
-                op: BinaryOp::Pow,
-                right: Box::new(right),
-            },
-
-            // Comparison operators
-            ExprSuffix::Eq(right) => Expr::BinaryOp {
-                left: Box::new(expr),
-                op: BinaryOp::Eq,
-                right: Box::new(right),
-            },
-
-            ExprSuffix::NotEq(right) => Expr::BinaryOp {
-                left: Box::new(expr),
-                op: BinaryOp::NotEq,
-                right: Box::new(right),
-            },
-
-            ExprSuffix::Lt(right) => Expr::BinaryOp {
-                left: Box::new(expr),
-                op: BinaryOp::Lt,
-                right: Box::new(right),
-            },
-
-            ExprSuffix::LtEq(right) => Expr::BinaryOp {
-                left: Box::new(expr),
-                op: BinaryOp::LtEq,
-                right: Box::new(right),
-            },
-
-            ExprSuffix::Gt(right) => Expr::BinaryOp {
-                left: Box::new(expr),
-                op: BinaryOp::Gt,
-                right: Box::new(right),
-            },
-
-            ExprSuffix::GtEq(right) => Expr::BinaryOp {
-                left: Box::new(expr),
-                op: BinaryOp::GtEq,
-                right: Box::new(right),
-            },
-
-            // Logical operators
-            ExprSuffix::And(right) => Expr::BinaryOp {
-                left: Box::new(expr),
-                op: BinaryOp::And,
-                right: Box::new(right),
-            },
-
-            ExprSuffix::Or(right) => Expr::BinaryOp {
-                left: Box::new(expr),
-                op: BinaryOp::Or,
-                right: Box::new(right),
-            },
-
-            ExprSuffix::Xor(right) => Expr::BinaryOp {
-                left: Box::new(expr),
-                op: BinaryOp::Xor,
-                right: Box::new(right),
-            },
-
-            // String operators
-            ExprSuffix::Contains(right) => Expr::BinaryOp {
-                left: Box::new(expr),
-                op: BinaryOp::Contains,
-                right: Box::new(right),
-            },
-
-            ExprSuffix::StartsWith(right) => Expr::BinaryOp {
-                left: Box::new(expr),
-                op: BinaryOp::StartsWith,
-                right: Box::new(right),
-            },
-
-            ExprSuffix::EndsWith(right) => Expr::BinaryOp {
-                left: Box::new(expr),
-                op: BinaryOp::EndsWith,
-                right: Box::new(right),
-            },
-
-            ExprSuffix::Regex(right) => Expr::BinaryOp {
-                left: Box::new(expr),
-                op: BinaryOp::Regex,
-                right: Box::new(right),
-            },
+            // Binary operators - string
+            ExprSuffix::Contains(r) => make_binary_op(expr, BinaryOp::Contains, r),
+            ExprSuffix::StartsWith(r) => make_binary_op(expr, BinaryOp::StartsWith, r),
+            ExprSuffix::EndsWith(r) => make_binary_op(expr, BinaryOp::EndsWith, r),
+            ExprSuffix::Regex(r) => make_binary_op(expr, BinaryOp::Regex, r),
 
             // List membership
             ExprSuffix::In(right) => Expr::In {
