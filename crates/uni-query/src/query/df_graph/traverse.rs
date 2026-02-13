@@ -1298,13 +1298,21 @@ impl GraphTraverseMainExec {
                 true,
             ));
 
-            // Edge properties: all as Utf8 (JSON strings from main table)
+            // Edge properties: Utf8 for named props, LargeBinary for _all_props JSONB
             for prop in edge_properties {
-                fields.push(Field::new(
-                    format!("{}.{}", edge_var, prop),
-                    DataType::Utf8,
-                    true,
-                ));
+                if prop == "_all_props" {
+                    fields.push(Field::new(
+                        format!("{}._all_props", edge_var),
+                        DataType::LargeBinary,
+                        true,
+                    ));
+                } else {
+                    fields.push(Field::new(
+                        format!("{}.{}", edge_var, prop),
+                        DataType::Utf8,
+                        true,
+                    ));
+                }
             }
         }
 
@@ -1636,17 +1644,41 @@ impl GraphTraverseMainStream {
                 columns.push(Arc::new(type_builder.finish()));
             }
 
-            // Add edge property columns (all as Utf8 from JSON)
+            // Add edge property columns
             for prop_name in &self.edge_properties {
-                let mut builder = arrow_array::builder::StringBuilder::new();
-                for (_, _, _, _, props) in &expansions {
-                    match props.get(prop_name) {
-                        Some(uni_common::Value::String(s)) => builder.append_value(s),
-                        Some(uni_common::Value::Null) | None => builder.append_null(),
-                        Some(other) => builder.append_value(other.to_string()),
+                if prop_name == "_all_props" {
+                    // Serialize all edge properties to JSONB blob
+                    use crate::query::df_graph::scan::serde_json_to_jsonb;
+                    let mut builder = arrow_array::builder::LargeBinaryBuilder::new();
+                    for (_, _, _, _, props) in &expansions {
+                        if props.is_empty() {
+                            builder.append_null();
+                        } else {
+                            let mut json_map = serde_json::Map::new();
+                            for (k, v) in props.iter() {
+                                let json_val: serde_json::Value = v.clone().into();
+                                json_map.insert(k.clone(), json_val);
+                            }
+                            let json = serde_json::Value::Object(json_map);
+                            match serde_json_to_jsonb(&json) {
+                                Ok(bytes) => builder.append_value(bytes),
+                                Err(_) => builder.append_null(),
+                            }
+                        }
                     }
+                    columns.push(Arc::new(builder.finish()));
+                } else {
+                    // Named property as Utf8
+                    let mut builder = arrow_array::builder::StringBuilder::new();
+                    for (_, _, _, _, props) in &expansions {
+                        match props.get(prop_name) {
+                            Some(uni_common::Value::String(s)) => builder.append_value(s),
+                            Some(uni_common::Value::Null) | None => builder.append_null(),
+                            Some(other) => builder.append_value(other.to_string()),
+                        }
+                    }
+                    columns.push(Arc::new(builder.finish()));
                 }
-                columns.push(Arc::new(builder.finish()));
             }
         }
 

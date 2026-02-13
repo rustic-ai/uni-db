@@ -405,9 +405,26 @@ impl GraphUnwindStream {
                         if args.len() == 1 {
                             let val = self.evaluate_expr_impl(&args[0], batch, row_idx)?;
                             if let Value::Map(map) = val {
-                                let keys: Vec<Value> =
-                                    map.keys().map(|k| Value::String(k.clone())).collect();
+                                // Use _all_props sub-map for schemaless entities
+                                // when present; otherwise use the top-level map.
+                                let source = match map.get("_all_props") {
+                                    Some(Value::Map(all)) => all,
+                                    _ => &map,
+                                };
+                                let mut key_strings: Vec<String> = source
+                                    .iter()
+                                    .filter(|(k, v)| !v.is_null() && !k.starts_with('_'))
+                                    .map(|(k, _)| k.clone())
+                                    .collect();
+                                key_strings.sort();
+                                let keys: Vec<Value> = key_strings
+                                    .into_iter()
+                                    .map(Value::String)
+                                    .collect();
                                 return Ok(Value::List(keys));
+                            }
+                            if let Value::Null = val {
+                                return Ok(Value::Null);
                             }
                         }
                         Ok(Value::List(vec![]))
@@ -659,6 +676,15 @@ pub(crate) fn arrow_to_json_value(array: &dyn Array, row: usize) -> Value {
             return Value::from(parsed);
         }
         return Value::Null;
+    }
+
+    // Struct — convert fields to a Map so keys()/properties() UDFs work
+    if let Some(s) = any.downcast_ref::<arrow_array::StructArray>() {
+        let mut map = HashMap::new();
+        for (field, child) in s.fields().iter().zip(s.columns()) {
+            map.insert(field.name().clone(), arrow_to_json_value(child.as_ref(), row));
+        }
+        return Value::Map(map);
     }
 
     // Fallback

@@ -1774,7 +1774,7 @@ impl HybridPhysicalPlanner {
         let source_col = format!("{}._vid", source_variable);
 
         // Extract edge properties for schemaless edges (all treated as Utf8/JSON)
-        let edge_properties: Vec<String> = if let Some(edge_var) = step_variable {
+        let mut edge_properties: Vec<String> = if let Some(edge_var) = step_variable {
             all_properties
                 .get(edge_var)
                 .map(|props| props.iter().filter(|p| *p != "*").cloned().collect())
@@ -1782,6 +1782,16 @@ impl HybridPhysicalPlanner {
         } else {
             Vec::new()
         };
+
+        // If edge has wildcard, include _all_props for keys()/properties() support
+        if let Some(edge_var) = step_variable
+            && all_properties
+                .get(edge_var)
+                .is_some_and(|props| props.contains("*"))
+            && !edge_properties.iter().any(|p| p == "_all_props")
+        {
+            edge_properties.push("_all_props".to_string());
+        }
 
         // Extract target vertex properties
         let mut target_properties: Vec<String> = all_properties
@@ -3150,6 +3160,15 @@ impl HybridPhysicalPlanner {
         struct_args.push(DfExpr::Column(datafusion::common::Column::from_name(
             format!("{}._vid", target_variable),
         )));
+
+        // Include _all_props if present (for keys()/properties() on schemaless edges)
+        let all_props_col = format!("{}._all_props", variable);
+        if input_schema.column_with_name(&all_props_col).is_some() {
+            struct_args.push(lit("_all_props"));
+            struct_args.push(DfExpr::Column(datafusion::common::Column::from_name(
+                all_props_col,
+            )));
+        }
 
         for prop in properties {
             struct_args.push(lit(prop.clone()));
