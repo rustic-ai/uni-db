@@ -1442,6 +1442,26 @@ fn scalar_to_value(scalar: &ScalarValue) -> DFResult<Value> {
                 ))
             }
         }
+        ScalarValue::LargeList(arr) => {
+            if arr.len() == 0 || arr.is_null(0) {
+                Ok(Value::Null)
+            } else {
+                Ok(uni_store::storage::arrow_convert::arrow_to_value(
+                    arr.as_ref(),
+                    0,
+                ))
+            }
+        }
+        ScalarValue::FixedSizeList(arr) => {
+            if arr.len() == 0 || arr.is_null(0) {
+                Ok(Value::Null)
+            } else {
+                Ok(uni_store::storage::arrow_convert::arrow_to_value(
+                    arr.as_ref(),
+                    0,
+                ))
+            }
+        }
         // Unsigned and smaller integer types
         ScalarValue::UInt64(Some(u)) => Ok(Value::Int(*u as i64)),
         ScalarValue::UInt32(Some(u)) => Ok(Value::Int(*u as i64)),
@@ -1902,7 +1922,7 @@ impl ScalarUDFImpl for ToBooleanUdf {
                 Value::Float(_) => Value::Null,
                 Value::List(_) | Value::Map(_) => {
                     return Err(datafusion::error::DataFusionError::Execution(format!(
-                        "toboolean(): cannot convert {:?} to boolean",
+                        "InvalidArgumentValue: toboolean(): cannot convert {:?} to boolean",
                         val
                     )));
                 }

@@ -321,10 +321,18 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
         prop: &str,
         input_schema: &Schema,
     ) -> Result<Arc<dyn PhysicalExpr>> {
-        if let Expr::Variable(var_name) = base
-            && let Some(expr) = self.try_compile_struct_field(var_name, prop, input_schema)
-        {
-            return Ok(expr);
+        if let Expr::Variable(var_name) = base {
+            // 1. Try struct field access (e.g. `x.a` where `x` is a Struct column)
+            if let Some(expr) = self.try_compile_struct_field(var_name, prop, input_schema) {
+                return Ok(expr);
+            }
+            // 2. Try flat column "{var}.{prop}" (for pattern comprehension inner schemas)
+            let flat_col = format!("{}.{}", var_name, prop);
+            if let Ok(col_idx) = input_schema.index_of(&flat_col) {
+                return Ok(Arc::new(
+                    datafusion::physical_expr::expressions::Column::new(&flat_col, col_idx),
+                ));
+            }
         }
         self.compile_standard(
             &Expr::Property(Box::new(base.clone()), prop.to_string()),
