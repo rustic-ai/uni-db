@@ -165,7 +165,7 @@ jobs:
 
       - name: Build Python bindings (uni-db)
         working-directory: bindings/uni-db
-        run: poetry run maturin develop --release
+        run: poetry run maturin develop
 
       - name: Lint Python code (uni-db)
         working-directory: bindings/uni-db
