@@ -58,6 +58,131 @@ fn resolve_list_element_type(
     }
 }
 
+/// Physical expression wrapper that converts LargeList<T> to LargeBinary (JSONB).
+///
+/// Used in CASE expressions to unify branch types when mixing typed lists
+/// (e.g., from list comprehensions) with JSONB-encoded lists.
+#[derive(Debug)]
+struct LargeListToJsonbExpr {
+    child: Arc<dyn PhysicalExpr>,
+}
+
+impl LargeListToJsonbExpr {
+    fn new(child: Arc<dyn PhysicalExpr>) -> Self {
+        Self { child }
+    }
+}
+
+impl std::fmt::Display for LargeListToJsonbExpr {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "LargeListToJsonb({})", self.child)
+    }
+}
+
+impl PartialEq for LargeListToJsonbExpr {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.child, &other.child)
+    }
+}
+
+impl Eq for LargeListToJsonbExpr {}
+
+impl std::hash::Hash for LargeListToJsonbExpr {
+    fn hash<H: std::hash::Hasher>(&self, _state: &mut H) {
+        // Hash based on type since we can't hash PhysicalExpr
+        std::any::type_name::<Self>().hash(_state);
+    }
+}
+
+impl PartialEq<dyn std::any::Any> for LargeListToJsonbExpr {
+    fn eq(&self, other: &dyn std::any::Any) -> bool {
+        other
+            .downcast_ref::<Self>()
+            .map(|x| self == x)
+            .unwrap_or(false)
+    }
+}
+
+impl PhysicalExpr for LargeListToJsonbExpr {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn data_type(&self, _input_schema: &Schema) -> datafusion::error::Result<DataType> {
+        Ok(DataType::LargeBinary)
+    }
+
+    fn nullable(&self, input_schema: &Schema) -> datafusion::error::Result<bool> {
+        self.child.nullable(input_schema)
+    }
+
+    fn evaluate(
+        &self,
+        batch: &arrow_array::RecordBatch,
+    ) -> datafusion::error::Result<datafusion::logical_expr::ColumnarValue> {
+        use datafusion::arrow::compute::cast;
+        use datafusion::logical_expr::ColumnarValue;
+
+        let child_result = self.child.evaluate(batch)?;
+        let child_array = child_result.into_array(batch.num_rows())?;
+
+        // Normalize List → LargeList (pattern from quantifier.rs:182-189)
+        let list_array = if let DataType::List(field) = child_array.data_type() {
+            let target_type = DataType::LargeList(field.clone());
+            cast(&child_array, &target_type).map_err(|e| {
+                datafusion::error::DataFusionError::Execution(format!(
+                    "List to LargeList cast failed: {e}"
+                ))
+            })?
+        } else {
+            child_array.clone()
+        };
+
+        // If already LargeBinary, pass through
+        if list_array.data_type() == &DataType::LargeBinary {
+            return Ok(ColumnarValue::Array(list_array));
+        }
+
+        // Convert LargeList to JSONB
+        if let Some(large_list) = list_array
+            .as_any()
+            .downcast_ref::<datafusion::arrow::array::LargeListArray>()
+        {
+            let jsonb_array =
+                crate::query::df_graph::common::typed_large_list_to_jsonb_array(large_list)?;
+            Ok(ColumnarValue::Array(jsonb_array))
+        } else {
+            Err(datafusion::error::DataFusionError::Execution(format!(
+                "Expected List or LargeList, got {:?}",
+                list_array.data_type()
+            )))
+        }
+    }
+
+    fn children(&self) -> Vec<&Arc<dyn PhysicalExpr>> {
+        vec![&self.child]
+    }
+
+    fn with_new_children(
+        self: Arc<Self>,
+        children: Vec<Arc<dyn PhysicalExpr>>,
+    ) -> datafusion::error::Result<Arc<dyn PhysicalExpr>> {
+        if children.len() != 1 {
+            return Err(datafusion::error::DataFusionError::Execution(
+                "LargeListToJsonbExpr expects exactly 1 child".to_string(),
+            ));
+        }
+        Ok(Arc::new(LargeListToJsonbExpr::new(children[0].clone())))
+    }
+
+    fn fmt_sql(
+        &self,
+        f: &mut std::fmt::Formatter,
+    ) -> std::fmt::Result {
+        write!(f, "LargeListToJsonb({})", self.child)
+    }
+}
+
 /// Compiler for converting Cypher expressions directly to DataFusion Physical Expressions.
 pub struct CypherPhysicalExprCompiler<'a> {
     state: &'a SessionState,
@@ -236,24 +361,15 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
                 }
             }
 
-            // CASE expression with custom sub-expressions in branches
+            // CASE expression - always use custom compilation for type unification
             Expr::Case {
                 expr: case_operand,
                 when_then,
                 else_expr,
             } => {
-                let has_custom = case_operand
-                    .as_deref()
-                    .is_some_and(Self::contains_custom_expr)
-                    || when_then.iter().any(|(w, t)| {
-                        Self::contains_custom_expr(w) || Self::contains_custom_expr(t)
-                    })
-                    || else_expr.as_deref().is_some_and(Self::contains_custom_expr);
-                if has_custom {
-                    self.compile_case(case_operand, when_then, else_expr, input_schema)
-                } else {
-                    self.compile_standard(expr, input_schema)
-                }
+                // Always use compile_case() to handle JSONB boolean conversion and
+                // LargeList/LargeBinary type unification
+                self.compile_case(case_operand, when_then, else_expr, input_schema)
             }
 
             // Default to standard compilation for leaf nodes or non-custom trees
@@ -820,6 +936,10 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
     ///
     /// Recursively compiles the operand, each when/then pair, and the else
     /// branch, then builds a `CaseExpr` physical expression.
+    ///
+    /// Applies two fixes for TCK compliance:
+    /// 1. Wraps JSONB WHEN conditions with `_jsonb_to_bool` for proper boolean evaluation
+    /// 2. Unifies branch types when mixing LargeList and LargeBinary to avoid cast errors
     fn compile_case(
         &self,
         operand: &Option<Box<Expr>>,
@@ -832,7 +952,7 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
             .map(|e| self.compile(e, input_schema))
             .transpose()?;
 
-        let when_then_phy: Vec<(Arc<dyn PhysicalExpr>, Arc<dyn PhysicalExpr>)> = when_then
+        let mut when_then_phy: Vec<(Arc<dyn PhysicalExpr>, Arc<dyn PhysicalExpr>)> = when_then
             .iter()
             .map(|(w, t)| {
                 let w_phy = self.compile(w, input_schema)?;
@@ -841,10 +961,63 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
             })
             .collect::<Result<Vec<_>>>()?;
 
-        let else_phy = else_expr
+        let mut else_phy = else_expr
             .as_deref()
             .map(|e| self.compile(e, input_schema))
             .transpose()?;
+
+        // Fix B: Wrap JSONB WHEN conditions with _jsonb_to_bool
+        for (w_phy, _) in &mut when_then_phy {
+            if let Ok(dt) = w_phy.data_type(input_schema) {
+                if dt == DataType::LargeBinary {
+                    *w_phy = self.wrap_with_jsonb_to_bool(w_phy.clone())?;
+                }
+            }
+        }
+
+        // Fix A: Unify branch types when mixing LargeList and LargeBinary
+        // Collect all branch data types
+        let mut branch_types: Vec<DataType> = Vec::new();
+        for (_, t_phy) in &when_then_phy {
+            if let Ok(dt) = t_phy.data_type(input_schema) {
+                branch_types.push(dt);
+            }
+        }
+        if let Some(ref e_phy) = else_phy {
+            if let Ok(dt) = e_phy.data_type(input_schema) {
+                branch_types.push(dt);
+            }
+        }
+
+        // Check if we have a mix of LargeBinary and LargeList/List types
+        let has_large_binary = branch_types
+            .iter()
+            .any(|dt| matches!(dt, DataType::LargeBinary));
+        let has_list = branch_types
+            .iter()
+            .any(|dt| matches!(dt, DataType::List(_) | DataType::LargeList(_)));
+
+        // If we have both, wrap List/LargeList branches with LargeListToJsonbExpr
+        if has_large_binary && has_list {
+            for (_, t_phy) in &mut when_then_phy {
+                if let Ok(dt) = t_phy.data_type(input_schema) {
+                    if matches!(dt, DataType::List(_) | DataType::LargeList(_)) {
+                        *t_phy = Arc::new(LargeListToJsonbExpr::new(t_phy.clone()));
+                    }
+                }
+            }
+            if let Some(e_phy) = else_phy.take() {
+                if let Ok(dt) = e_phy.data_type(input_schema) {
+                    if matches!(dt, DataType::List(_) | DataType::LargeList(_)) {
+                        else_phy = Some(Arc::new(LargeListToJsonbExpr::new(e_phy)));
+                    } else {
+                        else_phy = Some(e_phy);
+                    }
+                } else {
+                    else_phy = Some(e_phy);
+                }
+            }
+        }
 
         let case_expr = datafusion::physical_expr::expressions::CaseExpr::try_new(
             operand_phy,
@@ -1127,6 +1300,36 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
         udf_phy
             .with_new_children(children)
             .map_err(|e| anyhow!("Failed to rebind {} children: {}", error_context, e))
+    }
+
+    /// Wrap a LargeBinary (JSONB) expression with `_jsonb_to_bool` conversion.
+    ///
+    /// Used when a JSONB expression needs to be used as a boolean (e.g., in WHEN clauses).
+    fn wrap_with_jsonb_to_bool(
+        &self,
+        expr: Arc<dyn PhysicalExpr>,
+    ) -> Result<Arc<dyn PhysicalExpr>> {
+        let Some(udf) = self.state.scalar_functions().get("_jsonb_to_bool") else {
+            return Err(anyhow!("_jsonb_to_bool UDF not found"));
+        };
+
+        let dummy_col = datafusion::logical_expr::Expr::Column(datafusion::common::Column::new(
+            None::<String>,
+            "__jsonb__",
+        ));
+        let udf_expr = datafusion::logical_expr::Expr::ScalarFunction(
+            datafusion::logical_expr::expr::ScalarFunction {
+                func: udf.clone(),
+                args: vec![dummy_col],
+            },
+        );
+
+        self.plan_udf_physical_expr(
+            &udf_expr,
+            &[("__jsonb__", DataType::LargeBinary)],
+            vec![expr],
+            "JSONB to bool",
+        )
     }
 
     /// Plan a binary UDF with the given name and operand types.
