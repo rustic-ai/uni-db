@@ -196,26 +196,45 @@ impl PhysicalExpr for ReduceExecExpr {
                 inner_columns.push(taken);
             }
 
-            // 2. Take accumulator values
-            let acc_taken = datafusion::arrow::compute::take(&current_acc, &active_indices, None)?;
-            inner_columns.push(acc_taken);
-
-            // 3. Take variable values from flattened list values
-            let var_taken = datafusion::arrow::compute::take(values, &variable_indices, None)?;
-            inner_columns.push(var_taken);
-
-            // Construct inner schema
+            // Construct inner schema with accumulator and variable fields
             let mut inner_fields = batch.schema().fields().to_vec();
-            inner_fields.push(Arc::new(Field::new(
+            let acc_field = Arc::new(Field::new(
                 &self.accumulator_name,
                 current_acc.data_type().clone(),
                 true,
-            )));
-            inner_fields.push(Arc::new(Field::new(
+            ));
+            let var_field = Arc::new(Field::new(
                 &self.variable_name,
                 values.data_type().clone(),
                 true,
-            )));
+            ));
+
+            // 2. Take accumulator values and replace/append to columns
+            let acc_taken = datafusion::arrow::compute::take(&current_acc, &active_indices, None)?;
+            if let Some(pos) = inner_fields
+                .iter()
+                .position(|f| f.name() == &self.accumulator_name)
+            {
+                inner_columns[pos] = acc_taken;
+                inner_fields[pos] = acc_field;
+            } else {
+                inner_columns.push(acc_taken);
+                inner_fields.push(acc_field);
+            }
+
+            // 3. Take variable values from flattened list values and replace/append to columns
+            let var_taken = datafusion::arrow::compute::take(values, &variable_indices, None)?;
+            if let Some(pos) = inner_fields
+                .iter()
+                .position(|f| f.name() == &self.variable_name)
+            {
+                inner_columns[pos] = var_taken;
+                inner_fields[pos] = var_field;
+            } else {
+                inner_columns.push(var_taken);
+                inner_fields.push(var_field);
+            }
+
             let inner_schema = Arc::new(Schema::new(inner_fields));
 
             let inner_batch = RecordBatch::try_new(inner_schema, inner_columns)?;

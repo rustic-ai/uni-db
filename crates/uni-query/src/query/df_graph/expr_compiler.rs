@@ -175,10 +175,7 @@ impl PhysicalExpr for LargeListToJsonbExpr {
         Ok(Arc::new(LargeListToJsonbExpr::new(children[0].clone())))
     }
 
-    fn fmt_sql(
-        &self,
-        f: &mut std::fmt::Formatter,
-    ) -> std::fmt::Result {
+    fn fmt_sql(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         write!(f, "LargeListToJsonb({})", self.child)
     }
 }
@@ -271,7 +268,13 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
                 self.compile_binary_op_dispatch(left, op, right, input_schema)
             }
             Expr::UnaryOp { op, expr: inner } => {
-                if Self::contains_custom_expr(inner) {
+                if matches!(op, UnaryOp::Not) {
+                    let mut inner_phy = self.compile(inner, input_schema)?;
+                    if let Ok(DataType::LargeBinary) = inner_phy.data_type(input_schema) {
+                        inner_phy = self.wrap_with_jsonb_to_bool(inner_phy)?;
+                    }
+                    self.compile_unary_op(op, inner_phy, input_schema)
+                } else if Self::contains_custom_expr(inner) {
                     let inner_phy = self.compile(inner, input_schema)?;
                     self.compile_unary_op(op, inner_phy, input_schema)
                 } else {
@@ -415,9 +418,13 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
         let left_dt = left_phy.data_type(input_schema).ok();
         let right_dt = right_phy.data_type(input_schema).ok();
         let has_jsonb = is_jsonb_type(left_dt.as_ref()) || is_jsonb_type(right_dt.as_ref());
+
         if has_jsonb {
+            // JSONB types need special handling via compile_binary_op
             self.compile_binary_op(op, left_phy, right_phy, input_schema)
         } else {
+            // Standard types: use compile_standard to get proper type coercion
+            // (e.g., Int64 == Float64 requires coercion to work)
             self.compile_standard(
                 &Expr::BinaryOp {
                     left: Box::new(left.clone()),
@@ -671,19 +678,67 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
             "List comprehension",
         )?;
 
-        // Create inner schema with loop variable
+        // Create inner schema with loop variable (shadow outer variable if same name)
         let mut fields = input_schema.fields().to_vec();
-        fields.push(Arc::new(Field::new(variable, inner_data_type, true)));
+        let loop_var_field = Arc::new(Field::new(variable, inner_data_type, true));
+
+        if let Some(pos) = fields.iter().position(|f| f.name() == variable) {
+            fields[pos] = loop_var_field;
+        } else {
+            fields.push(loop_var_field);
+        }
+
         let inner_schema = Arc::new(Schema::new(fields));
 
-        // Compile inner expressions
+        // Compile inner expressions with scoped translation context
+        let needs_scoping = self
+            .translation_ctx
+            .is_some_and(|ctx| ctx.variable_kinds.contains_key(variable));
+
+        let scoped_ctx: Option<TranslationContext>;
+        let inner_compiler: CypherPhysicalExprCompiler;
+
+        if needs_scoping {
+            let ctx = self.translation_ctx.unwrap();
+            let mut new_kinds = ctx.variable_kinds.clone();
+            new_kinds.remove(variable);
+            scoped_ctx = Some(TranslationContext {
+                parameters: ctx.parameters.clone(),
+                variable_labels: ctx.variable_labels.clone(),
+                variable_kinds: new_kinds,
+            });
+            inner_compiler = CypherPhysicalExprCompiler {
+                state: self.state,
+                translation_ctx: scoped_ctx.as_ref(),
+                graph_ctx: self.graph_ctx.clone(),
+                uni_schema: self.uni_schema.clone(),
+                session_ctx: self.session_ctx.clone(),
+                storage: self.storage.clone(),
+                params: self.params.clone(),
+            };
+        } else {
+            #[allow(unused_assignments)]
+            {
+                scoped_ctx = None;
+            }
+            inner_compiler = CypherPhysicalExprCompiler {
+                state: self.state,
+                translation_ctx: self.translation_ctx,
+                graph_ctx: self.graph_ctx.clone(),
+                uni_schema: self.uni_schema.clone(),
+                session_ctx: self.session_ctx.clone(),
+                storage: self.storage.clone(),
+                params: self.params.clone(),
+            };
+        }
+
         let predicate_phy = if let Some(pred) = where_clause {
-            Some(self.compile(pred, &inner_schema)?)
+            Some(inner_compiler.compile(pred, &inner_schema)?)
         } else {
             None
         };
 
-        let map_phy = self.compile(map_expr, &inner_schema)?;
+        let map_phy = inner_compiler.compile(map_expr, &inner_schema)?;
         let output_item_type = map_phy.data_type(&inner_schema)?;
 
         Ok(Arc::new(ListComprehensionExecExpr::new(
@@ -716,12 +771,70 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
         let inner_data_type =
             resolve_list_element_type(&list_data_type, acc_type.clone(), "Reduce")?;
 
+        // Create inner schema with accumulator and loop variable (shadow outer variables if same names)
         let mut fields = input_schema.fields().to_vec();
-        fields.push(Arc::new(Field::new(accumulator, acc_type.clone(), true)));
-        fields.push(Arc::new(Field::new(variable, inner_data_type, true)));
+
+        let acc_field = Arc::new(Field::new(accumulator, acc_type.clone(), true));
+        if let Some(pos) = fields.iter().position(|f| f.name() == accumulator) {
+            fields[pos] = acc_field;
+        } else {
+            fields.push(acc_field);
+        }
+
+        let var_field = Arc::new(Field::new(variable, inner_data_type, true));
+        if let Some(pos) = fields.iter().position(|f| f.name() == variable) {
+            fields[pos] = var_field;
+        } else {
+            fields.push(var_field);
+        }
+
         let inner_schema = Arc::new(Schema::new(fields));
 
-        let reduce_phy = self.compile(reduce_expr, &inner_schema)?;
+        // Compile reduce expression with scoped translation context
+        let needs_scoping = self.translation_ctx.is_some_and(|ctx| {
+            ctx.variable_kinds.contains_key(accumulator)
+                || ctx.variable_kinds.contains_key(variable)
+        });
+
+        let scoped_ctx: Option<TranslationContext>;
+        let reduce_compiler: CypherPhysicalExprCompiler;
+
+        if needs_scoping {
+            let ctx = self.translation_ctx.unwrap();
+            let mut new_kinds = ctx.variable_kinds.clone();
+            new_kinds.remove(accumulator);
+            new_kinds.remove(variable);
+            scoped_ctx = Some(TranslationContext {
+                parameters: ctx.parameters.clone(),
+                variable_labels: ctx.variable_labels.clone(),
+                variable_kinds: new_kinds,
+            });
+            reduce_compiler = CypherPhysicalExprCompiler {
+                state: self.state,
+                translation_ctx: scoped_ctx.as_ref(),
+                graph_ctx: self.graph_ctx.clone(),
+                uni_schema: self.uni_schema.clone(),
+                session_ctx: self.session_ctx.clone(),
+                storage: self.storage.clone(),
+                params: self.params.clone(),
+            };
+        } else {
+            #[allow(unused_assignments)]
+            {
+                scoped_ctx = None;
+            }
+            reduce_compiler = CypherPhysicalExprCompiler {
+                state: self.state,
+                translation_ctx: self.translation_ctx,
+                graph_ctx: self.graph_ctx.clone(),
+                uni_schema: self.uni_schema.clone(),
+                session_ctx: self.session_ctx.clone(),
+                storage: self.storage.clone(),
+                params: self.params.clone(),
+            };
+        }
+
+        let reduce_phy = reduce_compiler.compile(reduce_expr, &inner_schema)?;
         let output_type = reduce_phy.data_type(&inner_schema)?;
 
         Ok(Arc::new(ReduceExecExpr::new(
@@ -751,11 +864,70 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
             resolve_list_element_type(&list_data_type, DataType::LargeBinary, "Quantifier")?;
 
         // Create inner schema with loop variable
+        // If a field with the same name exists in the outer schema, replace it (shadow it)
+        // to ensure the loop variable takes precedence.
         let mut fields = input_schema.fields().to_vec();
-        fields.push(Arc::new(Field::new(variable, inner_data_type, true)));
+        let loop_var_field = Arc::new(Field::new(variable, inner_data_type, true));
+
+        // Find and replace existing field with same name, or append if not found
+        if let Some(pos) = fields.iter().position(|f| f.name() == variable) {
+            fields[pos] = loop_var_field;
+        } else {
+            fields.push(loop_var_field);
+        }
+
         let inner_schema = Arc::new(Schema::new(fields));
 
-        let predicate_phy = self.compile(predicate, &inner_schema)?;
+        // Compile predicate with a scoped translation context that removes the loop variable
+        // from variable_kinds, so property access on the loop variable doesn't incorrectly
+        // generate flat columns (like "x.name") that don't exist in the inner schema.
+        let needs_scoping = self
+            .translation_ctx
+            .is_some_and(|ctx| ctx.variable_kinds.contains_key(variable));
+
+        let scoped_ctx: Option<TranslationContext>;
+        let pred_compiler: CypherPhysicalExprCompiler;
+
+        if needs_scoping {
+            let ctx = self.translation_ctx.unwrap();
+            let mut new_kinds = ctx.variable_kinds.clone();
+            new_kinds.remove(variable);
+            scoped_ctx = Some(TranslationContext {
+                parameters: ctx.parameters.clone(),
+                variable_labels: ctx.variable_labels.clone(),
+                variable_kinds: new_kinds,
+            });
+            pred_compiler = CypherPhysicalExprCompiler {
+                state: self.state,
+                translation_ctx: scoped_ctx.as_ref(),
+                graph_ctx: self.graph_ctx.clone(),
+                uni_schema: self.uni_schema.clone(),
+                session_ctx: self.session_ctx.clone(),
+                storage: self.storage.clone(),
+                params: self.params.clone(),
+            };
+        } else {
+            #[allow(unused_assignments)]
+            {
+                scoped_ctx = None;
+            }
+            pred_compiler = CypherPhysicalExprCompiler {
+                state: self.state,
+                translation_ctx: self.translation_ctx,
+                graph_ctx: self.graph_ctx.clone(),
+                uni_schema: self.uni_schema.clone(),
+                session_ctx: self.session_ctx.clone(),
+                storage: self.storage.clone(),
+                params: self.params.clone(),
+            };
+        }
+
+        let mut predicate_phy = pred_compiler.compile(predicate, &inner_schema)?;
+
+        // Wrap JSONB predicates with _jsonb_to_bool for proper boolean evaluation
+        if let Ok(DataType::LargeBinary) = predicate_phy.data_type(&inner_schema) {
+            predicate_phy = self.wrap_with_jsonb_to_bool(predicate_phy)?;
+        }
 
         let qt = match quantifier {
             uni_cypher::ast::Quantifier::All => QuantifierType::All,
@@ -967,11 +1139,19 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
             .transpose()?;
 
         // Fix B: Wrap JSONB WHEN conditions with _jsonb_to_bool
+        // Apply wrapping defensively - if we can't determine type or if it's LargeBinary
         for (w_phy, _) in &mut when_then_phy {
-            if let Ok(dt) = w_phy.data_type(input_schema) {
-                if dt == DataType::LargeBinary {
-                    *w_phy = self.wrap_with_jsonb_to_bool(w_phy.clone())?;
+            let should_wrap = match w_phy.data_type(input_schema) {
+                Ok(dt) => dt == DataType::LargeBinary,
+                Err(_) => {
+                    // If we can't determine the type, check if it's likely JSONB by looking
+                    // for common patterns (column references, function calls that might return JSONB)
+                    // For now, be conservative and don't wrap if we can't determine type
+                    false
                 }
+            };
+            if should_wrap {
+                *w_phy = self.wrap_with_jsonb_to_bool(w_phy.clone())?;
             }
         }
 
@@ -983,10 +1163,10 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
                 branch_types.push(dt);
             }
         }
-        if let Some(ref e_phy) = else_phy {
-            if let Ok(dt) = e_phy.data_type(input_schema) {
-                branch_types.push(dt);
-            }
+        if let Some(ref e_phy) = else_phy
+            && let Ok(dt) = e_phy.data_type(input_schema)
+        {
+            branch_types.push(dt);
         }
 
         // Check if we have a mix of LargeBinary and LargeList/List types
@@ -1000,19 +1180,17 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
         // If we have both, wrap List/LargeList branches with LargeListToJsonbExpr
         if has_large_binary && has_list {
             for (_, t_phy) in &mut when_then_phy {
-                if let Ok(dt) = t_phy.data_type(input_schema) {
-                    if matches!(dt, DataType::List(_) | DataType::LargeList(_)) {
-                        *t_phy = Arc::new(LargeListToJsonbExpr::new(t_phy.clone()));
-                    }
+                if let Ok(dt) = t_phy.data_type(input_schema)
+                    && matches!(dt, DataType::List(_) | DataType::LargeList(_))
+                {
+                    *t_phy = Arc::new(LargeListToJsonbExpr::new(t_phy.clone()));
                 }
             }
             if let Some(e_phy) = else_phy.take() {
-                if let Ok(dt) = e_phy.data_type(input_schema) {
-                    if matches!(dt, DataType::List(_) | DataType::LargeList(_)) {
-                        else_phy = Some(Arc::new(LargeListToJsonbExpr::new(e_phy)));
-                    } else {
-                        else_phy = Some(e_phy);
-                    }
+                if let Ok(dt) = e_phy.data_type(input_schema)
+                    && matches!(dt, DataType::List(_) | DataType::LargeList(_))
+                {
+                    else_phy = Some(Arc::new(LargeListToJsonbExpr::new(e_phy)));
                 } else {
                     else_phy = Some(e_phy);
                 }
@@ -1081,6 +1259,31 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
         // When either operand is LargeBinary (JSONB), standard Arrow comparison
         // kernels can't handle the type mismatch. Route through Cypher comparison
         // UDFs which decode JSONB to Value for comparison.
+        let mut left = left;
+        let mut right = right;
+        let left_type = left.data_type(input_schema).ok();
+        let right_type = right.data_type(input_schema).ok();
+
+        // Type unification: if one side is LargeList and the other is LargeBinary,
+        // convert LargeList to LargeBinary for consistent handling
+        let left_is_list = matches!(
+            left_type.as_ref(),
+            Some(DataType::List(_) | DataType::LargeList(_))
+        );
+        let right_is_list = matches!(
+            right_type.as_ref(),
+            Some(DataType::List(_) | DataType::LargeList(_))
+        );
+        let left_is_binary = matches!(left_type.as_ref(), Some(DataType::LargeBinary));
+        let right_is_binary = matches!(right_type.as_ref(), Some(DataType::LargeBinary));
+
+        if left_is_list && right_is_binary {
+            left = Arc::new(LargeListToJsonbExpr::new(left));
+        } else if right_is_list && left_is_binary {
+            right = Arc::new(LargeListToJsonbExpr::new(right));
+        }
+
+        // Recalculate types after unification
         let left_type = left.data_type(input_schema).ok();
         let right_type = right.data_type(input_schema).ok();
         let has_jsonb = is_jsonb_type(left_type.as_ref()) || is_jsonb_type(right_type.as_ref());

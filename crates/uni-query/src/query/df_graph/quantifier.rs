@@ -164,15 +164,13 @@ impl PhysicalExpr for QuantifierExecExpr {
         let list_val = self.input_list.evaluate(batch)?;
         let list_array = list_val.into_array(num_rows)?;
 
-        // --- Step 2: JSONB decode (LargeBinary → LargeList<inferred_type>) ---
-        // For quantifiers, we need native-typed elements so the predicate (e.g. `x > 0`)
-        // can use standard Arrow comparison kernels. Infer the element type from the
-        // first non-null JSONB value and decode accordingly.
+        // --- Step 2: JSONB decode (LargeBinary → LargeList<LargeBinary>) ---
+        // Keep elements as JSONB (LargeBinary) to match the compile-time schema.
+        // The compiled predicate handles LargeBinary via JSONB UDFs (_jsonb_to_int64, etc.).
         let list_array = if let DataType::LargeBinary = list_array.data_type() {
-            let element_type = infer_jsonb_array_element_type(list_array.as_ref());
             crate::query::df_graph::common::jsonb_array_to_large_list(
                 list_array.as_ref(),
-                &element_type,
+                &DataType::LargeBinary,
             )?
         } else {
             list_array
@@ -241,21 +239,53 @@ impl PhysicalExpr for QuantifierExecExpr {
             inner_columns.push(taken);
         }
 
-        inner_columns.push(values.clone());
-
         let mut inner_fields = batch.schema().fields().to_vec();
-        inner_fields.push(Arc::new(Field::new(
+        let loop_field = Arc::new(Field::new(
             &self.variable_name,
             values.data_type().clone(),
             true,
-        )));
+        ));
+
+        // Replace existing column if loop variable shadows an outer column,
+        // otherwise append at the end — matching compile_quantifier's schema construction.
+        if let Some(pos) = inner_fields
+            .iter()
+            .position(|f| f.name() == &self.variable_name)
+        {
+            inner_columns[pos] = values.clone();
+            inner_fields[pos] = loop_field;
+        } else {
+            inner_columns.push(values.clone());
+            inner_fields.push(loop_field);
+        }
+
         let inner_schema = Arc::new(Schema::new(inner_fields));
         let inner_batch = RecordBatch::try_new(inner_schema, inner_columns)?;
 
         // --- Step 5: Evaluate predicate and reduce ---
-        let pred_val = self.predicate.evaluate(&inner_batch)?;
+        let pred_val = self.predicate.evaluate(&inner_batch).map_err(|e| {
+            let err_msg = e.to_string();
+            if err_msg.contains("Invalid arithmetic operation") {
+                datafusion::error::DataFusionError::Execution(format!(
+                    "SyntaxError: InvalidArgumentType - {}",
+                    err_msg
+                ))
+            } else {
+                e
+            }
+        })?;
         let pred_array = pred_val.into_array(inner_batch.num_rows())?;
-        let pred_array = cast(&pred_array, &DataType::Boolean)?;
+        let pred_array = cast(&pred_array, &DataType::Boolean).map_err(|e| {
+            let err_msg = e.to_string();
+            if err_msg.contains("Invalid arithmetic operation") {
+                datafusion::error::DataFusionError::Execution(format!(
+                    "SyntaxError: InvalidArgumentType - {}",
+                    err_msg
+                ))
+            } else {
+                datafusion::error::DataFusionError::ArrowError(Box::new(e), None)
+            }
+        })?;
         let pred_bools = pred_array
             .as_any()
             .downcast_ref::<BooleanArray>()
@@ -431,52 +461,4 @@ impl QuantifierExecExpr {
 
         builder.finish()
     }
-}
-
-/// Infer the native Arrow element type from a JSONB-encoded array column.
-///
-/// Samples the first non-null JSONB array element to determine the natural type.
-/// Falls back to `LargeBinary` if the array is empty, all-null, or contains
-/// heterogeneous types.
-fn infer_jsonb_array_element_type(array: &dyn Array) -> DataType {
-    use datafusion::arrow::array::LargeBinaryArray;
-
-    let Some(binary_arr) = array.as_any().downcast_ref::<LargeBinaryArray>() else {
-        return DataType::LargeBinary;
-    };
-
-    for i in 0..binary_arr.len() {
-        if binary_arr.is_null(i) {
-            continue;
-        }
-        let blob = binary_arr.value(i);
-        let raw = jsonb::RawJsonb::new(blob);
-        let json_str = raw.to_string();
-        let Ok(serde_json::Value::Array(elements)) =
-            serde_json::from_str::<serde_json::Value>(&json_str)
-        else {
-            continue;
-        };
-        // Find first non-null element and infer type
-        for elem in &elements {
-            match elem {
-                serde_json::Value::Number(n) => {
-                    return if n.is_f64() && !n.is_i64() && !n.is_u64() {
-                        DataType::Float64
-                    } else {
-                        DataType::Int64
-                    };
-                }
-                serde_json::Value::String(_) => return DataType::Utf8,
-                serde_json::Value::Bool(_) => return DataType::Boolean,
-                serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
-                    // Nested structures stay as JSONB
-                    return DataType::LargeBinary;
-                }
-                serde_json::Value::Null => continue,
-            }
-        }
-    }
-
-    DataType::LargeBinary
 }

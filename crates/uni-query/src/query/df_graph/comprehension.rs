@@ -192,14 +192,26 @@ impl PhysicalExpr for ListComprehensionExecExpr {
             inner_columns.push(taken);
         }
 
-        inner_columns.push(values.clone());
-
         let mut inner_fields = batch.schema().fields().to_vec();
-        inner_fields.push(Arc::new(Field::new(
+        let loop_field = Arc::new(Field::new(
             &self.variable_name,
             values.data_type().clone(),
             true,
-        )));
+        ));
+
+        // Replace existing column if loop variable shadows an outer column,
+        // otherwise append at the end — matching compile_list_comprehension's schema construction.
+        if let Some(pos) = inner_fields
+            .iter()
+            .position(|f| f.name() == &self.variable_name)
+        {
+            inner_columns[pos] = values.clone();
+            inner_fields[pos] = loop_field;
+        } else {
+            inner_columns.push(values.clone());
+            inner_fields.push(loop_field);
+        }
+
         let inner_schema = Arc::new(Schema::new(inner_fields));
 
         let inner_batch = RecordBatch::try_new(inner_schema, inner_columns)?;
