@@ -90,8 +90,9 @@ jobs:
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: "cloud-tests"
+          shared-key: "test"
           cache-on-failure: true
+          save-if: false
 
       - name: Wait for LocalStack
         run: |
@@ -132,8 +133,9 @@ jobs:
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: "python-tests"
+          shared-key: "test"
           cache-on-failure: true
+          save-if: false
 
       - name: Install Poetry
         uses: snok/install-poetry@v1
@@ -190,8 +192,9 @@ jobs:
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: "docs"
+          shared-key: "test"
           cache-on-failure: true
+          save-if: false
 
       - name: Build documentation
         run: cargo doc --no-deps --workspace --exclude uni-python --exclude uni-tck
