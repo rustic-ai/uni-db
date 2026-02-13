@@ -1,0 +1,115 @@
+{
+  "edge_types": {
+    "ADMIN": {
+      "dst_labels": [],
+      "id": 1,
+      "src_labels": []
+    },
+    "HATES": {
+      "dst_labels": [],
+      "id": 2,
+      "src_labels": []
+    },
+    "KNOWS": {
+      "dst_labels": [],
+      "id": 3,
+      "src_labels": []
+    },
+    "T": {
+      "dst_labels": [],
+      "id": 4,
+      "src_labels": []
+    },
+    "WONDERS": {
+      "dst_labels": [],
+      "id": 5,
+      "src_labels": []
+    },
+    "X": {
+      "dst_labels": [],
+      "id": 6,
+      "src_labels": []
+    }
+  },
+  "indexes": [],
+  "labels": {
+    "A": {
+      "id": 1
+    },
+    "B": {
+      "id": 2
+    },
+    "Bar": {
+      "id": 3
+    },
+    "C": {
+      "id": 4
+    },
+    "Person": {
+      "id": 5
+    }
+  },
+  "properties": {
+    "A": {
+      "id": {
+        "nullable": true,
+        "type": "Int64"
+      },
+      "name": {
+        "nullable": true,
+        "type": "String"
+      },
+      "p1": {
+        "nullable": true,
+        "type": "Int64"
+      }
+    },
+    "B": {
+      "id": {
+        "nullable": true,
+        "type": "Int64"
+      },
+      "name": {
+        "nullable": true,
+        "type": "String"
+      },
+      "p2": {
+        "nullable": true,
+        "type": "Int64"
+      }
+    },
+    "C": {
+      "a": {
+        "nullable": true,
+        "type": "String"
+      },
+      "id": {
+        "nullable": true,
+        "type": "Int64"
+      },
+      "name": {
+        "nullable": true,
+        "type": "String"
+      }
+    },
+    "KNOWS": {
+      "name": {
+        "nullable": true,
+        "type": "String"
+      }
+    },
+    "Person": {
+      "name": {
+        "nullable": true,
+        "type": "String"
+      }
+    },
+    "T": {
+      "name": {
+        "nullable": true,
+        "type": "String"
+      }
+    }
+  },
+  "schema_version": 1
+}

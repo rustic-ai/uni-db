@@ -1,0 +1,55 @@
+{
+  "edge_types": {
+    "X": {
+      "dst_labels": [],
+      "id": 1,
+      "src_labels": []
+    }
+  },
+  "indexes": [],
+  "labels": {
+    "DoesNotExist": {
+      "id": 1
+    },
+    "L": {
+      "id": 2
+    }
+  },
+  "properties": {
+    "DoesNotExist": {
+      "num": {
+        "nullable": true,
+        "type": "Json"
+      }
+    },
+    "L": {
+      "name": {
+        "nullable": true,
+        "type": "String"
+      },
+      "name2": {
+        "nullable": true,
+        "type": "String"
+      },
+      "num": {
+        "nullable": true,
+        "type": "Int64"
+      }
+    },
+    "X": {
+      "a": {
+        "nullable": true,
+        "type": "String"
+      },
+      "b": {
+        "nullable": true,
+        "type": "String"
+      },
+      "num": {
+        "nullable": true,
+        "type": "Int64"
+      }
+    }
+  },
+  "schema_version": 1
+}

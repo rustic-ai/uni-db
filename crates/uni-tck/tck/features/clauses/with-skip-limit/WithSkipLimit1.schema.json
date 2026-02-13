@@ -1,0 +1,49 @@
+{
+  "edge_types": {
+    "T1": {
+      "dst_labels": [],
+      "id": 1,
+      "src_labels": []
+    },
+    "T2": {
+      "dst_labels": [],
+      "id": 2,
+      "src_labels": []
+    },
+    "T3": {
+      "dst_labels": [],
+      "id": 3,
+      "src_labels": []
+    }
+  },
+  "indexes": [],
+  "labels": {
+    "X": {
+      "id": 1
+    },
+    "Y": {
+      "id": 2
+    }
+  },
+  "properties": {
+    "T1": {
+      "num": {
+        "nullable": true,
+        "type": "Int64"
+      }
+    },
+    "T2": {
+      "num": {
+        "nullable": true,
+        "type": "Int64"
+      }
+    },
+    "T3": {
+      "num": {
+        "nullable": true,
+        "type": "Int64"
+      }
+    }
+  },
+  "schema_version": 1
+}

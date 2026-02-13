@@ -1,0 +1,145 @@
+{
+  "edge_types": {
+    "A": {
+      "dst_labels": [],
+      "id": 1,
+      "src_labels": []
+    },
+    "B": {
+      "dst_labels": [],
+      "id": 2,
+      "src_labels": []
+    },
+    "FRIEND": {
+      "dst_labels": [],
+      "id": 3,
+      "src_labels": []
+    },
+    "KNOWS": {
+      "dst_labels": [],
+      "id": 4,
+      "src_labels": []
+    },
+    "LOOP": {
+      "dst_labels": [],
+      "id": 5,
+      "src_labels": []
+    },
+    "REL": {
+      "dst_labels": [],
+      "id": 6,
+      "src_labels": []
+    },
+    "T": {
+      "dst_labels": [],
+      "id": 7,
+      "src_labels": []
+    },
+    "T1": {
+      "dst_labels": [],
+      "id": 8,
+      "src_labels": []
+    },
+    "T2": {
+      "dst_labels": [],
+      "id": 9,
+      "src_labels": []
+    }
+  },
+  "indexes": [],
+  "labels": {
+    "A": {
+      "id": 1
+    },
+    "B": {
+      "id": 2
+    },
+    "C": {
+      "id": 3
+    },
+    "D": {
+      "id": 4
+    },
+    "E": {
+      "id": 5
+    },
+    "F": {
+      "id": 6
+    },
+    "Foo": {
+      "id": 7
+    },
+    "G": {
+      "id": 8
+    },
+    "H": {
+      "id": 9
+    },
+    "I": {
+      "id": 10
+    },
+    "J": {
+      "id": 11
+    },
+    "K": {
+      "id": 12
+    },
+    "L": {
+      "id": 13
+    },
+    "Looper": {
+      "id": 14
+    },
+    "M": {
+      "id": 15
+    },
+    "TheLabel": {
+      "id": 16
+    },
+    "U": {
+      "id": 17
+    },
+    "V": {
+      "id": 18
+    },
+    "W": {
+      "id": 19
+    },
+    "X": {
+      "id": 20
+    },
+    "Y": {
+      "id": 21
+    },
+    "Z": {
+      "id": 22
+    }
+  },
+  "properties": {
+    "A": {
+      "num": {
+        "nullable": true,
+        "type": "Int64"
+      }
+    },
+    "B": {
+      "num": {
+        "nullable": true,
+        "type": "Int64"
+      }
+    },
+    "C": {
+      "num": {
+        "nullable": true,
+        "type": "Int64"
+      }
+    },
+    "REL": {
+      "name": {
+        "nullable": true,
+        "type": "String"
+      }
+    }
+  },
+  "schema_version": 1
+}

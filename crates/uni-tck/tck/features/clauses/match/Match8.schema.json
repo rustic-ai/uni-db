@@ -1,0 +1,37 @@
+{
+  "edge_types": {
+    "ATE": {
+      "dst_labels": [],
+      "id": 1,
+      "src_labels": []
+    },
+    "T1": {
+      "dst_labels": [],
+      "id": 2,
+      "src_labels": []
+    },
+    "T2": {
+      "dst_labels": [],
+      "id": 3,
+      "src_labels": []
+    }
+  },
+  "indexes": [],
+  "labels": {
+    "A": {
+      "id": 1
+    },
+    "B": {
+      "id": 2
+    }
+  },
+  "properties": {
+    "ATE": {
+      "times": {
+        "nullable": true,
+        "type": "Int64"
+      }
+    }
+  },
+  "schema_version": 1
+}

@@ -1,0 +1,54 @@
+{
+  "edge_types": {},
+  "indexes": [],
+  "labels": {
+    "Bar": {
+      "id": 1
+    },
+    "DoesNotExist": {
+      "id": 2
+    },
+    "Foo": {
+      "id": 3
+    },
+    "L": {
+      "id": 4
+    },
+    "L1": {
+      "id": 5
+    },
+    "L2": {
+      "id": 6
+    },
+    "L3": {
+      "id": 7
+    }
+  },
+  "properties": {
+    "L": {
+      "num": {
+        "nullable": true,
+        "type": "Int64"
+      }
+    },
+    "L1": {
+      "num": {
+        "nullable": true,
+        "type": "Int64"
+      }
+    },
+    "L2": {
+      "num": {
+        "nullable": true,
+        "type": "Int64"
+      }
+    },
+    "L3": {
+      "num": {
+        "nullable": true,
+        "type": "Int64"
+      }
+    }
+  },
+  "schema_version": 1
+}

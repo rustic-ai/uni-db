@@ -1,0 +1,72 @@
+{
+  "edge_types": {
+    "FOO": {
+      "dst_labels": [],
+      "id": 1,
+      "src_labels": []
+    },
+    "HATES": {
+      "dst_labels": [],
+      "id": 2,
+      "src_labels": []
+    },
+    "KNOWS": {
+      "dst_labels": [],
+      "id": 3,
+      "src_labels": []
+    },
+    "T": {
+      "dst_labels": [],
+      "id": 4,
+      "src_labels": []
+    },
+    "T1": {
+      "dst_labels": [],
+      "id": 5,
+      "src_labels": []
+    },
+    "T2": {
+      "dst_labels": [],
+      "id": 6,
+      "src_labels": []
+    },
+    "T3": {
+      "dst_labels": [],
+      "id": 7,
+      "src_labels": []
+    },
+    "T4": {
+      "dst_labels": [],
+      "id": 8,
+      "src_labels": []
+    },
+    "WONDERS": {
+      "dst_labels": [],
+      "id": 9,
+      "src_labels": []
+    },
+    "Y": {
+      "dst_labels": [],
+      "id": 10,
+      "src_labels": []
+    }
+  },
+  "indexes": [],
+  "labels": {
+    "A": {
+      "id": 1
+    },
+    "B": {
+      "id": 2
+    }
+  },
+  "properties": {
+    "KNOWS": {
+      "name": {
+        "nullable": true,
+        "type": "String"
+      }
+    }
+  },
+  "schema_version": 1
+}

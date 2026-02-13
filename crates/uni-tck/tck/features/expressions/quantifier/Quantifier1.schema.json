@@ -1,0 +1,61 @@
+{
+  "edge_types": {
+    "I": {
+      "dst_labels": [],
+      "id": 1,
+      "src_labels": []
+    },
+    "RA": {
+      "dst_labels": [],
+      "id": 2,
+      "src_labels": []
+    },
+    "RB": {
+      "dst_labels": [],
+      "id": 3,
+      "src_labels": []
+    }
+  },
+  "indexes": [],
+  "labels": {
+    "A": {
+      "id": 1
+    },
+    "B": {
+      "id": 2
+    },
+    "SNodes": {
+      "id": 3
+    },
+    "SRelationships": {
+      "id": 4
+    }
+  },
+  "properties": {
+    "A": {
+      "name": {
+        "nullable": true,
+        "type": "String"
+      }
+    },
+    "B": {
+      "name": {
+        "nullable": true,
+        "type": "String"
+      }
+    },
+    "RA": {
+      "name": {
+        "nullable": true,
+        "type": "String"
+      }
+    },
+    "RB": {
+      "name": {
+        "nullable": true,
+        "type": "String"
+      }
+    }
+  },
+  "schema_version": 1
+}

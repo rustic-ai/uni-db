@@ -1,0 +1,63 @@
+{
+  "edge_types": {
+    "B": {
+      "dst_labels": [],
+      "id": 1,
+      "src_labels": []
+    },
+    "HAS": {
+      "dst_labels": [],
+      "id": 2,
+      "src_labels": []
+    },
+    "T": {
+      "dst_labels": [],
+      "id": 3,
+      "src_labels": []
+    },
+    "Y": {
+      "dst_labels": [],
+      "id": 4,
+      "src_labels": []
+    }
+  },
+  "indexes": [],
+  "labels": {
+    "A": {
+      "id": 1
+    },
+    "B": {
+      "id": 2
+    },
+    "C": {
+      "id": 3
+    },
+    "D": {
+      "id": 4
+    },
+    "L": {
+      "id": 5
+    },
+    "X": {
+      "id": 6
+    },
+    "Y": {
+      "id": 7
+    }
+  },
+  "properties": {
+    "T": {
+      "name": {
+        "nullable": true,
+        "type": "String"
+      }
+    },
+    "X": {
+      "n": {
+        "nullable": true,
+        "type": "Int64"
+      }
+    }
+  },
+  "schema_version": 1
+}

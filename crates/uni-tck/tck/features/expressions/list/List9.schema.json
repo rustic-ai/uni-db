@@ -1,0 +1,18 @@
+{
+  "edge_types": {},
+  "indexes": [],
+  "labels": {
+    "TheLabel": {
+      "id": 1
+    }
+  },
+  "properties": {
+    "TheLabel": {
+      "array": {
+        "nullable": true,
+        "type": "Json"
+      }
+    }
+  },
+  "schema_version": 1
+}

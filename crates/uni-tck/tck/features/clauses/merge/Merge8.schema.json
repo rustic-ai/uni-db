@@ -1,0 +1,39 @@
+{
+  "edge_types": {
+    "TYPE": {
+      "dst_labels": [],
+      "id": 1,
+      "src_labels": []
+    }
+  },
+  "indexes": [],
+  "labels": {
+    "A": {
+      "id": 1
+    },
+    "B": {
+      "id": 2
+    }
+  },
+  "properties": {
+    "A": {
+      "id": {
+        "nullable": true,
+        "type": "Int64"
+      }
+    },
+    "B": {
+      "id": {
+        "nullable": true,
+        "type": "Int64"
+      }
+    },
+    "TYPE": {
+      "name": {
+        "nullable": true,
+        "type": "Json"
+      }
+    }
+  },
+  "schema_version": 1
+}

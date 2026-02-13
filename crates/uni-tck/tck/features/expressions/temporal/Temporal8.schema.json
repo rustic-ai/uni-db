@@ -1,0 +1,40 @@
+{
+  "edge_types": {},
+  "indexes": [],
+  "labels": {
+    "Duration": {
+      "id": 1
+    },
+    "Duration1": {
+      "id": 2
+    },
+    "Duration2": {
+      "id": 3
+    }
+  },
+  "properties": {
+    "Duration": {
+      "date": {
+        "nullable": true,
+        "type": "Duration"
+      },
+      "dur": {
+        "nullable": true,
+        "type": "Duration"
+      }
+    },
+    "Duration1": {
+      "date": {
+        "nullable": true,
+        "type": "Duration"
+      }
+    },
+    "Duration2": {
+      "date": {
+        "nullable": true,
+        "type": "Duration"
+      }
+    }
+  },
+  "schema_version": 1
+}

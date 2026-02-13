@@ -1,0 +1,54 @@
+{
+  "edge_types": {
+    "AA_HAS_VALUE": {
+      "dst_labels": [],
+      "id": 1,
+      "src_labels": []
+    },
+    "ADV_HAS_PRODUCT": {
+      "dst_labels": [],
+      "id": 2,
+      "src_labels": []
+    },
+    "AP_HAS_VALUE": {
+      "dst_labels": [],
+      "id": 3,
+      "src_labels": []
+    },
+    "T": {
+      "dst_labels": [],
+      "id": 4,
+      "src_labels": []
+    }
+  },
+  "indexes": [],
+  "labels": {
+    "A": {
+      "id": 1
+    },
+    "B": {
+      "id": 2
+    },
+    "C": {
+      "id": 3
+    },
+    "D": {
+      "id": 4
+    }
+  },
+  "properties": {
+    "B": {
+      "id": {
+        "nullable": true,
+        "type": "Int64"
+      }
+    },
+    "C": {
+      "id": {
+        "nullable": true,
+        "type": "Int64"
+      }
+    }
+  },
+  "schema_version": 1
+}

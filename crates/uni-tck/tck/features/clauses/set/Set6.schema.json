@@ -1,0 +1,33 @@
+{
+  "edge_types": {
+    "R": {
+      "dst_labels": [],
+      "id": 1,
+      "src_labels": []
+    }
+  },
+  "indexes": [],
+  "labels": {
+    "Foo": {
+      "id": 1
+    },
+    "N": {
+      "id": 2
+    }
+  },
+  "properties": {
+    "N": {
+      "num": {
+        "nullable": true,
+        "type": "Int64"
+      }
+    },
+    "R": {
+      "num": {
+        "nullable": true,
+        "type": "Int64"
+      }
+    }
+  },
+  "schema_version": 1
+}

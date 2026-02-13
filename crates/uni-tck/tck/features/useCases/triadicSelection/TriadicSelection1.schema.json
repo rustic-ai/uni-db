@@ -1,0 +1,52 @@
+{
+  "edge_types": {
+    "FOLLOWS": {
+      "dst_labels": [],
+      "id": 1,
+      "src_labels": []
+    },
+    "FRIEND": {
+      "dst_labels": [],
+      "id": 2,
+      "src_labels": []
+    },
+    "KNOWS": {
+      "dst_labels": [],
+      "id": 3,
+      "src_labels": []
+    }
+  },
+  "indexes": [],
+  "labels": {
+    "A": {
+      "id": 1
+    },
+    "X": {
+      "id": 2
+    },
+    "Y": {
+      "id": 3
+    }
+  },
+  "properties": {
+    "A": {
+      "name": {
+        "nullable": true,
+        "type": "String"
+      }
+    },
+    "X": {
+      "name": {
+        "nullable": true,
+        "type": "String"
+      }
+    },
+    "Y": {
+      "name": {
+        "nullable": true,
+        "type": "String"
+      }
+    }
+  },
+  "schema_version": 1
+}

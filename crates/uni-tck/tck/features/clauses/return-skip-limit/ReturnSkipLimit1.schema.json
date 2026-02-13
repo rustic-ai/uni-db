@@ -1,0 +1,18 @@
+{
+  "edge_types": {},
+  "indexes": [],
+  "labels": {
+    "Person": {
+      "id": 1
+    }
+  },
+  "properties": {
+    "Person": {
+      "name": {
+        "nullable": true,
+        "type": "String"
+      }
+    }
+  },
+  "schema_version": 1
+}

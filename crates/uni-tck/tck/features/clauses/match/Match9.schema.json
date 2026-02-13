@@ -1,0 +1,63 @@
+{
+  "edge_types": {
+    "REL": {
+      "dst_labels": [],
+      "id": 1,
+      "src_labels": []
+    },
+    "T": {
+      "dst_labels": [],
+      "id": 2,
+      "src_labels": []
+    },
+    "X": {
+      "dst_labels": [],
+      "id": 3,
+      "src_labels": []
+    },
+    "Y": {
+      "dst_labels": [],
+      "id": 4,
+      "src_labels": []
+    }
+  },
+  "indexes": [],
+  "labels": {
+    "A": {
+      "id": 1
+    },
+    "B": {
+      "id": 2
+    },
+    "Blue": {
+      "id": 3
+    },
+    "C": {
+      "id": 4
+    },
+    "End": {
+      "id": 5
+    },
+    "Green": {
+      "id": 6
+    },
+    "Red": {
+      "id": 7
+    },
+    "Start": {
+      "id": 8
+    },
+    "Yellow": {
+      "id": 9
+    }
+  },
+  "properties": {
+    "REL": {
+      "num": {
+        "nullable": true,
+        "type": "Int64"
+      }
+    }
+  },
+  "schema_version": 1
+}

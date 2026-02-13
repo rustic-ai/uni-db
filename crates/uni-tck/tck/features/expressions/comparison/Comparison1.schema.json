@@ -1,0 +1,32 @@
+{
+  "edge_types": {
+    "LOOP": {
+      "dst_labels": [],
+      "id": 1,
+      "src_labels": []
+    },
+    "T": {
+      "dst_labels": [],
+      "id": 2,
+      "src_labels": []
+    }
+  },
+  "indexes": [],
+  "labels": {
+    "A": {
+      "id": 1
+    },
+    "TheLabel": {
+      "id": 2
+    }
+  },
+  "properties": {
+    "TheLabel": {
+      "id": {
+        "nullable": true,
+        "type": "Int64"
+      }
+    }
+  },
+  "schema_version": 1
+}

@@ -1,0 +1,122 @@
+{
+  "edge_types": {
+    "BAR": {
+      "dst_labels": [],
+      "id": 1,
+      "src_labels": []
+    },
+    "FOO": {
+      "dst_labels": [],
+      "id": 2,
+      "src_labels": []
+    },
+    "KNOWS": {
+      "dst_labels": [],
+      "id": 3,
+      "src_labels": []
+    },
+    "LOOP": {
+      "dst_labels": [],
+      "id": 4,
+      "src_labels": []
+    },
+    "NOR_THIS": {
+      "dst_labels": [],
+      "id": 5,
+      "src_labels": []
+    },
+    "NOT_EXIST": {
+      "dst_labels": [],
+      "id": 6,
+      "src_labels": []
+    },
+    "PLAYS_FOR": {
+      "dst_labels": [],
+      "id": 7,
+      "src_labels": []
+    },
+    "REL": {
+      "dst_labels": [],
+      "id": 8,
+      "src_labels": []
+    },
+    "SUPPORTS": {
+      "dst_labels": [],
+      "id": 9,
+      "src_labels": []
+    },
+    "T": {
+      "dst_labels": [],
+      "id": 10,
+      "src_labels": []
+    },
+    "X": {
+      "dst_labels": [],
+      "id": 11,
+      "src_labels": []
+    }
+  },
+  "indexes": [],
+  "labels": {
+    "A": {
+      "id": 1
+    },
+    "B": {
+      "id": 2
+    },
+    "C": {
+      "id": 3
+    },
+    "NonExistent": {
+      "id": 4
+    },
+    "NotThere": {
+      "id": 5
+    },
+    "Player": {
+      "id": 6
+    },
+    "Single": {
+      "id": 7
+    },
+    "Team": {
+      "id": 8
+    },
+    "X": {
+      "id": 9
+    },
+    "Y": {
+      "id": 10
+    },
+    "Z": {
+      "id": 11
+    }
+  },
+  "properties": {
+    "A": {
+      "num": {
+        "nullable": true,
+        "type": "Int64"
+      }
+    },
+    "B": {
+      "num": {
+        "nullable": true,
+        "type": "Int64"
+      }
+    },
+    "C": {
+      "num": {
+        "nullable": true,
+        "type": "Int64"
+      }
+    },
+    "REL": {
+      "name": {
+        "nullable": true,
+        "type": "String"
+      }
+    }
+  },
+  "schema_version": 1
+}

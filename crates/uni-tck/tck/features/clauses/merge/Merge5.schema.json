@@ -1,0 +1,115 @@
+{
+  "edge_types": {
+    "A": {
+      "dst_labels": [],
+      "id": 1,
+      "src_labels": []
+    },
+    "B": {
+      "dst_labels": [],
+      "id": 2,
+      "src_labels": []
+    },
+    "FB": {
+      "dst_labels": [],
+      "id": 3,
+      "src_labels": []
+    },
+    "FOO": {
+      "dst_labels": [],
+      "id": 4,
+      "src_labels": []
+    },
+    "KNOWS": {
+      "dst_labels": [],
+      "id": 5,
+      "src_labels": []
+    },
+    "R": {
+      "dst_labels": [],
+      "id": 6,
+      "src_labels": []
+    },
+    "REL": {
+      "dst_labels": [],
+      "id": 7,
+      "src_labels": []
+    },
+    "T": {
+      "dst_labels": [],
+      "id": 8,
+      "src_labels": []
+    },
+    "TYPE": {
+      "dst_labels": [],
+      "id": 9,
+      "src_labels": []
+    },
+    "X": {
+      "dst_labels": [],
+      "id": 10,
+      "src_labels": []
+    }
+  },
+  "indexes": [],
+  "labels": {
+    "A": {
+      "id": 1
+    },
+    "B": {
+      "id": 2
+    },
+    "Bar": {
+      "id": 3
+    },
+    "C": {
+      "id": 4
+    },
+    "Foo": {
+      "id": 5
+    }
+  },
+  "properties": {
+    "B": {
+      "num": {
+        "nullable": true,
+        "type": "Int64"
+      }
+    },
+    "FB": {
+      "foobar": {
+        "nullable": true,
+        "type": "Json"
+      }
+    },
+    "KNOWS": {
+      "name": {
+        "nullable": true,
+        "type": "String"
+      }
+    },
+    "T": {
+      "name": {
+        "nullable": true,
+        "type": "String"
+      },
+      "numbers": {
+        "nullable": true,
+        "type": "Json"
+      }
+    },
+    "TYPE": {
+      "name": {
+        "nullable": true,
+        "type": "String"
+      }
+    },
+    "X": {
+      "num": {
+        "nullable": true,
+        "type": "Json"
+      }
+    }
+  },
+  "schema_version": 1
+}

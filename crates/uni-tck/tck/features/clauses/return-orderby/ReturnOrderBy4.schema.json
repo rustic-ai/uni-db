@@ -1,0 +1,22 @@
+{
+  "edge_types": {},
+  "indexes": [],
+  "labels": {
+    "Crew": {
+      "id": 1
+    }
+  },
+  "properties": {
+    "Crew": {
+      "name": {
+        "nullable": true,
+        "type": "String"
+      },
+      "rank": {
+        "nullable": true,
+        "type": "Int64"
+      }
+    }
+  },
+  "schema_version": 1
+}

@@ -1,0 +1,35 @@
+{
+  "edge_types": {
+    "REL": {
+      "dst_labels": [],
+      "id": 1,
+      "src_labels": []
+    },
+    "T": {
+      "dst_labels": [],
+      "id": 2,
+      "src_labels": []
+    }
+  },
+  "indexes": [],
+  "labels": {
+    "R": {
+      "id": 1
+    },
+    "T": {
+      "id": 2
+    },
+    "X": {
+      "id": 3
+    }
+  },
+  "properties": {
+    "T": {
+      "id": {
+        "nullable": true,
+        "type": "Int64"
+      }
+    }
+  },
+  "schema_version": 1
+}

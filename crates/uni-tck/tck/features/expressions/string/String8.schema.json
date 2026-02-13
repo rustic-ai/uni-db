@@ -1,0 +1,18 @@
+{
+  "edge_types": {},
+  "indexes": [],
+  "labels": {
+    "TheLabel": {
+      "id": 1
+    }
+  },
+  "properties": {
+    "TheLabel": {
+      "name": {
+        "nullable": true,
+        "type": "String"
+      }
+    }
+  },
+  "schema_version": 1
+}

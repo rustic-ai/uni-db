@@ -1,0 +1,34 @@
+{
+  "edge_types": {
+    "DoesNotExist": {
+      "dst_labels": [],
+      "id": 1,
+      "src_labels": []
+    },
+    "R": {
+      "dst_labels": [],
+      "id": 2,
+      "src_labels": []
+    },
+    "T": {
+      "dst_labels": [],
+      "id": 3,
+      "src_labels": []
+    }
+  },
+  "indexes": [],
+  "labels": {
+    "T": {
+      "id": 1
+    }
+  },
+  "properties": {
+    "T": {
+      "id": {
+        "nullable": true,
+        "type": "Int64"
+      }
+    }
+  },
+  "schema_version": 1
+}

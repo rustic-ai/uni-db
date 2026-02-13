@@ -1,0 +1,42 @@
+{
+  "edge_types": {
+    "T": {
+      "dst_labels": [],
+      "id": 1,
+      "src_labels": []
+    }
+  },
+  "indexes": [],
+  "labels": {
+    "IntNode": {
+      "id": 1
+    },
+    "Root": {
+      "id": 2
+    },
+    "TextNode": {
+      "id": 3
+    }
+  },
+  "properties": {
+    "IntNode": {
+      "var": {
+        "nullable": true,
+        "type": "Int64"
+      }
+    },
+    "Root": {
+      "name": {
+        "nullable": true,
+        "type": "String"
+      }
+    },
+    "TextNode": {
+      "var": {
+        "nullable": true,
+        "type": "String"
+      }
+    }
+  },
+  "schema_version": 1
+}

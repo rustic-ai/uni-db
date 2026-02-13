@@ -1,0 +1,39 @@
+{
+  "edge_types": {},
+  "indexes": [],
+  "labels": {
+    "DoesNotExist": {
+      "id": 1
+    },
+    "X": {
+      "id": 2
+    }
+  },
+  "properties": {
+    "DoesNotExist": {
+      "num": {
+        "nullable": true,
+        "type": "Int64"
+      }
+    },
+    "X": {
+      "baz": {
+        "nullable": true,
+        "type": "String"
+      },
+      "name": {
+        "nullable": true,
+        "type": "String"
+      },
+      "name2": {
+        "nullable": true,
+        "type": "Json"
+      },
+      "num": {
+        "nullable": true,
+        "type": "Int64"
+      }
+    }
+  },
+  "schema_version": 1
+}

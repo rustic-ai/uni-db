@@ -1,0 +1,60 @@
+{
+  "edge_types": {
+    "LIKES": {
+      "dst_labels": [],
+      "id": 1,
+      "src_labels": []
+    }
+  },
+  "indexes": [],
+  "labels": {
+    "A": {
+      "id": 1
+    },
+    "B": {
+      "id": 2
+    },
+    "C": {
+      "id": 3
+    },
+    "D": {
+      "id": 4
+    },
+    "E": {
+      "id": 5
+    }
+  },
+  "properties": {
+    "A": {
+      "name": {
+        "nullable": true,
+        "type": "String"
+      }
+    },
+    "B": {
+      "name": {
+        "nullable": true,
+        "type": "String"
+      }
+    },
+    "C": {
+      "name": {
+        "nullable": true,
+        "type": "String"
+      }
+    },
+    "D": {
+      "name": {
+        "nullable": true,
+        "type": "String"
+      }
+    },
+    "E": {
+      "name": {
+        "nullable": true,
+        "type": "Json"
+      }
+    }
+  },
+  "schema_version": 1
+}

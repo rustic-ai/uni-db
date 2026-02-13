@@ -1,0 +1,108 @@
+{
+  "edge_types": {
+    "E1": {
+      "dst_labels": [],
+      "id": 1,
+      "src_labels": []
+    },
+    "E2": {
+      "dst_labels": [],
+      "id": 2,
+      "src_labels": []
+    },
+    "LOOP": {
+      "dst_labels": [],
+      "id": 3,
+      "src_labels": []
+    },
+    "REL": {
+      "dst_labels": [],
+      "id": 4,
+      "src_labels": []
+    },
+    "T": {
+      "dst_labels": [],
+      "id": 5,
+      "src_labels": []
+    }
+  },
+  "indexes": [],
+  "labels": {
+    "A": {
+      "id": 1
+    },
+    "B": {
+      "id": 2
+    },
+    "C": {
+      "id": 3
+    },
+    "D": {
+      "id": 4
+    },
+    "NonExistent": {
+      "id": 5
+    },
+    "Single": {
+      "id": 6
+    },
+    "X": {
+      "id": 7
+    },
+    "Y": {
+      "id": 8
+    },
+    "Z": {
+      "id": 9
+    }
+  },
+  "properties": {
+    "A": {
+      "num": {
+        "nullable": true,
+        "type": "Int64"
+      }
+    },
+    "B": {
+      "name": {
+        "nullable": true,
+        "type": "String"
+      },
+      "num": {
+        "nullable": true,
+        "type": "Int64"
+      }
+    },
+    "C": {
+      "name": {
+        "nullable": true,
+        "type": "String"
+      }
+    },
+    "D": {
+      "name": {
+        "nullable": true,
+        "type": "String"
+      }
+    },
+    "X": {
+      "val": {
+        "nullable": true,
+        "type": "Int64"
+      }
+    },
+    "Y": {
+      "val": {
+        "nullable": true,
+        "type": "Int64"
+      }
+    },
+    "Z": {
+      "val": {
+        "nullable": true,
+        "type": "Int64"
+      }
+    }
+  },
+  "schema_version": 1
+}

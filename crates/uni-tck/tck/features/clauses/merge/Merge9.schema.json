@@ -1,0 +1,53 @@
+{
+  "edge_types": {
+    "ACTED_IN": {
+      "dst_labels": [],
+      "id": 1,
+      "src_labels": []
+    },
+    "KNOWS": {
+      "dst_labels": [],
+      "id": 2,
+      "src_labels": []
+    }
+  },
+  "indexes": [],
+  "labels": {
+    "A": {
+      "id": 1
+    },
+    "B": {
+      "id": 2
+    },
+    "C": {
+      "id": 3
+    },
+    "Movie": {
+      "id": 4
+    },
+    "Person": {
+      "id": 5
+    }
+  },
+  "properties": {
+    "A": {
+      "num": {
+        "nullable": true,
+        "type": "Json"
+      }
+    },
+    "Movie": {
+      "name": {
+        "nullable": true,
+        "type": "String"
+      }
+    },
+    "Person": {
+      "name": {
+        "nullable": true,
+        "type": "Json"
+      }
+    }
+  },
+  "schema_version": 1
+}

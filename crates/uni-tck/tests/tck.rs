@@ -3,8 +3,9 @@
 //! Scenario Outlines are expanded, and each is run through the cucumber
 //! framework's `filter_run` with a name+line filter.
 //!
-//! Each scenario writes a result JSON to `target/cucumber/nextest/` so that
-//! results can be aggregated into a report after the nextest run.
+//! Each scenario writes a result JSON to `target/cucumber/nextest/` by default
+//! (or `UNI_TCK_NEXTEST_RESULTS_DIR` when set) so that results can be
+//! aggregated into a report after the nextest run.
 
 use std::collections::HashMap;
 use std::io::Write;
@@ -16,7 +17,10 @@ use cucumber::{World, WriterExt};
 use gherkin::GherkinEnv;
 use libtest_mimic::{Arguments, Failed, Trial};
 use regex::Regex;
-use uni_tck::UniWorld;
+use uni_tck::{
+    clear_tck_run_context_for_current_thread, set_tck_run_context_for_current_thread,
+    TckSchemaMode, UniWorld,
+};
 
 /// Thread-safe in-memory buffer that implements [`std::io::Write`].
 ///
@@ -43,8 +47,38 @@ impl SharedBuffer {
     }
 }
 
+fn schema_mode_from_env() -> TckSchemaMode {
+    match std::env::var("UNI_TCK_SCHEMA_MODE") {
+        Ok(raw) => match raw.trim().to_ascii_lowercase().as_str() {
+            "" | "schemaless" | "off" | "none" => TckSchemaMode::Schemaless,
+            "schema" | "sidecar" | "predefined" | "predefined-schema" => TckSchemaMode::Sidecar,
+            other => panic!(
+                "Invalid UNI_TCK_SCHEMA_MODE='{}'. Expected one of: schemaless, sidecar",
+                other
+            ),
+        },
+        Err(_) => TckSchemaMode::Schemaless,
+    }
+}
+
+struct TckRunContextGuard;
+
+impl TckRunContextGuard {
+    fn set(feature_path: PathBuf, schema_mode: TckSchemaMode) -> Self {
+        set_tck_run_context_for_current_thread(feature_path, schema_mode);
+        Self
+    }
+}
+
+impl Drop for TckRunContextGuard {
+    fn drop(&mut self) {
+        clear_tck_run_context_for_current_thread();
+    }
+}
+
 fn main() {
     let args = Arguments::from_args();
+    let schema_mode = schema_mode_from_env();
 
     let feature_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tck/features");
     let scenarios = discover_scenarios(&feature_dir);
@@ -77,7 +111,7 @@ fn main() {
                 let fp = feature_path.clone();
                 let sn = scenario_name.clone();
                 Trial::test(test_name, move || {
-                    run_single_scenario(fp, sn, scenario_line)
+                    run_single_scenario(fp, sn, scenario_line, schema_mode)
                 })
             },
         )
@@ -231,6 +265,7 @@ fn run_single_scenario(
     feature_path: PathBuf,
     scenario_name: String,
     scenario_line: usize,
+    schema_mode: TckSchemaMode,
 ) -> Result<(), Failed> {
     // Initialize tracing (ignore errors if already initialized)
     let _ = tracing_subscriber::fmt()
@@ -238,8 +273,12 @@ fn run_single_scenario(
         .with_test_writer()
         .try_init();
 
-    let rt =
-        tokio::runtime::Runtime::new().map_err(|e| format!("Failed to create runtime: {e}"))?;
+    let _run_ctx_guard = TckRunContextGuard::set(feature_path.clone(), schema_mode);
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| format!("Failed to create runtime: {e}"))?;
 
     let buffer = SharedBuffer::default();
     let fp = feature_path.clone();
@@ -333,7 +372,32 @@ fn extract_error_from_output(output: &str) -> String {
     }
 }
 
-/// Write a per-scenario result JSON to `target/cucumber/nextest/`.
+/// Resolve the directory used for per-scenario nextest JSON output.
+///
+/// Default: `target/cucumber/nextest` at repository root.
+/// Override with `UNI_TCK_NEXTEST_RESULTS_DIR` (absolute or repo-relative).
+fn nextest_results_dir() -> PathBuf {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
+
+    match std::env::var("UNI_TCK_NEXTEST_RESULTS_DIR") {
+        Ok(raw) if !raw.trim().is_empty() => {
+            let candidate = PathBuf::from(raw.trim());
+            if candidate.is_absolute() {
+                candidate
+            } else {
+                repo_root.join(candidate)
+            }
+        }
+        _ => repo_root.join("target/cucumber/nextest"),
+    }
+}
+
+/// Write a per-scenario result JSON to the configured nextest results directory.
 ///
 /// Each file is named `{feature_stem}_{line}.json` to ensure uniqueness
 /// across concurrent processes. When `error_message` is provided, it is
@@ -346,12 +410,7 @@ fn write_result_json(
     status: &str,
     error_message: Option<&str>,
 ) {
-    let results_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .join("target/cucumber/nextest");
+    let results_dir = nextest_results_dir();
 
     // Best-effort: don't fail the test if we can't write the result
     let _ = std::fs::create_dir_all(&results_dir);

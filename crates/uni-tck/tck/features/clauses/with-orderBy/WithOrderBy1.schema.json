@@ -1,0 +1,192 @@
+{
+  "edge_types": {
+    "REL": {
+      "dst_labels": [],
+      "id": 1,
+      "src_labels": []
+    }
+  },
+  "indexes": [],
+  "labels": {
+    "A": {
+      "id": 1
+    },
+    "B": {
+      "id": 2
+    },
+    "C": {
+      "id": 3
+    },
+    "D": {
+      "id": 4
+    },
+    "E": {
+      "id": 5
+    },
+    "F": {
+      "id": 6
+    },
+    "N": {
+      "id": 7
+    }
+  },
+  "properties": {
+    "A": {
+      "bool": {
+        "nullable": true,
+        "type": "Bool"
+      },
+      "date": {
+        "nullable": true,
+        "type": "Date"
+      },
+      "datetime": {
+        "nullable": true,
+        "type": "Json"
+      },
+      "list": {
+        "nullable": true,
+        "type": "Json"
+      },
+      "name": {
+        "nullable": true,
+        "type": "String"
+      },
+      "num": {
+        "nullable": true,
+        "type": "Float64"
+      },
+      "time": {
+        "nullable": true,
+        "type": "Json"
+      }
+    },
+    "B": {
+      "bool": {
+        "nullable": true,
+        "type": "Bool"
+      },
+      "date": {
+        "nullable": true,
+        "type": "Date"
+      },
+      "datetime": {
+        "nullable": true,
+        "type": "Json"
+      },
+      "list": {
+        "nullable": true,
+        "type": "Json"
+      },
+      "name": {
+        "nullable": true,
+        "type": "String"
+      },
+      "num": {
+        "nullable": true,
+        "type": "Float64"
+      },
+      "time": {
+        "nullable": true,
+        "type": "Json"
+      }
+    },
+    "C": {
+      "bool": {
+        "nullable": true,
+        "type": "Bool"
+      },
+      "date": {
+        "nullable": true,
+        "type": "Date"
+      },
+      "datetime": {
+        "nullable": true,
+        "type": "Json"
+      },
+      "list": {
+        "nullable": true,
+        "type": "Json"
+      },
+      "name": {
+        "nullable": true,
+        "type": "String"
+      },
+      "num": {
+        "nullable": true,
+        "type": "Float64"
+      },
+      "time": {
+        "nullable": true,
+        "type": "Json"
+      }
+    },
+    "D": {
+      "bool": {
+        "nullable": true,
+        "type": "Bool"
+      },
+      "date": {
+        "nullable": true,
+        "type": "Date"
+      },
+      "datetime": {
+        "nullable": true,
+        "type": "Json"
+      },
+      "list": {
+        "nullable": true,
+        "type": "Json"
+      },
+      "name": {
+        "nullable": true,
+        "type": "String"
+      },
+      "num": {
+        "nullable": true,
+        "type": "Float64"
+      },
+      "time": {
+        "nullable": true,
+        "type": "Json"
+      }
+    },
+    "E": {
+      "bool": {
+        "nullable": true,
+        "type": "Bool"
+      },
+      "date": {
+        "nullable": true,
+        "type": "Date"
+      },
+      "datetime": {
+        "nullable": true,
+        "type": "Json"
+      },
+      "list": {
+        "nullable": true,
+        "type": "Json"
+      },
+      "name": {
+        "nullable": true,
+        "type": "String"
+      },
+      "num": {
+        "nullable": true,
+        "type": "Float64"
+      },
+      "time": {
+        "nullable": true,
+        "type": "Json"
+      }
+    },
+    "F": {
+      "date": {
+        "nullable": true,
+        "type": "Date"
+      }
+    }
+  },
+  "schema_version": 1
+}

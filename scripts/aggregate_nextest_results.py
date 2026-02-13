@@ -2,14 +2,15 @@
 """
 Aggregate per-scenario nextest result JSONs into cucumber-compatible JSON.
 
-Reads individual result files from target/cucumber/nextest/ and produces
+Reads individual result files from a nextest output directory and produces
 a timestamped results file in the same format as cucumber's JSON writer,
 so analyze_tck_json.py can consume it.
 
 Usage:
     python scripts/aggregate_nextest_results.py
 
-Writes to: target/cucumber/results_YYYYMMDD_HHMMSS.json
+Reads from: target/cucumber/nextest (default)
+Writes to: target/cucumber/results_YYYYMMDD_HHMMSS.json (default)
 Prints the output path to stdout (last line) for use by calling scripts.
 """
 
@@ -24,13 +25,21 @@ from pathlib import Path
 def main():
     parser = argparse.ArgumentParser(description="Aggregate nextest results into cucumber JSON")
     parser.add_argument(
+        "--results-dir",
+        help="Override the input directory containing per-scenario JSON files "
+             "(default: target/cucumber/nextest)",
+    )
+    parser.add_argument(
         "--output-dir",
         help="Override the output directory for the results JSON (default: target/cucumber)",
     )
     args = parser.parse_args()
 
     repo_root = Path(__file__).parent.parent
-    results_dir = repo_root / "target" / "cucumber" / "nextest"
+    if args.results_dir:
+        results_dir = repo_root / args.results_dir
+    else:
+        results_dir = repo_root / "target" / "cucumber" / "nextest"
 
     if args.output_dir:
         output_dir = repo_root / args.output_dir

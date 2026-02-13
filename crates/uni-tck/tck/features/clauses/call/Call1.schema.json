@@ -1,0 +1,36 @@
+{
+  "edge_types": {},
+  "indexes": [],
+  "labels": {
+    "A": {
+      "id": 1
+    },
+    "B": {
+      "id": 2
+    },
+    "C": {
+      "id": 3
+    }
+  },
+  "properties": {
+    "A": {
+      "name": {
+        "nullable": true,
+        "type": "String"
+      }
+    },
+    "B": {
+      "name": {
+        "nullable": true,
+        "type": "String"
+      }
+    },
+    "C": {
+      "name": {
+        "nullable": true,
+        "type": "String"
+      }
+    }
+  },
+  "schema_version": 1
+}

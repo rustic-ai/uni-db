@@ -1,0 +1,17 @@
+{
+  "edge_types": {
+    "REL": {
+      "dst_labels": [],
+      "id": 1,
+      "src_labels": []
+    }
+  },
+  "indexes": [],
+  "labels": {
+    "N": {
+      "id": 1
+    }
+  },
+  "properties": {},
+  "schema_version": 1
+}

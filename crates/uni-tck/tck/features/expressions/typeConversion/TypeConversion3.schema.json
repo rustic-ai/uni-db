@@ -1,0 +1,24 @@
+{
+  "edge_types": {
+    "T": {
+      "dst_labels": [],
+      "id": 1,
+      "src_labels": []
+    }
+  },
+  "indexes": [],
+  "labels": {
+    "Movie": {
+      "id": 1
+    }
+  },
+  "properties": {
+    "Movie": {
+      "rating": {
+        "nullable": true,
+        "type": "Int64"
+      }
+    }
+  },
+  "schema_version": 1
+}

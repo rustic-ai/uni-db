@@ -1,0 +1,65 @@
+{
+  "edge_types": {
+    "LOOP": {
+      "dst_labels": [],
+      "id": 1,
+      "src_labels": []
+    },
+    "REL": {
+      "dst_labels": [],
+      "id": 2,
+      "src_labels": []
+    },
+    "T1": {
+      "dst_labels": [],
+      "id": 3,
+      "src_labels": []
+    },
+    "T2": {
+      "dst_labels": [],
+      "id": 4,
+      "src_labels": []
+    },
+    "T3": {
+      "dst_labels": [],
+      "id": 5,
+      "src_labels": []
+    }
+  },
+  "indexes": [],
+  "labels": {
+    "A": {
+      "id": 1
+    },
+    "B": {
+      "id": 2
+    },
+    "C": {
+      "id": 3
+    },
+    "Single": {
+      "id": 4
+    },
+    "Start": {
+      "id": 5
+    },
+    "X": {
+      "id": 6
+    }
+  },
+  "properties": {
+    "A": {
+      "num": {
+        "nullable": true,
+        "type": "Int64"
+      }
+    },
+    "B": {
+      "num": {
+        "nullable": true,
+        "type": "Int64"
+      }
+    }
+  },
+  "schema_version": 1
+}

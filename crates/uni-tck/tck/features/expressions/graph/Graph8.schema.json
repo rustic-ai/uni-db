@@ -1,0 +1,24 @@
+{
+  "edge_types": {
+    "KNOWS": {
+      "dst_labels": [],
+      "id": 1,
+      "src_labels": []
+    }
+  },
+  "indexes": [],
+  "labels": {},
+  "properties": {
+    "KNOWS": {
+      "status": {
+        "nullable": true,
+        "type": "String"
+      },
+      "year": {
+        "nullable": true,
+        "type": "String"
+      }
+    }
+  },
+  "schema_version": 1
+}

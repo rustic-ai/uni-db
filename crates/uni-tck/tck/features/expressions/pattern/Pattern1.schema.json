@@ -1,0 +1,46 @@
+{
+  "edge_types": {
+    "REL": {
+      "dst_labels": [],
+      "id": 1,
+      "src_labels": []
+    },
+    "REL1": {
+      "dst_labels": [],
+      "id": 2,
+      "src_labels": []
+    },
+    "REL2": {
+      "dst_labels": [],
+      "id": 3,
+      "src_labels": []
+    },
+    "REL3": {
+      "dst_labels": [],
+      "id": 4,
+      "src_labels": []
+    },
+    "REL4": {
+      "dst_labels": [],
+      "id": 5,
+      "src_labels": []
+    }
+  },
+  "indexes": [],
+  "labels": {
+    "A": {
+      "id": 1
+    },
+    "B": {
+      "id": 2
+    },
+    "C": {
+      "id": 3
+    },
+    "D": {
+      "id": 4
+    }
+  },
+  "properties": {},
+  "schema_version": 1
+}

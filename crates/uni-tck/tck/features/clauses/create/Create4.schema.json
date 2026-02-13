@@ -1,0 +1,164 @@
+{
+  "edge_types": {
+    "ACTED_IN": {
+      "dst_labels": [],
+      "id": 1,
+      "src_labels": []
+    },
+    "BUDDY": {
+      "dst_labels": [],
+      "id": 2,
+      "src_labels": []
+    },
+    "CURRICULUM": {
+      "dst_labels": [],
+      "id": 3,
+      "src_labels": []
+    },
+    "DEPARTMENT": {
+      "dst_labels": [],
+      "id": 4,
+      "src_labels": []
+    },
+    "DIRECTED": {
+      "dst_labels": [],
+      "id": 5,
+      "src_labels": []
+    },
+    "FOLLOWS": {
+      "dst_labels": [],
+      "id": 6,
+      "src_labels": []
+    },
+    "PRODUCED": {
+      "dst_labels": [],
+      "id": 7,
+      "src_labels": []
+    },
+    "REVIEWED": {
+      "dst_labels": [],
+      "id": 8,
+      "src_labels": []
+    },
+    "STAFF": {
+      "dst_labels": [],
+      "id": 9,
+      "src_labels": []
+    },
+    "STUDENT": {
+      "dst_labels": [],
+      "id": 10,
+      "src_labels": []
+    },
+    "TAUGHT_BY": {
+      "dst_labels": [],
+      "id": 11,
+      "src_labels": []
+    },
+    "WROTE": {
+      "dst_labels": [],
+      "id": 12,
+      "src_labels": []
+    }
+  },
+  "indexes": [],
+  "labels": {
+    "Department": {
+      "id": 1
+    },
+    "Movie": {
+      "id": 2
+    },
+    "Person": {
+      "id": 3
+    },
+    "School": {
+      "id": 4
+    },
+    "Student": {
+      "id": 5
+    },
+    "StudyBuddy": {
+      "id": 6
+    },
+    "Subject": {
+      "id": 7
+    },
+    "Teacher": {
+      "id": 8
+    }
+  },
+  "properties": {
+    "ACTED_IN": {
+      "roles": {
+        "nullable": true,
+        "type": "Json"
+      }
+    },
+    "Department": {
+      "name": {
+        "nullable": true,
+        "type": "String"
+      }
+    },
+    "Movie": {
+      "released": {
+        "nullable": true,
+        "type": "Int64"
+      },
+      "tagline": {
+        "nullable": true,
+        "type": "String"
+      },
+      "title": {
+        "nullable": true,
+        "type": "String"
+      }
+    },
+    "Person": {
+      "born": {
+        "nullable": true,
+        "type": "Int64"
+      },
+      "name": {
+        "nullable": true,
+        "type": "String"
+      }
+    },
+    "REVIEWED": {
+      "rating": {
+        "nullable": true,
+        "type": "Int64"
+      },
+      "summary": {
+        "nullable": true,
+        "type": "String"
+      }
+    },
+    "School": {
+      "name": {
+        "nullable": true,
+        "type": "String"
+      }
+    },
+    "Student": {
+      "name": {
+        "nullable": true,
+        "type": "String"
+      }
+    },
+    "Subject": {
+      "name": {
+        "nullable": true,
+        "type": "String"
+      }
+    },
+    "Teacher": {
+      "name": {
+        "nullable": true,
+        "type": "String"
+      }
+    }
+  },
+  "schema_version": 1
+}

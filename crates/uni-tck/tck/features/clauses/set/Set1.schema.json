@@ -1,0 +1,54 @@
+{
+  "edge_types": {
+    "REL": {
+      "dst_labels": [],
+      "id": 1,
+      "src_labels": []
+    }
+  },
+  "indexes": [],
+  "labels": {
+    "A": {
+      "id": 1
+    },
+    "DoesNotExist": {
+      "id": 2
+    },
+    "X": {
+      "id": 3
+    }
+  },
+  "properties": {
+    "A": {
+      "name": {
+        "nullable": true,
+        "type": "String"
+      },
+      "numbers": {
+        "nullable": true,
+        "type": "Json"
+      }
+    },
+    "DoesNotExist": {
+      "num": {
+        "nullable": true,
+        "type": "Json"
+      }
+    },
+    "X": {
+      "name": {
+        "nullable": true,
+        "type": "Json"
+      },
+      "name2": {
+        "nullable": true,
+        "type": "Json"
+      },
+      "num": {
+        "nullable": true,
+        "type": "Json"
+      }
+    }
+  },
+  "schema_version": 1
+}

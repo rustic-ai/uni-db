@@ -1,0 +1,263 @@
+{
+  "edge_types": {},
+  "indexes": [],
+  "labels": {
+    "A": {
+      "id": 1
+    },
+    "B": {
+      "id": 2
+    },
+    "C": {
+      "id": 3
+    },
+    "D": {
+      "id": 4
+    },
+    "E": {
+      "id": 5
+    },
+    "F": {
+      "id": 6
+    }
+  },
+  "properties": {
+    "A": {
+      "bool": {
+        "nullable": true,
+        "type": "Bool"
+      },
+      "bool2": {
+        "nullable": true,
+        "type": "Bool"
+      },
+      "date": {
+        "nullable": true,
+        "type": "Date"
+      },
+      "datetime": {
+        "nullable": true,
+        "type": "Json"
+      },
+      "list": {
+        "nullable": true,
+        "type": "Json"
+      },
+      "list2": {
+        "nullable": true,
+        "type": "Json"
+      },
+      "name": {
+        "nullable": true,
+        "type": "String"
+      },
+      "num": {
+        "nullable": true,
+        "type": "Float64"
+      },
+      "num2": {
+        "nullable": true,
+        "type": "Float64"
+      },
+      "time": {
+        "nullable": true,
+        "type": "Json"
+      },
+      "title": {
+        "nullable": true,
+        "type": "String"
+      }
+    },
+    "B": {
+      "bool": {
+        "nullable": true,
+        "type": "Bool"
+      },
+      "bool2": {
+        "nullable": true,
+        "type": "Bool"
+      },
+      "date": {
+        "nullable": true,
+        "type": "Date"
+      },
+      "datetime": {
+        "nullable": true,
+        "type": "Json"
+      },
+      "list": {
+        "nullable": true,
+        "type": "Json"
+      },
+      "list2": {
+        "nullable": true,
+        "type": "Json"
+      },
+      "name": {
+        "nullable": true,
+        "type": "String"
+      },
+      "num": {
+        "nullable": true,
+        "type": "Float64"
+      },
+      "num2": {
+        "nullable": true,
+        "type": "Float64"
+      },
+      "time": {
+        "nullable": true,
+        "type": "Json"
+      },
+      "title": {
+        "nullable": true,
+        "type": "String"
+      }
+    },
+    "C": {
+      "bool": {
+        "nullable": true,
+        "type": "Bool"
+      },
+      "bool2": {
+        "nullable": true,
+        "type": "Bool"
+      },
+      "date": {
+        "nullable": true,
+        "type": "Date"
+      },
+      "datetime": {
+        "nullable": true,
+        "type": "Json"
+      },
+      "list": {
+        "nullable": true,
+        "type": "Json"
+      },
+      "list2": {
+        "nullable": true,
+        "type": "Json"
+      },
+      "name": {
+        "nullable": true,
+        "type": "String"
+      },
+      "num": {
+        "nullable": true,
+        "type": "Float64"
+      },
+      "num2": {
+        "nullable": true,
+        "type": "Float64"
+      },
+      "time": {
+        "nullable": true,
+        "type": "Json"
+      },
+      "title": {
+        "nullable": true,
+        "type": "String"
+      }
+    },
+    "D": {
+      "bool": {
+        "nullable": true,
+        "type": "Bool"
+      },
+      "bool2": {
+        "nullable": true,
+        "type": "Bool"
+      },
+      "date": {
+        "nullable": true,
+        "type": "Date"
+      },
+      "datetime": {
+        "nullable": true,
+        "type": "Json"
+      },
+      "list": {
+        "nullable": true,
+        "type": "Json"
+      },
+      "list2": {
+        "nullable": true,
+        "type": "Json"
+      },
+      "name": {
+        "nullable": true,
+        "type": "String"
+      },
+      "num": {
+        "nullable": true,
+        "type": "Float64"
+      },
+      "num2": {
+        "nullable": true,
+        "type": "Float64"
+      },
+      "time": {
+        "nullable": true,
+        "type": "Json"
+      },
+      "title": {
+        "nullable": true,
+        "type": "String"
+      }
+    },
+    "E": {
+      "bool": {
+        "nullable": true,
+        "type": "Bool"
+      },
+      "bool2": {
+        "nullable": true,
+        "type": "Bool"
+      },
+      "date": {
+        "nullable": true,
+        "type": "Date"
+      },
+      "datetime": {
+        "nullable": true,
+        "type": "Json"
+      },
+      "list": {
+        "nullable": true,
+        "type": "Json"
+      },
+      "list2": {
+        "nullable": true,
+        "type": "Json"
+      },
+      "name": {
+        "nullable": true,
+        "type": "String"
+      },
+      "num": {
+        "nullable": true,
+        "type": "Float64"
+      },
+      "num2": {
+        "nullable": true,
+        "type": "Float64"
+      },
+      "time": {
+        "nullable": true,
+        "type": "Json"
+      },
+      "title": {
+        "nullable": true,
+        "type": "String"
+      }
+    },
+    "F": {
+      "date": {
+        "nullable": true,
+        "type": "Date"
+      }
+    }
+  },
+  "schema_version": 1
+}

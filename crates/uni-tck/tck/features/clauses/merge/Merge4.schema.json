@@ -1,0 +1,36 @@
+{
+  "edge_types": {},
+  "indexes": [],
+  "labels": {
+    "City": {
+      "id": 1
+    },
+    "L": {
+      "id": 2
+    },
+    "M1": {
+      "id": 3
+    },
+    "M2": {
+      "id": 4
+    },
+    "Person": {
+      "id": 5
+    }
+  },
+  "properties": {
+    "City": {
+      "name": {
+        "nullable": true,
+        "type": "Json"
+      }
+    },
+    "Person": {
+      "bornIn": {
+        "nullable": true,
+        "type": "String"
+      }
+    }
+  },
+  "schema_version": 1
+}

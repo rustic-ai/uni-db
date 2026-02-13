@@ -1,0 +1,98 @@
+{
+  "edge_types": {
+    "CONTAINS": {
+      "dst_labels": [],
+      "id": 1,
+      "src_labels": []
+    },
+    "EDGE": {
+      "dst_labels": [],
+      "id": 2,
+      "src_labels": []
+    },
+    "FRIEND": {
+      "dst_labels": [],
+      "id": 3,
+      "src_labels": []
+    },
+    "LIKES": {
+      "dst_labels": [],
+      "id": 4,
+      "src_labels": []
+    },
+    "T": {
+      "dst_labels": [],
+      "id": 5,
+      "src_labels": []
+    },
+    "WORKED_WITH": {
+      "dst_labels": [],
+      "id": 6,
+      "src_labels": []
+    },
+    "X": {
+      "dst_labels": [],
+      "id": 7,
+      "src_labels": []
+    },
+    "Y": {
+      "dst_labels": [],
+      "id": 8,
+      "src_labels": []
+    }
+  },
+  "indexes": [],
+  "labels": {
+    "A": {
+      "id": 1
+    },
+    "Artist": {
+      "id": 2
+    },
+    "B": {
+      "id": 3
+    },
+    "C": {
+      "id": 4
+    },
+    "D": {
+      "id": 5
+    },
+    "Node": {
+      "id": 6
+    }
+  },
+  "properties": {
+    "A": {
+      "name": {
+        "nullable": true,
+        "type": "String"
+      }
+    },
+    "B": {
+      "name": {
+        "nullable": true,
+        "type": "String"
+      }
+    },
+    "C": {
+      "name": {
+        "nullable": true,
+        "type": "String"
+      }
+    },
+    "D": {
+      "name": {
+        "nullable": true,
+        "type": "String"
+      }
+    },
+    "WORKED_WITH": {
+      "year": {
+        "nullable": true,
+        "type": "Int64"
+      }
+    }
+  },
+  "schema_version": 1
+}

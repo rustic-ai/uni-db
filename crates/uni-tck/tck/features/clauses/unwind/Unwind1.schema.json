@@ -1,0 +1,62 @@
+{
+  "edge_types": {
+    "IN": {
+      "dst_labels": [],
+      "id": 1,
+      "src_labels": []
+    },
+    "X": {
+      "dst_labels": [],
+      "id": 2,
+      "src_labels": []
+    },
+    "Y": {
+      "dst_labels": [],
+      "id": 3,
+      "src_labels": []
+    }
+  },
+  "indexes": [],
+  "labels": {
+    "E": {
+      "id": 1
+    },
+    "Event": {
+      "id": 2
+    },
+    "Person": {
+      "id": 3
+    },
+    "S": {
+      "id": 4
+    },
+    "Year": {
+      "id": 5
+    }
+  },
+  "properties": {
+    "Event": {
+      "id": {
+        "nullable": true,
+        "type": "Json"
+      }
+    },
+    "Person": {
+      "login": {
+        "nullable": true,
+        "type": "Json"
+      },
+      "name": {
+        "nullable": true,
+        "type": "Json"
+      }
+    },
+    "Year": {
+      "year": {
+        "nullable": true,
+        "type": "Json"
+      }
+    }
+  },
+  "schema_version": 1
+}

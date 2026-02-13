@@ -1,0 +1,18 @@
+{
+  "edge_types": {},
+  "indexes": [],
+  "labels": {
+    "X": {
+      "id": 1
+    }
+  },
+  "properties": {
+    "X": {
+      "prop": {
+        "nullable": true,
+        "type": "Int64"
+      }
+    }
+  },
+  "schema_version": 1
+}

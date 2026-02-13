@@ -1,0 +1,95 @@
+{
+  "edge_types": {
+    "A": {
+      "dst_labels": [],
+      "id": 1,
+      "src_labels": []
+    },
+    "B": {
+      "dst_labels": [],
+      "id": 2,
+      "src_labels": []
+    },
+    "FOO": {
+      "dst_labels": [],
+      "id": 3,
+      "src_labels": []
+    },
+    "KNOWS": {
+      "dst_labels": [],
+      "id": 4,
+      "src_labels": []
+    },
+    "LINK": {
+      "dst_labels": [],
+      "id": 5,
+      "src_labels": []
+    },
+    "R": {
+      "dst_labels": [],
+      "id": 6,
+      "src_labels": []
+    },
+    "TYPE": {
+      "dst_labels": [],
+      "id": 7,
+      "src_labels": []
+    },
+    "X": {
+      "dst_labels": [],
+      "id": 8,
+      "src_labels": []
+    }
+  },
+  "indexes": [],
+  "labels": {
+    "A": {
+      "id": 1
+    },
+    "B": {
+      "id": 2
+    },
+    "Begin": {
+      "id": 3
+    },
+    "End": {
+      "id": 4
+    },
+    "Root": {
+      "id": 5
+    },
+    "X": {
+      "id": 6
+    },
+    "Y": {
+      "id": 7
+    }
+  },
+  "properties": {
+    "R": {
+      "id": {
+        "nullable": true,
+        "type": "Int64"
+      },
+      "name": {
+        "nullable": true,
+        "type": "String"
+      },
+      "num": {
+        "nullable": true,
+        "type": "Int64"
+      }
+    },
+    "X": {
+      "id": {
+        "nullable": true,
+        "type": "Int64"
+      },
+      "name": {
+        "nullable": true,
+        "type": "Json"
+      }
+    }
+  },
+  "schema_version": 1
+}

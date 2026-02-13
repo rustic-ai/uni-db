@@ -1,0 +1,46 @@
+{
+  "edge_types": {
+    "REL": {
+      "dst_labels": [],
+      "id": 1,
+      "src_labels": []
+    }
+  },
+  "indexes": [],
+  "labels": {
+    "A": {
+      "id": 1
+    }
+  },
+  "properties": {
+    "A": {
+      "age": {
+        "nullable": true,
+        "type": "Int64"
+      },
+      "name": {
+        "nullable": true,
+        "type": "String"
+      },
+      "property1": {
+        "nullable": true,
+        "type": "Int64"
+      },
+      "property2": {
+        "nullable": true,
+        "type": "Int64"
+      }
+    },
+    "REL": {
+      "property1": {
+        "nullable": true,
+        "type": "Int64"
+      },
+      "property2": {
+        "nullable": true,
+        "type": "Int64"
+      }
+    }
+  },
+  "schema_version": 1
+}

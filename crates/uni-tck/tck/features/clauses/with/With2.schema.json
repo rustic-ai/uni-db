@@ -1,0 +1,31 @@
+{
+  "edge_types": {},
+  "indexes": [],
+  "labels": {
+    "Begin": {
+      "id": 1
+    },
+    "End": {
+      "id": 2
+    }
+  },
+  "properties": {
+    "Begin": {
+      "num": {
+        "nullable": true,
+        "type": "Json"
+      }
+    },
+    "End": {
+      "id": {
+        "nullable": true,
+        "type": "Int64"
+      },
+      "num": {
+        "nullable": true,
+        "type": "Int64"
+      }
+    }
+  },
+  "schema_version": 1
+}

@@ -47,6 +47,7 @@ coverage/
 
 # Python
 __pycache__/
+crates/uni-tck/scripts/__pycache__/
 *.py[cod]
 *$py.class
 *.so

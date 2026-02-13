@@ -1,0 +1,28 @@
+{
+  "edge_types": {
+    "NOT_THERE": {
+      "dst_labels": [],
+      "id": 1,
+      "src_labels": []
+    },
+    "T": {
+      "dst_labels": [],
+      "id": 2,
+      "src_labels": []
+    },
+    "T1": {
+      "dst_labels": [],
+      "id": 3,
+      "src_labels": []
+    },
+    "T2": {
+      "dst_labels": [],
+      "id": 4,
+      "src_labels": []
+    }
+  },
+  "indexes": [],
+  "labels": {},
+  "properties": {},
+  "schema_version": 1
+}

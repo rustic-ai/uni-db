@@ -1,0 +1,66 @@
+{
+  "edge_types": {
+    "LIKE": {
+      "dst_labels": [],
+      "id": 1,
+      "src_labels": []
+    },
+    "POSTED_BY": {
+      "dst_labels": [],
+      "id": 2,
+      "src_labels": []
+    },
+    "T1": {
+      "dst_labels": [],
+      "id": 3,
+      "src_labels": []
+    },
+    "T2": {
+      "dst_labels": [],
+      "id": 4,
+      "src_labels": []
+    }
+  },
+  "indexes": [],
+  "labels": {
+    "Begin": {
+      "id": 1
+    },
+    "End": {
+      "id": 2
+    },
+    "Message": {
+      "id": 3
+    },
+    "Person": {
+      "id": 4
+    }
+  },
+  "properties": {
+    "Begin": {
+      "num": {
+        "nullable": true,
+        "type": "Int64"
+      }
+    },
+    "End": {
+      "num": {
+        "nullable": true,
+        "type": "Int64"
+      }
+    },
+    "LIKE": {
+      "creationDate": {
+        "nullable": true,
+        "type": "Int64"
+      }
+    },
+    "Message": {
+      "id": {
+        "nullable": true,
+        "type": "Int64"
+      }
+    }
+  },
+  "schema_version": 1
+}

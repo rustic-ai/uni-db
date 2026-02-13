@@ -1,0 +1,23 @@
+{
+  "edge_types": {},
+  "indexes": [],
+  "labels": {
+    "A": {
+      "id": 1
+    },
+    "Bar": {
+      "id": 2
+    },
+    "DoesNotExist": {
+      "id": 3
+    },
+    "Foo": {
+      "id": 4
+    },
+    "L": {
+      "id": 5
+    }
+  },
+  "properties": {},
+  "schema_version": 1
+}

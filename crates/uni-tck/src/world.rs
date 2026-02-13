@@ -1,10 +1,48 @@
 use cucumber::World;
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::Arc;
 use tempfile::TempDir;
 use uni_common::UniError;
 use uni_db::Uni;
 use uni_query::{QueryResult, Value};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TckSchemaMode {
+    #[default]
+    Schemaless,
+    Sidecar,
+}
+
+#[derive(Debug, Clone, Default)]
+struct TckRunContext {
+    feature_path: Option<PathBuf>,
+    schema_mode: TckSchemaMode,
+}
+
+thread_local! {
+    static TCK_RUN_CONTEXT: RefCell<TckRunContext> = RefCell::new(TckRunContext::default());
+}
+
+pub fn set_tck_run_context_for_current_thread(feature_path: PathBuf, schema_mode: TckSchemaMode) {
+    TCK_RUN_CONTEXT.with(|ctx| {
+        *ctx.borrow_mut() = TckRunContext {
+            feature_path: Some(feature_path),
+            schema_mode,
+        };
+    });
+}
+
+pub fn clear_tck_run_context_for_current_thread() {
+    TCK_RUN_CONTEXT.with(|ctx| {
+        *ctx.borrow_mut() = TckRunContext::default();
+    });
+}
+
+fn get_tck_run_context_for_current_thread() -> TckRunContext {
+    TCK_RUN_CONTEXT.with(|ctx| ctx.borrow().clone())
+}
 
 #[derive(World)]
 #[world(init = Self::new)]
@@ -63,6 +101,11 @@ impl UniWorld {
     }
 
     pub async fn init_db(&mut self) -> anyhow::Result<()> {
+        // Keep DB init idempotent so chained Given steps operate on the same graph state.
+        if self.db.is_some() {
+            return Ok(());
+        }
+
         // Use in_memory for fastest initialization
         // Disable background tasks for test databases (they create many short-lived instances)
         let mut config = uni_common::UniConfig::default();
@@ -70,6 +113,22 @@ impl UniWorld {
         config.compaction.enabled = false; // Disable background compaction
 
         let db = Uni::in_memory().config(config).build().await?;
+        let run_ctx = get_tck_run_context_for_current_thread();
+        if run_ctx.schema_mode == TckSchemaMode::Sidecar {
+            let feature_path = run_ctx.feature_path.ok_or_else(|| {
+                anyhow::anyhow!("TCK schema sidecar mode requires feature path run context")
+            })?;
+            let schema_path = feature_path.with_extension("schema.json");
+            if !schema_path.exists() {
+                anyhow::bail!(
+                    "Missing sidecar schema for feature '{}': '{}'",
+                    feature_path.display(),
+                    schema_path.display()
+                );
+            }
+            db.load_schema(&schema_path).await?;
+        }
+
         self.db = Some(Arc::new(db));
         Ok(())
     }

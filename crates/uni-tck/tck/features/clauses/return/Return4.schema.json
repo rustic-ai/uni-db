@@ -1,0 +1,59 @@
+{
+  "edge_types": {
+    "LIKE": {
+      "dst_labels": [],
+      "id": 1,
+      "src_labels": []
+    },
+    "POSTED_BY": {
+      "dst_labels": [],
+      "id": 2,
+      "src_labels": []
+    }
+  },
+  "indexes": [],
+  "labels": {
+    "A": {
+      "id": 1
+    },
+    "B": {
+      "id": 2
+    },
+    "Message": {
+      "id": 3
+    },
+    "Person": {
+      "id": 4
+    },
+    "Singleton": {
+      "id": 5
+    }
+  },
+  "properties": {
+    "A": {
+      "num": {
+        "nullable": true,
+        "type": "Json"
+      }
+    },
+    "B": {
+      "num": {
+        "nullable": true,
+        "type": "Int64"
+      }
+    },
+    "LIKE": {
+      "creationDate": {
+        "nullable": true,
+        "type": "Int64"
+      }
+    },
+    "Message": {
+      "id": {
+        "nullable": true,
+        "type": "Int64"
+      }
+    }
+  },
+  "schema_version": 1
+}

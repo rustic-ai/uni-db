@@ -1,0 +1,42 @@
+{
+  "edge_types": {
+    "OWNS": {
+      "dst_labels": [],
+      "id": 1,
+      "src_labels": []
+    }
+  },
+  "indexes": [],
+  "labels": {
+    "Bar": {
+      "id": 1
+    },
+    "DoesNotExist": {
+      "id": 2
+    },
+    "Dog": {
+      "id": 3
+    },
+    "Foo": {
+      "id": 4
+    },
+    "Person": {
+      "id": 5
+    }
+  },
+  "properties": {
+    "Bar": {
+      "name": {
+        "nullable": true,
+        "type": "String"
+      }
+    },
+    "Foo": {
+      "name": {
+        "nullable": true,
+        "type": "String"
+      }
+    }
+  },
+  "schema_version": 1
+}

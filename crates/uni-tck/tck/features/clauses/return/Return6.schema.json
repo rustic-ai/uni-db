@@ -1,0 +1,57 @@
+{
+  "edge_types": {
+    "A": {
+      "dst_labels": [],
+      "id": 1,
+      "src_labels": []
+    },
+    "ATE": {
+      "dst_labels": [],
+      "id": 2,
+      "src_labels": []
+    },
+    "FATHER": {
+      "dst_labels": [],
+      "id": 3,
+      "src_labels": []
+    },
+    "R": {
+      "dst_labels": [],
+      "id": 4,
+      "src_labels": []
+    }
+  },
+  "indexes": [],
+  "labels": {
+    "L": {
+      "id": 1
+    },
+    "Person": {
+      "id": 2
+    },
+    "T": {
+      "id": 3
+    }
+  },
+  "properties": {
+    "ATE": {
+      "times": {
+        "nullable": true,
+        "type": "Int64"
+      }
+    },
+    "Person": {
+      "age": {
+        "nullable": true,
+        "type": "Json"
+      }
+    },
+    "T": {
+      "name": {
+        "nullable": true,
+        "type": "String"
+      }
+    }
+  },
+  "schema_version": 1
+}

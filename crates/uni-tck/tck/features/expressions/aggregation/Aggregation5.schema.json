@@ -1,0 +1,33 @@
+{
+  "edge_types": {
+    "NOT_EXIST": {
+      "dst_labels": [],
+      "id": 1,
+      "src_labels": []
+    }
+  },
+  "indexes": [],
+  "labels": {
+    "DoesExist": {
+      "id": 1
+    },
+    "DoesNotExist": {
+      "id": 2
+    }
+  },
+  "properties": {
+    "DoesExist": {
+      "num": {
+        "nullable": true,
+        "type": "Int64"
+      }
+    },
+    "DoesNotExist": {
+      "num": {
+        "nullable": true,
+        "type": "Json"
+      }
+    }
+  },
+  "schema_version": 1
+}

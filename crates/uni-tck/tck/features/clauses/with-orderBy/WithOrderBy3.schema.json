@@ -1,0 +1,74 @@
+{
+  "edge_types": {},
+  "indexes": [],
+  "labels": {
+    "A": {
+      "id": 1
+    },
+    "B": {
+      "id": 2
+    },
+    "C": {
+      "id": 3
+    },
+    "D": {
+      "id": 4
+    },
+    "E": {
+      "id": 5
+    }
+  },
+  "properties": {
+    "A": {
+      "bool": {
+        "nullable": true,
+        "type": "Bool"
+      },
+      "num": {
+        "nullable": true,
+        "type": "Int64"
+      }
+    },
+    "B": {
+      "bool": {
+        "nullable": true,
+        "type": "Bool"
+      },
+      "num": {
+        "nullable": true,
+        "type": "Int64"
+      }
+    },
+    "C": {
+      "bool": {
+        "nullable": true,
+        "type": "Bool"
+      },
+      "num": {
+        "nullable": true,
+        "type": "Int64"
+      }
+    },
+    "D": {
+      "bool": {
+        "nullable": true,
+        "type": "Bool"
+      },
+      "num": {
+        "nullable": true,
+        "type": "Int64"
+      }
+    },
+    "E": {
+      "bool": {
+        "nullable": true,
+        "type": "Bool"
+      },
+      "num": {
+        "nullable": true,
+        "type": "Int64"
+      }
+    }
+  },
+  "schema_version": 1
+}

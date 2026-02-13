@@ -1,0 +1,46 @@
+{
+  "edge_types": {
+    "NOT_THERE": {
+      "dst_labels": [],
+      "id": 1,
+      "src_labels": []
+    },
+    "R": {
+      "dst_labels": [],
+      "id": 2,
+      "src_labels": []
+    }
+  },
+  "indexes": [],
+  "labels": {
+    "DoesNotExist": {
+      "id": 1
+    },
+    "Person": {
+      "id": 2
+    }
+  },
+  "properties": {
+    "Person": {
+      "level": {
+        "nullable": true,
+        "type": "Int64"
+      },
+      "name": {
+        "nullable": true,
+        "type": "String"
+      }
+    },
+    "R": {
+      "level": {
+        "nullable": true,
+        "type": "Int64"
+      },
+      "name": {
+        "nullable": true,
+        "type": "String"
+      }
+    }
+  },
+  "schema_version": 1
+}
