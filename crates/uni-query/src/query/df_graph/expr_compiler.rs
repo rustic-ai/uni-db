@@ -172,7 +172,9 @@ impl PhysicalExpr for LargeListToCypherValueExpr {
                 "LargeListToCypherValueExpr expects exactly 1 child".to_string(),
             ));
         }
-        Ok(Arc::new(LargeListToCypherValueExpr::new(children[0].clone())))
+        Ok(Arc::new(LargeListToCypherValueExpr::new(
+            children[0].clone(),
+        )))
     }
 
     fn fmt_sql(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
@@ -417,7 +419,8 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
         let right_phy = self.compile(right, input_schema)?;
         let left_dt = left_phy.data_type(input_schema).ok();
         let right_dt = right_phy.data_type(input_schema).ok();
-        let has_cv = is_cypher_value_type(left_dt.as_ref()) || is_cypher_value_type(right_dt.as_ref());
+        let has_cv =
+            is_cypher_value_type(left_dt.as_ref()) || is_cypher_value_type(right_dt.as_ref());
 
         if has_cv {
             // CypherValue types need special handling via compile_binary_op
@@ -1286,7 +1289,8 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
         // Recalculate types after unification
         let left_type = left.data_type(input_schema).ok();
         let right_type = right.data_type(input_schema).ok();
-        let has_cv = is_cypher_value_type(left_type.as_ref()) || is_cypher_value_type(right_type.as_ref());
+        let has_cv =
+            is_cypher_value_type(left_type.as_ref()) || is_cypher_value_type(right_type.as_ref());
 
         if has_cv {
             if let Some(result) = self.compile_cv_comparison(
@@ -1448,10 +1452,7 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
     /// Wrap a LargeBinary (CypherValue) expression with `_cv_to_bool` conversion.
     ///
     /// Used when a CypherValue expression needs to be used as a boolean (e.g., in WHEN clauses).
-    fn wrap_with_cv_to_bool(
-        &self,
-        expr: Arc<dyn PhysicalExpr>,
-    ) -> Result<Arc<dyn PhysicalExpr>> {
+    fn wrap_with_cv_to_bool(&self, expr: Arc<dyn PhysicalExpr>) -> Result<Arc<dyn PhysicalExpr>> {
         let Some(udf) = self.state.scalar_functions().get("_cv_to_bool") else {
             return Err(anyhow!("_cv_to_bool UDF not found"));
         };

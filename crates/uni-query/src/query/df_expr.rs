@@ -282,7 +282,9 @@ pub fn cypher_expr_to_df(expr: &Expr, context: Option<&TranslationContext>) -> R
         Expr::Map(entries) => {
             if entries.is_empty() {
                 // Empty map {} — encode as LargeBinary CypherValue since named_struct() needs args
-                let cv_bytes = uni_common::cypher_value_codec::encode(&uni_common::Value::Map(Default::default()));
+                let cv_bytes = uni_common::cypher_value_codec::encode(&uni_common::Value::Map(
+                    Default::default(),
+                ));
                 return Ok(lit(ScalarValue::LargeBinary(Some(cv_bytes))));
             }
             // Use named_struct to create a Struct type in DataFusion.
@@ -2385,7 +2387,6 @@ pub fn apply_type_coercion(expr: &DfExpr, schema: &datafusion::common::DFSchema)
         _ => Ok(expr.clone()),
     }
 }
-
 
 #[cfg(test)]
 mod tests {

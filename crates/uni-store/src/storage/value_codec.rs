@@ -313,18 +313,23 @@ mod tests {
         let null_cv = uni_common::cypher_value_codec::encode(&uni_common::Value::Null);
         builder.append_value(&null_cv);
 
-        let text_cv = uni_common::cypher_value_codec::encode(&uni_common::Value::String("plain text".to_string()));
+        let text_cv = uni_common::cypher_value_codec::encode(&uni_common::Value::String(
+            "plain text".to_string(),
+        ));
         builder.append_value(&text_cv);
 
         let array = builder.finish();
 
-        let val = value_from_column(&array, &DataType::CypherValue, 0, CrdtDecodeMode::Strict).unwrap();
+        let val =
+            value_from_column(&array, &DataType::CypherValue, 0, CrdtDecodeMode::Strict).unwrap();
         assert_eq!(val, serde_json::json!({"key": "value"}));
 
-        let val = value_from_column(&array, &DataType::CypherValue, 1, CrdtDecodeMode::Strict).unwrap();
+        let val =
+            value_from_column(&array, &DataType::CypherValue, 1, CrdtDecodeMode::Strict).unwrap();
         assert_eq!(val, Value::Null);
 
-        let val = value_from_column(&array, &DataType::CypherValue, 2, CrdtDecodeMode::Strict).unwrap();
+        let val =
+            value_from_column(&array, &DataType::CypherValue, 2, CrdtDecodeMode::Strict).unwrap();
         assert_eq!(val, Value::String("plain text".to_string()));
     }
 }

@@ -164,8 +164,7 @@ pub fn large_list_of_cv_to_cv_array(
         .downcast_ref::<LargeBinaryArray>()
         .ok_or_else(|| {
             datafusion::error::DataFusionError::Execution(
-                "large_list_of_cv_to_cv_array: inner values must be LargeBinaryArray"
-                    .to_string(),
+                "large_list_of_cv_to_cv_array: inner values must be LargeBinaryArray".to_string(),
             )
         })?;
 

@@ -91,48 +91,43 @@ pub fn decode(bytes: &[u8]) -> Result<Value, UniError> {
     match tag {
         TAG_NULL => Ok(Value::Null),
         TAG_BOOL => {
-            let b: bool = rmp_serde::from_slice(payload)
-                .map_err(|e| UniError::Storage {
-                    message: format!("failed to decode bool: {}", e),
-                    source: None,
-                })?;
+            let b: bool = rmp_serde::from_slice(payload).map_err(|e| UniError::Storage {
+                message: format!("failed to decode bool: {}", e),
+                source: None,
+            })?;
             Ok(Value::Bool(b))
         }
         TAG_INT => {
-            let i: i64 = rmp_serde::from_slice(payload)
-                .map_err(|e| UniError::Storage {
-                    message: format!("failed to decode int: {}", e),
-                    source: None,
-                })?;
+            let i: i64 = rmp_serde::from_slice(payload).map_err(|e| UniError::Storage {
+                message: format!("failed to decode int: {}", e),
+                source: None,
+            })?;
             Ok(Value::Int(i))
         }
         TAG_FLOAT => {
-            let f: f64 = rmp_serde::from_slice(payload)
-                .map_err(|e| UniError::Storage {
-                    message: format!("failed to decode float: {}", e),
-                    source: None,
-                })?;
+            let f: f64 = rmp_serde::from_slice(payload).map_err(|e| UniError::Storage {
+                message: format!("failed to decode float: {}", e),
+                source: None,
+            })?;
             Ok(Value::Float(f))
         }
         TAG_STRING => {
-            let s: String = rmp_serde::from_slice(payload)
-                .map_err(|e| UniError::Storage {
-                    message: format!("failed to decode string: {}", e),
-                    source: None,
-                })?;
+            let s: String = rmp_serde::from_slice(payload).map_err(|e| UniError::Storage {
+                message: format!("failed to decode string: {}", e),
+                source: None,
+            })?;
             Ok(Value::String(s))
         }
         TAG_BYTES => {
-            let b: Vec<u8> = rmp_serde::from_slice(payload)
-                .map_err(|e| UniError::Storage {
-                    message: format!("failed to decode bytes: {}", e),
-                    source: None,
-                })?;
+            let b: Vec<u8> = rmp_serde::from_slice(payload).map_err(|e| UniError::Storage {
+                message: format!("failed to decode bytes: {}", e),
+                source: None,
+            })?;
             Ok(Value::Bytes(b))
         }
         TAG_LIST => {
-            let blobs: Vec<Vec<u8>> = rmp_serde::from_slice(payload)
-                .map_err(|e| UniError::Storage {
+            let blobs: Vec<Vec<u8>> =
+                rmp_serde::from_slice(payload).map_err(|e| UniError::Storage {
                     message: format!("failed to decode list: {}", e),
                     source: None,
                 })?;
@@ -140,8 +135,8 @@ pub fn decode(bytes: &[u8]) -> Result<Value, UniError> {
             Ok(Value::List(items?))
         }
         TAG_MAP => {
-            let blob_map: HashMap<String, Vec<u8>> = rmp_serde::from_slice(payload)
-                .map_err(|e| UniError::Storage {
+            let blob_map: HashMap<String, Vec<u8>> =
+                rmp_serde::from_slice(payload).map_err(|e| UniError::Storage {
                     message: format!("failed to decode map: {}", e),
                     source: None,
                 })?;
@@ -152,8 +147,8 @@ pub fn decode(bytes: &[u8]) -> Result<Value, UniError> {
             Ok(Value::Map(map))
         }
         TAG_NODE => {
-            let np: NodePayload = rmp_serde::from_slice(payload)
-                .map_err(|e| UniError::Storage {
+            let np: NodePayload =
+                rmp_serde::from_slice(payload).map_err(|e| UniError::Storage {
                     message: format!("failed to decode node: {}", e),
                     source: None,
                 })?;
@@ -168,8 +163,8 @@ pub fn decode(bytes: &[u8]) -> Result<Value, UniError> {
             }))
         }
         TAG_EDGE => {
-            let ep: EdgePayload = rmp_serde::from_slice(payload)
-                .map_err(|e| UniError::Storage {
+            let ep: EdgePayload =
+                rmp_serde::from_slice(payload).map_err(|e| UniError::Storage {
                     message: format!("failed to decode edge: {}", e),
                     source: None,
                 })?;
@@ -186,40 +181,43 @@ pub fn decode(bytes: &[u8]) -> Result<Value, UniError> {
             }))
         }
         TAG_PATH => {
-            let pp: PathPayload = rmp_serde::from_slice(payload)
-                .map_err(|e| UniError::Storage {
+            let pp: PathPayload =
+                rmp_serde::from_slice(payload).map_err(|e| UniError::Storage {
                     message: format!("failed to decode path: {}", e),
                     source: None,
                 })?;
-            let nodes: Result<Vec<Node>, UniError> = pp.nodes.iter().map(|b| {
-                match decode(b)? {
+            let nodes: Result<Vec<Node>, UniError> = pp
+                .nodes
+                .iter()
+                .map(|b| match decode(b)? {
                     Value::Node(n) => Ok(n),
                     _ => Err(UniError::Storage {
                         message: "path node blob is not a Node".to_string(),
                         source: None,
                     }),
-                }
-            }).collect();
-            let edges: Result<Vec<Edge>, UniError> = pp.edges.iter().map(|b| {
-                match decode(b)? {
+                })
+                .collect();
+            let edges: Result<Vec<Edge>, UniError> = pp
+                .edges
+                .iter()
+                .map(|b| match decode(b)? {
                     Value::Edge(e) => Ok(e),
                     _ => Err(UniError::Storage {
                         message: "path edge blob is not an Edge".to_string(),
                         source: None,
                     }),
-                }
-            }).collect();
+                })
+                .collect();
             Ok(Value::Path(Path {
                 nodes: nodes?,
                 edges: edges?,
             }))
         }
         TAG_VECTOR => {
-            let v: Vec<f32> = rmp_serde::from_slice(payload)
-                .map_err(|e| UniError::Storage {
-                    message: format!("failed to decode vector: {}", e),
-                    source: None,
-                })?;
+            let v: Vec<f32> = rmp_serde::from_slice(payload).map_err(|e| UniError::Storage {
+                message: format!("failed to decode vector: {}", e),
+                source: None,
+            })?;
             Ok(Value::Vector(v))
         }
         _ => Err(UniError::Storage {
@@ -315,14 +313,15 @@ fn encode_to_buf(value: &Value, buf: &mut Vec<u8>) {
         }
         Value::Map(map) => {
             buf.push(TAG_MAP);
-            let blob_map: HashMap<String, Vec<u8>> = map.iter()
-                .map(|(k, v)| (k.clone(), encode(v)))
-                .collect();
+            let blob_map: HashMap<String, Vec<u8>> =
+                map.iter().map(|(k, v)| (k.clone(), encode(v))).collect();
             rmp_serde::encode::write(buf, &blob_map).expect("map encode failed");
         }
         Value::Node(node) => {
             buf.push(TAG_NODE);
-            let props_blobs: Vec<(String, Vec<u8>)> = node.properties.iter()
+            let props_blobs: Vec<(String, Vec<u8>)> = node
+                .properties
+                .iter()
                 .map(|(k, v)| (k.clone(), encode(v)))
                 .collect();
             let payload = NodePayload {
@@ -334,7 +333,9 @@ fn encode_to_buf(value: &Value, buf: &mut Vec<u8>) {
         }
         Value::Edge(edge) => {
             buf.push(TAG_EDGE);
-            let props_blobs: Vec<(String, Vec<u8>)> = edge.properties.iter()
+            let props_blobs: Vec<(String, Vec<u8>)> = edge
+                .properties
+                .iter()
                 .map(|(k, v)| (k.clone(), encode(v)))
                 .collect();
             let payload = EdgePayload {
@@ -348,10 +349,14 @@ fn encode_to_buf(value: &Value, buf: &mut Vec<u8>) {
         }
         Value::Path(path) => {
             buf.push(TAG_PATH);
-            let nodes_blobs: Vec<Vec<u8>> = path.nodes.iter()
+            let nodes_blobs: Vec<Vec<u8>> = path
+                .nodes
+                .iter()
                 .map(|n| encode(&Value::Node(n.clone())))
                 .collect();
-            let edges_blobs: Vec<Vec<u8>> = path.edges.iter()
+            let edges_blobs: Vec<Vec<u8>> = path
+                .edges
+                .iter()
                 .map(|e| encode(&Value::Edge(e.clone())))
                 .collect();
             let payload = PathPayload {
@@ -541,22 +546,18 @@ mod tests {
     #[test]
     fn test_round_trip_path() {
         let v = Value::Path(Path {
-            nodes: vec![
-                Node {
-                    vid: Vid::from(1),
-                    label: "A".to_string(),
-                    properties: HashMap::new(),
-                },
-            ],
-            edges: vec![
-                Edge {
-                    eid: Eid::from(1),
-                    edge_type: "REL".to_string(),
-                    src: Vid::from(1),
-                    dst: Vid::from(2),
-                    properties: HashMap::new(),
-                },
-            ],
+            nodes: vec![Node {
+                vid: Vid::from(1),
+                label: "A".to_string(),
+                properties: HashMap::new(),
+            }],
+            edges: vec![Edge {
+                eid: Eid::from(1),
+                edge_type: "REL".to_string(),
+                src: Vid::from(1),
+                dst: Vid::from(2),
+                properties: HashMap::new(),
+            }],
         });
         let bytes = encode(&v);
         assert_eq!(bytes[0], TAG_PATH);
@@ -579,7 +580,10 @@ mod tests {
         assert_eq!(peek_tag(&encode(&Value::Bool(true))), Some(TAG_BOOL));
         assert_eq!(peek_tag(&encode(&Value::Int(42))), Some(TAG_INT));
         assert_eq!(peek_tag(&encode(&Value::Float(3.14))), Some(TAG_FLOAT));
-        assert_eq!(peek_tag(&encode(&Value::String("x".to_string()))), Some(TAG_STRING));
+        assert_eq!(
+            peek_tag(&encode(&Value::String("x".to_string()))),
+            Some(TAG_STRING)
+        );
         assert_eq!(peek_tag(&[]), None);
     }
 

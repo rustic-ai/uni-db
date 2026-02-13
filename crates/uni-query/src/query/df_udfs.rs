@@ -2087,7 +2087,10 @@ where
                     _ => None,
                 }
             }
-            ScalarValue::Utf8(None) | ScalarValue::LargeUtf8(None) | ScalarValue::LargeBinary(None) | ScalarValue::Null => None,
+            ScalarValue::Utf8(None)
+            | ScalarValue::LargeUtf8(None)
+            | ScalarValue::LargeBinary(None)
+            | ScalarValue::Null => None,
             _ => None,
         }
     };
@@ -2098,9 +2101,9 @@ where
             let r_str = extract_string(r_scalar);
 
             match (l_str, r_str) {
-                (Some(l), Some(r)) => {
-                    Ok(ColumnarValue::Scalar(ScalarValue::Boolean(Some(op(&l, &r)))))
-                }
+                (Some(l), Some(r)) => Ok(ColumnarValue::Scalar(ScalarValue::Boolean(Some(op(
+                    &l, &r,
+                ))))),
                 _ => Ok(ColumnarValue::Scalar(ScalarValue::Boolean(None))),
             }
         }
@@ -2219,7 +2222,10 @@ where
 
             let result: BooleanArray = (0..l_arr.len())
                 .map(|idx| {
-                    match (extract_string_at(l_arr.as_ref(), idx), extract_string_at(r_arr.as_ref(), idx)) {
+                    match (
+                        extract_string_at(l_arr.as_ref(), idx),
+                        extract_string_at(r_arr.as_ref(), idx),
+                    ) {
                         (Some(l_str), Some(r_str)) => Some(op(&l_str, &r_str)),
                         _ => None,
                     }
@@ -2562,9 +2568,7 @@ impl ScalarUDFImpl for CvToBoolUdf {
                 let b = val.as_bool().unwrap_or(false);
                 Ok(ColumnarValue::Scalar(ScalarValue::Boolean(Some(b))))
             }
-            ColumnarValue::Scalar(_) => {
-                Ok(ColumnarValue::Scalar(ScalarValue::Boolean(None)))
-            }
+            ColumnarValue::Scalar(_) => Ok(ColumnarValue::Scalar(ScalarValue::Boolean(None))),
             ColumnarValue::Array(arr) => {
                 let lb_arr = arr
                     .as_any()

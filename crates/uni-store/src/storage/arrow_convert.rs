@@ -279,11 +279,10 @@ pub fn arrow_to_value(col: &dyn Array, row: usize) -> Value {
         if bytes.is_empty() {
             return Value::Null;
         }
-        return uni_common::cypher_value_codec::decode(bytes)
-            .unwrap_or_else(|e| {
-                eprintln!("CypherValue decode error: {}", e);
-                Value::Null
-            });
+        return uni_common::cypher_value_codec::decode(bytes).unwrap_or_else(|e| {
+            eprintln!("CypherValue decode error: {}", e);
+            Value::Null
+        });
     }
 
     // Binary (CRDT MessagePack) - decode to Value via serde_json boundary

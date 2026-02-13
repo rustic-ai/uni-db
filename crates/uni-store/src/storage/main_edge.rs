@@ -284,15 +284,16 @@ impl MainEdgeDataset {
                     let src_vid = Vid::from(src_arr.value(0));
                     let dst_vid = Vid::from(dst_arr.value(0));
                     let edge_type = type_arr.value(0).to_string();
-                    let properties: Properties =
-                        if props_arr.is_null(0) || props_arr.value(0).is_empty() {
-                            Properties::new()
-                        } else {
-                            let uni_val = uni_common::cypher_value_codec::decode(props_arr.value(0))
-                                .unwrap_or(uni_common::Value::Null);
-                            let json_val: serde_json::Value = uni_val.into();
-                            serde_json::from_value(json_val).unwrap_or_default()
-                        };
+                    let properties: Properties = if props_arr.is_null(0)
+                        || props_arr.value(0).is_empty()
+                    {
+                        Properties::new()
+                    } else {
+                        let uni_val = uni_common::cypher_value_codec::decode(props_arr.value(0))
+                            .unwrap_or(uni_common::Value::Null);
+                        let json_val: serde_json::Value = uni_val.into();
+                        serde_json::from_value(json_val).unwrap_or_default()
+                    };
 
                     return Ok(Some((src_vid, dst_vid, edge_type, properties)));
                 }

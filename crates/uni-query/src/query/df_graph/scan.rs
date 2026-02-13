@@ -1643,7 +1643,8 @@ fn map_to_output_schema(
                                     match uni_common::cypher_value_codec::decode(blob) {
                                         Ok(uni_common::Value::Map(map)) => {
                                             if let Some(val) = map.get(prop) {
-                                                let sub_bytes = uni_common::cypher_value_codec::encode(val);
+                                                let sub_bytes =
+                                                    uni_common::cypher_value_codec::encode(val);
                                                 builder.append_value(&sub_bytes);
                                             } else {
                                                 builder.append_null();
@@ -1744,7 +1745,8 @@ fn map_edge_to_output_schema(
                                 match uni_common::cypher_value_codec::decode(blob) {
                                     Ok(uni_common::Value::Map(map)) => {
                                         if let Some(val) = map.get(prop) {
-                                            let sub_bytes = uni_common::cypher_value_codec::encode(val);
+                                            let sub_bytes =
+                                                uni_common::cypher_value_codec::encode(val);
                                             builder.append_value(&sub_bytes);
                                         } else {
                                             builder.append_null();
