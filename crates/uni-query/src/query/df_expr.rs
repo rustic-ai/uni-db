@@ -35,12 +35,10 @@ use anyhow::{Result, anyhow};
 use datafusion::common::{Column, ScalarValue};
 use datafusion::logical_expr::{ColumnarValue, Expr as DfExpr, ScalarFunctionArgs, col, lit};
 use datafusion::prelude::ExprFunctionExt;
-use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::ops::Not;
 use std::sync::Arc;
 use uni_common::Value;
-use uni_common::core::schema::PropertyMeta;
 use uni_cypher::ast::{BinaryOp, CypherLiteral, Expr, MapProjectionItem, UnaryOp};
 
 // Internal column names for graph entities
@@ -88,18 +86,24 @@ fn is_string_literal(e: &DfExpr) -> bool {
     matches!(e, DfExpr::Literal(ScalarValue::Utf8(_), _))
 }
 
-/// Check if a DataFusion expression produces a list value.
-fn is_list_expr(e: &DfExpr) -> bool {
-    const LIST_FUNCS: &[&str] = &[
-        "make_array",
-        "_make_cypher_list",
-        "_cypher_list_concat",
-        "_cypher_list_append",
-    ];
+/// CypherValue list UDF names (LargeBinary-encoded lists).
+const CYPHER_LIST_FUNCS: &[&str] = &[
+    "_make_cypher_list",
+    "_cypher_list_concat",
+    "_cypher_list_append",
+];
 
+/// Check if a DataFusion expression is a CypherValue-encoded list (LargeBinary).
+fn is_cypher_list_expr(e: &DfExpr) -> bool {
     matches!(e, DfExpr::Literal(ScalarValue::LargeBinary(_), _))
+        || matches!(e, DfExpr::ScalarFunction(f) if CYPHER_LIST_FUNCS.contains(&f.func.name()))
+}
+
+/// Check if a DataFusion expression produces a list value (native or CypherValue).
+fn is_list_expr(e: &DfExpr) -> bool {
+    is_cypher_list_expr(e)
         || matches!(e, DfExpr::Literal(ScalarValue::List(_), _))
-        || matches!(e, DfExpr::ScalarFunction(f) if LIST_FUNCS.contains(&f.func.name()))
+        || matches!(e, DfExpr::ScalarFunction(f) if f.func.name() == "make_array")
 }
 
 /// Type of a variable in the query context.
@@ -164,25 +168,14 @@ pub fn cypher_expr_to_df(expr: &Expr, context: Option<&TranslationContext>) -> R
         }),
 
         Expr::Variable(name) => {
-            // Direct identifier becomes a column reference
-            // Use Column::from_name() to avoid treating dots as table.column qualifiers
-            // This is critical for transformed property expressions like "e.salary"
-            //
-            // When variable kind is known, resolve to identity column:
-            // - Node variables: n → n._vid
-            // - Edge variables: r → r._eid
-            // - Path variables: p → p (kept as-is, struct column)
+            // Use Column::from_name() to avoid treating dots as table.column qualifiers.
+            // When the variable kind is known (Node, Edge, or Path), return
+            // the column representing the whole entity. The struct is built by
+            // add_structural_projection() in the planner.
             if let Some(ctx) = context
-                && let Some(kind) = ctx.variable_kinds.get(name)
+                && ctx.variable_kinds.contains_key(name)
             {
-                return match kind {
-                    VariableKind::Node | VariableKind::Edge => {
-                        // Return the Struct column representing the whole entity.
-                        // This column is added by the hybrid planner when structural access is needed.
-                        Ok(DfExpr::Column(Column::from_name(name)))
-                    }
-                    VariableKind::Path => Ok(DfExpr::Column(Column::from_name(name))),
-                };
+                return Ok(DfExpr::Column(Column::from_name(name)));
             }
 
             // Check if the variable name matches a parameter (e.g., CTE working table
@@ -245,12 +238,7 @@ pub fn cypher_expr_to_df(expr: &Expr, context: Option<&TranslationContext>) -> R
 
             // If the array is CypherValue-encoded (LargeBinary), use _cypher_list_slice UDF
             // instead of DataFusion's array_slice which rejects LargeBinary input
-            let is_cv = matches!(&array_expr, DfExpr::Literal(ScalarValue::LargeBinary(_), _))
-                || matches!(&array_expr, DfExpr::ScalarFunction(f) if f.func.name() == "_make_cypher_list"
-                    || f.func.name() == "_cypher_list_concat"
-                    || f.func.name() == "_cypher_list_append");
-
-            if is_cv {
+            if is_cypher_list_expr(&array_expr) {
                 Ok(dummy_udf_expr(
                     "_cypher_list_slice",
                     vec![array_expr, start_expr, end_expr],
@@ -630,25 +618,15 @@ fn translate_in_expression(
         && let Some(kind) = ctx.variable_kinds.get(var)
     {
         match kind {
-            VariableKind::Node => {
-                use datafusion::logical_expr::Cast;
-                DfExpr::Cast(Cast::new(
-                    Box::new(DfExpr::Column(Column::from_name(format!(
-                        "{}.{}",
-                        var, COL_VID
-                    )))),
+            VariableKind::Node | VariableKind::Edge => {
+                let id_col = match kind {
+                    VariableKind::Node => COL_VID,
+                    _ => COL_EID,
+                };
+                cast_expr(
+                    DfExpr::Column(Column::from_name(format!("{}.{}", var, id_col))),
                     datafusion::arrow::datatypes::DataType::Int64,
-                ))
-            }
-            VariableKind::Edge => {
-                use datafusion::logical_expr::Cast;
-                DfExpr::Cast(Cast::new(
-                    Box::new(DfExpr::Column(Column::from_name(format!(
-                        "{}.{}",
-                        var, COL_EID
-                    )))),
-                    datafusion::arrow::datatypes::DataType::Int64,
-                ))
+                )
             }
             _ => cypher_expr_to_df(expr, context)?,
         }
@@ -662,14 +640,9 @@ fn translate_in_expression(
     // for cases like `1 IN ['1', 2]`.
     if let Expr::List(items) = list {
         if let Some(json_array) = try_items_to_json(items) {
-            // All-literal list → encode as CypherValue and pass to _cypher_in
-            let json_str = serde_json::Value::Array(json_array).to_string();
-            let cv_bytes = {
-                let parsed: serde_json::Value = serde_json::from_str(&json_str)
-                    .map_err(|e| anyhow!("Failed to parse IN list as JSON: {e}"))?;
-                let uni_val: uni_common::Value = parsed.into();
-                uni_common::cypher_value_codec::encode(&uni_val)
-            };
+            // All-literal list -> encode directly as CypherValue (no round-trip through string)
+            let uni_val: uni_common::Value = serde_json::Value::Array(json_array).into();
+            let cv_bytes = uni_common::cypher_value_codec::encode(&uni_val);
             let list_literal = lit(ScalarValue::LargeBinary(Some(cv_bytes)));
             Ok(dummy_udf_expr("_cypher_in", vec![left_expr, list_literal]))
         } else {
@@ -1620,40 +1593,6 @@ impl datafusion::logical_expr::ScalarUDFImpl for DummyUdf {
     }
 }
 
-/// Rewrite overflow property references in a DataFusion filter expression.
-///
-/// Properties that are NOT in the label's schema are "overflow" properties.
-/// With CypherValue encoding, these are already materialized as individual
-/// LargeBinary columns by scan.rs, so no rewriting is needed - the columns
-/// will be compared using Cypher comparison UDFs inserted by type coercion.
-///
-/// This function is now a no-op for CypherValue migration.
-pub fn rewrite_overflow_filters(
-    expr: DfExpr,
-    variable: &str,
-    label_props: Option<&HashMap<String, PropertyMeta>>,
-) -> Result<DfExpr> {
-    // No-op: overflow properties are already LargeBinary columns
-    let _ = (variable, label_props);
-    Ok(expr)
-}
-
-/// Like `rewrite_overflow_filters`, but with a custom source column suffix.
-///
-/// With CypherValue encoding, this is now a no-op.
-pub fn rewrite_overflow_filters_with_source(
-    expr: DfExpr,
-    variable: &str,
-    label_props: Option<&HashMap<String, PropertyMeta>>,
-    source_col_suffix: &str,
-) -> Result<DfExpr> {
-    // No-op: overflow properties are already LargeBinary columns
-    let _ = (variable, label_props, source_col_suffix);
-    Ok(expr)
-}
-
-// Old implementation removed - no longer needed with CypherValue
-#[allow(dead_code)]
 /// Collect all property accesses from an expression tree.
 ///
 /// Returns a list of (variable, property) pairs needed for column projection.

@@ -26,7 +26,10 @@
 
 use arrow::array::ArrayRef;
 use arrow::datatypes::DataType;
-use arrow_array::Array;
+use arrow_array::{
+    Array, BooleanArray, Float32Array, Float64Array, Int32Array, Int64Array, LargeBinaryArray,
+    LargeStringArray, StringArray, UInt64Array,
+};
 use datafusion::error::Result as DFResult;
 use datafusion::logical_expr::{
     ColumnarValue, ScalarFunctionArgs, ScalarUDF, ScalarUDFImpl, Signature, TypeSignature,
@@ -1311,20 +1314,83 @@ impl ScalarUDFImpl for DurationPropertyUdf {
     }
 }
 
+/// Downcast an `ArrayRef` to a concrete Arrow array type, returning a
+/// `DataFusionError::Execution` on failure.
+macro_rules! downcast_arr {
+    ($arr:expr, $array_type:ty) => {
+        $arr.as_any().downcast_ref::<$array_type>().ok_or_else(|| {
+            datafusion::error::DataFusionError::Execution(format!(
+                "Failed to downcast to {}",
+                stringify!($array_type)
+            ))
+        })?
+    };
+}
+
+/// Convert a string slice to `Value`, attempting JSON parse for object/array/quoted-string prefixes.
+fn string_to_value(s: &str) -> Value {
+    if (s.starts_with('{') || s.starts_with('[') || s.starts_with('"'))
+        && let Ok(obj) = serde_json::from_str::<serde_json::Value>(s)
+    {
+        return Value::from(obj);
+    }
+    Value::String(s.to_string())
+}
+
+/// Extract a `uni_common::Value` directly from an Arrow array at a given row.
+///
+/// This bypasses the `ScalarValue` intermediate allocation for common types,
+/// significantly reducing overhead in UDF execution. Falls back to the
+/// `ScalarValue::try_from_array` -> `scalar_to_value` path for complex types.
+fn get_value_from_array(arr: &ArrayRef, row: usize) -> DFResult<Value> {
+    if arr.is_null(row) {
+        return Ok(Value::Null);
+    }
+
+    match arr.data_type() {
+        DataType::LargeBinary => {
+            let typed = downcast_arr!(arr, LargeBinaryArray);
+            let bytes = typed.value(row);
+            if let Ok(val) = uni_common::cypher_value_codec::decode(bytes) {
+                return Ok(val);
+            }
+            // Fallback: try plain JSON text for UNWIND or legacy data
+            Ok(serde_json::from_slice::<serde_json::Value>(bytes)
+                .map(Value::from)
+                .unwrap_or(Value::Null))
+        }
+        DataType::Int64 => Ok(Value::Int(downcast_arr!(arr, Int64Array).value(row))),
+        DataType::Float64 => Ok(Value::Float(downcast_arr!(arr, Float64Array).value(row))),
+        DataType::Utf8 => Ok(string_to_value(downcast_arr!(arr, StringArray).value(row))),
+        DataType::LargeUtf8 => Ok(string_to_value(
+            downcast_arr!(arr, LargeStringArray).value(row),
+        )),
+        DataType::Boolean => Ok(Value::Bool(downcast_arr!(arr, BooleanArray).value(row))),
+        DataType::UInt64 => Ok(Value::Int(downcast_arr!(arr, UInt64Array).value(row) as i64)),
+        DataType::Int32 => Ok(Value::Int(downcast_arr!(arr, Int32Array).value(row) as i64)),
+        DataType::Float32 => Ok(Value::Float(
+            downcast_arr!(arr, Float32Array).value(row) as f64
+        )),
+        // Fallback: use existing ScalarValue path for Struct, List, FixedSizeList,
+        // Timestamp, Date32, and other complex types
+        _ => {
+            let scalar = ScalarValue::try_from_array(arr, row).map_err(|e| {
+                datafusion::error::DataFusionError::Execution(format!(
+                    "Cannot extract scalar from array at row {}: {}",
+                    row, e
+                ))
+            })?;
+            scalar_to_value(&scalar)
+        }
+    }
+}
+
 /// Convert DataFusion `ColumnarValue` arguments to `uni_common::Value` for UDF evaluation.
 fn get_value_args_for_row(args: &[ColumnarValue], row: usize) -> DFResult<Vec<Value>> {
     args.iter()
         .map(|arg| match arg {
             ColumnarValue::Scalar(scalar) => scalar_to_value(scalar),
-            ColumnarValue::Array(arr) => {
-                let scalar = ScalarValue::try_from_array(arr, row).map_err(|e| {
-                    datafusion::error::DataFusionError::Execution(format!(
-                        "Cannot extract scalar from array at row {}: {}",
-                        row, e
-                    ))
-                })?;
-                scalar_to_value(&scalar)
-            }
+            ColumnarValue::Array(arr) => get_value_from_array(arr, row),
         })
         .collect()
 }
@@ -1380,6 +1446,16 @@ where
     Ok(ColumnarValue::Array(arr))
 }
 
+/// Convert a scalar Arrow array (from Struct/List/LargeList/FixedSizeList) to `Value`.
+/// Returns `Null` if the array is empty or the first element is null.
+fn scalar_arr_to_value(arr: &dyn arrow::array::Array) -> DFResult<Value> {
+    if arr.is_empty() || arr.is_null(0) {
+        Ok(Value::Null)
+    } else {
+        Ok(uni_store::storage::arrow_convert::arrow_to_value(arr, 0))
+    }
+}
+
 /// Convert a single `ScalarValue` to `uni_common::Value`.
 fn scalar_to_value(scalar: &ScalarValue) -> DFResult<Value> {
     match scalar {
@@ -1413,46 +1489,10 @@ fn scalar_to_value(scalar: &ScalarValue) -> DFResult<Value> {
             Ok(Value::Float(*f))
         }
         ScalarValue::Boolean(Some(b)) => Ok(Value::Bool(*b)),
-        ScalarValue::Struct(arr) => {
-            if arr.len() == 0 || arr.is_null(0) {
-                Ok(Value::Null)
-            } else {
-                Ok(uni_store::storage::arrow_convert::arrow_to_value(
-                    arr.as_ref(),
-                    0,
-                ))
-            }
-        }
-        ScalarValue::List(arr) => {
-            if arr.len() == 0 || arr.is_null(0) {
-                Ok(Value::Null)
-            } else {
-                Ok(uni_store::storage::arrow_convert::arrow_to_value(
-                    arr.as_ref(),
-                    0,
-                ))
-            }
-        }
-        ScalarValue::LargeList(arr) => {
-            if arr.len() == 0 || arr.is_null(0) {
-                Ok(Value::Null)
-            } else {
-                Ok(uni_store::storage::arrow_convert::arrow_to_value(
-                    arr.as_ref(),
-                    0,
-                ))
-            }
-        }
-        ScalarValue::FixedSizeList(arr) => {
-            if arr.len() == 0 || arr.is_null(0) {
-                Ok(Value::Null)
-            } else {
-                Ok(uni_store::storage::arrow_convert::arrow_to_value(
-                    arr.as_ref(),
-                    0,
-                ))
-            }
-        }
+        ScalarValue::Struct(arr) => scalar_arr_to_value(arr.as_ref()),
+        ScalarValue::List(arr) => scalar_arr_to_value(arr.as_ref()),
+        ScalarValue::LargeList(arr) => scalar_arr_to_value(arr.as_ref()),
+        ScalarValue::FixedSizeList(arr) => scalar_arr_to_value(arr.as_ref()),
         // Unsigned and smaller integer types
         ScalarValue::UInt64(Some(u)) => Ok(Value::Int(*u as i64)),
         ScalarValue::UInt32(Some(u)) => Ok(Value::Int(*u as i64)),
@@ -2311,6 +2351,214 @@ pub fn create_cypher_gt_eq_udf() -> ScalarUDF {
     ScalarUDF::new_from_impl(CypherCompareUdf::new("_cypher_gt_eq", BinaryOp::GtEq))
 }
 
+/// Apply a comparison operator to an `Ordering` result.
+#[allow(clippy::match_like_matches_macro)]
+fn apply_comparison_op(ord: std::cmp::Ordering, op: &BinaryOp) -> bool {
+    use std::cmp::Ordering;
+    match (ord, op) {
+        (Ordering::Less, BinaryOp::Lt | BinaryOp::LtEq | BinaryOp::NotEq) => true,
+        (Ordering::Equal, BinaryOp::Eq | BinaryOp::LtEq | BinaryOp::GtEq) => true,
+        (Ordering::Greater, BinaryOp::Gt | BinaryOp::GtEq | BinaryOp::NotEq) => true,
+        _ => false,
+    }
+}
+
+/// Compare two f64 values with NaN awareness and Cypher comparison semantics.
+/// Returns `None` when partial_cmp fails (should not happen for non-NaN floats).
+fn compare_f64(lhs: f64, rhs: f64, op: &BinaryOp) -> Option<bool> {
+    if lhs.is_nan() || rhs.is_nan() {
+        Some(matches!(op, BinaryOp::NotEq))
+    } else {
+        Some(apply_comparison_op(lhs.partial_cmp(&rhs)?, op))
+    }
+}
+
+/// Decode CypherValue bytes as f64 (works for both TAG_INT and TAG_FLOAT).
+fn cv_bytes_as_f64(bytes: &[u8]) -> Option<f64> {
+    use uni_common::cypher_value_codec::{TAG_FLOAT, TAG_INT, decode_float, decode_int, peek_tag};
+    match peek_tag(bytes)? {
+        TAG_INT => decode_int(bytes).map(|i| i as f64),
+        TAG_FLOAT => decode_float(bytes),
+        _ => None,
+    }
+}
+
+/// Compare CypherValue bytes against an f64, returning the boolean comparison result.
+/// Returns `None` for null/incomparable types (caller should emit null).
+fn compare_cv_numeric(bytes: &[u8], rhs: f64, op: &BinaryOp) -> Option<bool> {
+    use uni_common::cypher_value_codec::{TAG_INT, TAG_NULL, decode_int, peek_tag};
+    // Special case: int-vs-int comparison preserves exact integer semantics
+    if peek_tag(bytes) == Some(TAG_INT)
+        && let Some(lhs_int) = decode_int(bytes)
+        // If rhs is exactly representable as i64, use integer comparison
+        && rhs.fract() == 0.0
+        && rhs >= i64::MIN as f64
+        && rhs <= i64::MAX as f64
+    {
+        return Some(apply_comparison_op(lhs_int.cmp(&(rhs as i64)), op));
+    }
+    if peek_tag(bytes) == Some(TAG_NULL) {
+        return None;
+    }
+    let lhs = cv_bytes_as_f64(bytes)?;
+    compare_f64(lhs, rhs, op)
+}
+
+/// Fast-path comparison for LargeBinary (CypherValue) vs native Arrow types.
+///
+/// Returns `Some(ColumnarValue)` if fast path succeeded, `None` to fallback to slow path.
+fn try_fast_compare(
+    lhs: &ColumnarValue,
+    rhs: &ColumnarValue,
+    op: &BinaryOp,
+) -> Option<ColumnarValue> {
+    use arrow_array::builder::BooleanBuilder;
+    use uni_common::cypher_value_codec::{
+        TAG_INT, TAG_NULL, TAG_STRING, decode_int, decode_string, peek_tag,
+    };
+
+    let (lhs_arr, rhs_arr) = match (lhs, rhs) {
+        (ColumnarValue::Array(l), ColumnarValue::Array(r)) => (l, r),
+        _ => return None,
+    };
+
+    // All fast paths require LHS to be LargeBinary
+    if !matches!(lhs_arr.data_type(), DataType::LargeBinary) {
+        return None;
+    }
+
+    let lb_arr = lhs_arr.as_any().downcast_ref::<LargeBinaryArray>()?;
+
+    match rhs_arr.data_type() {
+        // LargeBinary vs Int64
+        DataType::Int64 => {
+            let int_arr = rhs_arr.as_any().downcast_ref::<Int64Array>()?;
+            let mut builder = BooleanBuilder::with_capacity(lb_arr.len());
+            for i in 0..lb_arr.len() {
+                if lb_arr.is_null(i) || int_arr.is_null(i) {
+                    builder.append_null();
+                } else {
+                    match compare_cv_numeric(lb_arr.value(i), int_arr.value(i) as f64, op) {
+                        Some(result) => builder.append_value(result),
+                        None => builder.append_null(),
+                    }
+                }
+            }
+            Some(ColumnarValue::Array(Arc::new(builder.finish())))
+        }
+
+        // LargeBinary vs Float64
+        DataType::Float64 => {
+            let float_arr = rhs_arr.as_any().downcast_ref::<Float64Array>()?;
+            let mut builder = BooleanBuilder::with_capacity(lb_arr.len());
+            for i in 0..lb_arr.len() {
+                if lb_arr.is_null(i) || float_arr.is_null(i) {
+                    builder.append_null();
+                } else {
+                    match compare_cv_numeric(lb_arr.value(i), float_arr.value(i), op) {
+                        Some(result) => builder.append_value(result),
+                        None => builder.append_null(),
+                    }
+                }
+            }
+            Some(ColumnarValue::Array(Arc::new(builder.finish())))
+        }
+
+        // LargeBinary vs String (Utf8 or LargeUtf8)
+        DataType::Utf8 | DataType::LargeUtf8 => {
+            let mut builder = BooleanBuilder::with_capacity(lb_arr.len());
+            for i in 0..lb_arr.len() {
+                if lb_arr.is_null(i) || rhs_arr.is_null(i) {
+                    builder.append_null();
+                } else {
+                    let bytes = lb_arr.value(i);
+                    let rhs_str = if matches!(rhs_arr.data_type(), DataType::Utf8) {
+                        rhs_arr.as_any().downcast_ref::<StringArray>()?.value(i)
+                    } else {
+                        rhs_arr
+                            .as_any()
+                            .downcast_ref::<LargeStringArray>()?
+                            .value(i)
+                    };
+                    match peek_tag(bytes) {
+                        Some(TAG_STRING) => {
+                            if let Some(lhs_str) = decode_string(bytes) {
+                                builder.append_value(apply_comparison_op(
+                                    lhs_str.as_str().cmp(rhs_str),
+                                    op,
+                                ));
+                            } else {
+                                builder.append_null();
+                            }
+                        }
+                        _ => builder.append_null(),
+                    }
+                }
+            }
+            Some(ColumnarValue::Array(Arc::new(builder.finish())))
+        }
+
+        // LargeBinary vs LargeBinary
+        DataType::LargeBinary => {
+            let rhs_lb = rhs_arr.as_any().downcast_ref::<LargeBinaryArray>()?;
+            let mut builder = BooleanBuilder::with_capacity(lb_arr.len());
+            for i in 0..lb_arr.len() {
+                if lb_arr.is_null(i) || rhs_lb.is_null(i) {
+                    builder.append_null();
+                } else {
+                    let lhs_bytes = lb_arr.value(i);
+                    let rhs_bytes = rhs_lb.value(i);
+                    let lhs_tag = peek_tag(lhs_bytes);
+                    let rhs_tag = peek_tag(rhs_bytes);
+
+                    // Null propagation
+                    if lhs_tag == Some(TAG_NULL) || rhs_tag == Some(TAG_NULL) {
+                        builder.append_null();
+                        continue;
+                    }
+
+                    // Int vs Int: exact integer comparison
+                    if lhs_tag == Some(TAG_INT) && rhs_tag == Some(TAG_INT) {
+                        if let (Some(l), Some(r)) = (decode_int(lhs_bytes), decode_int(rhs_bytes)) {
+                            builder.append_value(apply_comparison_op(l.cmp(&r), op));
+                        } else {
+                            builder.append_null();
+                        }
+                        continue;
+                    }
+
+                    // String vs String
+                    if lhs_tag == Some(TAG_STRING) && rhs_tag == Some(TAG_STRING) {
+                        if let (Some(l), Some(r)) =
+                            (decode_string(lhs_bytes), decode_string(rhs_bytes))
+                        {
+                            builder.append_value(apply_comparison_op(l.cmp(&r), op));
+                        } else {
+                            builder.append_null();
+                        }
+                        continue;
+                    }
+
+                    // Numeric (mixed int/float): promote both to f64
+                    if let (Some(l), Some(r)) =
+                        (cv_bytes_as_f64(lhs_bytes), cv_bytes_as_f64(rhs_bytes))
+                    {
+                        match compare_f64(l, r, op) {
+                            Some(result) => builder.append_value(result),
+                            None => builder.append_null(),
+                        }
+                    } else {
+                        builder.append_null(); // Mismatched types or unsupported
+                    }
+                }
+            }
+            Some(ColumnarValue::Array(Arc::new(builder.finish())))
+        }
+
+        _ => None, // Fallback to slow path
+    }
+}
+
 #[derive(Debug)]
 struct CypherCompareUdf {
     name: String,
@@ -2357,15 +2605,21 @@ impl ScalarUDFImpl for CypherCompareUdf {
     }
 
     fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DFResult<ColumnarValue> {
+        if args.args.len() != 2 {
+            return Err(datafusion::error::DataFusionError::Execution(format!(
+                "{}(): requires 2 arguments",
+                self.name
+            )));
+        }
+
+        // Try fast path first
+        if let Some(result) = try_fast_compare(&args.args[0], &args.args[1], &self.op) {
+            return Ok(result);
+        }
+
+        // Fallback to slow path
         let output_type = DataType::Boolean;
-        let name = self.name.clone();
         invoke_cypher_udf(args, &output_type, |val_args| {
-            if val_args.len() != 2 {
-                return Err(datafusion::error::DataFusionError::Execution(format!(
-                    "{}(): requires 2 arguments",
-                    name
-                )));
-            }
             crate::query::expr_eval::eval_binary_op(&val_args[0], &self.op, &val_args[1])
                 .map_err(|e| datafusion::error::DataFusionError::Execution(e.to_string()))
         })
@@ -2391,6 +2645,141 @@ pub fn create_cypher_div_udf() -> ScalarUDF {
 }
 pub fn create_cypher_mod_udf() -> ScalarUDF {
     ScalarUDF::new_from_impl(CypherArithmeticUdf::new("_cypher_mod", BinaryOp::Mod))
+}
+
+/// Apply an integer arithmetic operator, returning CypherValue-encoded bytes.
+/// Returns `None` on overflow or division by zero.
+fn apply_int_arithmetic(lhs: i64, rhs: i64, op: &BinaryOp) -> Option<Vec<u8>> {
+    use uni_common::cypher_value_codec::{encode_float, encode_int};
+    match op {
+        BinaryOp::Add => lhs.checked_add(rhs).map(encode_int),
+        BinaryOp::Sub => lhs.checked_sub(rhs).map(encode_int),
+        BinaryOp::Mul => lhs.checked_mul(rhs).map(encode_int),
+        BinaryOp::Div => {
+            // Division always produces float in Cypher
+            if rhs == 0 {
+                None
+            } else {
+                Some(encode_float(lhs as f64 / rhs as f64))
+            }
+        }
+        BinaryOp::Mod => {
+            if rhs == 0 {
+                None
+            } else {
+                lhs.checked_rem(rhs).map(encode_int)
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Apply a float arithmetic operator, returning CypherValue-encoded bytes.
+fn apply_float_arithmetic(lhs: f64, rhs: f64, op: &BinaryOp) -> Option<Vec<u8>> {
+    use uni_common::cypher_value_codec::encode_float;
+    let result = match op {
+        BinaryOp::Add => lhs + rhs,
+        BinaryOp::Sub => lhs - rhs,
+        BinaryOp::Mul => lhs * rhs,
+        BinaryOp::Div => lhs / rhs, // Allows inf, -inf, NaN
+        BinaryOp::Mod => lhs % rhs,
+        _ => return None,
+    };
+    Some(encode_float(result))
+}
+
+/// Perform arithmetic on a CypherValue-encoded LHS against an i64 RHS.
+/// Returns `None` for null/incompatible types.
+fn cv_arithmetic_int(bytes: &[u8], rhs: i64, op: &BinaryOp) -> Option<Vec<u8>> {
+    use uni_common::cypher_value_codec::{TAG_FLOAT, TAG_INT, decode_float, decode_int, peek_tag};
+    match peek_tag(bytes)? {
+        TAG_INT => apply_int_arithmetic(decode_int(bytes)?, rhs, op),
+        TAG_FLOAT => apply_float_arithmetic(decode_float(bytes)?, rhs as f64, op),
+        _ => None,
+    }
+}
+
+/// Perform arithmetic on a CypherValue-encoded LHS against an f64 RHS.
+/// Returns `None` for null/incompatible types.
+fn cv_arithmetic_float(bytes: &[u8], rhs: f64, op: &BinaryOp) -> Option<Vec<u8>> {
+    let lhs = cv_bytes_as_f64(bytes)?;
+    apply_float_arithmetic(lhs, rhs, op)
+}
+
+/// Fast-path arithmetic for LargeBinary (CypherValue) vs native Arrow types.
+///
+/// Returns `Some(ColumnarValue)` if fast path succeeded, `None` to fallback to slow path.
+fn try_fast_arithmetic(
+    lhs: &ColumnarValue,
+    rhs: &ColumnarValue,
+    op: &BinaryOp,
+) -> Option<ColumnarValue> {
+    use arrow_array::builder::LargeBinaryBuilder;
+
+    let (lhs_arr, rhs_arr) = match (lhs, rhs) {
+        (ColumnarValue::Array(l), ColumnarValue::Array(r)) => (l, r),
+        _ => return None,
+    };
+
+    match (lhs_arr.data_type(), rhs_arr.data_type()) {
+        // LargeBinary vs Int64
+        (DataType::LargeBinary, DataType::Int64) => {
+            let lb_arr = lhs_arr.as_any().downcast_ref::<LargeBinaryArray>()?;
+            let int_arr = rhs_arr.as_any().downcast_ref::<Int64Array>()?;
+            let mut builder = LargeBinaryBuilder::new();
+            for i in 0..lb_arr.len() {
+                if lb_arr.is_null(i) || int_arr.is_null(i) {
+                    builder.append_null();
+                } else if let Some(bytes) = cv_arithmetic_int(lb_arr.value(i), int_arr.value(i), op)
+                {
+                    builder.append_value(&bytes);
+                } else {
+                    builder.append_null();
+                }
+            }
+            Some(ColumnarValue::Array(Arc::new(builder.finish())))
+        }
+
+        // LargeBinary vs Float64
+        (DataType::LargeBinary, DataType::Float64) => {
+            let lb_arr = lhs_arr.as_any().downcast_ref::<LargeBinaryArray>()?;
+            let float_arr = rhs_arr.as_any().downcast_ref::<Float64Array>()?;
+            let mut builder = LargeBinaryBuilder::new();
+            for i in 0..lb_arr.len() {
+                if lb_arr.is_null(i) || float_arr.is_null(i) {
+                    builder.append_null();
+                } else if let Some(bytes) =
+                    cv_arithmetic_float(lb_arr.value(i), float_arr.value(i), op)
+                {
+                    builder.append_value(&bytes);
+                } else {
+                    builder.append_null();
+                }
+            }
+            Some(ColumnarValue::Array(Arc::new(builder.finish())))
+        }
+
+        // Int64 vs Int64 (both native, routed here because other context forced UDF path)
+        (DataType::Int64, DataType::Int64) => {
+            let lhs_int = lhs_arr.as_any().downcast_ref::<Int64Array>()?;
+            let rhs_int = rhs_arr.as_any().downcast_ref::<Int64Array>()?;
+            let mut builder = LargeBinaryBuilder::new();
+            for i in 0..lhs_int.len() {
+                if lhs_int.is_null(i) || rhs_int.is_null(i) {
+                    builder.append_null();
+                } else if let Some(bytes) =
+                    apply_int_arithmetic(lhs_int.value(i), rhs_int.value(i), op)
+                {
+                    builder.append_value(&bytes);
+                } else {
+                    builder.append_null();
+                }
+            }
+            Some(ColumnarValue::Array(Arc::new(builder.finish())))
+        }
+
+        _ => None, // Fallback to slow path
+    }
 }
 
 #[derive(Debug)]
@@ -2439,15 +2828,21 @@ impl ScalarUDFImpl for CypherArithmeticUdf {
     }
 
     fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DFResult<ColumnarValue> {
+        if args.args.len() != 2 {
+            return Err(datafusion::error::DataFusionError::Execution(format!(
+                "{}(): requires 2 arguments",
+                self.name
+            )));
+        }
+
+        // Try fast path first
+        if let Some(result) = try_fast_arithmetic(&args.args[0], &args.args[1], &self.op) {
+            return Ok(result);
+        }
+
+        // Fallback to slow path
         let output_type = DataType::LargeBinary;
-        let name = self.name.clone();
         invoke_cypher_udf(args, &output_type, |val_args| {
-            if val_args.len() != 2 {
-                return Err(datafusion::error::DataFusionError::Execution(format!(
-                    "{}(): requires 2 arguments",
-                    name
-                )));
-            }
             crate::query::expr_eval::eval_binary_op(&val_args[0], &self.op, &val_args[1])
                 .map_err(|e| datafusion::error::DataFusionError::Execution(e.to_string()))
         })
@@ -2563,9 +2958,13 @@ impl ScalarUDFImpl for CvToBoolUdf {
 
         match &args.args[0] {
             ColumnarValue::Scalar(ScalarValue::LargeBinary(Some(bytes))) => {
-                let val = uni_common::cypher_value_codec::decode(bytes)
-                    .map_err(|e| datafusion::error::DataFusionError::Execution(e.to_string()))?;
-                let b = val.as_bool().unwrap_or(false);
+                // Fast path: tag-only decode for boolean
+                use uni_common::cypher_value_codec::{TAG_BOOL, TAG_NULL, decode_bool, peek_tag};
+                let b = match peek_tag(bytes) {
+                    Some(TAG_BOOL) => decode_bool(bytes).unwrap_or(false),
+                    Some(TAG_NULL) => false,
+                    _ => false, // Non-boolean in boolean context
+                };
                 Ok(ColumnarValue::Scalar(ScalarValue::Boolean(Some(b))))
             }
             ColumnarValue::Scalar(_) => Ok(ColumnarValue::Scalar(ScalarValue::Boolean(None))),
@@ -2581,18 +2980,21 @@ impl ScalarUDFImpl for CvToBoolUdf {
                     })?;
 
                 let mut builder = arrow_array::builder::BooleanBuilder::with_capacity(lb_arr.len());
+
+                // Fast path: tag-only decode for boolean
+                use uni_common::cypher_value_codec::{TAG_BOOL, TAG_NULL, decode_bool, peek_tag};
+
                 for i in 0..lb_arr.len() {
                     if lb_arr.is_null(i) {
                         builder.append_null();
                     } else {
                         let bytes = lb_arr.value(i);
-                        match uni_common::cypher_value_codec::decode(bytes) {
-                            Ok(val) => {
-                                let b = val.as_bool().unwrap_or(false);
-                                builder.append_value(b);
-                            }
-                            Err(_) => builder.append_null(),
-                        }
+                        let b = match peek_tag(bytes) {
+                            Some(TAG_BOOL) => decode_bool(bytes).unwrap_or(false),
+                            Some(TAG_NULL) => false,
+                            _ => false, // Non-boolean in boolean context
+                        };
+                        builder.append_value(b);
                     }
                 }
                 Ok(ColumnarValue::Array(Arc::new(builder.finish())))

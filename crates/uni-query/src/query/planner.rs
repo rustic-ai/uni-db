@@ -4587,7 +4587,7 @@ impl QueryPlanner {
 
     /// Extract predicates that reference only the specified variable
     fn extract_variable_predicates(predicate: &Expr, variable: &str) -> (Vec<Expr>, Option<Expr>) {
-        let analyzer = PredicateAnalyzer::new(None);
+        let analyzer = PredicateAnalyzer::new();
         let analysis = analyzer.analyze(predicate, variable);
 
         // Return pushable predicates and combined residual

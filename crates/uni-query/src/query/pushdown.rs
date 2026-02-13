@@ -2,7 +2,6 @@
 // Copyright 2024-2026 Dragonscale Team
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
 use uni_cypher::ast::{BinaryOp, CypherLiteral, Expr, UnaryOp};
 
 use uni_common::core::id::UniId;
@@ -88,7 +87,7 @@ impl<'a> IndexAwareAnalyzer<'a> {
             }
 
             // 4. Check if pushable to Lance
-            let analyzer = PredicateAnalyzer::new(None);
+            let analyzer = PredicateAnalyzer::new();
             if analyzer.is_pushable(&conj, variable) {
                 strategy.lance_predicates.push(conj);
             } else {
@@ -237,13 +236,12 @@ pub struct PredicateAnalysis {
     pub required_properties: Vec<String>,
 }
 
-pub struct PredicateAnalyzer {
-    _schema: Option<Arc<Schema>>,
-}
+#[derive(Default)]
+pub struct PredicateAnalyzer;
 
 impl PredicateAnalyzer {
-    pub fn new(schema: Option<Arc<Schema>>) -> Self {
-        Self { _schema: schema }
+    pub fn new() -> Self {
+        Self
     }
 
     /// Analyze a predicate and determine pushdown strategy

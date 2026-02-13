@@ -122,7 +122,7 @@ pub fn cypher_eq(left: &Value, right: &Value) -> Option<bool> {
     }
 
     // Mixed numeric equality (1 = 1.0)
-    if let (Some(l), Some(r)) = (value_as_f64(left), value_as_f64(right)) {
+    if let (Some(l), Some(r)) = (left.as_f64(), right.as_f64()) {
         if l.is_nan() || r.is_nan() {
             return Some(false);
         }
@@ -177,10 +177,6 @@ pub fn cypher_eq(left: &Value, right: &Value) -> Option<bool> {
 
     // Fallback to standard equality for other types (String, Bool)
     Some(left == right)
-}
-
-fn value_as_f64(v: &Value) -> Option<f64> {
-    v.as_f64()
 }
 
 /// Evaluate IN operator.
@@ -257,7 +253,7 @@ fn eval_numeric_op<F>(left: &Value, right: &Value, op: F) -> Result<Value>
 where
     F: Fn(f64, f64) -> f64,
 {
-    let (l, r) = match (value_as_f64(left), value_as_f64(right)) {
+    let (l, r) = match (left.as_f64(), right.as_f64()) {
         (Some(l), Some(r)) => (l, r),
         _ => return Err(anyhow!("Arithmetic operation requires numbers")),
     };
@@ -271,12 +267,8 @@ where
     {
         Ok(Value::Int(result as i64))
     } else {
-        Ok(json_f64(result))
+        Ok(Value::Float(result))
     }
-}
-
-fn json_f64(f: f64) -> Value {
-    Value::Float(f)
 }
 
 // ============================================================================
@@ -301,11 +293,11 @@ fn add_temporal_duration(temporal_str: &str, dur: &CypherDuration) -> Result<Val
 /// Evaluate addition with temporal-aware dispatch.
 fn eval_add(left: &Value, right: &Value) -> Result<Value> {
     // Numeric addition
-    if let (Some(l), Some(r)) = (value_as_f64(left), value_as_f64(right)) {
+    if let (Some(l), Some(r)) = (left.as_f64(), right.as_f64()) {
         if left.is_i64() && right.is_i64() {
             return Ok(Value::Int(left.as_i64().unwrap() + right.as_i64().unwrap()));
         }
-        return Ok(json_f64(l + r));
+        return Ok(Value::Float(l + r));
     }
 
     // String concatenation
@@ -401,14 +393,14 @@ fn eval_sub(left: &Value, right: &Value) -> Result<Value> {
 /// Evaluate multiplication with duration support.
 fn eval_mul(left: &Value, right: &Value) -> Result<Value> {
     // duration * number
-    if let (Value::String(s), Some(factor)) = (left, value_as_f64(right))
+    if let (Value::String(s), Some(factor)) = (left, right.as_f64())
         && is_duration_value(left)
     {
         let dur = parse_duration_to_cypher(s)?;
         return Ok(Value::String(dur.multiply(factor).to_iso8601()));
     }
     // number * duration
-    if let (Some(factor), Value::String(s)) = (value_as_f64(left), right)
+    if let (Some(factor), Value::String(s)) = (left.as_f64(), right)
         && is_duration_value(right)
     {
         let dur = parse_duration_to_cypher(s)?;
@@ -421,7 +413,7 @@ fn eval_mul(left: &Value, right: &Value) -> Result<Value> {
 /// Evaluate division with duration support.
 fn eval_div(left: &Value, right: &Value) -> Result<Value> {
     // duration / number
-    if let (Value::String(s), Some(divisor)) = (left, value_as_f64(right))
+    if let (Value::String(s), Some(divisor)) = (left, right.as_f64())
         && is_duration_value(left)
     {
         let dur = parse_duration_to_cypher(s)?;
@@ -446,14 +438,14 @@ where
     }
 
     // Handle NaN - NaN vs number returns false, NaN vs non-number returns null (cross-type)
-    let left_nan = value_as_f64(left).is_some_and(|f| f.is_nan());
-    let right_nan = value_as_f64(right).is_some_and(|f| f.is_nan());
+    let left_nan = left.as_f64().is_some_and(|f| f.is_nan());
+    let right_nan = right.as_f64().is_some_and(|f| f.is_nan());
     if left_nan || right_nan {
         if left_nan && right_nan {
             return Ok(Value::Bool(false));
         }
         let other = if left_nan { right } else { left };
-        if value_as_f64(other).is_some() {
+        if other.as_f64().is_some() {
             return Ok(Value::Bool(false)); // NaN vs number
         }
         return Ok(Value::Null); // NaN vs non-number (cross-type)
@@ -478,7 +470,7 @@ fn cypher_partial_cmp(left: &Value, right: &Value) -> Option<Ordering> {
     }
 
     // Number vs Number
-    if let (Some(l), Some(r)) = (value_as_f64(left), value_as_f64(right)) {
+    if let (Some(l), Some(r)) = (left.as_f64(), right.as_f64()) {
         return l.partial_cmp(&r);
     }
 

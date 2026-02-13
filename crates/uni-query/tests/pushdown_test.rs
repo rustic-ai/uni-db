@@ -57,7 +57,7 @@ fn test_or_to_in_conversion() {
         }),
     };
 
-    let analyzer = PredicateAnalyzer::new(None);
+    let analyzer = PredicateAnalyzer::new();
     let analysis = analyzer.analyze(&expr, "n");
 
     // Should be pushed as a single IN expression
@@ -88,7 +88,7 @@ fn test_is_null_pushdown() {
         "email".to_string(),
     )));
 
-    let analyzer = PredicateAnalyzer::new(None);
+    let analyzer = PredicateAnalyzer::new();
     let analysis = analyzer.analyze(&expr, "n");
 
     assert_eq!(analysis.pushable.len(), 1);
@@ -105,7 +105,7 @@ fn test_is_not_null_pushdown() {
         "email".to_string(),
     )));
 
-    let analyzer = PredicateAnalyzer::new(None);
+    let analyzer = PredicateAnalyzer::new();
     let analysis = analyzer.analyze(&expr, "n");
 
     assert_eq!(analysis.pushable.len(), 1);
@@ -138,7 +138,7 @@ fn test_predicate_flattening() {
         }),
     };
 
-    let analyzer = PredicateAnalyzer::new(None);
+    let analyzer = PredicateAnalyzer::new();
     let analysis = analyzer.analyze(&expr, "n");
 
     assert_eq!(analysis.pushable.len(), 2);

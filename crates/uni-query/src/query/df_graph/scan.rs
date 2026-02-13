@@ -1640,17 +1640,15 @@ fn map_to_output_schema(
                             if let Some(arr) = overflow_arr {
                                 if !arr.is_null(i) {
                                     let blob = arr.value(i);
-                                    match uni_common::cypher_value_codec::decode(blob) {
-                                        Ok(uni_common::Value::Map(map)) => {
-                                            if let Some(val) = map.get(prop) {
-                                                let sub_bytes =
-                                                    uni_common::cypher_value_codec::encode(val);
-                                                builder.append_value(&sub_bytes);
-                                            } else {
-                                                builder.append_null();
-                                            }
-                                        }
-                                        _ => builder.append_null(),
+                                    // Fast path: extract map entry without decoding entire map
+                                    if let Some(sub_bytes) =
+                                        uni_common::cypher_value_codec::extract_map_entry_raw(
+                                            blob, prop,
+                                        )
+                                    {
+                                        builder.append_value(&sub_bytes);
+                                    } else {
+                                        builder.append_null();
                                     }
                                 } else {
                                     builder.append_null();
@@ -1742,17 +1740,15 @@ fn map_edge_to_output_schema(
                         for i in 0..batch.num_rows() {
                             if !arr.is_null(i) {
                                 let blob = arr.value(i);
-                                match uni_common::cypher_value_codec::decode(blob) {
-                                    Ok(uni_common::Value::Map(map)) => {
-                                        if let Some(val) = map.get(prop) {
-                                            let sub_bytes =
-                                                uni_common::cypher_value_codec::encode(val);
-                                            builder.append_value(&sub_bytes);
-                                        } else {
-                                            builder.append_null();
-                                        }
-                                    }
-                                    _ => builder.append_null(),
+                                // Fast path: extract map entry without decoding entire map
+                                if let Some(sub_bytes) =
+                                    uni_common::cypher_value_codec::extract_map_entry_raw(
+                                        blob, prop,
+                                    )
+                                {
+                                    builder.append_value(&sub_bytes);
+                                } else {
+                                    builder.append_null();
                                 }
                             } else {
                                 builder.append_null();
@@ -2594,16 +2590,13 @@ fn map_to_schemaless_output_schema(
                     if let Some(arr) = props_arr {
                         if !arr.is_null(i) {
                             let blob = arr.value(i);
-                            match uni_common::cypher_value_codec::decode(blob) {
-                                Ok(uni_common::Value::Map(map)) => {
-                                    if let Some(val) = map.get(prop) {
-                                        let sub_bytes = uni_common::cypher_value_codec::encode(val);
-                                        builder.append_value(&sub_bytes);
-                                    } else {
-                                        builder.append_null();
-                                    }
-                                }
-                                _ => builder.append_null(),
+                            // Fast path: extract map entry without decoding entire map
+                            if let Some(sub_bytes) =
+                                uni_common::cypher_value_codec::extract_map_entry_raw(blob, prop)
+                            {
+                                builder.append_value(&sub_bytes);
+                            } else {
+                                builder.append_null();
                             }
                         } else {
                             builder.append_null();

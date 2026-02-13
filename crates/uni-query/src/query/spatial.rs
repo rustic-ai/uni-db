@@ -65,19 +65,15 @@ fn eval_point(args: &[Value]) -> Result<Value> {
             "Cartesian"
         };
 
-        let mut entries = vec![
+        let z_value = z.map_or(Value::Null, Value::Float);
+
+        return Ok(Value::Map(HashMap::from([
             ("type".to_string(), Value::String("Point".into())),
             ("crs".to_string(), Value::String(crs.into())),
             ("x".to_string(), Value::Float(x)),
             ("y".to_string(), Value::Float(y)),
-        ];
-        if let Some(z_val) = z {
-            entries.push(("z".to_string(), Value::Float(z_val)));
-        } else {
-            entries.push(("z".to_string(), Value::Null));
-        }
-
-        return Ok(Value::Map(HashMap::from_iter(entries)));
+            ("z".to_string(), z_value),
+        ])));
     }
 
     Err(anyhow!(
@@ -168,11 +164,6 @@ fn get_cartesian_coords(point: &HashMap<String, Value>, name: &str) -> Result<(f
     Ok((x, y))
 }
 
-/// Check if a value is within a range (inclusive).
-fn in_range(val: f64, min: f64, max: f64) -> bool {
-    val >= min && val <= max
-}
-
 /// Check if a point is within a bounding box defined by lower-left and upper-right corners.
 /// Usage: point.withinBBox(point, lowerLeft, upperRight)
 fn eval_within_bbox(args: &[Value]) -> Result<Value> {
@@ -199,7 +190,7 @@ fn eval_within_bbox(args: &[Value]) -> Result<Value> {
         let (max_lat, max_lon) = get_geo_coords(upper_right, "Upper-right")?;
 
         return Ok(Value::Bool(
-            in_range(lat, min_lat, max_lat) && in_range(lon, min_lon, max_lon),
+            (min_lat..=max_lat).contains(&lat) && (min_lon..=max_lon).contains(&lon),
         ));
     }
 
@@ -210,7 +201,7 @@ fn eval_within_bbox(args: &[Value]) -> Result<Value> {
         let (max_x, max_y) = get_cartesian_coords(upper_right, "Upper-right")?;
 
         return Ok(Value::Bool(
-            in_range(x, min_x, max_x) && in_range(y, min_y, max_y),
+            (min_x..=max_x).contains(&x) && (min_y..=max_y).contains(&y),
         ));
     }
 

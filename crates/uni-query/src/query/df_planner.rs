@@ -876,26 +876,12 @@ impl HybridPhysicalPlanner {
     /// Wraps the input plan with a `FilterExec` if `filter` is `Some`.
     /// Builds a `TranslationContext` marking `variable` as `VariableKind::Node`
     /// for correct expression translation.
-    ///
-    /// When `label_name` is provided, overflow property references in the filter
-    /// are rewritten to `json_get_*` UDF calls against the `overflow_json` column.
     fn apply_scan_filter(
         &self,
         plan: Arc<dyn ExecutionPlan>,
         variable: &str,
         filter: Option<&Expr>,
         label_name: Option<&str>,
-    ) -> Result<Arc<dyn ExecutionPlan>> {
-        self.apply_scan_filter_inner(plan, variable, filter, label_name, false)
-    }
-
-    fn apply_scan_filter_inner(
-        &self,
-        plan: Arc<dyn ExecutionPlan>,
-        variable: &str,
-        filter: Option<&Expr>,
-        label_name: Option<&str>,
-        schemaless: bool,
     ) -> Result<Arc<dyn ExecutionPlan>> {
         let Some(filter_expr) = filter else {
             return Ok(plan);
@@ -912,31 +898,7 @@ impl HybridPhysicalPlanner {
             variable_labels,
             variable_kinds,
         };
-        let mut df_filter = cypher_expr_to_df(filter_expr, Some(&ctx))?;
-
-        // Rewrite overflow property references to json_get_* UDF calls.
-        // For labels with no registered properties (schemaless), use an empty map
-        // so all non-system properties are recognized as overflow.
-        if let Some(label) = label_name {
-            let empty_props = HashMap::new();
-            let label_props = self.schema.properties.get(label).unwrap_or(&empty_props);
-            df_filter = crate::query::df_expr::rewrite_overflow_filters(
-                df_filter,
-                variable,
-                Some(label_props),
-            )?;
-        } else if schemaless {
-            // For schemaless scans (scan_all, schemaless_scan, multi_label_scan),
-            // all non-system properties are stored as CypherValue in _all_props.
-            // Rewrite filters to use json_get_* against the _all_props column.
-            let empty_props = HashMap::new();
-            df_filter = crate::query::df_expr::rewrite_overflow_filters_with_source(
-                df_filter,
-                variable,
-                Some(&empty_props),
-                "_all_props",
-            )?;
-        }
+        let df_filter = cypher_expr_to_df(filter_expr, Some(&ctx))?;
 
         let schema = plan.schema();
 
@@ -1260,8 +1222,7 @@ impl HybridPhysicalPlanner {
             scan_plan = self.add_structural_projection(scan_plan, variable, &struct_props)?;
         }
 
-        let filtered_plan =
-            self.apply_scan_filter_inner(scan_plan, variable, filter, None, true)?;
+        let filtered_plan = self.apply_scan_filter(scan_plan, variable, filter, None)?;
         self.wrap_optional(filtered_plan, optional)
     }
 
@@ -1311,8 +1272,7 @@ impl HybridPhysicalPlanner {
             scan_plan = self.add_structural_projection(scan_plan, variable, &struct_props)?;
         }
 
-        let filtered_plan =
-            self.apply_scan_filter_inner(scan_plan, variable, filter, None, true)?;
+        let filtered_plan = self.apply_scan_filter(scan_plan, variable, filter, None)?;
         self.wrap_optional(filtered_plan, optional)
     }
 
@@ -1361,8 +1321,7 @@ impl HybridPhysicalPlanner {
             scan_plan = self.add_structural_projection(scan_plan, variable, &struct_props)?;
         }
 
-        let filtered_plan =
-            self.apply_scan_filter_inner(scan_plan, variable, filter, None, true)?;
+        let filtered_plan = self.apply_scan_filter(scan_plan, variable, filter, None)?;
         self.wrap_optional(filtered_plan, optional)
     }
 
@@ -1452,7 +1411,6 @@ impl HybridPhysicalPlanner {
                 if needs_overflow && !edge_properties.contains(&"overflow_json".to_string()) {
                     edge_properties.push("overflow_json".to_string());
                 }
-                let _ = edge_var; // suppress unused warning
             }
 
             // Extract target vertex properties, expanding "*" wildcards
@@ -1713,41 +1671,7 @@ impl HybridPhysicalPlanner {
                 variable_labels,
                 variable_kinds,
             };
-            let mut df_filter = cypher_expr_to_df(filter_expr, Some(&ctx))?;
-
-            // Rewrite non-schema property references to json_get_* UDF calls against _all_props.
-            {
-                let empty_props = HashMap::new();
-                let label_props = if !target_label_name_str.is_empty() {
-                    self.schema
-                        .properties
-                        .get(target_label_name_str)
-                        .unwrap_or(&empty_props)
-                } else {
-                    &empty_props
-                };
-                df_filter = crate::query::df_expr::rewrite_overflow_filters_with_source(
-                    df_filter,
-                    target_variable,
-                    Some(label_props),
-                    "_all_props",
-                )?;
-            }
-            // Step edge: rewrite against overflow_json using edge type schema
-            if let Some(sv) = step_variable {
-                let edge_type_props = self.merged_edge_type_properties(edge_type_ids);
-                let empty_props = HashMap::new();
-                let edge_type_props_ref = if edge_type_props.is_empty() {
-                    &empty_props
-                } else {
-                    &edge_type_props
-                };
-                df_filter = crate::query::df_expr::rewrite_overflow_filters(
-                    df_filter,
-                    sv,
-                    Some(edge_type_props_ref),
-                )?;
-            }
+            let df_filter = cypher_expr_to_df(filter_expr, Some(&ctx))?;
 
             let final_filter = if optional {
                 // For OPTIONAL MATCH, allow NULL rows through (unmatched rows have NULL target VID)
@@ -2052,61 +1976,9 @@ impl HybridPhysicalPlanner {
                 )?));
             }
 
-            // Use logical-level rewriting: convert to DfExpr, rewrite, then compile
+            // Use logical-level rewriting: convert to DfExpr, then compile
             let ctx = self.translation_context_for_plan(input);
-            let mut df_filter = crate::query::df_expr::cypher_expr_to_df(predicate, Some(&ctx))?;
-
-            // Rewrite for each variable that has _all_props (schemaless columns)
-            let empty_props = HashMap::new();
-            for field in schema.fields() {
-                if field.name().ends_with("._all_props")
-                    && let Some(var) = field.name().strip_suffix("._all_props")
-                {
-                    df_filter = crate::query::df_expr::rewrite_overflow_filters_with_source(
-                        df_filter,
-                        var,
-                        Some(&empty_props),
-                        "_all_props",
-                    )?;
-                }
-            }
-
-            // Rewrite for each variable that has overflow_json (known-label with overflow)
-            for field in schema.fields() {
-                if field.name().ends_with(".overflow_json")
-                    && let Some(var) = field.name().strip_suffix(".overflow_json")
-                {
-                    // Build schema props for this variable from the output schema:
-                    // non-LargeBinary property columns are schema-defined
-                    let prefix = format!("{}.", var);
-                    let dummy_meta = uni_common::core::schema::PropertyMeta {
-                        r#type: uni_common::core::schema::DataType::String,
-                        nullable: true,
-                        added_in: 1,
-                        state: uni_common::core::schema::SchemaElementState::Active,
-                        generation_expression: None,
-                    };
-                    let schema_props: HashMap<String, uni_common::core::schema::PropertyMeta> =
-                        schema
-                            .fields()
-                            .iter()
-                            .filter(|f| {
-                                f.name().starts_with(&prefix)
-                                    && f.data_type() != &arrow::datatypes::DataType::LargeBinary
-                            })
-                            .filter_map(|f| {
-                                f.name()
-                                    .strip_prefix(&prefix)
-                                    .map(|prop| (prop.to_string(), dummy_meta.clone()))
-                            })
-                            .collect();
-                    df_filter = crate::query::df_expr::rewrite_overflow_filters(
-                        df_filter,
-                        var,
-                        Some(&schema_props),
-                    )?;
-                }
-            }
+            let df_filter = crate::query::df_expr::cypher_expr_to_df(predicate, Some(&ctx))?;
 
             // For OPTIONAL MATCH: use OptionalFilterExec for proper NULL row preservation.
             if !optional_variables.is_empty() {

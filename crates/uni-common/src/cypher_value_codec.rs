@@ -278,6 +278,65 @@ pub fn decode_string(bytes: &[u8]) -> Option<String> {
 }
 
 // ---------------------------------------------------------------------------
+// Fast typed encode (skip Value construction)
+// ---------------------------------------------------------------------------
+
+/// Encode an int directly without constructing a Value.
+pub fn encode_int(value: i64) -> Vec<u8> {
+    let mut buf = Vec::new();
+    buf.push(TAG_INT);
+    rmp_serde::encode::write(&mut buf, &value).expect("int encode failed");
+    buf
+}
+
+/// Encode a float directly without constructing a Value.
+pub fn encode_float(value: f64) -> Vec<u8> {
+    let mut buf = Vec::new();
+    buf.push(TAG_FLOAT);
+    rmp_serde::encode::write(&mut buf, &value).expect("float encode failed");
+    buf
+}
+
+/// Encode a bool directly without constructing a Value.
+pub fn encode_bool(value: bool) -> Vec<u8> {
+    let mut buf = Vec::new();
+    buf.push(TAG_BOOL);
+    rmp_serde::encode::write(&mut buf, &value).expect("bool encode failed");
+    buf
+}
+
+/// Encode a string directly without constructing a Value.
+pub fn encode_string(value: &str) -> Vec<u8> {
+    let mut buf = Vec::new();
+    buf.push(TAG_STRING);
+    rmp_serde::encode::write(&mut buf, value).expect("string encode failed");
+    buf
+}
+
+/// Encode null directly.
+pub fn encode_null() -> Vec<u8> {
+    vec![TAG_NULL]
+}
+
+/// Extract a map entry as raw bytes without decoding the entire map.
+///
+/// This is useful for extracting a single property from overflow JSON
+/// without paying the cost of decoding all other properties.
+///
+/// Returns `None` if:
+/// - The blob is not a TAG_MAP
+/// - The key doesn't exist in the map
+/// - Deserialization fails
+pub fn extract_map_entry_raw(blob: &[u8], key: &str) -> Option<Vec<u8>> {
+    if blob.first().copied() != Some(TAG_MAP) {
+        return None;
+    }
+    let payload = &blob[1..];
+    let blob_map: HashMap<String, Vec<u8>> = rmp_serde::from_slice(payload).ok()?;
+    blob_map.get(key).cloned()
+}
+
+// ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
 
@@ -440,7 +499,7 @@ mod tests {
 
     #[test]
     fn test_round_trip_float() {
-        for f in [-3.14, 0.0, 42.5, f64::MAX, f64::MIN] {
+        for f in [-3.15, 0.0, 42.5, f64::MAX, f64::MIN] {
             let v = Value::Float(f);
             let bytes = encode(&v);
             assert_eq!(bytes[0], TAG_FLOAT);
@@ -579,7 +638,7 @@ mod tests {
         assert_eq!(peek_tag(&encode(&Value::Null)), Some(TAG_NULL));
         assert_eq!(peek_tag(&encode(&Value::Bool(true))), Some(TAG_BOOL));
         assert_eq!(peek_tag(&encode(&Value::Int(42))), Some(TAG_INT));
-        assert_eq!(peek_tag(&encode(&Value::Float(3.14))), Some(TAG_FLOAT));
+        assert_eq!(peek_tag(&encode(&Value::Float(3.15))), Some(TAG_FLOAT));
         assert_eq!(
             peek_tag(&encode(&Value::String("x".to_string()))),
             Some(TAG_STRING)
@@ -604,8 +663,8 @@ mod tests {
 
     #[test]
     fn test_fast_decode_float() {
-        let bytes = encode(&Value::Float(3.14));
-        assert_eq!(decode_float(&bytes), Some(3.14));
+        let bytes = encode(&Value::Float(3.15));
+        assert_eq!(decode_float(&bytes), Some(3.15));
         assert_eq!(decode_float(&encode(&Value::Int(3))), None);
     }
 

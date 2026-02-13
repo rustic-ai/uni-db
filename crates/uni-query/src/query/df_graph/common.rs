@@ -105,8 +105,7 @@ pub fn edge_struct_fields() -> arrow_schema::Fields {
 /// columns. Converts the HashMap into a `Value::Map` and encodes it using the
 /// CypherValue codec.
 pub fn encode_props_to_cv(props: &std::collections::HashMap<String, uni_common::Value>) -> Vec<u8> {
-    let map: std::collections::HashMap<String, uni_common::Value> = props.clone();
-    let val = uni_common::Value::Map(map);
+    let val = uni_common::Value::Map(props.clone());
     uni_common::cypher_value_codec::encode(&val)
 }
 
@@ -195,16 +194,9 @@ pub fn large_list_of_cv_to_cv_array(
             }
         }
 
-        let array_val = serde_json::Value::Array(json_elements);
-        let array_str = serde_json::to_string(&array_val).unwrap_or_else(|_| "[]".to_string());
-        match serde_json::from_str::<serde_json::Value>(&array_str) {
-            Ok(json_val) => {
-                let uni_val: uni_common::Value = json_val.into();
-                let bytes = uni_common::cypher_value_codec::encode(&uni_val);
-                builder.append_value(&bytes);
-            }
-            Err(_) => builder.append_null(),
-        }
+        let uni_val: uni_common::Value = serde_json::Value::Array(json_elements).into();
+        let bytes = uni_common::cypher_value_codec::encode(&uni_val);
+        builder.append_value(&bytes);
     }
 
     Ok(Arc::new(builder.finish()))
@@ -238,6 +230,85 @@ pub fn typed_large_list_to_cv_array(
         return large_list_of_cv_to_cv_array(list);
     }
 
+    // Downcast the values array once before iterating over rows.
+    // The converter closure maps (values_array, element_index) -> serde_json::Value.
+    let elem_to_json: Box<dyn Fn(usize) -> serde_json::Value> = match values.data_type() {
+        DataType::Int64 => {
+            let typed = values
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .ok_or_else(|| {
+                    datafusion::error::DataFusionError::Execution("Expected Int64Array".to_string())
+                })?;
+            Box::new(move |idx| {
+                if typed.is_null(idx) {
+                    serde_json::Value::Null
+                } else {
+                    serde_json::Value::Number(serde_json::Number::from(typed.value(idx)))
+                }
+            })
+        }
+        DataType::Float64 => {
+            let typed = values
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .ok_or_else(|| {
+                    datafusion::error::DataFusionError::Execution(
+                        "Expected Float64Array".to_string(),
+                    )
+                })?;
+            Box::new(move |idx| {
+                if typed.is_null(idx) {
+                    serde_json::Value::Null
+                } else {
+                    serde_json::Number::from_f64(typed.value(idx))
+                        .map(serde_json::Value::Number)
+                        .unwrap_or(serde_json::Value::Null)
+                }
+            })
+        }
+        DataType::Utf8 => {
+            let typed = values
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .ok_or_else(|| {
+                    datafusion::error::DataFusionError::Execution(
+                        "Expected StringArray".to_string(),
+                    )
+                })?;
+            Box::new(move |idx| {
+                if typed.is_null(idx) {
+                    serde_json::Value::Null
+                } else {
+                    serde_json::Value::String(typed.value(idx).to_string())
+                }
+            })
+        }
+        DataType::Boolean => {
+            let typed = values
+                .as_any()
+                .downcast_ref::<BooleanArray>()
+                .ok_or_else(|| {
+                    datafusion::error::DataFusionError::Execution(
+                        "Expected BooleanArray".to_string(),
+                    )
+                })?;
+            Box::new(move |idx| {
+                if typed.is_null(idx) {
+                    serde_json::Value::Null
+                } else {
+                    serde_json::Value::Bool(typed.value(idx))
+                }
+            })
+        }
+        other => {
+            return Err(datafusion::error::DataFusionError::Execution(format!(
+                "Unsupported element type for typed_large_list_to_cv_array: {:?}",
+                other
+            )));
+        }
+    };
+
     let mut builder = LargeBinaryBuilder::new();
 
     for row_idx in 0..list.len() {
@@ -248,110 +319,11 @@ pub fn typed_large_list_to_cv_array(
 
         let start = list.offsets()[row_idx] as usize;
         let end = list.offsets()[row_idx + 1] as usize;
+        let json_elements: Vec<serde_json::Value> = (start..end).map(&elem_to_json).collect();
 
-        let mut json_elements = Vec::with_capacity(end - start);
-
-        // Convert elements based on type
-        match values.data_type() {
-            DataType::Int64 => {
-                let typed_values =
-                    values
-                        .as_any()
-                        .downcast_ref::<Int64Array>()
-                        .ok_or_else(|| {
-                            datafusion::error::DataFusionError::Execution(
-                                "Expected Int64Array".to_string(),
-                            )
-                        })?;
-                for elem_idx in start..end {
-                    if typed_values.is_null(elem_idx) {
-                        json_elements.push(serde_json::Value::Null);
-                    } else {
-                        json_elements.push(serde_json::Value::Number(serde_json::Number::from(
-                            typed_values.value(elem_idx),
-                        )));
-                    }
-                }
-            }
-            DataType::Float64 => {
-                let typed_values =
-                    values
-                        .as_any()
-                        .downcast_ref::<Float64Array>()
-                        .ok_or_else(|| {
-                            datafusion::error::DataFusionError::Execution(
-                                "Expected Float64Array".to_string(),
-                            )
-                        })?;
-                for elem_idx in start..end {
-                    if typed_values.is_null(elem_idx) {
-                        json_elements.push(serde_json::Value::Null);
-                    } else {
-                        let f = typed_values.value(elem_idx);
-                        if let Some(num) = serde_json::Number::from_f64(f) {
-                            json_elements.push(serde_json::Value::Number(num));
-                        } else {
-                            json_elements.push(serde_json::Value::Null);
-                        }
-                    }
-                }
-            }
-            DataType::Utf8 => {
-                let typed_values =
-                    values
-                        .as_any()
-                        .downcast_ref::<StringArray>()
-                        .ok_or_else(|| {
-                            datafusion::error::DataFusionError::Execution(
-                                "Expected StringArray".to_string(),
-                            )
-                        })?;
-                for elem_idx in start..end {
-                    if typed_values.is_null(elem_idx) {
-                        json_elements.push(serde_json::Value::Null);
-                    } else {
-                        json_elements.push(serde_json::Value::String(
-                            typed_values.value(elem_idx).to_string(),
-                        ));
-                    }
-                }
-            }
-            DataType::Boolean => {
-                let typed_values =
-                    values
-                        .as_any()
-                        .downcast_ref::<BooleanArray>()
-                        .ok_or_else(|| {
-                            datafusion::error::DataFusionError::Execution(
-                                "Expected BooleanArray".to_string(),
-                            )
-                        })?;
-                for elem_idx in start..end {
-                    if typed_values.is_null(elem_idx) {
-                        json_elements.push(serde_json::Value::Null);
-                    } else {
-                        json_elements.push(serde_json::Value::Bool(typed_values.value(elem_idx)));
-                    }
-                }
-            }
-            other => {
-                return Err(datafusion::error::DataFusionError::Execution(format!(
-                    "Unsupported element type for typed_large_list_to_cv_array: {:?}",
-                    other
-                )));
-            }
-        }
-
-        let array_val = serde_json::Value::Array(json_elements);
-        let array_str = serde_json::to_string(&array_val).unwrap_or_else(|_| "[]".to_string());
-        match serde_json::from_str::<serde_json::Value>(&array_str) {
-            Ok(json_val) => {
-                let uni_val: uni_common::Value = json_val.into();
-                let bytes = uni_common::cypher_value_codec::encode(&uni_val);
-                builder.append_value(&bytes);
-            }
-            Err(_) => builder.append_null(),
-        }
+        let uni_val: uni_common::Value = serde_json::Value::Array(json_elements).into();
+        let bytes = uni_common::cypher_value_codec::encode(&uni_val);
+        builder.append_value(&bytes);
     }
 
     Ok(Arc::new(builder.finish()))

@@ -151,17 +151,9 @@ impl Executor {
     }
 
     pub fn new_with_writer(storage: Arc<StorageManager>, writer: Arc<RwLock<Writer>>) -> Self {
-        Self {
-            storage,
-            writer: Some(writer),
-            l0_manager: None,
-            algo_registry: Arc::new(AlgorithmRegistry::new()),
-            use_transaction: false,
-            file_sandbox: uni_common::config::FileSandboxConfig::default(),
-            config: uni_common::config::UniConfig::default(),
-            gen_expr_cache: Arc::new(RwLock::new(HashMap::new())),
-            procedure_registry: None,
-        }
+        let mut executor = Self::new(storage);
+        executor.writer = Some(writer);
+        executor
     }
 
     /// Sets the external procedure registry for user-defined procedures.
