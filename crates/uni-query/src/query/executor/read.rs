@@ -522,7 +522,7 @@ impl Executor {
     /// Converts DataFusion RecordBatches to row-based HashMap format.
     ///
     /// Handles special metadata on fields:
-    /// - `json_encoded=true`: Parse the string value as JSON to restore original type
+    /// - `cv_encoded=true`: Parse the string value as JSON to restore original type
     ///
     /// Also normalizes path structures to user-facing format (converts _vid to _id).
     fn record_batches_to_rows(
@@ -544,7 +544,7 @@ impl Executor {
 
                     // Check if this field contains JSON-encoded values (e.g., from UNWIND)
                     // Parse JSON string to restore the original type
-                    if field.metadata().get("json_encoded") == Some(&"true".to_string())
+                    if field.metadata().get("cv_encoded") == Some(&"true".to_string())
                         && let Value::String(s) = &value
                         && let Ok(parsed) = serde_json::from_str::<serde_json::Value>(s)
                     {
@@ -7912,7 +7912,7 @@ impl Executor {
                 })?;
                 Ok(Value::Bool(b))
             }
-            DataType::Json => {
+            DataType::CypherValue => {
                 let json_val: serde_json::Value = serde_json::from_str(s).map_err(|_| {
                     anyhow!("Failed to parse JSON for property '{}': {}", prop_name, s)
                 })?;

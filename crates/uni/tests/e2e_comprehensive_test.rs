@@ -54,7 +54,7 @@ mod test_helpers {
             .property_nullable("float32_val", DataType::Float32)
             .property_nullable("float64_val", DataType::Float64)
             .property_nullable("bool_val", DataType::Bool)
-            .property_nullable("json_val", DataType::Json)
+            .property_nullable("json_val", DataType::CypherValue)
             .property_nullable("nullable_str", DataType::String)
             // Temporal types in separate label to avoid nullable issues
             .label("TemporalNode")

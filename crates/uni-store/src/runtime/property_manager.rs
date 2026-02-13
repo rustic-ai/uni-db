@@ -1147,13 +1147,13 @@ impl PropertyManager {
 
         let jsonb_bytes = binary_array.value(row);
 
-        // Decode JSONB binary to JSON string
-        let raw_jsonb = jsonb::RawJsonb::new(jsonb_bytes);
-        // Use to_string() which works for all JSONB values (objects, arrays, scalars)
-        let json_str = raw_jsonb.to_string();
+        // Decode CypherValue binary
+        let uni_val = uni_common::cypher_value_codec::decode(jsonb_bytes)
+            .map_err(|e| anyhow!("Failed to decode CypherValue: {}", e))?;
+        let json_val: serde_json::Value = uni_val.into();
 
-        // Parse JSON string to Properties
-        let overflow_props: Properties = serde_json::from_str(&json_str)
+        // Parse to Properties
+        let overflow_props: Properties = serde_json::from_value(json_val)
             .map_err(|e| anyhow!("Failed to parse overflow properties: {}", e))?;
 
         Ok(Some(overflow_props))

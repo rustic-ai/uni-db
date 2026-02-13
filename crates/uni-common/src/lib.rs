@@ -6,6 +6,7 @@ pub mod api {
 }
 
 pub mod config;
+pub mod cypher_value_codec;
 pub mod sync;
 pub mod value;
 

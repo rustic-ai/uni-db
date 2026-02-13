@@ -40,7 +40,6 @@ reqwest = { workspace = true }
 parquet = { workspace = true }
 rand = { workspace = true }
 base64 = "0.21"
-jsonb = "0.5.3"
 datafusion = { workspace = true }
 
 [features]

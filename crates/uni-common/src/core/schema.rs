@@ -62,7 +62,7 @@ pub enum DataType {
     Time,
     DateTime,
     Duration,
-    Json,
+    CypherValue,
     Point(PointType),
     Vector { dimensions: usize },
     Crdt(CrdtType),
@@ -96,7 +96,7 @@ impl DataType {
                 ArrowDataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into()))
             }
             DataType::Duration => ArrowDataType::Duration(TimeUnit::Microsecond),
-            DataType::Json => ArrowDataType::LargeBinary, // JSONB binary encoding
+            DataType::CypherValue => ArrowDataType::LargeBinary, // MessagePack-tagged binary encoding
             DataType::Point(pt) => match pt {
                 PointType::Geographic => ArrowDataType::Struct(Fields::from(vec![
                     Field::new("latitude", ArrowDataType::Float64, false),

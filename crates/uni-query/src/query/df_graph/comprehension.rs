@@ -112,10 +112,10 @@ impl PhysicalExpr for ListComprehensionExecExpr {
     }
 
     fn data_type(&self, _input_schema: &Schema) -> Result<DataType> {
-        // When output elements are JSONB (LargeBinary), produce a single JSONB
+        // When output elements are CypherValue (LargeBinary), produce a single CypherValue
         // array blob instead of LargeList<LargeBinary>. This keeps the
-        // comprehension output in the canonical JSONB domain, consistent with
-        // reverse(), list_concat(), and other JSONB-aware operators.
+        // comprehension output in the canonical CypherValue domain, consistent with
+        // reverse(), list_concat(), and other CypherValue-aware operators.
         if self.output_item_type == DataType::LargeBinary {
             return Ok(DataType::LargeBinary);
         }
@@ -135,9 +135,9 @@ impl PhysicalExpr for ListComprehensionExecExpr {
         let list_val = self.input_list.evaluate(batch)?;
         let list_array = list_val.into_array(batch.num_rows())?;
 
-        // 2. Decode JSONB-encoded arrays (LargeBinary → LargeList<LargeBinary>)
+        // 2. Decode CypherValue-encoded arrays (LargeBinary → LargeList<LargeBinary>)
         let list_array = if let DataType::LargeBinary = list_array.data_type() {
-            crate::query::df_graph::common::jsonb_array_to_large_list(
+            crate::query::df_graph::common::cv_array_to_large_list(
                 list_array.as_ref(),
                 &DataType::LargeBinary,
             )?
@@ -275,13 +275,13 @@ impl PhysicalExpr for ListComprehensionExecExpr {
             nulls.cloned(),
         );
 
-        // When output items are JSONB, re-encode the LargeList<LargeBinary>
-        // into a flat LargeBinaryArray of JSONB array blobs so that the
+        // When output items are CypherValue, re-encode the LargeList<LargeBinary>
+        // into a flat LargeBinaryArray of CypherValue array blobs so that the
         // result type matches what data_type() reports.
         if self.output_item_type == DataType::LargeBinary {
-            let jsonb_array =
-                crate::query::df_graph::common::large_list_of_jsonb_to_jsonb_array(&new_list)?;
-            return Ok(ColumnarValue::Array(jsonb_array));
+            let cypher_value_array =
+                crate::query::df_graph::common::large_list_of_cv_to_cv_array(&new_list)?;
+            return Ok(ColumnarValue::Array(cypher_value_array));
         }
 
         Ok(ColumnarValue::Array(Arc::new(new_list)))

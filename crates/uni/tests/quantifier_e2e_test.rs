@@ -15,13 +15,13 @@ async fn create_test_db() -> Result<Uni> {
     db.schema()
         .label("Person")
         .property_nullable("name", DataType::String)
-        .property_nullable("tags", DataType::Json) // Mixed types: integers or strings
+        .property_nullable("tags", DataType::CypherValue) // Mixed types: integers or strings
         .property_nullable("scores", DataType::List(Box::new(DataType::Int64)))
         .property_nullable("values", DataType::List(Box::new(DataType::Int64)))
         .property_nullable("items", DataType::List(Box::new(DataType::Int64)))
         .property_nullable("errors", DataType::List(Box::new(DataType::Int64)))
         .property_nullable("numbers", DataType::List(Box::new(DataType::Int64)))
-        .property_nullable("data", DataType::Json) // Nested list [[1,2], [3,4]]
+        .property_nullable("data", DataType::CypherValue) // Nested list [[1,2], [3,4]]
         .apply()
         .await?;
 

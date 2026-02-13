@@ -48,7 +48,7 @@ struct ElementTypeInfo {
     /// Arrow data type for the unwind variable column.
     data_type: DataType,
     /// Whether values need JSON encoding metadata.
-    is_json_encoded: bool,
+    is_cv_encoded: bool,
 }
 
 /// UNWIND execution plan that expands list values into multiple rows.
@@ -129,7 +129,7 @@ impl GraphUnwindExec {
     fn infer_element_type(expr: &Expr) -> ElementTypeInfo {
         let json_fallback = || ElementTypeInfo {
             data_type: DataType::Utf8,
-            is_json_encoded: true,
+            is_cv_encoded: true,
         };
 
         let Expr::List(items) = expr else {
@@ -163,7 +163,7 @@ impl GraphUnwindExec {
         if all_match {
             ElementTypeInfo {
                 data_type: expected,
-                is_json_encoded: false,
+                is_cv_encoded: false,
             }
         } else {
             json_fallback()
@@ -185,9 +185,9 @@ impl GraphUnwindExec {
         let type_info = Self::infer_element_type(expr);
 
         let mut field = Field::new(variable, type_info.data_type, true);
-        if type_info.is_json_encoded {
+        if type_info.is_cv_encoded {
             let mut metadata = std::collections::HashMap::new();
-            metadata.insert("json_encoded".to_string(), "true".to_string());
+            metadata.insert("cv_encoded".to_string(), "true".to_string());
             field = field.with_metadata(metadata);
         }
         fields.push(field);
@@ -505,12 +505,12 @@ impl GraphUnwindStream {
 
         // Add the unwind variable column using the appropriate typed builder
         let unwind_field = self.schema.field(self.schema.fields().len() - 1);
-        let is_json_encoded = unwind_field
+        let is_cv_encoded = unwind_field
             .metadata()
-            .get("json_encoded")
+            .get("cv_encoded")
             .is_some_and(|v| v == "true");
 
-        let unwind_col: ArrayRef = match (unwind_field.data_type(), is_json_encoded) {
+        let unwind_col: ArrayRef = match (unwind_field.data_type(), is_cv_encoded) {
             (DataType::Boolean, false) => {
                 let mut builder = BooleanBuilder::with_capacity(num_rows);
                 for (_, value) in expansions {
@@ -664,13 +664,11 @@ pub(crate) fn arrow_to_json_value(array: &dyn Array, row: usize) -> Value {
         return Value::List(result);
     }
 
-    // LargeBinary (JSONB) — decode to Value
+    // LargeBinary (CypherValue) — decode to Value
     if let Some(arr) = any.downcast_ref::<arrow_array::LargeBinaryArray>() {
         let bytes = arr.value(row);
-        let raw = jsonb::RawJsonb::new(bytes);
-        let jsonb_str = raw.to_string();
-        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&jsonb_str) {
-            return Value::from(parsed);
+        if let Ok(uni_val) = uni_common::cypher_value_codec::decode(bytes) {
+            return uni_val;
         }
         // Fallback: try plain JSON text
         if let Ok(parsed) = serde_json::from_slice::<serde_json::Value>(bytes) {
@@ -717,7 +715,7 @@ mod tests {
         assert_eq!(output_schema.field(2).name(), "item");
         assert_eq!(output_schema.field(2).data_type(), &DataType::Utf8);
         assert_eq!(
-            output_schema.field(2).metadata().get("json_encoded"),
+            output_schema.field(2).metadata().get("cv_encoded"),
             Some(&"true".to_string())
         );
     }
@@ -801,7 +799,7 @@ mod tests {
         let field = output_schema.field(1);
         assert_eq!(field.name(), "x");
         assert_eq!(field.data_type(), &DataType::Utf8);
-        // Plain string, no json_encoded metadata
+        // Plain string, no cv_encoded metadata
         assert!(field.metadata().is_empty());
     }
 
@@ -823,7 +821,7 @@ mod tests {
         assert_eq!(field.name(), "x");
         assert_eq!(field.data_type(), &DataType::Utf8);
         assert_eq!(
-            field.metadata().get("json_encoded"),
+            field.metadata().get("cv_encoded"),
             Some(&"true".to_string())
         );
     }

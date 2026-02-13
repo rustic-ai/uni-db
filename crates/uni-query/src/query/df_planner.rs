@@ -909,7 +909,7 @@ impl HybridPhysicalPlanner {
             )?;
         } else if schemaless {
             // For schemaless scans (scan_all, schemaless_scan, multi_label_scan),
-            // all non-system properties are stored as JSONB in _all_props.
+            // all non-system properties are stored as CypherValue in _all_props.
             // Rewrite filters to use json_get_* against the _all_props column.
             let empty_props = HashMap::new();
             df_filter = crate::query::df_expr::rewrite_overflow_filters_with_source(
@@ -1236,7 +1236,7 @@ impl HybridPhysicalPlanner {
         if need_full {
             // Filter out "*" (wildcard marker) from struct_props.
             // Keep "_all_props" so that keys()/properties() UDFs can extract
-            // property names at runtime from the JSONB blob.
+            // property names at runtime from the CypherValue blob.
             let struct_props: Vec<String> =
                 properties.iter().filter(|p| *p != "*").cloned().collect();
             scan_plan = self.add_structural_projection(scan_plan, variable, &struct_props)?;
@@ -1287,7 +1287,7 @@ impl HybridPhysicalPlanner {
         if need_full {
             // Filter out "*" (wildcard marker) from struct_props.
             // Keep "_all_props" so that keys()/properties() UDFs can extract
-            // property names at runtime from the JSONB blob.
+            // property names at runtime from the CypherValue blob.
             let struct_props: Vec<String> =
                 properties.iter().filter(|p| *p != "*").cloned().collect();
             scan_plan = self.add_structural_projection(scan_plan, variable, &struct_props)?;
@@ -1337,7 +1337,7 @@ impl HybridPhysicalPlanner {
         if need_full {
             // Filter out "*" (wildcard marker) from struct_props.
             // Keep "_all_props" so that keys()/properties() UDFs can extract
-            // property names at runtime from the JSONB blob.
+            // property names at runtime from the CypherValue blob.
             let struct_props: Vec<String> =
                 properties.iter().filter(|p| *p != "*").cloned().collect();
             scan_plan = self.add_structural_projection(scan_plan, variable, &struct_props)?;
@@ -1460,9 +1460,9 @@ impl HybridPhysicalPlanner {
                 target_properties.push("_all_props".to_string());
             }
 
-            // Check for non-schema properties that need JSONB extraction.
+            // Check for non-schema properties that need CypherValue extraction.
             // For the traverse path, always use _all_props (not overflow_json) as
-            // the JSONB source since get_property_value handles _all_props directly.
+            // the CypherValue source since get_property_value handles _all_props directly.
             let target_label_props = if !target_label_name_str.is_empty() {
                 self.schema.properties.get(target_label_name_str)
             } else {
@@ -1579,12 +1579,6 @@ impl HybridPhysicalPlanner {
                     )));
                 }
             }
-            if edge_type_ids.len() != 1 {
-                return Err(anyhow!(
-                    "Variable-length traversal only supports single edge type"
-                ));
-            }
-
             {
                 // Resolve target properties for VLP (same logic as single-hop above)
                 let vlp_target_label_name_str =
@@ -1603,7 +1597,7 @@ impl HybridPhysicalPlanner {
                 Arc::new(GraphVariableLengthTraverseExec::new(
                     input_plan,
                     source_col,
-                    edge_type_ids[0],
+                    edge_type_ids.to_vec(),
                     adj_direction,
                     min_hops,
                     max_hops,
@@ -1816,7 +1810,7 @@ impl HybridPhysicalPlanner {
             .unwrap_or_default();
 
         // Always include _all_props so post-traverse filters can rewrite
-        // property accesses to json_get_* calls against the JSONB blob.
+        // property accesses to json_get_* calls against the CypherValue blob.
         // Also include it when wildcard access was requested (RETURN n) even if empty.
         let target_has_wildcard = all_properties
             .get(target_variable)
@@ -1927,7 +1921,7 @@ impl HybridPhysicalPlanner {
             .unwrap_or_default();
 
         // Always include _all_props so post-traverse filters can rewrite
-        // property accesses to json_get_* calls against the JSONB blob.
+        // property accesses to json_get_* calls against the CypherValue blob.
         // Also include it when wildcard access was requested (RETURN n) even if empty.
         let target_has_wildcard = all_properties
             .get(target_variable)
@@ -1999,7 +1993,7 @@ impl HybridPhysicalPlanner {
         let input_plan = self.plan_internal(input, all_properties)?;
         let schema = input_plan.schema();
 
-        // Check if any referenced columns are LargeBinary (schemaless JSONB).
+        // Check if any referenced columns are LargeBinary (schemaless CypherValue).
         // If so, rewrite the filter to use json_get_* UDFs against _all_props.
         let has_schemaless_cols = schema.fields().iter().any(|f| {
             f.data_type() == &arrow::datatypes::DataType::LargeBinary
@@ -2011,7 +2005,7 @@ impl HybridPhysicalPlanner {
             // If the predicate contains custom expressions (quantifiers, comprehensions,
             // reduce), bypass the logical-level rewriting path and use the physical
             // compiler directly. Custom expressions cannot be translated to DfExpr.
-            // The physical compiler handles JSONB-encoded lists natively (JSONB decode
+            // The physical compiler handles CypherValue-encoded lists natively (CypherValue decode
             // in QuantifierExecExpr/ListComprehensionExecExpr).
             if crate::query::df_graph::expr_compiler::CypherPhysicalExprCompiler::contains_custom_expr(predicate) {
                 let ctx = self.translation_context_for_plan(input);
@@ -2228,7 +2222,7 @@ impl HybridPhysicalPlanner {
             // Handle whole-node/relationship projection: RETURN n
             // The scan layer materializes the variable as either:
             //   - A Struct column (registered labels via add_structural_projection)
-            //   - A LargeBinary/JSONB column aliased as the variable (schemaless via add_alias_projection)
+            //   - A LargeBinary/CypherValue column aliased as the variable (schemaless via add_alias_projection)
             // Project that column directly, plus _vid/_labels helpers for post-processing.
             if let Expr::Variable(var_name) = expr {
                 if schema.column_with_name(var_name).is_some() {

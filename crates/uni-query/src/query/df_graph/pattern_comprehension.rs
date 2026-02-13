@@ -725,11 +725,8 @@ impl PatternComprehensionExecExpr {
 
         let props_builder = nodes_struct.field_builder::<LargeBinaryBuilder>(2).unwrap();
         if let Some(props) = l0_visibility::get_vertex_properties(vid, query_ctx) {
-            if let Ok(json) = serde_json::to_vec(&props) {
-                props_builder.append_value(&json);
-            } else {
-                props_builder.append_null();
-            }
+            let cv_bytes = super::common::encode_props_to_cv(&props);
+            props_builder.append_value(&cv_bytes);
         } else {
             props_builder.append_null();
         }
@@ -768,11 +765,8 @@ impl PatternComprehensionExecExpr {
 
         let props_builder = rels_struct.field_builder::<LargeBinaryBuilder>(4).unwrap();
         if let Some(props) = l0_visibility::get_edge_properties(eid, query_ctx) {
-            if let Ok(json) = serde_json::to_vec(&props) {
-                props_builder.append_value(&json);
-            } else {
-                props_builder.append_null();
-            }
+            let cv_bytes = super::common::encode_props_to_cv(&props);
+            props_builder.append_value(&cv_bytes);
         } else {
             props_builder.append_null();
         }

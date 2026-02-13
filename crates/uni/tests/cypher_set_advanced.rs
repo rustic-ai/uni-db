@@ -29,7 +29,7 @@ async fn test_cypher_set_advanced() -> anyhow::Result<()> {
         DataType::Vector { dimensions: 3 },
         true,
     )?;
-    schema_manager.add_property("Item", "metadata", DataType::Json, true)?;
+    schema_manager.add_property("Item", "metadata", DataType::CypherValue, true)?;
 
     schema_manager.add_edge_type(
         "RELATED",

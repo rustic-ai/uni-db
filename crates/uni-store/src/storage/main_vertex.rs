@@ -184,13 +184,11 @@ impl MainVertexDataset {
         // props_json column (JSONB binary encoding)
         let mut props_json_builder = LargeBinaryBuilder::new();
         for (_, _, props, _, _) in vertices.iter() {
-            let jsonb_bytes = jsonb::to_owned_jsonb(props)
-                .map(|b| b.to_vec())
-                .unwrap_or_else(|_| {
-                    jsonb::to_owned_jsonb(&serde_json::json!({}))
-                        .unwrap()
-                        .to_vec()
-                });
+            let jsonb_bytes = {
+                let json_val = serde_json::to_value(props).unwrap_or(serde_json::json!({}));
+                let uni_val: uni_common::Value = json_val.into();
+                uni_common::cypher_value_codec::encode(&uni_val)
+            };
             props_json_builder.append_value(&jsonb_bytes);
         }
         columns.push(Arc::new(props_json_builder.finish()));
@@ -572,9 +570,10 @@ impl MainVertexDataset {
                         Properties::new()
                     } else {
                         let bytes = props_arr.value(i);
-                        let raw = jsonb::RawJsonb::new(bytes);
-                        let json_str = raw.to_string();
-                        serde_json::from_str(&json_str)
+                        let uni_val = uni_common::cypher_value_codec::decode(bytes)
+                            .map_err(|e| anyhow!("Failed to decode CypherValue: {}", e))?;
+                        let json_val: serde_json::Value = uni_val.into();
+                        serde_json::from_value(json_val)
                             .map_err(|e| anyhow!("Failed to parse props_json: {}", e))?
                     };
 
@@ -642,9 +641,10 @@ impl MainVertexDataset {
                             best_props = Some(Properties::new());
                         } else {
                             let bytes = props_arr.value(i);
-                            let raw = jsonb::RawJsonb::new(bytes);
-                            let json_str = raw.to_string();
-                            let parsed: Properties = serde_json::from_str(&json_str)
+                            let uni_val = uni_common::cypher_value_codec::decode(bytes)
+                                .map_err(|e| anyhow!("Failed to decode CypherValue: {}", e))?;
+                            let json_val: serde_json::Value = uni_val.into();
+                            let parsed: Properties = serde_json::from_value(json_val)
                                 .map_err(|e| anyhow!("Failed to parse props_json: {}", e))?;
                             best_props = Some(parsed);
                         }

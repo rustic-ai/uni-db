@@ -665,7 +665,7 @@ impl Executor {
             "time" => Ok(DataType::Time),
             "datetime" => Ok(DataType::DateTime),
             "duration" => Ok(DataType::Duration),
-            "json" | "jsonb" => Ok(DataType::Json),
+            "json" | "jsonb" => Ok(DataType::CypherValue),
             "point" => Ok(DataType::Point(PointType::Cartesian2D)),
             "point3d" => Ok(DataType::Point(PointType::Cartesian3D)),
             "geopoint" | "geographic" => Ok(DataType::Point(PointType::Geographic)),

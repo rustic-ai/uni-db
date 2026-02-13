@@ -247,7 +247,7 @@ impl GraphScanExec {
         }
     }
 
-    /// Build schema for schemaless vertex scan (all properties as LargeBinary/JSONB).
+    /// Build schema for schemaless vertex scan (all properties as LargeBinary/CypherValue).
     fn build_schemaless_vertex_schema(variable: &str, properties: &[String]) -> SchemaRef {
         let mut fields = vec![
             Field::new(format!("{}._vid", variable), DataType::UInt64, false),
@@ -260,7 +260,7 @@ impl GraphScanExec {
 
         for prop in properties {
             let col_name = format!("{}.{}", variable, prop);
-            // Schemaless properties use LargeBinary with JSONB encoding to preserve types
+            // Schemaless properties use LargeBinary with CypherValue encoding to preserve types
             fields.push(Field::new(&col_name, DataType::LargeBinary, true));
         }
 
@@ -499,7 +499,7 @@ impl GraphScanStream {
 
 /// Resolve the Arrow data type for a property, handling system columns like `overflow_json`.
 ///
-/// Falls back to `LargeBinary` (JSONB) if the property is not found in the schema,
+/// Falls back to `LargeBinary` (CypherValue) if the property is not found in the schema,
 /// preserving original value types for overflow/unknown properties.
 pub(crate) fn resolve_property_type(
     prop: &str,
@@ -774,7 +774,7 @@ fn accumulate_l0_vertex_props(
 
 /// Build a RecordBatch from schemaless VIDs and their properties.
 ///
-/// Property values are encoded as LargeBinary (JSONB) to preserve types.
+/// Property values are encoded as LargeBinary (CypherValue) to preserve types.
 ///
 /// Superseded by `columnar_scan_schemaless_vertex_batch_static`.
 #[allow(dead_code)]
@@ -809,7 +809,7 @@ fn build_schemaless_vertex_record_batch(
     }
     columns.push(Arc::new(labels_builder.finish()));
 
-    // 3. Build property columns (as LargeBinary / JSONB)
+    // 3. Build property columns (as LargeBinary / CypherValue)
     for field in schema.fields().iter().skip(2) {
         let prop_name = field.name().split('.').nth(1).unwrap_or(field.name());
 
@@ -819,7 +819,7 @@ fn build_schemaless_vertex_record_batch(
                 Some(Value::Null) | None => builder.append_null(),
                 Some(val) => {
                     let json_val: serde_json::Value = val.into();
-                    match serde_json_to_jsonb(&json_val) {
+                    match encode_cypher_value(&json_val) {
                         Ok(bytes) => builder.append_value(bytes),
                         Err(_) => builder.append_null(),
                     }
@@ -959,7 +959,7 @@ pub(crate) fn build_vertex_record_batch_static(
         let prop_name = field.name().split('.').nth(1).unwrap_or(field.name());
 
         if prop_name == "overflow_json" {
-            // Reconstruct the overflow_json JSONB blob from all non-system properties.
+            // Reconstruct the overflow_json CypherValue blob from all non-system properties.
             // The PropertyManager already decoded overflow_json into individual properties,
             // so we re-encode them as a JSON object for filter expressions like
             // json_get_string(overflow_json, 'key').
@@ -976,7 +976,7 @@ pub(crate) fn build_vertex_record_batch_static(
         .map_err(|e| datafusion::error::DataFusionError::ArrowError(Box::new(e), None))
 }
 
-/// Build the `overflow_json` column by reconstructing a JSONB object from all
+/// Build the `overflow_json` column by reconstructing a CypherValue object from all
 /// non-system properties in the props map.
 #[allow(dead_code)]
 fn build_overflow_json_column(
@@ -1000,7 +1000,7 @@ fn build_overflow_json_column(
                 builder.append_null();
             } else {
                 let json_val = serde_json::Value::Object(obj);
-                match serde_json_to_jsonb(&json_val) {
+                match encode_cypher_value(&json_val) {
                     Ok(bytes) => builder.append_value(bytes),
                     Err(_) => builder.append_null(),
                 }
@@ -1295,7 +1295,7 @@ fn build_l0_vertex_batch(
                 columns.push(Arc::new(UInt64Array::from(vals)));
             }
             "overflow_json" => {
-                // Collect non-schema properties as JSONB
+                // Collect non-schema properties as CypherValue
                 let mut builder = arrow_array::builder::LargeBinaryBuilder::new();
                 for vid_u64 in &vids {
                     let (props, _) = &vid_data[vid_u64];
@@ -1313,7 +1313,7 @@ fn build_l0_vertex_batch(
                         builder.append_null();
                     } else {
                         let json_val = serde_json::Value::Object(overflow);
-                        match serde_json_to_jsonb(&json_val) {
+                        match encode_cypher_value(&json_val) {
                             Ok(bytes) => builder.append_value(bytes),
                             Err(_) => builder.append_null(),
                         }
@@ -1449,7 +1449,7 @@ fn build_l0_edge_batch(
                 columns.push(Arc::new(UInt64Array::from(vals)));
             }
             "overflow_json" => {
-                // Collect non-schema properties as JSONB
+                // Collect non-schema properties as CypherValue
                 let mut builder = arrow_array::builder::LargeBinaryBuilder::new();
                 for eid_u64 in &eids {
                     let (_, _, props, _) = &eid_data[eid_u64];
@@ -1467,7 +1467,7 @@ fn build_l0_edge_batch(
                         builder.append_null();
                     } else {
                         let json_val = serde_json::Value::Object(overflow);
-                        match serde_json_to_jsonb(&json_val) {
+                        match encode_cypher_value(&json_val) {
                             Ok(bytes) => builder.append_value(bytes),
                             Err(_) => builder.append_null(),
                         }
@@ -1606,7 +1606,7 @@ fn map_to_output_schema(
             match batch.column_by_name(prop) {
                 Some(col) => columns.push(col.clone()),
                 None => {
-                    // Column missing in Lance — extract from overflow_json JSONB blob
+                    // Column missing in Lance — extract from overflow_json CypherValue blob
                     // with L0 overlay (mirrors schemaless path logic)
                     let mut builder = arrow_array::builder::LargeBinaryBuilder::new();
                     for i in 0..batch.num_rows() {
@@ -1628,7 +1628,7 @@ fn map_to_output_schema(
                             match val_opt {
                                 Some(val) if !val.is_null() => {
                                     let json_val: serde_json::Value = val.into();
-                                    match serde_json_to_jsonb(&json_val) {
+                                    match encode_cypher_value(&json_val) {
                                         Ok(bytes) => builder.append_value(bytes),
                                         Err(_) => builder.append_null(),
                                     }
@@ -1636,14 +1636,18 @@ fn map_to_output_schema(
                                 _ => builder.append_null(),
                             }
                         } else {
-                            // Extract from overflow_json JSONB blob
+                            // Extract from overflow_json CypherValue blob
                             if let Some(arr) = overflow_arr {
                                 if !arr.is_null(i) {
                                     let blob = arr.value(i);
-                                    let raw = jsonb::RawJsonb::new(blob);
-                                    match raw.get_by_name(prop, false) {
-                                        Ok(Some(sub_val)) => {
-                                            builder.append_value(sub_val.as_ref());
+                                    match uni_common::cypher_value_codec::decode(blob) {
+                                        Ok(uni_common::Value::Map(map)) => {
+                                            if let Some(val) = map.get(prop) {
+                                                let sub_bytes = uni_common::cypher_value_codec::encode(val);
+                                                builder.append_value(&sub_bytes);
+                                            } else {
+                                                builder.append_null();
+                                            }
                                         }
                                         _ => builder.append_null(),
                                     }
@@ -1726,7 +1730,7 @@ fn map_edge_to_output_schema(
             match batch.column_by_name(prop) {
                 Some(col) => columns.push(col.clone()),
                 None => {
-                    // Column missing in Lance — extract from overflow_json JSONB blob
+                    // Column missing in Lance — extract from overflow_json CypherValue blob
                     // (mirrors the vertex path in map_to_output_schema)
                     let overflow_arr = batch
                         .column_by_name("overflow_json")
@@ -1737,10 +1741,14 @@ fn map_edge_to_output_schema(
                         for i in 0..batch.num_rows() {
                             if !arr.is_null(i) {
                                 let blob = arr.value(i);
-                                let raw = jsonb::RawJsonb::new(blob);
-                                match raw.get_by_name(prop, false) {
-                                    Ok(Some(sub_val)) => {
-                                        builder.append_value(sub_val.as_ref());
+                                match uni_common::cypher_value_codec::decode(blob) {
+                                    Ok(uni_common::Value::Map(map)) => {
+                                        if let Some(val) = map.get(prop) {
+                                            let sub_bytes = uni_common::cypher_value_codec::encode(val);
+                                            builder.append_value(&sub_bytes);
+                                        } else {
+                                            builder.append_null();
+                                        }
                                     }
                                     _ => builder.append_null(),
                                 }
@@ -2416,7 +2424,7 @@ fn build_l0_schemaless_vertex_batch(
                     if props.is_empty() {
                         builder.append_null();
                     } else {
-                        // Encode properties as JSONB blob
+                        // Encode properties as CypherValue blob
                         let json_obj: serde_json::Value = {
                             let mut map = serde_json::Map::new();
                             for (k, v) in props {
@@ -2425,7 +2433,7 @@ fn build_l0_schemaless_vertex_batch(
                             }
                             serde_json::Value::Object(map)
                         };
-                        match serde_json_to_jsonb(&json_obj) {
+                        match encode_cypher_value(&json_obj) {
                             Ok(bytes) => builder.append_value(bytes),
                             Err(_) => builder.append_null(),
                         }
@@ -2459,8 +2467,8 @@ fn build_l0_schemaless_vertex_batch(
 ///
 /// The internal batch has `_vid, labels, props_json, _version` columns. The output
 /// schema has `{variable}._vid`, `{variable}._labels`, and per-property columns.
-/// Individual properties are extracted from the `props_json` JSONB blob using
-/// `jsonb::RawJsonb::get_by_name()` for direct sub-value extraction.
+/// Individual properties are extracted from the `props_json` CypherValue blob by
+/// decoding to a Map and extracting the sub-value.
 fn map_to_schemaless_output_schema(
     batch: &RecordBatch,
     _variable: &str,
@@ -2551,7 +2559,7 @@ fn map_to_schemaless_output_schema(
                 }
             }
         } else {
-            // Extract individual property from JSONB blob
+            // Extract individual property from CypherValue blob
             let mut builder = arrow_array::builder::LargeBinaryBuilder::new();
             for i in 0..batch.num_rows() {
                 let vid = Vid::from(vid_arr.value(i));
@@ -2572,7 +2580,7 @@ fn map_to_schemaless_output_schema(
                     match val_opt {
                         Some(val) if !val.is_null() => {
                             let json_val: serde_json::Value = val.into();
-                            match serde_json_to_jsonb(&json_val) {
+                            match encode_cypher_value(&json_val) {
                                 Ok(bytes) => builder.append_value(bytes),
                                 Err(_) => builder.append_null(),
                             }
@@ -2580,14 +2588,18 @@ fn map_to_schemaless_output_schema(
                         _ => builder.append_null(),
                     }
                 } else {
-                    // Extract from props_json JSONB blob
+                    // Extract from props_json CypherValue blob
                     if let Some(arr) = props_arr {
                         if !arr.is_null(i) {
                             let blob = arr.value(i);
-                            let raw = jsonb::RawJsonb::new(blob);
-                            match raw.get_by_name(prop, false) {
-                                Ok(Some(sub_val)) => {
-                                    builder.append_value(sub_val.as_ref());
+                            match uni_common::cypher_value_codec::decode(blob) {
+                                Ok(uni_common::Value::Map(map)) => {
+                                    if let Some(val) = map.get(prop) {
+                                        let sub_bytes = uni_common::cypher_value_codec::encode(val);
+                                        builder.append_value(&sub_bytes);
+                                    } else {
+                                        builder.append_null();
+                                    }
                                 }
                                 _ => builder.append_null(),
                             }
@@ -2719,17 +2731,12 @@ pub(crate) fn get_property_value(
         .cloned()
 }
 
-/// Encode a `serde_json::Value` as JSONB binary.
+/// Encode a `serde_json::Value` as CypherValue binary (MessagePack-tagged).
 ///
-/// Uses `jsonb::parse_value` (JSON text parsing) instead of `jsonb::to_owned_jsonb`
-/// (serde serialization) because `serde_json::Number` does not serialize correctly
-/// through serde — it produces a tagged struct string instead of a JSONB number.
-pub(crate) fn serde_json_to_jsonb(val: &serde_json::Value) -> Result<Vec<u8>, String> {
-    let json_str =
-        serde_json::to_string(val).map_err(|e| format!("JSON serialization failed: {e}"))?;
-    let jsonb_bytes =
-        jsonb::parse_value(json_str.as_bytes()).map_err(|e| format!("JSONB parse failed: {e}"))?;
-    Ok(jsonb_bytes.to_vec())
+/// Converts from serde_json::Value -> uni_common::Value -> CypherValue bytes.
+pub(crate) fn encode_cypher_value(val: &serde_json::Value) -> Result<Vec<u8>, String> {
+    let uni_val: uni_common::Value = val.clone().into();
+    Ok(uni_common::cypher_value_codec::encode(&uni_val))
 }
 
 /// Build a numeric column from property values using the specified builder and extractor.
@@ -2761,7 +2768,7 @@ pub(crate) fn build_property_column_static(
 ) -> DFResult<ArrayRef> {
     match data_type {
         DataType::LargeBinary => {
-            // Handle JSONB binary columns (overflow_json and Json-typed properties).
+            // Handle CypherValue binary columns (overflow_json and Json-typed properties).
             use arrow_array::builder::LargeBinaryBuilder;
             let mut builder = LargeBinaryBuilder::new();
 
@@ -2772,7 +2779,7 @@ pub(crate) fn build_property_column_static(
                         builder.append_value(&bytes);
                     }
                     Some(Value::List(arr)) if arr.iter().all(|v| v.as_u64().is_some()) => {
-                        // Raw JSONB bytes stored as list of u8 values from PropertyManager
+                        // Raw CypherValue bytes stored as list of u8 values from PropertyManager
                         let bytes: Vec<u8> = arr
                             .iter()
                             .filter_map(|v| v.as_u64().map(|n| n as u8))
@@ -2780,9 +2787,9 @@ pub(crate) fn build_property_column_static(
                         builder.append_value(&bytes);
                     }
                     Some(val) => {
-                        // Value from PropertyManager — convert to serde_json and re-encode to JSONB binary
+                        // Value from PropertyManager — convert to serde_json and re-encode to CypherValue binary
                         let json_val: serde_json::Value = val.into();
-                        match serde_json_to_jsonb(&json_val) {
+                        match encode_cypher_value(&json_val) {
                             Ok(bytes) => builder.append_value(bytes),
                             Err(_) => builder.append_null(),
                         }
@@ -3512,25 +3519,26 @@ mod tests {
     }
 
     #[test]
-    fn test_jsonb_all_props_extraction() {
-        // Simulate _all_props encoding using serde_json_to_jsonb helper
+    fn test_cypher_value_all_props_extraction() {
+        // Simulate _all_props encoding using encode_cypher_value helper
         let json_obj = serde_json::json!({"age": 30, "name": "Alice"});
-        let jsonb_bytes = serde_json_to_jsonb(&json_obj).unwrap();
-        let raw = jsonb::RawJsonb::new(&jsonb_bytes);
+        let cv_bytes = encode_cypher_value(&json_obj).unwrap();
 
-        // Extract "age" value (this is what json_get_int does)
-        let val = raw.get_by_name("age", false).unwrap().unwrap();
-        let val_raw = jsonb::RawJsonb::new(val.as_ref());
-        let result = val_raw.to_i64();
-
-        assert!(result.is_ok(), "to_i64 failed: {:?}", result.err());
-        assert_eq!(result.unwrap(), 30);
+        // Decode and extract "age" value
+        let decoded = uni_common::cypher_value_codec::decode(&cv_bytes).unwrap();
+        match decoded {
+            uni_common::Value::Map(map) => {
+                let age_val = map.get("age").unwrap();
+                assert_eq!(age_val, &uni_common::Value::Int(30));
+            }
+            _ => panic!("Expected Map"),
+        }
 
         // Also test single value encoding
         let single_val = serde_json::json!(30);
-        let single_bytes = serde_json_to_jsonb(&single_val).unwrap();
-        let single_raw = jsonb::RawJsonb::new(&single_bytes);
-        assert_eq!(single_raw.to_i64().unwrap(), 30);
+        let single_bytes = encode_cypher_value(&single_val).unwrap();
+        let single_decoded = uni_common::cypher_value_codec::decode(&single_bytes).unwrap();
+        assert_eq!(single_decoded, uni_common::Value::Int(30));
     }
 
     /// Helper to build a RecordBatch with _vid, _deleted, _version columns for testing.

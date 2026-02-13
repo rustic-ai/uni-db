@@ -376,7 +376,7 @@ impl BindFixedPathStream {
                         .cloned()
                 });
                 let props = l0_visibility::get_vertex_properties(v, query_ctx)
-                    .and_then(|p| serde_json::to_vec(&p).ok());
+                    .map(|p| super::common::encode_props_to_cv(&p));
                 (v.as_u64(), resolved_label, props)
             }
             None => (0, None, None),
@@ -416,7 +416,7 @@ impl BindFixedPathStream {
             Some(e) => {
                 let type_name = l0_visibility::get_edge_type(e, query_ctx).unwrap_or_default();
                 let props = l0_visibility::get_edge_properties(e, query_ctx)
-                    .and_then(|p| serde_json::to_vec(&p).ok());
+                    .map(|p| super::common::encode_props_to_cv(&p));
                 (e.as_u64(), type_name, props)
             }
             None => (0, String::new(), None),

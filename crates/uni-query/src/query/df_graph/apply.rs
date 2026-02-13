@@ -428,11 +428,15 @@ fn rows_to_batch(rows: &[HashMap<String, Value>], schema: &SchemaRef) -> DFResul
                         if val.is_null() {
                             builder.append_null();
                         } else {
-                            // Serialize to JSONB
+                            // Serialize to CypherValue
                             let json_val: serde_json::Value = val.clone().into();
                             let json_str = serde_json::to_string(&json_val).unwrap_or_default();
-                            match jsonb::parse_value(json_str.as_bytes()) {
-                                Ok(owned) => builder.append_value(owned.to_vec()),
+                            match serde_json::from_str::<serde_json::Value>(&json_str) {
+                                Ok(parsed) => {
+                                    let uni_val: uni_common::Value = parsed.into();
+                                    let cv_bytes = uni_common::cypher_value_codec::encode(&uni_val);
+                                    builder.append_value(&cv_bytes);
+                                }
                                 Err(_) => builder.append_null(),
                             }
                         }

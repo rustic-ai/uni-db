@@ -273,20 +273,17 @@ pub fn arrow_to_value(col: &dyn Array, row: usize) -> Value {
         return Value::Int(d.value(row));
     }
 
-    // LargeBinary (JSONB-encoded JSON values)
+    // LargeBinary (CypherValue MessagePack-tagged encoding)
     if let Some(b) = col.as_any().downcast_ref::<LargeBinaryArray>() {
         let bytes = b.value(row);
         if bytes.is_empty() {
             return Value::Null;
         }
-        let raw = jsonb::RawJsonb::new(bytes);
-        let json_str = raw.to_string();
-        if json_str == "null" {
-            return Value::Null;
-        }
-        let json_val: serde_json::Value =
-            serde_json::from_str(&json_str).unwrap_or_else(|_| serde_json::Value::String(json_str));
-        return Value::from(json_val);
+        return uni_common::cypher_value_codec::decode(bytes)
+            .unwrap_or_else(|e| {
+                eprintln!("CypherValue decode error: {}", e);
+                Value::Null
+            });
     }
 
     // Binary (CRDT MessagePack) - decode to Value via serde_json boundary
@@ -463,12 +460,9 @@ fn values_to_large_binary_array(values: &[Value]) -> ArrayRef {
         if v.is_null() {
             builder.append_null();
         } else {
-            // Encode as JSONB — convert to serde_json::Value at the serialization boundary
-            let json_val: serde_json::Value = v.clone().into();
-            let jsonb_bytes = jsonb::to_owned_jsonb(&json_val)
-                .map(|b| b.to_vec())
-                .unwrap_or_else(|_| vec![]);
-            builder.append_value(&jsonb_bytes);
+            // Encode as CypherValue (MessagePack-tagged)
+            let cv_bytes = uni_common::cypher_value_codec::encode(v);
+            builder.append_value(&cv_bytes);
         }
     }
     Arc::new(builder.finish())
@@ -555,7 +549,7 @@ impl<'a> PropertyExtractor<'a> {
             DataType::Vector { dimensions } => {
                 self.build_vector_column(len, deleted, get_props, *dimensions)
             }
-            DataType::Json => self.build_json_column(len, deleted, get_props),
+            DataType::CypherValue => self.build_json_column(len, deleted, get_props),
             DataType::List(inner) => self.build_list_column(len, deleted, get_props, inner),
             DataType::Map(key, value) => self.build_map_column(len, deleted, get_props, key, value),
             DataType::Crdt(_) => self.build_crdt_column(len, deleted, get_props),
@@ -875,12 +869,9 @@ impl<'a> PropertyExtractor<'a> {
             } else {
                 val.unwrap_or(&null_val)
             };
-            // Convert to serde_json::Value at the JSONB serialization boundary
-            let json_val: serde_json::Value = uni_val.clone().into();
-            let jsonb_bytes = jsonb::to_owned_jsonb(&json_val)
-                .map_err(|e| anyhow!("JSONB encode error: {}", e))?
-                .to_vec();
-            builder.append_value(&jsonb_bytes);
+            // Encode to CypherValue (MessagePack-tagged)
+            let cv_bytes = uni_common::cypher_value_codec::encode(uni_val);
+            builder.append_value(&cv_bytes);
         }
         Ok(Arc::new(builder.finish()))
     }

@@ -25,7 +25,6 @@ uni-common = { workspace = true }
 uni-crdt = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-jsonb = "0.5.3"
 anyhow = { workspace = true }
 tracing = { workspace = true }
 log = { workspace = true }

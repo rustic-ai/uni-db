@@ -59,7 +59,7 @@ type BfsResult = (Vid, usize, Vec<Vid>, Vec<Eid>);
 /// Expansion record: (original_row_idx, target_vid, hop_count, node_path, edge_path)
 type ExpansionRecord = (usize, Vid, usize, Vec<Vid>, Vec<Eid>);
 
-/// Resolve edge property Arrow type, falling back to `LargeBinary` (JSONB) for
+/// Resolve edge property Arrow type, falling back to `LargeBinary` (CypherValue) for
 /// schemaless properties. Unlike vertex properties, schemaless edge properties must
 /// preserve original JSON value types (int, float, etc.) since edge types commonly
 /// lack explicit property definitions.
@@ -728,8 +728,8 @@ async fn build_traverse_output_batch(
 
             for prop_name in &target_properties {
                 if prop_name == "_all_props" {
-                    // Build JSONB blob from all vertex properties (L0 + storage)
-                    use crate::query::df_graph::scan::serde_json_to_jsonb;
+                    // Build CypherValue blob from all vertex properties (L0 + storage)
+                    use crate::query::df_graph::scan::encode_cypher_value;
                     use arrow_array::builder::LargeBinaryBuilder;
 
                     let mut builder = LargeBinaryBuilder::new();
@@ -757,7 +757,7 @@ async fn build_traverse_output_batch(
                             builder.append_null();
                         } else {
                             let json = serde_json::Value::Object(merged_props);
-                            match serde_json_to_jsonb(&json) {
+                            match encode_cypher_value(&json) {
                                 Ok(bytes) => builder.append_value(bytes),
                                 Err(_) => builder.append_null(),
                             }
@@ -1298,7 +1298,7 @@ impl GraphTraverseMainExec {
                 true,
             ));
 
-            // Edge properties: Utf8 for named props, LargeBinary for _all_props JSONB
+            // Edge properties: Utf8 for named props, LargeBinary for _all_props CypherValue
             for prop in edge_properties {
                 if prop == "_all_props" {
                     fields.push(Field::new(
@@ -1647,8 +1647,8 @@ impl GraphTraverseMainStream {
             // Add edge property columns
             for prop_name in &self.edge_properties {
                 if prop_name == "_all_props" {
-                    // Serialize all edge properties to JSONB blob
-                    use crate::query::df_graph::scan::serde_json_to_jsonb;
+                    // Serialize all edge properties to CypherValue blob
+                    use crate::query::df_graph::scan::encode_cypher_value;
                     let mut builder = arrow_array::builder::LargeBinaryBuilder::new();
                     for (_, _, _, _, props) in &expansions {
                         if props.is_empty() {
@@ -1660,7 +1660,7 @@ impl GraphTraverseMainStream {
                                 json_map.insert(k.clone(), json_val);
                             }
                             let json = serde_json::Value::Object(json_map);
-                            match serde_json_to_jsonb(&json) {
+                            match encode_cypher_value(&json) {
                                 Ok(bytes) => builder.append_value(bytes),
                                 Err(_) => builder.append_null(),
                             }
@@ -1684,12 +1684,12 @@ impl GraphTraverseMainStream {
 
         // Add target property columns (hydrate from L0 buffers)
         {
-            use crate::query::df_graph::scan::serde_json_to_jsonb;
+            use crate::query::df_graph::scan::encode_cypher_value;
             let l0_ctx = self.graph_ctx.l0_context();
 
             for prop_name in &self.target_properties {
                 if prop_name == "_all_props" {
-                    // Build full JSONB blob from all L0 vertex properties
+                    // Build full CypherValue blob from all L0 vertex properties
                     let mut builder = arrow_array::builder::LargeBinaryBuilder::new();
                     for (_, target_vid, _, _, _) in &expansions {
                         let mut merged_props = serde_json::Map::new();
@@ -1706,7 +1706,7 @@ impl GraphTraverseMainStream {
                             builder.append_null();
                         } else {
                             let json = serde_json::Value::Object(merged_props);
-                            match serde_json_to_jsonb(&json) {
+                            match encode_cypher_value(&json) {
                                 Ok(bytes) => builder.append_value(bytes),
                                 Err(_) => builder.append_null(),
                             }
@@ -1714,7 +1714,7 @@ impl GraphTraverseMainStream {
                     }
                     columns.push(Arc::new(builder.finish()));
                 } else {
-                    // Extract individual property from L0 and encode as JSONB
+                    // Extract individual property from L0 and encode as CypherValue
                     let mut builder = arrow_array::builder::LargeBinaryBuilder::new();
                     for (_, target_vid, _, _, _) in &expansions {
                         let mut found = false;
@@ -1725,7 +1725,7 @@ impl GraphTraverseMainStream {
                                 && !val.is_null()
                             {
                                 let json_val: serde_json::Value = val.clone().into();
-                                if let Ok(bytes) = serde_json_to_jsonb(&json_val) {
+                                if let Ok(bytes) = encode_cypher_value(&json_val) {
                                     builder.append_value(bytes);
                                     found = true;
                                     break;
@@ -1985,8 +1985,8 @@ pub struct GraphVariableLengthTraverseExec {
     /// Column name containing source VIDs.
     source_column: String,
 
-    /// Edge type ID to traverse.
-    edge_type_id: u32,
+    /// Edge type IDs to traverse.
+    edge_type_ids: Vec<u32>,
 
     /// Traversal direction.
     direction: Direction,
@@ -2029,7 +2029,7 @@ impl fmt::Debug for GraphVariableLengthTraverseExec {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("GraphVariableLengthTraverseExec")
             .field("source_column", &self.source_column)
-            .field("edge_type_id", &self.edge_type_id)
+            .field("edge_type_ids", &self.edge_type_ids)
             .field("direction", &self.direction)
             .field("min_hops", &self.min_hops)
             .field("max_hops", &self.max_hops)
@@ -2044,7 +2044,7 @@ impl GraphVariableLengthTraverseExec {
     pub fn new(
         input: Arc<dyn ExecutionPlan>,
         source_column: impl Into<String>,
-        edge_type_id: u32,
+        edge_type_ids: Vec<u32>,
         direction: Direction,
         min_hops: usize,
         max_hops: usize,
@@ -2077,7 +2077,7 @@ impl GraphVariableLengthTraverseExec {
         Self {
             input,
             source_column,
-            edge_type_id,
+            edge_type_ids,
             direction,
             min_hops,
             max_hops,
@@ -2150,8 +2150,8 @@ impl DisplayAs for GraphVariableLengthTraverseExec {
             | DisplayFormatType::TreeRender => {
                 write!(
                     f,
-                    "GraphVariableLengthTraverseExec: {} --[{}*{}..{}]--> target",
-                    self.source_column, self.edge_type_id, self.min_hops, self.max_hops
+                    "GraphVariableLengthTraverseExec: {} --[{:?}*{}..{}]--> target",
+                    self.source_column, self.edge_type_ids, self.min_hops, self.max_hops
                 )
             }
         }
@@ -2192,7 +2192,7 @@ impl ExecutionPlan for GraphVariableLengthTraverseExec {
         Ok(Arc::new(Self::new(
             children[0].clone(),
             self.source_column.clone(),
-            self.edge_type_id,
+            self.edge_type_ids.clone(),
             self.direction,
             self.min_hops,
             self.max_hops,
@@ -2216,7 +2216,7 @@ impl ExecutionPlan for GraphVariableLengthTraverseExec {
 
         let warm_fut = self
             .graph_ctx
-            .warming_future(vec![self.edge_type_id], self.direction);
+            .warming_future(self.edge_type_ids.clone(), self.direction);
 
         Ok(Box::pin(GraphVariableLengthTraverseStream {
             input: input_stream,
@@ -2237,7 +2237,7 @@ impl GraphVariableLengthTraverseExec {
     fn clone_for_stream(&self) -> GraphVariableLengthTraverseExecData {
         GraphVariableLengthTraverseExecData {
             source_column: self.source_column.clone(),
-            edge_type_id: self.edge_type_id,
+            edge_type_ids: self.edge_type_ids.clone(),
             direction: self.direction,
             min_hops: self.min_hops,
             max_hops: self.max_hops,
@@ -2254,7 +2254,7 @@ impl GraphVariableLengthTraverseExec {
 /// Data needed by the stream (without ExecutionPlan overhead).
 struct GraphVariableLengthTraverseExecData {
     source_column: String,
-    edge_type_id: u32,
+    edge_type_ids: Vec<u32>,
     direction: Direction,
     min_hops: usize,
     max_hops: usize,
@@ -2306,16 +2306,20 @@ impl GraphVariableLengthTraverseExecData {
                 continue;
             }
 
-            // Get neighbors
-            let neighbors =
-                self.graph_ctx
-                    .get_neighbors(current, self.edge_type_id, self.direction);
+            // Get neighbors across all edge types
+            let mut all_neighbors = Vec::new();
+            for &edge_type_id in &self.edge_type_ids {
+                let neighbors = self
+                    .graph_ctx
+                    .get_neighbors(current, edge_type_id, self.direction);
+                all_neighbors.extend(neighbors);
+            }
 
             // For Direction::Both, deduplicate edges by eid at each hop.
             // This prevents the same edge being found twice (once outgoing, once incoming).
             let mut seen_edges_at_hop: HashSet<u64> = HashSet::new();
 
-            for (neighbor, eid) in neighbors {
+            for (neighbor, eid) in all_neighbors {
                 // Deduplicate edges for undirected patterns
                 if is_undirected && !seen_edges_at_hop.insert(eid.as_u64()) {
                     continue;
@@ -2577,16 +2581,6 @@ impl GraphVariableLengthTraverseStream {
         if self.exec.path_variable.is_some() {
             use arrow_array::builder::{ListBuilder, StringBuilder, StructBuilder, UInt64Builder};
 
-            // Get edge type name from schema (use unified lookup to include schemaless types)
-            let edge_type_name = self
-                .exec
-                .graph_ctx
-                .storage()
-                .schema_manager()
-                .schema()
-                .edge_type_name_by_id_unified(self.exec.edge_type_id)
-                .unwrap_or_default();
-
             use arrow_array::builder::LargeBinaryBuilder;
 
             // Build node struct fields: _vid, _label, properties
@@ -2650,11 +2644,8 @@ impl GraphVariableLengthTraverseStream {
                     let props_builder =
                         nodes_struct.field_builder::<LargeBinaryBuilder>(2).unwrap();
                     if let Some(props) = l0_visibility::get_vertex_properties(*vid, &query_ctx) {
-                        if let Ok(json) = serde_json::to_vec(&props) {
-                            props_builder.append_value(&json);
-                        } else {
-                            props_builder.append_null();
-                        }
+                        let cv_bytes = super::common::encode_props_to_cv(&props);
+                        props_builder.append_value(&cv_bytes);
                     } else {
                         props_builder.append_null();
                     }
@@ -2669,6 +2660,9 @@ impl GraphVariableLengthTraverseStream {
                         .field_builder::<UInt64Builder>(0)
                         .unwrap()
                         .append_value(eid.as_u64());
+                    // Look up edge type for this specific edge
+                    let edge_type_name = l0_visibility::get_edge_type(*eid, &query_ctx)
+                        .unwrap_or_else(|| "UNKNOWN".to_string());
                     rels_struct
                         .field_builder::<StringBuilder>(1)
                         .unwrap()
@@ -2684,11 +2678,8 @@ impl GraphVariableLengthTraverseStream {
                     // Look up edge properties from L0 chain and serialize to JSON
                     let props_builder = rels_struct.field_builder::<LargeBinaryBuilder>(4).unwrap();
                     if let Some(props) = l0_visibility::get_edge_properties(*eid, &query_ctx) {
-                        if let Ok(json) = serde_json::to_vec(&props) {
-                            props_builder.append_value(&json);
-                        } else {
-                            props_builder.append_null();
-                        }
+                        let cv_bytes = super::common::encode_props_to_cv(&props);
+                        props_builder.append_value(&cv_bytes);
                     } else {
                         props_builder.append_null();
                     }
@@ -3342,11 +3333,8 @@ impl GraphVariableLengthTraverseMainStream {
                     let props_builder =
                         edges_struct.field_builder::<LargeBinaryBuilder>(4).unwrap();
                     if let Some(props) = l0_visibility::get_edge_properties(*eid, &query_ctx) {
-                        if let Ok(json) = serde_json::to_vec(&props) {
-                            props_builder.append_value(&json);
-                        } else {
-                            props_builder.append_null();
-                        }
+                        let cv_bytes = super::common::encode_props_to_cv(&props);
+                        props_builder.append_value(&cv_bytes);
                     } else {
                         props_builder.append_null();
                     }
@@ -3426,11 +3414,8 @@ impl GraphVariableLengthTraverseMainStream {
                     let props_builder =
                         nodes_struct.field_builder::<LargeBinaryBuilder>(2).unwrap();
                     if let Some(props) = l0_visibility::get_vertex_properties(*vid, &query_ctx) {
-                        if let Ok(json) = serde_json::to_vec(&props) {
-                            props_builder.append_value(&json);
-                        } else {
-                            props_builder.append_null();
-                        }
+                        let cv_bytes = super::common::encode_props_to_cv(&props);
+                        props_builder.append_value(&cv_bytes);
                     } else {
                         props_builder.append_null();
                     }
@@ -3462,11 +3447,8 @@ impl GraphVariableLengthTraverseMainStream {
                     // Look up edge properties from L0 chain and serialize to JSON
                     let props_builder = rels_struct.field_builder::<LargeBinaryBuilder>(4).unwrap();
                     if let Some(props) = l0_visibility::get_edge_properties(*eid, &query_ctx) {
-                        if let Ok(json) = serde_json::to_vec(&props) {
-                            props_builder.append_value(&json);
-                        } else {
-                            props_builder.append_null();
-                        }
+                        let cv_bytes = super::common::encode_props_to_cv(&props);
+                        props_builder.append_value(&cv_bytes);
                     } else {
                         props_builder.append_null();
                     }

@@ -118,12 +118,12 @@ impl PhysicalExpr for ReduceExecExpr {
         let list_val = self.list_expr.evaluate(batch)?;
         let list_array = list_val.into_array(batch.num_rows())?;
 
-        // Decode JSONB-encoded arrays (LargeBinary → LargeList<element_type>)
+        // Decode CypherValue-encoded arrays (LargeBinary → LargeList<element_type>)
         // Use the accumulator type as the target element type since the reduce body
         // was compiled expecting elements to match the accumulator type.
         let list_array = if let DataType::LargeBinary = list_array.data_type() {
             let element_type = self.output_type.clone();
-            crate::query::df_graph::common::jsonb_array_to_large_list(
+            crate::query::df_graph::common::cv_array_to_large_list(
                 list_array.as_ref(),
                 &element_type,
             )?

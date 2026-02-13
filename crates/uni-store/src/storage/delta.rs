@@ -189,11 +189,13 @@ impl DeltaDataset {
             if overflow_props.is_empty() {
                 builder.append_null();
             } else {
-                let jsonb = jsonb::to_owned_jsonb(&overflow_props).map_err(|e| {
-                    anyhow!("Failed to serialize overflow properties to JSONB: {}", e)
-                })?;
-                let bytes = jsonb.to_vec();
-                builder.append_value(&bytes);
+                let jsonb = {
+                    let json_val = serde_json::to_value(&overflow_props)
+                        .map_err(|e| anyhow!("Failed to serialize overflow properties: {}", e))?;
+                    let uni_val: uni_common::Value = json_val.into();
+                    uni_common::cypher_value_codec::encode(&uni_val)
+                };
+                builder.append_value(&jsonb);
             }
         }
 

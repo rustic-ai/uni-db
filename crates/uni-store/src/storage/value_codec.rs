@@ -108,22 +108,19 @@ pub fn value_from_column(
             }
             Ok(serde_json::json!(vec))
         }
-        DataType::Json => {
+        DataType::CypherValue => {
             let bytes = col
                 .as_any()
                 .downcast_ref::<LargeBinaryArray>()
-                .ok_or_else(|| anyhow!("Invalid large binary col for json"))?
+                .ok_or_else(|| anyhow!("Invalid large binary col for CypherValue"))?
                 .value(row);
             if bytes.is_empty() {
                 return Ok(Value::Null);
             }
-            let raw = jsonb::RawJsonb::new(bytes);
-            let json_str = raw.to_string();
-            if json_str == "null" {
-                Ok(Value::Null)
-            } else {
-                Ok(serde_json::from_str(&json_str).unwrap_or_else(|_| Value::String(json_str)))
-            }
+            let uni_val = uni_common::cypher_value_codec::decode(bytes)
+                .map_err(|e| anyhow!("CypherValue decode error: {}", e))?;
+            // Convert uni_common::Value to serde_json::Value
+            Ok(uni_val.into())
         }
         DataType::Crdt(_) => {
             let bytes = col
@@ -307,24 +304,27 @@ mod tests {
         // Encode JSON values as JSONB binary (matching the LargeBinary storage format)
         let mut builder = LargeBinaryBuilder::new();
 
-        let obj_jsonb = jsonb::to_owned_jsonb(&serde_json::json!({"key": "value"})).unwrap();
-        builder.append_value(obj_jsonb.to_vec());
+        let obj_cv = {
+            let val: uni_common::Value = serde_json::json!({"key": "value"}).into();
+            uni_common::cypher_value_codec::encode(&val)
+        };
+        builder.append_value(&obj_cv);
 
-        let null_jsonb = jsonb::to_owned_jsonb(&Value::Null).unwrap();
-        builder.append_value(null_jsonb.to_vec());
+        let null_cv = uni_common::cypher_value_codec::encode(&uni_common::Value::Null);
+        builder.append_value(&null_cv);
 
-        let text_jsonb = jsonb::to_owned_jsonb(&Value::String("plain text".to_string())).unwrap();
-        builder.append_value(text_jsonb.to_vec());
+        let text_cv = uni_common::cypher_value_codec::encode(&uni_common::Value::String("plain text".to_string()));
+        builder.append_value(&text_cv);
 
         let array = builder.finish();
 
-        let val = value_from_column(&array, &DataType::Json, 0, CrdtDecodeMode::Strict).unwrap();
+        let val = value_from_column(&array, &DataType::CypherValue, 0, CrdtDecodeMode::Strict).unwrap();
         assert_eq!(val, serde_json::json!({"key": "value"}));
 
-        let val = value_from_column(&array, &DataType::Json, 1, CrdtDecodeMode::Strict).unwrap();
+        let val = value_from_column(&array, &DataType::CypherValue, 1, CrdtDecodeMode::Strict).unwrap();
         assert_eq!(val, Value::Null);
 
-        let val = value_from_column(&array, &DataType::Json, 2, CrdtDecodeMode::Strict).unwrap();
+        let val = value_from_column(&array, &DataType::CypherValue, 2, CrdtDecodeMode::Strict).unwrap();
         assert_eq!(val, Value::String("plain text".to_string()));
     }
 }

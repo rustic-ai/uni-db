@@ -11,11 +11,11 @@ use uni_common::core::id::Vid;
 use uni_common::core::schema::{DataType, LabelMeta, PropertyMeta, Schema, SchemaElementState};
 use uni_store::storage::vertex::VertexDataset;
 
-/// Helper to decode JSONB binary to JSON string.
+/// Helper to decode CypherValue binary to JSON string.
 fn decode_jsonb(bytes: &[u8]) -> Result<String> {
-    let raw_jsonb = jsonb::RawJsonb::new(bytes);
-    // Use to_string() which works for all JSONB values (objects, arrays, scalars)
-    Ok(raw_jsonb.to_string())
+    let uni_val = uni_common::cypher_value_codec::decode(bytes)?;
+    let json_val: serde_json::Value = uni_val.into();
+    Ok(json_val.to_string())
 }
 
 /// Helper to create a test schema with partial properties.

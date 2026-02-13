@@ -50,7 +50,7 @@ impl Display for QuantifierType {
 /// Physical expression evaluating `ALL/ANY/SINGLE/NONE(x IN list WHERE pred)`.
 ///
 /// Steps 1–4 mirror [`super::comprehension::ListComprehensionExecExpr`]: evaluate input
-/// list, JSONB-decode, normalize to `LargeList`, flatten with row indices, build inner
+/// list, CypherValue-decode, normalize to `LargeList`, flatten with row indices, build inner
 /// batch. Step 5 evaluates the predicate on the inner batch and performs boolean reduction
 /// with three-valued null logic per parent row.
 #[derive(Debug)]
@@ -164,11 +164,11 @@ impl PhysicalExpr for QuantifierExecExpr {
         let list_val = self.input_list.evaluate(batch)?;
         let list_array = list_val.into_array(num_rows)?;
 
-        // --- Step 2: JSONB decode (LargeBinary → LargeList<LargeBinary>) ---
-        // Keep elements as JSONB (LargeBinary) to match the compile-time schema.
-        // The compiled predicate handles LargeBinary via JSONB UDFs (_jsonb_to_int64, etc.).
+        // --- Step 2: CypherValue decode (LargeBinary → LargeList<LargeBinary>) ---
+        // Keep elements as CypherValue (LargeBinary) to match the compile-time schema.
+        // The compiled predicate handles LargeBinary via CypherValue comparison/arithmetic UDFs.
         let list_array = if let DataType::LargeBinary = list_array.data_type() {
-            crate::query::df_graph::common::jsonb_array_to_large_list(
+            crate::query::df_graph::common::cv_array_to_large_list(
                 list_array.as_ref(),
                 &DataType::LargeBinary,
             )?

@@ -343,7 +343,7 @@ impl BindZeroLengthPathStream {
                         .cloned()
                 });
                 let props = l0_visibility::get_vertex_properties(v, query_ctx)
-                    .and_then(|p| serde_json::to_vec(&p).ok());
+                    .map(|p| super::common::encode_props_to_cv(&p));
                 (v.as_u64(), resolved_label, props)
             }
             None => (0, None, None),

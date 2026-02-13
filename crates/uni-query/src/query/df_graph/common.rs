@@ -99,6 +99,17 @@ pub fn edge_struct_fields() -> arrow_schema::Fields {
     ])
 }
 
+/// Encode a properties HashMap to CypherValue bytes for LargeBinary columns.
+///
+/// Used when materializing path properties that need to be stored in LargeBinary
+/// columns. Converts the HashMap into a `Value::Map` and encodes it using the
+/// CypherValue codec.
+pub fn encode_props_to_cv(props: &std::collections::HashMap<String, uni_common::Value>) -> Vec<u8> {
+    let map: std::collections::HashMap<String, uni_common::Value> = props.clone();
+    let val = uni_common::Value::Map(map);
+    uni_common::cypher_value_codec::encode(&val)
+}
+
 /// Build edge list field for schema with given step variable name.
 ///
 /// Creates a list of edge structs for the relationship variable in VLP patterns.
@@ -129,20 +140,20 @@ pub fn build_path_struct_field(path_var: &str) -> Field {
     )
 }
 
-/// Re-encode a `LargeListArray` of JSONB elements into a `LargeBinaryArray` of JSONB arrays.
+/// Re-encode a `LargeListArray` of CypherValue elements into a `LargeBinaryArray` of CypherValue arrays.
 ///
 /// Each row in the input `LargeListArray` contains zero or more `LargeBinary`
-/// elements that are individually JSONB-encoded values. This function decodes
+/// elements that are individually CypherValue-encoded values. This function decodes
 /// each element, wraps them into a `serde_json::Value::Array`, and re-encodes
-/// the whole array as a single JSONB blob in the output `LargeBinaryArray`.
+/// the whole array as a single CypherValue blob in the output `LargeBinaryArray`.
 ///
 /// Null rows in the input produce null entries in the output.
 ///
 /// # Errors
 ///
 /// Returns a `DataFusionError::Execution` if the input is not a
-/// `LargeListArray` or if JSONB decoding fails.
-pub fn large_list_of_jsonb_to_jsonb_array(
+/// `LargeListArray` or if CypherValue decoding fails.
+pub fn large_list_of_cv_to_cv_array(
     list: &datafusion::arrow::array::LargeListArray,
 ) -> datafusion::error::Result<Arc<dyn datafusion::arrow::array::Array>> {
     use datafusion::arrow::array::{LargeBinaryArray, LargeBinaryBuilder};
@@ -153,7 +164,7 @@ pub fn large_list_of_jsonb_to_jsonb_array(
         .downcast_ref::<LargeBinaryArray>()
         .ok_or_else(|| {
             datafusion::error::DataFusionError::Execution(
-                "large_list_of_jsonb_to_jsonb_array: inner values must be LargeBinaryArray"
+                "large_list_of_cv_to_cv_array: inner values must be LargeBinaryArray"
                     .to_string(),
             )
         })?;
@@ -175,10 +186,11 @@ pub fn large_list_of_jsonb_to_jsonb_array(
                 json_elements.push(serde_json::Value::Null);
             } else {
                 let blob = binary_values.value(elem_idx);
-                let raw = jsonb::RawJsonb::new(blob);
-                let json_str = raw.to_string();
-                match serde_json::from_str::<serde_json::Value>(&json_str) {
-                    Ok(val) => json_elements.push(val),
+                match uni_common::cypher_value_codec::decode(blob) {
+                    Ok(uni_val) => {
+                        let json_val: serde_json::Value = uni_val.into();
+                        json_elements.push(json_val);
+                    }
                     Err(_) => json_elements.push(serde_json::Value::Null),
                 }
             }
@@ -186,8 +198,12 @@ pub fn large_list_of_jsonb_to_jsonb_array(
 
         let array_val = serde_json::Value::Array(json_elements);
         let array_str = serde_json::to_string(&array_val).unwrap_or_else(|_| "[]".to_string());
-        match jsonb::parse_value(array_str.as_bytes()) {
-            Ok(owned) => builder.append_value(owned.to_vec()),
+        match serde_json::from_str::<serde_json::Value>(&array_str) {
+            Ok(json_val) => {
+                let uni_val: uni_common::Value = json_val.into();
+                let bytes = uni_common::cypher_value_codec::encode(&uni_val);
+                builder.append_value(&bytes);
+            }
             Err(_) => builder.append_null(),
         }
     }
@@ -195,21 +211,21 @@ pub fn large_list_of_jsonb_to_jsonb_array(
     Ok(Arc::new(builder.finish()))
 }
 
-/// Convert a typed `LargeListArray` to a `LargeBinaryArray` of JSONB arrays.
+/// Convert a typed `LargeListArray` to a `LargeBinaryArray` of CypherValue arrays.
 ///
 /// Each row in the input `LargeListArray` contains zero or more elements of a
 /// specific type (Int64, Float64, Utf8, Boolean, or nested LargeBinary). This
-/// function converts each row into a JSON array and encodes it as a JSONB blob.
+/// function converts each row into a JSON array and encodes it as a CypherValue blob.
 ///
-/// If the inner type is already `LargeBinary` (JSONB), delegates to
-/// `large_list_of_jsonb_to_jsonb_array()`.
+/// If the inner type is already `LargeBinary` (CypherValue), delegates to
+/// `large_list_of_cv_to_cv_array()`.
 ///
 /// Null rows in the input produce null entries in the output.
 ///
 /// # Errors
 ///
-/// Returns a `DataFusionError::Execution` if JSONB encoding fails.
-pub fn typed_large_list_to_jsonb_array(
+/// Returns a `DataFusionError::Execution` if CypherValue encoding fails.
+pub fn typed_large_list_to_cv_array(
     list: &datafusion::arrow::array::LargeListArray,
 ) -> datafusion::error::Result<Arc<dyn datafusion::arrow::array::Array>> {
     use datafusion::arrow::array::{
@@ -220,7 +236,7 @@ pub fn typed_large_list_to_jsonb_array(
 
     // If inner type is LargeBinary, delegate to existing function
     if values.data_type() == &DataType::LargeBinary {
-        return large_list_of_jsonb_to_jsonb_array(list);
+        return large_list_of_cv_to_cv_array(list);
     }
 
     let mut builder = LargeBinaryBuilder::new();
@@ -239,33 +255,35 @@ pub fn typed_large_list_to_jsonb_array(
         // Convert elements based on type
         match values.data_type() {
             DataType::Int64 => {
-                let typed_values = values
-                    .as_any()
-                    .downcast_ref::<Int64Array>()
-                    .ok_or_else(|| {
-                        datafusion::error::DataFusionError::Execution(
-                            "Expected Int64Array".to_string(),
-                        )
-                    })?;
+                let typed_values =
+                    values
+                        .as_any()
+                        .downcast_ref::<Int64Array>()
+                        .ok_or_else(|| {
+                            datafusion::error::DataFusionError::Execution(
+                                "Expected Int64Array".to_string(),
+                            )
+                        })?;
                 for elem_idx in start..end {
                     if typed_values.is_null(elem_idx) {
                         json_elements.push(serde_json::Value::Null);
                     } else {
-                        json_elements.push(serde_json::Value::Number(
-                            serde_json::Number::from(typed_values.value(elem_idx)),
-                        ));
+                        json_elements.push(serde_json::Value::Number(serde_json::Number::from(
+                            typed_values.value(elem_idx),
+                        )));
                     }
                 }
             }
             DataType::Float64 => {
-                let typed_values = values
-                    .as_any()
-                    .downcast_ref::<Float64Array>()
-                    .ok_or_else(|| {
-                        datafusion::error::DataFusionError::Execution(
-                            "Expected Float64Array".to_string(),
-                        )
-                    })?;
+                let typed_values =
+                    values
+                        .as_any()
+                        .downcast_ref::<Float64Array>()
+                        .ok_or_else(|| {
+                            datafusion::error::DataFusionError::Execution(
+                                "Expected Float64Array".to_string(),
+                            )
+                        })?;
                 for elem_idx in start..end {
                     if typed_values.is_null(elem_idx) {
                         json_elements.push(serde_json::Value::Null);
@@ -280,32 +298,35 @@ pub fn typed_large_list_to_jsonb_array(
                 }
             }
             DataType::Utf8 => {
-                let typed_values = values
-                    .as_any()
-                    .downcast_ref::<StringArray>()
-                    .ok_or_else(|| {
-                        datafusion::error::DataFusionError::Execution(
-                            "Expected StringArray".to_string(),
-                        )
-                    })?;
+                let typed_values =
+                    values
+                        .as_any()
+                        .downcast_ref::<StringArray>()
+                        .ok_or_else(|| {
+                            datafusion::error::DataFusionError::Execution(
+                                "Expected StringArray".to_string(),
+                            )
+                        })?;
                 for elem_idx in start..end {
                     if typed_values.is_null(elem_idx) {
                         json_elements.push(serde_json::Value::Null);
                     } else {
-                        json_elements
-                            .push(serde_json::Value::String(typed_values.value(elem_idx).to_string()));
+                        json_elements.push(serde_json::Value::String(
+                            typed_values.value(elem_idx).to_string(),
+                        ));
                     }
                 }
             }
             DataType::Boolean => {
-                let typed_values = values
-                    .as_any()
-                    .downcast_ref::<BooleanArray>()
-                    .ok_or_else(|| {
-                        datafusion::error::DataFusionError::Execution(
-                            "Expected BooleanArray".to_string(),
-                        )
-                    })?;
+                let typed_values =
+                    values
+                        .as_any()
+                        .downcast_ref::<BooleanArray>()
+                        .ok_or_else(|| {
+                            datafusion::error::DataFusionError::Execution(
+                                "Expected BooleanArray".to_string(),
+                            )
+                        })?;
                 for elem_idx in start..end {
                     if typed_values.is_null(elem_idx) {
                         json_elements.push(serde_json::Value::Null);
@@ -316,7 +337,7 @@ pub fn typed_large_list_to_jsonb_array(
             }
             other => {
                 return Err(datafusion::error::DataFusionError::Execution(format!(
-                    "Unsupported element type for typed_large_list_to_jsonb_array: {:?}",
+                    "Unsupported element type for typed_large_list_to_cv_array: {:?}",
                     other
                 )));
             }
@@ -324,8 +345,12 @@ pub fn typed_large_list_to_jsonb_array(
 
         let array_val = serde_json::Value::Array(json_elements);
         let array_str = serde_json::to_string(&array_val).unwrap_or_else(|_| "[]".to_string());
-        match jsonb::parse_value(array_str.as_bytes()) {
-            Ok(owned) => builder.append_value(owned.to_vec()),
+        match serde_json::from_str::<serde_json::Value>(&array_str) {
+            Ok(json_val) => {
+                let uni_val: uni_common::Value = json_val.into();
+                let bytes = uni_common::cypher_value_codec::encode(&uni_val);
+                builder.append_value(&bytes);
+            }
             Err(_) => builder.append_null(),
         }
     }
@@ -333,14 +358,14 @@ pub fn typed_large_list_to_jsonb_array(
     Ok(Arc::new(builder.finish()))
 }
 
-/// Convert a `LargeBinaryArray` of JSONB-encoded arrays into a `LargeListArray`.
+/// Convert a `LargeBinaryArray` of CypherValue-encoded arrays into a `LargeListArray`.
 ///
-/// Each element in the input array is a JSONB blob encoding a JSON array (e.g. `[1,2,3]`).
+/// Each element in the input array is a CypherValue blob encoding a JSON array (e.g. `[1,2,3]`).
 /// Elements are converted to the specified `element_type`. For example, if `element_type`
-/// is `Int64`, JSONB numbers are parsed as i64 values.
+/// is `Int64`, CypherValue numbers are parsed as i64 values.
 ///
-/// Non-array JSONB values and nulls produce empty lists.
-pub fn jsonb_array_to_large_list(
+/// Non-array CypherValue values and nulls produce empty lists.
+pub fn cv_array_to_large_list(
     array: &dyn datafusion::arrow::array::Array,
     element_type: &DataType,
 ) -> datafusion::error::Result<Arc<dyn datafusion::arrow::array::Array>> {
@@ -352,7 +377,7 @@ pub fn jsonb_array_to_large_list(
         .downcast_ref::<LargeBinaryArray>()
         .ok_or_else(|| {
             datafusion::error::DataFusionError::Execution(
-                "jsonb_array_to_large_list: expected LargeBinaryArray".to_string(),
+                "cv_array_to_large_list: expected LargeBinaryArray".to_string(),
             )
         })?;
 
@@ -369,11 +394,18 @@ pub fn jsonb_array_to_large_list(
         }
 
         let blob = binary_arr.value(i);
-        let raw = jsonb::RawJsonb::new(blob);
-        let json_str = raw.to_string();
+        let uni_val = match uni_common::cypher_value_codec::decode(blob) {
+            Ok(v) => v,
+            Err(_) => {
+                all_elements.push(Vec::new());
+                nulls.push(false);
+                continue;
+            }
+        };
+        let json_val_decoded: serde_json::Value = uni_val.into();
 
-        match serde_json::from_str::<serde_json::Value>(&json_str) {
-            Ok(serde_json::Value::Array(elements)) => {
+        match json_val_decoded {
+            serde_json::Value::Array(elements) => {
                 all_elements.push(elements);
                 nulls.push(true);
             }
@@ -459,14 +491,18 @@ pub fn jsonb_array_to_large_list(
             }
             Arc::new(builder.finish())
         }
-        // Fallback: keep as JSONB LargeBinary blobs
+        // Fallback: keep as CypherValue LargeBinary blobs
         _ => {
             let mut builder = datafusion::arrow::array::builder::LargeBinaryBuilder::new();
             for elems in &all_elements {
                 for elem in elems {
                     let elem_str = serde_json::to_string(elem).unwrap_or_default();
-                    match jsonb::parse_value(elem_str.as_bytes()) {
-                        Ok(owned) => builder.append_value(owned.to_vec()),
+                    match serde_json::from_str::<serde_json::Value>(&elem_str) {
+                        Ok(json_val) => {
+                            let uni_val: uni_common::Value = json_val.into();
+                            let bytes = uni_common::cypher_value_codec::encode(&uni_val);
+                            builder.append_value(&bytes);
+                        }
                         Err(_) => builder.append_null(),
                     }
                 }

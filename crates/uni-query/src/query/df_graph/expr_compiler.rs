@@ -27,8 +27,8 @@ use uni_common::core::schema::Schema as UniSchema;
 use uni_cypher::ast::{BinaryOp, CypherLiteral, Expr, Query, UnaryOp};
 use uni_store::storage::manager::StorageManager;
 
-/// Check if a data type represents JSONB (LargeBinary).
-fn is_jsonb_type(dt: Option<&DataType>) -> bool {
+/// Check if a data type represents CypherValue (LargeBinary).
+fn is_cypher_value_type(dt: Option<&DataType>) -> bool {
     dt.is_some_and(|t| *t == DataType::LargeBinary)
 }
 
@@ -58,43 +58,43 @@ fn resolve_list_element_type(
     }
 }
 
-/// Physical expression wrapper that converts LargeList<T> to LargeBinary (JSONB).
+/// Physical expression wrapper that converts LargeList<T> to LargeBinary (CypherValue).
 ///
 /// Used in CASE expressions to unify branch types when mixing typed lists
-/// (e.g., from list comprehensions) with JSONB-encoded lists.
+/// (e.g., from list comprehensions) with CypherValue-encoded lists.
 #[derive(Debug)]
-struct LargeListToJsonbExpr {
+struct LargeListToCypherValueExpr {
     child: Arc<dyn PhysicalExpr>,
 }
 
-impl LargeListToJsonbExpr {
+impl LargeListToCypherValueExpr {
     fn new(child: Arc<dyn PhysicalExpr>) -> Self {
         Self { child }
     }
 }
 
-impl std::fmt::Display for LargeListToJsonbExpr {
+impl std::fmt::Display for LargeListToCypherValueExpr {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "LargeListToJsonb({})", self.child)
+        write!(f, "LargeListToCypherValue({})", self.child)
     }
 }
 
-impl PartialEq for LargeListToJsonbExpr {
+impl PartialEq for LargeListToCypherValueExpr {
     fn eq(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.child, &other.child)
     }
 }
 
-impl Eq for LargeListToJsonbExpr {}
+impl Eq for LargeListToCypherValueExpr {}
 
-impl std::hash::Hash for LargeListToJsonbExpr {
+impl std::hash::Hash for LargeListToCypherValueExpr {
     fn hash<H: std::hash::Hasher>(&self, _state: &mut H) {
         // Hash based on type since we can't hash PhysicalExpr
         std::any::type_name::<Self>().hash(_state);
     }
 }
 
-impl PartialEq<dyn std::any::Any> for LargeListToJsonbExpr {
+impl PartialEq<dyn std::any::Any> for LargeListToCypherValueExpr {
     fn eq(&self, other: &dyn std::any::Any) -> bool {
         other
             .downcast_ref::<Self>()
@@ -103,7 +103,7 @@ impl PartialEq<dyn std::any::Any> for LargeListToJsonbExpr {
     }
 }
 
-impl PhysicalExpr for LargeListToJsonbExpr {
+impl PhysicalExpr for LargeListToCypherValueExpr {
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
@@ -143,14 +143,14 @@ impl PhysicalExpr for LargeListToJsonbExpr {
             return Ok(ColumnarValue::Array(list_array));
         }
 
-        // Convert LargeList to JSONB
+        // Convert LargeList to CypherValue
         if let Some(large_list) = list_array
             .as_any()
             .downcast_ref::<datafusion::arrow::array::LargeListArray>()
         {
-            let jsonb_array =
-                crate::query::df_graph::common::typed_large_list_to_jsonb_array(large_list)?;
-            Ok(ColumnarValue::Array(jsonb_array))
+            let cv_array =
+                crate::query::df_graph::common::typed_large_list_to_cv_array(large_list)?;
+            Ok(ColumnarValue::Array(cv_array))
         } else {
             Err(datafusion::error::DataFusionError::Execution(format!(
                 "Expected List or LargeList, got {:?}",
@@ -169,14 +169,14 @@ impl PhysicalExpr for LargeListToJsonbExpr {
     ) -> datafusion::error::Result<Arc<dyn PhysicalExpr>> {
         if children.len() != 1 {
             return Err(datafusion::error::DataFusionError::Execution(
-                "LargeListToJsonbExpr expects exactly 1 child".to_string(),
+                "LargeListToCypherValueExpr expects exactly 1 child".to_string(),
             ));
         }
-        Ok(Arc::new(LargeListToJsonbExpr::new(children[0].clone())))
+        Ok(Arc::new(LargeListToCypherValueExpr::new(children[0].clone())))
     }
 
     fn fmt_sql(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "LargeListToJsonb({})", self.child)
+        write!(f, "LargeListToCypherValue({})", self.child)
     }
 }
 
@@ -263,7 +263,7 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
                 list,
                 expr: expression,
             } => self.compile_reduce(accumulator, init, variable, list, expression, input_schema),
-            // For BinaryOp, check if children contain custom expressions or JSONB types
+            // For BinaryOp, check if children contain custom expressions or CypherValue types
             Expr::BinaryOp { left, op, right } => {
                 self.compile_binary_op_dispatch(left, op, right, input_schema)
             }
@@ -271,7 +271,7 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
                 if matches!(op, UnaryOp::Not) {
                     let mut inner_phy = self.compile(inner, input_schema)?;
                     if let Ok(DataType::LargeBinary) = inner_phy.data_type(input_schema) {
-                        inner_phy = self.wrap_with_jsonb_to_bool(inner_phy)?;
+                        inner_phy = self.wrap_with_cv_to_bool(inner_phy)?;
                     }
                     self.compile_unary_op(op, inner_phy, input_schema)
                 } else if Self::contains_custom_expr(inner) {
@@ -370,7 +370,7 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
                 when_then,
                 else_expr,
             } => {
-                // Always use compile_case() to handle JSONB boolean conversion and
+                // Always use compile_case() to handle CypherValue boolean conversion and
                 // LargeList/LargeBinary type unification
                 self.compile_case(case_operand, when_then, else_expr, input_schema)
             }
@@ -380,7 +380,7 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
         }
     }
 
-    /// Dispatch binary op compilation, checking for custom expressions and JSONB types.
+    /// Dispatch binary op compilation, checking for custom expressions and CypherValue types.
     fn compile_binary_op_dispatch(
         &self,
         left: &Expr,
@@ -410,17 +410,17 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
         }
 
         // Compile sub-expressions to check their types. If either operand
-        // produces LargeBinary (JSONB), standard Arrow kernels will fail at
+        // produces LargeBinary (CypherValue), standard Arrow kernels will fail at
         // runtime for comparisons. Route through compile_binary_op which
         // dispatches to Cypher comparison UDFs.
         let left_phy = self.compile(left, input_schema)?;
         let right_phy = self.compile(right, input_schema)?;
         let left_dt = left_phy.data_type(input_schema).ok();
         let right_dt = right_phy.data_type(input_schema).ok();
-        let has_jsonb = is_jsonb_type(left_dt.as_ref()) || is_jsonb_type(right_dt.as_ref());
+        let has_cv = is_cypher_value_type(left_dt.as_ref()) || is_cypher_value_type(right_dt.as_ref());
 
-        if has_jsonb {
-            // JSONB types need special handling via compile_binary_op
+        if has_cv {
+            // CypherValue types need special handling via compile_binary_op
             self.compile_binary_op(op, left_phy, right_phy, input_schema)
         } else {
             // Standard types: use compile_standard to get proper type coercion
@@ -766,7 +766,7 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
         let acc_type = initial_phy.data_type(input_schema)?;
 
         let list_data_type = list_phy.data_type(input_schema)?;
-        // For LargeBinary (JSONB arrays), use the accumulator type as element type so the
+        // For LargeBinary (CypherValue arrays), use the accumulator type as element type so the
         // reduce body expression compiles correctly (e.g. acc + x where both are Int64).
         let inner_data_type =
             resolve_list_element_type(&list_data_type, acc_type.clone(), "Reduce")?;
@@ -924,9 +924,9 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
 
         let mut predicate_phy = pred_compiler.compile(predicate, &inner_schema)?;
 
-        // Wrap JSONB predicates with _jsonb_to_bool for proper boolean evaluation
+        // Wrap CypherValue predicates with _cv_to_bool for proper boolean evaluation
         if let Ok(DataType::LargeBinary) = predicate_phy.data_type(&inner_schema) {
-            predicate_phy = self.wrap_with_jsonb_to_bool(predicate_phy)?;
+            predicate_phy = self.wrap_with_cv_to_bool(predicate_phy)?;
         }
 
         let qt = match quantifier {
@@ -1110,7 +1110,7 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
     /// branch, then builds a `CaseExpr` physical expression.
     ///
     /// Applies two fixes for TCK compliance:
-    /// 1. Wraps JSONB WHEN conditions with `_jsonb_to_bool` for proper boolean evaluation
+    /// 1. Wraps CypherValue WHEN conditions with `_cv_to_bool` for proper boolean evaluation
     /// 2. Unifies branch types when mixing LargeList and LargeBinary to avoid cast errors
     fn compile_case(
         &self,
@@ -1138,20 +1138,20 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
             .map(|e| self.compile(e, input_schema))
             .transpose()?;
 
-        // Fix B: Wrap JSONB WHEN conditions with _jsonb_to_bool
+        // Fix B: Wrap CypherValue WHEN conditions with _cv_to_bool
         // Apply wrapping defensively - if we can't determine type or if it's LargeBinary
         for (w_phy, _) in &mut when_then_phy {
             let should_wrap = match w_phy.data_type(input_schema) {
                 Ok(dt) => dt == DataType::LargeBinary,
                 Err(_) => {
-                    // If we can't determine the type, check if it's likely JSONB by looking
-                    // for common patterns (column references, function calls that might return JSONB)
+                    // If we can't determine the type, check if it's likely CypherValue by looking
+                    // for common patterns (column references, function calls that might return CypherValue)
                     // For now, be conservative and don't wrap if we can't determine type
                     false
                 }
             };
             if should_wrap {
-                *w_phy = self.wrap_with_jsonb_to_bool(w_phy.clone())?;
+                *w_phy = self.wrap_with_cv_to_bool(w_phy.clone())?;
             }
         }
 
@@ -1177,20 +1177,20 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
             .iter()
             .any(|dt| matches!(dt, DataType::List(_) | DataType::LargeList(_)));
 
-        // If we have both, wrap List/LargeList branches with LargeListToJsonbExpr
+        // If we have both, wrap List/LargeList branches with LargeListToCypherValueExpr
         if has_large_binary && has_list {
             for (_, t_phy) in &mut when_then_phy {
                 if let Ok(dt) = t_phy.data_type(input_schema)
                     && matches!(dt, DataType::List(_) | DataType::LargeList(_))
                 {
-                    *t_phy = Arc::new(LargeListToJsonbExpr::new(t_phy.clone()));
+                    *t_phy = Arc::new(LargeListToCypherValueExpr::new(t_phy.clone()));
                 }
             }
             if let Some(e_phy) = else_phy.take() {
                 if let Ok(dt) = e_phy.data_type(input_schema)
                     && matches!(dt, DataType::List(_) | DataType::LargeList(_))
                 {
-                    else_phy = Some(Arc::new(LargeListToJsonbExpr::new(e_phy)));
+                    else_phy = Some(Arc::new(LargeListToCypherValueExpr::new(e_phy)));
                 } else {
                     else_phy = Some(e_phy);
                 }
@@ -1256,9 +1256,9 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
             _ => return Err(anyhow!("Unsupported binary op in compiler: {:?}", op)),
         };
 
-        // When either operand is LargeBinary (JSONB), standard Arrow comparison
+        // When either operand is LargeBinary (CypherValue), standard Arrow comparison
         // kernels can't handle the type mismatch. Route through Cypher comparison
-        // UDFs which decode JSONB to Value for comparison.
+        // UDFs which decode CypherValue to Value for comparison.
         let mut left = left;
         let mut right = right;
         let left_type = left.data_type(input_schema).ok();
@@ -1278,18 +1278,18 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
         let right_is_binary = matches!(right_type.as_ref(), Some(DataType::LargeBinary));
 
         if left_is_list && right_is_binary {
-            left = Arc::new(LargeListToJsonbExpr::new(left));
+            left = Arc::new(LargeListToCypherValueExpr::new(left));
         } else if right_is_list && left_is_binary {
-            right = Arc::new(LargeListToJsonbExpr::new(right));
+            right = Arc::new(LargeListToCypherValueExpr::new(right));
         }
 
         // Recalculate types after unification
         let left_type = left.data_type(input_schema).ok();
         let right_type = right.data_type(input_schema).ok();
-        let has_jsonb = is_jsonb_type(left_type.as_ref()) || is_jsonb_type(right_type.as_ref());
+        let has_cv = is_cypher_value_type(left_type.as_ref()) || is_cypher_value_type(right_type.as_ref());
 
-        if has_jsonb {
-            if let Some(result) = self.compile_jsonb_comparison(
+        if has_cv {
+            if let Some(result) = self.compile_cv_comparison(
                 df_op,
                 left.clone(),
                 right.clone(),
@@ -1298,7 +1298,7 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
             )? {
                 return Ok(result);
             }
-            if let Some(result) = self.compile_jsonb_list_concat(
+            if let Some(result) = self.compile_cv_list_concat(
                 left.clone(),
                 right.clone(),
                 &left_type,
@@ -1307,7 +1307,7 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
             )? {
                 return Ok(result);
             }
-            if let Some(result) = self.compile_jsonb_arithmetic(
+            if let Some(result) = self.compile_cv_arithmetic(
                 df_op,
                 left.clone(),
                 right.clone(),
@@ -1324,8 +1324,8 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
             .map_err(|e| anyhow!("Failed to create binary expression: {}", e))
     }
 
-    /// Compile JSONB comparison using Cypher UDFs.
-    fn compile_jsonb_comparison(
+    /// Compile CypherValue comparison using Cypher UDFs.
+    fn compile_cv_comparison(
         &self,
         df_op: datafusion::logical_expr::Operator,
         left: Arc<dyn PhysicalExpr>,
@@ -1354,8 +1354,8 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
         )
     }
 
-    /// Compile JSONB list concatenation.
-    fn compile_jsonb_list_concat(
+    /// Compile CypherValue list concatenation.
+    fn compile_cv_list_concat(
         &self,
         left: Arc<dyn PhysicalExpr>,
         right: Arc<dyn PhysicalExpr>,
@@ -1369,7 +1369,7 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
             return Ok(None);
         }
 
-        // List concat when at least one side is a list (JSONB or Arrow List)
+        // List concat when at least one side is a list (CypherValue or Arrow List)
         let is_list = |t: &Option<DataType>| {
             t.as_ref()
                 .is_some_and(|dt| matches!(dt, DataType::LargeBinary | DataType::List(_)))
@@ -1388,97 +1388,37 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
         )
     }
 
-    /// Compile JSONB arithmetic by decoding the LargeBinary side to match the typed side.
+    /// Compile CypherValue arithmetic.
     ///
-    /// Returns `Some(expr)` if the operation was handled,
-    /// `None` to fall through to standard binary handling.
-    fn compile_jsonb_arithmetic(
+    /// Routes arithmetic operations through CypherValue-aware UDFs when at least
+    /// one operand is LargeBinary (CypherValue-encoded).
+    fn compile_cv_arithmetic(
         &self,
         df_op: datafusion::logical_expr::Operator,
         left: Arc<dyn PhysicalExpr>,
         right: Arc<dyn PhysicalExpr>,
         left_type: &Option<DataType>,
         right_type: &Option<DataType>,
-        input_schema: &Schema,
+        _input_schema: &Schema,
     ) -> Result<Option<Arc<dyn PhysicalExpr>>> {
-        let left_is_lb = is_jsonb_type(left_type.as_ref());
-        let right_is_lb = is_jsonb_type(right_type.as_ref());
+        use datafusion::logical_expr::Operator;
 
-        // Only handle mixed types (one LB, one typed)
-        if left_is_lb == right_is_lb {
-            return Ok(None);
-        }
-
-        // One side is LB, other is typed — decode LB to match
-        let target = if left_is_lb {
-            right_type.as_ref()
-        } else {
-            left_type.as_ref()
-        };
-        let Some(target_dt) = target else {
-            return Ok(None);
+        let udf_name = match df_op {
+            Operator::Plus => "_cypher_add",
+            Operator::Minus => "_cypher_sub",
+            Operator::Multiply => "_cypher_mul",
+            Operator::Divide => "_cypher_div",
+            Operator::Modulo => "_cypher_mod",
+            _ => return Ok(None),
         };
 
-        let decode_udf_name = match target_dt {
-            DataType::Int8
-            | DataType::Int16
-            | DataType::Int32
-            | DataType::Int64
-            | DataType::UInt8
-            | DataType::UInt16
-            | DataType::UInt32
-            | DataType::UInt64 => Some("_jsonb_to_int64"),
-            DataType::Float16 | DataType::Float32 | DataType::Float64 => Some("_jsonb_to_float64"),
-            DataType::Utf8 | DataType::LargeUtf8 => Some("_jsonb_to_utf8"),
-            DataType::Boolean => Some("_jsonb_to_bool"),
-            _ => None,
-        };
-        let Some(udf_name) = decode_udf_name else {
-            return Ok(None);
-        };
-        let Some(udf) = self.state.scalar_functions().get(udf_name) else {
-            return Ok(None);
-        };
-
-        let dummy_col = datafusion::logical_expr::Expr::Column(datafusion::common::Column::new(
-            None::<String>,
-            "__lb__",
-        ));
-        let udf_expr = datafusion::logical_expr::Expr::ScalarFunction(
-            datafusion::logical_expr::expr::ScalarFunction {
-                func: udf.clone(),
-                args: vec![dummy_col],
-            },
-        );
-
-        let decoded_left = if left_is_lb {
-            self.plan_udf_physical_expr(
-                &udf_expr,
-                &[("__lb__", DataType::LargeBinary)],
-                vec![left],
-                "JSONB decode",
-            )?
-        } else {
-            left
-        };
-        let decoded_right = if right_is_lb {
-            self.plan_udf_physical_expr(
-                &udf_expr,
-                &[("__lb__", DataType::LargeBinary)],
-                vec![right],
-                "JSONB decode",
-            )?
-        } else {
-            right
-        };
-
-        let result = binary(decoded_left, df_op, decoded_right, input_schema).map_err(|e| {
-            anyhow!(
-                "Failed to create binary expression after JSONB decode: {}",
-                e
-            )
-        })?;
-        Ok(Some(result))
+        self.plan_binary_udf(
+            udf_name,
+            left,
+            right,
+            left_type.clone().unwrap_or(DataType::LargeBinary),
+            right_type.clone().unwrap_or(DataType::LargeBinary),
+        )
     }
 
     /// Plan a UDF expression with dummy schema columns, then rebind to actual physical expressions.
@@ -1505,20 +1445,20 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
             .map_err(|e| anyhow!("Failed to rebind {} children: {}", error_context, e))
     }
 
-    /// Wrap a LargeBinary (JSONB) expression with `_jsonb_to_bool` conversion.
+    /// Wrap a LargeBinary (CypherValue) expression with `_cv_to_bool` conversion.
     ///
-    /// Used when a JSONB expression needs to be used as a boolean (e.g., in WHEN clauses).
-    fn wrap_with_jsonb_to_bool(
+    /// Used when a CypherValue expression needs to be used as a boolean (e.g., in WHEN clauses).
+    fn wrap_with_cv_to_bool(
         &self,
         expr: Arc<dyn PhysicalExpr>,
     ) -> Result<Arc<dyn PhysicalExpr>> {
-        let Some(udf) = self.state.scalar_functions().get("_jsonb_to_bool") else {
-            return Err(anyhow!("_jsonb_to_bool UDF not found"));
+        let Some(udf) = self.state.scalar_functions().get("_cv_to_bool") else {
+            return Err(anyhow!("_cv_to_bool UDF not found"));
         };
 
         let dummy_col = datafusion::logical_expr::Expr::Column(datafusion::common::Column::new(
             None::<String>,
-            "__jsonb__",
+            "__cv__",
         ));
         let udf_expr = datafusion::logical_expr::Expr::ScalarFunction(
             datafusion::logical_expr::expr::ScalarFunction {
@@ -1529,9 +1469,9 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
 
         self.plan_udf_physical_expr(
             &udf_expr,
-            &[("__jsonb__", DataType::LargeBinary)],
+            &[("__cv__", DataType::LargeBinary)],
             vec![expr],
-            "JSONB to bool",
+            "CypherValue to bool",
         )
     }
 

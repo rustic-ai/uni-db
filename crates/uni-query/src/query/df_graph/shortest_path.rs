@@ -423,7 +423,7 @@ impl GraphShortestPathStream {
                             .first()
                             .cloned();
                         let props = l0_visibility::get_vertex_properties(vid, &query_ctx)
-                            .and_then(|p| serde_json::to_vec(&p).ok());
+                            .map(|p| super::common::encode_props_to_cv(&p));
 
                         let ns = nodes_builder.values();
                         ns.field_builder::<UInt64Builder>(0)
@@ -538,7 +538,7 @@ impl GraphShortestPathStream {
                     let type_name =
                         l0_visibility::get_edge_type(eid, &query_ctx).unwrap_or_default();
                     let props = l0_visibility::get_edge_properties(eid, &query_ctx)
-                        .and_then(|p| serde_json::to_vec(&p).ok());
+                        .map(|p| super::common::encode_props_to_cv(&p));
                     return (eid.as_u64(), type_name, props);
                 }
             }
