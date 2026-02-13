@@ -1451,6 +1451,15 @@ impl HybridPhysicalPlanner {
             // passed to GraphTraverseExec as an actual property column name.
             target_properties.retain(|p| p != "*");
 
+            // When wildcard access was requested but no specific properties resolved,
+            // add _all_props to ensure properties are loaded (mirrors plan_scan_all behavior).
+            let target_has_wildcard = all_properties
+                .get(target_variable)
+                .is_some_and(|p| p.contains("*"));
+            if target_has_wildcard && target_properties.is_empty() {
+                target_properties.push("_all_props".to_string());
+            }
+
             // Check for non-schema properties that need JSONB extraction.
             // For the traverse path, always use _all_props (not overflow_json) as
             // the JSONB source since get_property_value handles _all_props directly.
@@ -1627,7 +1636,7 @@ impl HybridPhysicalPlanner {
                 .filter_map(|f| {
                     f.name()
                         .strip_prefix(&prefix)
-                        .filter(|prop| !prop.starts_with('_'))
+                        .filter(|prop| !prop.starts_with('_') || *prop == "_all_props")
                         .map(|prop| prop.to_string())
                 })
                 .collect();
@@ -1652,7 +1661,7 @@ impl HybridPhysicalPlanner {
                 .filter_map(|f| {
                     f.name()
                         .strip_prefix(&prefix)
-                        .filter(|prop| !prop.starts_with('_'))
+                        .filter(|prop| !prop.starts_with('_') && *prop != "overflow_json")
                         .map(|prop| prop.to_string())
                 })
                 .collect();
@@ -1808,7 +1817,13 @@ impl HybridPhysicalPlanner {
 
         // Always include _all_props so post-traverse filters can rewrite
         // property accesses to json_get_* calls against the JSONB blob.
-        if !target_properties.is_empty() && !target_properties.iter().any(|p| p == "_all_props") {
+        // Also include it when wildcard access was requested (RETURN n) even if empty.
+        let target_has_wildcard = all_properties
+            .get(target_variable)
+            .is_some_and(|p| p.contains("*"));
+        if (target_has_wildcard || !target_properties.is_empty())
+            && !target_properties.iter().any(|p| p == "_all_props")
+        {
             target_properties.push("_all_props".to_string());
         }
 
@@ -1842,7 +1857,7 @@ impl HybridPhysicalPlanner {
                 .filter_map(|f| {
                     f.name()
                         .strip_prefix(&prefix)
-                        .filter(|prop| !prop.starts_with('_'))
+                        .filter(|prop| !prop.starts_with('_') || *prop == "_all_props")
                         .map(|prop| prop.to_string())
                 })
                 .collect();
@@ -1865,7 +1880,7 @@ impl HybridPhysicalPlanner {
                 .filter_map(|f| {
                     f.name()
                         .strip_prefix(&prefix)
-                        .filter(|prop| !prop.starts_with('_'))
+                        .filter(|prop| !prop.starts_with('_') && *prop != "overflow_json")
                         .map(|prop| prop.to_string())
                 })
                 .collect();
@@ -1913,7 +1928,13 @@ impl HybridPhysicalPlanner {
 
         // Always include _all_props so post-traverse filters can rewrite
         // property accesses to json_get_* calls against the JSONB blob.
-        if !target_properties.is_empty() && !target_properties.iter().any(|p| p == "_all_props") {
+        // Also include it when wildcard access was requested (RETURN n) even if empty.
+        let target_has_wildcard = all_properties
+            .get(target_variable)
+            .is_some_and(|p| p.contains("*"));
+        if (target_has_wildcard || !target_properties.is_empty())
+            && !target_properties.iter().any(|p| p == "_all_props")
+        {
             target_properties.push("_all_props".to_string());
         }
 

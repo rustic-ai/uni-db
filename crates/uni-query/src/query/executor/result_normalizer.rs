@@ -151,6 +151,29 @@ impl ResultNormalizer {
             }
         }
 
+        // Expand _all_props JSONB blob (used by traverse and schemaless scan paths).
+        // _all_props is decoded from JSONB to Value::Map by arrow_to_value.
+        if let Some(Value::Map(all_props)) = map.get("_all_props") {
+            let mut properties: HashMap<String, Value> = all_props
+                .iter()
+                .map(|(k, v)| (k.clone(), Self::normalize_property_value(v.clone())))
+                .collect();
+            // Merge any inline non-internal properties (schema-defined props loaded as columns)
+            for (k, v) in map.iter() {
+                if !k.starts_with('_')
+                    && k.as_str() != "properties"
+                    && k.as_str() != "label"
+                    && k.as_str() != "type"
+                    && k.as_str() != "overflow_json"
+                {
+                    properties
+                        .entry(k.clone())
+                        .or_insert_with(|| Self::normalize_property_value(v.clone()));
+                }
+            }
+            return properties;
+        }
+
         // Fall back to extracting inline properties (excluding _ prefixed and special fields)
         map.iter()
             .filter(|(k, _)| {
@@ -158,6 +181,7 @@ impl ResultNormalizer {
                     && k.as_str() != "properties"
                     && k.as_str() != "label"
                     && k.as_str() != "type"
+                    && k.as_str() != "overflow_json"
             })
             .map(|(k, v)| (k.clone(), Self::normalize_property_value(v.clone())))
             .collect()
