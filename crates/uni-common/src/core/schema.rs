@@ -429,6 +429,7 @@ impl Schema {
     pub fn all_edge_type_ids(&self) -> Vec<u32> {
         let mut ids: Vec<u32> = self.edge_types.values().map(|m| m.id).collect();
         ids.extend(self.schemaless_registry.all_type_ids());
+        ids.sort_unstable();
         ids
     }
 }

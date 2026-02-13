@@ -43,7 +43,7 @@
     "City": {
       "name": {
         "nullable": true,
-        "type": "Json"
+        "type": "CypherValue"
       }
     },
     "L": {
@@ -55,15 +55,15 @@
     "N": {
       "var": {
         "nullable": true,
-        "type": "Json"
+        "type": "CypherValue"
       },
       "x": {
         "nullable": true,
-        "type": "Json"
+        "type": "CypherValue"
       },
       "y": {
         "nullable": true,
-        "type": "Json"
+        "type": "CypherValue"
       }
     },
     "Person": {

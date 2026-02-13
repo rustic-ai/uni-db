@@ -4,7 +4,7 @@
 use crate::query::pushdown::PredicateAnalyzer;
 use crate::query::{AGGREGATE_WINDOW_FUNCTIONS, MANUAL_WINDOW_FUNCTIONS};
 use anyhow::{Result, anyhow};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use uni_common::Value;
 use uni_common::core::schema::{
@@ -108,6 +108,112 @@ fn add_var_to_scope(
 /// Convert VariableInfo vec to String vec for backward compatibility
 fn vars_to_strings(vars: &[VariableInfo]) -> Vec<String> {
     vars.iter().map(|v| v.name.clone()).collect()
+}
+
+fn infer_with_output_type(expr: &Expr, vars_in_scope: &[VariableInfo]) -> VariableType {
+    match expr {
+        Expr::Variable(v) => find_var_in_scope(vars_in_scope, v)
+            .map(|info| info.var_type)
+            .unwrap_or(VariableType::Scalar),
+        Expr::Literal(CypherLiteral::Null) => VariableType::Imported,
+        Expr::FunctionCall { name, args, .. } => {
+            let lower = name.to_lowercase();
+            if lower == "coalesce" {
+                infer_coalesce_type(args, vars_in_scope)
+            } else if lower == "collect" && !args.is_empty() {
+                let collected = infer_with_output_type(&args[0], vars_in_scope);
+                if matches!(
+                    collected,
+                    VariableType::Node
+                        | VariableType::Edge
+                        | VariableType::Path
+                        | VariableType::Imported
+                ) {
+                    collected
+                } else {
+                    VariableType::Scalar
+                }
+            } else {
+                VariableType::Scalar
+            }
+        }
+        // WITH list literals/expressions produce scalar list values. Preserving
+        // entity typing here causes invalid node/edge reuse in later MATCH clauses
+        // (e.g. WITH [n] AS users; MATCH (users)-->() should fail at compile time).
+        Expr::List(_) => VariableType::Scalar,
+        _ => VariableType::Scalar,
+    }
+}
+
+fn infer_coalesce_type(args: &[Expr], vars_in_scope: &[VariableInfo]) -> VariableType {
+    let mut resolved: Option<VariableType> = None;
+    let mut saw_imported = false;
+    for arg in args {
+        let t = infer_with_output_type(arg, vars_in_scope);
+        match t {
+            VariableType::Node | VariableType::Edge | VariableType::Path => {
+                if let Some(existing) = resolved {
+                    if existing != t {
+                        return VariableType::Scalar;
+                    }
+                } else {
+                    resolved = Some(t);
+                }
+            }
+            VariableType::Imported => saw_imported = true,
+            VariableType::Scalar => {}
+        }
+    }
+    if let Some(t) = resolved {
+        t
+    } else if saw_imported {
+        VariableType::Imported
+    } else {
+        VariableType::Scalar
+    }
+}
+
+fn infer_unwind_output_type(expr: &Expr, vars_in_scope: &[VariableInfo]) -> VariableType {
+    match expr {
+        Expr::Variable(v) => find_var_in_scope(vars_in_scope, v)
+            .map(|info| info.var_type)
+            .unwrap_or(VariableType::Scalar),
+        Expr::FunctionCall { name, args, .. }
+            if name.eq_ignore_ascii_case("collect") && !args.is_empty() =>
+        {
+            infer_with_output_type(&args[0], vars_in_scope)
+        }
+        Expr::List(items) => {
+            let mut inferred: Option<VariableType> = None;
+            for item in items {
+                let t = infer_with_output_type(item, vars_in_scope);
+                if !matches!(
+                    t,
+                    VariableType::Node
+                        | VariableType::Edge
+                        | VariableType::Path
+                        | VariableType::Imported
+                ) {
+                    return VariableType::Scalar;
+                }
+                if let Some(existing) = inferred {
+                    if existing != t
+                        && t != VariableType::Imported
+                        && existing != VariableType::Imported
+                    {
+                        return VariableType::Scalar;
+                    }
+                    if existing == VariableType::Imported && t != VariableType::Imported {
+                        inferred = Some(t);
+                    }
+                } else {
+                    inferred = Some(t);
+                }
+            }
+            inferred.unwrap_or(VariableType::Scalar)
+        }
+        _ => VariableType::Scalar,
+    }
 }
 
 /// Collect all variable names referenced in an expression
@@ -346,6 +452,188 @@ fn contains_aggregate_recursive(expr: &Expr) -> bool {
     }
 }
 
+fn collect_aggregate_reprs(expr: &Expr, out: &mut HashSet<String>) {
+    match expr {
+        Expr::FunctionCall { name, args, .. } => {
+            let is_agg = matches!(
+                name.to_lowercase().as_str(),
+                "count" | "sum" | "avg" | "min" | "max" | "collect" | "stdev" | "stdevp"
+            );
+            if is_agg {
+                out.insert(expr.to_string_repr());
+                return;
+            }
+            for arg in args {
+                collect_aggregate_reprs(arg, out);
+            }
+        }
+        Expr::BinaryOp { left, right, .. } => {
+            collect_aggregate_reprs(left, out);
+            collect_aggregate_reprs(right, out);
+        }
+        Expr::UnaryOp { expr, .. }
+        | Expr::IsNull(expr)
+        | Expr::IsNotNull(expr)
+        | Expr::IsUnique(expr) => collect_aggregate_reprs(expr, out),
+        Expr::List(items) => {
+            for item in items {
+                collect_aggregate_reprs(item, out);
+            }
+        }
+        Expr::Case {
+            expr,
+            when_then,
+            else_expr,
+        } => {
+            if let Some(e) = expr {
+                collect_aggregate_reprs(e, out);
+            }
+            for (w, t) in when_then {
+                collect_aggregate_reprs(w, out);
+                collect_aggregate_reprs(t, out);
+            }
+            if let Some(e) = else_expr {
+                collect_aggregate_reprs(e, out);
+            }
+        }
+        Expr::In { expr, list } => {
+            collect_aggregate_reprs(expr, out);
+            collect_aggregate_reprs(list, out);
+        }
+        Expr::Property(base, _) => collect_aggregate_reprs(base, out),
+        _ => {}
+    }
+}
+
+#[derive(Debug, Clone)]
+enum NonAggregateRef {
+    Var(String),
+    Property {
+        repr: String,
+        base_var: Option<String>,
+    },
+}
+
+fn collect_non_aggregate_refs(expr: &Expr, inside_agg: bool, out: &mut Vec<NonAggregateRef>) {
+    match expr {
+        Expr::FunctionCall { name, args, .. } => {
+            let is_agg = matches!(
+                name.to_lowercase().as_str(),
+                "count" | "sum" | "avg" | "min" | "max" | "collect" | "stdev" | "stdevp"
+            );
+            if is_agg {
+                return;
+            }
+            for arg in args {
+                collect_non_aggregate_refs(arg, inside_agg, out);
+            }
+        }
+        Expr::Variable(v) if !inside_agg => out.push(NonAggregateRef::Var(v.clone())),
+        Expr::Property(base, _) if !inside_agg => {
+            let base_var = if let Expr::Variable(v) = base.as_ref() {
+                Some(v.clone())
+            } else {
+                None
+            };
+            out.push(NonAggregateRef::Property {
+                repr: expr.to_string_repr(),
+                base_var,
+            });
+        }
+        Expr::BinaryOp { left, right, .. } => {
+            collect_non_aggregate_refs(left, inside_agg, out);
+            collect_non_aggregate_refs(right, inside_agg, out);
+        }
+        Expr::UnaryOp { expr, .. }
+        | Expr::IsNull(expr)
+        | Expr::IsNotNull(expr)
+        | Expr::IsUnique(expr) => collect_non_aggregate_refs(expr, inside_agg, out),
+        Expr::List(items) => {
+            for item in items {
+                collect_non_aggregate_refs(item, inside_agg, out);
+            }
+        }
+        Expr::Case {
+            expr,
+            when_then,
+            else_expr,
+        } => {
+            if let Some(e) = expr {
+                collect_non_aggregate_refs(e, inside_agg, out);
+            }
+            for (w, t) in when_then {
+                collect_non_aggregate_refs(w, inside_agg, out);
+                collect_non_aggregate_refs(t, inside_agg, out);
+            }
+            if let Some(e) = else_expr {
+                collect_non_aggregate_refs(e, inside_agg, out);
+            }
+        }
+        Expr::In { expr, list } => {
+            collect_non_aggregate_refs(expr, inside_agg, out);
+            collect_non_aggregate_refs(list, inside_agg, out);
+        }
+        _ => {}
+    }
+}
+
+fn validate_with_order_by_aggregate_item(
+    expr: &Expr,
+    projected_aggregate_reprs: &HashSet<String>,
+    projected_simple_reprs: &HashSet<String>,
+    projected_aliases: &HashSet<String>,
+) -> Result<()> {
+    let mut aggregate_reprs = HashSet::new();
+    collect_aggregate_reprs(expr, &mut aggregate_reprs);
+    for agg in aggregate_reprs {
+        if !projected_aggregate_reprs.contains(&agg) {
+            return Err(anyhow!(
+                "SyntaxError: UndefinedVariable - Aggregation expression '{}' is not projected in WITH",
+                agg
+            ));
+        }
+    }
+
+    let mut refs = Vec::new();
+    collect_non_aggregate_refs(expr, false, &mut refs);
+    refs.retain(|r| match r {
+        NonAggregateRef::Var(v) => !projected_aliases.contains(v),
+        NonAggregateRef::Property { repr, .. } => !projected_simple_reprs.contains(repr),
+    });
+
+    let mut dedup = HashSet::new();
+    refs.retain(|r| {
+        let key = match r {
+            NonAggregateRef::Var(v) => format!("v:{v}"),
+            NonAggregateRef::Property { repr, .. } => format!("p:{repr}"),
+        };
+        dedup.insert(key)
+    });
+
+    if refs.len() > 1 {
+        return Err(anyhow!(
+            "SyntaxError: AmbiguousAggregationExpression - ORDER BY item mixes aggregation with multiple non-grouping references"
+        ));
+    }
+
+    if let Some(r) = refs.first() {
+        return match r {
+            NonAggregateRef::Var(v) => Err(anyhow!(
+                "SyntaxError: UndefinedVariable - Variable '{}' not defined",
+                v
+            )),
+            NonAggregateRef::Property { base_var, .. } => Err(anyhow!(
+                "SyntaxError: UndefinedVariable - Variable '{}' not defined",
+                base_var
+                    .clone()
+                    .unwrap_or_else(|| "<property-base>".to_string())
+            )),
+        };
+    }
+
+    Ok(())
+}
+
 /// Validate that no aggregation functions appear in WHERE clause.
 fn validate_no_aggregation_in_where(predicate: &Expr) -> Result<()> {
     if contains_aggregate_recursive(predicate) {
@@ -356,28 +644,125 @@ fn validate_no_aggregation_in_where(predicate: &Expr) -> Result<()> {
     Ok(())
 }
 
-/// Parse and validate a non-negative integer expression for SKIP or LIMIT.
-/// Returns `Ok(Some(n))` for valid integers, or an error for negative/float/other values.
-fn parse_non_negative_integer(expr: &Expr, clause_name: &str) -> Result<Option<usize>> {
+#[derive(Debug, Clone, Copy)]
+enum ConstNumber {
+    Int(i64),
+    Float(f64),
+}
+
+impl ConstNumber {
+    fn to_f64(self) -> f64 {
+        match self {
+            Self::Int(v) => v as f64,
+            Self::Float(v) => v,
+        }
+    }
+}
+
+fn eval_const_numeric_expr(expr: &Expr) -> Result<ConstNumber> {
     match expr {
-        Expr::Literal(CypherLiteral::Integer(n)) => {
-            if *n < 0 {
+        Expr::Literal(CypherLiteral::Integer(n)) => Ok(ConstNumber::Int(*n)),
+        Expr::Literal(CypherLiteral::Float(f)) => Ok(ConstNumber::Float(*f)),
+        Expr::UnaryOp {
+            op: uni_cypher::ast::UnaryOp::Neg,
+            expr,
+        } => match eval_const_numeric_expr(expr)? {
+            ConstNumber::Int(v) => Ok(ConstNumber::Int(-v)),
+            ConstNumber::Float(v) => Ok(ConstNumber::Float(-v)),
+        },
+        Expr::BinaryOp { left, op, right } => {
+            let l = eval_const_numeric_expr(left)?;
+            let r = eval_const_numeric_expr(right)?;
+            match op {
+                BinaryOp::Add => match (l, r) {
+                    (ConstNumber::Int(a), ConstNumber::Int(b)) => Ok(ConstNumber::Int(a + b)),
+                    _ => Ok(ConstNumber::Float(l.to_f64() + r.to_f64())),
+                },
+                BinaryOp::Sub => match (l, r) {
+                    (ConstNumber::Int(a), ConstNumber::Int(b)) => Ok(ConstNumber::Int(a - b)),
+                    _ => Ok(ConstNumber::Float(l.to_f64() - r.to_f64())),
+                },
+                BinaryOp::Mul => match (l, r) {
+                    (ConstNumber::Int(a), ConstNumber::Int(b)) => Ok(ConstNumber::Int(a * b)),
+                    _ => Ok(ConstNumber::Float(l.to_f64() * r.to_f64())),
+                },
+                BinaryOp::Div => Ok(ConstNumber::Float(l.to_f64() / r.to_f64())),
+                BinaryOp::Mod => match (l, r) {
+                    (ConstNumber::Int(a), ConstNumber::Int(b)) => Ok(ConstNumber::Int(a % b)),
+                    _ => Ok(ConstNumber::Float(l.to_f64() % r.to_f64())),
+                },
+                BinaryOp::Pow => Ok(ConstNumber::Float(l.to_f64().powf(r.to_f64()))),
+                _ => Err(anyhow!(
+                    "SyntaxError: InvalidArgumentType - unsupported operator in constant expression"
+                )),
+            }
+        }
+        Expr::FunctionCall { name, args, .. } => {
+            let lower = name.to_lowercase();
+            match lower.as_str() {
+                "rand" if args.is_empty() => {
+                    use rand::Rng;
+                    let mut rng = rand::thread_rng();
+                    Ok(ConstNumber::Float(rng.r#gen::<f64>()))
+                }
+                "tointeger" | "toint" if args.len() == 1 => {
+                    match eval_const_numeric_expr(&args[0])? {
+                        ConstNumber::Int(v) => Ok(ConstNumber::Int(v)),
+                        ConstNumber::Float(v) => Ok(ConstNumber::Int(v.trunc() as i64)),
+                    }
+                }
+                "ceil" if args.len() == 1 => Ok(ConstNumber::Float(
+                    eval_const_numeric_expr(&args[0])?.to_f64().ceil(),
+                )),
+                "floor" if args.len() == 1 => Ok(ConstNumber::Float(
+                    eval_const_numeric_expr(&args[0])?.to_f64().floor(),
+                )),
+                "abs" if args.len() == 1 => match eval_const_numeric_expr(&args[0])? {
+                    ConstNumber::Int(v) => Ok(ConstNumber::Int(v.abs())),
+                    ConstNumber::Float(v) => Ok(ConstNumber::Float(v.abs())),
+                },
+                _ => Err(anyhow!(
+                    "SyntaxError: InvalidArgumentType - expression is not a constant integer expression"
+                )),
+            }
+        }
+        _ => Err(anyhow!(
+            "SyntaxError: InvalidArgumentType - expression is not a constant integer expression"
+        )),
+    }
+}
+
+/// Parse and validate a non-negative integer expression for SKIP or LIMIT.
+/// Returns `Ok(Some(n))` for valid constants, or an error for negative/float/non-constant values.
+fn parse_non_negative_integer(expr: &Expr, clause_name: &str) -> Result<Option<usize>> {
+    let referenced_vars = collect_expr_variables(expr);
+    if !referenced_vars.is_empty() {
+        return Err(anyhow!(
+            "SyntaxError: NonConstantExpression - {} requires expression independent of row variables",
+            clause_name
+        ));
+    }
+
+    let value = eval_const_numeric_expr(expr)?;
+    let as_int = match value {
+        ConstNumber::Int(v) => v,
+        ConstNumber::Float(v) => {
+            if !v.is_finite() || (v.fract().abs() > f64::EPSILON) {
                 return Err(anyhow!(
-                    "SyntaxError: NegativeIntegerArgument - {} requires non-negative integer",
+                    "SyntaxError: InvalidArgumentType - {} requires integer, got float",
                     clause_name
                 ));
             }
-            Ok(Some(*n as usize))
+            v as i64
         }
-        Expr::Literal(CypherLiteral::Float(_)) => Err(anyhow!(
-            "SyntaxError: InvalidArgumentType - {} requires integer, got float",
+    };
+    if as_int < 0 {
+        return Err(anyhow!(
+            "SyntaxError: NegativeIntegerArgument - {} requires non-negative integer",
             clause_name
-        )),
-        _ => Err(anyhow!(
-            "SyntaxError: InvalidArgumentType - {} must be an integer literal",
-            clause_name
-        )),
+        ));
     }
+    Ok(Some(as_int as usize))
 }
 
 /// Validate that aggregation functions are not nested.
@@ -1072,6 +1457,11 @@ impl QueryPlanner {
     pub fn plan_with_scope(&self, query: Query, vars: Vec<String>) -> Result<LogicalPlan> {
         // Apply query rewrites before planning
         let rewritten_query = crate::query::rewrite::rewrite_query(query)?;
+        if Self::has_mixed_union_modes(&rewritten_query) {
+            return Err(anyhow!(
+                "SyntaxError: InvalidClauseComposition - Cannot mix UNION and UNION ALL in the same query"
+            ));
+        }
 
         match rewritten_query {
             Query::Single(stmt) => self.plan_single(stmt, vars),
@@ -1109,6 +1499,25 @@ impl QueryPlanner {
         }
     }
 
+    fn collect_union_modes(query: &Query, out: &mut HashSet<bool>) {
+        match query {
+            Query::Union { left, right, all } => {
+                out.insert(*all);
+                Self::collect_union_modes(left, out);
+                Self::collect_union_modes(right, out);
+            }
+            Query::Explain(inner) => Self::collect_union_modes(inner, out),
+            Query::TimeTravel { query, .. } => Self::collect_union_modes(query, out),
+            Query::Single(_) | Query::Schema(_) | Query::Transaction(_) => {}
+        }
+    }
+
+    fn has_mixed_union_modes(query: &Query) -> bool {
+        let mut modes = HashSet::new();
+        Self::collect_union_modes(query, &mut modes);
+        modes.len() > 1
+    }
+
     fn next_anon_var(&self) -> String {
         let id = self.anon_counter.get();
         self.anon_counter.set(id + 1);
@@ -1127,6 +1536,14 @@ impl QueryPlanner {
             | LogicalPlan::Sort { input, .. }
             | LogicalPlan::Distinct { input, .. }
             | LogicalPlan::Filter { input, .. } => Self::extract_projection_columns(input),
+            LogicalPlan::Union { left, right, .. } => {
+                let left_cols = Self::extract_projection_columns(left);
+                if left_cols.is_empty() {
+                    Self::extract_projection_columns(right)
+                } else {
+                    left_cols
+                }
+            }
             LogicalPlan::Aggregate {
                 group_by,
                 aggregates,
@@ -1426,7 +1843,8 @@ impl QueryPlanner {
 
         let mut vars_in_scope: Vec<VariableInfo> = initial_vars;
 
-        for clause in query.clauses {
+        let clause_count = query.clauses.len();
+        for (clause_idx, clause) in query.clauses.into_iter().enumerate() {
             match clause {
                 Clause::Match(match_clause) => {
                     plan = self.plan_match_clause(&match_clause, plan, &mut vars_in_scope)?;
@@ -1437,7 +1855,8 @@ impl QueryPlanner {
                         expr: unwind.expr.clone(),
                         variable: unwind.variable.clone(),
                     };
-                    add_var_to_scope(&mut vars_in_scope, &unwind.variable, VariableType::Scalar)?;
+                    let unwind_out_type = infer_unwind_output_type(&unwind.expr, &vars_in_scope);
+                    add_var_to_scope(&mut vars_in_scope, &unwind.variable, unwind_out_type)?;
                 }
                 Clause::LoadCsv(load_csv) => {
                     plan = LogicalPlan::LoadCsv {
@@ -1454,9 +1873,21 @@ impl QueryPlanner {
                             procedure,
                             arguments,
                         } => {
+                            let has_yield_star = call_clause.yield_items.len() == 1
+                                && call_clause.yield_items[0].name == "*"
+                                && call_clause.yield_items[0].alias.is_none();
+                            if has_yield_star && clause_idx + 1 < clause_count {
+                                return Err(anyhow!(
+                                    "SyntaxError: UnexpectedSyntax - YIELD * is only allowed in standalone procedure calls"
+                                ));
+                            }
+
                             // Validate for duplicate yield names (VariableAlreadyBound)
                             let mut yield_names = Vec::new();
                             for item in &call_clause.yield_items {
+                                if item.name == "*" {
+                                    continue;
+                                }
                                 let output_name = item.alias.as_ref().unwrap_or(&item.name);
                                 if yield_names.contains(output_name) {
                                     return Err(anyhow!(
@@ -1469,6 +1900,9 @@ impl QueryPlanner {
 
                             let mut yields = Vec::new();
                             for item in &call_clause.yield_items {
+                                if item.name == "*" {
+                                    continue;
+                                }
                                 yields.push((item.name.clone(), item.alias.clone()));
                                 let var_name = item.alias.as_ref().unwrap_or(&item.name);
                                 // Use Imported because procedure return types are unknown
@@ -1523,6 +1957,12 @@ impl QueryPlanner {
                     };
 
                     for path in &merge_clause.pattern.paths {
+                        if let Some(path_var) = &path.variable
+                            && !path_var.is_empty()
+                            && !is_var_in_scope(&vars_in_scope, path_var)
+                        {
+                            add_var_to_scope(&mut vars_in_scope, path_var, VariableType::Path)?;
+                        }
                         for element in &path.elements {
                             if let PatternElement::Node(n) = element {
                                 if let Some(v) = &n.variable
@@ -1583,6 +2023,13 @@ impl QueryPlanner {
                                         &create_vars,
                                     )?;
 
+                                    if let Some(v) = r.variable.as_deref()
+                                        && !v.is_empty()
+                                    {
+                                        check_not_already_bound(v, &vars_in_scope, &create_vars)?;
+                                        create_vars.push(v);
+                                    }
+
                                     // Validate relationship constraints for CREATE
                                     if r.types.len() != 1 {
                                         return Err(anyhow!(
@@ -1598,13 +2045,6 @@ impl QueryPlanner {
                                         return Err(anyhow!(
                                             "SyntaxError: CreatingVarLength - Variable length relationships cannot be created"
                                         ));
-                                    }
-
-                                    if let Some(v) = r.variable.as_deref()
-                                        && !v.is_empty()
-                                    {
-                                        check_not_already_bound(v, &vars_in_scope, &create_vars)?;
-                                        create_vars.push(v);
                                     }
                                 }
                                 PatternElement::Parenthesized { .. } => {}
@@ -3591,6 +4031,9 @@ impl QueryPlanner {
         let mut has_agg = false;
         let mut projections = Vec::new();
         let mut new_vars: Vec<VariableInfo> = Vec::new();
+        let mut projected_aggregate_reprs: HashSet<String> = HashSet::new();
+        let mut projected_simple_reprs: HashSet<String> = HashSet::new();
+        let mut projected_aliases: HashSet<String> = HashSet::new();
 
         for item in &with_clause.items {
             match item {
@@ -3598,6 +4041,8 @@ impl QueryPlanner {
                     // WITH * - add all variables in scope
                     for v in vars_in_scope {
                         projections.push((Expr::Variable(v.name.clone()), Some(v.name.clone())));
+                        projected_aliases.insert(v.name.clone());
+                        projected_simple_reprs.insert(v.name.clone());
                     }
                     new_vars.extend(vars_in_scope.iter().cloned());
                 }
@@ -3606,6 +4051,8 @@ impl QueryPlanner {
                         for v in vars_in_scope {
                             projections
                                 .push((Expr::Variable(v.name.clone()), Some(v.name.clone())));
+                            projected_aliases.insert(v.name.clone());
+                            projected_simple_reprs.insert(v.name.clone());
                         }
                         new_vars.extend(vars_in_scope.iter().cloned());
                     } else {
@@ -3613,13 +4060,20 @@ impl QueryPlanner {
                         if expr.is_aggregate() {
                             has_agg = true;
                             aggregates.push(expr.clone());
+                            projected_aggregate_reprs.insert(expr.to_string_repr());
                         } else if !group_by.contains(expr) {
                             group_by.push(expr.clone());
+                            if matches!(expr, Expr::Variable(_) | Expr::Property(_, _)) {
+                                projected_simple_reprs.insert(expr.to_string_repr());
+                            }
                         }
 
-                        // WITH creates scalar bindings for its outputs
+                        // Preserve non-scalar type information when WITH aliases
+                        // entity/path-capable expressions.
                         if let Some(a) = alias {
-                            new_vars.push(VariableInfo::new(a.clone(), VariableType::Scalar));
+                            let inferred = infer_with_output_type(expr, vars_in_scope);
+                            new_vars.push(VariableInfo::new(a.clone(), inferred));
+                            projected_aliases.insert(a.clone());
                         } else if let Expr::Variable(v) = expr {
                             // Preserve the original type if the variable is just passed through
                             if let Some(existing) = find_var_in_scope(vars_in_scope, v) {
@@ -3627,6 +4081,7 @@ impl QueryPlanner {
                             } else {
                                 new_vars.push(VariableInfo::new(v.clone(), VariableType::Scalar));
                             }
+                            projected_aliases.insert(v.clone());
                         }
                     }
                 }
@@ -3713,9 +4168,9 @@ impl QueryPlanner {
             };
         }
 
-        // Validate and apply ORDER BY for WITH clause
-        // Build an extended scope that includes both WITH aliases and original variables
-        // so ORDER BY can reference either (mirrors RETURN ORDER BY handling).
+        // Validate and apply ORDER BY for WITH clause.
+        // Keep pre-WITH vars in scope for parser compatibility, then apply
+        // stricter checks for aggregate-containing ORDER BY items.
         if let Some(order_by) = &with_clause.order_by {
             let order_by_scope: Vec<VariableInfo> = {
                 let mut scope = new_vars.clone();
@@ -3729,11 +4184,19 @@ impl QueryPlanner {
             for item in order_by {
                 validate_expression_variables(&item.expr, &order_by_scope)?;
                 validate_expression(&item.expr, &order_by_scope)?;
-                // Aggregation functions not allowed in ORDER BY of WITH
-                if contains_aggregate_recursive(&item.expr) {
+                let has_aggregate_in_item = contains_aggregate_recursive(&item.expr);
+                if has_aggregate_in_item && !has_agg {
                     return Err(anyhow!(
                         "SyntaxError: InvalidAggregation - Aggregation functions not allowed in ORDER BY of WITH"
                     ));
+                }
+                if has_agg && has_aggregate_in_item {
+                    validate_with_order_by_aggregate_item(
+                        &item.expr,
+                        &projected_aggregate_reprs,
+                        &projected_simple_reprs,
+                        &projected_aliases,
+                    )?;
                 }
             }
             plan = LogicalPlan::Sort {

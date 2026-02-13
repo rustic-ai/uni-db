@@ -22,7 +22,7 @@
     "City": {
       "name": {
         "nullable": true,
-        "type": "Json"
+        "type": "CypherValue"
       }
     },
     "Person": {
@@ -34,7 +34,7 @@
     "TheLabel": {
       "num": {
         "nullable": true,
-        "type": "Json"
+        "type": "CypherValue"
       }
     }
   },

@@ -16,7 +16,7 @@
       },
       "missing": {
         "nullable": true,
-        "type": "Json"
+        "type": "CypherValue"
       }
     }
   },

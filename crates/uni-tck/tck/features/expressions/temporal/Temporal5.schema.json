@@ -10,7 +10,7 @@
     "Val": {
       "date": {
         "nullable": true,
-        "type": "Json"
+        "type": "CypherValue"
       }
     }
   },

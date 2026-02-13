@@ -42,11 +42,11 @@
       },
       "datetime": {
         "nullable": true,
-        "type": "Json"
+        "type": "CypherValue"
       },
       "list": {
         "nullable": true,
-        "type": "Json"
+        "type": "CypherValue"
       },
       "name": {
         "nullable": true,
@@ -58,7 +58,7 @@
       },
       "time": {
         "nullable": true,
-        "type": "Json"
+        "type": "CypherValue"
       }
     },
     "B": {
@@ -72,11 +72,11 @@
       },
       "datetime": {
         "nullable": true,
-        "type": "Json"
+        "type": "CypherValue"
       },
       "list": {
         "nullable": true,
-        "type": "Json"
+        "type": "CypherValue"
       },
       "name": {
         "nullable": true,
@@ -88,7 +88,7 @@
       },
       "time": {
         "nullable": true,
-        "type": "Json"
+        "type": "CypherValue"
       }
     },
     "C": {
@@ -102,11 +102,11 @@
       },
       "datetime": {
         "nullable": true,
-        "type": "Json"
+        "type": "CypherValue"
       },
       "list": {
         "nullable": true,
-        "type": "Json"
+        "type": "CypherValue"
       },
       "name": {
         "nullable": true,
@@ -118,7 +118,7 @@
       },
       "time": {
         "nullable": true,
-        "type": "Json"
+        "type": "CypherValue"
       }
     },
     "D": {
@@ -132,11 +132,11 @@
       },
       "datetime": {
         "nullable": true,
-        "type": "Json"
+        "type": "CypherValue"
       },
       "list": {
         "nullable": true,
-        "type": "Json"
+        "type": "CypherValue"
       },
       "name": {
         "nullable": true,
@@ -148,7 +148,7 @@
       },
       "time": {
         "nullable": true,
-        "type": "Json"
+        "type": "CypherValue"
       }
     },
     "E": {
@@ -162,11 +162,11 @@
       },
       "datetime": {
         "nullable": true,
-        "type": "Json"
+        "type": "CypherValue"
       },
       "list": {
         "nullable": true,
-        "type": "Json"
+        "type": "CypherValue"
       },
       "name": {
         "nullable": true,
@@ -178,7 +178,7 @@
       },
       "time": {
         "nullable": true,
-        "type": "Json"
+        "type": "CypherValue"
       }
     },
     "F": {

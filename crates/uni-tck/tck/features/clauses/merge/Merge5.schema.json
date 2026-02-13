@@ -79,7 +79,7 @@
     "FB": {
       "foobar": {
         "nullable": true,
-        "type": "Json"
+        "type": "CypherValue"
       }
     },
     "KNOWS": {
@@ -95,7 +95,7 @@
       },
       "numbers": {
         "nullable": true,
-        "type": "Json"
+        "type": "CypherValue"
       }
     },
     "TYPE": {
@@ -107,7 +107,7 @@
     "X": {
       "num": {
         "nullable": true,
-        "type": "Json"
+        "type": "CypherValue"
       }
     }
   },

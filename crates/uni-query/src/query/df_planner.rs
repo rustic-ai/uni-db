@@ -69,7 +69,7 @@ use parking_lot::RwLock;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use uni_common::core::schema::Schema as UniSchema;
+use uni_common::core::schema::{PropertyMeta, Schema as UniSchema};
 use uni_cypher::ast::{Direction as AstDirection, Expr, SortItem};
 use uni_store::runtime::l0::L0Buffer;
 use uni_store::runtime::property_manager::PropertyManager;
@@ -353,6 +353,24 @@ impl HybridPhysicalPlanner {
             }
             _ => {}
         }
+    }
+
+    fn merged_edge_type_properties(&self, edge_type_ids: &[u32]) -> HashMap<String, PropertyMeta> {
+        let mut merged = HashMap::new();
+        let mut sorted_ids = edge_type_ids.to_vec();
+        sorted_ids.sort_unstable();
+
+        for edge_type_id in sorted_ids {
+            if let Some(type_name) = self.schema.edge_type_name_by_id_unified(edge_type_id)
+                && let Some(props) = self.schema.properties.get(&type_name)
+            {
+                for (name, meta) in props {
+                    merged.entry(name.clone()).or_insert_with(|| meta.clone());
+                }
+            }
+        }
+
+        merged
     }
 
     /// Plan a logical plan into an execution plan.
@@ -1420,15 +1438,11 @@ impl HybridPhysicalPlanner {
                 let has_wildcard = all_properties
                     .get(edge_var)
                     .is_some_and(|props| props.contains("*"));
-                let edge_type_name = edge_type_ids
-                    .first()
-                    .and_then(|&id| self.schema.edge_type_name_by_id(id));
-                let edge_type_props =
-                    edge_type_name.and_then(|name| self.schema.properties.get(name));
+                let edge_type_props = self.merged_edge_type_properties(edge_type_ids);
                 let has_overflow_edge_props = edge_properties.iter().any(|p| {
                     p != "overflow_json"
                         && !p.starts_with('_')
-                        && !edge_type_props.is_some_and(|tp| tp.contains_key(p.as_str()))
+                        && !edge_type_props.contains_key(p.as_str())
                 });
                 // Add overflow_json if:
                 // 1. Wildcard was used AND edge_properties is empty (no schema props for this edge type)
@@ -1721,17 +1735,17 @@ impl HybridPhysicalPlanner {
             }
             // Step edge: rewrite against overflow_json using edge type schema
             if let Some(sv) = step_variable {
-                let edge_type_name = edge_type_ids
-                    .first()
-                    .and_then(|&id| self.schema.edge_type_name_by_id(id));
+                let edge_type_props = self.merged_edge_type_properties(edge_type_ids);
                 let empty_props = HashMap::new();
-                let edge_type_props = edge_type_name
-                    .and_then(|name| self.schema.properties.get(name))
-                    .unwrap_or(&empty_props);
+                let edge_type_props_ref = if edge_type_props.is_empty() {
+                    &empty_props
+                } else {
+                    &edge_type_props
+                };
                 df_filter = crate::query::df_expr::rewrite_overflow_filters(
                     df_filter,
                     sv,
-                    Some(edge_type_props),
+                    Some(edge_type_props_ref),
                 )?;
             }
 

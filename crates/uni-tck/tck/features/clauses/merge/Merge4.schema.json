@@ -22,7 +22,7 @@
     "City": {
       "name": {
         "nullable": true,
-        "type": "Json"
+        "type": "CypherValue"
       }
     },
     "Person": {

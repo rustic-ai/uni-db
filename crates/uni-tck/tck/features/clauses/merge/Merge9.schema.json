@@ -33,7 +33,7 @@
     "A": {
       "num": {
         "nullable": true,
-        "type": "Json"
+        "type": "CypherValue"
       }
     },
     "Movie": {
@@ -45,7 +45,7 @@
     "Person": {
       "name": {
         "nullable": true,
-        "type": "Json"
+        "type": "CypherValue"
       }
     }
   },

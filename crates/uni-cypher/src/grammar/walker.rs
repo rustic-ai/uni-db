@@ -515,8 +515,12 @@ fn build_call_clause(pair: Pair<Rule>) -> Result<Clause, ParseError> {
                                 let mut yi_inner = yield_items_pair.into_inner();
                                 let first = yi_inner.next().unwrap();
                                 if first.as_rule() == Rule::star {
-                                    // YIELD * - empty yield items means all
-                                    yield_items = vec![];
+                                    // Preserve YIELD * explicitly so planner can validate
+                                    // standalone-vs-in-query restrictions.
+                                    yield_items = vec![YieldItem {
+                                        name: "*".to_string(),
+                                        alias: None,
+                                    }];
                                 } else {
                                     // Regular yield items
                                     yield_items.push(build_yield_item(first)?);

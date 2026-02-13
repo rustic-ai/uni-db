@@ -10,7 +10,7 @@
     "TheLabel": {
       "array": {
         "nullable": true,
-        "type": "Json"
+        "type": "CypherValue"
       }
     }
   },

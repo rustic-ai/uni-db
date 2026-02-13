@@ -10,7 +10,7 @@
     "Person": {
       "age": {
         "nullable": true,
-        "type": "Json"
+        "type": "CypherValue"
       }
     }
   },

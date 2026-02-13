@@ -27,7 +27,7 @@
       },
       "name2": {
         "nullable": true,
-        "type": "Json"
+        "type": "CypherValue"
       },
       "num": {
         "nullable": true,

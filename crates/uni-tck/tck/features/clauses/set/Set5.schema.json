@@ -19,7 +19,7 @@
     "X": {
       "name": {
         "nullable": true,
-        "type": "Json"
+        "type": "CypherValue"
       },
       "name2": {
         "nullable": true,

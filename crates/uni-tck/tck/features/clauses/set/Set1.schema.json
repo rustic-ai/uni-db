@@ -26,27 +26,27 @@
       },
       "numbers": {
         "nullable": true,
-        "type": "Json"
+        "type": "CypherValue"
       }
     },
     "DoesNotExist": {
       "num": {
         "nullable": true,
-        "type": "Json"
+        "type": "CypherValue"
       }
     },
     "X": {
       "name": {
         "nullable": true,
-        "type": "Json"
+        "type": "CypherValue"
       },
       "name2": {
         "nullable": true,
-        "type": "Json"
+        "type": "CypherValue"
       },
       "num": {
         "nullable": true,
-        "type": "Json"
+        "type": "CypherValue"
       }
     }
   },

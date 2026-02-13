@@ -33,7 +33,7 @@
     "A": {
       "num": {
         "nullable": true,
-        "type": "Json"
+        "type": "CypherValue"
       }
     },
     "B": {

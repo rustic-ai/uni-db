@@ -377,3 +377,268 @@ async fn test_semantic_type_on_node() {
         "InvalidArgumentType",
     );
 }
+
+#[tokio::test]
+async fn test_with_alias_preserves_relationship_type_for_reuse() {
+    let (schema_manager, _dir) = setup_schema().await;
+    schema_manager.add_label("X").unwrap();
+    schema_manager
+        .add_edge_type("T1", vec![], vec!["X".to_string()])
+        .unwrap();
+    schema_manager
+        .add_edge_type("T2", vec![], vec!["X".to_string()])
+        .unwrap();
+    schema_manager.save().await.unwrap();
+    let planner = planner_from(&schema_manager);
+
+    let ast = uni_query::parse_cypher(
+        "MATCH ()-[r1]->(:X)
+         WITH r1 AS r2
+         MATCH ()-[r2]->()
+         RETURN r2",
+    )
+    .unwrap();
+    assert!(
+        planner.plan(ast).is_ok(),
+        "WITH alias should preserve relationship type compatibility"
+    );
+}
+
+#[tokio::test]
+async fn test_with_null_allows_optional_match_binding() {
+    let (schema_manager, _dir) = setup_schema().await;
+    schema_manager.save().await.unwrap();
+    let planner = planner_from(&schema_manager);
+
+    let ast = uni_query::parse_cypher(
+        "WITH null AS a
+         OPTIONAL MATCH p = (a)-[r]->()
+         RETURN nodes(p), nodes(null)",
+    )
+    .unwrap();
+    assert!(
+        planner.plan(ast).is_ok(),
+        "Null alias should remain entity-compatible for OPTIONAL MATCH"
+    );
+}
+
+#[tokio::test]
+async fn test_merge_path_variable_is_in_scope() {
+    let (schema_manager, _dir) = setup_schema().await;
+    schema_manager.save().await.unwrap();
+    let planner = planner_from(&schema_manager);
+
+    let ast = uni_query::parse_cypher("MERGE p = (a {num: 1}) RETURN p").unwrap();
+    assert!(
+        planner.plan(ast).is_ok(),
+        "MERGE path variable should be available in subsequent RETURN"
+    );
+}
+
+#[tokio::test]
+async fn test_union_chain_with_same_columns_plans() {
+    let (schema_manager, _dir) = setup_schema().await;
+    schema_manager.save().await.unwrap();
+    let planner = planner_from(&schema_manager);
+
+    let ast = uni_query::parse_cypher(
+        "RETURN 2 AS x
+         UNION
+         RETURN 1 AS x
+         UNION
+         RETURN 2 AS x",
+    )
+    .unwrap();
+    assert!(
+        planner.plan(ast).is_ok(),
+        "Chained UNION with same projection columns should plan"
+    );
+}
+
+#[tokio::test]
+async fn test_skip_limit_accept_constant_expressions() {
+    let (schema_manager, _dir) = setup_schema().await;
+    schema_manager.add_label("N").unwrap();
+    schema_manager.save().await.unwrap();
+    let planner = planner_from(&schema_manager);
+
+    let ast = uni_query::parse_cypher(
+        "MATCH (n:N)
+         WITH n SKIP toInteger(rand() * 9)
+         RETURN count(*) AS c",
+    )
+    .unwrap();
+    assert!(
+        planner.plan(ast).is_ok(),
+        "SKIP should accept constant expressions independent of row variables"
+    );
+
+    let ast = uni_query::parse_cypher(
+        "MATCH (n:N)
+         WITH n LIMIT toInteger(ceil(1.7))
+         RETURN count(*) AS c",
+    )
+    .unwrap();
+    assert!(
+        planner.plan(ast).is_ok(),
+        "LIMIT should accept constant expressions independent of row variables"
+    );
+}
+
+#[tokio::test]
+async fn test_with_list_alias_is_not_node_compatible() {
+    let (schema_manager, _dir) = setup_schema().await;
+    schema_manager.add_label("Person").unwrap();
+    schema_manager
+        .add_edge_type(
+            "KNOWS",
+            vec!["Person".to_string()],
+            vec!["Person".to_string()],
+        )
+        .unwrap();
+    schema_manager.save().await.unwrap();
+    let planner = planner_from(&schema_manager);
+
+    assert_plan_error(
+        &planner,
+        "MATCH (n:Person)
+         WITH [n] AS users
+         MATCH (users)-[:KNOWS]->(m)
+         RETURN m",
+        "VariableTypeConflict",
+    );
+}
+
+#[tokio::test]
+async fn test_with_order_by_projected_aggregate_expression_allowed() {
+    let (schema_manager, _dir) = setup_schema().await;
+    schema_manager.add_label("A").unwrap();
+    schema_manager
+        .add_property("A", "num", DataType::Int64, true)
+        .unwrap();
+    schema_manager
+        .add_property("A", "num2", DataType::Int64, true)
+        .unwrap();
+    schema_manager.save().await.unwrap();
+    let planner = planner_from(&schema_manager);
+
+    let ast = uni_query::parse_cypher(
+        "MATCH (a:A)
+         WITH a.num2 % 3 AS mod, sum(a.num + a.num2) AS s
+         ORDER BY sum(a.num + a.num2)
+         RETURN mod, s",
+    )
+    .unwrap();
+    assert!(
+        planner.plan(ast).is_ok(),
+        "ORDER BY should allow aggregate expressions projected by WITH"
+    );
+}
+
+#[tokio::test]
+async fn test_with_order_by_aggregate_without_with_aggregation_fails_invalid_aggregation() {
+    let (schema_manager, _dir) = setup_schema().await;
+    schema_manager.add_label("N").unwrap();
+    schema_manager
+        .add_property("N", "num", DataType::Int64, true)
+        .unwrap();
+    schema_manager.save().await.unwrap();
+    let planner = planner_from(&schema_manager);
+
+    assert_plan_error(
+        &planner,
+        "MATCH (n:N)
+         WITH n.num AS foo
+         ORDER BY count(1)
+         RETURN foo",
+        "InvalidAggregation",
+    );
+}
+
+#[tokio::test]
+async fn test_with_order_by_aggregate_with_non_projected_ref_fails_undefined() {
+    let (schema_manager, _dir) = setup_schema().await;
+    schema_manager.add_label("Person").unwrap();
+    schema_manager
+        .add_property("Person", "age", DataType::Int64, true)
+        .unwrap();
+    schema_manager.save().await.unwrap();
+    let planner = planner_from(&schema_manager);
+
+    assert_plan_error(
+        &planner,
+        "MATCH (me:Person)--(you:Person)
+         WITH count(you.age) AS agg
+         ORDER BY me.age + count(you.age)
+         RETURN *",
+        "UndefinedVariable",
+    );
+}
+
+#[tokio::test]
+async fn test_with_order_by_aggregate_with_multiple_non_grouping_refs_is_ambiguous() {
+    let (schema_manager, _dir) = setup_schema().await;
+    schema_manager.add_label("Person").unwrap();
+    schema_manager
+        .add_property("Person", "age", DataType::Int64, true)
+        .unwrap();
+    schema_manager.save().await.unwrap();
+    let planner = planner_from(&schema_manager);
+
+    assert_plan_error(
+        &planner,
+        "MATCH (me:Person)--(you:Person)
+         WITH me.age + you.age, count(*) AS cnt
+         ORDER BY me.age + you.age + count(*)
+         RETURN *",
+        "AmbiguousAggregationExpression",
+    );
+}
+
+#[tokio::test]
+async fn test_union_mixing_union_and_union_all_fails() {
+    let (schema_manager, _dir) = setup_schema().await;
+    schema_manager.save().await.unwrap();
+    let planner = planner_from(&schema_manager);
+
+    assert_plan_error(
+        &planner,
+        "RETURN 1 AS x
+         UNION ALL
+         RETURN 2 AS x
+         UNION
+         RETURN 3 AS x",
+        "InvalidClauseComposition",
+    );
+}
+
+#[tokio::test]
+async fn test_union_mixing_union_all_after_union_fails() {
+    let (schema_manager, _dir) = setup_schema().await;
+    schema_manager.save().await.unwrap();
+    let planner = planner_from(&schema_manager);
+
+    assert_plan_error(
+        &planner,
+        "RETURN 1 AS x
+         UNION
+         RETURN 2 AS x
+         UNION ALL
+         RETURN 3 AS x",
+        "InvalidClauseComposition",
+    );
+}
+
+#[tokio::test]
+async fn test_in_query_call_with_yield_star_fails_unexpected_syntax() {
+    let (schema_manager, _dir) = setup_schema().await;
+    schema_manager.save().await.unwrap();
+    let planner = planner_from(&schema_manager);
+
+    assert_plan_error(
+        &planner,
+        "CALL test.my.proc('Stefan', 1) YIELD *
+         RETURN city, country_code",
+        "UnexpectedSyntax",
+    );
+}

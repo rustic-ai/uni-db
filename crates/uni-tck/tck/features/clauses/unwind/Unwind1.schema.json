@@ -38,23 +38,23 @@
     "Event": {
       "id": {
         "nullable": true,
-        "type": "Json"
+        "type": "CypherValue"
       }
     },
     "Person": {
       "login": {
         "nullable": true,
-        "type": "Json"
+        "type": "CypherValue"
       },
       "name": {
         "nullable": true,
-        "type": "Json"
+        "type": "CypherValue"
       }
     },
     "Year": {
       "year": {
         "nullable": true,
-        "type": "Json"
+        "type": "CypherValue"
       }
     }
   },

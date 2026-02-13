@@ -87,7 +87,7 @@
       },
       "name": {
         "nullable": true,
-        "type": "Json"
+        "type": "CypherValue"
       }
     }
   },

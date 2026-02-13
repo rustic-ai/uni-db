@@ -79,6 +79,37 @@ fn resolve_edge_property_type(
     }
 }
 
+fn merged_edge_schema_props(
+    uni_schema: &uni_common::core::schema::Schema,
+    edge_type_ids: &[u32],
+) -> HashMap<String, uni_common::core::schema::PropertyMeta> {
+    let mut merged: HashMap<String, uni_common::core::schema::PropertyMeta> = HashMap::new();
+    let mut sorted_ids = edge_type_ids.to_vec();
+    sorted_ids.sort_unstable();
+
+    for edge_type_id in sorted_ids {
+        if let Some(edge_type_name) = uni_schema.edge_type_name_by_id_unified(edge_type_id)
+            && let Some(props) = uni_schema.properties.get(edge_type_name.as_str())
+        {
+            for (prop_name, meta) in props {
+                match merged.get_mut(prop_name) {
+                    Some(existing) => {
+                        if existing.r#type != meta.r#type {
+                            existing.r#type = uni_common::core::schema::DataType::CypherValue;
+                        }
+                        existing.nullable |= meta.nullable;
+                    }
+                    None => {
+                        merged.insert(prop_name.clone(), meta.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    merged
+}
+
 /// Expansion tuple for variable-length traversal: (input_row_idx, target_vid, hop_count, node_path, edge_path)
 type VarLengthExpansion = (usize, Vid, usize, Vec<Vid>, Vec<Eid>);
 
@@ -214,11 +245,12 @@ impl GraphTraverseExec {
         let label_props = target_label_name
             .as_deref()
             .and_then(|ln| uni_schema.properties.get(ln));
-
-        let edge_props = edge_type_ids
-            .first()
-            .and_then(|&id| uni_schema.edge_type_name_by_id_unified(id))
-            .and_then(|name| uni_schema.properties.get(name.as_str()));
+        let merged_edge_props = merged_edge_schema_props(&uni_schema, &edge_type_ids);
+        let edge_props = if merged_edge_props.is_empty() {
+            None
+        } else {
+            Some(&merged_edge_props)
+        };
 
         // Build output schema: input schema + target VID + target props + optional edge ID + edge properties
         let schema = Self::build_schema(
@@ -811,10 +843,12 @@ async fn build_traverse_output_batch(
                 .map_err(|e| datafusion::error::DataFusionError::Execution(e.to_string()))?;
 
             let uni_schema = graph_ctx.storage().schema_manager().schema();
-            let edge_type_props = edge_type_ids
-                .first()
-                .and_then(|&id| uni_schema.edge_type_name_by_id_unified(id))
-                .and_then(|name| uni_schema.properties.get(name.as_str()));
+            let merged_edge_props = merged_edge_schema_props(&uni_schema, &edge_type_ids);
+            let edge_type_props = if merged_edge_props.is_empty() {
+                None
+            } else {
+                Some(&merged_edge_props)
+            };
 
             // Use Vid::from(eid) as key — matches PropertyManager's return format
             let vid_keys: Vec<Vid> = eids.iter().map(|e| Vid::from(e.as_u64())).collect();

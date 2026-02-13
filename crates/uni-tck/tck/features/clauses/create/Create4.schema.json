@@ -92,7 +92,7 @@
     "ACTED_IN": {
       "roles": {
         "nullable": true,
-        "type": "Json"
+        "type": "CypherValue"
       }
     },
     "Department": {

@@ -24,7 +24,7 @@
     "TheLabel": {
       "numbers": {
         "nullable": true,
-        "type": "Json"
+        "type": "CypherValue"
       }
     },
     "X": {

@@ -77,8 +77,8 @@ def main():
         for sc in sorted(scenarios, key=lambda s: s["line"]):
             status = sc["status"]
             step_result = {"status": status}
-            if status == "failed":
-                # Use actual error message from the test runner if available
+            if status in {"failed", "skipped"}:
+                # Preserve detailed failure/skip reason from the test runner when available.
                 step_result["error_message"] = sc.get(
                     "error_message",
                     f"Scenario failed: {sc['scenario_name']}",
@@ -117,10 +117,21 @@ def main():
         for el in f["elements"]
         if el["steps"][0]["result"]["status"] == "passed"
     )
-    failed = total - passed
+    failed = sum(
+        1
+        for f in cucumber_json
+        for el in f["elements"]
+        if el["steps"][0]["result"]["status"] == "failed"
+    )
+    skipped = sum(
+        1
+        for f in cucumber_json
+        for el in f["elements"]
+        if el["steps"][0]["result"]["status"] == "skipped"
+    )
 
     print(f"✅ Wrote {output_path} ({len(cucumber_json)} features, {total} scenarios)", file=sys.stderr)
-    print(f"   Passed: {passed}, Failed: {failed}", file=sys.stderr)
+    print(f"   Passed: {passed}, Failed: {failed}, Skipped: {skipped}", file=sys.stderr)
 
     # Print path to stdout for scripts to capture
     print(output_path)

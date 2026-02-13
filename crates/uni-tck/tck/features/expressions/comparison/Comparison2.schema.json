@@ -19,7 +19,7 @@
     "Child": {
       "var": {
         "nullable": true,
-        "type": "Json"
+        "type": "CypherValue"
       }
     }
   },

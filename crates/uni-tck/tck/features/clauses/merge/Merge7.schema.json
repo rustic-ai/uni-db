@@ -30,7 +30,7 @@
     "B": {
       "created": {
         "nullable": true,
-        "type": "Json"
+        "type": "CypherValue"
       },
       "name": {
         "nullable": true,
@@ -40,7 +40,7 @@
     "KNOWS": {
       "created": {
         "nullable": true,
-        "type": "Json"
+        "type": "CypherValue"
       }
     },
     "TYPE": {

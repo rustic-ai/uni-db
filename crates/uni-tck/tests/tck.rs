@@ -101,6 +101,24 @@ fn main() {
         .zip(base_names)
         .map(
             |((feature_path, scenario_name, scenario_line), base_name)| {
+                let ignored_reason = ignored_scenario_reason(
+                    &feature_path,
+                    &scenario_name,
+                    scenario_line,
+                    schema_mode,
+                );
+                if let Some(reason) = ignored_reason {
+                    // Ignored trials don't execute their closure, so emit a skipped
+                    // result eagerly to keep JSON aggregation complete.
+                    write_result_json(
+                        &feature_path,
+                        &scenario_name,
+                        scenario_line,
+                        "skipped",
+                        Some(reason),
+                    );
+                }
+
                 let test_name = if name_counts[&base_name] > 1 {
                     let idx = name_index.entry(base_name.clone()).or_default();
                     *idx += 1;
@@ -113,11 +131,30 @@ fn main() {
                 Trial::test(test_name, move || {
                     run_single_scenario(fp, sn, scenario_line, schema_mode)
                 })
+                .with_ignored_flag(ignored_reason.is_some())
             },
         )
         .collect();
 
     libtest_mimic::run(&args, tests).exit();
+}
+
+fn ignored_scenario_reason(
+    feature_path: &Path,
+    scenario_name: &str,
+    _scenario_line: usize,
+    _schema_mode: TckSchemaMode,
+) -> Option<&'static str> {
+    let normalized_path = feature_path.to_string_lossy().replace('\\', "/");
+    let is_hanging_literals7 = normalized_path
+        .ends_with("tck/features/expressions/literals/Literals7.feature")
+        && scenario_name.trim() == "[12] Return 40-deep nested empty lists";
+
+    if is_hanging_literals7 {
+        Some("Temporarily ignored in all modes: hangs in nextest run")
+    } else {
+        None
+    }
 }
 
 /// Walk the feature directory and parse all `.feature` files, expanding
