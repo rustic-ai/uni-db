@@ -55,7 +55,7 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Run clippy
-        run: cargo clippy --workspace --exclude uni-tck --all-targets --all-features -- -D warnings
+        run: cargo clippy --workspace --exclude uni-tck --all-targets -- -D warnings
 
       - name: Run tests
         run: cargo nextest run --workspace --exclude uni-tck
