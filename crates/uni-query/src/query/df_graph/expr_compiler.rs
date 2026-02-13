@@ -244,8 +244,7 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
         // For Add with a list-producing operand (AST-level detection),
         // compile through the standard path which uses cypher_expr_to_df
         // to correctly route list + scalar to _cypher_list_concat.
-        if *op == BinaryOp::Add
-            && (Self::is_list_producing(left) || Self::is_list_producing(right))
+        if *op == BinaryOp::Add && (Self::is_list_producing(left) || Self::is_list_producing(right))
         {
             return self.compile_standard(
                 &Expr::BinaryOp {
@@ -301,11 +300,17 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
             let col_expr: Arc<dyn PhysicalExpr> = Arc::new(
                 datafusion::physical_expr::expressions::Column::new(var_name, col_idx),
             );
-            Some(Arc::new(StructFieldAccessExpr::new(col_expr, field_idx, output_type)))
-        } else {
-            Some(Arc::new(datafusion::physical_expr::expressions::Literal::new(
-                datafusion::common::ScalarValue::Null,
+            Some(Arc::new(StructFieldAccessExpr::new(
+                col_expr,
+                field_idx,
+                output_type,
             )))
+        } else {
+            Some(Arc::new(
+                datafusion::physical_expr::expressions::Literal::new(
+                    datafusion::common::ScalarValue::Null,
+                ),
+            ))
         }
     }
 
@@ -321,7 +326,10 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
         {
             return Ok(expr);
         }
-        self.compile_standard(&Expr::Property(Box::new(base.clone()), prop.to_string()), input_schema)
+        self.compile_standard(
+            &Expr::Property(Box::new(base.clone()), prop.to_string()),
+            input_schema,
+        )
     }
 
     /// Compile bracket access on a struct column (e.g. `x['a']` where `x` is Struct).
@@ -350,9 +358,15 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
     fn compile_exists(&self, query: &Query) -> Result<Arc<dyn PhysicalExpr>> {
         let err = |dep: &str| anyhow!("EXISTS requires {}", dep);
 
-        let graph_ctx = self.graph_ctx.clone().ok_or_else(|| err("GraphExecutionContext"))?;
+        let graph_ctx = self
+            .graph_ctx
+            .clone()
+            .ok_or_else(|| err("GraphExecutionContext"))?;
         let uni_schema = self.uni_schema.clone().ok_or_else(|| err("UniSchema"))?;
-        let session_ctx = self.session_ctx.clone().ok_or_else(|| err("SessionContext"))?;
+        let session_ctx = self
+            .session_ctx
+            .clone()
+            .ok_or_else(|| err("SessionContext"))?;
         let storage = self.storage.clone().ok_or_else(|| err("StorageManager"))?;
 
         Ok(Arc::new(ExistsExecExpr::new(
@@ -493,8 +507,11 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
 
         // Resolve input list type
         let list_data_type = input_list_phy.data_type(input_schema)?;
-        let inner_data_type =
-            resolve_list_element_type(&list_data_type, DataType::LargeBinary, "List comprehension")?;
+        let inner_data_type = resolve_list_element_type(
+            &list_data_type,
+            DataType::LargeBinary,
+            "List comprehension",
+        )?;
 
         // Create inner schema with loop variable
         let mut fields = input_schema.fields().to_vec();
@@ -538,7 +555,8 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
         let list_data_type = list_phy.data_type(input_schema)?;
         // For LargeBinary (JSONB arrays), use the accumulator type as element type so the
         // reduce body expression compiles correctly (e.g. acc + x where both are Int64).
-        let inner_data_type = resolve_list_element_type(&list_data_type, acc_type.clone(), "Reduce")?;
+        let inner_data_type =
+            resolve_list_element_type(&list_data_type, acc_type.clone(), "Reduce")?;
 
         let mut fields = input_schema.fields().to_vec();
         fields.push(Arc::new(Field::new(accumulator, acc_type.clone(), true)));
@@ -607,7 +625,10 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
     ) -> Result<Arc<dyn PhysicalExpr>> {
         let err = |dep: &str| anyhow!("Pattern comprehension requires {}", dep);
 
-        let graph_ctx = self.graph_ctx.as_ref().ok_or_else(|| err("GraphExecutionContext"))?;
+        let graph_ctx = self
+            .graph_ctx
+            .as_ref()
+            .ok_or_else(|| err("GraphExecutionContext"))?;
         let uni_schema = self.uni_schema.as_ref().ok_or_else(|| err("UniSchema"))?;
 
         // 1. Analyze pattern to get anchor column and traversal steps
@@ -705,14 +726,22 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
         let has_jsonb = is_jsonb_type(left_type.as_ref()) || is_jsonb_type(right_type.as_ref());
 
         if has_jsonb {
-            if let Some(result) =
-                self.compile_jsonb_comparison(df_op, left.clone(), right.clone(), &left_type, &right_type)?
-            {
+            if let Some(result) = self.compile_jsonb_comparison(
+                df_op,
+                left.clone(),
+                right.clone(),
+                &left_type,
+                &right_type,
+            )? {
                 return Ok(result);
             }
-            if let Some(result) =
-                self.compile_jsonb_list_concat(left.clone(), right.clone(), &left_type, &right_type, df_op)?
-            {
+            if let Some(result) = self.compile_jsonb_list_concat(
+                left.clone(),
+                right.clone(),
+                &left_type,
+                &right_type,
+                df_op,
+            )? {
                 return Ok(result);
             }
             if let Some(result) = self.compile_jsonb_arithmetic(
@@ -848,9 +877,10 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
             return Ok(None);
         };
 
-        let dummy_col = datafusion::logical_expr::Expr::Column(
-            datafusion::common::Column::new(None::<String>, "__lb__"),
-        );
+        let dummy_col = datafusion::logical_expr::Expr::Column(datafusion::common::Column::new(
+            None::<String>,
+            "__lb__",
+        ));
         let udf_expr = datafusion::logical_expr::Expr::ScalarFunction(
             datafusion::logical_expr::expr::ScalarFunction {
                 func: udf.clone(),
@@ -928,12 +958,14 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
             datafusion::logical_expr::expr::ScalarFunction {
                 func: udf.clone(),
                 args: vec![
-                    datafusion::logical_expr::Expr::Column(
-                        datafusion::common::Column::new(None::<String>, "__left__"),
-                    ),
-                    datafusion::logical_expr::Expr::Column(
-                        datafusion::common::Column::new(None::<String>, "__right__"),
-                    ),
+                    datafusion::logical_expr::Expr::Column(datafusion::common::Column::new(
+                        None::<String>,
+                        "__left__",
+                    )),
+                    datafusion::logical_expr::Expr::Column(datafusion::common::Column::new(
+                        None::<String>,
+                        "__right__",
+                    )),
                 ],
             },
         );

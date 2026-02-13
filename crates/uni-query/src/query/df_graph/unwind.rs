@@ -161,7 +161,10 @@ impl GraphUnwindExec {
         });
 
         if all_match {
-            ElementTypeInfo { data_type: expected, is_json_encoded: false }
+            ElementTypeInfo {
+                data_type: expected,
+                is_json_encoded: false,
+            }
         } else {
             json_fallback()
         }
@@ -417,10 +420,8 @@ impl GraphUnwindStream {
                                     .map(|(k, _)| k.clone())
                                     .collect();
                                 key_strings.sort();
-                                let keys: Vec<Value> = key_strings
-                                    .into_iter()
-                                    .map(Value::String)
-                                    .collect();
+                                let keys: Vec<Value> =
+                                    key_strings.into_iter().map(Value::String).collect();
                                 return Ok(Value::List(keys));
                             }
                             if let Value::Null = val {
@@ -682,7 +683,10 @@ pub(crate) fn arrow_to_json_value(array: &dyn Array, row: usize) -> Value {
     if let Some(s) = any.downcast_ref::<arrow_array::StructArray>() {
         let mut map = HashMap::new();
         for (field, child) in s.fields().iter().zip(s.columns()) {
-            map.insert(field.name().clone(), arrow_to_json_value(child.as_ref(), row));
+            map.insert(
+                field.name().clone(),
+                arrow_to_json_value(child.as_ref(), row),
+            );
         }
         return Value::Map(map);
     }

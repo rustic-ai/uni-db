@@ -1,16 +1,12 @@
-# Continuous Integration Workflow
+# Pull Request Workflow
 #
-# Runs comprehensive tests, lints, cloud integration, and documentation builds.
-# Only runs on main branch pushes to avoid duplicate runs with PR workflow.
-#
-# Optimization: The test job runs first to build and cache all Rust dependencies.
-# Other jobs (cloud-tests, python-tests, docs) run in parallel after test completes,
-# reusing the cached dependencies for faster execution.
+# Runs essential tests and checks for pull requests.
+# Focused on fast feedback - only runs Rust and Python tests.
 
-name: CI
+name: PR Checks
 
 on:
-  push:
+  pull_request:
     branches: [main]
 
 env:
@@ -18,11 +14,10 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
-  # Basic tests and lints
-  # Uses xlarge runner for faster builds (8 cores, 32GB RAM)
-  test:
-    name: Test
-    runs-on: linux-xlarge-32
+  # Format and lint checks
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -30,6 +25,38 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-lint-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run clippy
+        run: cargo clippy --workspace --exclude uni-tck --all-targets -- -D warnings
+
+  # Rust tests
+  rust-tests:
+    name: Rust Tests
+    runs-on: ubuntu-xlarge
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
 
       - name: Install system dependencies
         run: |
@@ -50,79 +77,12 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-
 
-      - name: Check formatting
-        run: cargo fmt --all -- --check
-
-      - name: Run clippy
-        run: cargo clippy --workspace --exclude uni-tck --all-targets -- -D warnings
-
       - name: Run tests
         run: cargo nextest run --workspace --exclude uni-tck
 
-  # Cloud storage integration tests with LocalStack
-  # Runs after test job to reuse cached dependencies
-  cloud-tests:
-    name: Cloud Integration Tests
-    needs: test
-    runs-on: ubuntu-latest
-    services:
-      localstack:
-        image: localstack/localstack:latest
-        ports:
-          - 4566:4566
-        env:
-          SERVICES: s3
-          AWS_ACCESS_KEY_ID: test
-          AWS_SECRET_ACCESS_KEY: test
-          AWS_DEFAULT_REGION: us-east-1
-        options: >-
-          --health-cmd "curl -f http://localhost:4566/_localstack/health"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y mold protobuf-compiler
-
-      - name: Cache cargo
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-cloud-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-cloud-
-            ${{ runner.os }}-cargo-
-
-      - name: Wait for LocalStack
-        run: |
-          timeout 120 bash -c 'until curl -sf http://localhost:4566/_localstack/health > /dev/null 2>&1; do echo "Waiting for LocalStack..."; sleep 2; done'
-          echo "LocalStack is ready!"
-
-      - name: Run cloud integration tests
-        env:
-          AWS_ACCESS_KEY_ID: test
-          AWS_SECRET_ACCESS_KEY: test
-          AWS_REGION: us-east-1
-          AWS_ENDPOINT_URL: http://localhost:4566
-        run: |
-          cargo test --test cloud_integration_test -- --ignored
-
   # Python bindings tests
-  # Runs after test job to reuse cached dependencies
   python-tests:
     name: Python Tests
-    needs: test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -185,36 +145,3 @@ jobs:
       - name: Run Python tests (uni-pydantic)
         working-directory: bindings/uni-pydantic
         run: poetry run pytest tests/ -v -n auto
-
-  # Build documentation and check examples
-  # Runs after test job to reuse cached dependencies
-  docs:
-    name: Documentation
-    needs: test
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y mold protobuf-compiler
-
-      - name: Cache cargo
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-
-
-      - name: Build documentation
-        run: cargo doc --no-deps --workspace --exclude uni-python --exclude uni-tck
-        env:
-          RUSTDOCFLAGS: -D warnings

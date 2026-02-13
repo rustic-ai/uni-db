@@ -50,9 +50,7 @@ const COL_LABELS: &str = "_labels";
 const COL_TYPE: &str = "_type";
 
 /// Infer the common Arrow DataType from a list of ScalarValues, ignoring nulls.
-fn infer_common_scalar_type(
-    scalars: &[ScalarValue],
-) -> datafusion::arrow::datatypes::DataType {
+fn infer_common_scalar_type(scalars: &[ScalarValue]) -> datafusion::arrow::datatypes::DataType {
     use datafusion::arrow::datatypes::DataType;
 
     let non_null: Vec<_> = scalars
@@ -74,7 +72,10 @@ fn infer_common_scalar_type(
         DataType::Float64
     } else if non_null.iter().all(|s| matches!(s, ScalarValue::Utf8(_))) {
         DataType::Utf8
-    } else if non_null.iter().all(|s| matches!(s, ScalarValue::Boolean(_))) {
+    } else if non_null
+        .iter()
+        .all(|s| matches!(s, ScalarValue::Boolean(_)))
+    {
         DataType::Boolean
     } else {
         // Mixed types - use LargeBinary (JSONB) to preserve type information
@@ -493,7 +494,10 @@ fn translate_property_access(
             // Non-graph variable (map from WITH, UNWIND element, aliased value):
             // use index UDF for dynamic field access at runtime.
             let base_expr = DfExpr::Column(Column::from_name(var_name));
-            Ok(dummy_udf_expr("index", vec![base_expr, lit(prop.to_string())]))
+            Ok(dummy_udf_expr(
+                "index",
+                vec![base_expr, lit(prop.to_string())],
+            ))
         }
     } else {
         // Base is a complex expression (e.g., function call result,
@@ -524,7 +528,10 @@ fn translate_property_access(
 
         // General fallback: evaluate base, use index UDF for property access.
         let base_expr = cypher_expr_to_df(base, context)?;
-        Ok(dummy_udf_expr("index", vec![base_expr, lit(prop.to_string())]))
+        Ok(dummy_udf_expr(
+            "index",
+            vec![base_expr, lit(prop.to_string())],
+        ))
     }
 }
 
@@ -727,8 +734,10 @@ fn translate_map_projection(
         match item {
             MapProjectionItem::Property(prop) => {
                 args.push(lit(prop.clone()));
-                let prop_expr =
-                    cypher_expr_to_df(&Expr::Property(Box::new(base.clone()), prop.clone()), context)?;
+                let prop_expr = cypher_expr_to_df(
+                    &Expr::Property(Box::new(base.clone()), prop.clone()),
+                    context,
+                )?;
                 args.push(prop_expr);
             }
             MapProjectionItem::LiteralEntry(key, expr) => {
@@ -905,7 +914,9 @@ fn translate_binary_op(left: DfExpr, op: &BinaryOp, right: DfExpr) -> Result<DfE
         // Arithmetic operators
         BinaryOp::Add => {
             if is_string_literal(&left) || is_string_literal(&right) {
-                Ok(datafusion::functions::string::expr_fn::concat(vec![left, right]))
+                Ok(datafusion::functions::string::expr_fn::concat(vec![
+                    left, right,
+                ]))
             } else if is_list_expr(&left) || is_list_expr(&right) {
                 Ok(dummy_udf_expr("_cypher_list_concat", vec![left, right]))
             } else {
@@ -1035,15 +1046,21 @@ fn translate_aggregate_function(
         }
         "MIN" => {
             check1!("MIN");
-            Some(Ok(datafusion::functions_aggregate::min_max::min(first_arg(df_args))))
+            Some(Ok(datafusion::functions_aggregate::min_max::min(
+                first_arg(df_args),
+            )))
         }
         "MAX" => {
             check1!("MAX");
-            Some(Ok(datafusion::functions_aggregate::min_max::max(first_arg(df_args))))
+            Some(Ok(datafusion::functions_aggregate::min_max::max(
+                first_arg(df_args),
+            )))
         }
         "COLLECT" => {
             check1!("COLLECT");
-            Some(Ok(datafusion::functions_aggregate::array_agg::array_agg(first_arg(df_args))))
+            Some(Ok(datafusion::functions_aggregate::array_agg::array_agg(
+                first_arg(df_args),
+            )))
         }
         _ => None,
     }
@@ -1071,7 +1088,10 @@ fn translate_string_function(name_upper: &str, df_args: Vec<DfExpr>) -> Option<R
     match name_upper {
         "TOSTRING" => {
             check1!("toString");
-            Some(Ok(cast_expr(first_arg(&df_args), datafusion::arrow::datatypes::DataType::Utf8)))
+            Some(Ok(cast_expr(
+                first_arg(&df_args),
+                datafusion::arrow::datatypes::DataType::Utf8,
+            )))
         }
         "TOINTEGER" | "TOINT" => {
             check1!("toInteger");
@@ -1087,11 +1107,15 @@ fn translate_string_function(name_upper: &str, df_args: Vec<DfExpr>) -> Option<R
         }
         "UPPER" | "TOUPPER" => {
             check1!("upper");
-            Some(Ok(datafusion::functions::string::expr_fn::upper(first_arg(&df_args))))
+            Some(Ok(datafusion::functions::string::expr_fn::upper(
+                first_arg(&df_args),
+            )))
         }
         "LOWER" | "TOLOWER" => {
             check1!("lower");
-            Some(Ok(datafusion::functions::string::expr_fn::lower(first_arg(&df_args))))
+            Some(Ok(datafusion::functions::string::expr_fn::lower(
+                first_arg(&df_args),
+            )))
         }
         "SUBSTRING" => {
             check_n!(2, "substring");
@@ -1101,30 +1125,45 @@ fn translate_string_function(name_upper: &str, df_args: Vec<DfExpr>) -> Option<R
                 df_args[1].clone() + lit(1i64),
             );
             if df_args.len() == 3 {
-                Some(Ok(datafusion::functions::unicode::expr_fn::left(substr_expr, df_args[2].clone())))
+                Some(Ok(datafusion::functions::unicode::expr_fn::left(
+                    substr_expr,
+                    df_args[2].clone(),
+                )))
             } else {
                 Some(Ok(substr_expr))
             }
         }
         "TRIM" => {
             check1!("TRIM");
-            Some(Ok(datafusion::functions::string::expr_fn::btrim(vec![first_arg(&df_args)])))
+            Some(Ok(datafusion::functions::string::expr_fn::btrim(vec![
+                first_arg(&df_args),
+            ])))
         }
         "LTRIM" => {
             check1!("LTRIM");
-            Some(Ok(datafusion::functions::string::expr_fn::ltrim(vec![first_arg(&df_args)])))
+            Some(Ok(datafusion::functions::string::expr_fn::ltrim(vec![
+                first_arg(&df_args),
+            ])))
         }
         "RTRIM" => {
             check1!("RTRIM");
-            Some(Ok(datafusion::functions::string::expr_fn::rtrim(vec![first_arg(&df_args)])))
+            Some(Ok(datafusion::functions::string::expr_fn::rtrim(vec![
+                first_arg(&df_args),
+            ])))
         }
         "LEFT" => {
             check_n!(2, "left");
-            Some(Ok(datafusion::functions::unicode::expr_fn::left(df_args[0].clone(), df_args[1].clone())))
+            Some(Ok(datafusion::functions::unicode::expr_fn::left(
+                df_args[0].clone(),
+                df_args[1].clone(),
+            )))
         }
         "RIGHT" => {
             check_n!(2, "right");
-            Some(Ok(datafusion::functions::unicode::expr_fn::right(df_args[0].clone(), df_args[1].clone())))
+            Some(Ok(datafusion::functions::unicode::expr_fn::right(
+                df_args[0].clone(),
+                df_args[1].clone(),
+            )))
         }
         "REPLACE" => {
             check_n!(3, "replace");
@@ -1136,7 +1175,9 @@ fn translate_string_function(name_upper: &str, df_args: Vec<DfExpr>) -> Option<R
         }
         "REVERSE" => {
             check1!("reverse");
-            Some(Ok(datafusion::functions::unicode::expr_fn::reverse(first_arg(&df_args))))
+            Some(Ok(datafusion::functions::unicode::expr_fn::reverse(
+                first_arg(&df_args),
+            )))
         }
         "SPLIT" => {
             check_n!(2, "split");
@@ -1176,9 +1217,8 @@ fn translate_math_function(name_upper: &str, df_args: &[DfExpr]) -> Option<Resul
     }
 
     // Helper: apply a unary math function that takes a single Float64 arg
-    let unary_f64 = |name: &str, f: fn(DfExpr) -> DfExpr| {
-        Some(apply_unary_math_f64(df_args, name, f))
-    };
+    let unary_f64 =
+        |name: &str, f: fn(DfExpr) -> DfExpr| Some(apply_unary_math_f64(df_args, name, f));
 
     match name_upper {
         "ABS" => {
@@ -1215,8 +1255,12 @@ fn translate_math_function(name_upper: &str, df_args: &[DfExpr]) -> Option<Resul
         "ATAN" => unary_f64("atan", expr_fn::atan),
         "ATAN2" => {
             check_n!(2, "atan2");
-            let cast_f64 = |e: DfExpr| cast_expr(e, datafusion::arrow::datatypes::DataType::Float64);
-            Some(Ok(expr_fn::atan2(cast_f64(df_args[0].clone()), cast_f64(df_args[1].clone()))))
+            let cast_f64 =
+                |e: DfExpr| cast_expr(e, datafusion::arrow::datatypes::DataType::Float64);
+            Some(Ok(expr_fn::atan2(
+                cast_f64(df_args[0].clone()),
+                cast_f64(df_args[1].clone()),
+            )))
         }
         "RAND" | "RANDOM" => Some(Ok(expr_fn::random())),
         "E" if df_args.is_empty() => Some(Ok(lit(std::f64::consts::E))),
@@ -1480,7 +1524,8 @@ fn translate_function_call(
         return result;
     }
 
-    if let Some(result) = translate_graph_function(&name_upper, name, df_args.clone(), args, context)
+    if let Some(result) =
+        translate_graph_function(&name_upper, name, df_args.clone(), args, context)
     {
         return result;
     }

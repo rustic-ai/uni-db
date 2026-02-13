@@ -1004,10 +1004,9 @@ where
             Ok(ColumnarValue::Scalar(ScalarValue::Int64(Some(op(*v)))))
         }
         ColumnarValue::Array(arr) => {
-            let arr = arr
-                .as_any()
-                .downcast_ref::<Int64Array>()
-                .ok_or_else(|| DataFusionError::Execution(format!("{}(): array must be Int64", name)))?;
+            let arr = arr.as_any().downcast_ref::<Int64Array>().ok_or_else(|| {
+                DataFusionError::Execution(format!("{}(): array must be Int64", name))
+            })?;
 
             let result: Int64Array = arr.iter().map(|v| v.map(&op)).collect();
 
@@ -1574,7 +1573,7 @@ fn value_to_columnar(val: &Value) -> DFResult<ColumnarValue> {
         other => {
             return Err(datafusion::error::DataFusionError::Execution(format!(
                 "value_to_columnar(): unsupported type {other:?}"
-            )))
+            )));
         }
     };
     Ok(ColumnarValue::Scalar(scalar))
@@ -1643,12 +1642,11 @@ impl ScalarUDFImpl for HasNullUdf {
         match &args.args[0] {
             ColumnarValue::Scalar(scalar) => {
                 let has_null = match scalar {
-                    ScalarValue::List(arr) => {
-                        arr.as_any()
-                            .downcast_ref::<arrow::array::ListArray>()
-                            .map(|a| !a.is_empty() && a.value(0).null_count() > 0)
-                            .unwrap_or(arr.null_count() > 0)
-                    }
+                    ScalarValue::List(arr) => arr
+                        .as_any()
+                        .downcast_ref::<arrow::array::ListArray>()
+                        .map(|a| !a.is_empty() && a.value(0).null_count() > 0)
+                        .unwrap_or(arr.null_count() > 0),
                     ScalarValue::LargeList(arr) => arr.len() > 0 && arr.value(0).null_count() > 0,
                     ScalarValue::FixedSizeList(arr) => {
                         arr.len() > 0 && arr.value(0).null_count() > 0
@@ -1660,33 +1658,32 @@ impl ScalarUDFImpl for HasNullUdf {
             ColumnarValue::Array(arr) => {
                 use arrow_array::{LargeListArray, ListArray};
 
-                let results: arrow::array::BooleanArray = if let Some(list_arr) =
-                    arr.as_any().downcast_ref::<ListArray>()
-                {
-                    (0..list_arr.len())
-                        .map(|i| {
-                            if list_arr.is_null(i) {
-                                None
-                            } else {
-                                Some(check_list_nulls(list_arr, i))
-                            }
-                        })
-                        .collect()
-                } else if let Some(large) = arr.as_any().downcast_ref::<LargeListArray>() {
-                    (0..large.len())
-                        .map(|i| {
-                            if large.is_null(i) {
-                                None
-                            } else {
-                                Some(check_list_nulls(large, i))
-                            }
-                        })
-                        .collect()
-                } else {
-                    return Err(datafusion::error::DataFusionError::Execution(
-                        "_has_null(): requires list array".to_string(),
-                    ));
-                };
+                let results: arrow::array::BooleanArray =
+                    if let Some(list_arr) = arr.as_any().downcast_ref::<ListArray>() {
+                        (0..list_arr.len())
+                            .map(|i| {
+                                if list_arr.is_null(i) {
+                                    None
+                                } else {
+                                    Some(check_list_nulls(list_arr, i))
+                                }
+                            })
+                            .collect()
+                    } else if let Some(large) = arr.as_any().downcast_ref::<LargeListArray>() {
+                        (0..large.len())
+                            .map(|i| {
+                                if large.is_null(i) {
+                                    None
+                                } else {
+                                    Some(check_list_nulls(large, i))
+                                }
+                            })
+                            .collect()
+                    } else {
+                        return Err(datafusion::error::DataFusionError::Execution(
+                            "_has_null(): requires list array".to_string(),
+                        ));
+                    };
                 Ok(ColumnarValue::Array(Arc::new(results)))
             }
         }
