@@ -451,6 +451,11 @@ impl<'a> ExpressionWalker<'a> {
                     .collect(),
             },
 
+            Expr::LabelCheck { expr, labels } => Expr::LabelCheck {
+                expr: Box::new(self.rewrite_expr(*expr)),
+                labels,
+            },
+
             // Leaf nodes - no rewriting needed
             Expr::Literal(_) | Expr::Parameter(_) | Expr::Variable(_) | Expr::Wildcard => expr,
         }

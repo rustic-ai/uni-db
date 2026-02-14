@@ -1119,6 +1119,9 @@ impl Executor {
                             if let Some(var) = &n.variable {
                                 let mut obj = HashMap::new();
                                 obj.insert("_vid".to_string(), Value::Int(new_vid.as_u64() as i64));
+                                let labels_list: Vec<Value> =
+                                    n.labels.iter().map(|l| Value::String(l.clone())).collect();
+                                obj.insert("_labels".to_string(), Value::List(labels_list));
                                 for (k, v) in &final_props {
                                     obj.insert(k.clone(), v.clone());
                                 }

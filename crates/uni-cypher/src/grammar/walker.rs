@@ -833,13 +833,16 @@ fn apply_tail_to_expr(
                     // IS :Label - check if variable has label
                     // Skip the colon, get the label name
                     let label = tail_inner.next().unwrap().as_str().to_string();
-                    // Convert to function call: hasLabel(left, 'label')
-                    Ok(Expr::FunctionCall {
-                        name: "hasLabel".to_string(),
-                        args: vec![left, Expr::Literal(CypherLiteral::String(label))],
-                        distinct: false,
-                        window_spec: None,
-                    })
+                    match left {
+                        Expr::LabelCheck { expr, mut labels } => {
+                            labels.push(label);
+                            Ok(Expr::LabelCheck { expr, labels })
+                        }
+                        _ => Ok(Expr::LabelCheck {
+                            expr: Box::new(left),
+                            labels: vec![label],
+                        }),
+                    }
                 }
             }
         }
@@ -919,12 +922,17 @@ fn apply_tail_to_expr(
         Rule::identifier_or_keyword => {
             // Bare :Label predicate (without IS)
             let label = normalize_identifier(op_pair.as_str());
-            Ok(Expr::FunctionCall {
-                name: "hasLabel".to_string(),
-                args: vec![left, Expr::Literal(CypherLiteral::String(label))],
-                distinct: false,
-                window_spec: None,
-            })
+            // If left is already a LabelCheck, accumulate labels (conjunctive: a:A:B)
+            match left {
+                Expr::LabelCheck { expr, mut labels } => {
+                    labels.push(label);
+                    Ok(Expr::LabelCheck { expr, labels })
+                }
+                _ => Ok(Expr::LabelCheck {
+                    expr: Box::new(left),
+                    labels: vec![label],
+                }),
+            }
         }
         _ => unreachable!("Unexpected non-chainable rule: {:?}", rule),
     }

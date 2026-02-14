@@ -2089,6 +2089,55 @@ impl Executor {
                     ))
                 }
 
+                Expr::LabelCheck { expr, labels } => {
+                    let val = this
+                        .evaluate_expr(expr, row, prop_manager, params, ctx)
+                        .await?;
+                    match &val {
+                        Value::Null => Ok(Value::Null),
+                        Value::Map(map) => {
+                            // Check if this is an edge (has _eid) or node (has _vid)
+                            let is_edge = map.contains_key("_eid")
+                                || map.contains_key("_type_name")
+                                || (map.contains_key("_type") && !map.contains_key("_vid"));
+
+                            if is_edge {
+                                // Edges have a single type
+                                if labels.len() > 1 {
+                                    return Ok(Value::Bool(false));
+                                }
+                                let label_to_check = &labels[0];
+                                let has_type = if let Some(Value::String(t)) = map.get("_type_name")
+                                {
+                                    t == label_to_check
+                                } else if let Some(Value::String(t)) = map.get("_type") {
+                                    t == label_to_check
+                                } else {
+                                    false
+                                };
+                                Ok(Value::Bool(has_type))
+                            } else {
+                                // Node: check all labels
+                                let has_all = labels.iter().all(|label_to_check| {
+                                    if let Some(Value::List(labels_arr)) = map.get("_labels") {
+                                        labels_arr
+                                            .iter()
+                                            .any(|l| l.as_str() == Some(label_to_check.as_str()))
+                                    } else if let Some(Value::String(label_str)) = map.get("_label")
+                                    {
+                                        label_str == label_to_check
+                                            || label_str.split(':').any(|l| l == label_to_check)
+                                    } else {
+                                        false
+                                    }
+                                });
+                                Ok(Value::Bool(has_all))
+                            }
+                        }
+                        _ => Ok(Value::Bool(false)),
+                    }
+                }
+
                 Expr::MapProjection { base, items } => {
                     let base_value = this
                         .evaluate_expr(base, row, prop_manager, params, ctx)

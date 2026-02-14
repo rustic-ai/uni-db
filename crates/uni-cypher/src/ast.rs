@@ -619,6 +619,11 @@ pub enum Expr {
         base: Box<Expr>,
         items: Vec<MapProjectionItem>,
     },
+    /// Label check expression: `a:B` or conjunctive `a:A:B`
+    LabelCheck {
+        expr: Box<Expr>,
+        labels: Vec<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1215,6 +1220,11 @@ impl Expr {
                     })
                     .collect(),
             },
+
+            Expr::LabelCheck { expr, labels } => Expr::LabelCheck {
+                expr: Box::new(expr.substitute_variable(old_var, new_var)),
+                labels: labels.clone(),
+            },
         }
     }
 
@@ -1289,6 +1299,7 @@ impl Expr {
                 map_expr,
                 ..
             } => where_clause.as_ref().is_some_and(|e| e.is_aggregate()) || map_expr.is_aggregate(),
+            Expr::LabelCheck { .. } => false,
             _ => false,
         }
     }
@@ -1553,6 +1564,11 @@ impl Expr {
                     })
                     .collect();
                 format!("{}{{{}}}", base.to_string_repr(), items_str.join(", "))
+            }
+
+            Expr::LabelCheck { expr, labels } => {
+                let labels_str: String = labels.iter().map(|l| format!(":{}", l)).collect();
+                format!("{}{}", expr.to_string_repr(), labels_str)
             }
         }
     }

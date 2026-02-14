@@ -306,6 +306,7 @@ fn collect_expr_variables_inner(expr: &Expr, vars: &mut Vec<String>) {
                 collect_expr_variables_inner(v, vars);
             }
         }
+        Expr::LabelCheck { expr, .. } => collect_expr_variables_inner(expr, vars),
         _ => {} // Literals and other non-variable expressions
     }
 }
@@ -4814,6 +4815,7 @@ impl QueryPlanner {
                     Self::collect_expr_variables_impl(e, vars);
                 }
             }
+            Expr::LabelCheck { expr, .. } => Self::collect_expr_variables_impl(expr, vars),
             _ => {}
         }
     }
@@ -6048,6 +6050,9 @@ fn collect_properties_from_expr_into(
                     uni_cypher::ast::MapProjectionItem::Variable(_) => {}
                 }
             }
+        }
+        Expr::LabelCheck { expr, .. } => {
+            collect_properties_from_expr_into(expr, properties);
         }
         // Literals, parameters, wildcard don't reference properties
         Expr::Literal(_) | Expr::Parameter(_) | Expr::Wildcard => {}

@@ -409,6 +409,64 @@ pub fn cypher_expr_to_df(expr: &Expr, context: Option<&TranslationContext>) -> R
         }
 
         Expr::MapProjection { base, items } => translate_map_projection(base, items, context),
+
+        Expr::LabelCheck { expr, labels } => {
+            if let Expr::Variable(var) = expr.as_ref() {
+                // Check if variable is an edge (uses _type) or node (uses _labels)
+                let is_edge = context
+                    .and_then(|ctx| ctx.variable_kinds.get(var))
+                    .is_some_and(|k| matches!(k, VariableKind::Edge));
+
+                if is_edge {
+                    // Edges have a single type: check _type_name = label
+                    // For conjunctive labels on edges (e.g., r:A:B), this is always false
+                    // since edges have exactly one type
+                    if labels.len() > 1 {
+                        Ok(lit(false))
+                    } else {
+                        let type_col =
+                            DfExpr::Column(Column::from_name(format!("{}.{}", var, COL_TYPE)));
+                        // CASE WHEN _type IS NULL THEN NULL ELSE _type = 'label' END
+                        Ok(DfExpr::Case(datafusion::logical_expr::Case {
+                            expr: None,
+                            when_then_expr: vec![(
+                                Box::new(type_col.clone().is_null()),
+                                Box::new(DfExpr::Literal(ScalarValue::Boolean(None), None)),
+                            )],
+                            else_expr: Some(Box::new(type_col.eq(lit(labels[0].clone())))),
+                        }))
+                    }
+                } else {
+                    // Node: check _labels array contains all specified labels
+                    let labels_col =
+                        DfExpr::Column(Column::from_name(format!("{}.{}", var, COL_LABELS)));
+                    let mut checks: Option<DfExpr> = None;
+                    for label in labels {
+                        let check = datafusion::functions_nested::expr_fn::array_has(
+                            labels_col.clone(),
+                            lit(label.clone()),
+                        );
+                        checks = Some(match checks {
+                            Some(prev) => prev.and(check),
+                            None => check,
+                        });
+                    }
+                    // Wrap in CASE WHEN _labels IS NULL THEN NULL ELSE ... END
+                    Ok(DfExpr::Case(datafusion::logical_expr::Case {
+                        expr: None,
+                        when_then_expr: vec![(
+                            Box::new(labels_col.is_null()),
+                            Box::new(DfExpr::Literal(ScalarValue::Boolean(None), None)),
+                        )],
+                        else_expr: Some(Box::new(checks.unwrap())),
+                    }))
+                }
+            } else {
+                Err(anyhow!(
+                    "LabelCheck on non-variable expression not yet supported in DataFusion"
+                ))
+            }
+        }
     }
 }
 
@@ -1748,6 +1806,9 @@ fn collect_properties_recursive(expr: &Expr, properties: &mut Vec<(String, Strin
                     uni_cypher::ast::MapProjectionItem::Variable(_) => {}
                 }
             }
+        }
+        Expr::LabelCheck { expr, .. } => {
+            collect_properties_recursive(expr, properties);
         }
         // Terminal nodes and subqueries (which have their own scope)
         Expr::Wildcard | Expr::Variable(_) | Expr::Parameter(_) | Expr::Literal(_) => {}

@@ -377,6 +377,9 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
                 self.compile_case(case_operand, when_then, else_expr, input_schema)
             }
 
+            // LabelCheck: delegate to standard compilation (uses cypher_expr_to_df)
+            Expr::LabelCheck { .. } => self.compile_standard(expr, input_schema),
+
             // Default to standard compilation for leaf nodes or non-custom trees
             _ => self.compile_standard(expr, input_schema),
         }
@@ -631,6 +634,7 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
                 Self::contains_custom_expr(l) || Self::contains_custom_expr(r)
             }
             Expr::Exists { .. } => true,
+            Expr::LabelCheck { expr, .. } => Self::contains_custom_expr(expr),
             _ => false,
         }
     }

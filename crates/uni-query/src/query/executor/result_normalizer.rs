@@ -234,15 +234,23 @@ impl ResultNormalizer {
             .or_else(|| map.get("label"))
             .and_then(Self::value_to_string)
             .or_else(|| {
-                // Handle _labels (List<String>) from structural projection — use first label
+                // Handle _labels (List<String>) from structural projection — join all labels
                 if let Some(Value::List(labels)) = map.get("_labels") {
-                    labels.first().and_then(|v| {
-                        if let Value::String(s) = v {
-                            Some(s.clone())
-                        } else {
-                            None
-                        }
-                    })
+                    let label_strs: Vec<&str> = labels
+                        .iter()
+                        .filter_map(|v| {
+                            if let Value::String(s) = v {
+                                Some(s.as_str())
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
+                    if label_strs.is_empty() {
+                        None
+                    } else {
+                        Some(label_strs.join(":"))
+                    }
                 } else {
                     None
                 }
