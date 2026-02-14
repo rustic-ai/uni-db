@@ -23,9 +23,9 @@ fn into_parse_error(e: impl std::fmt::Display) -> UniError {
     }
 }
 
-/// Convert an error into the appropriate `UniError` type.
+/// Convert a planner/compile-time error into the appropriate `UniError` type.
 /// Errors starting with "SyntaxError:" are treated as parse/syntax errors.
-/// All other errors are query/semantic errors.
+/// All other errors are query/semantic errors (CompileTime).
 fn into_query_error(e: impl std::fmt::Display, cypher: &str) -> UniError {
     let msg = e.to_string();
     // Errors containing "SyntaxError:" prefix should be treated as syntax errors
@@ -37,6 +37,24 @@ fn into_query_error(e: impl std::fmt::Display, cypher: &str) -> UniError {
             line: None,
             column: None,
             context: Some(cypher.to_string()),
+        }
+    } else {
+        UniError::Query {
+            message: msg,
+            query: Some(cypher.to_string()),
+        }
+    }
+}
+
+/// Convert an executor/runtime error into the appropriate `UniError` type.
+/// TypeError messages from UDF execution become `UniError::Type` (Runtime phase).
+/// All other executor errors remain `UniError::Query`.
+fn into_execution_error(e: impl std::fmt::Display, cypher: &str) -> UniError {
+    let msg = e.to_string();
+    if msg.contains("TypeError:") {
+        UniError::Type {
+            expected: msg,
+            actual: String::new(),
         }
     } else {
         UniError::Query {
@@ -105,7 +123,7 @@ impl Uni {
         let (results, profile_output) = executor
             .profile(logical_plan, &params)
             .await
-            .map_err(|e| into_query_error(e, cypher))?;
+            .map_err(|e| into_execution_error(e, cypher))?;
 
         // Convert results to QueryResult
         let columns = if results.is_empty() {
@@ -227,9 +245,19 @@ impl Uni {
         let stream = executor.execute_stream(logical_plan, self.properties.clone(), params);
 
         let row_stream = stream.map(move |batch_res| {
-            let results = batch_res.map_err(|e| UniError::Query {
-                message: e.to_string(),
-                query: Some(cypher_for_error.clone()),
+            let results = batch_res.map_err(|e| {
+                let msg = e.to_string();
+                if msg.contains("TypeError:") {
+                    UniError::Type {
+                        expected: msg,
+                        actual: String::new(),
+                    }
+                } else {
+                    UniError::Query {
+                        message: msg,
+                        query: Some(cypher_for_error.clone()),
+                    }
+                }
             })?;
 
             if results.is_empty() {
@@ -334,7 +362,7 @@ impl Uni {
         let results = executor
             .execute(logical_plan, &self.properties, &params)
             .await
-            .map_err(|e| into_query_error(e, cypher))?;
+            .map_err(|e| into_execution_error(e, cypher))?;
 
         let columns = if results.is_empty() {
             Arc::new(vec![])

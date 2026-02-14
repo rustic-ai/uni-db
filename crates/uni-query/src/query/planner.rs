@@ -30,7 +30,11 @@ pub enum VariableType {
     /// Path variable (from MATCH p = (a)-[*]->(b), etc.)
     Path,
     /// Scalar variable (from WITH expr AS x, UNWIND list AS item, etc.)
+    /// Could hold a map or dynamic value — property access is allowed.
     Scalar,
+    /// Scalar from a known non-graph literal (int, float, bool, string, list).
+    /// Property access is NOT allowed on these at compile time.
+    ScalarLiteral,
     /// Imported from outer scope with unknown type (from plan_with_scope string vars).
     /// Compatible with any concrete type — allows subqueries to re-bind the variable.
     Imported,
@@ -41,7 +45,10 @@ impl VariableType {
     ///
     /// `Imported` is always compatible because the actual type is unknown at plan time.
     fn is_compatible_with(self, expected: VariableType) -> bool {
-        self == expected || self == VariableType::Imported
+        self == expected
+            || self == VariableType::Imported
+            // ScalarLiteral behaves like Scalar for compatibility checks
+            || (self == VariableType::ScalarLiteral && expected == VariableType::Scalar)
     }
 }
 
@@ -115,8 +122,10 @@ fn add_var_to_scope(
             existing.var_type = var_type;
         } else if var_type == VariableType::Imported || existing.var_type == var_type {
             // New type is Imported (keep existing) or same type — no conflict
-        } else if existing.var_type == VariableType::Scalar
-            && matches!(var_type, VariableType::Node | VariableType::Edge)
+        } else if matches!(
+            existing.var_type,
+            VariableType::Scalar | VariableType::ScalarLiteral
+        ) && matches!(var_type, VariableType::Node | VariableType::Edge)
         {
             // Scalar can be used as Node/Edge in CREATE context — a scalar
             // holding a node/edge reference is valid for pattern use
@@ -146,6 +155,11 @@ fn infer_with_output_type(expr: &Expr, vars_in_scope: &[VariableInfo]) -> Variab
             .map(|info| info.var_type)
             .unwrap_or(VariableType::Scalar),
         Expr::Literal(CypherLiteral::Null) => VariableType::Imported,
+        // Known non-graph literals: property access is NOT valid on these.
+        Expr::Literal(CypherLiteral::Integer(_))
+        | Expr::Literal(CypherLiteral::Float(_))
+        | Expr::Literal(CypherLiteral::String(_))
+        | Expr::Literal(CypherLiteral::Bool(_)) => VariableType::ScalarLiteral,
         Expr::FunctionCall { name, args, .. } => {
             let lower = name.to_lowercase();
             if lower == "coalesce" {
@@ -170,7 +184,8 @@ fn infer_with_output_type(expr: &Expr, vars_in_scope: &[VariableInfo]) -> Variab
         // WITH list literals/expressions produce scalar list values. Preserving
         // entity typing here causes invalid node/edge reuse in later MATCH clauses
         // (e.g. WITH [n] AS users; MATCH (users)-->() should fail at compile time).
-        Expr::List(_) => VariableType::Scalar,
+        // Lists are ScalarLiteral since property access is not valid on them.
+        Expr::List(_) => VariableType::ScalarLiteral,
         _ => VariableType::Scalar,
     }
 }
@@ -191,7 +206,7 @@ fn infer_coalesce_type(args: &[Expr], vars_in_scope: &[VariableInfo]) -> Variabl
                 }
             }
             VariableType::Imported => saw_imported = true,
-            VariableType::Scalar => {}
+            VariableType::Scalar | VariableType::ScalarLiteral => {}
         }
     }
     if let Some(t) = resolved {
@@ -346,14 +361,18 @@ fn validate_function_call(name: &str, args: &[Expr], vars_in_scope: &[VariableIn
             Expr::Literal(CypherLiteral::Integer(_))
             | Expr::Literal(CypherLiteral::Float(_))
             | Expr::Literal(CypherLiteral::String(_))
-            | Expr::Literal(CypherLiteral::Bool(_)) => {
+            | Expr::Literal(CypherLiteral::Bool(_))
+            | Expr::List(_) => {
                 return Err(anyhow!(
                     "SyntaxError: InvalidArgumentType - properties() requires a node, relationship, or map"
                 ));
             }
             Expr::Variable(var_name) => {
                 if let Some(info) = find_var_in_scope(vars_in_scope, var_name)
-                    && info.var_type == VariableType::Scalar
+                    && matches!(
+                        info.var_type,
+                        VariableType::Scalar | VariableType::ScalarLiteral
+                    )
                 {
                     return Err(anyhow!(
                         "SyntaxError: InvalidArgumentType - properties() requires a node, relationship, or map"
@@ -919,16 +938,23 @@ fn validate_expression(expr: &Expr, vars_in_scope: &[VariableInfo]) -> Result<()
         | Expr::IsNotNull(e)
         | Expr::IsUnique(e) => validate_expression(e, vars_in_scope),
         Expr::Property(base, prop) => {
-            // Paths don't have properties
             if let Expr::Variable(var_name) = base.as_ref()
                 && let Some(var_info) = find_var_in_scope(vars_in_scope, var_name)
-                && var_info.var_type == VariableType::Path
             {
-                return Err(anyhow!(
-                    "SyntaxError: InvalidArgumentType - Type mismatch: expected Node or Relationship but was Path for property access '{}.{}'",
-                    var_name,
-                    prop
-                ));
+                // Paths don't have properties
+                if var_info.var_type == VariableType::Path {
+                    return Err(anyhow!(
+                        "SyntaxError: InvalidArgumentType - Type mismatch: expected Node or Relationship but was Path for property access '{}.{}'",
+                        var_name,
+                        prop
+                    ));
+                }
+                // Known non-graph literals (int, float, bool, string, list) don't have properties
+                if var_info.var_type == VariableType::ScalarLiteral {
+                    return Err(anyhow!(
+                        "TypeError: InvalidArgumentType - Property access on a non-graph element is not allowed"
+                    ));
+                }
             }
             validate_expression(base, vars_in_scope)
         }
@@ -2225,7 +2251,10 @@ impl QueryPlanner {
                             // Check if variable is defined
                             if let Some(info) = find_var_in_scope(&vars_in_scope, var) {
                                 // Check if variable is an entity type (Node, Edge, Path), not Scalar
-                                if info.var_type == VariableType::Scalar {
+                                if matches!(
+                                    info.var_type,
+                                    VariableType::Scalar | VariableType::ScalarLiteral
+                                ) {
                                     return Err(anyhow!(
                                         "SyntaxError: InvalidArgumentType - DELETE requires node or relationship, '{}' is a scalar value",
                                         var

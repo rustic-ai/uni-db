@@ -606,6 +606,7 @@ fn translate_list_literal(items: &[Expr], context: Option<&TranslationContext>) 
     let mut has_list = false;
     let mut has_map = false;
     let mut has_numeric = false;
+    let mut has_graph_entity = false;
 
     for item in items {
         match item {
@@ -616,8 +617,17 @@ fn translate_list_literal(items: &[Expr], context: Option<&TranslationContext>) 
             Expr::Literal(CypherLiteral::Bool(_)) => has_bool = true,
             Expr::List(_) => has_list = true,
             Expr::Map(_) => has_map = true,
+            // Check if a variable is a graph entity (Node/Edge/Path) — these have struct
+            // Arrow types that cannot be unified with scalar types in make_array.
+            Expr::Variable(name) => {
+                if context
+                    .and_then(|ctx| ctx.variable_kinds.get(name))
+                    .is_some()
+                {
+                    has_graph_entity = true;
+                }
+            }
             // Treat Null as compatible with anything
-            // If complex expr (e.g. Variable), assume compatibility or let DF handle it
             _ => {}
         }
     }
@@ -625,8 +635,9 @@ fn translate_list_literal(items: &[Expr], context: Option<&TranslationContext>) 
     // Check distinct non-null types count
     let types_count = has_numeric as u8 + has_string as u8 + has_bool as u8 + has_map as u8;
 
-    // Mixed types or nested lists: encode as LargeBinary CypherValue
-    if has_list || has_map || types_count > 1 {
+    // Mixed types, nested lists, or graph entities mixed with other types:
+    // encode as LargeBinary CypherValue to avoid Arrow type unification failures.
+    if has_list || has_map || types_count > 1 || has_graph_entity {
         // Try to convert all items to JSON values for CypherValue encoding
         if let Some(json_array) = try_items_to_json(items) {
             let uni_val: uni_common::Value = serde_json::Value::Array(json_array).into();
@@ -1457,8 +1468,13 @@ fn translate_graph_function(
             {
                 return Some(Ok(lit(label.clone())));
             }
-            // Fallback: use _type column from traverse output (schemaless edges)
-            if let Some(Expr::Variable(var)) = args.first() {
+            // Use _type column only when the variable is a known edge in the context.
+            // Non-edge variables (e.g. loop variables in list comprehensions) must go
+            // through the type() UDF which handles CypherValue-encoded inputs.
+            if let Some(Expr::Variable(var)) = args.first()
+                && context
+                    .is_some_and(|ctx| ctx.variable_kinds.get(var) == Some(&VariableKind::Edge))
+            {
                 return Some(Ok(DfExpr::Column(Column::from_name(format!(
                     "{}.{}",
                     var, COL_TYPE

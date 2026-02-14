@@ -277,10 +277,10 @@ struct TypeUdf {
 impl TypeUdf {
     fn new() -> Self {
         Self {
-            signature: Signature::new(
-                TypeSignature::Exact(vec![DataType::Utf8]),
-                Volatility::Immutable,
-            ),
+            // Accept any type: Utf8 for normal edge columns, LargeBinary for
+            // CypherValue-encoded values (e.g. from heterogeneous list comprehensions),
+            // and Null for null propagation.
+            signature: Signature::new(TypeSignature::Any(1), Volatility::Immutable),
         }
     }
 }
@@ -305,13 +305,38 @@ impl ScalarUDFImpl for TypeUdf {
     }
 
     fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DFResult<ColumnarValue> {
-        // type() is a pass-through - the edge type is already stored as a string column
         if args.args.is_empty() {
             return Err(datafusion::error::DataFusionError::Execution(
                 "type(): requires 1 argument".to_string(),
             ));
         }
-        Ok(args.args[0].clone())
+        let output_type = DataType::Utf8;
+        invoke_cypher_udf(args, &output_type, |val_args| {
+            if val_args.is_empty() {
+                return Err(datafusion::error::DataFusionError::Execution(
+                    "type(): requires 1 argument".to_string(),
+                ));
+            }
+            let val = &val_args[0];
+            match val {
+                // Edge represented as a map (from CypherValue encoding)
+                Value::Map(map) => {
+                    if let Some(Value::String(t)) = map.get("_type") {
+                        Ok(Value::String(t.clone()))
+                    } else {
+                        // Map without _type key is not a relationship
+                        Err(datafusion::error::DataFusionError::Execution(
+                            "TypeError: InvalidArgumentValue - type() requires a relationship argument".to_string(),
+                        ))
+                    }
+                }
+                Value::Null => Ok(Value::Null),
+                _ => Err(datafusion::error::DataFusionError::Execution(
+                    "TypeError: InvalidArgumentValue - type() requires a relationship argument"
+                        .to_string(),
+                )),
+            }
+        })
     }
 }
 
@@ -664,13 +689,24 @@ impl ScalarUDFImpl for LabelsUdf {
             }
 
             let node = &val_args[0];
-            if let Value::Map(map) = node
-                && let Some(Value::List(arr)) = map.get("_labels")
-            {
-                return Ok(Value::List(arr.clone()));
+            match node {
+                Value::Map(map) => {
+                    if let Some(Value::List(arr)) = map.get("_labels") {
+                        Ok(Value::List(arr.clone()))
+                    } else {
+                        // Map without _labels key is not a node
+                        Err(datafusion::error::DataFusionError::Execution(
+                            "TypeError: InvalidArgumentValue - labels() requires a node argument"
+                                .to_string(),
+                        ))
+                    }
+                }
+                Value::Null => Ok(Value::Null),
+                _ => Err(datafusion::error::DataFusionError::Execution(
+                    "TypeError: InvalidArgumentValue - labels() requires a node argument"
+                        .to_string(),
+                )),
             }
-
-            Ok(Value::Null)
         })
     }
 }
