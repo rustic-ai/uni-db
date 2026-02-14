@@ -1555,10 +1555,27 @@ impl HybridPhysicalPlanner {
                 // Resolve target properties for VLP (same logic as single-hop above)
                 let vlp_target_label_name_str =
                     self.schema.label_name_by_id(target_label_id).unwrap_or("");
-                let vlp_target_properties = self.resolve_properties(
+                let vlp_target_properties_raw = self.resolve_properties(
                     target_variable,
                     vlp_target_label_name_str,
                     all_properties,
+                );
+                let target_has_wildcard = all_properties
+                    .get(target_variable)
+                    .is_some_and(|p| p.contains("*"));
+                let vlp_target_label_props: Option<HashSet<String>> =
+                    if vlp_target_label_name_str.is_empty() {
+                        None
+                    } else {
+                        self.schema
+                            .properties
+                            .get(vlp_target_label_name_str)
+                            .map(|props| props.keys().cloned().collect())
+                    };
+                let vlp_target_properties = sanitize_vlp_target_properties(
+                    vlp_target_properties_raw,
+                    target_has_wildcard,
+                    vlp_target_label_props.as_ref(),
                 );
                 let vlp_target_label_name = if vlp_target_label_name_str.is_empty() {
                     None
@@ -1936,71 +1953,34 @@ impl HybridPhysicalPlanner {
 
         // Check if any referenced columns are LargeBinary (schemaless CypherValue).
         // If so, rewrite the filter to use json_get_* UDFs against _all_props.
-        let has_schemaless_cols = schema.fields().iter().any(|f| {
-            f.data_type() == &arrow::datatypes::DataType::LargeBinary
-                && f.name().contains('.')
-                && !f.name().ends_with("._all_props")
-        });
+        let has_schemaless_cols = has_schemaless_property_columns(&schema);
 
         if has_schemaless_cols {
-            // If the predicate contains custom expressions (quantifiers, comprehensions,
-            // reduce), bypass the logical-level rewriting path and use the physical
-            // compiler directly. Custom expressions cannot be translated to DfExpr.
-            // The physical compiler handles CypherValue-encoded lists natively (CypherValue decode
-            // in QuantifierExecExpr/ListComprehensionExecExpr).
-            if crate::query::df_graph::expr_compiler::CypherPhysicalExprCompiler::contains_custom_expr(predicate) {
-                let ctx = self.translation_context_for_plan(input);
-                let session = self.session_ctx.read();
-                let state = session.state();
-                let compiler = crate::query::df_graph::expr_compiler::CypherPhysicalExprCompiler::new(
-                    &state,
-                    Some(&ctx),
-                )
-                .with_subquery_ctx(
-                    self.graph_ctx.clone(),
-                    self.schema.clone(),
-                    self.session_ctx.clone(),
-                    self.storage.clone(),
-                    self.params.clone(),
-                );
-                let physical_predicate = compiler.compile(predicate, &schema)?;
-
-                if !optional_variables.is_empty() {
-                    return Ok(Arc::new(OptionalFilterExec::new(
-                        input_plan,
-                        physical_predicate,
-                        optional_variables.clone(),
-                    )));
-                }
-
-                return Ok(Arc::new(FilterExec::try_new(
-                    physical_predicate,
-                    input_plan,
-                )?));
-            }
-
-            // Use logical-level rewriting: convert to DfExpr, then compile
+            // For schemaless CypherValue columns, always use physical compilation.
+            // This avoids logical planning coercion failures (e.g. LargeBinary vs Int64).
             let ctx = self.translation_context_for_plan(input);
-            let df_filter = crate::query::df_expr::cypher_expr_to_df(predicate, Some(&ctx))?;
+            let session = self.session_ctx.read();
+            let state = session.state();
+            let compiler = crate::query::df_graph::expr_compiler::CypherPhysicalExprCompiler::new(
+                &state,
+                Some(&ctx),
+            )
+            .with_subquery_ctx(
+                self.graph_ctx.clone(),
+                self.schema.clone(),
+                self.session_ctx.clone(),
+                self.storage.clone(),
+                self.params.clone(),
+            );
+            let physical_predicate = compiler.compile(predicate, &schema)?;
 
-            // For OPTIONAL MATCH: use OptionalFilterExec for proper NULL row preservation.
             if !optional_variables.is_empty() {
-                let session = self.session_ctx.read();
-                let physical_predicate =
-                    self.create_physical_filter_expr(&df_filter, &schema, &session)?;
-
                 return Ok(Arc::new(OptionalFilterExec::new(
                     input_plan,
                     physical_predicate,
                     optional_variables.clone(),
                 )));
             }
-
-            let df_filter = self.wrap_optional_null_guard(df_filter, optional_variables, &schema);
-
-            let session = self.session_ctx.read();
-            let physical_predicate =
-                self.create_physical_filter_expr(&df_filter, &schema, &session)?;
 
             return Ok(Arc::new(FilterExec::try_new(
                 physical_predicate,
@@ -2041,40 +2021,6 @@ impl HybridPhysicalPlanner {
             physical_predicate,
             input_plan,
         )?))
-    }
-
-    /// Wrap a filter expression with OPTIONAL MATCH NULL preservation.
-    ///
-    /// For each optional variable, adds `OR (var._vid IS NULL)` so that rows where
-    /// the optional variable was not matched (NULL) are preserved regardless of
-    /// the predicate result.
-    fn wrap_optional_null_guard(
-        &self,
-        filter: DfExpr,
-        optional_variables: &HashSet<String>,
-        schema: &SchemaRef,
-    ) -> DfExpr {
-        if optional_variables.is_empty() {
-            return filter;
-        }
-
-        // Build OR chain: (filter) OR (var1._vid IS NULL) OR (var2._vid IS NULL) ...
-        let mut result = filter;
-        for var in optional_variables {
-            let vid_col = format!("{}._vid", var);
-            // Only add the null check if the column exists in the schema
-            if schema.column_with_name(&vid_col).is_some() {
-                let is_null = DfExpr::IsNull(Box::new(DfExpr::Column(
-                    datafusion::common::Column::from_name(&vid_col),
-                )));
-                result = DfExpr::BinaryExpr(datafusion::logical_expr::BinaryExpr::new(
-                    Box::new(result),
-                    datafusion::logical_expr::Operator::Or,
-                    Box::new(is_null),
-                ));
-            }
-        }
-        result
     }
 
     /// Plan a projection, passing alias map through to Sort nodes in the input chain.
@@ -3346,9 +3292,48 @@ fn convert_direction(ast_dir: AstDirection) -> Direction {
     }
 }
 
+/// Return true when the schema contains CypherValue-encoded property columns.
+fn has_schemaless_property_columns(schema: &SchemaRef) -> bool {
+    schema.fields().iter().any(|f| {
+        f.data_type() == &arrow::datatypes::DataType::LargeBinary
+            && f.name().contains('.')
+            && !f.name().ends_with("._all_props")
+    })
+}
+
+/// Clean VLP target property list derived from planner property collection.
+///
+/// Removes the wildcard sentinel `"*"` (not a real property), and ensures
+/// `_all_props` is loaded when wildcard/non-schema properties require it.
+fn sanitize_vlp_target_properties(
+    mut properties: Vec<String>,
+    target_has_wildcard: bool,
+    target_label_props: Option<&HashSet<String>>,
+) -> Vec<String> {
+    properties.retain(|p| p != "*");
+
+    if target_has_wildcard && properties.is_empty() {
+        properties.push("_all_props".to_string());
+    }
+
+    let has_non_schema_props = properties.iter().any(|p| {
+        p != "_all_props"
+            && p != "overflow_json"
+            && !p.starts_with('_')
+            && !target_label_props.is_some_and(|props| props.contains(p))
+    });
+    if has_non_schema_props && !properties.iter().any(|p| p == "_all_props") {
+        properties.push("_all_props".to_string());
+    }
+
+    properties
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use arrow_schema::{DataType, Field, Schema};
+    use std::sync::Arc;
 
     #[test]
     fn test_convert_direction() {
@@ -3364,5 +3349,51 @@ mod tests {
             convert_direction(AstDirection::Both),
             Direction::Both
         ));
+    }
+
+    #[test]
+    fn test_has_schemaless_property_columns() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("n._vid", DataType::UInt64, false),
+            Field::new("n.name", DataType::LargeBinary, true),
+            Field::new("n._all_props", DataType::LargeBinary, true),
+        ]));
+        assert!(has_schemaless_property_columns(&schema));
+
+        let schema_no_props = Arc::new(Schema::new(vec![
+            Field::new("n._vid", DataType::UInt64, false),
+            Field::new("n._all_props", DataType::LargeBinary, true),
+            Field::new("blob", DataType::LargeBinary, true),
+        ]));
+        assert!(!has_schemaless_property_columns(&schema_no_props));
+    }
+
+    #[test]
+    fn test_sanitize_vlp_target_properties_removes_wildcard() {
+        let props = vec!["*".to_string(), "name".to_string()];
+        let label_props = HashSet::from(["name".to_string()]);
+        let sanitized = sanitize_vlp_target_properties(props, true, Some(&label_props));
+
+        assert_eq!(sanitized, vec!["name".to_string()]);
+    }
+
+    #[test]
+    fn test_sanitize_vlp_target_properties_adds_all_props_for_wildcard_empty() {
+        let props = vec!["*".to_string()];
+        let sanitized = sanitize_vlp_target_properties(props, true, None);
+
+        assert_eq!(sanitized, vec!["_all_props".to_string()]);
+    }
+
+    #[test]
+    fn test_sanitize_vlp_target_properties_adds_all_props_for_non_schema() {
+        let props = vec!["custom_prop".to_string()];
+        let label_props = HashSet::from(["name".to_string()]);
+        let sanitized = sanitize_vlp_target_properties(props, false, Some(&label_props));
+
+        assert_eq!(
+            sanitized,
+            vec!["custom_prop".to_string(), "_all_props".to_string()]
+        );
     }
 }

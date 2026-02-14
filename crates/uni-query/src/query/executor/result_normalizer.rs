@@ -131,20 +131,23 @@ impl ResultNormalizer {
             match props_value {
                 // Properties stored as a Map
                 Value::Map(m) => {
-                    return m
-                        .iter()
-                        .map(|(k, v)| (k.clone(), Self::normalize_property_value(v.clone())))
-                        .collect();
+                    return Self::prune_null_properties(
+                        m.iter()
+                            .map(|(k, v)| (k.clone(), Self::normalize_property_value(v.clone())))
+                            .collect(),
+                    );
                 }
                 // Properties stored as Bytes (JSON serialized)
                 Value::Bytes(bytes) => {
                     if let Ok(props) =
                         serde_json::from_slice::<HashMap<String, serde_json::Value>>(bytes)
                     {
-                        return props
-                            .into_iter()
-                            .map(|(k, v)| (k, Self::json_value_to_value(v)))
-                            .collect();
+                        return Self::prune_null_properties(
+                            props
+                                .into_iter()
+                                .map(|(k, v)| (k, Self::json_value_to_value(v)))
+                                .collect(),
+                        );
                     }
                 }
                 _ => {}
@@ -171,20 +174,28 @@ impl ResultNormalizer {
                         .or_insert_with(|| Self::normalize_property_value(v.clone()));
                 }
             }
-            return properties;
+            return Self::prune_null_properties(properties);
         }
 
         // Fall back to extracting inline properties (excluding _ prefixed and special fields)
-        map.iter()
-            .filter(|(k, _)| {
-                !k.starts_with('_')
-                    && k.as_str() != "properties"
-                    && k.as_str() != "label"
-                    && k.as_str() != "type"
-                    && k.as_str() != "overflow_json"
-            })
-            .map(|(k, v)| (k.clone(), Self::normalize_property_value(v.clone())))
-            .collect()
+        Self::prune_null_properties(
+            map.iter()
+                .filter(|(k, _)| {
+                    !k.starts_with('_')
+                        && k.as_str() != "properties"
+                        && k.as_str() != "label"
+                        && k.as_str() != "type"
+                        && k.as_str() != "overflow_json"
+                })
+                .map(|(k, v)| (k.clone(), Self::normalize_property_value(v.clone())))
+                .collect(),
+        )
+    }
+
+    /// Remove properties with null values from user-facing entity property maps.
+    fn prune_null_properties(mut properties: HashMap<String, Value>) -> HashMap<String, Value> {
+        properties.retain(|_, v| !v.is_null());
+        properties
     }
 
     /// Convert a serde_json::Value to our Value type.
@@ -540,5 +551,49 @@ mod tests {
             }
             _ => panic!("Expected Edge variant"),
         }
+    }
+
+    #[test]
+    fn test_normalize_node_prunes_null_properties() {
+        let mut map = HashMap::new();
+        map.insert("_vid".to_string(), Value::Int(1));
+        map.insert("_label".to_string(), Value::String("Person".to_string()));
+        map.insert("name".to_string(), Value::String("Alice".to_string()));
+        map.insert("age".to_string(), Value::Null);
+
+        let result = ResultNormalizer::normalize_value(Value::Map(map)).unwrap();
+        let Value::Node(node) = result else {
+            panic!("Expected Node variant");
+        };
+
+        assert_eq!(
+            node.properties.get("name"),
+            Some(&Value::String("Alice".to_string()))
+        );
+        assert!(!node.properties.contains_key("age"));
+    }
+
+    #[test]
+    fn test_normalize_edge_prunes_null_properties_from_all_props_and_inline() {
+        let mut all_props = HashMap::new();
+        all_props.insert("since".to_string(), Value::Null);
+        all_props.insert("weight".to_string(), Value::Int(7));
+
+        let mut edge_map = HashMap::new();
+        edge_map.insert("_eid".to_string(), Value::Int(10));
+        edge_map.insert("_type".to_string(), Value::String("REL".to_string()));
+        edge_map.insert("_src".to_string(), Value::Int(1));
+        edge_map.insert("_dst".to_string(), Value::Int(2));
+        edge_map.insert("_all_props".to_string(), Value::Map(all_props));
+        edge_map.insert("name".to_string(), Value::Null);
+
+        let result = ResultNormalizer::normalize_value(Value::Map(edge_map)).unwrap();
+        let Value::Edge(edge) = result else {
+            panic!("Expected Edge variant");
+        };
+
+        assert_eq!(edge.properties.get("weight"), Some(&Value::Int(7)));
+        assert!(!edge.properties.contains_key("since"));
+        assert!(!edge.properties.contains_key("name"));
     }
 }

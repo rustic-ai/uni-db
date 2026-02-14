@@ -4003,7 +4003,6 @@ mod tests {
         uni_common::cypher_value_codec::encode(&uni_val)
     }
 
-
     // Note: Old CypherValue decode UDF tests removed - those UDFs no longer exist.
     // CypherValue operations now route through Cypher-semantic UDFs instead.
 
