@@ -1,28 +1,26 @@
 # TCK Compliance Report
 
-**Generated:** 2026-02-13 12:42:43
-**Results:** `results_20260213_094223.json`
-**Compared to:** `results_20260213_082754.json`
+**Generated:** 2026-02-13 17:42:23
+**Results:** `results_20260213_174223.json`
+**Compared to:** `results_20260213_161042.json`
 
 ## Summary
 
 | Metric | Current | Previous | Delta |
 |--------|---------|----------|-------|
 | Scenarios | 3897 | 3897 |  |
-| Passed | 2542 | 2487 | +55 |
-| Failed | 1354 | 1410 | -56 |
-| Pass Rate | 65.2% | 63.8% | 📈 +1.4pp |
+| Passed | 2618 | 2565 | +53 |
+| Failed | 1278 | 1331 | -53 |
+| Pass Rate | 67.2% | 65.8% | 📈 +1.4pp |
 
-**🟢 Fixed:** 57 scenarios now passing
-
-**🔴 Regressions:** 1 scenarios now failing
+**🟢 Fixed:** 53 scenarios now passing
 
 ## Feature Breakdown
 
 | Feature | Scenarios | Passed | Failed | Rate | Delta |
 |---------|-----------|--------|--------|------|-------|
 | ✅ Aggregation1 | 2 | 2 | 0 | 100% |  |
-| ⚠️ Aggregation2 | 12 | 6 | 6 | 50% |  |
+| ⚠️ Aggregation2 | 12 | 8 | 4 | 67% | +17pp |
 | ❌ Aggregation3 | 2 | 0 | 2 | 0% |  |
 | ❌ Aggregation5 | 2 | 0 | 2 | 0% |  |
 | ❌ Aggregation6 | 13 | 0 | 13 | 0% |  |
@@ -38,7 +36,7 @@
 | ✅ Call4 | 2 | 2 | 0 | 100% |  |
 | ✅ Call5 | 19 | 17 | 2 | 89% |  |
 | ⚠️ Call6 | 3 | 2 | 1 | 67% |  |
-| ✅ Comparison1 | 43 | 41 | 2 | 95% | +2pp |
+| ✅ Comparison1 | 43 | 41 | 2 | 95% |  |
 | ✅ Comparison2 | 19 | 19 | 0 | 100% |  |
 | ✅ Comparison3 | 9 | 9 | 0 | 100% |  |
 | ✅ Comparison4 | 1 | 1 | 0 | 100% |  |
@@ -82,29 +80,29 @@
 | ✅ Literals4 | 10 | 10 | 0 | 100% |  |
 | ✅ Literals5 | 27 | 26 | 1 | 96% |  |
 | ✅ Literals6 | 13 | 12 | 1 | 92% |  |
-| ✅ Literals7 | 20 | 17 | 2 | 85% | -5pp |
-| ✅ Literals8 | 27 | 26 | 1 | 96% | +4pp |
+| ✅ Literals7 | 20 | 17 | 2 | 85% |  |
+| ✅ Literals8 | 27 | 26 | 1 | 96% |  |
 | ⚠️ Map1 | 19 | 12 | 7 | 63% |  |
 | ⚠️ Map2 | 14 | 11 | 3 | 79% |  |
 | ❌ Map3 | 11 | 3 | 8 | 27% |  |
 | ✅ Match1 | 86 | 85 | 1 | 99% |  |
 | ✅ Match2 | 86 | 83 | 3 | 97% |  |
-| ⚠️ Match3 | 30 | 16 | 14 | 53% | +3pp |
-| ❌ Match4 | 10 | 2 | 8 | 20% |  |
-| ❌ Match5 | 29 | 7 | 22 | 24% |  |
-| ✅ Match6 | 97 | 95 | 2 | 98% | +1pp |
+| ⚠️ Match3 | 30 | 16 | 14 | 53% |  |
+| ❌ Match4 | 10 | 4 | 6 | 40% |  |
+| ✅ Match5 | 29 | 27 | 2 | 93% |  |
+| ✅ Match6 | 97 | 95 | 2 | 98% |  |
 | ❌ Match7 | 31 | 9 | 22 | 29% |  |
 | ❌ Match8 | 3 | 1 | 2 | 33% |  |
-| ❌ Match9 | 9 | 0 | 9 | 0% |  |
-| ✅ MatchWhere1 | 15 | 13 | 2 | 87% | +7pp |
-| ⚠️ MatchWhere2 | 2 | 1 | 1 | 50% | -50pp |
+| ❌ Match9 | 9 | 3 | 6 | 33% |  |
+| ✅ MatchWhere1 | 15 | 13 | 2 | 87% |  |
+| ⚠️ MatchWhere2 | 2 | 1 | 1 | 50% |  |
 | ⚠️ MatchWhere3 | 3 | 2 | 1 | 67% |  |
 | ⚠️ MatchWhere4 | 2 | 1 | 1 | 50% |  |
 | ✅ MatchWhere5 | 4 | 4 | 0 | 100% |  |
 | ✅ MatchWhere6 | 8 | 7 | 1 | 88% |  |
 | ✅ Mathematical11 | 1 | 1 | 0 | 100% |  |
 | ✅ Mathematical13 | 1 | 1 | 0 | 100% |  |
-| ❌ Mathematical2 | 1 | 0 | 1 | 0% |  |
+| ✅ Mathematical2 | 1 | 1 | 0 | 100% | +100pp |
 | ✅ Mathematical3 | 1 | 1 | 0 | 100% |  |
 | ⚠️ Mathematical8 | 2 | 1 | 1 | 50% |  |
 | ❌ Merge1 | 17 | 3 | 14 | 18% |  |
@@ -128,26 +126,26 @@
 | ✅ Precedence2 | 26 | 26 | 0 | 100% |  |
 | ✅ Precedence3 | 11 | 11 | 0 | 100% |  |
 | ✅ Precedence4 | 12 | 12 | 0 | 100% |  |
-| ✅ Quantifier1 | 105 | 105 | 0 | 100% | +6pp |
-| ⚠️ Quantifier10 | 8 | 4 | 4 | 50% |  |
-| ❌ Quantifier11 | 22 | 6 | 16 | 27% | +5pp |
-| ❌ Quantifier12 | 17 | 6 | 11 | 35% | +6pp |
-| ✅ Quantifier2 | 106 | 106 | 0 | 100% | +6pp |
-| ✅ Quantifier3 | 105 | 105 | 0 | 100% | +6pp |
-| ✅ Quantifier4 | 105 | 105 | 0 | 100% | +6pp |
+| ✅ Quantifier1 | 105 | 105 | 0 | 100% |  |
+| ✅ Quantifier10 | 8 | 8 | 0 | 100% | +50pp |
+| ✅ Quantifier11 | 22 | 18 | 4 | 82% | +59pp |
+| ✅ Quantifier12 | 17 | 17 | 0 | 100% | +71pp |
+| ✅ Quantifier2 | 106 | 106 | 0 | 100% |  |
+| ✅ Quantifier3 | 105 | 105 | 0 | 100% |  |
+| ✅ Quantifier4 | 105 | 105 | 0 | 100% |  |
 | ✅ Quantifier5 | 31 | 31 | 0 | 100% |  |
 | ✅ Quantifier6 | 21 | 21 | 0 | 100% |  |
 | ✅ Quantifier7 | 36 | 36 | 0 | 100% |  |
 | ✅ Quantifier8 | 31 | 31 | 0 | 100% |  |
-| ❌ Quantifier9 | 17 | 5 | 12 | 29% |  |
+| ✅ Quantifier9 | 17 | 17 | 0 | 100% | +71pp |
 | ⚠️ Remove1 | 7 | 4 | 3 | 57% |  |
 | ✅ Remove2 | 5 | 5 | 0 | 100% |  |
 | ✅ Remove3 | 21 | 18 | 3 | 86% |  |
 | ✅ Return1 | 2 | 2 | 0 | 100% |  |
-| ❌ Return2 | 18 | 8 | 10 | 44% |  |
+| ⚠️ Return2 | 18 | 9 | 9 | 50% | +6pp |
 | ✅ Return3 | 3 | 3 | 0 | 100% |  |
 | ❌ Return4 | 11 | 5 | 6 | 45% |  |
-| ✅ Return5 | 5 | 5 | 0 | 100% | +20pp |
+| ✅ Return5 | 5 | 5 | 0 | 100% |  |
 | ❌ Return6 | 21 | 6 | 15 | 29% |  |
 | ❌ Return7 | 2 | 0 | 2 | 0% |  |
 | ✅ Return8 | 1 | 1 | 0 | 100% |  |
@@ -160,19 +158,19 @@
 | ⚠️ ReturnSkipLimit1 | 11 | 8 | 3 | 73% |  |
 | ⚠️ ReturnSkipLimit2 | 17 | 13 | 4 | 76% |  |
 | ⚠️ ReturnSkipLimit3 | 3 | 2 | 1 | 67% |  |
-| ❌ Set1 | 11 | 4 | 7 | 36% |  |
+| ⚠️ Set1 | 11 | 6 | 5 | 55% | +18pp |
 | ❌ Set2 | 3 | 0 | 3 | 0% |  |
 | ⚠️ Set3 | 8 | 4 | 4 | 50% |  |
 | ❌ Set4 | 5 | 0 | 5 | 0% |  |
 | ❌ Set5 | 5 | 0 | 5 | 0% |  |
 | ❌ Set6 | 21 | 6 | 15 | 29% |  |
 | ❌ String1 | 1 | 0 | 1 | 0% |  |
-| ✅ String10 | 9 | 8 | 1 | 89% |  |
+| ✅ String10 | 9 | 9 | 0 | 100% | +11pp |
 | ✅ String11 | 2 | 2 | 0 | 100% |  |
 | ❌ String3 | 1 | 0 | 1 | 0% |  |
 | ❌ String4 | 1 | 0 | 1 | 0% |  |
-| ✅ String8 | 9 | 8 | 1 | 89% |  |
-| ✅ String9 | 9 | 8 | 1 | 89% |  |
+| ✅ String8 | 9 | 9 | 0 | 100% | +11pp |
+| ✅ String9 | 9 | 9 | 0 | 100% | +11pp |
 | ⚠️ Temporal1 | 207 | 117 | 90 | 57% |  |
 | ❌ Temporal10 | 131 | 35 | 96 | 27% |  |
 | ❌ Temporal2 | 53 | 16 | 37 | 30% |  |
@@ -191,7 +189,7 @@
 | ✅ Union1 | 5 | 4 | 1 | 80% |  |
 | ✅ Union2 | 5 | 4 | 1 | 80% |  |
 | ✅ Union3 | 2 | 2 | 0 | 100% |  |
-| ⚠️ Unwind1 | 14 | 8 | 6 | 57% |  |
+| ⚠️ Unwind1 | 14 | 11 | 3 | 79% | +21pp |
 | ⚠️ With1 | 6 | 3 | 3 | 50% |  |
 | ⚠️ With2 | 2 | 1 | 1 | 50% |  |
 | ❌ With3 | 1 | 0 | 1 | 0% |  |
@@ -200,7 +198,7 @@
 | ❌ With6 | 9 | 1 | 8 | 11% |  |
 | ⚠️ With7 | 2 | 1 | 1 | 50% |  |
 | ⚠️ WithOrderBy1 | 96 | 49 | 47 | 51% |  |
-| ❌ WithOrderBy2 | 83 | 25 | 58 | 30% | +30pp |
+| ❌ WithOrderBy2 | 83 | 25 | 58 | 30% |  |
 | ⚠️ WithOrderBy3 | 93 | 65 | 28 | 70% |  |
 | ⚠️ WithOrderBy4 | 20 | 13 | 7 | 65% |  |
 | ❌ WithSkipLimit1 | 2 | 0 | 2 | 0% |  |
@@ -214,73 +212,63 @@
 | ✅ WithWhere6 | 1 | 1 | 0 | 100% |  |
 | ✅ WithWhere7 | 3 | 3 | 0 | 100% |  |
 
-## 🔴 Regressions
-
-Scenarios that were passing but are now failing:
-
-- **MatchWhere2** — [1] Filter nodes with conjunctive two-part property predicate on multi variables with multiple bindings (line 33)
-
 ## 🟢 Newly Passing
 
 Scenarios that were failing but are now passing:
 
-- **Comparison1** — [2] Number-typed float comparison (line 52)
-- **Literals8** — [19] Fail on a map containing key starting with a number (line 300)
-- **Match3** — [30] Fail when using a list or nodes as a node (line 565)
-- **Match6** — [15] Variable-length named path (line 281)
-- **MatchWhere1** — [9] Filter relationship with a parameter in a property predicate on multi variables with one binding (line 177)
-- **Quantifier1** — [7] None quantifier on list literal containing maps (line 186)
-- **Quantifier1** — [7] None quantifier on list literal containing maps (line 187)
-- **Quantifier1** — [7] None quantifier on list literal containing maps (line 188)
-- **Quantifier1** — [7] None quantifier on list literal containing maps (line 189)
-- **Quantifier1** — [8] None quantifier on list containing nodes (line 193)
-- **Quantifier1** — [9] None quantifier on list containing relationships (line 239)
+- **Aggregation2** — [10] `min()` over list values (line 141)
+- **Aggregation2** — [9] `max()` over list values (line 129)
+- **Mathematical2** — [1] Allow addition (line 33)
+- **Quantifier10** — [4] Single quantifier is always equal whether the size of the list filtered with same the predicate is one (line 124)
+- **Quantifier10** — [4] Single quantifier is always equal whether the size of the list filtered with same the predicate is one (line 125)
+- **Quantifier10** — [4] Single quantifier is always equal whether the size of the list filtered with same the predicate is one (line 126)
+- **Quantifier10** — [4] Single quantifier is always equal whether the size of the list filtered with same the predicate is one (line 127)
+- **Quantifier11** — [3] Any quantifier is always true if the single or the all quantifier is true (line 112)
+- **Quantifier11** — [4] Any quantifier is always equal the boolean negative of the none quantifier (line 140)
+- **Quantifier11** — [4] Any quantifier is always equal the boolean negative of the none quantifier (line 141)
+- **Quantifier11** — [4] Any quantifier is always equal the boolean negative of the none quantifier (line 142)
+- **Quantifier11** — [4] Any quantifier is always equal the boolean negative of the none quantifier (line 143)
+- **Quantifier11** — [5] Any quantifier is always equal the boolean negative of the all quantifier on the boolean negative of the predicate (line 170)
+- **Quantifier11** — [5] Any quantifier is always equal the boolean negative of the all quantifier on the boolean negative of the predicate (line 171)
+- **Quantifier11** — [5] Any quantifier is always equal the boolean negative of the all quantifier on the boolean negative of the predicate (line 172)
+- **Quantifier11** — [5] Any quantifier is always equal the boolean negative of the all quantifier on the boolean negative of the predicate (line 173)
+- **Quantifier11** — [6] Any quantifier is always equal whether the size of the list filtered with same the predicate is grater zero (line 206)
+- **Quantifier11** — [6] Any quantifier is always equal whether the size of the list filtered with same the predicate is grater zero (line 207)
 - **Quantifier11** — [6] Any quantifier is always equal whether the size of the list filtered with same the predicate is grater zero (line 208)
+- **Quantifier11** — [6] Any quantifier is always equal whether the size of the list filtered with same the predicate is grater zero (line 209)
+- **Quantifier12** — [3] All quantifier is always equal the none quantifier on the boolean negative of the predicate (line 104)
+- **Quantifier12** — [3] All quantifier is always equal the none quantifier on the boolean negative of the predicate (line 105)
+- **Quantifier12** — [3] All quantifier is always equal the none quantifier on the boolean negative of the predicate (line 106)
+- **Quantifier12** — [3] All quantifier is always equal the none quantifier on the boolean negative of the predicate (line 107)
+- **Quantifier12** — [4] All quantifier is always equal the boolean negative of the any quantifier on the boolean negative of the predicate (line 134)
+- **Quantifier12** — [4] All quantifier is always equal the boolean negative of the any quantifier on the boolean negative of the predicate (line 135)
+- **Quantifier12** — [4] All quantifier is always equal the boolean negative of the any quantifier on the boolean negative of the predicate (line 136)
+- **Quantifier12** — [4] All quantifier is always equal the boolean negative of the any quantifier on the boolean negative of the predicate (line 137)
+- **Quantifier12** — [5] All quantifier is always equal whether the size of the list filtered with same the predicate is equal the size of the unfiltered list (line 170)
+- **Quantifier12** — [5] All quantifier is always equal whether the size of the list filtered with same the predicate is equal the size of the unfiltered list (line 171)
+- **Quantifier12** — [5] All quantifier is always equal whether the size of the list filtered with same the predicate is equal the size of the unfiltered list (line 172)
 - **Quantifier12** — [5] All quantifier is always equal whether the size of the list filtered with same the predicate is equal the size of the unfiltered list (line 173)
-- **Quantifier2** — [7] Single quantifier on list literal containing maps (line 186)
-- **Quantifier2** — [7] Single quantifier on list literal containing maps (line 187)
-- **Quantifier2** — [7] Single quantifier on list literal containing maps (line 188)
-- **Quantifier2** — [7] Single quantifier on list literal containing maps (line 189)
-- **Quantifier2** — [8] Single quantifier on list containing nodes (line 193)
-- **Quantifier2** — [9] Single quantifier on list containing relationships (line 239)
-- **Quantifier3** — [7] Any quantifier on list literal containing maps (line 186)
-- **Quantifier3** — [7] Any quantifier on list literal containing maps (line 187)
-- **Quantifier3** — [7] Any quantifier on list literal containing maps (line 188)
-- **Quantifier3** — [7] Any quantifier on list literal containing maps (line 189)
-- **Quantifier3** — [8] Any quantifier on list containing nodes (line 193)
-- **Quantifier3** — [9] Any quantifier on list containing relationships (line 239)
-- **Quantifier4** — [7] All quantifier on list literal containing maps (line 186)
-- **Quantifier4** — [7] All quantifier on list literal containing maps (line 187)
-- **Quantifier4** — [7] All quantifier on list literal containing maps (line 188)
-- **Quantifier4** — [7] All quantifier on list literal containing maps (line 189)
-- **Quantifier4** — [8] All quantifier on list containing nodes (line 193)
-- **Quantifier4** — [9] All quantifier on list containing relationships (line 239)
-- **Return5** — [4] DISTINCT inside aggregation should work with nested lists of maps in maps (line 82)
-- **WithOrderBy2** — [25] Fail on sorting by an aggregation (line 770)
-- **WithOrderBy2** — [25] Fail on sorting by an aggregation (line 771)
-- **WithOrderBy2** — [25] Fail on sorting by an aggregation (line 772)
-- **WithOrderBy2** — [25] Fail on sorting by an aggregation (line 773)
-- **WithOrderBy2** — [25] Fail on sorting by an aggregation (line 774)
-- **WithOrderBy2** — [25] Fail on sorting by an aggregation (line 775)
-- **WithOrderBy2** — [25] Fail on sorting by an aggregation (line 776)
-- **WithOrderBy2** — [25] Fail on sorting by an aggregation (line 777)
-- **WithOrderBy2** — [25] Fail on sorting by an aggregation (line 778)
-- **WithOrderBy2** — [25] Fail on sorting by an aggregation (line 779)
-- **WithOrderBy2** — [25] Fail on sorting by an aggregation (line 780)
-- **WithOrderBy2** — [25] Fail on sorting by an aggregation (line 781)
-- **WithOrderBy2** — [25] Fail on sorting by an aggregation (line 782)
-- **WithOrderBy2** — [25] Fail on sorting by an aggregation (line 783)
-- **WithOrderBy2** — [25] Fail on sorting by an aggregation (line 784)
-- **WithOrderBy2** — [25] Fail on sorting by an aggregation (line 785)
-- **WithOrderBy2** — [25] Fail on sorting by an aggregation (line 786)
-- **WithOrderBy2** — [25] Fail on sorting by an aggregation (line 787)
-- **WithOrderBy2** — [25] Fail on sorting by an aggregation (line 788)
-- **WithOrderBy2** — [25] Fail on sorting by an aggregation (line 789)
-- **WithOrderBy2** — [25] Fail on sorting by an aggregation (line 790)
-- **WithOrderBy2** — [25] Fail on sorting by an aggregation (line 791)
-- **WithOrderBy2** — [25] Fail on sorting by an aggregation (line 792)
-- **WithOrderBy2** — [25] Fail on sorting by an aggregation (line 793)
-- **WithOrderBy2** — [25] Fail on sorting by an aggregation (line 794)
+- **Quantifier9** — [3] None quantifier is always equal the boolean negative of the any quantifier (line 104)
+- **Quantifier9** — [3] None quantifier is always equal the boolean negative of the any quantifier (line 105)
+- **Quantifier9** — [3] None quantifier is always equal the boolean negative of the any quantifier (line 106)
+- **Quantifier9** — [3] None quantifier is always equal the boolean negative of the any quantifier (line 107)
+- **Quantifier9** — [4] None quantifier is always equal the all quantifier on the boolean negative of the predicate (line 134)
+- **Quantifier9** — [4] None quantifier is always equal the all quantifier on the boolean negative of the predicate (line 135)
+- **Quantifier9** — [4] None quantifier is always equal the all quantifier on the boolean negative of the predicate (line 136)
+- **Quantifier9** — [4] None quantifier is always equal the all quantifier on the boolean negative of the predicate (line 137)
+- **Quantifier9** — [5] None quantifier is always equal whether the size of the list filtered with same the predicate is zero (line 170)
+- **Quantifier9** — [5] None quantifier is always equal whether the size of the list filtered with same the predicate is zero (line 171)
+- **Quantifier9** — [5] None quantifier is always equal whether the size of the list filtered with same the predicate is zero (line 172)
+- **Quantifier9** — [5] None quantifier is always equal whether the size of the list filtered with same the predicate is zero (line 173)
+- **Return2** — [6] Adding a property and a literal in projection (line 108)
+- **Set1** — [6] Concatenate elements onto a list property (line 127)
+- **Set1** — [7] Concatenate elements in reverse onto a list property (line 142)
+- **String10** — [8] Handling non-string operands for CONTAINS (line 174)
+- **String8** — [8] Handling non-string operands for STARTS WITH (line 174)
+- **String9** — [8] Handling non-string operands for ENDS WITH (line 174)
+- **Unwind1** — [3] Unwinding a concatenation of lists (line 61)
+- **Unwind1** — [4] Unwinding a collected unwound expression (line 79)
+- **Unwind1** — [7] Double unwinding a list of lists (line 140)
 
 ## Failed Scenarios
 
@@ -291,7 +279,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/aggregation/Aggregation2.feature:88:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("max(x)", Some(String("5")))]. Expected
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("max(x)", Some(Float(3.2)))]. Expected:
   ... (truncated)
   ```
 - **[6] `min()` over mixed numeric values** (line 93)
@@ -299,23 +287,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/aggregation/Aggregation2.feature:100:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("min(x)", Some(String("0.1")))]. Expec
-  ... (truncated)
-  ```
-- **[9] `max()` over list values** (line 129)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/aggregation/Aggregation2.feature:136:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("max(x)", Some(String("[2]")))]. Expec
-  ... (truncated)
-  ```
-- **[10] `min()` over list values** (line 141)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/aggregation/Aggregation2.feature:148:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("min(x)", Some(String("[1]")))]. Expec
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("min(x)", Some(Int(1)))]. Expected: [{
   ... (truncated)
   ```
 - **[11] `max()` over mixed values** (line 153)
@@ -323,7 +295,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/aggregation/Aggregation2.feature:160:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("max(x)", Some(String("[1,2]")))]. Exp
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("max(x)", Some(List([Int(1), Int(2)]))
   ... (truncated)
   ```
 - **[12] `min()` over mixed values** (line 165)
@@ -331,7 +303,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/aggregation/Aggregation2.feature:172:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("min(x)", Some(String("\"a\"")))]. Exp
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("min(x)", Some(Int(1)))]. Expected: [{
   ... (truncated)
   ```
 
@@ -350,7 +322,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/aggregation/Aggregation3.feature:60:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("sum(i)", Some(Float(3004498500.0)))]. 
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "This feature is not implemented: Unsupported CAST from Large
   ... (truncated)
   ```
 
@@ -361,7 +333,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/aggregation/Aggregation5.feature:45:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("n", Some(Node(Node { vid: Vid(0), labe
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("collect(x)", Some(Null)), ("n", Some(N
   ... (truncated)
   ```
 - **[2] OPTIONAL MATCH and `collect()` on node property** (line 50)
@@ -533,7 +505,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/aggregation/Aggregation8.feature:80:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("c", Some(List([Int(1), Null])))]. Expe
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("c", Some(List([Null, Int(1)])))]. Expe
   ... (truncated)
   ```
 
@@ -733,7 +705,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/clauses/create/Create2.feature:200:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("x", Some(Node(Node { vid: Vid(0), label: "Begin", p
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("y", Some(Node(Node { vid: Vid(1), label: "End", pro
   ... (truncated)
   ```
 - **[12] Create a single relationship and a starting node on an existing end node** (line 204)
@@ -787,7 +759,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/clauses/create/Create5.feature:89:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("b", Some(Node(Node { vid: Vid(1), label: "B", proper
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("a", Some(Node(Node { vid: Vid(0), label: "A", proper
   ... (truncated)
   ```
 - **[5] Create a pattern with multiple hops and varying directions** (line 112)
@@ -1188,7 +1160,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/graph/Graph5.feature:45:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Bool(true))), ("a", Some(Node(Node {
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("a", Some(Node(Node { vid: Vid(0), label: "A", prop
   ... (truncated)
   ```
 - **[2] Single-labels expression on relationships** (line 59)
@@ -1370,7 +1342,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/graph/Graph9.feature:73:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("properties(null)", Some(Null)), ("properties(n)", 
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("properties(n)", Some(Null)), ("properties(r)", Som
   ... (truncated)
   ```
 - **[7] `properties()` failing on a list of booleans** (line 105)
@@ -2316,7 +2288,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/literals/Literals8.feature:294:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("literal", Some(Map({"data": List([Map({"ppu
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("literal", Some(Map({"data": List([Map({"bat
   ... (truncated)
   ```
 
@@ -2524,7 +2496,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/map/Map3.feature:99:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("a", Some(Bool(true))), ("b", Some(Bool(false))), ("c",
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("c", Some(Bool(false))), ("a", Some(Bool(true))), ("b",
   ... (truncated)
   ```
 
@@ -2577,7 +2549,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/clauses/match/Match3.feature:60:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("r", Some(Edge(Edge { eid: Eid(0), edge_type: "LOOP", s
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("b", Some(Node(Node { vid: Vid(1), label: "B", properti
   ... (truncated)
   ```
 - **[3] Undirected match on simple relationship graph** (line 65)
@@ -2605,7 +2577,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/clauses/match/Match3.feature:149:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("m", Some(Node(Node { vid: Vid(1), label: "Z", propert
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("n", Some(Node(Node { vid: Vid(0), label: "A", propert
   ... (truncated)
   ```
 - **[8] Matching using relationship predicate with multiples of the same type** (line 154)
@@ -2625,7 +2597,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/clauses/match/Match3.feature:215:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("b", Some(Node(Node { vid: Vid(0), label: "A", propert
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("r", Some(Edge(Edge { eid: Eid(0), edge_type: "LOOP", 
   ... (truncated)
   ```
 - **[12] Undirected match of self-relationship in self-relationship graph** (line 220)
@@ -2649,7 +2621,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/clauses/match/Match3.feature:263:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("r", Some(Edge(Edge { eid: Eid(0), edge_type: "LOOP", 
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("n", Some(Node(Node { vid: Vid(0), label: "A", propert
   ... (truncated)
   ```
 - **[15] Mixing directed and undirected pattern parts with self-relationship, simple** (line 268)
@@ -2657,7 +2629,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/clauses/match/Match3.feature:281:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("x", Some(Node(Node { vid: Vid(0), label: "A", propert
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("y", Some(Node(Node { vid: Vid(1), label: "Looper", pr
   ... (truncated)
   ```
 - **[16] Mixing directed and undirected pattern parts with self-relationship, undirected** (line 287)
@@ -2665,7 +2637,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/clauses/match/Match3.feature:300:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("z", Some(Node(Node { vid: Vid(1), label: "Looper", pr
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("y", Some(Node(Node { vid: Vid(1), label: "Looper", pr
   ... (truncated)
   ```
 - **[23] Matching disconnected patterns** (line 451)
@@ -2707,14 +2679,6 @@ Scenarios that were failing but are now passing:
 
 ### Match4
 
-- **[1] Handling fixed-length variable length pattern** (line 33)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/match/Match4.feature:44:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Schema error: No field named \"r._eid\". Did you mean 'a._vid'?.", query: So
-  ... (truncated)
-  ```
 - **[2] Simple variable length pattern** (line 49)
   ```
   Step failed:
@@ -2759,18 +2723,6 @@ Scenarios that were failing but are now passing:
 4 steps (3 passed, 1 fai
   ... (truncated)
   ```
-- **[6] Matching variable length patterns from a bound node** (line 134)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/match/Match4.feature:148:5
-      Matched: crates/uni-tck/src/steps/then.rs:48:1
-      Step panicked. Captured output: No result found
-[Summary]
-1 feature
-1 scenario (1 failed)
-4 steps (3 passed, 1 failed)
-
-  ```
 - **[7] Matching variable length patterns including a bound relationship** (line 153)
   ```
   Step failed:
@@ -2803,158 +2755,6 @@ Scenarios that were failing but are now passing:
 4 steps (3 passed, 1 fa
   ... (truncated)
   ```
-- **[2] Handling explicitly unbounded variable length match** (line 94)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/match/Match5.feature:101:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("c.name", Some(Null))]. Expected: [{"c.name": String("
-  ... (truncated)
-  ```
-- **[3] Handling single bounded variable length match 1** (line 119)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/match/Match5.feature:126:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("c.name", Some(Null))]. Expected: [{"c.name": String("
-  ... (truncated)
-  ```
-- **[4] Handling single bounded variable length match 2** (line 131)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/match/Match5.feature:138:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("c.name", Some(Null))]. Expected: [{"c.name": String("
-  ... (truncated)
-  ```
-- **[5] Handling single bounded variable length match 3** (line 144)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/match/Match5.feature:151:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("c.name", Some(Null))]. Expected: [{"c.name": String("
-  ... (truncated)
-  ```
-- **[6] Handling upper and lower bounded variable length match 1** (line 159)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/match/Match5.feature:166:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("c.name", Some(Null))]. Expected: [{"c.name": String("
-  ... (truncated)
-  ```
-- **[7] Handling upper and lower bounded variable length match 2** (line 177)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/match/Match5.feature:184:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("c.name", Some(Null))]. Expected: [{"c.name": String("
-  ... (truncated)
-  ```
-- **[8] Handling symmetrically bounded variable length match, bounds are zero** (line 194)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/match/Match5.feature:201:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("c.name", Some(Null))]. Expected: [{"c.name": String("
-  ... (truncated)
-  ```
-- **[9] Handling symmetrically bounded variable length match, bounds are one** (line 206)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/match/Match5.feature:213:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("c.name", Some(Null))]. Expected: [{"c.name": String("
-  ... (truncated)
-  ```
-- **[10] Handling symmetrically bounded variable length match, bounds are two** (line 219)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/match/Match5.feature:226:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("c.name", Some(Null))]. Expected: [{"c.name": String("
-  ... (truncated)
-  ```
-- **[14] Handling upper bounded variable length match 1** (line 267)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/match/Match5.feature:274:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("c.name", Some(Null))]. Expected: [{"c.name": String("
-  ... (truncated)
-  ```
-- **[15] Handling upper bounded variable length match 2** (line 280)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/match/Match5.feature:287:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("c.name", Some(Null))]. Expected: [{"c.name": String("
-  ... (truncated)
-  ```
-- **[16] Handling lower bounded variable length match 1** (line 297)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/match/Match5.feature:304:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("c.name", Some(Null))]. Expected: [{"c.name": String("
-  ... (truncated)
-  ```
-- **[17] Handling lower bounded variable length match 2** (line 323)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/match/Match5.feature:330:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("c.name", Some(Null))]. Expected: [{"c.name": String("
-  ... (truncated)
-  ```
-- **[18] Handling lower bounded variable length match 3** (line 348)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/match/Match5.feature:355:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("c.name", Some(Null))]. Expected: [{"c.name": String("
-  ... (truncated)
-  ```
-- **[20] Handling a variable length relationship and a standard relationship in chain, zero length 2** (line 384)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/match/Match5.feature:391:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("c.name", Some(Null))]. Expected: [{"c.name": String("
-  ... (truncated)
-  ```
-- **[22] Handling a variable length relationship and a standard relationship in chain, single length 2** (line 412)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/match/Match5.feature:419:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("c.name", Some(Null))]. Expected: [{"c.name": String("
-  ... (truncated)
-  ```
-- **[24] Handling a variable length relationship and a standard relationship in chain, longer 2** (line 446)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/match/Match5.feature:453:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("c.name", Some(Null))]. Expected: [{"c.name": String("
-  ... (truncated)
-  ```
-- **[25] Handling a variable length relationship and a standard relationship in chain, longer 3** (line 465)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/match/Match5.feature:480:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("c.name", Some(Null))]. Expected: [{"c.name": String("
-  ... (truncated)
-  ```
-- **[26] Handling mixed relationship patterns and directions 1** (line 500)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/match/Match5.feature:521:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("c.name", Some(Null))]. Expected: [{"c.name": String("
-  ... (truncated)
-  ```
 - **[27] Handling mixed relationship patterns and directions 2** (line 541)
   ```
   Step failed:
@@ -2965,14 +2765,6 @@ Scenarios that were failing but are now passing:
 1 feature
 1 scenario (1 failed)
 6 steps (5 passed, 1 f
-  ... (truncated)
-  ```
-- **[28] Handling mixed relationship patterns 1** (line 584)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/match/Match5.feature:599:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("c.name", Some(Null))]. Expected: [{"c.name": String("
   ... (truncated)
   ```
 
@@ -3086,11 +2878,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/clauses/match/Match7.feature:255:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): Row count mismatch: expected 4, got 1
-[Summary]
-1 feature
-1 scenario (1 failed)
-4 steps (3 passed, 1 fai
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("b", Some(Node(Node { vid: Vid(0), label: "Single", pr
   ... (truncated)
   ```
 - **[13] Variable length optional relationships with bound nodes** (line 263)
@@ -3098,7 +2886,11 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/clauses/match/Match7.feature:280:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("x", Some(Node(Node { vid: Vid(3), label: "C", propert
+      Step panicked. Captured output: Result mismatch (any order): Row count mismatch: expected 1, got 4
+[Summary]
+1 feature
+1 scenario (1 failed)
+4 steps (3 passed, 1 fai
   ... (truncated)
   ```
 - **[14] Variable length optional relationships with length predicates** (line 285)
@@ -3106,11 +2898,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/clauses/match/Match7.feature:302:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): Row count mismatch: expected 1, got 0
-[Summary]
-1 feature
-1 scenario (1 failed)
-4 steps (3 passed, 1 fai
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("b", Some(Node(Node { vid: Vid(0), label: "Single", pr
   ... (truncated)
   ```
 - **[15] Variable length patterns and nulls** (line 307)
@@ -3162,7 +2950,11 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/clauses/match/Match7.feature:424:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("p", Some(Path(Path { nodes: [Node { vid: Vid(1), labe
+      Step panicked. Captured output: Result mismatch (any order): Row count mismatch: expected 1, got 2
+[Summary]
+1 feature
+1 scenario (1 failed)
+4 steps (3 passed, 1 fai
   ... (truncated)
   ```
 - **[22] MATCH after OPTIONAL MATCH** (line 453)
@@ -3178,7 +2970,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/clauses/match/Match7.feature:491:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 1. Actual values: [("b", Some(Node(Node { vid: Vid(3), label: "Y", propert
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 1. Actual values: [("b", Some(Node(Node { vid: Vid(2), label: "Y", propert
   ... (truncated)
   ```
 - **[24] Optionally matching self-loops** (line 498)
@@ -3240,15 +3032,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/clauses/match/Match9.feature:45:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Schema error: No field named \"r._eid\". Valid fields are \"_anon_0._vid\", 
-  ... (truncated)
-  ```
-- **[2] Return relationships by collecting them as a list - directed, one way** (line 54)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/match/Match9.feature:65:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Schema error: No field named \"r._eid\". Did you mean 'a._vid'?.", query: So
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 4. Actual values: [("l", Some(Null))]. Expected: [{"l": Edge(Edge { eid: Ei
   ... (truncated)
   ```
 - **[3] Return relationships by collecting them as a list - undirected, starting from two extremes** (line 70)
@@ -3256,23 +3040,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/clauses/match/Match9.feature:81:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Schema error: No field named \"r._eid\". Did you mean 'a._vid'?.", query: So
-  ... (truncated)
-  ```
-- **[4] Return relationships by collecting them as a list - undirected, starting from one extreme** (line 87)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/match/Match9.feature:98:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Schema error: No field named \"r._eid\". Did you mean 'a._vid'?.", query: So
-  ... (truncated)
-  ```
-- **[5] Variable length pattern with label predicate on both sides** (line 103)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/match/Match9.feature:117:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Schema error: No field named \"r._eid\". Did you mean 'a._vid'?.", query: S
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 1. Actual values: [("r", Some(Null))]. Expected: [{"r": List([Edge(Edge { e
   ... (truncated)
   ```
 - **[6] Matching relationships into a list and matching variable length using the list, with bound nodes** (line 122)
@@ -3296,7 +3064,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/clauses/match/Match9.feature:177:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Schema error: No field named \"r._eid\". Did you mean 'a._vid'?.", query: S
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("b", Some(Node(Node { vid: Vid(1), label: "B", propert
   ... (truncated)
   ```
 - **[9] Optionally matching named paths with variable length patterns** (line 182)
@@ -3304,7 +3072,11 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/clauses/match/Match9.feature:196:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Schema error: No field named \"r._eid\". Did you mean 'a._vid'?.", query: S
+      Step panicked. Captured output: Result mismatch (any order): Row count mismatch: expected 2, got 4
+[Summary]
+1 feature
+1 scenario (1 failed)
+4 steps (3 passed, 1 fai
   ... (truncated)
   ```
 
@@ -3376,17 +3148,6 @@ Scenarios that were failing but are now passing:
 1 feature
 1 scenario (1 failed)
 4 steps (3 pa
-  ... (truncated)
-  ```
-
-### Mathematical2
-
-- **[1] Allow addition** (line 33)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/mathematical/Mathematical2.feature:45:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: _cypher_list_concat(): at least one argum
   ... (truncated)
   ```
 
@@ -4005,7 +3766,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/null/Null2.feature:129:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 1. Actual values: [("b", Some(Bool(false))), ("n", Some(Node(Node { vid:
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 1. Actual values: [("n", Some(Node(Node { vid: Vid(1), label: "X", prope
   ... (truncated)
   ```
 
@@ -4480,41 +4241,6 @@ Scenarios that were failing but are now passing:
   ... (truncated)
   ```
 
-### Quantifier10
-
-- **[4] Single quantifier is always equal whether the size of the list filtered with same the predicate is one** (line 124)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/quantifier/Quantifier10.feature:116:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: Arithmetic operation requires numbers", que
-  ... (truncated)
-  ```
-- **[4] Single quantifier is always equal whether the size of the list filtered with same the predicate is one** (line 125)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/quantifier/Quantifier10.feature:116:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: Arithmetic operation requires numbers", que
-  ... (truncated)
-  ```
-- **[4] Single quantifier is always equal whether the size of the list filtered with same the predicate is one** (line 126)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/quantifier/Quantifier10.feature:116:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Null))]. Expected: [{"re
-  ... (truncated)
-  ```
-- **[4] Single quantifier is always equal whether the size of the list filtered with same the predicate is one** (line 127)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/quantifier/Quantifier10.feature:116:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Null))]. Expected: [{"re
-  ... (truncated)
-  ```
-
 ### Quantifier11
 
 - **[3] Any quantifier is always true if the single or the all quantifier is true** (line 109)
@@ -4534,18 +4260,14 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/quantifier/Quantifier11.feature:102:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: Arithmetic operation requires numbers", que
+      Step panicked. Captured output: Result mismatch (any order): Row count mismatch: expected 1, got 0
+[Summary]
+1 feature
+1 scenario (1 failed)
+3 steps (
   ... (truncated)
   ```
 - **[3] Any quantifier is always true if the single or the all quantifier is true** (line 111)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/quantifier/Quantifier11.feature:102:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: Arithmetic operation requires numbers", que
-  ... (truncated)
-  ```
-- **[3] Any quantifier is always true if the single or the all quantifier is true** (line 112)
   ```
   Step failed:
       Defined: tck/features/expressions/quantifier/Quantifier11.feature:102:5
@@ -4567,336 +4289,6 @@ Scenarios that were failing but are now passing:
 1 feature
 1 scenario (1 failed)
 3 steps (
-  ... (truncated)
-  ```
-- **[4] Any quantifier is always equal the boolean negative of the none quantifier** (line 140)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/quantifier/Quantifier11.feature:132:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: Arithmetic operation requires numbers", que
-  ... (truncated)
-  ```
-- **[4] Any quantifier is always equal the boolean negative of the none quantifier** (line 141)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/quantifier/Quantifier11.feature:132:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: Arithmetic operation requires numbers", que
-  ... (truncated)
-  ```
-- **[4] Any quantifier is always equal the boolean negative of the none quantifier** (line 142)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/quantifier/Quantifier11.feature:132:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): Row count mismatch: expected 1, got 2
-[Summary]
-1 feature
-1 scenario (1 failed)
-3 steps (
-  ... (truncated)
-  ```
-- **[4] Any quantifier is always equal the boolean negative of the none quantifier** (line 143)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/quantifier/Quantifier11.feature:132:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): Row count mismatch: expected 1, got 2
-[Summary]
-1 feature
-1 scenario (1 failed)
-3 steps (
-  ... (truncated)
-  ```
-- **[5] Any quantifier is always equal the boolean negative of the all quantifier on the boolean negative of the predicate** (line 170)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/quantifier/Quantifier11.feature:162:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: Arithmetic operation requires numbers", que
-  ... (truncated)
-  ```
-- **[5] Any quantifier is always equal the boolean negative of the all quantifier on the boolean negative of the predicate** (line 171)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/quantifier/Quantifier11.feature:162:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: Arithmetic operation requires numbers", que
-  ... (truncated)
-  ```
-- **[5] Any quantifier is always equal the boolean negative of the all quantifier on the boolean negative of the predicate** (line 172)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/quantifier/Quantifier11.feature:162:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): Row count mismatch: expected 1, got 2
-[Summary]
-1 feature
-1 scenario (1 failed)
-3 steps (
-  ... (truncated)
-  ```
-- **[5] Any quantifier is always equal the boolean negative of the all quantifier on the boolean negative of the predicate** (line 173)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/quantifier/Quantifier11.feature:162:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): Row count mismatch: expected 1, got 2
-[Summary]
-1 feature
-1 scenario (1 failed)
-3 steps (
-  ... (truncated)
-  ```
-- **[6] Any quantifier is always equal whether the size of the list filtered with same the predicate is grater zero** (line 206)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/quantifier/Quantifier11.feature:198:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: Arithmetic operation requires numbers", que
-  ... (truncated)
-  ```
-- **[6] Any quantifier is always equal whether the size of the list filtered with same the predicate is grater zero** (line 207)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/quantifier/Quantifier11.feature:198:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: Arithmetic operation requires numbers", que
-  ... (truncated)
-  ```
-- **[6] Any quantifier is always equal whether the size of the list filtered with same the predicate is grater zero** (line 209)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/quantifier/Quantifier11.feature:198:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Null))]. Expected: [{"re
-  ... (truncated)
-  ```
-
-### Quantifier12
-
-- **[3] All quantifier is always equal the none quantifier on the boolean negative of the predicate** (line 104)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/quantifier/Quantifier12.feature:96:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: Arithmetic operation requires numbers", quer
-  ... (truncated)
-  ```
-- **[3] All quantifier is always equal the none quantifier on the boolean negative of the predicate** (line 105)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/quantifier/Quantifier12.feature:96:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: Arithmetic operation requires numbers", quer
-  ... (truncated)
-  ```
-- **[3] All quantifier is always equal the none quantifier on the boolean negative of the predicate** (line 106)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/quantifier/Quantifier12.feature:96:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): Row count mismatch: expected 1, got 2
-[Summary]
-1 feature
-1 scenario (1 failed)
-3 steps (2
-  ... (truncated)
-  ```
-- **[3] All quantifier is always equal the none quantifier on the boolean negative of the predicate** (line 107)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/quantifier/Quantifier12.feature:96:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): Row count mismatch: expected 1, got 2
-[Summary]
-1 feature
-1 scenario (1 failed)
-3 steps (2
-  ... (truncated)
-  ```
-- **[4] All quantifier is always equal the boolean negative of the any quantifier on the boolean negative of the predicate** (line 134)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/quantifier/Quantifier12.feature:126:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: Arithmetic operation requires numbers", que
-  ... (truncated)
-  ```
-- **[4] All quantifier is always equal the boolean negative of the any quantifier on the boolean negative of the predicate** (line 135)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/quantifier/Quantifier12.feature:126:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: Arithmetic operation requires numbers", que
-  ... (truncated)
-  ```
-- **[4] All quantifier is always equal the boolean negative of the any quantifier on the boolean negative of the predicate** (line 136)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/quantifier/Quantifier12.feature:126:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): Row count mismatch: expected 1, got 2
-[Summary]
-1 feature
-1 scenario (1 failed)
-3 steps (
-  ... (truncated)
-  ```
-- **[4] All quantifier is always equal the boolean negative of the any quantifier on the boolean negative of the predicate** (line 137)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/quantifier/Quantifier12.feature:126:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): Row count mismatch: expected 1, got 2
-[Summary]
-1 feature
-1 scenario (1 failed)
-3 steps (
-  ... (truncated)
-  ```
-- **[5] All quantifier is always equal whether the size of the list filtered with same the predicate is equal the size of the unfiltered list** (line 170)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/quantifier/Quantifier12.feature:162:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: Arithmetic operation requires numbers", que
-  ... (truncated)
-  ```
-- **[5] All quantifier is always equal whether the size of the list filtered with same the predicate is equal the size of the unfiltered list** (line 171)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/quantifier/Quantifier12.feature:162:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: Arithmetic operation requires numbers", que
-  ... (truncated)
-  ```
-- **[5] All quantifier is always equal whether the size of the list filtered with same the predicate is equal the size of the unfiltered list** (line 172)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/quantifier/Quantifier12.feature:162:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Null))]. Expected: [{"re
-  ... (truncated)
-  ```
-
-### Quantifier9
-
-- **[3] None quantifier is always equal the boolean negative of the any quantifier** (line 104)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/quantifier/Quantifier9.feature:96:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: Arithmetic operation requires numbers", query
-  ... (truncated)
-  ```
-- **[3] None quantifier is always equal the boolean negative of the any quantifier** (line 105)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/quantifier/Quantifier9.feature:96:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: Arithmetic operation requires numbers", query
-  ... (truncated)
-  ```
-- **[3] None quantifier is always equal the boolean negative of the any quantifier** (line 106)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/quantifier/Quantifier9.feature:96:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): Row count mismatch: expected 1, got 2
-[Summary]
-1 feature
-1 scenario (1 failed)
-3 steps (2 
-  ... (truncated)
-  ```
-- **[3] None quantifier is always equal the boolean negative of the any quantifier** (line 107)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/quantifier/Quantifier9.feature:96:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): Row count mismatch: expected 1, got 2
-[Summary]
-1 feature
-1 scenario (1 failed)
-3 steps (2 
-  ... (truncated)
-  ```
-- **[4] None quantifier is always equal the all quantifier on the boolean negative of the predicate** (line 134)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/quantifier/Quantifier9.feature:126:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: Arithmetic operation requires numbers", quer
-  ... (truncated)
-  ```
-- **[4] None quantifier is always equal the all quantifier on the boolean negative of the predicate** (line 135)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/quantifier/Quantifier9.feature:126:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: Arithmetic operation requires numbers", quer
-  ... (truncated)
-  ```
-- **[4] None quantifier is always equal the all quantifier on the boolean negative of the predicate** (line 136)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/quantifier/Quantifier9.feature:126:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): Row count mismatch: expected 1, got 2
-[Summary]
-1 feature
-1 scenario (1 failed)
-3 steps (2
-  ... (truncated)
-  ```
-- **[4] None quantifier is always equal the all quantifier on the boolean negative of the predicate** (line 137)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/quantifier/Quantifier9.feature:126:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): Row count mismatch: expected 1, got 2
-[Summary]
-1 feature
-1 scenario (1 failed)
-3 steps (2
-  ... (truncated)
-  ```
-- **[5] None quantifier is always equal whether the size of the list filtered with same the predicate is zero** (line 170)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/quantifier/Quantifier9.feature:162:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: Arithmetic operation requires numbers", quer
-  ... (truncated)
-  ```
-- **[5] None quantifier is always equal whether the size of the list filtered with same the predicate is zero** (line 171)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/quantifier/Quantifier9.feature:162:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: Arithmetic operation requires numbers", quer
-  ... (truncated)
-  ```
-- **[5] None quantifier is always equal whether the size of the list filtered with same the predicate is zero** (line 172)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/quantifier/Quantifier9.feature:162:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): Row count mismatch: expected 1, got 2
-[Summary]
-1 feature
-1 scenario (1 failed)
-3 steps (2
-  ... (truncated)
-  ```
-- **[5] None quantifier is always equal whether the size of the list filtered with same the predicate is zero** (line 173)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/quantifier/Quantifier9.feature:162:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Null))]. Expected: [{"res
   ... (truncated)
   ```
 
@@ -4956,14 +4348,6 @@ Scenarios that were failing but are now passing:
 
 ### Return2
 
-- **[6] Adding a property and a literal in projection** (line 108)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/return/Return2.feature:119:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: _cypher_list_concat(): at least one argument must be a l
-  ... (truncated)
-  ```
 - **[8] Returning label predicate expression** (line 140)
   ```
   Step failed:
@@ -5661,22 +5045,6 @@ Scenarios that were failing but are now passing:
 1 featur
   ... (truncated)
   ```
-- **[6] Concatenate elements onto a list property** (line 127)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/set/Set1.feature:135:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Invalid types for addition", query: Some("\nCREATE (a {numbers: [1, 2, 3]})\nSE
-  ... (truncated)
-  ```
-- **[7] Concatenate elements in reverse onto a list property** (line 142)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/set/Set1.feature:150:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Invalid types for addition", query: Some("\nCREATE (a {numbers: [3, 4, 5]})\nSE
-  ... (truncated)
-  ```
 - **[9] Failing when using undefined variable in SET** (line 170)
   ```
   Step failed:
@@ -6032,21 +5400,6 @@ Scenarios that were failing but are now passing:
   ... (truncated)
   ```
 
-### String10
-
-- **[8] Handling non-string operands for CONTAINS** (line 174)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/string/String10.feature:190:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): Row count mismatch: expected 1, got 2
-[Summary]
-1 feature
-1 scenario (1 failed)
-4 steps (3 passed
-  ... (truncated)
-  ```
-
 ### String3
 
 - **[1] `reverse()`** (line 33)
@@ -6070,36 +5423,6 @@ Scenarios that were failing but are now passing:
       Defined: tck/features/expressions/string/String4.feature:40:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
       Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("item", Some(Int(0)))]. Expected: [{"item": Int(2
-  ... (truncated)
-  ```
-
-### String8
-
-- **[8] Handling non-string operands for STARTS WITH** (line 174)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/string/String8.feature:190:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): Row count mismatch: expected 1, got 2
-[Summary]
-1 feature
-1 scenario (1 failed)
-4 steps (3 passed,
-  ... (truncated)
-  ```
-
-### String9
-
-- **[8] Handling non-string operands for ENDS WITH** (line 174)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/string/String9.feature:190:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): Row count mismatch: expected 1, got 2
-[Summary]
-1 feature
-1 scenario (1 failed)
-4 steps (3 passed,
   ... (truncated)
   ```
 
@@ -8933,7 +8256,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal5.feature:45:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("d.week", Some(Null)), ("d.day", Some(Null)),
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("d.month", Some(Null)), ("d.quarter", Some(Nu
   ... (truncated)
   ```
 - **[2] Should provide accessors for date in last weekYear** (line 50)
@@ -8941,7 +8264,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal5.feature:62:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("d.weekDay", Some(Null)), ("d.year", Some(Nul
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("d.weekYear", Some(Null)), ("d.week", Some(Nu
   ... (truncated)
   ```
 - **[3] Should provide accessors for local time** (line 67)
@@ -8949,7 +8272,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal5.feature:79:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("d.hour", Some(Null)), ("d.microsecond", Some
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("d.nanosecond", Some(Null)), ("d.microsecond"
   ... (truncated)
   ```
 - **[4] Should provide accessors for time** (line 84)
@@ -8957,7 +8280,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal5.feature:96:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("d.offset", Some(Null)), ("d.microsecond", So
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("d.offsetMinutes", Some(Null)), ("d.nanosecon
   ... (truncated)
   ```
 - **[5] Should provide accessors for local date time** (line 101)
@@ -8965,7 +8288,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal5.feature:114:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("d.year", Some(Null)), ("d.hour", Some(Null)
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("d.dayOfQuarter", Some(Null)), ("d.milliseco
   ... (truncated)
   ```
 - **[6] Should provide accessors for date time** (line 119)
@@ -8973,7 +8296,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal5.feature:133:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("d.ordinalDay", Some(Null)), ("d.month", Som
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("d.week", Some(Null)), ("d.microsecond", Som
   ... (truncated)
   ```
 - **[7] Should provide accessors for duration** (line 138)
@@ -8981,7 +8304,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal5.feature:152:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("d.minutesOfHour", Some(Int(1))), ("d.quarte
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("d.microsecondsOfSecond", Some(Int(111111)))
   ... (truncated)
   ```
 
@@ -8992,7 +8315,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal7.feature:74:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("x >= d", Some(Bool(true))), ("x <= d", Some(
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("x >= d", Some(Bool(true))), ("x < d", Some(B
   ... (truncated)
   ```
 
@@ -9131,7 +8454,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal8.feature:160:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("sum", Some(Int(394099340000000))), ("diff",
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("diff", Some(Int(391220640000000))), ("sum",
   ... (truncated)
   ```
 - **[6] Should add or subtract durations** (line 169)
@@ -9155,7 +8478,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal8.feature:160:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("sum", Some(Int(2878700000000))), ("diff", S
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("diff", Some(Int(0))), ("sum", Some(Int(2878
   ... (truncated)
   ```
 - **[6] Should add or subtract durations** (line 172)
@@ -9163,7 +8486,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal8.feature:160:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("diff", Some(Int(-408132543500000))), ("sum"
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("sum", Some(Int(411011243500000))), ("diff",
   ... (truncated)
   ```
 - **[6] Should add or subtract durations** (line 173)
@@ -9171,7 +8494,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal8.feature:160:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("sum", Some(Int(802231883500000))), ("diff",
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("diff", Some(Int(16911903500000))), ("sum", 
   ... (truncated)
   ```
 - **[6] Should add or subtract durations** (line 174)
@@ -9179,7 +8502,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal8.feature:160:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("sum", Some(Int(411011243500000))), ("diff",
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("diff", Some(Int(408132543500000))), ("sum",
   ... (truncated)
   ```
 - **[6] Should add or subtract durations** (line 175)
@@ -11361,22 +10684,6 @@ Scenarios that were failing but are now passing:
 
 ### Unwind1
 
-- **[3] Unwinding a concatenation of lists** (line 61)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/unwind/Unwind1.feature:69:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: Invalid types for addition", query: Some("\nWITH [1, 2, 3
-  ... (truncated)
-  ```
-- **[4] Unwinding a collected unwound expression** (line 79)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/unwind/Unwind1.feature:88:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("x", Some(String("1")))]. Expected: [{"x": Int(1)}, {
-  ... (truncated)
-  ```
 - **[5] Unwinding a collected expression** (line 94)
   ```
   Step failed:
@@ -11397,18 +10704,6 @@ Scenarios that were failing but are now passing:
 5 steps (4 passed, 1 fa
   ... (truncated)
   ```
-- **[7] Double unwinding a list of lists** (line 140)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/unwind/Unwind1.feature:149:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): Row count mismatch: expected 6, got 2
-[Summary]
-1 feature
-1 scenario (1 failed)
-3 steps (2 passed, 1 f
-  ... (truncated)
-  ```
 - **[12] Unwind does not remove variables from scope** (line 217)
   ```
   Step failed:
@@ -11425,7 +10720,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/clauses/with/With1.feature:47:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("b", Some(Node(Node { vid: Vid(1), label: "B", properties
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("a", Some(Node(Node { vid: Vid(0), label: "A", properties
   ... (truncated)
   ```
 - **[2] Forwarind a node variable 2** (line 52)
@@ -11783,7 +11078,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:662:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("a", Some(Node(Node { vid: Vid(3), label:
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("name", Some(String("sit"))), ("a", Some(
   ... (truncated)
   ```
 - **[29] Sort by a string variable projected from a node property in ascending order** (line 673)
@@ -11855,7 +11150,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:851:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 1. Actual values: [("a", Some(Node(Node { vid: Vid(4), label:
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 1. Actual values: [("time", Some(String("12:31:15"))), ("a", 
   ... (truncated)
   ```
 - **[35] Sort by a local time variable projected from a node property in ascending order** (line 861)
@@ -11879,7 +11174,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:883:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 2. Actual values: [("time", Some(String("12:30:14.645876123")
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 2. Actual values: [("a", Some(Node(Node { vid: Vid(3), label:
   ... (truncated)
   ```
 - **[36] Sort by a local time variable projected from a node property in descending order** (line 893)
@@ -11887,7 +11182,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:883:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 2. Actual values: [("time", Some(String("12:30:14.645876123")
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 2. Actual values: [("a", Some(Node(Node { vid: Vid(3), label:
   ... (truncated)
   ```
 - **[37] Sort by a time variable projected from a node property in ascending order** (line 923)
@@ -11903,7 +11198,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:914:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("a", Some(Node(Node { vid: Vid(0), label:
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("time", Some(String("10:35-08:00"))), ("a
   ... (truncated)
   ```
 - **[37] Sort by a time variable projected from a node property in ascending order** (line 925)
@@ -11911,7 +11206,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:914:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("a", Some(Node(Node { vid: Vid(0), label:
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("time", Some(String("10:35-08:00"))), ("a
   ... (truncated)
   ```
 - **[38] Sort by a time variable projected from a node property in descending order** (line 955)
@@ -11919,7 +11214,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:946:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 2. Actual values: [("time", Some(String("12:30:14.645876123+0
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 2. Actual values: [("a", Some(Node(Node { vid: Vid(4), label:
   ... (truncated)
   ```
 - **[38] Sort by a time variable projected from a node property in descending order** (line 956)
@@ -11927,7 +11222,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:946:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 2. Actual values: [("time", Some(String("12:30:14.645876123+0
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 2. Actual values: [("a", Some(Node(Node { vid: Vid(4), label:
   ... (truncated)
   ```
 - **[41] Sort by a date time variable projected from a node property in ascending order** (line 1049)
@@ -11935,7 +11230,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:1040:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 2. Actual values: [("a", Some(Node(Node { vid: Vid(0), label
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 2. Actual values: [("datetime", Some(String("1984-10-11T12:3
   ... (truncated)
   ```
 - **[41] Sort by a date time variable projected from a node property in ascending order** (line 1050)
@@ -11943,7 +11238,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:1040:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 2. Actual values: [("datetime", Some(String("1984-10-11T12:3
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 2. Actual values: [("a", Some(Node(Node { vid: Vid(0), label
   ... (truncated)
   ```
 - **[41] Sort by a date time variable projected from a node property in ascending order** (line 1051)
@@ -11951,7 +11246,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:1040:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 2. Actual values: [("datetime", Some(String("1984-10-11T12:3
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 2. Actual values: [("a", Some(Node(Node { vid: Vid(0), label
   ... (truncated)
   ```
 - **[45] Sort order should be consistent with comparisons where comparisons are defined #Example: booleans** (line 1144)
@@ -12752,7 +12047,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/clauses/with-orderBy/WithOrderBy4.feature:331:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("mod", Some(Int(2))), ("sum", Some(Float(
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("sum", Some(Float(7.0))), ("mod", Some(In
   ... (truncated)
   ```
 - **[15] Sort by an aliased aggregate projection does allow subsequent matching** (line 378)
@@ -12838,7 +12133,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/clauses/with-skip-limit/WithSkipLimit2.feature:141:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("x", Some(Node(Node { vid: Vid(4), l
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("c", Some(Float(1.0))), ("x", Some(N
   ... (truncated)
   ```
 

@@ -116,8 +116,23 @@ pub enum VariableKind {
     Node,
     /// Edge/relationship variable - identity is `_eid`
     Edge,
+    /// Edge list variable (r in `[r*]`) - List<Edge>
+    EdgeList,
     /// Path variable - kept as-is (struct with nodes/relationships)
     Path,
+}
+
+impl VariableKind {
+    /// Return the appropriate edge variable kind based on whether the
+    /// pattern is variable-length (`[r*]` -> `EdgeList`) or single-hop
+    /// (`[r]` -> `Edge`).
+    pub fn edge_for(is_variable_length: bool) -> Self {
+        if is_variable_length {
+            Self::EdgeList
+        } else {
+            Self::Edge
+        }
+    }
 }
 
 /// Convert a Cypher expression to a DataFusion expression.

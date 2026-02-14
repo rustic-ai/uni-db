@@ -26,7 +26,9 @@
 
 use crate::query::df_graph::common::compute_plan_properties;
 use arrow::compute::take;
-use arrow_array::builder::{BooleanBuilder, Float64Builder, Int64Builder, StringBuilder};
+use arrow_array::builder::{
+    BooleanBuilder, Float64Builder, Int64Builder, LargeBinaryBuilder, StringBuilder,
+};
 use arrow_array::{Array, ArrayRef, RecordBatch, UInt64Array};
 use arrow_schema::{DataType, Field, Schema, SchemaRef};
 use datafusion::common::Result as DFResult;
@@ -128,7 +130,7 @@ impl GraphUnwindExec {
     /// to JSON-encoded Utf8.
     fn infer_element_type(expr: &Expr) -> ElementTypeInfo {
         let json_fallback = || ElementTypeInfo {
-            data_type: DataType::Utf8,
+            data_type: DataType::LargeBinary,
             is_cv_encoded: true,
         };
 
@@ -556,6 +558,19 @@ impl GraphUnwindStream {
                 }
                 Arc::new(builder.finish())
             }
+            (DataType::LargeBinary, _) => {
+                // CypherValue-encoded: preserves exact types through UNWIND
+                let mut builder = LargeBinaryBuilder::with_capacity(num_rows, num_rows * 16);
+                for (_, value) in expansions {
+                    if value.is_null() {
+                        builder.append_null();
+                    } else {
+                        let encoded = uni_common::cypher_value_codec::encode(value);
+                        builder.append_value(&encoded);
+                    }
+                }
+                Arc::new(builder.finish())
+            }
             _ => {
                 // Fallback: JSON-encoded Utf8 (heterogeneous or non-inferrable types)
                 let mut builder = StringBuilder::new();
@@ -713,7 +728,7 @@ mod tests {
         assert_eq!(output_schema.field(0).name(), "n._vid");
         assert_eq!(output_schema.field(1).name(), "n.name");
         assert_eq!(output_schema.field(2).name(), "item");
-        assert_eq!(output_schema.field(2).data_type(), &DataType::Utf8);
+        assert_eq!(output_schema.field(2).data_type(), &DataType::LargeBinary);
         assert_eq!(
             output_schema.field(2).metadata().get("cv_encoded"),
             Some(&"true".to_string())
@@ -819,7 +834,7 @@ mod tests {
 
         let field = output_schema.field(1);
         assert_eq!(field.name(), "x");
-        assert_eq!(field.data_type(), &DataType::Utf8);
+        assert_eq!(field.data_type(), &DataType::LargeBinary);
         assert_eq!(
             field.metadata().get("cv_encoded"),
             Some(&"true".to_string())

@@ -1574,6 +1574,7 @@ impl HybridPhysicalPlanner {
                     min_hops,
                     max_hops,
                     target_variable.to_string(),
+                    step_variable.map(|s| s.to_string()),
                     path_variable.map(|s| s.to_string()),
                     vlp_target_properties,
                     vlp_target_label_name,
@@ -1611,7 +1612,9 @@ impl HybridPhysicalPlanner {
         }
 
         // Structural projection for edge variable
+        // Only for single-hop traversals; VLP step variables are already List<Edge>
         if let Some(edge_var) = step_variable
+            && !is_variable_length
             && all_properties
                 .get(edge_var)
                 .is_some_and(|p| p.contains("*"))
@@ -1647,7 +1650,7 @@ impl HybridPhysicalPlanner {
             variable_kinds.insert(source_variable.to_string(), VariableKind::Node);
             variable_kinds.insert(target_variable.to_string(), VariableKind::Node);
             if let Some(sv) = step_variable {
-                variable_kinds.insert(sv.to_string(), VariableKind::Edge);
+                variable_kinds.insert(sv.to_string(), VariableKind::edge_for(is_variable_length));
             }
             if let Some(pv) = path_variable {
                 variable_kinds.insert(pv.to_string(), VariableKind::Path);
@@ -3156,31 +3159,23 @@ fn collect_variable_kinds(plan: &LogicalPlan, kinds: &mut HashMap<String, Variab
             target_variable,
             step_variable,
             path_variable,
+            is_variable_length,
             ..
-        } => {
-            collect_variable_kinds(input, kinds);
-            kinds.insert(source_variable.clone(), VariableKind::Node);
-            kinds.insert(target_variable.clone(), VariableKind::Node);
-            if let Some(sv) = step_variable {
-                kinds.insert(sv.clone(), VariableKind::Edge);
-            }
-            if let Some(pv) = path_variable {
-                kinds.insert(pv.clone(), VariableKind::Path);
-            }
         }
-        LogicalPlan::TraverseMainByType {
+        | LogicalPlan::TraverseMainByType {
             input,
             source_variable,
             target_variable,
             step_variable,
             path_variable,
+            is_variable_length,
             ..
         } => {
             collect_variable_kinds(input, kinds);
             kinds.insert(source_variable.clone(), VariableKind::Node);
             kinds.insert(target_variable.clone(), VariableKind::Node);
             if let Some(sv) = step_variable {
-                kinds.insert(sv.clone(), VariableKind::Edge);
+                kinds.insert(sv.clone(), VariableKind::edge_for(*is_variable_length));
             }
             if let Some(pv) = path_variable {
                 kinds.insert(pv.clone(), VariableKind::Path);

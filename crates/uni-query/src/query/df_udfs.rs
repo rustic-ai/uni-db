@@ -3574,10 +3574,16 @@ impl ScalarUDFImpl for CypherListConcatUdf {
                     result.extend(list.iter().cloned());
                     Ok(Value::List(result))
                 }
-                _ => Err(datafusion::error::DataFusionError::Execution(format!(
-                    "_cypher_list_concat(): at least one argument must be a list, got {:?} and {:?}",
-                    vals[0], vals[1]
-                ))),
+                _ => {
+                    // Neither is a list — fall back to regular addition
+                    // (dispatch routes all CypherValue Plus here because LargeBinary matches)
+                    crate::query::expr_eval::eval_binary_op(
+                        &vals[0],
+                        &uni_cypher::ast::BinaryOp::Add,
+                        &vals[1],
+                    )
+                    .map_err(|e| datafusion::error::DataFusionError::Execution(e.to_string()))
+                }
             }
         })
     }

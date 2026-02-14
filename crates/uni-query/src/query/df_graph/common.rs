@@ -115,7 +115,8 @@ pub fn encode_props_to_cv(props: &std::collections::HashMap<String, uni_common::
 /// For example, `r` in `MATCH (a)-[r*1..3]->(b)` gets a `List<EdgeStruct>`.
 pub fn build_edge_list_field(step_var: &str) -> Field {
     let edge_item = Field::new("item", DataType::Struct(edge_struct_fields()), true);
-    Field::new(step_var, DataType::List(Arc::new(edge_item)), false)
+    // Field must be nullable to support OPTIONAL MATCH unmatched (r = NULL)
+    Field::new(step_var, DataType::List(Arc::new(edge_item)), true)
 }
 
 /// Build path struct field for schema with given path variable name.
@@ -137,6 +138,123 @@ pub fn build_path_struct_field(path_var: &str) -> Field {
         ])),
         false,
     )
+}
+
+/// Create a `ListBuilder<StructBuilder>` for building edge list arrays.
+///
+/// Used when materializing edge lists for step variables (`r` in `[r*1..3]`)
+/// and path relationship arrays. Returns a builder whose struct fields match
+/// `edge_struct_fields()`.
+pub fn new_edge_list_builder()
+-> arrow_array::builder::ListBuilder<arrow_array::builder::StructBuilder> {
+    use arrow_array::builder::{LargeBinaryBuilder, StringBuilder, StructBuilder, UInt64Builder};
+    arrow_array::builder::ListBuilder::new(StructBuilder::new(
+        edge_struct_fields(),
+        vec![
+            Box::new(UInt64Builder::new()),
+            Box::new(StringBuilder::new()),
+            Box::new(UInt64Builder::new()),
+            Box::new(UInt64Builder::new()),
+            Box::new(LargeBinaryBuilder::new()),
+        ],
+    ))
+}
+
+/// Create a `ListBuilder<StructBuilder>` for building node list arrays.
+///
+/// Used when materializing path node arrays. Returns a builder whose struct
+/// fields match `node_struct_fields()`.
+pub fn new_node_list_builder()
+-> arrow_array::builder::ListBuilder<arrow_array::builder::StructBuilder> {
+    use arrow_array::builder::{LargeBinaryBuilder, StringBuilder, StructBuilder, UInt64Builder};
+    arrow_array::builder::ListBuilder::new(StructBuilder::new(
+        node_struct_fields(),
+        vec![
+            Box::new(UInt64Builder::new()),
+            Box::new(StringBuilder::new()),
+            Box::new(LargeBinaryBuilder::new()),
+        ],
+    ))
+}
+
+/// Append a single edge to an edge struct builder.
+///
+/// Writes `_eid`, `_type_name`, `_src`, `_dst`, and `properties` fields,
+/// then appends the struct row. The `query_ctx` is used to look up edge
+/// properties from the L0 visibility chain.
+pub fn append_edge_to_struct(
+    struct_builder: &mut arrow_array::builder::StructBuilder,
+    eid: uni_common::core::id::Eid,
+    type_name: &str,
+    src_vid: u64,
+    dst_vid: u64,
+    query_ctx: &uni_store::runtime::context::QueryContext,
+) {
+    use arrow_array::builder::{LargeBinaryBuilder, StringBuilder, UInt64Builder};
+    use uni_store::runtime::l0_visibility;
+
+    struct_builder
+        .field_builder::<UInt64Builder>(0)
+        .unwrap()
+        .append_value(eid.as_u64());
+    struct_builder
+        .field_builder::<StringBuilder>(1)
+        .unwrap()
+        .append_value(type_name);
+    struct_builder
+        .field_builder::<UInt64Builder>(2)
+        .unwrap()
+        .append_value(src_vid);
+    struct_builder
+        .field_builder::<UInt64Builder>(3)
+        .unwrap()
+        .append_value(dst_vid);
+    let props_builder = struct_builder
+        .field_builder::<LargeBinaryBuilder>(4)
+        .unwrap();
+    if let Some(props) = l0_visibility::get_edge_properties(eid, query_ctx) {
+        let cv_bytes = encode_props_to_cv(&props);
+        props_builder.append_value(&cv_bytes);
+    } else {
+        props_builder.append_null();
+    }
+    struct_builder.append(true);
+}
+
+/// Append a single node to a node struct builder.
+///
+/// Writes `_vid`, `_label`, and `properties` fields, then appends the struct
+/// row. The `query_ctx` is used to look up labels and properties from the L0
+/// visibility chain.
+pub fn append_node_to_struct(
+    struct_builder: &mut arrow_array::builder::StructBuilder,
+    vid: uni_common::core::id::Vid,
+    query_ctx: &uni_store::runtime::context::QueryContext,
+) {
+    use arrow_array::builder::{LargeBinaryBuilder, StringBuilder, UInt64Builder};
+    use uni_store::runtime::l0_visibility;
+
+    struct_builder
+        .field_builder::<UInt64Builder>(0)
+        .unwrap()
+        .append_value(vid.as_u64());
+    let labels = l0_visibility::get_vertex_labels(vid, query_ctx);
+    let label_builder = struct_builder.field_builder::<StringBuilder>(1).unwrap();
+    if let Some(label) = labels.first() {
+        label_builder.append_value(label);
+    } else {
+        label_builder.append_null();
+    }
+    let props_builder = struct_builder
+        .field_builder::<LargeBinaryBuilder>(2)
+        .unwrap();
+    if let Some(props) = l0_visibility::get_vertex_properties(vid, query_ctx) {
+        let cv_bytes = encode_props_to_cv(&props);
+        props_builder.append_value(&cv_bytes);
+    } else {
+        props_builder.append_null();
+    }
+    struct_builder.append(true);
 }
 
 /// Re-encode a `LargeListArray` of CypherValue elements into a `LargeBinaryArray` of CypherValue arrays.

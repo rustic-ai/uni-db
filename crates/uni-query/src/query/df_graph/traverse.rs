@@ -32,7 +32,8 @@
 
 use crate::query::df_graph::GraphExecutionContext;
 use crate::query::df_graph::common::{
-    build_edge_list_field, build_path_struct_field, column_as_vid_array, compute_plan_properties,
+    append_edge_to_struct, append_node_to_struct, build_edge_list_field, build_path_struct_field,
+    column_as_vid_array, compute_plan_properties, new_edge_list_builder, new_node_list_builder,
 };
 use crate::query::df_graph::scan::{build_property_column_static, resolve_property_type};
 use arrow::compute::take;
@@ -2034,6 +2035,9 @@ pub struct GraphVariableLengthTraverseExec {
     /// Variable name for target vertex columns.
     target_variable: String,
 
+    /// Variable name for relationship list (r in `[r*]`) - holds `List<Edge>`.
+    step_variable: Option<String>,
+
     /// Variable name for path (if path is bound).
     path_variable: Option<String>,
 
@@ -2083,6 +2087,7 @@ impl GraphVariableLengthTraverseExec {
         min_hops: usize,
         max_hops: usize,
         target_variable: impl Into<String>,
+        step_variable: Option<String>,
         path_variable: Option<String>,
         target_properties: Vec<String>,
         target_label_name: Option<String>,
@@ -2102,6 +2107,7 @@ impl GraphVariableLengthTraverseExec {
         let schema = Self::build_schema(
             input.schema(),
             &target_variable,
+            step_variable.as_deref(),
             path_variable.as_deref(),
             &target_properties,
             label_props,
@@ -2116,6 +2122,7 @@ impl GraphVariableLengthTraverseExec {
             min_hops,
             max_hops,
             target_variable,
+            step_variable,
             path_variable,
             target_properties,
             target_label_name,
@@ -2131,6 +2138,7 @@ impl GraphVariableLengthTraverseExec {
     fn build_schema(
         input_schema: SchemaRef,
         target_variable: &str,
+        step_variable: Option<&str>,
         path_variable: Option<&str>,
         target_properties: &[String],
         label_props: Option<
@@ -2166,6 +2174,11 @@ impl GraphVariableLengthTraverseExec {
 
         // Add hop count
         fields.push(Field::new("_hop_count", DataType::UInt64, false));
+
+        // Add step variable (edge list) if bound
+        if let Some(step_var) = step_variable {
+            fields.push(build_edge_list_field(step_var));
+        }
 
         // Add path struct if bound
         if let Some(path_var) = path_variable {
@@ -2231,6 +2244,7 @@ impl ExecutionPlan for GraphVariableLengthTraverseExec {
             self.min_hops,
             self.max_hops,
             self.target_variable.clone(),
+            self.step_variable.clone(),
             self.path_variable.clone(),
             self.target_properties.clone(),
             self.target_label_name.clone(),
@@ -2276,6 +2290,7 @@ impl GraphVariableLengthTraverseExec {
             min_hops: self.min_hops,
             max_hops: self.max_hops,
             target_variable: self.target_variable.clone(),
+            step_variable: self.step_variable.clone(),
             path_variable: self.path_variable.clone(),
             target_properties: self.target_properties.clone(),
             target_label_name: self.target_label_name.clone(),
@@ -2293,6 +2308,7 @@ struct GraphVariableLengthTraverseExecData {
     min_hops: usize,
     max_hops: usize,
     target_variable: String,
+    step_variable: Option<String>,
     path_variable: Option<String>,
     target_properties: Vec<String>,
     target_label_name: Option<String>,
@@ -2327,11 +2343,6 @@ impl GraphVariableLengthTraverseExecData {
 
                 if label_ok {
                     results.push((current, depth, node_path.clone(), edge_path.clone()));
-
-                    // For OPTIONAL MATCH, stop after first match to avoid Cartesian product
-                    if self.is_optional && !results.is_empty() {
-                        return results;
-                    }
                 }
             }
 
@@ -2524,8 +2535,13 @@ impl GraphVariableLengthTraverseStream {
             let vid = Vid::from(src);
             let bfs_results = self.exec.bfs(vid);
 
-            for (target, hop_count, node_path, edge_path) in bfs_results {
-                expansions.push((row_idx, target, hop_count, node_path, edge_path));
+            if bfs_results.is_empty() && self.exec.is_optional {
+                // Preserve row with NULL target for OPTIONAL MATCH
+                expansions.push((row_idx, Vid::from(0u64), 0, vec![], vec![]));
+            } else {
+                for (target, hop_count, node_path, edge_path) in bfs_results {
+                    expansions.push((row_idx, target, hop_count, node_path, edge_path));
+                }
             }
         }
 
@@ -2610,114 +2626,62 @@ impl GraphVariableLengthTraverseStream {
             .collect();
         columns.push(Arc::new(UInt64Array::from(hop_counts)));
 
+        // Add step variable (edge list) column if bound
+        if self.exec.step_variable.is_some() {
+            let mut edges_builder = new_edge_list_builder();
+            let query_ctx = self.exec.graph_ctx.query_context();
+
+            for (_, target_vid, _, node_path, edge_path) in expansions {
+                if target_vid.as_u64() == 0 {
+                    // Null row for OPTIONAL MATCH unmatched
+                    edges_builder.append_null();
+                } else if edge_path.is_empty() {
+                    // Zero-hop match: empty list
+                    edges_builder.append(true);
+                } else {
+                    for (i, eid) in edge_path.iter().enumerate() {
+                        let type_name = l0_visibility::get_edge_type(*eid, &query_ctx)
+                            .unwrap_or_else(|| "UNKNOWN".to_string());
+                        append_edge_to_struct(
+                            edges_builder.values(),
+                            *eid,
+                            &type_name,
+                            node_path[i].as_u64(),
+                            node_path[i + 1].as_u64(),
+                            &query_ctx,
+                        );
+                    }
+                    edges_builder.append(true);
+                }
+            }
+
+            columns.push(Arc::new(edges_builder.finish()));
+        }
+
         // Add path variable column if bound.
         // For named paths, we output a Path struct with nodes and relationships arrays.
         if self.exec.path_variable.is_some() {
-            use arrow_array::builder::{ListBuilder, StringBuilder, StructBuilder, UInt64Builder};
-
-            use arrow_array::builder::LargeBinaryBuilder;
-
-            // Build node struct fields: _vid, _label, properties
-            let node_struct_fields = vec![
-                Arc::new(Field::new("_vid", DataType::UInt64, false)),
-                Arc::new(Field::new("_label", DataType::Utf8, true)),
-                Arc::new(Field::new("properties", DataType::LargeBinary, true)),
-            ];
-
-            // Build edge struct fields: _eid, _type_name, _src, _dst, properties
-            let edge_struct_fields = vec![
-                Arc::new(Field::new("_eid", DataType::UInt64, false)),
-                Arc::new(Field::new("_type_name", DataType::Utf8, false)),
-                Arc::new(Field::new("_src", DataType::UInt64, false)),
-                Arc::new(Field::new("_dst", DataType::UInt64, false)),
-                Arc::new(Field::new("properties", DataType::LargeBinary, true)),
-            ];
-
-            // Single list builder for all nodes (one list per row)
-            let mut nodes_builder = ListBuilder::new(StructBuilder::new(
-                node_struct_fields,
-                vec![
-                    Box::new(UInt64Builder::new()),
-                    Box::new(StringBuilder::new()),
-                    Box::new(LargeBinaryBuilder::new()),
-                ],
-            ));
-
-            // Single list builder for all relationships (one list per row)
-            let mut rels_builder = ListBuilder::new(StructBuilder::new(
-                edge_struct_fields,
-                vec![
-                    Box::new(UInt64Builder::new()),
-                    Box::new(StringBuilder::new()),
-                    Box::new(UInt64Builder::new()),
-                    Box::new(UInt64Builder::new()),
-                    Box::new(LargeBinaryBuilder::new()),
-                ],
-            ));
-
-            // Get query context for label and property lookup
+            let mut nodes_builder = new_node_list_builder();
+            let mut rels_builder = new_edge_list_builder();
             let query_ctx = self.exec.graph_ctx.query_context();
 
             for (_, _, _, node_path, edge_path) in expansions {
-                // Build nodes list for this row
-                let nodes_struct = nodes_builder.values();
                 for vid in node_path {
-                    nodes_struct
-                        .field_builder::<UInt64Builder>(0)
-                        .unwrap()
-                        .append_value(vid.as_u64());
-                    // Look up label from L0 chain
-                    let labels = l0_visibility::get_vertex_labels(*vid, &query_ctx);
-                    let label_builder = nodes_struct.field_builder::<StringBuilder>(1).unwrap();
-                    if let Some(label) = labels.first() {
-                        label_builder.append_value(label);
-                    } else {
-                        label_builder.append_null();
-                    }
-                    // Look up properties from L0 chain and serialize to JSON
-                    let props_builder =
-                        nodes_struct.field_builder::<LargeBinaryBuilder>(2).unwrap();
-                    if let Some(props) = l0_visibility::get_vertex_properties(*vid, &query_ctx) {
-                        let cv_bytes = super::common::encode_props_to_cv(&props);
-                        props_builder.append_value(&cv_bytes);
-                    } else {
-                        props_builder.append_null();
-                    }
-                    nodes_struct.append(true);
+                    append_node_to_struct(nodes_builder.values(), *vid, &query_ctx);
                 }
                 nodes_builder.append(true);
 
-                // Build relationships list for this row
-                let rels_struct = rels_builder.values();
                 for (i, eid) in edge_path.iter().enumerate() {
-                    rels_struct
-                        .field_builder::<UInt64Builder>(0)
-                        .unwrap()
-                        .append_value(eid.as_u64());
-                    // Look up edge type for this specific edge
-                    let edge_type_name = l0_visibility::get_edge_type(*eid, &query_ctx)
+                    let type_name = l0_visibility::get_edge_type(*eid, &query_ctx)
                         .unwrap_or_else(|| "UNKNOWN".to_string());
-                    rels_struct
-                        .field_builder::<StringBuilder>(1)
-                        .unwrap()
-                        .append_value(&edge_type_name);
-                    rels_struct
-                        .field_builder::<UInt64Builder>(2)
-                        .unwrap()
-                        .append_value(node_path[i].as_u64());
-                    rels_struct
-                        .field_builder::<UInt64Builder>(3)
-                        .unwrap()
-                        .append_value(node_path[i + 1].as_u64());
-                    // Look up edge properties from L0 chain and serialize to JSON
-                    let props_builder = rels_struct.field_builder::<LargeBinaryBuilder>(4).unwrap();
-                    if let Some(props) = l0_visibility::get_edge_properties(*eid, &query_ctx) {
-                        let cv_bytes = super::common::encode_props_to_cv(&props);
-                        props_builder.append_value(&cv_bytes);
-                    } else {
-                        props_builder.append_null();
-                    }
-                    rels_struct.append(true);
+                    append_edge_to_struct(
+                        rels_builder.values(),
+                        *eid,
+                        &type_name,
+                        node_path[i].as_u64(),
+                        node_path[i + 1].as_u64(),
+                        &query_ctx,
+                    );
                 }
                 rels_builder.append(true);
             }
@@ -2830,28 +2794,88 @@ async fn hydrate_vlp_target_properties(
             property_columns.push(column);
         }
     } else {
-        // No label — emit null columns
+        // No label name — use label-agnostic property lookup.
+        // This scans all label datasets, slower but correct for label-less traversals.
+        let non_internal_props: Vec<&str> = target_properties
+            .iter()
+            .filter(|p| *p != "_all_props")
+            .map(|s| s.as_str())
+            .collect();
+        let property_manager = graph_ctx.property_manager();
+        let query_ctx = graph_ctx.query_context();
+
+        let props_map = if !non_internal_props.is_empty() {
+            property_manager
+                .get_batch_vertex_props(&target_vids, &non_internal_props, Some(&query_ctx))
+                .await
+                .map_err(|e| datafusion::error::DataFusionError::Execution(e.to_string()))?
+        } else {
+            std::collections::HashMap::new()
+        };
+
         for prop_name in &target_properties {
-            let _ = prop_name;
-            let null_col = arrow_array::new_null_array(
-                &arrow_schema::DataType::LargeBinary,
-                target_vids.len(),
-            );
-            property_columns.push(null_col);
+            if prop_name == "_all_props" {
+                // Build CypherValue blob from all vertex properties (L0 + storage)
+                use crate::query::df_graph::scan::encode_cypher_value;
+                use arrow_array::builder::LargeBinaryBuilder;
+
+                let mut builder = LargeBinaryBuilder::new();
+                let l0_ctx = graph_ctx.l0_context();
+                for vid in &target_vids {
+                    let mut merged_props = serde_json::Map::new();
+                    // Collect from storage-hydrated props
+                    if let Some(vid_props) = props_map.get(vid) {
+                        for (k, v) in vid_props.iter() {
+                            let json_val: serde_json::Value = v.clone().into();
+                            merged_props.insert(k.to_string(), json_val);
+                        }
+                    }
+                    // Overlay L0 properties
+                    for l0 in l0_ctx.iter_l0_buffers() {
+                        let guard = l0.read();
+                        if let Some(l0_props) = guard.vertex_properties.get(vid) {
+                            for (k, v) in l0_props.iter() {
+                                let json_val: serde_json::Value = v.clone().into();
+                                merged_props.insert(k.to_string(), json_val);
+                            }
+                        }
+                    }
+                    if merged_props.is_empty() {
+                        builder.append_null();
+                    } else {
+                        let json = serde_json::Value::Object(merged_props);
+                        match encode_cypher_value(&json) {
+                            Ok(bytes) => builder.append_value(bytes),
+                            Err(_) => builder.append_null(),
+                        }
+                    }
+                }
+                property_columns.push(Arc::new(builder.finish()));
+            } else {
+                let column = build_property_column_static(
+                    &target_vids,
+                    &props_map,
+                    prop_name,
+                    &arrow::datatypes::DataType::LargeBinary,
+                )?;
+                property_columns.push(column);
+            }
         }
     }
 
     // Rebuild batch replacing the null placeholder property columns with hydrated ones.
-    // Schema layout after VID: [target._vid, target._labels, target.prop1..., _hop_count, path?]
-    // Property columns start 2 positions after VID (skip _labels).
-    let prop_start = vid_col_idx + 2; // +1 for _labels
+    // Find each property column by name — works regardless of column ordering
+    // (schema-aware puts props before _hop_count; schemaless puts them after).
+    // Use col_idx > vid_col_idx to only replace this VLP's own property columns,
+    // not pre-existing input columns with the same name (duplicate variable binding).
     let mut new_columns: Vec<ArrayRef> = Vec::with_capacity(schema.fields().len());
     let mut prop_idx = 0;
-    for (col_idx, _field) in schema.fields().iter().enumerate() {
-        if col_idx >= prop_start
-            && col_idx < prop_start + target_properties.len()
-            && prop_idx < property_columns.len()
-        {
+    for (col_idx, field) in schema.fields().iter().enumerate() {
+        let is_target_prop = col_idx > vid_col_idx
+            && target_properties
+                .iter()
+                .any(|p| *field.name() == format!("{}.{}", target_variable, p));
+        if is_target_prop && prop_idx < property_columns.len() {
             new_columns.push(property_columns[prop_idx].clone());
             prop_idx += 1;
         } else {
@@ -3144,6 +3168,11 @@ enum VarLengthMainStreamState {
     Loading(Pin<Box<dyn std::future::Future<Output = DFResult<EdgeAdjacencyMap>> + Send>>),
     /// Processing input batches with loaded adjacency.
     Processing(EdgeAdjacencyMap),
+    /// Materializing properties for a batch.
+    Materializing {
+        adjacency: EdgeAdjacencyMap,
+        fut: Pin<Box<dyn std::future::Future<Output = DFResult<RecordBatch>> + Send>>,
+    },
     /// Stream is done.
     Done,
 }
@@ -3156,7 +3185,6 @@ struct GraphVariableLengthTraverseMainStream {
     direction: Direction,
     min_hops: usize,
     max_hops: usize,
-    #[allow(dead_code)]
     target_variable: String,
     /// Relationship variable like `r` in `[r*1..3]` - gets a List of edge structs.
     step_variable: Option<String>,
@@ -3186,11 +3214,6 @@ impl GraphVariableLengthTraverseMainStream {
             // Emit result if within hop range (including zero-length patterns)
             if depth >= self.min_hops && depth <= self.max_hops {
                 results.push((current, depth, node_path.clone(), edge_path.clone()));
-
-                // For OPTIONAL MATCH, stop after first match to avoid Cartesian product
-                if self.is_optional && !results.is_empty() {
-                    return results;
-                }
             }
 
             // Stop if at max depth
@@ -3312,181 +3335,50 @@ impl GraphVariableLengthTraverseMainStream {
         columns.push(Arc::new(UInt64Array::from(hop_counts)));
 
         // Add step variable column if bound (list of edge structs).
-        // This is the relationship variable like `r` in `[r*1..3]`.
         if self.step_variable.is_some() {
-            use arrow_array::builder::{
-                LargeBinaryBuilder, ListBuilder, StringBuilder, StructBuilder, UInt64Builder,
-            };
-
-            // Build edge struct fields: _eid, _type_name, _src, _dst, properties
-            let edge_struct_fields = vec![
-                Arc::new(Field::new("_eid", DataType::UInt64, false)),
-                Arc::new(Field::new("_type_name", DataType::Utf8, false)),
-                Arc::new(Field::new("_src", DataType::UInt64, false)),
-                Arc::new(Field::new("_dst", DataType::UInt64, false)),
-                Arc::new(Field::new("properties", DataType::LargeBinary, true)),
-            ];
-
-            let mut edges_builder = ListBuilder::new(StructBuilder::new(
-                edge_struct_fields.clone(),
-                vec![
-                    Box::new(UInt64Builder::new()),
-                    Box::new(StringBuilder::new()),
-                    Box::new(UInt64Builder::new()),
-                    Box::new(UInt64Builder::new()),
-                    Box::new(LargeBinaryBuilder::new()),
-                ],
-            ));
-
-            // Get query context for property lookup
+            let mut edges_builder = new_edge_list_builder();
             let query_ctx = self.graph_ctx.query_context();
+            let type_names_str = self.type_names.join("|");
 
             for (_, _, _, node_path, edge_path) in expansions.iter() {
-                // Build edges list for this row
-                let edges_struct = edges_builder.values();
-                // For VLP with multiple types, join type names as we don't track which type each edge has
-                let type_names_str = self.type_names.join("|");
                 for (i, eid) in edge_path.iter().enumerate() {
-                    edges_struct
-                        .field_builder::<UInt64Builder>(0)
-                        .unwrap()
-                        .append_value(eid.as_u64());
-                    edges_struct
-                        .field_builder::<StringBuilder>(1)
-                        .unwrap()
-                        .append_value(&type_names_str);
-                    edges_struct
-                        .field_builder::<UInt64Builder>(2)
-                        .unwrap()
-                        .append_value(node_path[i].as_u64());
-                    edges_struct
-                        .field_builder::<UInt64Builder>(3)
-                        .unwrap()
-                        .append_value(node_path[i + 1].as_u64());
-                    // Look up edge properties from L0 chain and serialize to JSON
-                    let props_builder =
-                        edges_struct.field_builder::<LargeBinaryBuilder>(4).unwrap();
-                    if let Some(props) = l0_visibility::get_edge_properties(*eid, &query_ctx) {
-                        let cv_bytes = super::common::encode_props_to_cv(&props);
-                        props_builder.append_value(&cv_bytes);
-                    } else {
-                        props_builder.append_null();
-                    }
-                    edges_struct.append(true);
+                    append_edge_to_struct(
+                        edges_builder.values(),
+                        *eid,
+                        &type_names_str,
+                        node_path[i].as_u64(),
+                        node_path[i + 1].as_u64(),
+                        &query_ctx,
+                    );
                 }
                 edges_builder.append(true);
             }
 
-            // Finish the builder to get the array
-            let edges_array = Arc::new(edges_builder.finish()) as ArrayRef;
-            columns.push(edges_array);
+            columns.push(Arc::new(edges_builder.finish()) as ArrayRef);
         }
 
         // Add path variable column if bound.
-        // For named paths, we output a Path struct with nodes and relationships arrays.
         if self.path_variable.is_some() {
-            use arrow_array::builder::{
-                LargeBinaryBuilder, ListBuilder, StringBuilder, StructBuilder, UInt64Builder,
-            };
-
-            // Build node struct fields: _vid, _label, properties
-            let node_struct_fields = vec![
-                Arc::new(Field::new("_vid", DataType::UInt64, false)),
-                Arc::new(Field::new("_label", DataType::Utf8, true)),
-                Arc::new(Field::new("properties", DataType::LargeBinary, true)),
-            ];
-
-            // Build edge struct fields: _eid, _type_name, _src, _dst, properties
-            let edge_struct_fields = vec![
-                Arc::new(Field::new("_eid", DataType::UInt64, false)),
-                Arc::new(Field::new("_type_name", DataType::Utf8, false)),
-                Arc::new(Field::new("_src", DataType::UInt64, false)),
-                Arc::new(Field::new("_dst", DataType::UInt64, false)),
-                Arc::new(Field::new("properties", DataType::LargeBinary, true)),
-            ];
-
-            // Use single ListBuilders for all rows (not per-row builders)
-            let mut nodes_builder = ListBuilder::new(StructBuilder::new(
-                node_struct_fields.clone(),
-                vec![
-                    Box::new(UInt64Builder::new()),
-                    Box::new(StringBuilder::new()),
-                    Box::new(LargeBinaryBuilder::new()),
-                ],
-            ));
-            let mut rels_builder = ListBuilder::new(StructBuilder::new(
-                edge_struct_fields.clone(),
-                vec![
-                    Box::new(UInt64Builder::new()),
-                    Box::new(StringBuilder::new()),
-                    Box::new(UInt64Builder::new()),
-                    Box::new(UInt64Builder::new()),
-                    Box::new(LargeBinaryBuilder::new()),
-                ],
-            ));
-
-            // Get query context for label and property lookup
+            let mut nodes_builder = new_node_list_builder();
+            let mut rels_builder = new_edge_list_builder();
             let query_ctx = self.graph_ctx.query_context();
+            let type_names_str = self.type_names.join("|");
 
             for (_, _, _, node_path, edge_path) in expansions.iter() {
-                // Build nodes list for this row
-                let nodes_struct = nodes_builder.values();
                 for vid in node_path {
-                    nodes_struct
-                        .field_builder::<UInt64Builder>(0)
-                        .unwrap()
-                        .append_value(vid.as_u64());
-                    // Look up label from L0 chain
-                    let labels = l0_visibility::get_vertex_labels(*vid, &query_ctx);
-                    let label_builder = nodes_struct.field_builder::<StringBuilder>(1).unwrap();
-                    if let Some(label) = labels.first() {
-                        label_builder.append_value(label);
-                    } else {
-                        label_builder.append_null();
-                    }
-                    // Look up properties from L0 chain and serialize to JSON
-                    let props_builder =
-                        nodes_struct.field_builder::<LargeBinaryBuilder>(2).unwrap();
-                    if let Some(props) = l0_visibility::get_vertex_properties(*vid, &query_ctx) {
-                        let cv_bytes = super::common::encode_props_to_cv(&props);
-                        props_builder.append_value(&cv_bytes);
-                    } else {
-                        props_builder.append_null();
-                    }
-                    nodes_struct.append(true);
+                    append_node_to_struct(nodes_builder.values(), *vid, &query_ctx);
                 }
                 nodes_builder.append(true);
 
-                // Build relationships list for this row
-                let rels_struct = rels_builder.values();
-                // For VLP with multiple types, join type names as we don't track which type each edge has
-                let type_names_str = self.type_names.join("|");
                 for (i, eid) in edge_path.iter().enumerate() {
-                    rels_struct
-                        .field_builder::<UInt64Builder>(0)
-                        .unwrap()
-                        .append_value(eid.as_u64());
-                    rels_struct
-                        .field_builder::<StringBuilder>(1)
-                        .unwrap()
-                        .append_value(&type_names_str);
-                    rels_struct
-                        .field_builder::<UInt64Builder>(2)
-                        .unwrap()
-                        .append_value(node_path[i].as_u64());
-                    rels_struct
-                        .field_builder::<UInt64Builder>(3)
-                        .unwrap()
-                        .append_value(node_path[i + 1].as_u64());
-                    // Look up edge properties from L0 chain and serialize to JSON
-                    let props_builder = rels_struct.field_builder::<LargeBinaryBuilder>(4).unwrap();
-                    if let Some(props) = l0_visibility::get_edge_properties(*eid, &query_ctx) {
-                        let cv_bytes = super::common::encode_props_to_cv(&props);
-                        props_builder.append_value(&cv_bytes);
-                    } else {
-                        props_builder.append_null();
-                    }
-                    rels_struct.append(true);
+                    append_edge_to_struct(
+                        rels_builder.values(),
+                        *eid,
+                        &type_names_str,
+                        node_path[i].as_u64(),
+                        node_path[i + 1].as_u64(),
+                        &query_ctx,
+                    );
                 }
                 rels_builder.append(true);
             }
@@ -3553,9 +3445,40 @@ impl Stream for GraphVariableLengthTraverseMainStream {
                 VarLengthMainStreamState::Processing(adjacency) => {
                     match self.input.poll_next_unpin(cx) {
                         Poll::Ready(Some(Ok(batch))) => {
-                            let result = self.process_batch(batch, &adjacency);
-                            self.state = VarLengthMainStreamState::Processing(adjacency);
-                            return Poll::Ready(Some(result));
+                            let base_batch = match self.process_batch(batch, &adjacency) {
+                                Ok(b) => b,
+                                Err(e) => {
+                                    self.state = VarLengthMainStreamState::Processing(adjacency);
+                                    return Poll::Ready(Some(Err(e)));
+                                }
+                            };
+
+                            // If no properties need async hydration, return directly
+                            if self.target_properties.is_empty() {
+                                self.state = VarLengthMainStreamState::Processing(adjacency);
+                                return Poll::Ready(Some(Ok(base_batch)));
+                            }
+
+                            // Create async hydration future
+                            let schema = self.schema.clone();
+                            let target_variable = self.target_variable.clone();
+                            let target_properties = self.target_properties.clone();
+                            let graph_ctx = self.graph_ctx.clone();
+
+                            let fut = hydrate_vlp_target_properties(
+                                base_batch,
+                                schema,
+                                target_variable,
+                                target_properties,
+                                None, // schemaless — no label name
+                                graph_ctx,
+                            );
+
+                            self.state = VarLengthMainStreamState::Materializing {
+                                adjacency,
+                                fut: Box::pin(fut),
+                            };
+                            // Continue loop to poll the future
                         }
                         Poll::Ready(Some(Err(e))) => {
                             self.state = VarLengthMainStreamState::Done;
@@ -3567,6 +3490,22 @@ impl Stream for GraphVariableLengthTraverseMainStream {
                         }
                         Poll::Pending => {
                             self.state = VarLengthMainStreamState::Processing(adjacency);
+                            return Poll::Pending;
+                        }
+                    }
+                }
+                VarLengthMainStreamState::Materializing { adjacency, mut fut } => {
+                    match fut.as_mut().poll(cx) {
+                        Poll::Ready(Ok(batch)) => {
+                            self.state = VarLengthMainStreamState::Processing(adjacency);
+                            return Poll::Ready(Some(Ok(batch)));
+                        }
+                        Poll::Ready(Err(e)) => {
+                            self.state = VarLengthMainStreamState::Done;
+                            return Poll::Ready(Some(Err(e)));
+                        }
+                        Poll::Pending => {
+                            self.state = VarLengthMainStreamState::Materializing { adjacency, fut };
                             return Poll::Pending;
                         }
                     }
@@ -3675,8 +3614,14 @@ mod tests {
             false,
         )]));
 
-        let output_schema =
-            GraphVariableLengthTraverseExec::build_schema(input_schema, "b", Some("p"), &[], None);
+        let output_schema = GraphVariableLengthTraverseExec::build_schema(
+            input_schema,
+            "b",
+            None,
+            Some("p"),
+            &[],
+            None,
+        );
 
         assert_eq!(output_schema.fields().len(), 5);
         assert_eq!(output_schema.field(0).name(), "a._vid");

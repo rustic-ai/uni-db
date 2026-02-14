@@ -253,6 +253,10 @@ fn eval_numeric_op<F>(left: &Value, right: &Value, op: F) -> Result<Value>
 where
     F: Fn(f64, f64) -> f64,
 {
+    // Cypher null propagation: null op anything = null
+    if left.is_null() || right.is_null() {
+        return Ok(Value::Null);
+    }
     let (l, r) = match (left.as_f64(), right.as_f64()) {
         (Some(l), Some(r)) => (l, r),
         _ => return Err(anyhow!("Arithmetic operation requires numbers")),
@@ -292,6 +296,31 @@ fn add_temporal_duration(temporal_str: &str, dur: &CypherDuration) -> Result<Val
 
 /// Evaluate addition with temporal-aware dispatch.
 fn eval_add(left: &Value, right: &Value) -> Result<Value> {
+    // Null propagation
+    if left.is_null() || right.is_null() {
+        return Ok(Value::Null);
+    }
+
+    // List concatenation: list + list, list + scalar, scalar + list
+    match (left, right) {
+        (Value::List(l), Value::List(r)) => {
+            let mut result = l.clone();
+            result.extend(r.iter().cloned());
+            return Ok(Value::List(result));
+        }
+        (Value::List(l), _) => {
+            let mut result = l.clone();
+            result.push(right.clone());
+            return Ok(Value::List(result));
+        }
+        (_, Value::List(r)) => {
+            let mut result = vec![left.clone()];
+            result.extend(r.iter().cloned());
+            return Ok(Value::List(result));
+        }
+        _ => {}
+    }
+
     // Numeric addition
     if let (Some(l), Some(r)) = (left.as_f64(), right.as_f64()) {
         if left.is_i64() && right.is_i64() {
@@ -349,6 +378,11 @@ fn eval_add(left: &Value, right: &Value) -> Result<Value> {
 
 /// Evaluate subtraction with temporal-aware dispatch.
 fn eval_sub(left: &Value, right: &Value) -> Result<Value> {
+    // Null propagation
+    if left.is_null() || right.is_null() {
+        return Ok(Value::Null);
+    }
+
     // temporal - duration
     if let (Value::String(l), Value::String(r)) = (left, right) {
         let l_type = classify_temporal(l);
@@ -392,6 +426,11 @@ fn eval_sub(left: &Value, right: &Value) -> Result<Value> {
 
 /// Evaluate multiplication with duration support.
 fn eval_mul(left: &Value, right: &Value) -> Result<Value> {
+    // Null propagation
+    if left.is_null() || right.is_null() {
+        return Ok(Value::Null);
+    }
+
     // duration * number
     if let (Value::String(s), Some(factor)) = (left, right.as_f64())
         && is_duration_value(left)
@@ -412,6 +451,11 @@ fn eval_mul(left: &Value, right: &Value) -> Result<Value> {
 
 /// Evaluate division with duration support.
 fn eval_div(left: &Value, right: &Value) -> Result<Value> {
+    // Null propagation
+    if left.is_null() || right.is_null() {
+        return Ok(Value::Null);
+    }
+
     // duration / number
     if let (Value::String(s), Some(divisor)) = (left, right.as_f64())
         && is_duration_value(left)

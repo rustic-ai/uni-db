@@ -108,9 +108,13 @@ impl UniWorld {
 
         // Use in_memory for fastest initialization
         // Disable background tasks for test databases (they create many short-lived instances)
-        let mut config = uni_common::UniConfig::default();
-        config.auto_flush_interval = None; // Disable auto-flush background task
-        config.compaction.enabled = false; // Disable background compaction
+        #[allow(clippy::field_reassign_with_default)]
+        let config = {
+            let mut config = uni_common::UniConfig::default();
+            config.auto_flush_interval = None; // Disable auto-flush background task
+            config.compaction.enabled = false; // Disable background compaction
+            config
+        };
 
         let db = Uni::in_memory().config(config).build().await?;
         let run_ctx = get_tck_run_context_for_current_thread();

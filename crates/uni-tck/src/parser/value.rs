@@ -11,6 +11,9 @@ use std::collections::HashMap;
 use uni_common::core::id::{Eid, Vid};
 use uni_query::{Edge, Node, Path, Value};
 
+/// Type alias for edge bracket parsing result: (edge_type, properties)
+type EdgeBracketResult<'a> = (Option<&'a str>, Option<HashMap<String, Value>>);
+
 /// Parse a TCK value string into a `Value`, failing on trailing input.
 pub fn parse_value(input: &str) -> Result<Value, String> {
     match value(input.trim()) {
@@ -230,9 +233,7 @@ fn edge_in_path(input: &str) -> IResult<&str, Edge> {
 }
 
 /// Shared bracket parsing for edge functions.
-fn parse_edge_brackets(
-    input: &str,
-) -> IResult<&str, (Option<&str>, Option<HashMap<String, Value>>)> {
+fn parse_edge_brackets(input: &str) -> IResult<&str, EdgeBracketResult<'_>> {
     let (input, _) = multispace0(input)?;
     let (input, _) = char('[')(input)?;
     let (input, _) = multispace0(input)?;
