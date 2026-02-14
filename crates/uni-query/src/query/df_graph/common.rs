@@ -705,6 +705,50 @@ pub fn infer_logical_plan_schema(plan: &LogicalPlan, schema_info: &UniSchema) ->
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use arrow_array::{LargeBinaryArray, UInt64Array};
+    use arrow_schema::Schema;
+
+    #[test]
+    fn test_extract_row_params_loses_uint64_to_int() {
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "n._vid",
+            DataType::UInt64,
+            true,
+        )]));
+        let batch = RecordBatch::try_new(schema, vec![Arc::new(UInt64Array::from(vec![Some(7)]))])
+            .expect("batch should be valid");
+
+        let params = extract_row_params(&batch, 0);
+        assert_eq!(params.get("n._vid"), Some(&Value::Int(7)));
+    }
+
+    #[test]
+    fn test_extract_row_params_decodes_largebinary_to_map() {
+        let encoded = uni_common::cypher_value_codec::encode(&Value::Map(HashMap::new()));
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "m._all_props",
+            DataType::LargeBinary,
+            true,
+        )]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![Arc::new(LargeBinaryArray::from(vec![Some(
+                encoded.as_slice(),
+            )]))],
+        )
+        .expect("batch should be valid");
+
+        let params = extract_row_params(&batch, 0);
+        assert_eq!(
+            params.get("m._all_props"),
+            Some(&Value::Map(HashMap::new()))
+        );
+    }
+}
+
 /// Infer Arrow DataType for a Cypher expression using schema metadata.
 fn infer_expr_type(expr: &Expr, schema_info: &UniSchema) -> DataType {
     match expr {

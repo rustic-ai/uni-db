@@ -1908,9 +1908,12 @@ impl QueryPlanner {
         let mut plan = LogicalPlan::Empty;
 
         if !initial_vars.is_empty() {
+            // Project bound variables from outer scope as parameters.
+            // These come from the enclosing query's row (passed as sub_params in EXISTS evaluation).
+            // Use Parameter expressions to read from params, not Variable which would read from input row.
             let projections = initial_vars
                 .iter()
-                .map(|v| (Expr::Variable(v.name.clone()), Some(v.name.clone())))
+                .map(|v| (Expr::Parameter(v.name.clone()), Some(v.name.clone())))
                 .collect();
             plan = LogicalPlan::Project {
                 input: Box::new(plan),

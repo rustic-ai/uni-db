@@ -1967,9 +1967,11 @@ impl PhysicalExpr for ExistsExecExpr {
             let planner = QueryPlanner::new(self.uni_schema.clone());
             let logical_plan = match planner.plan_with_scope(self.query.clone(), vars_in_scope) {
                 Ok(plan) => plan,
-                Err(_) => {
-                    builder.append_value(false);
-                    continue;
+                Err(e) => {
+                    return Err(datafusion::error::DataFusionError::Execution(format!(
+                        "EXISTS subquery planning failed: {}",
+                        e
+                    )));
                 }
             };
 
@@ -2014,8 +2016,11 @@ impl PhysicalExpr for ExistsExecExpr {
                     let has_rows = batches.iter().any(|b| b.num_rows() > 0);
                     builder.append_value(has_rows);
                 }
-                Err(_) => {
-                    builder.append_value(false);
+                Err(e) => {
+                    return Err(datafusion::error::DataFusionError::Execution(format!(
+                        "EXISTS subquery execution failed: {}",
+                        e
+                    )));
                 }
             }
         }

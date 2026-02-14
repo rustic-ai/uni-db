@@ -1572,7 +1572,7 @@ impl HybridPhysicalPlanner {
                             .get(vlp_target_label_name_str)
                             .map(|props| props.keys().cloned().collect())
                     };
-                let vlp_target_properties = sanitize_vlp_target_properties(
+                let mut vlp_target_properties = sanitize_vlp_target_properties(
                     vlp_target_properties_raw,
                     target_has_wildcard,
                     vlp_target_label_props.as_ref(),
@@ -1582,6 +1582,23 @@ impl HybridPhysicalPlanner {
                 } else {
                     Some(vlp_target_label_name_str.to_string())
                 };
+
+                // Check if target variable is already bound (for patterns where target is in scope)
+                let target_vid_col = format!("{}._vid", target_variable);
+                let bound_target_column = if input_plan
+                    .schema()
+                    .column_with_name(&target_vid_col)
+                    .is_some()
+                {
+                    Some(target_vid_col)
+                } else {
+                    None
+                };
+                if bound_target_column.is_some() {
+                    // For correlated patterns with bound target, traversal only needs reachability.
+                    // Reuse existing bound target columns from input and avoid re-hydrating props.
+                    vlp_target_properties.clear();
+                }
 
                 Arc::new(GraphVariableLengthTraverseExec::new(
                     input_plan,
@@ -1597,6 +1614,7 @@ impl HybridPhysicalPlanner {
                     vlp_target_label_name,
                     self.graph_ctx.clone(),
                     optional,
+                    bound_target_column,
                 ))
             }
         };
@@ -1741,6 +1759,18 @@ impl HybridPhysicalPlanner {
         let adj_direction = convert_direction(direction);
         let source_col = format!("{}._vid", source_variable);
 
+        // Check if target variable is already bound (for patterns where target is in scope)
+        let target_vid_col = format!("{}._vid", target_variable);
+        let bound_target_column = if input_plan
+            .schema()
+            .column_with_name(&target_vid_col)
+            .is_some()
+        {
+            Some(target_vid_col)
+        } else {
+            None
+        };
+
         // Extract edge properties for schemaless edges (all treated as Utf8/JSON)
         let mut edge_properties: Vec<String> = if let Some(edge_var) = step_variable {
             all_properties
@@ -1778,6 +1808,10 @@ impl HybridPhysicalPlanner {
         {
             target_properties.push("_all_props".to_string());
         }
+        if bound_target_column.is_some() {
+            // Target already comes from outer scope; avoid redundant property materialization.
+            target_properties.clear();
+        }
 
         // Create the schemaless traversal execution plan
         let traverse_plan: Arc<dyn ExecutionPlan> = Arc::new(GraphTraverseMainExec::new(
@@ -1791,6 +1825,7 @@ impl HybridPhysicalPlanner {
             target_properties,
             self.graph_ctx.clone(),
             optional,
+            bound_target_column,
         ));
 
         let mut result_plan = traverse_plan;
@@ -1872,6 +1907,18 @@ impl HybridPhysicalPlanner {
         let adj_direction = convert_direction(direction);
         let source_col = format!("{}._vid", source_variable);
 
+        // Check if target variable is already bound (for patterns where target is in scope)
+        let target_vid_col = format!("{}._vid", target_variable);
+        let bound_target_column = if input_plan
+            .schema()
+            .column_with_name(&target_vid_col)
+            .is_some()
+        {
+            Some(target_vid_col)
+        } else {
+            None
+        };
+
         // Extract target vertex properties
         let mut target_properties: Vec<String> = all_properties
             .get(target_variable)
@@ -1889,6 +1936,10 @@ impl HybridPhysicalPlanner {
         {
             target_properties.push("_all_props".to_string());
         }
+        if bound_target_column.is_some() {
+            // Correlated EXISTS only requires reachability; keep bound target columns from input.
+            target_properties.clear();
+        }
 
         let traverse_plan = Arc::new(GraphVariableLengthTraverseMainExec::new(
             input_plan,
@@ -1903,6 +1954,7 @@ impl HybridPhysicalPlanner {
             target_properties,
             self.graph_ctx.clone(),
             optional,
+            bound_target_column,
         ));
 
         Ok(traverse_plan)

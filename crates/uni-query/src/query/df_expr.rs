@@ -858,6 +858,12 @@ fn value_to_scalar(value: &Value) -> Result<ScalarValue> {
             let mut entries: Vec<(&String, &Value)> = map.iter().collect();
             entries.sort_by_key(|(k, _)| *k);
 
+            if entries.is_empty() {
+                return Ok(ScalarValue::Struct(Arc::new(
+                    datafusion::arrow::array::StructArray::new_empty_fields(1, None),
+                )));
+            }
+
             let mut fields_arrays = Vec::with_capacity(entries.len());
 
             for (k, v) in entries {
@@ -3045,6 +3051,35 @@ mod tests {
         assert!(
             s.contains("index"),
             "expected index UDF for non-graph variable, got: {s}"
+        );
+    }
+
+    #[test]
+    fn test_value_to_scalar_non_empty_map_becomes_struct() {
+        let mut map = std::collections::HashMap::new();
+        map.insert("k".to_string(), Value::Int(1));
+        let scalar = value_to_scalar(&Value::Map(map)).unwrap();
+        assert!(
+            matches!(scalar, ScalarValue::Struct(_)),
+            "expected Struct scalar for map input"
+        );
+    }
+
+    #[test]
+    fn test_value_to_scalar_empty_map_becomes_struct() {
+        let scalar = value_to_scalar(&Value::Map(Default::default())).unwrap();
+        assert!(
+            matches!(scalar, ScalarValue::Struct(_)),
+            "empty map should produce an empty Struct scalar"
+        );
+    }
+
+    #[test]
+    fn test_value_to_scalar_null_is_untyped_null() {
+        let scalar = value_to_scalar(&Value::Null).unwrap();
+        assert!(
+            matches!(scalar, ScalarValue::Null),
+            "expected untyped Null scalar for Value::Null"
         );
     }
 }

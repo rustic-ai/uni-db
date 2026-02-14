@@ -711,6 +711,8 @@ pub(crate) fn arrow_to_json_value(array: &dyn Array, row: usize) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use arrow_array::{LargeBinaryArray, UInt64Array};
+    use std::collections::HashMap;
     use uni_cypher::ast::CypherLiteral;
 
     #[test]
@@ -896,5 +898,20 @@ mod tests {
             }
             _ => panic!("Expected list"),
         }
+    }
+
+    #[test]
+    fn test_arrow_to_json_value_uint64_is_coerced_to_int() {
+        let arr = UInt64Array::from(vec![Some(42u64)]);
+        let value = arrow_to_json_value(&arr, 0);
+        assert_eq!(value, Value::Int(42));
+    }
+
+    #[test]
+    fn test_arrow_to_json_value_largebinary_decodes_cypher_map() {
+        let encoded = uni_common::cypher_value_codec::encode(&Value::Map(HashMap::new()));
+        let arr = LargeBinaryArray::from(vec![Some(encoded.as_slice())]);
+        let value = arrow_to_json_value(&arr, 0);
+        assert_eq!(value, Value::Map(HashMap::new()));
     }
 }

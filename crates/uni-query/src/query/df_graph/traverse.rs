@@ -575,7 +575,13 @@ impl GraphTraverseStream {
             };
 
             // Get expected target VID if this is a bound target pattern
-            let expected_target = bound_target_vids.and_then(|arr| arr.value(row_idx).into());
+            let expected_target = bound_target_vids.and_then(|arr| {
+                if arr.is_null(row_idx) {
+                    None
+                } else {
+                    Some(arr.value(row_idx))
+                }
+            });
 
             // Collect used edge IDs for this row from all previous hops
             let used_eids: HashSet<u64> = used_edge_arrays
@@ -1223,6 +1229,10 @@ pub struct GraphTraverseMainExec {
     /// Whether this is an OPTIONAL MATCH (preserve unmatched source rows with NULLs).
     optional: bool,
 
+    /// Column name of an already-bound target VID (for patterns where target is in scope).
+    /// When set, only traversals reaching this exact VID are included.
+    bound_target_column: Option<String>,
+
     /// Output schema.
     schema: SchemaRef,
 
@@ -1258,6 +1268,7 @@ impl GraphTraverseMainExec {
         target_properties: Vec<String>,
         graph_ctx: Arc<GraphExecutionContext>,
         optional: bool,
+        bound_target_column: Option<String>,
     ) -> Self {
         let source_column = source_column.into();
         let target_variable = target_variable.into();
@@ -1284,6 +1295,7 @@ impl GraphTraverseMainExec {
             target_properties,
             graph_ctx,
             optional,
+            bound_target_column,
             schema,
             properties,
             metrics: ExecutionPlanMetricsSet::new(),
@@ -1304,19 +1316,21 @@ impl GraphTraverseMainExec {
             .map(|f| f.as_ref().clone())
             .collect();
 
-        // Add target ._vid column (nullable for OPTIONAL MATCH)
-        fields.push(Field::new(
-            format!("{}._vid", target_variable),
-            DataType::UInt64,
-            true,
-        ));
+        // Add target ._vid column (only if not already in input, nullable for OPTIONAL MATCH)
+        let target_vid_name = format!("{}._vid", target_variable);
+        if input_schema.column_with_name(&target_vid_name).is_none() {
+            fields.push(Field::new(target_vid_name, DataType::UInt64, true));
+        }
 
-        // Add target ._labels column (List(Utf8)) for labels() support
-        fields.push(Field::new(
-            format!("{}._labels", target_variable),
-            DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
-            true,
-        ));
+        // Add target ._labels column (only if not already in input)
+        let target_labels_name = format!("{}._labels", target_variable);
+        if input_schema.column_with_name(&target_labels_name).is_none() {
+            fields.push(Field::new(
+                target_labels_name,
+                DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
+                true,
+            ));
+        }
 
         // Add edge columns if edge variable is bound
         if let Some(edge_var) = edge_variable {
@@ -1422,6 +1436,7 @@ impl ExecutionPlan for GraphTraverseMainExec {
             target_properties: self.target_properties.clone(),
             graph_ctx: self.graph_ctx.clone(),
             optional: self.optional,
+            bound_target_column: self.bound_target_column.clone(),
             schema: self.schema.clone(),
             properties: self.properties.clone(),
             metrics: self.metrics.clone(),
@@ -1447,6 +1462,7 @@ impl ExecutionPlan for GraphTraverseMainExec {
             self.target_properties.clone(),
             self.graph_ctx.clone(),
             self.optional,
+            self.bound_target_column.clone(),
             self.schema.clone(),
             metrics,
         )))
@@ -1505,6 +1521,9 @@ struct GraphTraverseMainStream {
     /// Whether this is optional (preserve unmatched rows).
     optional: bool,
 
+    /// Column name of an already-bound target VID (for filtering).
+    bound_target_column: Option<String>,
+
     /// Output schema.
     schema: SchemaRef,
 
@@ -1529,6 +1548,7 @@ impl GraphTraverseMainStream {
         target_properties: Vec<String>,
         graph_ctx: Arc<GraphExecutionContext>,
         optional: bool,
+        bound_target_column: Option<String>,
         schema: SchemaRef,
         metrics: BaselineMetrics,
     ) -> Self {
@@ -1548,6 +1568,7 @@ impl GraphTraverseMainStream {
             target_properties,
             graph_ctx,
             optional,
+            bound_target_column,
             schema,
             state: GraphTraverseMainState::LoadingEdges {
                 future: Box::pin(fut),
@@ -1574,6 +1595,15 @@ impl GraphTraverseMainStream {
         let source_vid_cow = column_as_vid_array(source_col.as_ref())?;
         let source_vids: &UInt64Array = &source_vid_cow;
 
+        // Read bound target VIDs if column exists
+        let bound_target_cow = self
+            .bound_target_column
+            .as_ref()
+            .and_then(|col| input.column_by_name(col))
+            .map(|c| column_as_vid_array(c.as_ref()))
+            .transpose()?;
+        let expected_targets: Option<&UInt64Array> = bound_target_cow.as_deref();
+
         // Build expansions: (input_row_idx, target_vid, eid, edge_type, edge_props)
         type Expansion = (usize, Vid, Eid, String, uni_common::Properties);
         let mut expansions: Vec<Expansion> = Vec::new();
@@ -1584,6 +1614,18 @@ impl GraphTraverseMainStream {
 
                 if let Some(neighbors) = adjacency.get(&src_vid) {
                     for (target_vid, eid, edge_type, props) in neighbors {
+                        // Filter by bound target VID if set (for patterns where target is in scope).
+                        // Only include traversals where the target matches the expected VID.
+                        if let Some(targets) = expected_targets {
+                            if targets.is_null(row_idx) {
+                                continue;
+                            }
+                            let expected_vid = targets.value(row_idx);
+                            if target_vid.as_u64() != expected_vid {
+                                continue;
+                            }
+                        }
+
                         expansions.push((
                             row_idx,
                             *target_vid,
@@ -1628,14 +1670,22 @@ impl GraphTraverseMainStream {
             columns.push(expanded);
         }
 
-        // Add target ._vid column
+        // Add target ._vid column (only if not already in input)
+        let target_vid_name = format!("{}._vid", self.target_variable);
         let target_vids: Vec<u64> = expansions
             .iter()
             .map(|(_, vid, _, _, _)| vid.as_u64())
             .collect();
-        columns.push(Arc::new(UInt64Array::from(target_vids)));
+        if input.schema().column_with_name(&target_vid_name).is_none() {
+            columns.push(Arc::new(UInt64Array::from(target_vids.clone())));
+        }
 
-        // Add target ._labels column (from L0 buffers)
+        // Add target ._labels column (only if not already in input)
+        let target_labels_name = format!("{}._labels", self.target_variable);
+        if input
+            .schema()
+            .column_with_name(&target_labels_name)
+            .is_none()
         {
             use arrow_array::builder::{ListBuilder, StringBuilder};
             let l0_ctx = self.graph_ctx.l0_context();
@@ -2050,6 +2100,9 @@ pub struct GraphVariableLengthTraverseExec {
     /// Whether this is an optional match (LEFT JOIN semantics).
     is_optional: bool,
 
+    /// Column name of an already-bound target VID (for patterns where target is in scope).
+    bound_target_column: Option<String>,
+
     /// Graph execution context.
     graph_ctx: Arc<GraphExecutionContext>,
 
@@ -2093,6 +2146,7 @@ impl GraphVariableLengthTraverseExec {
         target_label_name: Option<String>,
         graph_ctx: Arc<GraphExecutionContext>,
         is_optional: bool,
+        bound_target_column: Option<String>,
     ) -> Self {
         let source_column = source_column.into();
         let target_variable = target_variable.into();
@@ -2127,6 +2181,7 @@ impl GraphVariableLengthTraverseExec {
             target_properties,
             target_label_name,
             is_optional,
+            bound_target_column,
             graph_ctx,
             schema,
             properties,
@@ -2151,25 +2206,29 @@ impl GraphVariableLengthTraverseExec {
             .map(|f| f.as_ref().clone())
             .collect();
 
-        // Add target VID column
-        fields.push(Field::new(
-            format!("{}._vid", target_variable),
-            DataType::UInt64,
-            false,
-        ));
+        // Add target VID column (only if not already in input)
+        let target_vid_name = format!("{}._vid", target_variable);
+        if input_schema.column_with_name(&target_vid_name).is_none() {
+            fields.push(Field::new(target_vid_name, DataType::UInt64, true));
+        }
 
-        // Add target ._labels column (List(Utf8)) for labels() and structural projection support
-        fields.push(Field::new(
-            format!("{}._labels", target_variable),
-            DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
-            true,
-        ));
+        // Add target ._labels column (only if not already in input)
+        let target_labels_name = format!("{}._labels", target_variable);
+        if input_schema.column_with_name(&target_labels_name).is_none() {
+            fields.push(Field::new(
+                target_labels_name,
+                DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
+                true,
+            ));
+        }
 
-        // Add target vertex property columns
+        // Add target vertex property columns (skip if already in input)
         for prop_name in target_properties {
             let col_name = format!("{}.{}", target_variable, prop_name);
-            let arrow_type = resolve_property_type(prop_name, label_props);
-            fields.push(Field::new(&col_name, arrow_type, true));
+            if input_schema.column_with_name(&col_name).is_none() {
+                let arrow_type = resolve_property_type(prop_name, label_props);
+                fields.push(Field::new(&col_name, arrow_type, true));
+            }
         }
 
         // Add hop count
@@ -2250,6 +2309,7 @@ impl ExecutionPlan for GraphVariableLengthTraverseExec {
             self.target_label_name.clone(),
             self.graph_ctx.clone(),
             self.is_optional,
+            self.bound_target_column.clone(),
         )))
     }
 
@@ -2295,6 +2355,7 @@ impl GraphVariableLengthTraverseExec {
             target_properties: self.target_properties.clone(),
             target_label_name: self.target_label_name.clone(),
             is_optional: self.is_optional,
+            bound_target_column: self.bound_target_column.clone(),
             graph_ctx: self.graph_ctx.clone(),
         }
     }
@@ -2313,6 +2374,7 @@ struct GraphVariableLengthTraverseExecData {
     target_properties: Vec<String>,
     target_label_name: Option<String>,
     is_optional: bool,
+    bound_target_column: Option<String>,
     graph_ctx: Arc<GraphExecutionContext>,
 }
 
@@ -2524,6 +2586,16 @@ impl GraphVariableLengthTraverseStream {
         let source_vid_cow = column_as_vid_array(source_col.as_ref())?;
         let source_vids: &UInt64Array = &source_vid_cow;
 
+        // Read bound target VIDs if column exists
+        let bound_target_cow = self
+            .exec
+            .bound_target_column
+            .as_ref()
+            .and_then(|col| batch.column_by_name(col))
+            .map(|c| column_as_vid_array(c.as_ref()))
+            .transpose()?;
+        let expected_targets: Option<&UInt64Array> = bound_target_cow.as_deref();
+
         // Collect all BFS results
         let mut expansions: Vec<VarLengthExpansion> = Vec::new();
 
@@ -2540,6 +2612,18 @@ impl GraphVariableLengthTraverseStream {
                 expansions.push((row_idx, Vid::from(0u64), 0, vec![], vec![]));
             } else {
                 for (target, hop_count, node_path, edge_path) in bfs_results {
+                    // Filter by bound target VID if set (for patterns where target is in scope).
+                    // Only include paths where the final target matches the expected VID.
+                    if let Some(targets) = expected_targets {
+                        if targets.is_null(row_idx) {
+                            continue;
+                        }
+                        let expected_vid = targets.value(row_idx);
+                        if target.as_u64() != expected_vid {
+                            continue;
+                        }
+                    }
+
                     expansions.push((row_idx, target, hop_count, node_path, edge_path));
                 }
             }
@@ -2573,14 +2657,24 @@ impl GraphVariableLengthTraverseStream {
             columns.push(expanded);
         }
 
-        // Add target VID column
+        // Collect target VIDs for use in multiple places
         let target_vids: Vec<u64> = expansions
             .iter()
             .map(|(_, vid, _, _, _)| vid.as_u64())
             .collect();
-        columns.push(Arc::new(UInt64Array::from(target_vids.clone())));
 
-        // Add target ._labels column (from L0 buffers)
+        // Add target VID column (only if not already in input)
+        let target_vid_name = format!("{}._vid", self.exec.target_variable);
+        if input.schema().column_with_name(&target_vid_name).is_none() {
+            columns.push(Arc::new(UInt64Array::from(target_vids.clone())));
+        }
+
+        // Add target ._labels column (only if not already in input)
+        let target_labels_name = format!("{}._labels", self.exec.target_variable);
+        if input
+            .schema()
+            .column_with_name(&target_labels_name)
+            .is_none()
         {
             use arrow_array::builder::{ListBuilder, StringBuilder};
             let l0_ctx = self.exec.graph_ctx.l0_context();
@@ -2610,12 +2704,15 @@ impl GraphVariableLengthTraverseStream {
             columns.push(Arc::new(labels_builder.finish()));
         }
 
-        // Add null placeholder columns for target properties (hydrated async if needed)
-        for _ in &self.exec.target_properties {
-            let col_idx = columns.len();
-            if col_idx < self.schema.fields().len() {
-                let field = self.schema.field(col_idx);
-                columns.push(arrow_array::new_null_array(field.data_type(), num_rows));
+        // Add null placeholder columns for target properties (hydrated async if needed, skip if already in input)
+        for prop_name in &self.exec.target_properties {
+            let full_prop_name = format!("{}.{}", self.exec.target_variable, prop_name);
+            if input.schema().column_with_name(&full_prop_name).is_none() {
+                let col_idx = columns.len();
+                if col_idx < self.schema.fields().len() {
+                    let field = self.schema.field(col_idx);
+                    columns.push(arrow_array::new_null_array(field.data_type(), num_rows));
+                }
             }
         }
 
@@ -2758,14 +2855,8 @@ async fn hydrate_vlp_target_properties(
     };
 
     let vid_col = base_batch.column(vid_col_idx);
-    let target_vid_array = vid_col
-        .as_any()
-        .downcast_ref::<UInt64Array>()
-        .ok_or_else(|| {
-            datafusion::error::DataFusionError::Execution(
-                "Target VID column is not UInt64".to_string(),
-            )
-        })?;
+    let target_vid_cow = column_as_vid_array(vid_col.as_ref())?;
+    let target_vid_array: &UInt64Array = &target_vid_cow;
 
     let target_vids: Vec<Vid> = target_vid_array
         .iter()
@@ -2930,6 +3021,9 @@ pub struct GraphVariableLengthTraverseMainExec {
     /// Whether this is an optional match (LEFT JOIN semantics).
     is_optional: bool,
 
+    /// Column name of an already-bound target VID (for patterns where target is in scope).
+    bound_target_column: Option<String>,
+
     /// Graph execution context.
     graph_ctx: Arc<GraphExecutionContext>,
 
@@ -2972,6 +3066,7 @@ impl GraphVariableLengthTraverseMainExec {
         target_properties: Vec<String>,
         graph_ctx: Arc<GraphExecutionContext>,
         is_optional: bool,
+        bound_target_column: Option<String>,
     ) -> Self {
         let source_column = source_column.into();
         let target_variable = target_variable.into();
@@ -2998,6 +3093,7 @@ impl GraphVariableLengthTraverseMainExec {
             path_variable,
             target_properties,
             is_optional,
+            bound_target_column,
             graph_ctx,
             schema,
             properties,
@@ -3019,19 +3115,21 @@ impl GraphVariableLengthTraverseMainExec {
             .map(|f| f.as_ref().clone())
             .collect();
 
-        // Add target VID column
-        fields.push(Field::new(
-            format!("{}._vid", target_variable),
-            DataType::UInt64,
-            false,
-        ));
+        // Add target VID column (only if not already in input)
+        let target_vid_name = format!("{}._vid", target_variable);
+        if input_schema.column_with_name(&target_vid_name).is_none() {
+            fields.push(Field::new(target_vid_name, DataType::UInt64, true));
+        }
 
-        // Add target ._labels column (List(Utf8)) for labels() and structural projection support
-        fields.push(Field::new(
-            format!("{}._labels", target_variable),
-            DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
-            true,
-        ));
+        // Add target ._labels column (only if not already in input)
+        let target_labels_name = format!("{}._labels", target_variable);
+        if input_schema.column_with_name(&target_labels_name).is_none() {
+            fields.push(Field::new(
+                target_labels_name,
+                DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
+                true,
+            ));
+        }
 
         // Add hop count
         fields.push(Field::new("_hop_count", DataType::UInt64, false));
@@ -3048,12 +3146,12 @@ impl GraphVariableLengthTraverseMainExec {
         }
 
         // Add target property columns (as LargeBinary for lazy hydration via PropertyManager)
+        // Skip properties that are already in the input schema
         for prop in target_properties {
-            fields.push(Field::new(
-                format!("{}.{}", target_variable, prop),
-                DataType::LargeBinary,
-                true,
-            ));
+            let prop_name = format!("{}.{}", target_variable, prop);
+            if input_schema.column_with_name(&prop_name).is_none() {
+                fields.push(Field::new(prop_name, DataType::LargeBinary, true));
+            }
         }
 
         Arc::new(Schema::new(fields))
@@ -3120,6 +3218,7 @@ impl ExecutionPlan for GraphVariableLengthTraverseMainExec {
             self.target_properties.clone(),
             self.graph_ctx.clone(),
             self.is_optional,
+            self.bound_target_column.clone(),
         )))
     }
 
@@ -3151,6 +3250,7 @@ impl ExecutionPlan for GraphVariableLengthTraverseMainExec {
             target_properties: self.target_properties.clone(),
             graph_ctx: self.graph_ctx.clone(),
             is_optional: self.is_optional,
+            bound_target_column: self.bound_target_column.clone(),
             schema: self.schema.clone(),
             state: VarLengthMainStreamState::Loading(Box::pin(load_fut)),
             metrics,
@@ -3192,6 +3292,7 @@ struct GraphVariableLengthTraverseMainStream {
     target_properties: Vec<String>,
     graph_ctx: Arc<GraphExecutionContext>,
     is_optional: bool,
+    bound_target_column: Option<String>,
     schema: SchemaRef,
     state: VarLengthMainStreamState,
     metrics: BaselineMetrics,
@@ -3263,6 +3364,15 @@ impl GraphVariableLengthTraverseMainStream {
         let source_vid_cow = column_as_vid_array(source_col.as_ref())?;
         let source_vids: &UInt64Array = &source_vid_cow;
 
+        // Read bound target VIDs if column exists
+        let bound_target_cow = self
+            .bound_target_column
+            .as_ref()
+            .and_then(|col| batch.column_by_name(col))
+            .map(|c| column_as_vid_array(c.as_ref()))
+            .transpose()?;
+        let expected_targets: Option<&UInt64Array> = bound_target_cow.as_deref();
+
         // Collect BFS results: (original_row_idx, target_vid, hop_count, node_path, edge_path)
         let mut expansions: Vec<ExpansionRecord> = Vec::new();
 
@@ -3275,6 +3385,18 @@ impl GraphVariableLengthTraverseMainStream {
                 expansions.push((row_idx, Vid::from(0u64), 0, vec![], vec![]));
             } else {
                 for (target, hops, node_path, edge_path) in bfs_results {
+                    // Filter by bound target VID if set (for patterns where target is in scope).
+                    // Only include paths where the final target matches the expected VID.
+                    if let Some(targets) = expected_targets {
+                        if targets.is_null(row_idx) {
+                            continue;
+                        }
+                        let expected_vid = targets.value(row_idx);
+                        if target.as_u64() != expected_vid {
+                            continue;
+                        }
+                    }
+
                     expansions.push((row_idx, target, hops, node_path, edge_path));
                 }
             }
@@ -3298,14 +3420,22 @@ impl GraphVariableLengthTraverseMainStream {
             columns.push(expanded);
         }
 
-        // Add target VID column
-        let target_vids: Vec<u64> = expansions
-            .iter()
-            .map(|(_, vid, _, _, _)| vid.as_u64())
-            .collect();
-        columns.push(Arc::new(UInt64Array::from(target_vids)));
+        // Add target VID column (only if not already in input)
+        let target_vid_name = format!("{}._vid", self.target_variable);
+        if batch.schema().column_with_name(&target_vid_name).is_none() {
+            let target_vids: Vec<u64> = expansions
+                .iter()
+                .map(|(_, vid, _, _, _)| vid.as_u64())
+                .collect();
+            columns.push(Arc::new(UInt64Array::from(target_vids)));
+        }
 
-        // Add target ._labels column (from L0 buffers)
+        // Add target ._labels column (only if not already in input)
+        let target_labels_name = format!("{}._labels", self.target_variable);
+        if batch
+            .schema()
+            .column_with_name(&target_labels_name)
+            .is_none()
         {
             use arrow_array::builder::{ListBuilder, StringBuilder};
             let mut labels_builder = ListBuilder::new(StringBuilder::new());
@@ -3406,13 +3536,16 @@ impl GraphVariableLengthTraverseMainStream {
             columns.push(Arc::new(path_struct));
         }
 
-        // Add target property columns as NULL for now.
+        // Add target property columns as NULL for now (skip if already in input).
         // Property hydration happens via PropertyManager in the query execution pipeline.
-        for _prop_name in &self.target_properties {
-            columns.push(arrow_array::new_null_array(
-                &DataType::LargeBinary,
-                num_rows,
-            ));
+        for prop_name in &self.target_properties {
+            let full_prop_name = format!("{}.{}", self.target_variable, prop_name);
+            if batch.schema().column_with_name(&full_prop_name).is_none() {
+                columns.push(arrow_array::new_null_array(
+                    &DataType::LargeBinary,
+                    num_rows,
+                ));
+            }
         }
 
         RecordBatch::try_new(self.schema.clone(), columns)
