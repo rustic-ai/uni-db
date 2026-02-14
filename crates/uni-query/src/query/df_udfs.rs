@@ -4003,19 +4003,6 @@ mod tests {
         uni_common::cypher_value_codec::encode(&uni_val)
     }
 
-    /// Create a ScalarFunctionArgs with a single LargeBinary scalar.
-    fn make_scalar_args(scalar: ScalarValue, return_dt: DataType) -> ScalarFunctionArgs {
-        use datafusion::arrow::datatypes::Field;
-        use datafusion::config::ConfigOptions;
-
-        ScalarFunctionArgs {
-            args: vec![ColumnarValue::Scalar(scalar)],
-            arg_fields: vec![Arc::new(Field::new("input", DataType::LargeBinary, true))],
-            number_rows: 1,
-            return_field: Arc::new(Field::new("result", return_dt, true)),
-            config_options: Arc::new(ConfigOptions::default()),
-        }
-    }
 
     // Note: Old CypherValue decode UDF tests removed - those UDFs no longer exist.
     // CypherValue operations now route through Cypher-semantic UDFs instead.
