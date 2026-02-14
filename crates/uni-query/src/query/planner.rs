@@ -68,6 +68,36 @@ fn is_var_in_scope(vars: &[VariableInfo], name: &str) -> bool {
     find_var_in_scope(vars, name).is_some()
 }
 
+/// Check if an expression contains a pattern predicate.
+fn contains_pattern_predicate(expr: &Expr) -> bool {
+    match expr {
+        Expr::Exists {
+            from_pattern_predicate: true,
+            ..
+        } => true,
+        Expr::FunctionCall { args, .. } => args.iter().any(contains_pattern_predicate),
+        Expr::BinaryOp { left, right, .. } => {
+            contains_pattern_predicate(left) || contains_pattern_predicate(right)
+        }
+        Expr::UnaryOp { expr: e, .. } | Expr::Property(e, _) => contains_pattern_predicate(e),
+        Expr::List(items) => items.iter().any(contains_pattern_predicate),
+        Expr::Case {
+            expr,
+            when_then,
+            else_expr,
+        } => {
+            expr.as_ref().is_some_and(|e| contains_pattern_predicate(e))
+                || when_then
+                    .iter()
+                    .any(|(w, t)| contains_pattern_predicate(w) || contains_pattern_predicate(t))
+                || else_expr
+                    .as_ref()
+                    .is_some_and(|e| contains_pattern_predicate(e))
+        }
+        _ => false,
+    }
+}
+
 /// Add a variable to scope with type conflict validation.
 /// Returns an error if the variable already exists with a different type.
 fn add_var_to_scope(
@@ -923,6 +953,47 @@ fn validate_expression(expr: &Expr, vars_in_scope: &[VariableInfo]) -> Result<()
             validate_expression(e, vars_in_scope)?;
             validate_expression(list, vars_in_scope)
         }
+        Expr::Exists {
+            query,
+            from_pattern_predicate: true,
+        } => {
+            // Pattern predicates cannot introduce new named variables.
+            // Extract named vars from inner MATCH pattern, check each is in scope.
+            if let Query::Single(stmt) = query.as_ref() {
+                for clause in &stmt.clauses {
+                    if let Clause::Match(m) = clause {
+                        for path in &m.pattern.paths {
+                            for elem in &path.elements {
+                                match elem {
+                                    PatternElement::Node(n) => {
+                                        if let Some(var) = &n.variable
+                                            && !is_var_in_scope(vars_in_scope, var)
+                                        {
+                                            return Err(anyhow!(
+                                                "SyntaxError: UndefinedVariable - Variable '{}' not defined",
+                                                var
+                                            ));
+                                        }
+                                    }
+                                    PatternElement::Relationship(r) => {
+                                        if let Some(var) = &r.variable
+                                            && !is_var_in_scope(vars_in_scope, var)
+                                        {
+                                            return Err(anyhow!(
+                                                "SyntaxError: UndefinedVariable - Variable '{}' not defined",
+                                                var
+                                            ));
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(())
+        }
         _ => Ok(()),
     }
 }
@@ -1594,6 +1665,12 @@ impl QueryPlanner {
                         validate_expression_variables(expr, vars_in_scope)?;
                         // Validate function argument types and boolean operators
                         validate_expression(expr, vars_in_scope)?;
+                        // Pattern predicates are not allowed in RETURN
+                        if contains_pattern_predicate(expr) {
+                            return Err(anyhow!(
+                                "SyntaxError: UnexpectedSyntax - Pattern predicates are not allowed in RETURN"
+                            ));
+                        }
 
                         projections.push((expr.clone(), alias.clone()));
                         if expr.is_aggregate() {
@@ -2108,6 +2185,23 @@ impl QueryPlanner {
                     }
                 }
                 Clause::Set(set_clause) => {
+                    // Validate SET value expressions
+                    for item in &set_clause.items {
+                        match item {
+                            SetItem::Property { value, .. }
+                            | SetItem::Variable { value, .. }
+                            | SetItem::VariablePlus { value, .. } => {
+                                validate_expression_variables(value, &vars_in_scope)?;
+                                validate_expression(value, &vars_in_scope)?;
+                                if contains_pattern_predicate(value) {
+                                    return Err(anyhow!(
+                                        "SyntaxError: UnexpectedSyntax - Pattern predicates are not allowed in SET"
+                                    ));
+                                }
+                            }
+                            SetItem::Labels { .. } => {}
+                        }
+                    }
                     plan = LogicalPlan::Set {
                         input: Box::new(plan),
                         items: set_clause.items.clone(),
@@ -2353,7 +2447,7 @@ impl QueryPlanner {
                 }
             }
             Expr::Property(e, _) => Self::collect_window_functions(e, collected),
-            Expr::CountSubquery(_) | Expr::Exists(_) => {}
+            Expr::CountSubquery(_) | Expr::Exists { .. } => {}
             _ => {}
         }
     }
@@ -3554,6 +3648,20 @@ impl QueryPlanner {
         // Validate expression types (function args, boolean operators)
         validate_expression(predicate, vars_in_scope)?;
 
+        // Check that WHERE predicate isn't a bare node/edge/path variable
+        if let Expr::Variable(var_name) = predicate
+            && let Some(info) = find_var_in_scope(vars_in_scope, var_name)
+            && matches!(
+                info.var_type,
+                VariableType::Node | VariableType::Edge | VariableType::Path
+            )
+        {
+            return Err(anyhow!(
+                "SyntaxError: InvalidArgumentType - Type mismatch: expected Boolean but was {:?}",
+                info.var_type
+            ));
+        }
+
         let mut plan = plan;
 
         // Transform VALID_AT macro to function call
@@ -4056,6 +4164,16 @@ impl QueryPlanner {
                         }
                         new_vars.extend(vars_in_scope.iter().cloned());
                     } else {
+                        // Validate expression variables and syntax
+                        validate_expression_variables(expr, vars_in_scope)?;
+                        validate_expression(expr, vars_in_scope)?;
+                        // Pattern predicates are not allowed in WITH
+                        if contains_pattern_predicate(expr) {
+                            return Err(anyhow!(
+                                "SyntaxError: UnexpectedSyntax - Pattern predicates are not allowed in WITH"
+                            ));
+                        }
+
                         projections.push((expr.clone(), alias.clone()));
                         if expr.is_aggregate() {
                             has_agg = true;
@@ -5839,7 +5957,7 @@ fn collect_properties_from_expr_into(
             collect_properties_from_expr_into(list, properties);
             collect_properties_from_expr_into(expr, properties);
         }
-        Expr::Exists(_) | Expr::CountSubquery(_) | Expr::CollectSubquery(_) => {
+        Expr::Exists { .. } | Expr::CountSubquery(_) | Expr::CollectSubquery(_) => {
             // Subqueries have their own scope; no property collection needed
         }
         Expr::IsNull(expr) | Expr::IsNotNull(expr) | Expr::IsUnique(expr) => {

@@ -2256,10 +2256,14 @@ impl HybridPhysicalPlanner {
 
         let physical_group_by = PhysicalGroupBy::new_single(group_exprs);
 
+        // Pre-compute pattern comprehensions in aggregate arguments
+        let (input_plan, schema, rewritten_aggregates) =
+            self.precompute_custom_aggregate_args(input_plan, &schema, aggregates, &state, &ctx)?;
+
         // Translate aggregates and their associated filter expressions
         // (e.g. collect() uses a filter to exclude null values per Cypher spec)
         let (aggr_exprs, filter_exprs): (Vec<_>, Vec<_>) = self
-            .translate_aggregates(aggregates, &schema, &state, &ctx)?
+            .translate_aggregates(&rewritten_aggregates, &schema, &state, &ctx)?
             .into_iter()
             .unzip();
 
@@ -2389,6 +2393,103 @@ impl HybridPhysicalPlanner {
         }
 
         Ok(result)
+    }
+
+    /// Pre-compute pattern comprehensions in aggregate arguments.
+    ///
+    /// Scans aggregate expressions for pattern comprehensions, compiles them as
+    /// physical expressions, adds them as projected columns, and rewrites the
+    /// aggregate expressions to reference the pre-computed columns.
+    fn precompute_custom_aggregate_args(
+        &self,
+        input_plan: Arc<dyn ExecutionPlan>,
+        schema: &SchemaRef,
+        aggregates: &[Expr],
+        state: &SessionState,
+        ctx: &TranslationContext,
+    ) -> Result<(Arc<dyn ExecutionPlan>, SchemaRef, Vec<Expr>)> {
+        use crate::query::df_graph::expr_compiler::CypherPhysicalExprCompiler;
+
+        let mut needs_projection = false;
+        let mut proj_exprs: Vec<(Arc<dyn datafusion::physical_expr::PhysicalExpr>, String)> =
+            Vec::new();
+        let mut rewritten_aggregates = Vec::new();
+        let mut col_counter = 0;
+
+        // First pass: copy all existing columns
+        for (i, field) in schema.fields().iter().enumerate() {
+            let col_expr: Arc<dyn datafusion::physical_expr::PhysicalExpr> = Arc::new(
+                datafusion::physical_expr::expressions::Column::new(field.name(), i),
+            );
+            proj_exprs.push((col_expr, field.name().clone()));
+        }
+
+        // Second pass: scan aggregates for custom expressions in arguments
+        for agg_expr in aggregates {
+            let Expr::FunctionCall {
+                name,
+                args,
+                distinct,
+                window_spec,
+            } = agg_expr
+            else {
+                rewritten_aggregates.push(agg_expr.clone());
+                continue;
+            };
+
+            let mut rewritten_args = Vec::new();
+            let mut agg_needs_rewrite = false;
+
+            for arg in args {
+                if CypherPhysicalExprCompiler::contains_custom_expr(arg) {
+                    // Compile the custom expression
+                    let compiler = CypherPhysicalExprCompiler::new(state, Some(ctx))
+                        .with_subquery_ctx(
+                            self.graph_ctx.clone(),
+                            self.schema.clone(),
+                            self.session_ctx.clone(),
+                            self.storage.clone(),
+                            self.params.clone(),
+                        );
+                    let physical_expr = compiler.compile(arg, schema)?;
+
+                    // Add it as a projected column
+                    let col_name = format!("__pc_{}", col_counter);
+                    col_counter += 1;
+                    proj_exprs.push((physical_expr, col_name.clone()));
+
+                    // Rewrite aggregate to reference the column
+                    rewritten_args.push(Expr::Variable(col_name));
+                    agg_needs_rewrite = true;
+                    needs_projection = true;
+                } else {
+                    rewritten_args.push(arg.clone());
+                }
+            }
+
+            if agg_needs_rewrite {
+                rewritten_aggregates.push(Expr::FunctionCall {
+                    name: name.clone(),
+                    args: rewritten_args,
+                    distinct: *distinct,
+                    window_spec: window_spec.clone(),
+                });
+            } else {
+                rewritten_aggregates.push(agg_expr.clone());
+            }
+        }
+
+        if needs_projection {
+            let projection_exec = Arc::new(
+                datafusion::physical_plan::projection::ProjectionExec::try_new(
+                    proj_exprs, input_plan,
+                )?,
+            );
+            let new_schema = projection_exec.schema();
+            Ok((projection_exec, new_schema, rewritten_aggregates))
+        } else {
+            Ok((input_plan, schema.clone(), aggregates.to_vec()))
+        }
     }
 
     /// Plan a sort operation.

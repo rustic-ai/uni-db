@@ -554,7 +554,11 @@ pub enum Expr {
         when_then: Vec<(Expr, Expr)>,
         else_expr: Option<Box<Expr>>,
     },
-    Exists(Box<Query>),
+    Exists {
+        query: Box<Query>,
+        /// True when created from a bare pattern predicate `(n)-->()` in expression context.
+        from_pattern_predicate: bool,
+    },
     CountSubquery(Box<Query>),
     CollectSubquery(Box<Query>),
     IsNull(Box<Expr>),
@@ -1031,7 +1035,13 @@ impl Expr {
                     .map(|e| Box::new(e.substitute_variable(old_var, new_var))),
             },
 
-            Expr::Exists(query) => Expr::Exists(query.clone()), // Don't substitute inside subqueries
+            Expr::Exists {
+                query,
+                from_pattern_predicate,
+            } => Expr::Exists {
+                query: query.clone(),
+                from_pattern_predicate: *from_pattern_predicate,
+            }, // Don't substitute inside subqueries
             Expr::CountSubquery(query) => Expr::CountSubquery(query.clone()),
             Expr::CollectSubquery(query) => Expr::CollectSubquery(query.clone()),
 
@@ -1411,7 +1421,7 @@ impl Expr {
                 result.push_str(" END");
                 result
             }
-            Expr::Exists(_) => "EXISTS {...}".to_string(),
+            Expr::Exists { .. } => "EXISTS {...}".to_string(),
             Expr::CountSubquery(_) => "COUNT {...}".to_string(),
             Expr::CollectSubquery(_) => "COLLECT {...}".to_string(),
             Expr::IsNull(e) => format!("{} IS NULL", e.to_string_repr()),

@@ -1159,7 +1159,10 @@ fn build_primary_expression(pair: Pair<Rule>) -> Result<Expr, ParseError> {
                     first_item.as_rule()
                 ),
             };
-            Ok(Expr::Exists(Box::new(query)))
+            Ok(Expr::Exists {
+                query: Box::new(query),
+                from_pattern_predicate: false,
+            })
         }
         Rule::quantifier_expression => build_quantifier_expression(first),
         Rule::reduce_expression => build_reduce_expression(first),
@@ -1193,7 +1196,10 @@ fn build_primary_expression(pair: Pair<Rule>) -> Result<Expr, ParseError> {
             let statement = Statement {
                 clauses: vec![match_clause],
             };
-            Ok(Expr::Exists(Box::new(Query::Single(statement))))
+            Ok(Expr::Exists {
+                query: Box::new(Query::Single(statement)),
+                from_pattern_predicate: true,
+            })
         }
         Rule::COUNT => {
             let mut distinct = false;
@@ -2092,8 +2098,8 @@ fn build_range(pair: Pair<Rule>) -> Result<Range, ParseError> {
             max = Some(val as u32);
         }
     } else {
-        // [*] alone means 0 or more (Neo4j compatibility)
-        min = Some(0);
+        // [*] alone means 1 or more (OpenCypher standard default)
+        min = Some(1);
     }
 
     Ok(Range { min, max })

@@ -356,7 +356,13 @@ impl<'a> ExpressionWalker<'a> {
                 else_expr: else_expr.map(|e| Box::new(self.rewrite_expr(*e))),
             },
 
-            Expr::Exists(query) => Expr::Exists(Box::new(self.rewrite_query(*query))),
+            Expr::Exists {
+                query,
+                from_pattern_predicate,
+            } => Expr::Exists {
+                query: Box::new(self.rewrite_query(*query)),
+                from_pattern_predicate,
+            },
 
             Expr::CountSubquery(query) => Expr::CountSubquery(Box::new(self.rewrite_query(*query))),
 

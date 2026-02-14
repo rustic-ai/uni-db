@@ -360,7 +360,7 @@ pub fn cypher_expr_to_df(expr: &Expr, context: Option<&TranslationContext>) -> R
             "Reduce expressions not yet supported in DataFusion translation"
         )),
 
-        Expr::Exists(_) => Err(anyhow!(
+        Expr::Exists { .. } => Err(anyhow!(
             "EXISTS subqueries not yet supported in DataFusion translation"
         )),
 
@@ -1745,7 +1745,7 @@ fn collect_properties_recursive(expr: &Expr, properties: &mut Vec<(String, Strin
         }
         // Terminal nodes and subqueries (which have their own scope)
         Expr::Wildcard | Expr::Variable(_) | Expr::Parameter(_) | Expr::Literal(_) => {}
-        Expr::Exists(_) | Expr::CountSubquery(_) | Expr::CollectSubquery(_) => {}
+        Expr::Exists { .. } | Expr::CountSubquery(_) | Expr::CollectSubquery(_) => {}
     }
 }
 

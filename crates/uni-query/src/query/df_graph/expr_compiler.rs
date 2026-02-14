@@ -350,7 +350,7 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
             ),
 
             // EXISTS subquery: plan + execute per row, return boolean
-            Expr::Exists(query) => self.compile_exists(query),
+            Expr::Exists { query, .. } => self.compile_exists(query),
 
             // FunctionCall wrapping a custom expression (e.g. size(comprehension))
             Expr::FunctionCall {
@@ -547,6 +547,61 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
         )))
     }
 
+    /// Check if map_expr or where_clause contains a pattern comprehension that references the variable.
+    fn needs_vid_extraction_for_variable(
+        variable: &str,
+        map_expr: &Expr,
+        where_clause: Option<&Expr>,
+    ) -> bool {
+        fn expr_has_pattern_comp_referencing(expr: &Expr, var: &str) -> bool {
+            match expr {
+                Expr::PatternComprehension { pattern, .. } => {
+                    // Check if pattern uses the variable
+                    pattern.paths.iter().any(|path| {
+                        path.elements.iter().any(|elem| match elem {
+                            uni_cypher::ast::PatternElement::Node(n) => {
+                                n.variable.as_deref() == Some(var)
+                            }
+                            uni_cypher::ast::PatternElement::Relationship(r) => {
+                                r.variable.as_deref() == Some(var)
+                            }
+                            _ => false,
+                        })
+                    })
+                }
+                Expr::FunctionCall { args, .. } => args
+                    .iter()
+                    .any(|a| expr_has_pattern_comp_referencing(a, var)),
+                Expr::BinaryOp { left, right, .. } => {
+                    expr_has_pattern_comp_referencing(left, var)
+                        || expr_has_pattern_comp_referencing(right, var)
+                }
+                Expr::UnaryOp { expr: e, .. } | Expr::Property(e, _) => {
+                    expr_has_pattern_comp_referencing(e, var)
+                }
+                Expr::List(items) => items
+                    .iter()
+                    .any(|i| expr_has_pattern_comp_referencing(i, var)),
+                Expr::ListComprehension {
+                    list,
+                    map_expr,
+                    where_clause,
+                    ..
+                } => {
+                    expr_has_pattern_comp_referencing(list, var)
+                        || expr_has_pattern_comp_referencing(map_expr, var)
+                        || where_clause
+                            .as_ref()
+                            .is_some_and(|w| expr_has_pattern_comp_referencing(w, var))
+                }
+                _ => false,
+            }
+        }
+
+        expr_has_pattern_comp_referencing(map_expr, variable)
+            || where_clause.is_some_and(|w| expr_has_pattern_comp_referencing(w, variable))
+    }
+
     /// Check if an expression tree contains nodes that require custom compilation.
     pub fn contains_custom_expr(expr: &Expr) -> bool {
         match expr {
@@ -575,7 +630,7 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
             Expr::In { expr: l, list: r } => {
                 Self::contains_custom_expr(l) || Self::contains_custom_expr(r)
             }
-            Expr::Exists(_) => true,
+            Expr::Exists { .. } => true,
             _ => false,
         }
     }
@@ -683,12 +738,25 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
 
         // Create inner schema with loop variable (shadow outer variable if same name)
         let mut fields = input_schema.fields().to_vec();
-        let loop_var_field = Arc::new(Field::new(variable, inner_data_type, true));
+        let loop_var_field = Arc::new(Field::new(variable, inner_data_type.clone(), true));
 
         if let Some(pos) = fields.iter().position(|f| f.name() == variable) {
             fields[pos] = loop_var_field;
         } else {
             fields.push(loop_var_field);
+        }
+
+        // Check if we need VID extraction for nested pattern comprehensions
+        let needs_vid_extraction =
+            Self::needs_vid_extraction_for_variable(variable, map_expr, where_clause);
+        if needs_vid_extraction && inner_data_type == DataType::LargeBinary {
+            // Add a {variable}._vid field for VID extraction
+            let vid_field = Arc::new(Field::new(
+                format!("{}._vid", variable),
+                DataType::UInt64,
+                true,
+            ));
+            fields.push(vid_field);
         }
 
         let inner_schema = Arc::new(Schema::new(fields));

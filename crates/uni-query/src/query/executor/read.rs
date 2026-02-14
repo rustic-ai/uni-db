@@ -1361,7 +1361,7 @@ impl Executor {
                     }
                     Ok(Value::Map(map))
                 }
-                Expr::Exists(query) => {
+                Expr::Exists { query, .. } => {
                     // Plan and execute subquery; failures return false (pattern doesn't match)
                     let planner =
                         QueryPlanner::new(Arc::new(this.storage.schema_manager().schema().clone()));
