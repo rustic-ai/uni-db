@@ -15,7 +15,9 @@
 //! ```
 
 use crate::query::df_graph::GraphExecutionContext;
-use crate::query::df_graph::common::{compute_plan_properties, evaluate_simple_expr};
+use crate::query::df_graph::common::{
+    compute_plan_properties, evaluate_simple_expr, labels_data_type,
+};
 use crate::query::df_graph::scan::resolve_property_type;
 use arrow_array::builder::{
     Float32Builder, Float64Builder, Int64Builder, StringBuilder, UInt64Builder,
@@ -177,7 +179,7 @@ impl GraphProcedureCallExec {
                             fields.push(Field::new(output_name, DataType::Utf8, false));
                             fields.push(Field::new(
                                 format!("{}._labels", output_name),
-                                DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
+                                labels_data_type(),
                                 true,
                             ));
 
@@ -883,7 +885,8 @@ async fn build_search_result_batch(
                 field_idx += 1;
 
                 // _labels column
-                let mut labels_builder = arrow_array::builder::ListBuilder::new(StringBuilder::new());
+                let mut labels_builder =
+                    arrow_array::builder::ListBuilder::new(StringBuilder::new());
                 for _ in 0..num_rows {
                     labels_builder.values().append_value(label);
                     labels_builder.append(true);

@@ -153,22 +153,10 @@ impl Compactor {
 
                 // Extract labels from the _labels column (keep latest version's labels)
                 if let Some(list_arr) = labels_col
-                    && !list_arr.is_null(i)
                     && version >= *vertex_versions.entry(vid).or_insert(0)
                 {
-                    let values = list_arr.value(i);
-                    if let Some(str_arr) =
-                        values.as_any().downcast_ref::<arrow_array::StringArray>()
-                    {
-                        let labels: Vec<String> = (0..str_arr.len())
-                            .filter_map(|j| {
-                                if str_arr.is_null(j) {
-                                    None
-                                } else {
-                                    Some(str_arr.value(j).to_string())
-                                }
-                            })
-                            .collect();
+                    let labels = crate::storage::arrow_convert::labels_from_list_array(list_arr, i);
+                    if !labels.is_empty() {
                         vertex_labels.insert(vid, labels);
                     }
                 }

@@ -15,7 +15,9 @@
 //! ```
 
 use crate::query::df_graph::GraphExecutionContext;
-use crate::query::df_graph::common::{compute_plan_properties, evaluate_simple_expr};
+use crate::query::df_graph::common::{
+    compute_plan_properties, evaluate_simple_expr, labels_data_type,
+};
 use crate::query::df_graph::scan::resolve_property_type;
 use arrow_array::builder::{Float32Builder, StringBuilder, UInt64Builder};
 use arrow_array::{ArrayRef, RecordBatch};
@@ -164,11 +166,7 @@ impl GraphVectorKnnExec {
         let mut fields = vec![
             Field::new(format!("{}._vid", variable), DataType::UInt64, false),
             Field::new(variable, DataType::Utf8, false),
-            Field::new(
-                format!("{}._labels", variable),
-                DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
-                true,
-            ),
+            Field::new(format!("{}._labels", variable), labels_data_type(), true),
             Field::new(format!("{}._score", variable), DataType::Float32, true),
         ];
 

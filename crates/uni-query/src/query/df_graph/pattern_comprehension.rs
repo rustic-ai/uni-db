@@ -35,7 +35,9 @@ use uni_store::runtime::l0_visibility;
 use uni_store::storage::direction::Direction;
 
 use super::GraphExecutionContext;
-use crate::query::df_graph::common::{build_path_struct_field, column_as_vid_array};
+use crate::query::df_graph::common::{
+    build_path_struct_field, column_as_vid_array, labels_data_type,
+};
 use crate::query::df_graph::scan::build_property_column_static;
 
 /// A single hop derived from the pattern's elements.
@@ -652,7 +654,7 @@ impl PatternComprehensionExecExpr {
 
         let node_struct_fields = vec![
             Arc::new(Field::new("_vid", DataType::UInt64, false)),
-            Arc::new(Field::new("_labels", DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))), true)),
+            Arc::new(Field::new("_labels", labels_data_type(), true)),
             Arc::new(Field::new("properties", DataType::LargeBinary, true)),
         ];
         let edge_struct_fields = vec![
@@ -765,7 +767,9 @@ impl PatternComprehensionExecExpr {
             .append_value(vid.as_u64());
 
         let all_labels = l0_visibility::get_vertex_labels(vid, query_ctx);
-        let labels_builder = nodes_struct.field_builder::<ListBuilder<StringBuilder>>(1).unwrap();
+        let labels_builder = nodes_struct
+            .field_builder::<ListBuilder<StringBuilder>>(1)
+            .unwrap();
         for lbl in &all_labels {
             labels_builder.values().append_value(lbl);
         }

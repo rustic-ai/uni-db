@@ -691,10 +691,12 @@ impl<'a> BulkWriter<'a> {
                 updated_at.insert(*vid, now);
             }
 
-            // Convert 2-tuples to 3-tuples with labels for per-label table
+            // Build per-label and main-vertex entries from the 2-tuple input.
+            // Both tables need labels attached; compute once per vertex.
+            let labels = vec![label.to_string()];
             let vertices_with_labels: Vec<(Vid, Vec<String>, Properties)> = vertices
                 .iter()
-                .map(|(vid, props)| (*vid, vec![label.to_string()], props.clone()))
+                .map(|(vid, props)| (*vid, labels.clone(), props.clone()))
                 .collect();
 
             let batch = ds
@@ -721,10 +723,11 @@ impl<'a> BulkWriter<'a> {
                 .map_err(UniError::Internal)?;
 
             // Dual-write to main vertices table
-            let main_vertices: Vec<(Vid, Vec<String>, Properties, bool, u64)> = vertices
-                .iter()
-                .map(|(vid, props)| (*vid, vec![label.to_string()], props.clone(), false, 1u64))
-                .collect();
+            let main_vertices: Vec<(Vid, Vec<String>, Properties, bool, u64)> =
+                vertices_with_labels
+                    .into_iter()
+                    .map(|(vid, lbls, props)| (vid, lbls, props, false, 1u64))
+                    .collect();
 
             if !main_vertices.is_empty() {
                 let main_batch = MainVertexDataset::build_record_batch(

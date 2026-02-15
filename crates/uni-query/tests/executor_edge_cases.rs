@@ -115,7 +115,9 @@ async fn test_execute_match_with_null_properties() {
             Arc::new(StringArray::from(vec![None::<&str>; 3])),                   // ext_id
             // _labels
             {
-                let mut lb = arrow_array::builder::ListBuilder::new(arrow_array::builder::StringBuilder::new());
+                let mut lb = arrow_array::builder::ListBuilder::new(
+                    arrow_array::builder::StringBuilder::new(),
+                );
                 for _ in 0..3 {
                     lb.values().append_value("Person");
                     lb.append(true);

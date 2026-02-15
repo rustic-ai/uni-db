@@ -242,7 +242,11 @@ impl ResultNormalizer {
                 .collect()
         } else if let Some(Value::String(s)) = map.get("_labels") {
             // Single string fallback for backwards compat within same session
-            if s.is_empty() { vec![] } else { vec![s.clone()] }
+            if s.is_empty() {
+                vec![]
+            } else {
+                vec![s.clone()]
+            }
         } else {
             Vec::new()
         };

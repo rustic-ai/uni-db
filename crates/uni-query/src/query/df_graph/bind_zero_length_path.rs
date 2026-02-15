@@ -16,7 +16,7 @@
 //! ```
 
 use super::GraphExecutionContext;
-use super::common::compute_plan_properties;
+use super::common::{compute_plan_properties, labels_data_type};
 use arrow_array::builder::{
     LargeBinaryBuilder, ListBuilder, StringBuilder, StructBuilder, UInt64Builder,
 };
@@ -115,7 +115,7 @@ impl BindZeroLengthPathExec {
         // Node struct fields: _vid, _labels, properties (as LargeBinary/JSON)
         let node_struct_fields = Fields::from(vec![
             Field::new("_vid", DataType::UInt64, false),
-            Field::new("_labels", DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))), true),
+            Field::new("_labels", labels_data_type(), true),
             Field::new("properties", DataType::LargeBinary, true),
         ]);
         let node_item = Field::new("item", DataType::Struct(node_struct_fields), true);
@@ -268,7 +268,7 @@ impl BindZeroLengthPathStream {
         // Create builders for nodes and empty edges
         let node_struct_fields = Fields::from(vec![
             Field::new("_vid", DataType::UInt64, false),
-            Field::new("_labels", DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))), true),
+            Field::new("_labels", labels_data_type(), true),
             Field::new("properties", DataType::LargeBinary, true),
         ]);
         let edge_struct_fields = Fields::from(vec![
@@ -356,7 +356,9 @@ impl BindZeroLengthPathStream {
             .unwrap()
             .append_value(vid_value);
 
-        let labels_builder = nodes_struct.field_builder::<ListBuilder<StringBuilder>>(1).unwrap();
+        let labels_builder = nodes_struct
+            .field_builder::<ListBuilder<StringBuilder>>(1)
+            .unwrap();
         for lbl in &all_labels {
             labels_builder.values().append_value(lbl);
         }

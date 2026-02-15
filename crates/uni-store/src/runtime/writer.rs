@@ -1932,6 +1932,29 @@ impl Writer {
             }
 
             // 2.5 Flush Vertices - Collect by label (using vertex_labels from L0)
+            //
+            // Helper: fan-out a single vertex entry into per-label buckets.
+            // Each per-label table row carries the full label set so multi-label
+            // info is preserved after flush.
+            let push_vertex_to_labels = |vid: Vid,
+                                         all_labels: &[String],
+                                         props: Properties,
+                                         deleted: bool,
+                                         version: u64,
+                                         out: &mut HashMap<u16, Vec<VertexEntry>>| {
+                for label in all_labels {
+                    if let Some(label_id) = schema.label_id_by_name(label) {
+                        out.entry(label_id).or_default().push((
+                            vid,
+                            all_labels.to_vec(),
+                            props.clone(),
+                            deleted,
+                            version,
+                        ));
+                    }
+                }
+            };
+
             for (vid, props) in &old_l0.vertex_properties {
                 let version = old_l0.vertex_versions.get(vid).copied().unwrap_or(0);
                 // Collect timestamps for this vertex
@@ -1941,39 +1964,28 @@ impl Writer {
                 if let Some(&ts) = old_l0.vertex_updated_at.get(vid) {
                     vertex_updated_at.insert(*vid, ts);
                 }
-                // Get labels for this vertex (use first label for partitioning, or 0 if unknown)
                 if let Some(labels) = old_l0.vertex_labels.get(vid) {
-                    let all_labels: Vec<String> = labels.clone();
-                    for label in labels {
-                        // Look up label_id from schema
-                        if let Some(label_id) = schema.label_id_by_name(label) {
-                            vertices_by_label.entry(label_id).or_default().push((
-                                *vid,
-                                all_labels.clone(),
-                                props.clone(),
-                                false,
-                                version,
-                            ));
-                        }
-                    }
+                    push_vertex_to_labels(
+                        *vid,
+                        labels,
+                        props.clone(),
+                        false,
+                        version,
+                        &mut vertices_by_label,
+                    );
                 }
             }
             for &vid in &old_l0.vertex_tombstones {
                 let version = old_l0.vertex_versions.get(&vid).copied().unwrap_or(0);
-                // For tombstones, we might not have labels, try to get from vertex_labels
                 if let Some(labels) = old_l0.vertex_labels.get(&vid) {
-                    let all_labels: Vec<String> = labels.clone();
-                    for label in labels {
-                        if let Some(label_id) = schema.label_id_by_name(label) {
-                            vertices_by_label.entry(label_id).or_default().push((
-                                vid,
-                                all_labels.clone(),
-                                HashMap::new(),
-                                true,
-                                version,
-                            ));
-                        }
-                    }
+                    push_vertex_to_labels(
+                        vid,
+                        labels,
+                        HashMap::new(),
+                        true,
+                        version,
+                        &mut vertices_by_label,
+                    );
                 }
             }
         } // Drop read lock

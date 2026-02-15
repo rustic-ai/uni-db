@@ -33,7 +33,8 @@
 use crate::query::df_graph::GraphExecutionContext;
 use crate::query::df_graph::common::{
     append_edge_to_struct, append_node_to_struct, build_edge_list_field, build_path_struct_field,
-    column_as_vid_array, compute_plan_properties, new_edge_list_builder, new_node_list_builder,
+    column_as_vid_array, compute_plan_properties, labels_data_type, new_edge_list_builder,
+    new_node_list_builder,
 };
 use crate::query::df_graph::scan::{build_property_column_static, resolve_property_type};
 use arrow::compute::take;
@@ -326,7 +327,7 @@ impl GraphTraverseExec {
         // Add target ._labels column (List(Utf8)) for labels() and structural projection support
         fields.push(Field::new(
             format!("{}._labels", target_variable),
-            DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
+            labels_data_type(),
             true,
         ));
 
@@ -1506,11 +1507,7 @@ impl GraphTraverseMainExec {
         // Add target ._labels column (only if not already in input)
         let target_labels_name = format!("{}._labels", target_variable);
         if input_schema.column_with_name(&target_labels_name).is_none() {
-            fields.push(Field::new(
-                target_labels_name,
-                DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
-                true,
-            ));
+            fields.push(Field::new(target_labels_name, labels_data_type(), true));
         }
 
         // Add edge columns if edge variable is bound
@@ -2411,11 +2408,7 @@ impl GraphVariableLengthTraverseExec {
         // Add target ._labels column (only if not already in input)
         let target_labels_name = format!("{}._labels", target_variable);
         if input_schema.column_with_name(&target_labels_name).is_none() {
-            fields.push(Field::new(
-                target_labels_name,
-                DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
-                true,
-            ));
+            fields.push(Field::new(target_labels_name, labels_data_type(), true));
         }
 
         // Add target vertex property columns (skip if already in input)
@@ -3349,11 +3342,7 @@ impl GraphVariableLengthTraverseMainExec {
         // Add target ._labels column (only if not already in input)
         let target_labels_name = format!("{}._labels", target_variable);
         if input_schema.column_with_name(&target_labels_name).is_none() {
-            fields.push(Field::new(
-                target_labels_name,
-                DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
-                true,
-            ));
+            fields.push(Field::new(target_labels_name, labels_data_type(), true));
         }
 
         // Add hop count

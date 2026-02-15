@@ -43,6 +43,15 @@ pub fn compute_plan_properties(schema: SchemaRef) -> PlanProperties {
     )
 }
 
+/// Return the Arrow `DataType` for `_labels` columns: `List<Utf8>`.
+///
+/// This is used across scan, traverse, bind, and other modules whenever a
+/// `_labels` field needs to be declared in a schema. Centralizing the
+/// definition avoids divergence and reduces boilerplate.
+pub fn labels_data_type() -> DataType {
+    DataType::List(Arc::new(Field::new("item", DataType::Utf8, true)))
+}
+
 /// Extract a `UInt64Array` of vertex/edge IDs from an Arrow column.
 ///
 /// Accepts both `UInt64` (native VID type) and `Int64` (from parameter
@@ -181,7 +190,7 @@ pub fn extract_vids_from_cypher_value_column(col: &dyn Array) -> DFResult<arrow_
 pub fn node_struct_fields() -> arrow_schema::Fields {
     arrow_schema::Fields::from(vec![
         Field::new("_vid", DataType::UInt64, false),
-        Field::new("_labels", DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))), true),
+        Field::new("_labels", labels_data_type(), true),
         Field::new("properties", DataType::LargeBinary, true),
     ])
 }
@@ -267,7 +276,9 @@ pub fn new_edge_list_builder()
 /// fields match `node_struct_fields()`.
 pub fn new_node_list_builder()
 -> arrow_array::builder::ListBuilder<arrow_array::builder::StructBuilder> {
-    use arrow_array::builder::{LargeBinaryBuilder, ListBuilder, StringBuilder, StructBuilder, UInt64Builder};
+    use arrow_array::builder::{
+        LargeBinaryBuilder, ListBuilder, StringBuilder, StructBuilder, UInt64Builder,
+    };
     arrow_array::builder::ListBuilder::new(StructBuilder::new(
         node_struct_fields(),
         vec![
@@ -340,7 +351,9 @@ pub fn append_node_to_struct(
         .unwrap()
         .append_value(vid.as_u64());
     let labels = l0_visibility::get_vertex_labels(vid, query_ctx);
-    let labels_builder = struct_builder.field_builder::<ListBuilder<StringBuilder>>(1).unwrap();
+    let labels_builder = struct_builder
+        .field_builder::<ListBuilder<StringBuilder>>(1)
+        .unwrap();
     if labels.is_empty() {
         labels_builder.append(true); // empty list
     } else {

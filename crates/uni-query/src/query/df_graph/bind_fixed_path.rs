@@ -10,7 +10,7 @@
 //! where the traversals are single-hop and the path variable needs to be materialized.
 
 use super::GraphExecutionContext;
-use super::common::compute_plan_properties;
+use super::common::{compute_plan_properties, labels_data_type};
 use arrow_array::builder::{
     LargeBinaryBuilder, ListBuilder, StringBuilder, StructBuilder, UInt64Builder,
 };
@@ -111,7 +111,7 @@ impl BindFixedPathExec {
 pub fn build_path_struct_field(path_variable: &str) -> Field {
     let node_struct_fields = Fields::from(vec![
         Field::new("_vid", DataType::UInt64, false),
-        Field::new("_labels", DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))), true),
+        Field::new("_labels", labels_data_type(), true),
         Field::new("properties", DataType::LargeBinary, true),
     ]);
     let node_item = Field::new("item", DataType::Struct(node_struct_fields), true);
@@ -231,7 +231,7 @@ impl BindFixedPathStream {
         // Build node and edge struct fields (same as BindZeroLengthPathExec)
         let node_struct_fields = Fields::from(vec![
             Field::new("_vid", DataType::UInt64, false),
-            Field::new("_labels", DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))), true),
+            Field::new("_labels", labels_data_type(), true),
             Field::new("properties", DataType::LargeBinary, true),
         ]);
         let edge_struct_fields = Fields::from(vec![
@@ -403,7 +403,9 @@ impl BindFixedPathStream {
             .unwrap()
             .append_value(vid_value);
 
-        let labels_builder = nodes_struct.field_builder::<ListBuilder<StringBuilder>>(1).unwrap();
+        let labels_builder = nodes_struct
+            .field_builder::<ListBuilder<StringBuilder>>(1)
+            .unwrap();
         for lbl in &all_labels {
             labels_builder.values().append_value(lbl);
         }

@@ -89,6 +89,25 @@ where
     Arc::new(builder.finish())
 }
 
+/// Extract a `Vec<String>` from a single row of a `List<Utf8>` column.
+///
+/// Returns an empty vec when the row is null, the inner array is not a
+/// `StringArray`, or the list is empty.  Null entries inside the list are
+/// silently skipped.
+pub fn labels_from_list_array(list_arr: &ListArray, row: usize) -> Vec<String> {
+    if list_arr.is_null(row) {
+        return Vec::new();
+    }
+    let values = list_arr.value(row);
+    let Some(str_arr) = values.as_any().downcast_ref::<StringArray>() else {
+        return Vec::new();
+    };
+    (0..str_arr.len())
+        .filter(|&j| !str_arr.is_null(j))
+        .map(|j| str_arr.value(j).to_string())
+        .collect()
+}
+
 /// Parse a datetime string into microseconds since Unix epoch.
 ///
 /// Tries RFC3339, "%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%dT%H:%M%:z",
