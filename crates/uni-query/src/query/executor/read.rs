@@ -1235,6 +1235,13 @@ impl Executor {
                                 return Ok(arr[idx].clone());
                             }
                             return Ok(Value::Null);
+                        } else if idx_val.is_null() {
+                            return Ok(Value::Null);
+                        } else {
+                            return Err(anyhow::anyhow!(
+                                "TypeError: InvalidArgumentType - list index must be an integer, got: {:?}",
+                                idx_val
+                            ));
                         }
                     }
                     if let Value::Map(map) = &arr_val {
@@ -1301,7 +1308,7 @@ impl Executor {
                     if arr_val.is_null() {
                         return Ok(Value::Null);
                     }
-                    Err(anyhow!("Cannot index into {:?}", arr_val))
+                    Err(anyhow!("TypeError: InvalidArgumentType - cannot index into {:?}", arr_val))
                 }
                 Expr::ArraySlice { array, start, end } => {
                     let arr_val = this

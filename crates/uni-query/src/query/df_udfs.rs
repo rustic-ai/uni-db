@@ -570,17 +570,10 @@ impl ScalarUDFImpl for IndexUdf {
             let container = &val_args[0];
             let index = &val_args[1];
 
-            // Extract integer index, handling json-encoded Utf8 from UNWIND
-            let index_as_int = index.as_i64().or_else(|| {
-                // UNWIND stores integers as json-encoded Utf8 strings ("0", "1", ...)
-                // which scalar_to_value returns as Value::String
-                if let Some(s) = index.as_str() {
-                    s.parse::<i64>().ok()
-                } else {
-                    // Float indices are truncated to integer in Cypher
-                    index.as_f64().map(|f| f as i64)
-                }
-            });
+            // Strict integer-only index extraction — no coercion from string/float.
+            // Integers from UNWIND now arrive as Value::Int via native Int64 columns
+            // or CypherValue LargeBinary encoding.
+            let index_as_int = index.as_i64();
 
             let result = match container {
                 Value::List(arr) => {
@@ -596,8 +589,13 @@ impl ScalarUDFImpl for IndexUdf {
                         } else {
                             Value::Null
                         }
-                    } else {
+                    } else if index.is_null() {
                         Value::Null
+                    } else {
+                        return Err(datafusion::error::DataFusionError::Execution(format!(
+                            "TypeError: InvalidArgumentType - list index must be an integer, got: {:?}",
+                            index
+                        )));
                     }
                 }
                 Value::Map(map) => {
@@ -642,7 +640,12 @@ impl ScalarUDFImpl for IndexUdf {
                     }
                 }
                 Value::Null => Value::Null,
-                _ => Value::Null,
+                _ => {
+                    return Err(datafusion::error::DataFusionError::Execution(format!(
+                        "TypeError: InvalidArgumentType - cannot index into {:?}",
+                        container
+                    )));
+                }
             };
 
             Ok(result)
