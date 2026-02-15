@@ -1526,6 +1526,21 @@ impl Executor {
 
         // Validate argument count
         if evaluated_args.len() != proc_def.params.len() {
+            if evaluated_args.is_empty() && !proc_def.params.is_empty() {
+                // Standalone CALL with no YIELD is treated as missing implicit parameter(s).
+                if yield_items.is_empty() {
+                    return Err(anyhow!(
+                        "MissingParameter: Procedure '{}' requires {} implicit argument(s)",
+                        proc_def.name,
+                        proc_def.params.len()
+                    ));
+                }
+                // In-query CALL with YIELD cannot pass implicit arguments.
+                return Err(anyhow!(
+                    "InvalidArgumentPassingMode: Procedure '{}' requires explicit argument passing in in-query CALL",
+                    proc_def.name
+                ));
+            }
             return Err(anyhow!(
                 "InvalidNumberOfArguments: Procedure '{}' expects {} argument(s), got {}",
                 proc_def.name,

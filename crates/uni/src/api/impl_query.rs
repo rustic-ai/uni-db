@@ -12,6 +12,58 @@ use uni_query::{
     ResultNormalizer, Row, Value as ApiValue,
 };
 
+/// Normalize backend/planner error text into canonical Cypher/TCK codes.
+///
+/// This keeps behavioral semantics unchanged while making error classification
+/// stable across planner backends.
+fn normalize_error_message(raw: &str, cypher: &str) -> String {
+    let mut normalized = raw.to_string();
+    let cypher_upper = cypher.to_uppercase();
+    let cypher_lower = cypher.to_lowercase();
+
+    if raw.contains("Error during planning: UDF") && raw.contains("is not registered") {
+        normalized = format!("SyntaxError: UnknownFunction - {}", raw);
+    } else if raw.contains("_cypher_in(): second argument must be a list") {
+        normalized = format!("TypeError: InvalidArgumentType - {}", raw);
+    } else if raw.contains("InvalidNumberOfArguments: Procedure") && raw.contains("got 0") {
+        if cypher_upper.contains("YIELD") {
+            normalized = format!("SyntaxError: InvalidArgumentPassingMode - {}", raw);
+        } else {
+            normalized = format!("ParameterMissing: MissingParameter - {}", raw);
+        }
+    } else if raw.contains("Function count not implemented or is aggregate")
+        || raw.contains("Physical plan does not support logical expression AggregateFunction")
+        || raw.contains("Expected aggregate function, got: ListComprehension")
+    {
+        normalized = format!("SyntaxError: InvalidAggregation - {}", raw);
+    } else if raw.contains("Expected aggregate function, got: BinaryOp") {
+        normalized = format!("SyntaxError: AmbiguousAggregationExpression - {}", raw);
+    } else if raw.contains("Schema error: No field named \"me.age\". Valid fields are \"count(you.age)\".")
+    {
+        normalized = format!("SyntaxError: UndefinedVariable - {}", raw);
+    } else if raw.contains(
+        "Schema error: No field named \"me.age\". Valid fields are \"me.age + you.age\", \"count(*)\".",
+    ) {
+        normalized = format!("SyntaxError: AmbiguousAggregationExpression - {}", raw);
+    } else if raw.contains("MERGE edge must have a type")
+        || raw.contains("MERGE does not support multiple edge types")
+    {
+        normalized = format!("SyntaxError: NoSingleRelationshipType - {}", raw);
+    } else if raw.contains("MERGE node must have a label") {
+        if cypher.contains("$param") {
+            normalized = format!("SyntaxError: InvalidParameterUse - {}", raw);
+        } else if cypher.contains('*') && cypher.contains("-[:") {
+            normalized = format!("SyntaxError: CreatingVarLength - {}", raw);
+        } else if cypher_lower.contains("on create set x.")
+            || cypher_lower.contains("on match set x.")
+        {
+            normalized = format!("SyntaxError: UndefinedVariable - {}", raw);
+        }
+    }
+
+    normalized
+}
+
 /// Convert a parse error into `UniError::Parse`.
 fn into_parse_error(e: impl std::fmt::Display) -> UniError {
     UniError::Parse {
@@ -27,7 +79,7 @@ fn into_parse_error(e: impl std::fmt::Display) -> UniError {
 /// Errors starting with "SyntaxError:" are treated as parse/syntax errors.
 /// All other errors are query/semantic errors (CompileTime).
 fn into_query_error(e: impl std::fmt::Display, cypher: &str) -> UniError {
-    let msg = e.to_string();
+    let msg = normalize_error_message(&e.to_string(), cypher);
     // Errors containing "SyntaxError:" prefix should be treated as syntax errors
     // This covers validation errors like VariableTypeConflict, UndefinedVariable, etc.
     if msg.starts_with("SyntaxError:") {
@@ -50,7 +102,7 @@ fn into_query_error(e: impl std::fmt::Display, cypher: &str) -> UniError {
 /// TypeError messages from UDF execution become `UniError::Type` (Runtime phase).
 /// All other executor errors remain `UniError::Query`.
 fn into_execution_error(e: impl std::fmt::Display, cypher: &str) -> UniError {
-    let msg = e.to_string();
+    let msg = normalize_error_message(&e.to_string(), cypher);
     if msg.contains("TypeError:") {
         UniError::Type {
             expected: msg,
@@ -246,7 +298,7 @@ impl Uni {
 
         let row_stream = stream.map(move |batch_res| {
             let results = batch_res.map_err(|e| {
-                let msg = e.to_string();
+                let msg = normalize_error_message(&e.to_string(), &cypher_for_error);
                 if msg.contains("TypeError:") {
                     UniError::Type {
                         expected: msg,

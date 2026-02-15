@@ -10,12 +10,13 @@
 ## Build, Test, and Development Commands
 - `cargo build`: compile the project.
 - `cargo run`: run the local binary.
-- `cargo test`: run all tests.
-- `cargo test <name>`: run a specific test by name.
-- `cargo test --test <file>`: run one integration test (e.g., `cargo test --test cypher_pushdown`).
+- `cargo nextest run`: run all tests (parallel, preferred).
+- `cargo nextest run -E 'test(<name>)'`: run a specific test by name.
+- `cargo nextest run --run-ignored all`: include ignored/slow perf tests.
 - `cargo bench`: run Criterion benchmarks.
 - `cargo fmt`: format code.
 - `cargo clippy`: lint for common issues.
+- Use `cargo nextest` instead of `cargo test` for regular test runs.
 
 ## Coding Style & Naming Conventions
 - Follow standard Rust style and format with `rustfmt`.
@@ -28,6 +29,9 @@
 - Integration tests live in `tests/` and often use `#[tokio::test]`.
 - Benchmarks go in `benches/` using Criterion.
 - If a test is flaky or sensitive to parallelism, document it in `docs/KNOWN_ISSUES.md`.
+- For TCK compliance runs, use `scripts/run_tck_with_report.sh`.
+- For filtered TCK subsets, use `scripts/run_tck_with_report.sh "~Match1"` (replace filter as needed).
+- TCK run artifacts are written under `target/cucumber/` (results/report) and synced into `compliance_reports/` by mode.
 
 ## Commit & Pull Request Guidelines
 - Use Conventional Commits as in history: `feat: ...`, `fix: ...`, `docs: ...`, `chore: ...`.

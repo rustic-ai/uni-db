@@ -15,9 +15,10 @@ use uni_common::core::schema::{
 use uni_cypher::ast::{
     AlterEdgeType, AlterLabel, BinaryOp, CallKind, Clause, CreateConstraint, CreateEdgeType,
     CreateLabel, CypherLiteral, Direction, DropConstraint, DropEdgeType, DropLabel, Expr,
-    MatchClause, NodePattern, PathPattern, Pattern, PatternElement, Query, RelationshipPattern,
-    RemoveItem, ReturnClause, ReturnItem, SchemaCommand, SetClause, SetItem, ShortestPathMode,
-    ShowConstraints, SortItem, Statement, WindowSpec, WithClause, WithRecursiveClause,
+    MatchClause, MergeClause, NodePattern, PathPattern, Pattern, PatternElement, Query,
+    RelationshipPattern, RemoveItem, ReturnClause, ReturnItem, SchemaCommand, SetClause, SetItem,
+    ShortestPathMode, ShowConstraints, SortItem, Statement, WindowSpec, WithClause,
+    WithRecursiveClause,
 };
 
 /// Type of variable in scope for semantic validation.
@@ -910,6 +911,136 @@ fn check_not_already_bound(
     Ok(())
 }
 
+fn build_merge_scope(pattern: &Pattern, vars_in_scope: &[VariableInfo]) -> Vec<VariableInfo> {
+    let mut scope = vars_in_scope.to_vec();
+
+    for path in &pattern.paths {
+        if let Some(path_var) = &path.variable
+            && !path_var.is_empty()
+            && !is_var_in_scope(&scope, path_var)
+        {
+            scope.push(VariableInfo::new(path_var.clone(), VariableType::Path));
+        }
+        for element in &path.elements {
+            match element {
+                PatternElement::Node(n) => {
+                    if let Some(v) = &n.variable
+                        && !v.is_empty()
+                        && !is_var_in_scope(&scope, v)
+                    {
+                        scope.push(VariableInfo::new(v.clone(), VariableType::Node));
+                    }
+                }
+                PatternElement::Relationship(r) => {
+                    if let Some(v) = &r.variable
+                        && !v.is_empty()
+                        && !is_var_in_scope(&scope, v)
+                    {
+                        scope.push(VariableInfo::new(v.clone(), VariableType::Edge));
+                    }
+                }
+                PatternElement::Parenthesized { .. } => {}
+            }
+        }
+    }
+
+    scope
+}
+
+fn validate_merge_set_item(item: &SetItem, vars_in_scope: &[VariableInfo]) -> Result<()> {
+    match item {
+        SetItem::Property { expr, value } => {
+            validate_expression_variables(expr, vars_in_scope)?;
+            validate_expression(expr, vars_in_scope)?;
+            validate_expression_variables(value, vars_in_scope)?;
+            validate_expression(value, vars_in_scope)?;
+            if contains_pattern_predicate(expr) || contains_pattern_predicate(value) {
+                return Err(anyhow!(
+                    "SyntaxError: UnexpectedSyntax - Pattern predicates are not allowed in SET"
+                ));
+            }
+        }
+        SetItem::Variable { variable, value } | SetItem::VariablePlus { variable, value } => {
+            if !is_var_in_scope(vars_in_scope, variable) {
+                return Err(anyhow!(
+                    "SyntaxError: UndefinedVariable - Variable '{}' not defined",
+                    variable
+                ));
+            }
+            validate_expression_variables(value, vars_in_scope)?;
+            validate_expression(value, vars_in_scope)?;
+            if contains_pattern_predicate(value) {
+                return Err(anyhow!(
+                    "SyntaxError: UnexpectedSyntax - Pattern predicates are not allowed in SET"
+                ));
+            }
+        }
+        SetItem::Labels { variable, .. } => {
+            if !is_var_in_scope(vars_in_scope, variable) {
+                return Err(anyhow!(
+                    "SyntaxError: UndefinedVariable - Variable '{}' not defined",
+                    variable
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_merge_clause(merge_clause: &MergeClause, vars_in_scope: &[VariableInfo]) -> Result<()> {
+    for path in &merge_clause.pattern.paths {
+        for element in &path.elements {
+            match element {
+                PatternElement::Node(n) => {
+                    if let Some(Expr::Parameter(_)) = &n.properties {
+                        return Err(anyhow!(
+                            "SyntaxError: InvalidParameterUse - Parameters cannot be used as node predicates"
+                        ));
+                    }
+                }
+                PatternElement::Relationship(r) => {
+                    if let Some(variable) = &r.variable
+                        && !variable.is_empty()
+                        && is_var_in_scope(vars_in_scope, variable)
+                    {
+                        return Err(anyhow!(
+                            "SyntaxError: VariableAlreadyBound - Variable '{}' already defined",
+                            variable
+                        ));
+                    }
+                    if r.types.len() != 1 {
+                        return Err(anyhow!(
+                            "SyntaxError: NoSingleRelationshipType - Exactly one relationship type required for MERGE"
+                        ));
+                    }
+                    if r.range.is_some() {
+                        return Err(anyhow!(
+                            "SyntaxError: CreatingVarLength - Variable length relationships cannot be created"
+                        ));
+                    }
+                    if let Some(Expr::Parameter(_)) = &r.properties {
+                        return Err(anyhow!(
+                            "SyntaxError: InvalidParameterUse - Parameters cannot be used as relationship predicates"
+                        ));
+                    }
+                }
+                PatternElement::Parenthesized { .. } => {}
+            }
+        }
+    }
+
+    let merge_scope = build_merge_scope(&merge_clause.pattern, vars_in_scope);
+    for item in &merge_clause.on_create {
+        validate_merge_set_item(item, &merge_scope)?;
+    }
+    for item in &merge_clause.on_match {
+        validate_merge_set_item(item, &merge_scope)?;
+    }
+
+    Ok(())
+}
+
 /// Recursively validate an expression for type errors, undefined variables, etc.
 fn validate_expression(expr: &Expr, vars_in_scope: &[VariableInfo]) -> Result<()> {
     // Validate boolean operators and nested aggregation first
@@ -1666,6 +1797,9 @@ impl QueryPlanner {
         let mut aggregates = Vec::new();
         let mut has_agg = false;
         let mut projections = Vec::new();
+        let mut projected_aggregate_reprs: HashSet<String> = HashSet::new();
+        let mut projected_simple_reprs: HashSet<String> = HashSet::new();
+        let mut projected_aliases: HashSet<String> = HashSet::new();
 
         for item in &return_clause.items {
             match item {
@@ -1676,6 +1810,8 @@ impl QueryPlanner {
                         if !group_by.contains(&Expr::Variable(v.name.clone())) {
                             group_by.push(Expr::Variable(v.name.clone()));
                         }
+                        projected_aliases.insert(v.name.clone());
+                        projected_simple_reprs.insert(v.name.clone());
                     }
                 }
                 ReturnItem::Expr { expr, alias } => {
@@ -1686,6 +1822,8 @@ impl QueryPlanner {
                             if !group_by.contains(&Expr::Variable(v.name.clone())) {
                                 group_by.push(Expr::Variable(v.name.clone()));
                             }
+                            projected_aliases.insert(v.name.clone());
+                            projected_simple_reprs.insert(v.name.clone());
                         }
                     } else {
                         // Validate expression variables are defined
@@ -1703,8 +1841,18 @@ impl QueryPlanner {
                         if expr.is_aggregate() {
                             has_agg = true;
                             aggregates.push(expr.clone());
+                            projected_aggregate_reprs.insert(expr.to_string_repr());
                         } else if !group_by.contains(expr) {
                             group_by.push(expr.clone());
+                            if matches!(expr, Expr::Variable(_) | Expr::Property(_, _)) {
+                                projected_simple_reprs.insert(expr.to_string_repr());
+                            }
+                        }
+
+                        if let Some(a) = alias {
+                            projected_aliases.insert(a.clone());
+                        } else if let Expr::Variable(v) = expr {
+                            projected_aliases.insert(v.clone());
                         }
                     }
                 }
@@ -1824,6 +1972,20 @@ impl QueryPlanner {
             for item in order_by {
                 validate_expression_variables(&item.expr, &order_by_scope)?;
                 validate_expression(&item.expr, &order_by_scope)?;
+                let has_aggregate_in_item = contains_aggregate_recursive(&item.expr);
+                if has_aggregate_in_item && !has_agg {
+                    return Err(anyhow!(
+                        "SyntaxError: InvalidAggregation - Aggregation functions not allowed in ORDER BY after RETURN"
+                    ));
+                }
+                if has_agg && has_aggregate_in_item {
+                    validate_with_order_by_aggregate_item(
+                        &item.expr,
+                        &projected_aggregate_reprs,
+                        &projected_simple_reprs,
+                        &projected_aliases,
+                    )?;
+                }
             }
             plan = LogicalPlan::Sort {
                 input: Box::new(plan),
@@ -2052,6 +2214,8 @@ impl QueryPlanner {
                     }
                 }
                 Clause::Merge(merge_clause) => {
+                    validate_merge_clause(&merge_clause, &vars_in_scope)?;
+
                     plan = LogicalPlan::Merge {
                         input: Box::new(plan),
                         pattern: merge_clause.pattern.clone(),
