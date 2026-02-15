@@ -556,6 +556,7 @@ impl HybridPhysicalPlanner {
                 path_variable,
                 is_variable_length,
                 optional_pattern_vars,
+                scope_match_variables,
                 ..
             } => self.plan_traverse(
                 input,
@@ -573,6 +574,7 @@ impl HybridPhysicalPlanner {
                 *is_variable_length,
                 optional_pattern_vars,
                 all_properties,
+                scope_match_variables,
             ),
 
             LogicalPlan::ShortestPath {
@@ -1349,6 +1351,7 @@ impl HybridPhysicalPlanner {
         is_variable_length: bool,
         optional_pattern_vars: &HashSet<String>,
         all_properties: &HashMap<String, HashSet<String>>,
+        scope_match_variables: &HashSet<String>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
         let input_plan = self.plan_internal(input, all_properties)?;
 
@@ -1530,8 +1533,22 @@ impl HybridPhysicalPlanner {
                         .is_some_and(|bound_col| name == bound_col)
                     {
                         None
-                    } else if name.ends_with("._eid") || name.starts_with("__eid_to_") {
-                        Some(name.clone())
+                    } else if name.ends_with("._eid") {
+                        // Only include if the edge variable is in current MATCH scope
+                        let var_name = name.trim_end_matches("._eid");
+                        if scope_match_variables.contains(var_name) {
+                            Some(name.clone())
+                        } else {
+                            None
+                        }
+                    } else if name.starts_with("__eid_to_") {
+                        // Internal tracking columns - include only if associated variable is in scope
+                        let var_name = name.trim_start_matches("__eid_to_");
+                        if scope_match_variables.contains(var_name) {
+                            Some(name.clone())
+                        } else {
+                            None
+                        }
                     } else {
                         None
                     }

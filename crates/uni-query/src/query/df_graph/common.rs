@@ -77,10 +77,101 @@ pub fn column_as_vid_array(
         return column_as_vid_array(arr.column(vid_idx).as_ref());
     }
 
+    // Support CypherValue-encoded Node values in LargeBinary columns
+    // (e.g., from list comprehension loop variables over node collections)
+    // Also handles JSON round-tripped nodes (Value::Map with _id field)
+    if let Some(arr) = col.as_any().downcast_ref::<arrow_array::LargeBinaryArray>() {
+        use uni_common::cypher_value_codec;
+        let vids: arrow_array::UInt64Array = (0..arr.len())
+            .map(|i| {
+                if arr.is_null(i) {
+                    return None;
+                }
+                match cypher_value_codec::decode(arr.value(i)) {
+                    Ok(ref val) => extract_vid_from_value(val),
+                    _ => None,
+                }
+            })
+            .collect();
+        return Ok(std::borrow::Cow::Owned(vids));
+    }
+
     Err(datafusion::error::DataFusionError::Execution(format!(
         "VID column has type {:?}, expected UInt64 or Int64",
         col.data_type()
     )))
+}
+
+/// Extract a VID from a CypherValue.
+///
+/// Handles both `Value::Node` (native node) and `Value::Map` with `_id` field
+/// (JSON round-tripped node from `cv_array_to_large_list`).
+fn extract_vid_from_value(val: &Value) -> Option<u64> {
+    match val {
+        Value::Node(node) => Some(node.vid.as_u64()),
+        Value::Map(map) => {
+            // Handle round-tripped nodes that became Maps.
+            // Path nodes use struct fields (_vid, _label, properties) which
+            // round-trip through arrow_to_json_value as { "_vid": Int(N), ... }.
+            // Value::Node → serde_json uses { "_id": "N", ... }.
+            // Check both keys to handle either path.
+
+            // Check _vid first (from path struct → arrow_to_json_value round-trip)
+            if let Some(Value::Int(vid)) = map.get("_vid") {
+                return Some(*vid as u64);
+            }
+            // Also check _id (from Value::Node → serde_json round-trip)
+            if let Some(Value::String(id_str)) = map.get("_id") {
+                let trimmed = id_str
+                    .strip_prefix("Vid(")
+                    .and_then(|s| s.strip_suffix(')'));
+                if let Some(num_str) = trimmed {
+                    return num_str.parse::<u64>().ok();
+                }
+                return id_str.parse::<u64>().ok();
+            }
+            if let Some(Value::Int(id)) = map.get("_id") {
+                return Some(*id as u64);
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+/// Extract VIDs from a column of CypherValue-encoded Node values.
+///
+/// Takes a `LargeBinary` array where each element is a CypherValue-encoded
+/// value and extracts VIDs from Node values. Non-Node values produce nulls.
+/// Also handles JSON round-tripped node Maps from `cv_array_to_large_list`.
+pub fn extract_vids_from_cypher_value_column(col: &dyn Array) -> DFResult<arrow_array::ArrayRef> {
+    use arrow_array::LargeBinaryArray;
+    use arrow_array::builder::UInt64Builder;
+    use uni_common::cypher_value_codec;
+
+    let binary_col = col
+        .as_any()
+        .downcast_ref::<LargeBinaryArray>()
+        .ok_or_else(|| {
+            datafusion::error::DataFusionError::Execution(
+                "extract_vids_from_cypher_value_column: expected LargeBinary column".to_string(),
+            )
+        })?;
+    let mut builder = UInt64Builder::with_capacity(binary_col.len());
+    for i in 0..binary_col.len() {
+        if binary_col.is_null(i) {
+            builder.append_null();
+            continue;
+        }
+        match cypher_value_codec::decode(binary_col.value(i)) {
+            Ok(ref val) => match extract_vid_from_value(val) {
+                Some(vid) => builder.append_value(vid),
+                None => builder.append_null(),
+            },
+            Err(_) => builder.append_null(),
+        }
+    }
+    Ok(Arc::new(builder.finish()) as arrow_array::ArrayRef)
 }
 
 /// Build the standard node struct fields for path structures.

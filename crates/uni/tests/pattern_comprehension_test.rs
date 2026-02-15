@@ -673,3 +673,103 @@ async fn test_pc_null_property_in_map_expr() -> Result<()> {
 
     Ok(())
 }
+
+/// TCK Pattern2 [7]: Use a pattern comprehension inside a list comprehension.
+///
+/// MATCH p = (n:X)-->()
+/// RETURN n, [x IN nodes(p) | size([(x)-->(:Y) | 1])] AS list
+#[tokio::test(flavor = "multi_thread")]
+async fn test_pc_inside_list_comprehension() -> Result<()> {
+    let db = Uni::in_memory().build().await?;
+
+    db.execute(
+        "CREATE (n1:X {n: 1}), (m1:Y), (i1:Y), (i2:Y) \
+         CREATE (n1)-[:T]->(m1), \
+                (m1)-[:T]->(i1), \
+                (m1)-[:T]->(i2) \
+         CREATE (n2:X {n: 2}), (m2), (i3:L), (i4:Y) \
+         CREATE (n2)-[:T]->(m2), \
+                (m2)-[:T]->(i3), \
+                (m2)-[:T]->(i4)",
+    )
+    .await?;
+
+    // Verify data is set up correctly
+    let check = db
+        .query("MATCH (n:X)-->(m) RETURN n.n AS nn, labels(m) AS ml")
+        .await?;
+    eprintln!("Data check ({} rows):", check.len());
+    for row in check.rows() {
+        eprintln!("  {:?}", row);
+    }
+
+    // Verify what nodes(p) contains
+    let path_check = db
+        .query("MATCH p = (n:X)-->() RETURN n.n, nodes(p) AS np")
+        .await?;
+    eprintln!("Path nodes ({} rows):", path_check.len());
+    for row in path_check.rows() {
+        eprintln!("  {:?}", row);
+    }
+
+    // Now run the actual query
+    let results = db
+        .query(
+            "MATCH p = (n:X)-->() \
+             RETURN n, [x IN nodes(p) | size([(x)-->(:Y) | 1])] AS list",
+        )
+        .await?;
+
+    eprintln!("Pattern2 [7] results ({} rows):", results.len());
+    for row in results.rows() {
+        eprintln!("  {:?}", row);
+    }
+
+    assert_eq!(results.len(), 2, "Should have 2 rows");
+
+    // Find the row for n1 (n=1) and n2 (n=2)
+    let mut found_n1 = false;
+    let mut found_n2 = false;
+    for row in results.rows() {
+        let n_val = row.value("n").unwrap();
+        // Extract n property from node
+        let n_prop = match n_val {
+            Value::Node(node) => node.properties.get("n").cloned(),
+            Value::Map(map) => map.get("n").cloned().or_else(|| {
+                map.get("properties").and_then(|p| {
+                    if let Value::Map(pm) = p {
+                        pm.get("n").cloned()
+                    } else {
+                        None
+                    }
+                })
+            }),
+            _ => None,
+        };
+        let list = row.value("list").unwrap().as_array().unwrap().to_vec();
+        eprintln!("  n_prop={:?}, list={:?}", n_prop, list);
+
+        if n_prop == Some(Value::Int(1)) {
+            // n1:X {n:1} --> m1:Y; n1 has 1 Y neighbor (m1), m1 has 2 Y neighbors (i1, i2)
+            assert_eq!(
+                list,
+                vec![Value::Int(1), Value::Int(2)],
+                "n1 list should be [1, 2]"
+            );
+            found_n1 = true;
+        } else if n_prop == Some(Value::Int(2)) {
+            // n2:X {n:2} --> m2; n2 has 0 Y neighbors, m2 has 1 Y neighbor (i4)
+            assert_eq!(
+                list,
+                vec![Value::Int(0), Value::Int(1)],
+                "n2 list should be [0, 1]"
+            );
+            found_n2 = true;
+        }
+    }
+
+    assert!(found_n1, "Should find row for n1");
+    assert!(found_n2, "Should find row for n2");
+
+    Ok(())
+}

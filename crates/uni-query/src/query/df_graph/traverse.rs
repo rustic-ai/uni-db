@@ -646,14 +646,15 @@ impl GraphTraverseStream {
                     // VIDs no longer embed label information, so we must look up labels.
                     if let Some(ref label_name) = self.target_label_name {
                         let query_ctx = self.graph_ctx.query_context();
-                        let vertex_labels =
-                            l0_visibility::get_vertex_labels(target_vid, &query_ctx);
-                        // If L0 returns labels, check they contain the target label.
-                        // If L0 returns empty, the vertex is in storage (not in L0), so we trust
-                        // it was already filtered correctly by the dataset scan.
-                        if !vertex_labels.is_empty() && !vertex_labels.contains(label_name) {
-                            continue;
+                        if let Some(vertex_labels) =
+                            l0_visibility::get_vertex_labels_optional(target_vid, &query_ctx)
+                        {
+                            // Vertex is in L0 — require actual label match
+                            if !vertex_labels.contains(label_name) {
+                                continue;
+                            }
                         }
+                        // else: vertex not in L0 → trust storage-level filtering
                     }
 
                     expanded_rows.push((row_idx, target_vid, eid_u64, edge_type));
@@ -729,25 +730,24 @@ async fn build_traverse_output_batch(
     // Add target ._labels column (from L0 buffers)
     {
         use arrow_array::builder::{ListBuilder, StringBuilder};
-        let l0_ctx = graph_ctx.l0_context();
         let mut labels_builder = ListBuilder::new(StringBuilder::new());
+        let query_ctx = graph_ctx.query_context();
         for vid in &target_vids {
-            let mut row_labels: Vec<String> = Vec::new();
-            // If we have a target_label_name from the schema, include it
-            if let Some(ref label_name) = target_label_name {
-                row_labels.push(label_name.clone());
-            }
-            // Overlay L0 labels
-            for l0 in l0_ctx.iter_l0_buffers() {
-                let guard = l0.read();
-                if let Some(l0_labels) = guard.vertex_labels.get(vid) {
-                    for lbl in l0_labels {
-                        if !row_labels.contains(lbl) {
-                            row_labels.push(lbl.clone());
+            let row_labels: Vec<String> =
+                match l0_visibility::get_vertex_labels_optional(*vid, &query_ctx) {
+                    Some(labels) => {
+                        // Vertex is in L0 — use actual labels only
+                        labels
+                    }
+                    None => {
+                        // Vertex not in L0 — trust schema label (storage already filtered)
+                        if let Some(ref label_name) = target_label_name {
+                            vec![label_name.clone()]
+                        } else {
+                            vec![]
                         }
                     }
-                }
-            }
+                };
             let values = labels_builder.values();
             for lbl in &row_labels {
                 values.append_value(lbl);
@@ -2591,8 +2591,10 @@ impl GraphVariableLengthTraverseExecData {
                 // Only the final target node is constrained, not intermediate nodes.
                 let label_ok = if let Some(ref label_name) = self.target_label_name {
                     let query_ctx = self.graph_ctx.query_context();
-                    let vertex_labels = l0_visibility::get_vertex_labels(current, &query_ctx);
-                    vertex_labels.is_empty() || vertex_labels.contains(label_name)
+                    match l0_visibility::get_vertex_labels_optional(current, &query_ctx) {
+                        Some(labels) => labels.contains(label_name),
+                        None => true, // not in L0, trust storage
+                    }
                 } else {
                     true
                 };
@@ -2885,7 +2887,7 @@ impl GraphVariableLengthTraverseStream {
             .is_none()
         {
             use arrow_array::builder::{ListBuilder, StringBuilder};
-            let l0_ctx = self.exec.graph_ctx.l0_context();
+            let query_ctx = self.exec.graph_ctx.query_context();
             let mut labels_builder = ListBuilder::new(StringBuilder::new());
             for target_vid in &target_vids {
                 let Some(vid_u64) = target_vid else {
@@ -2893,20 +2895,21 @@ impl GraphVariableLengthTraverseStream {
                     continue;
                 };
                 let vid = Vid::from(*vid_u64);
-                let mut row_labels: Vec<String> = Vec::new();
-                if let Some(ref label_name) = self.exec.target_label_name {
-                    row_labels.push(label_name.clone());
-                }
-                for l0 in l0_ctx.iter_l0_buffers() {
-                    let guard = l0.read();
-                    if let Some(l0_labels) = guard.vertex_labels.get(&vid) {
-                        for lbl in l0_labels {
-                            if !row_labels.contains(lbl) {
-                                row_labels.push(lbl.clone());
+                let row_labels: Vec<String> =
+                    match l0_visibility::get_vertex_labels_optional(vid, &query_ctx) {
+                        Some(labels) => {
+                            // Vertex is in L0 — use actual labels only
+                            labels
+                        }
+                        None => {
+                            // Vertex not in L0 — trust schema label (storage already filtered)
+                            if let Some(ref label_name) = self.exec.target_label_name {
+                                vec![label_name.clone()]
+                            } else {
+                                vec![]
                             }
                         }
-                    }
-                }
+                    };
                 let values = labels_builder.values();
                 for lbl in &row_labels {
                     values.append_value(lbl);

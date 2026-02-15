@@ -448,6 +448,31 @@ pub fn get_vertex_labels(vid: Vid, ctx: &QueryContext) -> Vec<String> {
     Vec::new()
 }
 
+/// Get vertex labels, distinguishing "not in L0" from "in L0 with no labels".
+/// Returns `None` if vertex is not in any L0 buffer.
+/// Returns `Some(labels)` if vertex is in L0 (may be empty for unlabeled nodes).
+pub fn get_vertex_labels_optional(vid: Vid, ctx: &QueryContext) -> Option<Vec<String>> {
+    if let Some(tx_l0_arc) = &ctx.transaction_l0 {
+        let tx_l0 = tx_l0_arc.read();
+        if let Some(labels) = tx_l0.get_vertex_labels(vid) {
+            return Some(labels.to_vec());
+        }
+    }
+    {
+        let l0 = ctx.l0.read();
+        if let Some(labels) = l0.get_vertex_labels(vid) {
+            return Some(labels.to_vec());
+        }
+    }
+    for pending_l0_arc in ctx.pending_flush_l0s.iter().rev() {
+        let pending_l0 = pending_l0_arc.read();
+        if let Some(labels) = pending_l0.get_vertex_labels(vid) {
+            return Some(labels.to_vec());
+        }
+    }
+    None
+}
+
 /// Get the edge type for an edge from the L0 chain.
 /// Returns the type from the most recent L0 buffer that has the edge.
 /// Returns None if the edge is not in any L0 buffer.

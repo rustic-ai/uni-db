@@ -29,6 +29,9 @@ pub struct ListComprehensionExecExpr {
     input_schema: Arc<Schema>,
     /// Data type of the items in the output list
     output_item_type: DataType,
+    /// Whether to extract VIDs from CypherValue-encoded loop variable
+    /// for nested pattern comprehension anchor binding
+    needs_vid_extraction: bool,
 }
 
 impl Clone for ListComprehensionExecExpr {
@@ -40,6 +43,7 @@ impl Clone for ListComprehensionExecExpr {
             variable_name: self.variable_name.clone(),
             input_schema: self.input_schema.clone(),
             output_item_type: self.output_item_type.clone(),
+            needs_vid_extraction: self.needs_vid_extraction,
         }
     }
 }
@@ -52,6 +56,7 @@ impl ListComprehensionExecExpr {
         variable_name: String,
         input_schema: Arc<Schema>,
         output_item_type: DataType,
+        needs_vid_extraction: bool,
     ) -> Self {
         Self {
             input_list,
@@ -60,6 +65,7 @@ impl ListComprehensionExecExpr {
             variable_name,
             input_schema,
             output_item_type,
+            needs_vid_extraction,
         }
     }
 }
@@ -212,6 +218,26 @@ impl PhysicalExpr for ListComprehensionExecExpr {
             inner_fields.push(loop_field);
         }
 
+        // Materialize VID column from CypherValue-encoded loop variable for nested
+        // pattern comprehension anchor binding
+        if self.needs_vid_extraction {
+            let vid_field_name = format!("{}._vid", self.variable_name);
+            if !inner_fields.iter().any(|f| f.name() == &vid_field_name) {
+                let vid_field = Arc::new(Field::new(&vid_field_name, DataType::UInt64, true));
+                // Find the loop variable column
+                let loop_var_idx = inner_fields
+                    .iter()
+                    .position(|f| f.name() == &self.variable_name);
+                if let Some(idx) = loop_var_idx {
+                    let vid_array = super::common::extract_vids_from_cypher_value_column(
+                        inner_columns[idx].as_ref(),
+                    )?;
+                    inner_fields.push(vid_field);
+                    inner_columns.push(vid_array);
+                }
+            }
+        }
+
         let inner_schema = Arc::new(Schema::new(inner_fields));
 
         let inner_batch = RecordBatch::try_new(inner_schema, inner_columns)?;
@@ -311,6 +337,7 @@ impl PhysicalExpr for ListComprehensionExecExpr {
             variable_name: self.variable_name.clone(),
             input_schema: self.input_schema.clone(),
             output_item_type: self.output_item_type.clone(),
+            needs_vid_extraction: self.needs_vid_extraction,
         }))
     }
 

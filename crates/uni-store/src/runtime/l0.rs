@@ -189,13 +189,12 @@ impl L0Buffer {
         self.vertex_created_at.entry(vid).or_insert(now);
         self.vertex_updated_at.insert(vid, now);
 
-        // Track labels
-        if !labels.is_empty() {
-            let existing = self.vertex_labels.entry(vid).or_default();
-            for label in labels {
-                if !existing.contains(&label) {
-                    existing.push(label);
-                }
+        // Track labels — always create an entry so unlabeled vertices are
+        // distinguishable from "not in L0" when queried via get_vertex_labels.
+        let existing = self.vertex_labels.entry(vid).or_default();
+        for label in labels {
+            if !existing.contains(&label) {
+                existing.push(label);
             }
         }
 

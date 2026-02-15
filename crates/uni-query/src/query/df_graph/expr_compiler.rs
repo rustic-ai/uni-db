@@ -852,6 +852,7 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
             variable.to_string(),
             Arc::new(input_schema.clone()),
             output_item_type,
+            needs_vid_extraction,
         )))
     }
 

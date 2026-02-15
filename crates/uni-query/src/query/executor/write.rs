@@ -1872,6 +1872,7 @@ impl Executor {
                                         edge_properties: std::collections::HashSet::new(),
                                         is_variable_length,
                                         optional_pattern_vars: std::collections::HashSet::new(),
+                                        scope_match_variables: std::collections::HashSet::new(),
                                     };
 
                                     // Apply property filters for relationship

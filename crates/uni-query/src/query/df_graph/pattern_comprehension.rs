@@ -568,12 +568,12 @@ impl PatternComprehensionExecExpr {
                         }
 
                         // Label filtering
-                        if let Some(ref label_name) = step.target_label_name {
-                            let vertex_labels =
-                                l0_visibility::get_vertex_labels(target_vid, &query_ctx);
-                            if !vertex_labels.is_empty() && !vertex_labels.contains(label_name) {
-                                continue;
-                            }
+                        if let Some(ref label_name) = step.target_label_name
+                            && let Some(vertex_labels) =
+                                l0_visibility::get_vertex_labels_optional(target_vid, &query_ctx)
+                            && !vertex_labels.contains(label_name)
+                        {
+                            continue;
                         }
 
                         new_row_indices.push(outer_row);

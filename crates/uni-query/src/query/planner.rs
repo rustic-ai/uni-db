@@ -1228,6 +1228,11 @@ pub enum LogicalPlan {
         /// When any hop in the pattern fails, ALL these variables should be set to NULL.
         /// This ensures proper multi-hop OPTIONAL MATCH semantics.
         optional_pattern_vars: std::collections::HashSet<String>,
+        /// Variable names (node + edge) from the current MATCH clause scope.
+        /// Used for relationship uniqueness scoping: only edge ID columns whose
+        /// associated variable is in this set participate in uniqueness filtering.
+        /// Variables from previous disconnected MATCH clauses are excluded.
+        scope_match_variables: std::collections::HashSet<String>,
     },
     /// Traverse main edges table filtering by type name(s) (MATCH (a)-[:Unknown]->(b)).
     /// Used for edge types not defined in schema (schemaless support).
@@ -3408,6 +3413,12 @@ impl QueryPlanner {
             }
         }
 
+        // Deduplicate edge type IDs and unknown types ([:T|:T] → [:T])
+        edge_type_ids.sort_unstable();
+        edge_type_ids.dedup();
+        unknown_types.sort_unstable();
+        unknown_types.dedup();
+
         let mut target_variable = params.target_node.variable.clone().unwrap_or_default();
         if target_variable.is_empty() {
             target_variable = self.next_anon_var();
@@ -3634,6 +3645,23 @@ impl QueryPlanner {
             step_var.clone()
         };
 
+        // Collect all variables (node + edge) from the current MATCH clause scope
+        // for relationship uniqueness scoping. Edge ID columns (both named `r._eid`
+        // and anonymous `__eid_to_target`) are only included in uniqueness filtering
+        // if their associated variable is in this set. This prevents relationship
+        // uniqueness from being enforced across disconnected MATCH clauses.
+        let mut scope_match_variables: std::collections::HashSet<String> = vars_in_scope
+            [vars_before_pattern..]
+            .iter()
+            .map(|v| v.name.clone())
+            .collect();
+        // Include the current traverse's edge variable (not yet added to vars_in_scope)
+        if let Some(ref sv) = effective_step_var {
+            scope_match_variables.insert(sv.clone());
+        }
+        // Include the target variable (not yet added to vars_in_scope)
+        scope_match_variables.insert(target_variable.clone());
+
         let mut plan = LogicalPlan::Traverse {
             input: Box::new(plan),
             edge_type_ids,
@@ -3654,6 +3682,7 @@ impl QueryPlanner {
             edge_properties: std::collections::HashSet::new(),
             is_variable_length,
             optional_pattern_vars: params.optional_pattern_vars.clone(),
+            scope_match_variables,
         };
 
         // Apply relationship property predicates (e.g. [r {k: v}]).
@@ -4334,6 +4363,7 @@ impl QueryPlanner {
                 edge_properties,
                 is_variable_length,
                 optional_pattern_vars,
+                scope_match_variables,
             } => {
                 if target_variable == variable {
                     // Found the traverse producing this variable
@@ -4361,6 +4391,7 @@ impl QueryPlanner {
                         edge_properties,
                         is_variable_length,
                         optional_pattern_vars,
+                        scope_match_variables,
                     }
                 } else {
                     // Recurse into input
@@ -4382,6 +4413,7 @@ impl QueryPlanner {
                         edge_properties,
                         is_variable_length,
                         optional_pattern_vars,
+                        scope_match_variables,
                     }
                 }
             }
@@ -4980,6 +5012,7 @@ impl QueryPlanner {
                 edge_properties,
                 is_variable_length,
                 optional_pattern_vars,
+                scope_match_variables,
             } => LogicalPlan::Traverse {
                 input: Box::new(Self::push_predicate_to_scan(*input, variable, predicate)),
                 edge_type_ids,
@@ -4996,6 +5029,7 @@ impl QueryPlanner {
                 edge_properties,
                 is_variable_length,
                 optional_pattern_vars,
+                scope_match_variables,
             },
             other => other,
         }
@@ -5359,6 +5393,7 @@ impl QueryPlanner {
                 edge_properties,
                 is_variable_length,
                 optional_pattern_vars,
+                scope_match_variables,
             } => LogicalPlan::Traverse {
                 input: Box::new(Self::push_predicates_to_apply(*input, current_predicate)),
                 edge_type_ids,
@@ -5375,6 +5410,7 @@ impl QueryPlanner {
                 edge_properties,
                 is_variable_length,
                 optional_pattern_vars,
+                scope_match_variables,
             },
             other => other,
         }
