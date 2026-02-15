@@ -119,7 +119,7 @@ impl BindZeroLengthPathExec {
             Field::new("properties", DataType::LargeBinary, true),
         ]);
         let node_item = Field::new("item", DataType::Struct(node_struct_fields), true);
-        let nodes_field = Field::new("nodes", DataType::List(Arc::new(node_item)), false);
+        let nodes_field = Field::new("nodes", DataType::List(Arc::new(node_item)), true);
 
         // Edge struct fields: _eid, _type_name, _src, _dst, properties
         let edge_struct_fields = Fields::from(vec![
@@ -131,14 +131,14 @@ impl BindZeroLengthPathExec {
         ]);
         let edge_item = Field::new("item", DataType::Struct(edge_struct_fields), true);
         let relationships_field =
-            Field::new("relationships", DataType::List(Arc::new(edge_item)), false);
+            Field::new("relationships", DataType::List(Arc::new(edge_item)), true);
 
         // Path struct with nodes and relationships
         let path_struct_fields = Fields::from(vec![nodes_field, relationships_field]);
         fields.push(Field::new(
             path_variable,
             DataType::Struct(path_struct_fields),
-            false,
+            true,
         ));
 
         Arc::new(Schema::new(fields))
@@ -283,6 +283,7 @@ impl BindZeroLengthPathStream {
         let mut nodes_builder =
             ListBuilder::new(StructBuilder::from_fields(node_struct_fields, num_rows));
         let mut rels_builder = ListBuilder::new(StructBuilder::from_fields(edge_struct_fields, 0));
+        let mut path_validity = Vec::with_capacity(num_rows);
 
         for row_idx in 0..num_rows {
             let vid: Option<uni_common::core::id::Vid> = extract_column_value(
@@ -299,8 +300,16 @@ impl BindZeroLengthPathStream {
                 |arr: &arrow_array::StringArray, i| arr.value(i).to_string(),
             );
 
+            if vid.is_none() {
+                nodes_builder.append(false);
+                rels_builder.append(false);
+                path_validity.push(false);
+                continue;
+            }
+
             self.append_node_to_builder(&mut nodes_builder, vid, label, &query_ctx);
             rels_builder.append(true);
+            path_validity.push(true);
         }
 
         let nodes_array = Arc::new(nodes_builder.finish()) as ArrayRef;
@@ -308,15 +317,15 @@ impl BindZeroLengthPathStream {
 
         let path_array = StructArray::try_new(
             Fields::from(vec![
-                Arc::new(Field::new("nodes", nodes_array.data_type().clone(), false)),
+                Arc::new(Field::new("nodes", nodes_array.data_type().clone(), true)),
                 Arc::new(Field::new(
                     "relationships",
                     rels_array.data_type().clone(),
-                    false,
+                    true,
                 )),
             ]),
             vec![nodes_array, rels_array],
-            None,
+            Some(arrow::buffer::NullBuffer::from(path_validity)),
         )?;
 
         let mut columns: Vec<ArrayRef> = batch.columns().to_vec();

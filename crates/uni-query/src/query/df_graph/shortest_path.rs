@@ -413,6 +413,7 @@ impl GraphShortestPathStream {
             ListBuilder::new(StructBuilder::from_fields(node_struct_fields, num_rows));
         let mut rels_builder =
             ListBuilder::new(StructBuilder::from_fields(edge_struct_fields, num_rows));
+        let mut path_validity = Vec::with_capacity(num_rows);
 
         for path in paths {
             match path {
@@ -472,11 +473,13 @@ impl GraphShortestPathStream {
                         rs.append(true);
                     }
                     rels_builder.append(true);
+                    path_validity.push(true);
                 }
                 None => {
                     // Null path
                     nodes_builder.append(false);
                     rels_builder.append(false);
+                    path_validity.push(false);
                 }
             }
         }
@@ -486,15 +489,15 @@ impl GraphShortestPathStream {
 
         let path_struct = StructArray::try_new(
             Fields::from(vec![
-                Arc::new(Field::new("nodes", nodes_array.data_type().clone(), false)),
+                Arc::new(Field::new("nodes", nodes_array.data_type().clone(), true)),
                 Arc::new(Field::new(
                     "relationships",
                     rels_array.data_type().clone(),
-                    false,
+                    true,
                 )),
             ]),
             vec![nodes_array, rels_array],
-            None,
+            Some(arrow::buffer::NullBuffer::from(path_validity)),
         )?;
         columns.push(Arc::new(path_struct));
 

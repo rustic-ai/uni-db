@@ -35,7 +35,7 @@ use uni_store::runtime::l0_visibility;
 use uni_store::storage::direction::Direction;
 
 use super::GraphExecutionContext;
-use crate::query::df_graph::common::build_path_struct_field;
+use crate::query::df_graph::common::{build_path_struct_field, column_as_vid_array};
 use crate::query::df_graph::scan::build_property_column_static;
 
 /// A single hop derived from the pattern's elements.
@@ -193,8 +193,23 @@ impl PhysicalExpr for PatternComprehensionExecExpr {
         let num_rows = batch.num_rows();
 
         // Step 1: Extract anchor VIDs
-        let anchor_col = batch.column_by_name(&self.anchor_column).ok_or_else(|| {
-            DataFusionError::Execution(format!(
+        let anchor_col = if let Some(col) = batch.column_by_name(&self.anchor_column) {
+            col
+        } else if let Some(var_name) = self.anchor_column.strip_suffix("._vid") {
+            batch.column_by_name(var_name).ok_or_else(|| {
+                DataFusionError::Execution(format!(
+                    "Anchor column '{}' not found in batch schema: {:?}",
+                    self.anchor_column,
+                    batch
+                        .schema()
+                        .fields()
+                        .iter()
+                        .map(|f| f.name().as_str())
+                        .collect::<Vec<_>>()
+                ))
+            })?
+        } else {
+            return Err(DataFusionError::Execution(format!(
                 "Anchor column '{}' not found in batch schema: {:?}",
                 self.anchor_column,
                 batch
@@ -203,18 +218,10 @@ impl PhysicalExpr for PatternComprehensionExecExpr {
                     .iter()
                     .map(|f| f.name().as_str())
                     .collect::<Vec<_>>()
-            ))
-        })?;
-        let anchor_vids = anchor_col
-            .as_any()
-            .downcast_ref::<UInt64Array>()
-            .ok_or_else(|| {
-                DataFusionError::Execution(format!(
-                    "Anchor column '{}' is not UInt64, got {:?}",
-                    self.anchor_column,
-                    anchor_col.data_type()
-                ))
-            })?;
+            )));
+        };
+        let anchor_vid_cow = column_as_vid_array(anchor_col.as_ref())?;
+        let anchor_vids: &UInt64Array = &anchor_vid_cow;
 
         // Step 2: CSR expansion
         // Warm CSR for all edge types and directions
@@ -726,11 +733,11 @@ impl PatternComprehensionExecExpr {
         let nodes_array = Arc::new(nodes_builder.finish()) as ArrayRef;
         let rels_array = Arc::new(rels_builder.finish()) as ArrayRef;
 
-        let nodes_field = Arc::new(Field::new("nodes", nodes_array.data_type().clone(), false));
+        let nodes_field = Arc::new(Field::new("nodes", nodes_array.data_type().clone(), true));
         let rels_field = Arc::new(Field::new(
             "relationships",
             rels_array.data_type().clone(),
-            false,
+            true,
         ));
 
         let path_struct = arrow_array::StructArray::try_new(

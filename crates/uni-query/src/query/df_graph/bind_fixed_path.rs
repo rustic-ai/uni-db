@@ -115,7 +115,7 @@ pub fn build_path_struct_field(path_variable: &str) -> Field {
         Field::new("properties", DataType::LargeBinary, true),
     ]);
     let node_item = Field::new("item", DataType::Struct(node_struct_fields), true);
-    let nodes_field = Field::new("nodes", DataType::List(Arc::new(node_item)), false);
+    let nodes_field = Field::new("nodes", DataType::List(Arc::new(node_item)), true);
 
     let edge_struct_fields = Fields::from(vec![
         Field::new("_eid", DataType::UInt64, false),
@@ -126,10 +126,10 @@ pub fn build_path_struct_field(path_variable: &str) -> Field {
     ]);
     let edge_item = Field::new("item", DataType::Struct(edge_struct_fields), true);
     let relationships_field =
-        Field::new("relationships", DataType::List(Arc::new(edge_item)), false);
+        Field::new("relationships", DataType::List(Arc::new(edge_item)), true);
 
     let path_struct_fields = Fields::from(vec![nodes_field, relationships_field]);
-    Field::new(path_variable, DataType::Struct(path_struct_fields), false)
+    Field::new(path_variable, DataType::Struct(path_struct_fields), true)
 }
 
 impl DisplayAs for BindFixedPathExec {
@@ -250,8 +250,42 @@ impl BindFixedPathStream {
             edge_struct_fields,
             num_rows * self.edge_variables.len(),
         ));
+        let mut path_validity = Vec::with_capacity(num_rows);
 
         for row_idx in 0..num_rows {
+            // A fixed path is NULL if any required node or edge binding is missing.
+            let row_has_missing_node = self.node_variables.iter().any(|node_var| {
+                let vid_col_name = format!("{}._vid", node_var);
+                extract_column_value::<arrow_array::UInt64Array, u64>(
+                    &batch,
+                    &vid_col_name,
+                    row_idx,
+                    |arr, i| arr.value(i),
+                )
+                .is_none()
+            });
+            let row_has_missing_edge = self.edge_variables.iter().any(|edge_var| {
+                let eid_col_name = if edge_var.starts_with("__eid_to_") {
+                    edge_var.clone()
+                } else {
+                    format!("{}._eid", edge_var)
+                };
+                extract_column_value::<arrow_array::UInt64Array, u64>(
+                    &batch,
+                    &eid_col_name,
+                    row_idx,
+                    |arr, i| arr.value(i),
+                )
+                .is_none()
+            });
+
+            if row_has_missing_node || row_has_missing_edge {
+                nodes_builder.append(false);
+                rels_builder.append(false);
+                path_validity.push(false);
+                continue;
+            }
+
             // Add all nodes in path order
             for node_var in &self.node_variables {
                 let vid_col_name = format!("{}._vid", node_var);
@@ -334,6 +368,7 @@ impl BindFixedPathStream {
                 self.append_edge(&mut rels_builder, eid, src_vid, dst_vid, &query_ctx);
             }
             rels_builder.append(true);
+            path_validity.push(true);
         }
 
         let nodes_array = Arc::new(nodes_builder.finish()) as ArrayRef;
@@ -341,15 +376,15 @@ impl BindFixedPathStream {
 
         let path_array = StructArray::try_new(
             Fields::from(vec![
-                Arc::new(Field::new("nodes", nodes_array.data_type().clone(), false)),
+                Arc::new(Field::new("nodes", nodes_array.data_type().clone(), true)),
                 Arc::new(Field::new(
                     "relationships",
                     rels_array.data_type().clone(),
-                    false,
+                    true,
                 )),
             ]),
             vec![nodes_array, rels_array],
-            None,
+            Some(arrow::buffer::NullBuffer::from(path_validity)),
         )?;
 
         let mut columns: Vec<ArrayRef> = batch.columns().to_vec();

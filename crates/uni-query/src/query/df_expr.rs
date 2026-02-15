@@ -301,11 +301,35 @@ pub fn cypher_expr_to_df(expr: &Expr, context: Option<&TranslationContext>) -> R
         }
 
         Expr::IsNull(inner) => {
+            if let Expr::Variable(var) = inner.as_ref()
+                && let Some(ctx) = context
+                && let Some(kind) = ctx.variable_kinds.get(var)
+            {
+                let col_name = match kind {
+                    VariableKind::Node => format!("{}.{}", var, COL_VID),
+                    VariableKind::Edge => format!("{}.{}", var, COL_EID),
+                    VariableKind::Path | VariableKind::EdgeList => var.clone(),
+                };
+                return Ok(DfExpr::Column(Column::from_name(col_name)).is_null());
+            }
+
             let inner_expr = cypher_expr_to_df(inner, context)?;
             Ok(inner_expr.is_null())
         }
 
         Expr::IsNotNull(inner) => {
+            if let Expr::Variable(var) = inner.as_ref()
+                && let Some(ctx) = context
+                && let Some(kind) = ctx.variable_kinds.get(var)
+            {
+                let col_name = match kind {
+                    VariableKind::Node => format!("{}.{}", var, COL_VID),
+                    VariableKind::Edge => format!("{}.{}", var, COL_EID),
+                    VariableKind::Path | VariableKind::EdgeList => var.clone(),
+                };
+                return Ok(DfExpr::Column(Column::from_name(col_name)).is_not_null());
+            }
+
             let inner_expr = cypher_expr_to_df(inner, context)?;
             Ok(inner_expr.is_not_null())
         }

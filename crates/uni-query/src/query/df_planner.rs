@@ -555,6 +555,7 @@ impl HybridPhysicalPlanner {
                 target_filter,
                 path_variable,
                 is_variable_length,
+                optional_pattern_vars,
                 ..
             } => self.plan_traverse(
                 input,
@@ -570,6 +571,7 @@ impl HybridPhysicalPlanner {
                 *optional,
                 target_filter.as_ref(),
                 *is_variable_length,
+                optional_pattern_vars,
                 all_properties,
             ),
 
@@ -1345,12 +1347,22 @@ impl HybridPhysicalPlanner {
         optional: bool,
         target_filter: Option<&Expr>,
         is_variable_length: bool,
+        optional_pattern_vars: &HashSet<String>,
         all_properties: &HashMap<String, HashSet<String>>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
         let input_plan = self.plan_internal(input, all_properties)?;
 
         let adj_direction = convert_direction(direction);
-        let source_col = format!("{}._vid", source_variable);
+        let source_vid_col = format!("{}._vid", source_variable);
+        let source_col = if input_plan
+            .schema()
+            .column_with_name(&source_vid_col)
+            .is_some()
+        {
+            source_vid_col
+        } else {
+            source_variable.to_string()
+        };
 
         let traverse_plan: Arc<dyn ExecutionPlan> = if !is_variable_length {
             // Extract edge properties for pushdown hydration, expanding "*" wildcards
@@ -1498,13 +1510,27 @@ impl HybridPhysicalPlanner {
             // Collect edge ID columns from previous hops for relationship uniqueness.
             // Look for both explicit edge variables (ending in "._eid") and
             // internal tracking columns (starting with "__eid_to_").
+            //
+            // Rebound edge patterns (e.g. OPTIONAL MATCH ()-[r]->() where `r` is already bound)
+            // use a temporary edge variable `__rebound_{r}` for traversal and then filter on eid.
+            // Do not treat the already-bound `{r}._eid` as "used" here, otherwise the only
+            // candidate edge is filtered out before rebound matching.
+            let rebound_bound_edge_col = step_variable
+                .and_then(|sv| sv.strip_prefix("__rebound_"))
+                .map(|bound| format!("{}._eid", bound));
+
             let used_edge_columns: Vec<String> = input_plan
                 .schema()
                 .fields()
                 .iter()
                 .filter_map(|f| {
                     let name = f.name();
-                    if name.ends_with("._eid") || name.starts_with("__eid_to_") {
+                    if rebound_bound_edge_col
+                        .as_ref()
+                        .is_some_and(|bound_col| name == bound_col)
+                    {
+                        None
+                    } else if name.ends_with("._eid") || name.starts_with("__eid_to_") {
                         Some(name.clone())
                     } else {
                         None
@@ -1525,6 +1551,7 @@ impl HybridPhysicalPlanner {
                 None, // VIDs don't embed label - use VidLabelsIndex instead
                 self.graph_ctx.clone(),
                 optional,
+                optional_pattern_vars.clone(),
                 bound_target_column,
                 used_edge_columns,
             ))
@@ -1540,15 +1567,10 @@ impl HybridPhysicalPlanner {
                         path_var.to_string(),
                         self.graph_ctx.clone(),
                     )));
-                } else if min_hops == 0 {
+                } else if min_hops == 0 && step_variable.is_none() {
                     // min_hops=0 but no path variable - just return input as-is
                     // (the target is the same as source for zero-length)
                     return Ok(input_plan);
-                } else {
-                    // No edges to traverse and min_hops > 0 means no results
-                    return Ok(Arc::new(datafusion::physical_plan::empty::EmptyExec::new(
-                        input_plan.schema(),
-                    )));
                 }
             }
             {
@@ -1710,29 +1732,23 @@ impl HybridPhysicalPlanner {
                 variable_kinds,
             };
             let df_filter = cypher_expr_to_df(filter_expr, Some(&ctx))?;
-
-            let final_filter = if optional {
-                // For OPTIONAL MATCH, allow NULL rows through (unmatched rows have NULL target VID)
-                let target_vid_col = format!("{}._vid", target_variable);
-                let is_null = DfExpr::IsNull(Box::new(DfExpr::Column(
-                    datafusion::common::Column::from_name(&target_vid_col),
-                )));
-                DfExpr::BinaryExpr(datafusion::logical_expr::BinaryExpr::new(
-                    Box::new(df_filter),
-                    datafusion::logical_expr::Operator::Or,
-                    Box::new(is_null),
-                ))
-            } else {
-                df_filter
-            };
             let schema = traverse_plan.schema();
             let session = self.session_ctx.read();
             let physical_filter =
-                self.create_physical_filter_expr(&final_filter, &schema, &session)?;
-            Ok(Arc::new(FilterExec::try_new(
-                physical_filter,
-                traverse_plan,
-            )?))
+                self.create_physical_filter_expr(&df_filter, &schema, &session)?;
+
+            if optional {
+                Ok(Arc::new(OptionalFilterExec::new(
+                    traverse_plan,
+                    physical_filter,
+                    optional_pattern_vars.clone(),
+                )))
+            } else {
+                Ok(Arc::new(FilterExec::try_new(
+                    physical_filter,
+                    traverse_plan,
+                )?))
+            }
         } else {
             Ok(traverse_plan)
         }
@@ -1757,7 +1773,16 @@ impl HybridPhysicalPlanner {
         let input_plan = self.plan_internal(input, all_properties)?;
 
         let adj_direction = convert_direction(direction);
-        let source_col = format!("{}._vid", source_variable);
+        let source_vid_col = format!("{}._vid", source_variable);
+        let source_col = if input_plan
+            .schema()
+            .column_with_name(&source_vid_col)
+            .is_some()
+        {
+            source_vid_col
+        } else {
+            source_variable.to_string()
+        };
 
         // Check if target variable is already bound (for patterns where target is in scope)
         let target_vid_col = format!("{}._vid", target_variable);
@@ -1905,7 +1930,16 @@ impl HybridPhysicalPlanner {
         let input_plan = self.plan_internal(input, all_properties)?;
 
         let adj_direction = convert_direction(direction);
-        let source_col = format!("{}._vid", source_variable);
+        let source_vid_col = format!("{}._vid", source_variable);
+        let source_col = if input_plan
+            .schema()
+            .column_with_name(&source_vid_col)
+            .is_some()
+        {
+            source_vid_col
+        } else {
+            source_variable.to_string()
+        };
 
         // Check if target variable is already bound (for patterns where target is in scope)
         let target_vid_col = format!("{}._vid", target_variable);

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2024-2026 Dragonscale Team
 
-use crate::query::df_expr::{TranslationContext, cypher_expr_to_df};
+use crate::query::df_expr::{TranslationContext, VariableKind, cypher_expr_to_df};
 use crate::query::df_graph::GraphExecutionContext;
 use crate::query::df_graph::common::{execute_subplan, extract_row_params};
 use crate::query::df_graph::comprehension::ListComprehensionExecExpr;
@@ -393,6 +393,35 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
         right: &Expr,
         input_schema: &Schema,
     ) -> Result<Arc<dyn PhysicalExpr>> {
+        if matches!(op, BinaryOp::Eq | BinaryOp::NotEq)
+            && let (Expr::Variable(lv), Expr::Variable(rv)) = (left, right)
+            && let Some(ctx) = self.translation_ctx
+            && let (Some(lk), Some(rk)) = (ctx.variable_kinds.get(lv), ctx.variable_kinds.get(rv))
+        {
+            let identity_prop = match (lk, rk) {
+                (VariableKind::Node, VariableKind::Node) => Some("_vid"),
+                (VariableKind::Edge, VariableKind::Edge) => Some("_eid"),
+                _ => None,
+            };
+
+            if let Some(id_prop) = identity_prop {
+                return self.compile_standard(
+                    &Expr::BinaryOp {
+                        left: Box::new(Expr::Property(
+                            Box::new(Expr::Variable(lv.clone())),
+                            id_prop.to_string(),
+                        )),
+                        op: *op,
+                        right: Box::new(Expr::Property(
+                            Box::new(Expr::Variable(rv.clone())),
+                            id_prop.to_string(),
+                        )),
+                    },
+                    input_schema,
+                );
+            }
+        }
+
         if Self::contains_custom_expr(left) || Self::contains_custom_expr(right) {
             let left_phy = self.compile(left, input_schema)?;
             let right_phy = self.compile(right, input_schema)?;

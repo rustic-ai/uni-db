@@ -33,7 +33,7 @@
 
 use crate::query::df_graph::common::compute_plan_properties;
 use arrow_array::{Array, ArrayRef, BooleanArray, RecordBatch, new_null_array};
-use arrow_schema::SchemaRef;
+use arrow_schema::{Field, Schema, SchemaRef};
 use datafusion::common::Result as DFResult;
 use datafusion::execution::{RecordBatchStream, SendableRecordBatchStream, TaskContext};
 use datafusion::physical_expr::PhysicalExpr;
@@ -87,33 +87,9 @@ impl fmt::Debug for OptionalFilterExec {
 }
 
 impl OptionalFilterExec {
-    /// Create a new optional filter execution plan.
-    ///
-    /// The `optional_variables` set determines which columns are nulled out
-    /// when all rows for a source group are filtered. Columns whose name
-    /// starts with `{var}.` for any var in `optional_variables` are treated
-    /// as optional.
-    pub fn new(
-        input: Arc<dyn ExecutionPlan>,
-        predicate: Arc<dyn PhysicalExpr>,
-        optional_variables: HashSet<String>,
-    ) -> Self {
-        let schema = input.schema();
-        let properties = compute_plan_properties(Arc::clone(&schema));
-
-        Self {
-            input,
-            predicate,
-            optional_variables,
-            schema,
-            properties,
-            metrics: ExecutionPlanMetricsSet::new(),
-        }
-    }
-
     /// Check whether a column belongs to an optional variable.
-    fn is_optional_column(&self, col_name: &str) -> bool {
-        for var in &self.optional_variables {
+    fn is_optional_column_name(optional_variables: &HashSet<String>, col_name: &str) -> bool {
+        for var in optional_variables {
             // Match columns like "m._vid", "m.name", "r._eid", "r._type"
             if col_name.starts_with(var.as_str()) && col_name[var.len()..].starts_with('.') {
                 return true;
@@ -128,6 +104,51 @@ impl OptionalFilterExec {
             }
         }
         false
+    }
+
+    /// Create a new optional filter execution plan.
+    ///
+    /// The `optional_variables` set determines which columns are nulled out
+    /// when all rows for a source group are filtered. Columns whose name
+    /// starts with `{var}.` for any var in `optional_variables` are treated
+    /// as optional.
+    pub fn new(
+        input: Arc<dyn ExecutionPlan>,
+        predicate: Arc<dyn PhysicalExpr>,
+        optional_variables: HashSet<String>,
+    ) -> Self {
+        let input_schema = input.schema();
+        // OptionalFilter can synthesize NULLs for optional columns even when upstream
+        // declared them non-nullable (e.g., reused bound variables in OPTIONAL MATCH).
+        // Ensure these columns are nullable in this operator's output schema.
+        let fields: Vec<Field> = input_schema
+            .fields()
+            .iter()
+            .map(|f| {
+                if Self::is_optional_column_name(&optional_variables, f.name()) && !f.is_nullable()
+                {
+                    Field::new(f.name(), f.data_type().clone(), true)
+                } else {
+                    f.as_ref().clone()
+                }
+            })
+            .collect();
+        let schema: SchemaRef = Arc::new(Schema::new(fields));
+        let properties = compute_plan_properties(Arc::clone(&schema));
+
+        Self {
+            input,
+            predicate,
+            optional_variables,
+            schema,
+            properties,
+            metrics: ExecutionPlanMetricsSet::new(),
+        }
+    }
+
+    /// Check whether a column belongs to an optional variable.
+    fn is_optional_column(&self, col_name: &str) -> bool {
+        Self::is_optional_column_name(&self.optional_variables, col_name)
     }
 }
 

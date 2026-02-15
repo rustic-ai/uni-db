@@ -2029,6 +2029,15 @@ impl QueryPlanner {
                             let col_name = Self::get_aggregate_column_name(&expr);
                             (Expr::Variable(col_name), alias)
                         }
+                        // For grouped RETURN projections, reference the pre-computed
+                        // group-by output column instead of re-evaluating the expression
+                        // against the aggregate schema (which no longer has original vars).
+                        else if has_agg
+                            && !has_window_exprs
+                            && !matches!(expr, Expr::Variable(_) | Expr::Property(_, _))
+                        {
+                            (Expr::Variable(expr.to_string_repr()), alias)
+                        }
                         // Check if this expression is a window function
                         else if let Expr::FunctionCall {
                             window_spec: Some(_),
@@ -3081,6 +3090,7 @@ impl QueryPlanner {
                     PatternElement::Relationship(r) => {
                         if let Some(v) = &r.variable
                             && !v.is_empty()
+                            && !is_var_in_scope(vars_in_scope, v)
                         {
                             vars.insert(v.clone());
                         }
@@ -3100,6 +3110,7 @@ impl QueryPlanner {
                                 PatternElement::Relationship(r) => {
                                     if let Some(v) = &r.variable
                                         && !v.is_empty()
+                                        && !is_var_in_scope(vars_in_scope, v)
                                     {
                                         vars.insert(v.clone());
                                     }
@@ -3156,11 +3167,12 @@ impl QueryPlanner {
                                 info.var_type
                             ));
                         }
-                        if let Some(prop_filter) = self.properties_to_expr(&variable, &n.properties)
+                        if let Some(node_filter) =
+                            self.node_filter_expr(&variable, &n.labels, &n.properties)
                         {
                             plan = LogicalPlan::Filter {
                                 input: Box::new(plan),
-                                predicate: prop_filter,
+                                predicate: node_filter,
                                 optional_variables: std::collections::HashSet::new(),
                             };
                         }
@@ -3420,16 +3432,17 @@ impl QueryPlanner {
         // Also: (a)-[r]->()-[r]->(a) where r is reused as relationship in same pattern
         // BUT: MATCH (a)-[r]->() WITH r MATCH ()-[r]->() is ALLOWED (r is bound from previous clause)
         let mut bound_edge_var: Option<String> = None;
+        let mut bound_edge_list_var: Option<String> = None;
         if let Some(rel_var) = &params.rel.variable
             && !rel_var.is_empty()
             && let Some(info) = find_var_in_scope(vars_in_scope, rel_var)
         {
+            let is_from_previous_clause = vars_in_scope[..vars_before_pattern]
+                .iter()
+                .any(|v| v.name == *rel_var);
+
             if info.var_type == VariableType::Edge {
                 // Check if this edge variable comes from a previous clause (before this MATCH)
-                let is_from_previous_clause = vars_in_scope[..vars_before_pattern]
-                    .iter()
-                    .any(|v| v.name == *rel_var && v.var_type == VariableType::Edge);
-
                 if is_from_previous_clause {
                     // Edge variable bound from previous clause - this is allowed
                     // We'll filter the traversal to match this specific edge
@@ -3441,6 +3454,16 @@ impl QueryPlanner {
                         rel_var
                     ));
                 }
+            } else if params.rel.range.is_some()
+                && is_from_previous_clause
+                && matches!(
+                    info.var_type,
+                    VariableType::Scalar | VariableType::ScalarLiteral
+                )
+            {
+                // Allow VLP rebound against a previously bound relationship list
+                // (e.g. WITH [r1, r2] AS rs ... MATCH ()-[rs*]->()).
+                bound_edge_list_var = Some(rel_var.clone());
             } else if !info.var_type.is_compatible_with(VariableType::Edge) {
                 return Err(anyhow!(
                     "SyntaxError: VariableTypeConflict - Variable '{}' already defined as {:?}, cannot use as relationship",
@@ -3601,7 +3624,11 @@ impl QueryPlanner {
 
         // If we have a bound edge variable from a previous clause, use a temp variable
         // for the Traverse step, then filter to match the bound edge
-        let effective_step_var = if let Some(ref bv) = bound_edge_var {
+        let rebound_var = bound_edge_var
+            .as_ref()
+            .or(bound_edge_list_var.as_ref())
+            .cloned();
+        let effective_step_var = if let Some(ref bv) = rebound_var {
             Some(format!("__rebound_{}", bv))
         } else {
             step_var.clone()
@@ -3618,13 +3645,34 @@ impl QueryPlanner {
             min_hops,
             max_hops,
             optional: params.optional,
-            target_filter: self
-                .properties_to_expr(&target_variable, &params.target_node.properties),
+            target_filter: self.node_filter_expr(
+                &target_variable,
+                &params.target_node.labels,
+                &params.target_node.properties,
+            ),
             path_variable: path_var.clone(),
             edge_properties: std::collections::HashSet::new(),
             is_variable_length,
             optional_pattern_vars: params.optional_pattern_vars.clone(),
         };
+
+        // Apply relationship property predicates (e.g. [r {k: v}]).
+        // Use the effective step variable so rebound-edge patterns are filtered
+        // before being compared against the previously bound relationship.
+        if let Some(edge_var_name) = effective_step_var.as_ref()
+            && let Some(edge_prop_filter) =
+                self.properties_to_expr(edge_var_name, &params.rel.properties)
+        {
+            plan = LogicalPlan::Filter {
+                input: Box::new(plan),
+                predicate: edge_prop_filter,
+                optional_variables: if params.optional {
+                    params.optional_pattern_vars.clone()
+                } else {
+                    std::collections::HashSet::new()
+                },
+            };
+        }
 
         // Only apply bound target filter for Imported variables (from outer scope/subquery).
         // For regular cycle patterns like (a)-[:T]->(b)-[:T]->(a), the bound check
@@ -3653,7 +3701,59 @@ impl QueryPlanner {
             plan = LogicalPlan::Filter {
                 input: Box::new(plan),
                 predicate: bound_check,
-                optional_variables: std::collections::HashSet::new(),
+                optional_variables: if params.optional {
+                    params.optional_pattern_vars.clone()
+                } else {
+                    std::collections::HashSet::new()
+                },
+            };
+        }
+
+        // If we have a bound relationship list variable for a VLP pattern,
+        // add a filter to match the traversed relationship list exactly.
+        if let Some(ref bv) = bound_edge_list_var {
+            let temp_var = format!("__rebound_{}", bv);
+            let temp_eids = Expr::ListComprehension {
+                variable: "__rebound_edge".to_string(),
+                list: Box::new(Expr::Variable(temp_var.clone())),
+                where_clause: None,
+                map_expr: Box::new(Expr::FunctionCall {
+                    name: "toInteger".to_string(),
+                    args: vec![Expr::Property(
+                        Box::new(Expr::Variable("__rebound_edge".to_string())),
+                        "_eid".to_string(),
+                    )],
+                    distinct: false,
+                    window_spec: None,
+                }),
+            };
+            let bound_eids = Expr::ListComprehension {
+                variable: "__bound_edge".to_string(),
+                list: Box::new(Expr::Variable(bv.clone())),
+                where_clause: None,
+                map_expr: Box::new(Expr::FunctionCall {
+                    name: "toInteger".to_string(),
+                    args: vec![Expr::Property(
+                        Box::new(Expr::Variable("__bound_edge".to_string())),
+                        "_eid".to_string(),
+                    )],
+                    distinct: false,
+                    window_spec: None,
+                }),
+            };
+            let bound_list_check = Expr::BinaryOp {
+                left: Box::new(temp_eids),
+                op: BinaryOp::Eq,
+                right: Box::new(bound_eids),
+            };
+            plan = LogicalPlan::Filter {
+                input: Box::new(plan),
+                predicate: bound_list_check,
+                optional_variables: if params.optional {
+                    params.optional_pattern_vars.clone()
+                } else {
+                    std::collections::HashSet::new()
+                },
             };
         }
 
@@ -3661,6 +3761,7 @@ impl QueryPlanner {
         // Skip adding the edge variable if it's already bound from a previous clause
         if let Some(sv) = &step_var
             && bound_edge_var.is_none()
+            && bound_edge_list_var.is_none()
         {
             add_var_to_scope(vars_in_scope, sv, VariableType::Edge)?;
         }

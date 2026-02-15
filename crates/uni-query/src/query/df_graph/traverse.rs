@@ -175,6 +175,10 @@ pub struct GraphTraverseExec {
     /// Whether this is an OPTIONAL MATCH (preserve unmatched source rows with NULLs).
     optional: bool,
 
+    /// Variables introduced by the OPTIONAL MATCH pattern.
+    /// Used to determine which columns should be null-extended on failure.
+    optional_pattern_vars: HashSet<String>,
+
     /// Column name of an already-bound target VID (for cycle patterns like n-->k<--n).
     /// When set, only traversals that reach this VID are included.
     bound_target_column: Option<String>,
@@ -235,6 +239,7 @@ impl GraphTraverseExec {
         target_label_id: Option<u16>,
         graph_ctx: Arc<GraphExecutionContext>,
         optional: bool,
+        optional_pattern_vars: HashSet<String>,
         bound_target_column: Option<String>,
         used_edge_columns: Vec<String>,
     ) -> Self {
@@ -280,6 +285,7 @@ impl GraphTraverseExec {
             target_label_id,
             graph_ctx,
             optional,
+            optional_pattern_vars,
             bound_target_column,
             used_edge_columns,
             schema,
@@ -424,6 +430,7 @@ impl ExecutionPlan for GraphTraverseExec {
             self.target_label_id,
             self.graph_ctx.clone(),
             self.optional,
+            self.optional_pattern_vars.clone(),
             self.bound_target_column.clone(),
             self.used_edge_columns.clone(),
         )))
@@ -454,6 +461,7 @@ impl ExecutionPlan for GraphTraverseExec {
             target_label_name: self.target_label_name.clone(),
             graph_ctx: self.graph_ctx.clone(),
             optional: self.optional,
+            optional_pattern_vars: self.optional_pattern_vars.clone(),
             bound_target_column: self.bound_target_column.clone(),
             used_edge_columns: self.used_edge_columns.clone(),
             schema: self.schema.clone(),
@@ -515,6 +523,9 @@ struct GraphTraverseStream {
     /// Whether this is an OPTIONAL MATCH.
     optional: bool,
 
+    /// Variables introduced by the OPTIONAL MATCH pattern.
+    optional_pattern_vars: HashSet<String>,
+
     /// Column name of an already-bound target VID (for cycle patterns like n-->k<--n).
     bound_target_column: Option<String>,
 
@@ -574,8 +585,12 @@ impl GraphTraverseStream {
                 continue;
             };
 
-            // Get expected target VID if this is a bound target pattern
-            let expected_target = bound_target_vids.and_then(|arr| {
+            // Get expected target VID if this is a bound target pattern.
+            // Distinguish between:
+            // - no bound target column (no filtering),
+            // - bound target present but NULL for this row (must produce no expansion),
+            // - bound target present with VID.
+            let expected_target = bound_target_vids.map(|arr| {
                 if arr.is_null(row_idx) {
                     None
                 } else {
@@ -617,11 +632,14 @@ impl GraphTraverseStream {
                     }
 
                     // Filter by bound target VID if set (for cycle patterns).
-                    // Only include expansions where the target matches the expected VID.
-                    if let Some(expected) = expected_target
-                        && target_vid.as_u64() != expected
-                    {
-                        continue;
+                    // NULL bound targets do not match anything.
+                    if let Some(expected_opt) = expected_target {
+                        let Some(expected) = expected_opt else {
+                            continue;
+                        };
+                        if target_vid.as_u64() != expected {
+                            continue;
+                        }
                     }
 
                     // Filter by target label using L0 visibility.
@@ -666,12 +684,27 @@ async fn build_traverse_output_batch(
     target_label_name: Option<String>,
     graph_ctx: Arc<GraphExecutionContext>,
     optional: bool,
+    optional_pattern_vars: HashSet<String>,
 ) -> DFResult<RecordBatch> {
     if expansions.is_empty() {
         if !optional {
             return Ok(RecordBatch::new_empty(schema));
         }
-        return build_optional_null_batch(&input, &schema);
+        let unmatched_reps = collect_unmatched_optional_group_rows(
+            &input,
+            &HashSet::new(),
+            &schema,
+            &optional_pattern_vars,
+        )?;
+        if unmatched_reps.is_empty() {
+            return Ok(RecordBatch::new_empty(schema));
+        }
+        return build_optional_null_batch_for_rows_with_optional_vars(
+            &input,
+            &unmatched_reps,
+            &schema,
+            &optional_pattern_vars,
+        );
     }
 
     // Build index array for take operation
@@ -878,15 +911,23 @@ async fn build_traverse_output_batch(
         .map_err(|e| datafusion::error::DataFusionError::ArrowError(Box::new(e), None))?;
 
     if optional {
-        // Identify source rows that had no expansions and append null rows for them
-        let expanded_indices: HashSet<usize> =
+        // Identify source groups that had no expansions and append one null row per group.
+        let matched_indices: HashSet<usize> =
             expansions.iter().map(|(idx, _, _, _)| *idx).collect();
-        let unmatched: Vec<usize> = (0..input.num_rows())
-            .filter(|idx| !expanded_indices.contains(idx))
-            .collect();
+        let unmatched = collect_unmatched_optional_group_rows(
+            &input,
+            &matched_indices,
+            &schema,
+            &optional_pattern_vars,
+        )?;
 
         if !unmatched.is_empty() {
-            let null_batch = build_optional_null_batch_for_rows(&input, &unmatched, &schema)?;
+            let null_batch = build_optional_null_batch_for_rows_with_optional_vars(
+                &input,
+                &unmatched,
+                &schema,
+                &optional_pattern_vars,
+            )?;
             let combined = arrow::compute::concat_batches(&schema, [&expanded_batch, &null_batch])
                 .map_err(|e| datafusion::error::DataFusionError::ArrowError(Box::new(e), None))?;
             return Ok(combined);
@@ -894,19 +935,6 @@ async fn build_traverse_output_batch(
     }
 
     Ok(expanded_batch)
-}
-
-/// Build a batch where all input rows are preserved with NULL target/edge columns.
-/// Used when OPTIONAL MATCH finds no expansions for the entire batch.
-fn build_optional_null_batch(input: &RecordBatch, schema: &SchemaRef) -> DFResult<RecordBatch> {
-    let num_rows = input.num_rows();
-    let mut columns: Vec<ArrayRef> = input.columns().to_vec();
-    // Fill remaining columns with nulls matching schema field types
-    for field in schema.fields().iter().skip(input.num_columns()) {
-        columns.push(arrow_array::new_null_array(field.data_type(), num_rows));
-    }
-    RecordBatch::try_new(schema.clone(), columns)
-        .map_err(|e| datafusion::error::DataFusionError::ArrowError(Box::new(e), None))
 }
 
 /// Build a batch for specific unmatched source rows with NULL target/edge columns.
@@ -930,6 +958,131 @@ fn build_optional_null_batch_for_rows(
     for field in schema.fields().iter().skip(input.num_columns()) {
         columns.push(arrow_array::new_null_array(field.data_type(), num_rows));
     }
+    RecordBatch::try_new(schema.clone(), columns)
+        .map_err(|e| datafusion::error::DataFusionError::ArrowError(Box::new(e), None))
+}
+
+fn is_optional_column_for_vars(col_name: &str, optional_vars: &HashSet<String>) -> bool {
+    for var in optional_vars {
+        if col_name.starts_with(var.as_str()) && col_name[var.len()..].starts_with('.') {
+            return true;
+        }
+        if col_name == var.as_str() {
+            return true;
+        }
+        if col_name.starts_with("__eid_to_") && col_name.ends_with(var.as_str()) {
+            return true;
+        }
+    }
+    false
+}
+
+fn collect_unmatched_optional_group_rows(
+    input: &RecordBatch,
+    matched_indices: &HashSet<usize>,
+    schema: &SchemaRef,
+    optional_vars: &HashSet<String>,
+) -> DFResult<Vec<usize>> {
+    if input.num_rows() == 0 {
+        return Ok(Vec::new());
+    }
+
+    if optional_vars.is_empty() {
+        return Ok((0..input.num_rows())
+            .filter(|idx| !matched_indices.contains(idx))
+            .collect());
+    }
+
+    let source_vid_indices: Vec<usize> = schema
+        .fields()
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, field)| {
+            if idx >= input.num_columns() {
+                return None;
+            }
+            let name = field.name();
+            if !is_optional_column_for_vars(name, optional_vars) && name.ends_with("._vid") {
+                Some(idx)
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    // Group rows by non-optional VID bindings and preserve group order.
+    let mut groups: HashMap<Vec<u8>, (usize, bool)> = HashMap::new(); // (first_row_idx, any_matched)
+    let mut group_order: Vec<Vec<u8>> = Vec::new();
+
+    for row_idx in 0..input.num_rows() {
+        let key = compute_optional_group_key(input, row_idx, &source_vid_indices)?;
+        let entry = groups.entry(key.clone());
+        if matches!(entry, std::collections::hash_map::Entry::Vacant(_)) {
+            group_order.push(key.clone());
+        }
+        let matched = matched_indices.contains(&row_idx);
+        entry
+            .and_modify(|(_, any_matched)| *any_matched |= matched)
+            .or_insert((row_idx, matched));
+    }
+
+    Ok(group_order
+        .into_iter()
+        .filter_map(|key| {
+            groups
+                .get(&key)
+                .and_then(|(first_idx, any_matched)| (!*any_matched).then_some(*first_idx))
+        })
+        .collect())
+}
+
+fn compute_optional_group_key(
+    batch: &RecordBatch,
+    row_idx: usize,
+    source_vid_indices: &[usize],
+) -> DFResult<Vec<u8>> {
+    let mut key = Vec::with_capacity(source_vid_indices.len() * std::mem::size_of::<u64>());
+    for &col_idx in source_vid_indices {
+        let col = batch.column(col_idx);
+        let vid_cow = column_as_vid_array(col.as_ref())?;
+        let arr: &UInt64Array = &vid_cow;
+        if arr.is_null(row_idx) {
+            key.extend_from_slice(&u64::MAX.to_le_bytes());
+        } else {
+            key.extend_from_slice(&arr.value(row_idx).to_le_bytes());
+        }
+    }
+    Ok(key)
+}
+
+fn build_optional_null_batch_for_rows_with_optional_vars(
+    input: &RecordBatch,
+    unmatched_indices: &[usize],
+    schema: &SchemaRef,
+    optional_vars: &HashSet<String>,
+) -> DFResult<RecordBatch> {
+    if optional_vars.is_empty() {
+        return build_optional_null_batch_for_rows(input, unmatched_indices, schema);
+    }
+
+    let num_rows = unmatched_indices.len();
+    let indices: Vec<u64> = unmatched_indices.iter().map(|&idx| idx as u64).collect();
+    let indices_array = UInt64Array::from(indices);
+
+    let mut columns: Vec<ArrayRef> = Vec::with_capacity(schema.fields().len());
+    for (col_idx, field) in schema.fields().iter().enumerate() {
+        if col_idx < input.num_columns() {
+            if is_optional_column_for_vars(field.name(), optional_vars) {
+                columns.push(arrow_array::new_null_array(field.data_type(), num_rows));
+            } else {
+                let taken = take(input.column(col_idx).as_ref(), &indices_array, None)?;
+                columns.push(taken);
+            }
+        } else {
+            columns.push(arrow_array::new_null_array(field.data_type(), num_rows));
+        }
+    }
+
     RecordBatch::try_new(schema.clone(), columns)
         .map_err(|e| datafusion::error::DataFusionError::ArrowError(Box::new(e), None))
 }
@@ -985,6 +1138,7 @@ impl Stream for GraphTraverseStream {
                                     self.edge_variable.as_ref(),
                                     &self.graph_ctx,
                                     self.optional,
+                                    &self.optional_pattern_vars,
                                 );
                                 self.state = TraverseStreamState::Reading;
                                 if let Ok(ref r) = result {
@@ -1003,6 +1157,7 @@ impl Stream for GraphTraverseStream {
                             let graph_ctx = self.graph_ctx.clone();
 
                             let optional = self.optional;
+                            let optional_pattern_vars = self.optional_pattern_vars.clone();
 
                             let fut = build_traverse_output_batch(
                                 batch,
@@ -1015,6 +1170,7 @@ impl Stream for GraphTraverseStream {
                                 target_label_name,
                                 graph_ctx,
                                 optional,
+                                optional_pattern_vars,
                             );
 
                             self.state = TraverseStreamState::Materializing(Box::pin(fut));
@@ -1068,12 +1224,27 @@ fn build_traverse_output_batch_sync(
     edge_variable: Option<&String>,
     graph_ctx: &GraphExecutionContext,
     optional: bool,
+    optional_pattern_vars: &HashSet<String>,
 ) -> DFResult<RecordBatch> {
     if expansions.is_empty() {
         if !optional {
             return Ok(RecordBatch::new_empty(schema.clone()));
         }
-        return build_optional_null_batch(input, schema);
+        let unmatched_reps = collect_unmatched_optional_group_rows(
+            input,
+            &HashSet::new(),
+            schema,
+            optional_pattern_vars,
+        )?;
+        if unmatched_reps.is_empty() {
+            return Ok(RecordBatch::new_empty(schema.clone()));
+        }
+        return build_optional_null_batch_for_rows_with_optional_vars(
+            input,
+            &unmatched_reps,
+            schema,
+            optional_pattern_vars,
+        );
     }
 
     let indices: Vec<u64> = expansions
@@ -1147,14 +1318,22 @@ fn build_traverse_output_batch_sync(
         .map_err(|e| datafusion::error::DataFusionError::ArrowError(Box::new(e), None))?;
 
     if optional {
-        let expanded_indices: HashSet<usize> =
+        let matched_indices: HashSet<usize> =
             expansions.iter().map(|(idx, _, _, _)| *idx).collect();
-        let unmatched: Vec<usize> = (0..input.num_rows())
-            .filter(|idx| !expanded_indices.contains(idx))
-            .collect();
+        let unmatched = collect_unmatched_optional_group_rows(
+            input,
+            &matched_indices,
+            schema,
+            optional_pattern_vars,
+        )?;
 
         if !unmatched.is_empty() {
-            let null_batch = build_optional_null_batch_for_rows(input, &unmatched, schema)?;
+            let null_batch = build_optional_null_batch_for_rows_with_optional_vars(
+                input,
+                &unmatched,
+                schema,
+                optional_pattern_vars,
+            )?;
             let combined = arrow::compute::concat_batches(schema, [&expanded_batch, &null_batch])
                 .map_err(|e| {
                 datafusion::error::DataFusionError::ArrowError(Box::new(e), None)
@@ -1280,6 +1459,7 @@ impl GraphTraverseMainExec {
             &edge_variable,
             &edge_properties,
             &target_properties,
+            optional,
         );
 
         let properties = compute_plan_properties(schema.clone());
@@ -1309,6 +1489,7 @@ impl GraphTraverseMainExec {
         edge_variable: &Option<String>,
         edge_properties: &[String],
         target_properties: &[String],
+        optional: bool,
     ) -> SchemaRef {
         let mut fields: Vec<Field> = input_schema
             .fields()
@@ -1337,7 +1518,7 @@ impl GraphTraverseMainExec {
             fields.push(Field::new(
                 format!("{}._eid", edge_var),
                 DataType::UInt64,
-                false,
+                optional,
             ));
 
             // Add edge ._type column for type(r) support
@@ -1363,6 +1544,14 @@ impl GraphTraverseMainExec {
                     ));
                 }
             }
+        } else {
+            // Add internal edge ID for anonymous relationships so BindPath can
+            // reconstruct named paths (p = (a)-[:T]->(b)).
+            fields.push(Field::new(
+                format!("__eid_to_{}", target_variable),
+                DataType::UInt64,
+                optional,
+            ));
         }
 
         // Target properties: all as LargeBinary (deferred to PropertyManager)
@@ -1711,7 +1900,8 @@ impl GraphTraverseMainStream {
             columns.push(Arc::new(labels_builder.finish()));
         }
 
-        // Add edge columns if edge variable is bound
+        // Add edge columns if edge variable is bound.
+        // For anonymous relationships, emit internal edge IDs for BindPath.
         if self.edge_variable.is_some() {
             // Add edge ._eid column
             let eids: Vec<u64> = expansions
@@ -1765,6 +1955,12 @@ impl GraphTraverseMainStream {
                     columns.push(Arc::new(builder.finish()));
                 }
             }
+        } else {
+            let eids: Vec<u64> = expansions
+                .iter()
+                .map(|(_, _, eid, _, _)| eid.as_u64())
+                .collect();
+            columns.push(Arc::new(UInt64Array::from(eids)));
         }
 
         // Add target property columns (hydrate from L0 buffers)
@@ -2382,10 +2578,8 @@ impl GraphVariableLengthTraverseExecData {
     /// Perform BFS from a source vertex.
     fn bfs(&self, source: Vid) -> Vec<BfsResult> {
         let mut results = Vec::new();
-        let mut visited: HashSet<Vid> = HashSet::new();
         let mut queue: VecDeque<BfsResult> = VecDeque::new();
 
-        visited.insert(source);
         queue.push_back((source, 0, vec![source], vec![]));
 
         let is_undirected = matches!(self.direction, Direction::Both);
@@ -2432,14 +2626,16 @@ impl GraphVariableLengthTraverseExecData {
                     continue;
                 }
 
-                if !visited.contains(&neighbor) {
-                    visited.insert(neighbor);
-                    let mut new_node_path = node_path.clone();
-                    new_node_path.push(neighbor);
-                    let mut new_edge_path = edge_path.clone();
-                    new_edge_path.push(eid);
-                    queue.push_back((neighbor, depth + 1, new_node_path, new_edge_path));
+                // Enforce relationship uniqueness per-path (Cypher semantics).
+                if edge_path.contains(&eid) {
+                    continue;
                 }
+
+                let mut new_node_path = node_path.clone();
+                new_node_path.push(neighbor);
+                let mut new_edge_path = edge_path.clone();
+                new_edge_path.push(eid);
+                queue.push_back((neighbor, depth + 1, new_node_path, new_edge_path));
             }
         }
 
@@ -2600,20 +2796,15 @@ impl GraphVariableLengthTraverseStream {
         let mut expansions: Vec<VarLengthExpansion> = Vec::new();
 
         for (row_idx, source_vid) in source_vids.iter().enumerate() {
-            let Some(src) = source_vid else {
-                continue;
-            };
+            let mut emitted_for_row = false;
 
-            let vid = Vid::from(src);
-            let bfs_results = self.exec.bfs(vid);
+            if let Some(src) = source_vid {
+                let vid = Vid::from(src);
+                let bfs_results = self.exec.bfs(vid);
 
-            if bfs_results.is_empty() && self.exec.is_optional {
-                // Preserve row with NULL target for OPTIONAL MATCH
-                expansions.push((row_idx, Vid::from(0u64), 0, vec![], vec![]));
-            } else {
                 for (target, hop_count, node_path, edge_path) in bfs_results {
                     // Filter by bound target VID if set (for patterns where target is in scope).
-                    // Only include paths where the final target matches the expected VID.
+                    // NULL bound targets do not match anything.
                     if let Some(targets) = expected_targets {
                         if targets.is_null(row_idx) {
                             continue;
@@ -2625,7 +2816,14 @@ impl GraphVariableLengthTraverseStream {
                     }
 
                     expansions.push((row_idx, target, hop_count, node_path, edge_path));
+                    emitted_for_row = true;
                 }
+            }
+
+            if self.exec.is_optional && !emitted_for_row {
+                // Preserve the source row with NULL optional bindings.
+                // We use empty node/edge paths to mark unmatched rows.
+                expansions.push((row_idx, Vid::from(u64::MAX), 0, vec![], vec![]));
             }
         }
 
@@ -2657,10 +2855,20 @@ impl GraphVariableLengthTraverseStream {
             columns.push(expanded);
         }
 
-        // Collect target VIDs for use in multiple places
-        let target_vids: Vec<u64> = expansions
+        // Collect target VIDs and unmatched markers for use in multiple places.
+        // Unmatched OPTIONAL rows are represented by empty node/edge paths.
+        let unmatched_rows: Vec<bool> = expansions
             .iter()
-            .map(|(_, vid, _, _, _)| vid.as_u64())
+            .map(|(_, _, _, node_path, edge_path)| node_path.is_empty() && edge_path.is_empty())
+            .collect();
+        let target_vids: Vec<Option<u64>> = expansions
+            .iter()
+            .zip(unmatched_rows.iter())
+            .map(
+                |((_, vid, _, _, _), unmatched)| {
+                    if *unmatched { None } else { Some(vid.as_u64()) }
+                },
+            )
             .collect();
 
         // Add target VID column (only if not already in input)
@@ -2679,7 +2887,11 @@ impl GraphVariableLengthTraverseStream {
             use arrow_array::builder::{ListBuilder, StringBuilder};
             let l0_ctx = self.exec.graph_ctx.l0_context();
             let mut labels_builder = ListBuilder::new(StringBuilder::new());
-            for vid_u64 in &target_vids {
+            for target_vid in &target_vids {
+                let Some(vid_u64) = target_vid else {
+                    labels_builder.append(false);
+                    continue;
+                };
                 let vid = Vid::from(*vid_u64);
                 let mut row_labels: Vec<String> = Vec::new();
                 if let Some(ref label_name) = self.exec.target_label_name {
@@ -2728,8 +2940,8 @@ impl GraphVariableLengthTraverseStream {
             let mut edges_builder = new_edge_list_builder();
             let query_ctx = self.exec.graph_ctx.query_context();
 
-            for (_, target_vid, _, node_path, edge_path) in expansions {
-                if target_vid.as_u64() == 0 {
+            for (_, _, _, node_path, edge_path) in expansions {
+                if node_path.is_empty() && edge_path.is_empty() {
                     // Null row for OPTIONAL MATCH unmatched
                     edges_builder.append_null();
                 } else if edge_path.is_empty() {
@@ -2761,8 +2973,15 @@ impl GraphVariableLengthTraverseStream {
             let mut nodes_builder = new_node_list_builder();
             let mut rels_builder = new_edge_list_builder();
             let query_ctx = self.exec.graph_ctx.query_context();
+            let mut path_validity = Vec::with_capacity(expansions.len());
 
             for (_, _, _, node_path, edge_path) in expansions {
+                if node_path.is_empty() && edge_path.is_empty() {
+                    nodes_builder.append(false);
+                    rels_builder.append(false);
+                    path_validity.push(false);
+                    continue;
+                }
                 for vid in node_path {
                     append_node_to_struct(nodes_builder.values(), *vid, &query_ctx);
                 }
@@ -2781,6 +3000,7 @@ impl GraphVariableLengthTraverseStream {
                     );
                 }
                 rels_builder.append(true);
+                path_validity.push(true);
             }
 
             // Finish builders and get ListArrays
@@ -2788,18 +3008,18 @@ impl GraphVariableLengthTraverseStream {
             let rels_array = Arc::new(rels_builder.finish()) as ArrayRef;
 
             // Build the path struct fields
-            let nodes_field = Arc::new(Field::new("nodes", nodes_array.data_type().clone(), false));
+            let nodes_field = Arc::new(Field::new("nodes", nodes_array.data_type().clone(), true));
             let rels_field = Arc::new(Field::new(
                 "relationships",
                 rels_array.data_type().clone(),
-                false,
+                true,
             ));
 
             // Create the path struct array
             let path_struct = arrow_array::StructArray::try_new(
                 vec![nodes_field, rels_field].into(),
                 vec![nodes_array, rels_array],
-                None,
+                Some(arrow::buffer::NullBuffer::from(path_validity)),
             )
             .map_err(|e| datafusion::error::DataFusionError::ArrowError(Box::new(e), None))?;
 
@@ -2860,7 +3080,9 @@ async fn hydrate_vlp_target_properties(
 
     let target_vids: Vec<Vid> = target_vid_array
         .iter()
-        .map(|v| Vid::from(v.unwrap_or(0)))
+        // Preserve null rows by mapping them to a sentinel VID that never resolves
+        // to stored properties. The output property columns remain NULL for these rows.
+        .map(|v| Vid::from(v.unwrap_or(u64::MAX)))
         .collect();
 
     // Fetch properties from storage
@@ -3305,10 +3527,8 @@ impl GraphVariableLengthTraverseMainStream {
     /// Perform BFS from a source vertex using the adjacency map.
     fn bfs(&self, source: Vid, adjacency: &EdgeAdjacencyMap) -> Vec<MainBfsResult> {
         let mut results = Vec::new();
-        let mut visited: HashSet<Vid> = HashSet::new();
         let mut queue: VecDeque<MainBfsResult> = VecDeque::new();
 
-        visited.insert(source);
         queue.push_back((source, 0, vec![source], vec![]));
 
         while let Some((current, depth, node_path, edge_path)) = queue.pop_front() {
@@ -3333,14 +3553,16 @@ impl GraphVariableLengthTraverseMainStream {
                         continue;
                     }
 
-                    if !visited.contains(neighbor) {
-                        visited.insert(*neighbor);
-                        let mut new_node_path = node_path.clone();
-                        new_node_path.push(*neighbor);
-                        let mut new_edge_path = edge_path.clone();
-                        new_edge_path.push(*eid);
-                        queue.push_back((*neighbor, depth + 1, new_node_path, new_edge_path));
+                    // Enforce relationship uniqueness per-path (Cypher semantics).
+                    if edge_path.contains(eid) {
+                        continue;
                     }
+
+                    let mut new_node_path = node_path.clone();
+                    new_node_path.push(*neighbor);
+                    let mut new_edge_path = edge_path.clone();
+                    new_edge_path.push(*eid);
+                    queue.push_back((*neighbor, depth + 1, new_node_path, new_edge_path));
                 }
             }
         }
@@ -3376,17 +3598,16 @@ impl GraphVariableLengthTraverseMainStream {
         // Collect BFS results: (original_row_idx, target_vid, hop_count, node_path, edge_path)
         let mut expansions: Vec<ExpansionRecord> = Vec::new();
 
-        for row_idx in 0..source_vids.len() {
-            let source = Vid::from(source_vids.value(row_idx));
-            let bfs_results = self.bfs(source, adjacency);
+        for (row_idx, source_opt) in source_vids.iter().enumerate() {
+            let mut emitted_for_row = false;
 
-            if bfs_results.is_empty() && self.is_optional {
-                // Preserve row with NULL target for OPTIONAL MATCH
-                expansions.push((row_idx, Vid::from(0u64), 0, vec![], vec![]));
-            } else {
+            if let Some(source_u64) = source_opt {
+                let source = Vid::from(source_u64);
+                let bfs_results = self.bfs(source, adjacency);
+
                 for (target, hops, node_path, edge_path) in bfs_results {
                     // Filter by bound target VID if set (for patterns where target is in scope).
-                    // Only include paths where the final target matches the expected VID.
+                    // NULL bound targets do not match anything.
                     if let Some(targets) = expected_targets {
                         if targets.is_null(row_idx) {
                             continue;
@@ -3398,8 +3619,22 @@ impl GraphVariableLengthTraverseMainStream {
                     }
 
                     expansions.push((row_idx, target, hops, node_path, edge_path));
+                    emitted_for_row = true;
                 }
             }
+
+            if self.is_optional && !emitted_for_row {
+                // Preserve source row with NULL optional bindings.
+                expansions.push((row_idx, Vid::from(u64::MAX), 0, vec![], vec![]));
+            }
+        }
+
+        if expansions.is_empty() {
+            if self.is_optional {
+                let all_indices: Vec<usize> = (0..batch.num_rows()).collect();
+                return build_optional_null_batch_for_rows(&batch, &all_indices, &self.schema);
+            }
+            return Ok(RecordBatch::new_empty(self.schema.clone()));
         }
 
         let num_rows = expansions.len();
@@ -3423,9 +3658,15 @@ impl GraphVariableLengthTraverseMainStream {
         // Add target VID column (only if not already in input)
         let target_vid_name = format!("{}._vid", self.target_variable);
         if batch.schema().column_with_name(&target_vid_name).is_none() {
-            let target_vids: Vec<u64> = expansions
+            let target_vids: Vec<Option<u64>> = expansions
                 .iter()
-                .map(|(_, vid, _, _, _)| vid.as_u64())
+                .map(|(_, vid, _, node_path, edge_path)| {
+                    if node_path.is_empty() && edge_path.is_empty() {
+                        None
+                    } else {
+                        Some(vid.as_u64())
+                    }
+                })
                 .collect();
             columns.push(Arc::new(UInt64Array::from(target_vids)));
         }
@@ -3439,7 +3680,11 @@ impl GraphVariableLengthTraverseMainStream {
         {
             use arrow_array::builder::{ListBuilder, StringBuilder};
             let mut labels_builder = ListBuilder::new(StringBuilder::new());
-            for (_, vid, _, _, _) in expansions.iter() {
+            for (_, vid, _, node_path, edge_path) in expansions.iter() {
+                if node_path.is_empty() && edge_path.is_empty() {
+                    labels_builder.append(false);
+                    continue;
+                }
                 let mut row_labels: Vec<String> = Vec::new();
                 let labels =
                     l0_visibility::get_vertex_labels(*vid, &self.graph_ctx.query_context());
@@ -3471,17 +3716,24 @@ impl GraphVariableLengthTraverseMainStream {
             let type_names_str = self.type_names.join("|");
 
             for (_, _, _, node_path, edge_path) in expansions.iter() {
-                for (i, eid) in edge_path.iter().enumerate() {
-                    append_edge_to_struct(
-                        edges_builder.values(),
-                        *eid,
-                        &type_names_str,
-                        node_path[i].as_u64(),
-                        node_path[i + 1].as_u64(),
-                        &query_ctx,
-                    );
+                if node_path.is_empty() && edge_path.is_empty() {
+                    edges_builder.append_null();
+                } else if edge_path.is_empty() {
+                    // Zero-hop match: empty list.
+                    edges_builder.append(true);
+                } else {
+                    for (i, eid) in edge_path.iter().enumerate() {
+                        append_edge_to_struct(
+                            edges_builder.values(),
+                            *eid,
+                            &type_names_str,
+                            node_path[i].as_u64(),
+                            node_path[i + 1].as_u64(),
+                            &query_ctx,
+                        );
+                    }
+                    edges_builder.append(true);
                 }
-                edges_builder.append(true);
             }
 
             columns.push(Arc::new(edges_builder.finish()) as ArrayRef);
@@ -3493,8 +3745,15 @@ impl GraphVariableLengthTraverseMainStream {
             let mut rels_builder = new_edge_list_builder();
             let query_ctx = self.graph_ctx.query_context();
             let type_names_str = self.type_names.join("|");
+            let mut path_validity = Vec::with_capacity(expansions.len());
 
             for (_, _, _, node_path, edge_path) in expansions.iter() {
+                if node_path.is_empty() && edge_path.is_empty() {
+                    nodes_builder.append(false);
+                    rels_builder.append(false);
+                    path_validity.push(false);
+                    continue;
+                }
                 for vid in node_path {
                     append_node_to_struct(nodes_builder.values(), *vid, &query_ctx);
                 }
@@ -3511,6 +3770,7 @@ impl GraphVariableLengthTraverseMainStream {
                     );
                 }
                 rels_builder.append(true);
+                path_validity.push(true);
             }
 
             // Finish the builders to get the arrays
@@ -3518,18 +3778,18 @@ impl GraphVariableLengthTraverseMainStream {
             let rels_array = Arc::new(rels_builder.finish()) as ArrayRef;
 
             // Build the path struct with nodes and relationships fields
-            let nodes_field = Arc::new(Field::new("nodes", nodes_array.data_type().clone(), false));
+            let nodes_field = Arc::new(Field::new("nodes", nodes_array.data_type().clone(), true));
             let rels_field = Arc::new(Field::new(
                 "relationships",
                 rels_array.data_type().clone(),
-                false,
+                true,
             ));
 
             // Create the path struct array
             let path_struct = arrow_array::StructArray::try_new(
                 vec![nodes_field, rels_field].into(),
                 vec![nodes_array, rels_array],
-                None,
+                Some(arrow::buffer::NullBuffer::from(path_validity)),
             )
             .map_err(|e| datafusion::error::DataFusionError::ArrowError(Box::new(e), None))?;
 
@@ -3773,13 +4033,14 @@ mod tests {
         )]));
 
         let output_schema =
-            GraphTraverseMainExec::build_schema(&input_schema, "m", &None, &[], &[]);
+            GraphTraverseMainExec::build_schema(&input_schema, "m", &None, &[], &[], false);
 
-        // a._vid, m._vid, m._labels
-        assert_eq!(output_schema.fields().len(), 3);
+        // a._vid, m._vid, m._labels, __eid_to_m
+        assert_eq!(output_schema.fields().len(), 4);
         assert_eq!(output_schema.field(0).name(), "a._vid");
         assert_eq!(output_schema.field(1).name(), "m._vid");
         assert_eq!(output_schema.field(2).name(), "m._labels");
+        assert_eq!(output_schema.field(3).name(), "__eid_to_m");
     }
 
     #[test]
@@ -3796,6 +4057,7 @@ mod tests {
             &Some("r".to_string()),
             &[],
             &[],
+            false,
         );
 
         // a._vid, m._vid, m._labels, r._eid, r._type
@@ -3822,6 +4084,7 @@ mod tests {
             &Some("r".to_string()),
             &edge_props,
             &[],
+            false,
         );
 
         // a._vid, m._vid, m._labels, r._eid, r._type, r.weight, r.since
@@ -3852,6 +4115,7 @@ mod tests {
             &Some("r".to_string()),
             &[],
             &target_props,
+            false,
         );
 
         // a._vid, m._vid, m._labels, r._eid, r._type, m.name, m.age
