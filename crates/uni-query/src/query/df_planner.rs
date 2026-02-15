@@ -2435,9 +2435,21 @@ impl HybridPhysicalPlanner {
                         let udaf = Arc::new(crate::query::df_udfs::create_cypher_sum_udaf());
                         udaf.call(vec![arg])
                     } else {
-                        // Cast to Int64 for native sum (DataFusion doesn't support Int32 sum)
+                        // Widen small integers to Int64 (DataFusion doesn't support Int32 sum).
+                        // Float columns pass through unchanged so SUM preserves float type.
                         use datafusion::logical_expr::Cast;
-                        sum(DfExpr::Cast(Cast::new(Box::new(arg), datafusion::arrow::datatypes::DataType::Int64)))
+                        let is_float = if let DfExpr::Column(col) = &arg
+                            && let Ok(field) = schema.field_with_name(&col.name)
+                        {
+                            matches!(field.data_type(), datafusion::arrow::datatypes::DataType::Float32 | datafusion::arrow::datatypes::DataType::Float64)
+                        } else {
+                            false
+                        };
+                        if is_float {
+                            sum(DfExpr::Cast(Cast::new(Box::new(arg), datafusion::arrow::datatypes::DataType::Float64)))
+                        } else {
+                            sum(DfExpr::Cast(Cast::new(Box::new(arg), datafusion::arrow::datatypes::DataType::Int64)))
+                        }
                     }
                 }
                 "avg" => {
