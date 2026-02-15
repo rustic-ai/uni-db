@@ -20,11 +20,13 @@ use super::procedure::ProcedureRegistry;
 pub(crate) enum Accumulator {
     Count(i64),
     Sum(f64),
-    Min(Option<f64>),
-    Max(Option<f64>),
+    Min(Option<Value>),
+    Max(Option<Value>),
     Avg { sum: f64, count: i64 },
     Collect(Vec<Value>),
     CountDistinct(HashSet<String>),
+    PercentileDisc { values: Vec<f64>, percentile: f64 },
+    PercentileCont { values: Vec<f64>, percentile: f64 },
 }
 
 /// Extract a numeric value from a Value as f64.
@@ -41,8 +43,43 @@ fn numeric_to_value(val: f64) -> Value {
     }
 }
 
+/// Cross-type ordering rank for Cypher min/max (lower rank = smaller).
+fn cypher_type_rank(val: &Value) -> u8 {
+    match val {
+        Value::Null => 0,
+        Value::List(_) => 1,
+        Value::String(_) => 2,
+        Value::Bool(_) => 3,
+        Value::Int(_) | Value::Float(_) => 4,
+        _ => 5,
+    }
+}
+
+/// Compare two Cypher values for min/max with cross-type ordering.
+fn cypher_cross_type_cmp(a: &Value, b: &Value) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    let ra = cypher_type_rank(a);
+    let rb = cypher_type_rank(b);
+    if ra != rb {
+        return ra.cmp(&rb);
+    }
+    match (a, b) {
+        (Value::Int(l), Value::Int(r)) => l.cmp(r),
+        (Value::Float(l), Value::Float(r)) => l.partial_cmp(r).unwrap_or(Ordering::Equal),
+        (Value::Int(l), Value::Float(r)) => (*l as f64).partial_cmp(r).unwrap_or(Ordering::Equal),
+        (Value::Float(l), Value::Int(r)) => l.partial_cmp(&(*r as f64)).unwrap_or(Ordering::Equal),
+        (Value::String(l), Value::String(r)) => l.cmp(r),
+        (Value::Bool(l), Value::Bool(r)) => l.cmp(r),
+        _ => Ordering::Equal,
+    }
+}
+
 impl Accumulator {
     pub(crate) fn new(op: &str, distinct: bool) -> Self {
+        Self::new_with_percentile(op, distinct, 0.0)
+    }
+
+    pub(crate) fn new_with_percentile(op: &str, distinct: bool, percentile: f64) -> Self {
         let op_upper = op.to_uppercase();
         match op_upper.as_str() {
             "COUNT" if distinct => Accumulator::CountDistinct(HashSet::new()),
@@ -52,6 +89,8 @@ impl Accumulator {
             "MAX" => Accumulator::Max(None),
             "AVG" => Accumulator::Avg { sum: 0.0, count: 0 },
             "COLLECT" => Accumulator::Collect(Vec::new()),
+            "PERCENTILEDISC" => Accumulator::PercentileDisc { values: Vec::new(), percentile },
+            "PERCENTILECONT" => Accumulator::PercentileCont { values: Vec::new(), percentile },
             _ => Accumulator::Count(0),
         }
     }
@@ -69,13 +108,31 @@ impl Accumulator {
                 }
             }
             Accumulator::Min(current) => {
-                if let Some(n) = as_numeric(val) {
-                    *current = Some(current.map_or(n, |m| m.min(n)));
+                if !val.is_null() {
+                    *current = Some(match current.take() {
+                        None => val.clone(),
+                        Some(cur) => {
+                            if cypher_cross_type_cmp(val, &cur) == std::cmp::Ordering::Less {
+                                val.clone()
+                            } else {
+                                cur
+                            }
+                        }
+                    });
                 }
             }
             Accumulator::Max(current) => {
-                if let Some(n) = as_numeric(val) {
-                    *current = Some(current.map_or(n, |m| m.max(n)));
+                if !val.is_null() {
+                    *current = Some(match current.take() {
+                        None => val.clone(),
+                        Some(cur) => {
+                            if cypher_cross_type_cmp(val, &cur) == std::cmp::Ordering::Greater {
+                                val.clone()
+                            } else {
+                                cur
+                            }
+                        }
+                    });
                 }
             }
             Accumulator::Avg { sum, count } => {
@@ -94,6 +151,12 @@ impl Accumulator {
                     s.insert(val.to_string());
                 }
             }
+            Accumulator::PercentileDisc { values, .. }
+            | Accumulator::PercentileCont { values, .. } => {
+                if let Some(n) = as_numeric(val) {
+                    values.push(n);
+                }
+            }
         }
     }
 
@@ -101,8 +164,8 @@ impl Accumulator {
         match self {
             Accumulator::Count(c) => Value::Int(*c),
             Accumulator::Sum(s) => numeric_to_value(*s),
-            Accumulator::Min(opt) => opt.map_or(Value::Null, numeric_to_value),
-            Accumulator::Max(opt) => opt.map_or(Value::Null, numeric_to_value),
+            Accumulator::Min(opt) => opt.as_ref().cloned().unwrap_or(Value::Null),
+            Accumulator::Max(opt) => opt.as_ref().cloned().unwrap_or(Value::Null),
             Accumulator::Avg { sum, count } => {
                 if *count > 0 {
                     Value::Float(*sum / (*count as f64))
@@ -112,6 +175,37 @@ impl Accumulator {
             }
             Accumulator::Collect(v) => Value::List(v.clone()),
             Accumulator::CountDistinct(s) => Value::Int(s.len() as i64),
+            Accumulator::PercentileDisc { values, percentile } => {
+                if values.is_empty() {
+                    return Value::Null;
+                }
+                let mut sorted = values.clone();
+                sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                let n = sorted.len();
+                let idx = (percentile * (n as f64 - 1.0)).round() as usize;
+                let idx = idx.min(n - 1);
+                numeric_to_value(sorted[idx])
+            }
+            Accumulator::PercentileCont { values, percentile } => {
+                if values.is_empty() {
+                    return Value::Null;
+                }
+                let mut sorted = values.clone();
+                sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                let n = sorted.len();
+                if n == 1 {
+                    return Value::Float(sorted[0]);
+                }
+                let pos = percentile * (n as f64 - 1.0);
+                let lower = (pos.floor() as usize).min(n - 1);
+                let upper = (pos.ceil() as usize).min(n - 1);
+                if lower == upper {
+                    Value::Float(sorted[lower])
+                } else {
+                    let frac = pos - lower as f64;
+                    Value::Float(sorted[lower] + frac * (sorted[upper] - sorted[lower]))
+                }
+            }
         }
     }
 }

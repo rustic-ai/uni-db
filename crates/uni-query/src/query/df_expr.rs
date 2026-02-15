@@ -1128,30 +1128,46 @@ fn translate_aggregate_function(
         }
         "SUM" => {
             check1!("SUM");
-            let expr = datafusion::functions_aggregate::sum::sum(first_arg(df_args));
-            Some(maybe_distinct(expr, distinct, "SUM"))
+            let udaf = Arc::new(crate::query::df_udfs::create_cypher_sum_udaf());
+            Some(maybe_distinct(udaf.call(vec![first_arg(df_args)]), distinct, "SUM"))
         }
         "AVG" => {
             check1!("AVG");
-            let expr = datafusion::functions_aggregate::average::avg(first_arg(df_args));
+            let coerced = crate::query::df_udfs::cypher_to_float64_expr(first_arg(df_args));
+            let expr = datafusion::functions_aggregate::average::avg(coerced);
             Some(maybe_distinct(expr, distinct, "AVG"))
         }
         "MIN" => {
             check1!("MIN");
-            Some(Ok(datafusion::functions_aggregate::min_max::min(
-                first_arg(df_args),
-            )))
+            let udaf = Arc::new(crate::query::df_udfs::create_cypher_min_udaf());
+            Some(Ok(udaf.call(vec![first_arg(df_args)])))
         }
         "MAX" => {
             check1!("MAX");
-            Some(Ok(datafusion::functions_aggregate::min_max::max(
-                first_arg(df_args),
-            )))
+            let udaf = Arc::new(crate::query::df_udfs::create_cypher_max_udaf());
+            Some(Ok(udaf.call(vec![first_arg(df_args)])))
+        }
+        "PERCENTILEDISC" => {
+            if df_args.len() != 2 {
+                return Some(Err(anyhow!("percentileDisc() requires exactly 2 arguments")));
+            }
+            let coerced = crate::query::df_udfs::cypher_to_float64_expr(df_args[0].clone());
+            let udaf = Arc::new(crate::query::df_udfs::create_cypher_percentile_disc_udaf());
+            Some(Ok(udaf.call(vec![coerced, df_args[1].clone()])))
+        }
+        "PERCENTILECONT" => {
+            if df_args.len() != 2 {
+                return Some(Err(anyhow!("percentileCont() requires exactly 2 arguments")));
+            }
+            let coerced = crate::query::df_udfs::cypher_to_float64_expr(df_args[0].clone());
+            let udaf = Arc::new(crate::query::df_udfs::create_cypher_percentile_cont_udaf());
+            Some(Ok(udaf.call(vec![coerced, df_args[1].clone()])))
         }
         "COLLECT" => {
             check1!("COLLECT");
-            Some(Ok(datafusion::functions_aggregate::array_agg::array_agg(
+            Some(Ok(crate::query::df_udfs::create_cypher_collect_expr(
                 first_arg(df_args),
+                distinct,
             )))
         }
         _ => None,

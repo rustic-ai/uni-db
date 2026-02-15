@@ -72,6 +72,8 @@ static FUNCTION_SPECS: LazyLock<std::collections::HashMap<&'static str, Function
             ("MIN", no_entity),
             ("MAX", no_entity),
             ("COLLECT", no_entity),
+            ("PERCENTILEDISC", no_entity),
+            ("PERCENTILECONT", no_entity),
         ])
     });
 

@@ -198,6 +198,19 @@ pub fn register_cypher_udfs(ctx: &SessionContext) -> DFResult<()> {
         ctx.register_udf(create_temporal_udf(name));
     }
 
+    // CypherValue-to-Float64 conversion UDF (for sum/avg on LargeBinary columns)
+    ctx.register_udf(create_cypher_to_float64_udf());
+
+    // Cypher-aware aggregate UDAFs
+    ctx.register_udaf(create_cypher_min_udaf());
+    ctx.register_udaf(create_cypher_max_udaf());
+    ctx.register_udaf(create_cypher_sum_udaf());
+    ctx.register_udaf(create_cypher_collect_udaf());
+
+    // Cypher percentileDisc/percentileCont UDAFs
+    ctx.register_udaf(create_cypher_percentile_disc_udaf());
+    ctx.register_udaf(create_cypher_percentile_cont_udaf());
+
     Ok(())
 }
 
@@ -3953,6 +3966,1075 @@ fn cypher_value_cmp(a: &Value, b: &Value) -> Option<std::cmp::Ordering> {
         (Value::List(l), Value::List(r)) => cypher_list_cmp(l, r),
         _ => None, // Incomparable types
     }
+}
+
+// ============================================================================
+// CypherToFloat64 Scalar UDF
+// ============================================================================
+
+/// Scalar UDF that decodes LargeBinary CypherValue bytes to Float64.
+/// Non-numeric or null inputs produce Arrow null.
+/// Non-LargeBinary inputs (e.g., Int64, Float64) are passed through with a cast.
+struct CypherToFloat64Udf {
+    signature: Signature,
+}
+
+impl CypherToFloat64Udf {
+    fn new() -> Self {
+        Self {
+            signature: Signature::new(
+                TypeSignature::Any(1),
+                Volatility::Immutable,
+            ),
+        }
+    }
+}
+
+impl_udf_eq_hash!(CypherToFloat64Udf);
+
+impl std::fmt::Debug for CypherToFloat64Udf {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CypherToFloat64Udf").finish()
+    }
+}
+
+impl ScalarUDFImpl for CypherToFloat64Udf {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+    fn name(&self) -> &str {
+        "_cypher_to_float64"
+    }
+    fn signature(&self) -> &Signature {
+        &self.signature
+    }
+    fn return_type(&self, _args: &[DataType]) -> DFResult<DataType> {
+        Ok(DataType::Float64)
+    }
+    fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DFResult<ColumnarValue> {
+        if args.args.len() != 1 {
+            return Err(datafusion::error::DataFusionError::Execution(
+                "_cypher_to_float64 requires exactly 1 argument".into(),
+            ));
+        }
+        match &args.args[0] {
+            ColumnarValue::Scalar(scalar) => {
+                let f = match scalar {
+                    ScalarValue::LargeBinary(Some(bytes)) => cv_bytes_as_f64(bytes),
+                    ScalarValue::Int64(Some(i)) => Some(*i as f64),
+                    ScalarValue::Int32(Some(i)) => Some(*i as f64),
+                    ScalarValue::Float64(Some(f)) => Some(*f),
+                    ScalarValue::Float32(Some(f)) => Some(*f as f64),
+                    _ => None,
+                };
+                Ok(ColumnarValue::Scalar(ScalarValue::Float64(f)))
+            }
+            ColumnarValue::Array(arr) => {
+                let len = arr.len();
+                let mut builder = arrow::array::Float64Builder::with_capacity(len);
+                match arr.data_type() {
+                    DataType::LargeBinary => {
+                        let lb = arr.as_any().downcast_ref::<LargeBinaryArray>().unwrap();
+                        for i in 0..len {
+                            if lb.is_null(i) {
+                                builder.append_null();
+                            } else {
+                                match cv_bytes_as_f64(lb.value(i)) {
+                                    Some(f) => builder.append_value(f),
+                                    None => builder.append_null(),
+                                }
+                            }
+                        }
+                    }
+                    DataType::Int64 => {
+                        let int_arr = arr.as_any().downcast_ref::<Int64Array>().unwrap();
+                        for i in 0..len {
+                            if int_arr.is_null(i) {
+                                builder.append_null();
+                            } else {
+                                builder.append_value(int_arr.value(i) as f64);
+                            }
+                        }
+                    }
+                    DataType::Float64 => {
+                        let f_arr = arr.as_any().downcast_ref::<Float64Array>().unwrap();
+                        for i in 0..len {
+                            if f_arr.is_null(i) {
+                                builder.append_null();
+                            } else {
+                                builder.append_value(f_arr.value(i));
+                            }
+                        }
+                    }
+                    _ => {
+                        for _ in 0..len {
+                            builder.append_null();
+                        }
+                    }
+                }
+                Ok(ColumnarValue::Array(Arc::new(builder.finish())))
+            }
+        }
+    }
+}
+
+fn create_cypher_to_float64_udf() -> ScalarUDF {
+    ScalarUDF::from(CypherToFloat64Udf::new())
+}
+
+/// Helper: wrap a DataFusion expression with `_cypher_to_float64()` UDF.
+pub(crate) fn cypher_to_float64_expr(arg: datafusion::logical_expr::Expr) -> datafusion::logical_expr::Expr {
+    datafusion::logical_expr::Expr::ScalarFunction(
+        datafusion::logical_expr::expr::ScalarFunction::new_udf(
+            Arc::new(create_cypher_to_float64_udf()),
+            vec![arg],
+        ),
+    )
+}
+
+// ============================================================================
+// Cypher-aware Min/Max UDAFs
+// ============================================================================
+
+/// Cross-type ordering rank for Cypher min/max (lower rank = smaller).
+/// In OpenCypher: MAP < NODE < REL < PATH < LIST < STRING < BOOLEAN < NUMBER
+/// For min/max, we use: LIST(1) < STRING(2) < BOOLEAN(3) < NUMBER(4)
+fn cypher_type_rank(val: &Value) -> u8 {
+    match val {
+        Value::Null => 0,
+        Value::List(_) => 1,
+        Value::String(_) => 2,
+        Value::Bool(_) => 3,
+        Value::Int(_) | Value::Float(_) => 4,
+        _ => 5, // Map, Node, Edge, Path, etc.
+    }
+}
+
+/// Compare two Cypher values for min/max with cross-type ordering.
+/// Uses type rank for different types, within-type comparison for same type.
+fn cypher_cross_type_cmp(a: &Value, b: &Value) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    let ra = cypher_type_rank(a);
+    let rb = cypher_type_rank(b);
+    if ra != rb {
+        return ra.cmp(&rb);
+    }
+    // Same type rank: compare within type
+    match (a, b) {
+        (Value::Int(l), Value::Int(r)) => l.cmp(r),
+        (Value::Float(l), Value::Float(r)) => l.partial_cmp(r).unwrap_or(Ordering::Equal),
+        (Value::Int(l), Value::Float(r)) => (*l as f64)
+            .partial_cmp(r)
+            .unwrap_or(Ordering::Equal),
+        (Value::Float(l), Value::Int(r)) => l
+            .partial_cmp(&(*r as f64))
+            .unwrap_or(Ordering::Equal),
+        (Value::String(l), Value::String(r)) => l.cmp(r),
+        (Value::Bool(l), Value::Bool(r)) => l.cmp(r),
+        (Value::List(l), Value::List(r)) => {
+            cypher_list_cmp(l, r).unwrap_or(Ordering::Equal)
+        }
+        _ => Ordering::Equal,
+    }
+}
+
+/// Decode a LargeBinary scalar into a Value.
+fn scalar_binary_to_value(bytes: &[u8]) -> Value {
+    uni_common::cypher_value_codec::decode(bytes).unwrap_or(Value::Null)
+}
+
+use datafusion::logical_expr::{
+    Accumulator as DfAccumulator, AggregateUDF, AggregateUDFImpl,
+};
+
+/// Custom UDAF for Cypher-aware min/max on LargeBinary columns.
+#[derive(Debug, Clone)]
+struct CypherMinMaxUdaf {
+    name: String,
+    signature: Signature,
+    is_max: bool,
+}
+
+impl CypherMinMaxUdaf {
+    fn new(is_max: bool) -> Self {
+        let name = if is_max {
+            "_cypher_max"
+        } else {
+            "_cypher_min"
+        };
+        Self {
+            name: name.to_string(),
+            signature: Signature::new(TypeSignature::Any(1), Volatility::Immutable),
+            is_max,
+        }
+    }
+}
+
+impl PartialEq for CypherMinMaxUdaf {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name
+    }
+}
+
+impl Eq for CypherMinMaxUdaf {}
+
+impl Hash for CypherMinMaxUdaf {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.name.hash(state);
+    }
+}
+
+impl AggregateUDFImpl for CypherMinMaxUdaf {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+    fn name(&self) -> &str {
+        &self.name
+    }
+    fn signature(&self) -> &Signature {
+        &self.signature
+    }
+    fn return_type(&self, args: &[DataType]) -> DFResult<DataType> {
+        // Return same type as input
+        Ok(args.first().cloned().unwrap_or(DataType::LargeBinary))
+    }
+    fn accumulator(&self, _acc_args: datafusion::logical_expr::function::AccumulatorArgs) -> DFResult<Box<dyn DfAccumulator>> {
+        Ok(Box::new(CypherMinMaxAccumulator {
+            current: None,
+            is_max: self.is_max,
+        }))
+    }
+    fn state_fields(&self, args: datafusion::logical_expr::function::StateFieldsArgs) -> DFResult<Vec<Arc<arrow::datatypes::Field>>> {
+        Ok(vec![Arc::new(arrow::datatypes::Field::new(
+            args.name,
+            DataType::LargeBinary,
+            true,
+        ))])
+    }
+}
+
+#[derive(Debug)]
+struct CypherMinMaxAccumulator {
+    current: Option<Value>,
+    is_max: bool,
+}
+
+impl DfAccumulator for CypherMinMaxAccumulator {
+    fn update_batch(&mut self, values: &[ArrayRef]) -> DFResult<()> {
+        let arr = &values[0];
+        match arr.data_type() {
+            DataType::LargeBinary => {
+                let lb = arr.as_any().downcast_ref::<LargeBinaryArray>().unwrap();
+                for i in 0..lb.len() {
+                    if lb.is_null(i) {
+                        continue;
+                    }
+                    let val = scalar_binary_to_value(lb.value(i));
+                    if val.is_null() {
+                        continue;
+                    }
+                    self.current = Some(match self.current.take() {
+                        None => val,
+                        Some(cur) => {
+                            let ord = cypher_cross_type_cmp(&val, &cur);
+                            if (self.is_max && ord == std::cmp::Ordering::Greater)
+                                || (!self.is_max && ord == std::cmp::Ordering::Less)
+                            {
+                                val
+                            } else {
+                                cur
+                            }
+                        }
+                    });
+                }
+            }
+            _ => {
+                // For non-LargeBinary inputs, decode via ScalarValue
+                for i in 0..arr.len() {
+                    if arr.is_null(i) {
+                        continue;
+                    }
+                    let sv = ScalarValue::try_from_array(arr, i)
+                        .map_err(|e| datafusion::error::DataFusionError::Execution(e.to_string()))?;
+                    let val = scalar_to_value(&sv)?;
+                    if val.is_null() {
+                        continue;
+                    }
+                    self.current = Some(match self.current.take() {
+                        None => val,
+                        Some(cur) => {
+                            let ord = cypher_cross_type_cmp(&val, &cur);
+                            if (self.is_max && ord == std::cmp::Ordering::Greater)
+                                || (!self.is_max && ord == std::cmp::Ordering::Less)
+                            {
+                                val
+                            } else {
+                                cur
+                            }
+                        }
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+    fn evaluate(&mut self) -> DFResult<ScalarValue> {
+        match &self.current {
+            None => Ok(ScalarValue::LargeBinary(None)),
+            Some(val) => {
+                let bytes = uni_common::cypher_value_codec::encode(val);
+                Ok(ScalarValue::LargeBinary(Some(bytes)))
+            }
+        }
+    }
+    fn size(&self) -> usize {
+        std::mem::size_of_val(self) + self.current.as_ref().map_or(0, |_| 64)
+    }
+    fn state(&mut self) -> DFResult<Vec<ScalarValue>> {
+        Ok(vec![self.evaluate()?])
+    }
+    fn merge_batch(&mut self, states: &[ArrayRef]) -> DFResult<()> {
+        self.update_batch(states)
+    }
+}
+
+pub(crate) fn create_cypher_min_udaf() -> AggregateUDF {
+    AggregateUDF::from(CypherMinMaxUdaf::new(false))
+}
+
+pub(crate) fn create_cypher_max_udaf() -> AggregateUDF {
+    AggregateUDF::from(CypherMinMaxUdaf::new(true))
+}
+
+// ============================================================================
+// Cypher-aware SUM UDAF
+// ============================================================================
+
+/// Custom UDAF for Cypher sum that preserves integer type when all inputs are integers.
+#[derive(Debug, Clone)]
+struct CypherSumUdaf {
+    signature: Signature,
+}
+
+impl CypherSumUdaf {
+    fn new() -> Self {
+        Self {
+            signature: Signature::new(TypeSignature::Any(1), Volatility::Immutable),
+        }
+    }
+}
+
+impl PartialEq for CypherSumUdaf {
+    fn eq(&self, other: &Self) -> bool {
+        self.signature == other.signature
+    }
+}
+
+impl Eq for CypherSumUdaf {}
+
+impl Hash for CypherSumUdaf {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.name().hash(state);
+    }
+}
+
+impl AggregateUDFImpl for CypherSumUdaf {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+    fn name(&self) -> &str {
+        "_cypher_sum"
+    }
+    fn signature(&self) -> &Signature {
+        &self.signature
+    }
+    fn return_type(&self, _args: &[DataType]) -> DFResult<DataType> {
+        // We'll return LargeBinary to encode the result as a CypherValue,
+        // which preserves Int vs Float distinction.
+        Ok(DataType::LargeBinary)
+    }
+    fn accumulator(&self, _acc_args: datafusion::logical_expr::function::AccumulatorArgs) -> DFResult<Box<dyn DfAccumulator>> {
+        Ok(Box::new(CypherSumAccumulator {
+            sum: 0.0,
+            all_ints: true,
+            int_sum: 0i64,
+            has_value: false,
+        }))
+    }
+    fn state_fields(&self, args: datafusion::logical_expr::function::StateFieldsArgs) -> DFResult<Vec<Arc<arrow::datatypes::Field>>> {
+        Ok(vec![
+            Arc::new(arrow::datatypes::Field::new(
+                format!("{}_sum", args.name),
+                DataType::Float64,
+                true,
+            )),
+            Arc::new(arrow::datatypes::Field::new(
+                format!("{}_int_sum", args.name),
+                DataType::Int64,
+                true,
+            )),
+            Arc::new(arrow::datatypes::Field::new(
+                format!("{}_all_ints", args.name),
+                DataType::Boolean,
+                true,
+            )),
+            Arc::new(arrow::datatypes::Field::new(
+                format!("{}_has_value", args.name),
+                DataType::Boolean,
+                true,
+            )),
+        ])
+    }
+}
+
+#[derive(Debug)]
+struct CypherSumAccumulator {
+    sum: f64,
+    all_ints: bool,
+    int_sum: i64,
+    has_value: bool,
+}
+
+impl DfAccumulator for CypherSumAccumulator {
+    fn update_batch(&mut self, values: &[ArrayRef]) -> DFResult<()> {
+        let arr = &values[0];
+        for i in 0..arr.len() {
+            if arr.is_null(i) {
+                continue;
+            }
+            match arr.data_type() {
+                DataType::LargeBinary => {
+                    let lb = arr.as_any().downcast_ref::<LargeBinaryArray>().unwrap();
+                    let bytes = lb.value(i);
+                    use uni_common::cypher_value_codec::{TAG_INT, TAG_FLOAT, peek_tag, decode_int, decode_float};
+                    match peek_tag(bytes) {
+                        Some(TAG_INT) => {
+                            if let Some(v) = decode_int(bytes) {
+                                self.sum += v as f64;
+                                self.int_sum = self.int_sum.wrapping_add(v);
+                                self.has_value = true;
+                            }
+                        }
+                        Some(TAG_FLOAT) => {
+                            if let Some(v) = decode_float(bytes) {
+                                self.sum += v;
+                                self.all_ints = false;
+                                self.has_value = true;
+                            }
+                        }
+                        _ => {} // skip non-numeric
+                    }
+                }
+                DataType::Int64 => {
+                    let a = arr.as_any().downcast_ref::<Int64Array>().unwrap();
+                    let v = a.value(i);
+                    self.sum += v as f64;
+                    self.int_sum = self.int_sum.wrapping_add(v);
+                    self.has_value = true;
+                }
+                DataType::Float64 => {
+                    let a = arr.as_any().downcast_ref::<Float64Array>().unwrap();
+                    self.sum += a.value(i);
+                    self.all_ints = false;
+                    self.has_value = true;
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+    fn evaluate(&mut self) -> DFResult<ScalarValue> {
+        if !self.has_value {
+            return Ok(ScalarValue::LargeBinary(None));
+        }
+        let val = if self.all_ints {
+            Value::Int(self.int_sum)
+        } else {
+            Value::Float(self.sum)
+        };
+        let bytes = uni_common::cypher_value_codec::encode(&val);
+        Ok(ScalarValue::LargeBinary(Some(bytes)))
+    }
+    fn size(&self) -> usize {
+        std::mem::size_of_val(self)
+    }
+    fn state(&mut self) -> DFResult<Vec<ScalarValue>> {
+        Ok(vec![
+            ScalarValue::Float64(Some(self.sum)),
+            ScalarValue::Int64(Some(self.int_sum)),
+            ScalarValue::Boolean(Some(self.all_ints)),
+            ScalarValue::Boolean(Some(self.has_value)),
+        ])
+    }
+    fn merge_batch(&mut self, states: &[ArrayRef]) -> DFResult<()> {
+        let sum_arr = states[0].as_any().downcast_ref::<Float64Array>().unwrap();
+        let int_sum_arr = states[1].as_any().downcast_ref::<Int64Array>().unwrap();
+        let all_ints_arr = states[2].as_any().downcast_ref::<BooleanArray>().unwrap();
+        let has_value_arr = states[3].as_any().downcast_ref::<BooleanArray>().unwrap();
+        for i in 0..sum_arr.len() {
+            if !has_value_arr.is_null(i) && has_value_arr.value(i) {
+                self.sum += sum_arr.value(i);
+                self.int_sum = self.int_sum.wrapping_add(int_sum_arr.value(i));
+                if !all_ints_arr.value(i) {
+                    self.all_ints = false;
+                }
+                self.has_value = true;
+            }
+        }
+        Ok(())
+    }
+}
+
+pub(crate) fn create_cypher_sum_udaf() -> AggregateUDF {
+    AggregateUDF::from(CypherSumUdaf::new())
+}
+
+// ============================================================================
+// Cypher-aware COLLECT UDAF
+// ============================================================================
+
+/// Custom UDAF for Cypher collect() that filters nulls and returns [] (not null)
+/// when all inputs are null.
+#[derive(Debug, Clone)]
+struct CypherCollectUdaf {
+    signature: Signature,
+}
+
+impl CypherCollectUdaf {
+    fn new() -> Self {
+        Self {
+            signature: Signature::new(TypeSignature::Any(1), Volatility::Immutable),
+        }
+    }
+}
+
+impl PartialEq for CypherCollectUdaf {
+    fn eq(&self, other: &Self) -> bool {
+        self.signature == other.signature
+    }
+}
+
+impl Eq for CypherCollectUdaf {}
+
+impl Hash for CypherCollectUdaf {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.name().hash(state);
+    }
+}
+
+impl AggregateUDFImpl for CypherCollectUdaf {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+    fn name(&self) -> &str {
+        "_cypher_collect"
+    }
+    fn signature(&self) -> &Signature {
+        &self.signature
+    }
+    fn return_type(&self, _args: &[DataType]) -> DFResult<DataType> {
+        Ok(DataType::LargeBinary)
+    }
+    fn accumulator(&self, acc_args: datafusion::logical_expr::function::AccumulatorArgs) -> DFResult<Box<dyn DfAccumulator>> {
+        Ok(Box::new(CypherCollectAccumulator {
+            values: Vec::new(),
+            distinct: acc_args.is_distinct,
+        }))
+    }
+    fn state_fields(&self, args: datafusion::logical_expr::function::StateFieldsArgs) -> DFResult<Vec<Arc<arrow::datatypes::Field>>> {
+        Ok(vec![Arc::new(arrow::datatypes::Field::new(
+            args.name,
+            DataType::LargeBinary,
+            true,
+        ))])
+    }
+}
+
+#[derive(Debug)]
+struct CypherCollectAccumulator {
+    values: Vec<Value>,
+    distinct: bool,
+}
+
+impl DfAccumulator for CypherCollectAccumulator {
+    fn update_batch(&mut self, values: &[ArrayRef]) -> DFResult<()> {
+        let arr = &values[0];
+        for i in 0..arr.len() {
+            if arr.is_null(i) {
+                continue;
+            }
+            // For struct columns (node/edge from OPTIONAL MATCH), the struct itself
+            // may not be null, but the identity field (_vid/_eid) inside may be null.
+            // Check the first child array of the struct to detect this case.
+            if let Some(struct_arr) = arr.as_any().downcast_ref::<arrow::array::StructArray>()
+                && struct_arr.num_columns() > 0
+                && struct_arr.column(0).is_null(i)
+            {
+                continue;
+            }
+            let sv = ScalarValue::try_from_array(arr, i)
+                .map_err(|e| datafusion::error::DataFusionError::Execution(e.to_string()))?;
+            let val = scalar_to_value(&sv)?;
+            if val.is_null() {
+                continue;
+            }
+            if self.distinct {
+                // Use string repr for dedup (consistent with CountDistinct)
+                let repr = val.to_string();
+                if self.values.iter().any(|v| v.to_string() == repr) {
+                    continue;
+                }
+            }
+            self.values.push(val);
+        }
+        Ok(())
+    }
+    fn evaluate(&mut self) -> DFResult<ScalarValue> {
+        // Always return a list (empty list, not null)
+        let val = Value::List(self.values.clone());
+        let bytes = uni_common::cypher_value_codec::encode(&val);
+        Ok(ScalarValue::LargeBinary(Some(bytes)))
+    }
+    fn size(&self) -> usize {
+        std::mem::size_of_val(self) + self.values.len() * 64
+    }
+    fn state(&mut self) -> DFResult<Vec<ScalarValue>> {
+        Ok(vec![self.evaluate()?])
+    }
+    fn merge_batch(&mut self, states: &[ArrayRef]) -> DFResult<()> {
+        // States are LargeBinary containing encoded list values
+        let arr = &states[0];
+        if let Some(lb) = arr.as_any().downcast_ref::<LargeBinaryArray>() {
+            for i in 0..lb.len() {
+                if lb.is_null(i) {
+                    continue;
+                }
+                let val = scalar_binary_to_value(lb.value(i));
+                if let Value::List(items) = val {
+                    for item in items {
+                        if !item.is_null() {
+                            if self.distinct {
+                                let repr = item.to_string();
+                                if self.values.iter().any(|v| v.to_string() == repr) {
+                                    continue;
+                                }
+                            }
+                            self.values.push(item);
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+pub(crate) fn create_cypher_collect_udaf() -> AggregateUDF {
+    AggregateUDF::from(CypherCollectUdaf::new())
+}
+
+/// Create a Cypher collect() UDAF expression with optional distinct.
+pub(crate) fn create_cypher_collect_expr(arg: datafusion::logical_expr::Expr, distinct: bool) -> datafusion::logical_expr::Expr {
+    // We use the UDAF's call() but need to set distinct separately.
+    // For now, always include arg directly - distinct is handled in the accumulator.
+    let udaf = Arc::new(create_cypher_collect_udaf());
+    if distinct {
+        // Create with distinct flag set
+        datafusion::logical_expr::Expr::AggregateFunction(
+            datafusion::logical_expr::expr::AggregateFunction::new_udf(
+                udaf,
+                vec![arg],
+                true,  // distinct
+                None,
+                vec![],
+                None,
+            ),
+        )
+    } else {
+        udaf.call(vec![arg])
+    }
+}
+
+// ============================================================================
+// Cypher percentileDisc / percentileCont UDAFs
+// ============================================================================
+
+/// Custom UDAF for Cypher percentileDisc().
+#[derive(Debug, Clone)]
+struct CypherPercentileDiscUdaf {
+    signature: Signature,
+}
+
+impl CypherPercentileDiscUdaf {
+    fn new() -> Self {
+        Self {
+            signature: Signature::new(TypeSignature::Any(2), Volatility::Immutable),
+        }
+    }
+}
+
+impl PartialEq for CypherPercentileDiscUdaf {
+    fn eq(&self, other: &Self) -> bool {
+        self.signature == other.signature
+    }
+}
+
+impl Eq for CypherPercentileDiscUdaf {}
+
+impl Hash for CypherPercentileDiscUdaf {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.name().hash(state);
+    }
+}
+
+impl AggregateUDFImpl for CypherPercentileDiscUdaf {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+    fn name(&self) -> &str {
+        "percentiledisc"
+    }
+    fn signature(&self) -> &Signature {
+        &self.signature
+    }
+    fn return_type(&self, _args: &[DataType]) -> DFResult<DataType> {
+        Ok(DataType::Float64)
+    }
+    fn accumulator(&self, _acc_args: datafusion::logical_expr::function::AccumulatorArgs) -> DFResult<Box<dyn DfAccumulator>> {
+        Ok(Box::new(CypherPercentileDiscAccumulator {
+            values: Vec::new(),
+            percentile: None,
+        }))
+    }
+    fn state_fields(&self, args: datafusion::logical_expr::function::StateFieldsArgs) -> DFResult<Vec<Arc<arrow::datatypes::Field>>> {
+        Ok(vec![
+            Arc::new(arrow::datatypes::Field::new(
+                format!("{}_values", args.name),
+                DataType::List(Arc::new(arrow::datatypes::Field::new("item", DataType::Float64, true))),
+                true,
+            )),
+            Arc::new(arrow::datatypes::Field::new(
+                format!("{}_percentile", args.name),
+                DataType::Float64,
+                true,
+            )),
+        ])
+    }
+}
+
+#[derive(Debug)]
+struct CypherPercentileDiscAccumulator {
+    values: Vec<f64>,
+    percentile: Option<f64>,
+}
+
+impl CypherPercentileDiscAccumulator {
+    fn extract_f64(arr: &ArrayRef, i: usize) -> Option<f64> {
+        if arr.is_null(i) {
+            return None;
+        }
+        match arr.data_type() {
+            DataType::LargeBinary => {
+                let lb = arr.as_any().downcast_ref::<LargeBinaryArray>()?;
+                cv_bytes_as_f64(lb.value(i))
+            }
+            DataType::Int64 => {
+                let a = arr.as_any().downcast_ref::<Int64Array>()?;
+                Some(a.value(i) as f64)
+            }
+            DataType::Float64 => {
+                let a = arr.as_any().downcast_ref::<Float64Array>()?;
+                Some(a.value(i))
+            }
+            DataType::Int32 => {
+                let a = arr.as_any().downcast_ref::<Int32Array>()?;
+                Some(a.value(i) as f64)
+            }
+            DataType::Float32 => {
+                let a = arr.as_any().downcast_ref::<Float32Array>()?;
+                Some(a.value(i) as f64)
+            }
+            _ => None,
+        }
+    }
+
+    fn extract_percentile(arr: &ArrayRef, i: usize) -> Option<f64> {
+        if arr.is_null(i) {
+            return None;
+        }
+        match arr.data_type() {
+            DataType::Float64 => {
+                let a = arr.as_any().downcast_ref::<Float64Array>()?;
+                Some(a.value(i))
+            }
+            DataType::Int64 => {
+                let a = arr.as_any().downcast_ref::<Int64Array>()?;
+                Some(a.value(i) as f64)
+            }
+            DataType::LargeBinary => {
+                let lb = arr.as_any().downcast_ref::<LargeBinaryArray>()?;
+                cv_bytes_as_f64(lb.value(i))
+            }
+            _ => None,
+        }
+    }
+}
+
+impl DfAccumulator for CypherPercentileDiscAccumulator {
+    fn update_batch(&mut self, values: &[ArrayRef]) -> DFResult<()> {
+        let expr_arr = &values[0];
+        let pct_arr = &values[1];
+        for i in 0..expr_arr.len() {
+            // Extract percentile from second arg (constant for all rows)
+            if self.percentile.is_none() && let Some(p) = Self::extract_percentile(pct_arr, i) {
+                if !(0.0..=1.0).contains(&p) {
+                    return Err(datafusion::error::DataFusionError::Execution(
+                        "ArgumentError: NumberOutOfRange - percentileDisc(): percentile value must be between 0.0 and 1.0".to_string(),
+                    ));
+                }
+                self.percentile = Some(p);
+            }
+            if let Some(f) = Self::extract_f64(expr_arr, i) {
+                self.values.push(f);
+            }
+        }
+        Ok(())
+    }
+    fn evaluate(&mut self) -> DFResult<ScalarValue> {
+        let pct = match self.percentile {
+            Some(p) if !(0.0..=1.0).contains(&p) => {
+                return Err(datafusion::error::DataFusionError::Execution(
+                    "ArgumentError: NumberOutOfRange - percentileDisc(): percentile value must be between 0.0 and 1.0".to_string(),
+                ));
+            }
+            Some(p) => p,
+            None => 0.0,
+        };
+        if self.values.is_empty() {
+            return Ok(ScalarValue::Float64(None));
+        }
+        self.values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let n = self.values.len();
+        let idx = (pct * (n as f64 - 1.0)).round() as usize;
+        let idx = idx.min(n - 1);
+        let result = self.values[idx];
+        Ok(ScalarValue::Float64(Some(result)))
+    }
+    fn size(&self) -> usize {
+        std::mem::size_of_val(self) + self.values.capacity() * 8
+    }
+    fn state(&mut self) -> DFResult<Vec<ScalarValue>> {
+        // State: list of f64 values + percentile
+        let list_values: Vec<ScalarValue> = self.values.iter().map(|f| ScalarValue::Float64(Some(*f))).collect();
+        let list_scalar = ScalarValue::List(ScalarValue::new_list(&list_values, &DataType::Float64, true));
+        Ok(vec![
+            list_scalar,
+            ScalarValue::Float64(self.percentile),
+        ])
+    }
+    fn merge_batch(&mut self, states: &[ArrayRef]) -> DFResult<()> {
+        // Merge list arrays from state
+        let list_arr = &states[0];
+        let pct_arr = &states[1];
+        // Extract percentile
+        if self.percentile.is_none()
+            && let Some(f64_arr) = pct_arr.as_any().downcast_ref::<Float64Array>()
+        {
+            for i in 0..f64_arr.len() {
+                if !f64_arr.is_null(i) {
+                    self.percentile = Some(f64_arr.value(i));
+                    break;
+                }
+            }
+        }
+        // Extract values from list arrays
+        if let Some(list_array) = list_arr.as_any().downcast_ref::<arrow_array::ListArray>() {
+            for i in 0..list_array.len() {
+                if list_array.is_null(i) {
+                    continue;
+                }
+                let inner = list_array.value(i);
+                if let Some(f64_arr) = inner.as_any().downcast_ref::<Float64Array>() {
+                    for j in 0..f64_arr.len() {
+                        if !f64_arr.is_null(j) {
+                            self.values.push(f64_arr.value(j));
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Custom UDAF for Cypher percentileCont().
+#[derive(Debug, Clone)]
+struct CypherPercentileContUdaf {
+    signature: Signature,
+}
+
+impl CypherPercentileContUdaf {
+    fn new() -> Self {
+        Self {
+            signature: Signature::new(TypeSignature::Any(2), Volatility::Immutable),
+        }
+    }
+}
+
+impl PartialEq for CypherPercentileContUdaf {
+    fn eq(&self, other: &Self) -> bool {
+        self.signature == other.signature
+    }
+}
+
+impl Eq for CypherPercentileContUdaf {}
+
+impl Hash for CypherPercentileContUdaf {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.name().hash(state);
+    }
+}
+
+impl AggregateUDFImpl for CypherPercentileContUdaf {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+    fn name(&self) -> &str {
+        "percentilecont"
+    }
+    fn signature(&self) -> &Signature {
+        &self.signature
+    }
+    fn return_type(&self, _args: &[DataType]) -> DFResult<DataType> {
+        Ok(DataType::Float64)
+    }
+    fn accumulator(&self, _acc_args: datafusion::logical_expr::function::AccumulatorArgs) -> DFResult<Box<dyn DfAccumulator>> {
+        Ok(Box::new(CypherPercentileContAccumulator {
+            values: Vec::new(),
+            percentile: None,
+        }))
+    }
+    fn state_fields(&self, args: datafusion::logical_expr::function::StateFieldsArgs) -> DFResult<Vec<Arc<arrow::datatypes::Field>>> {
+        Ok(vec![
+            Arc::new(arrow::datatypes::Field::new(
+                format!("{}_values", args.name),
+                DataType::List(Arc::new(arrow::datatypes::Field::new("item", DataType::Float64, true))),
+                true,
+            )),
+            Arc::new(arrow::datatypes::Field::new(
+                format!("{}_percentile", args.name),
+                DataType::Float64,
+                true,
+            )),
+        ])
+    }
+}
+
+#[derive(Debug)]
+struct CypherPercentileContAccumulator {
+    values: Vec<f64>,
+    percentile: Option<f64>,
+}
+
+impl DfAccumulator for CypherPercentileContAccumulator {
+    fn update_batch(&mut self, values: &[ArrayRef]) -> DFResult<()> {
+        let expr_arr = &values[0];
+        let pct_arr = &values[1];
+        for i in 0..expr_arr.len() {
+            if self.percentile.is_none() && let Some(p) = CypherPercentileDiscAccumulator::extract_percentile(pct_arr, i) {
+                if !(0.0..=1.0).contains(&p) {
+                    return Err(datafusion::error::DataFusionError::Execution(
+                        "ArgumentError: NumberOutOfRange - percentileCont(): percentile value must be between 0.0 and 1.0".to_string(),
+                    ));
+                }
+                self.percentile = Some(p);
+            }
+            if let Some(f) = CypherPercentileDiscAccumulator::extract_f64(expr_arr, i) {
+                self.values.push(f);
+            }
+        }
+        Ok(())
+    }
+    fn evaluate(&mut self) -> DFResult<ScalarValue> {
+        let pct = match self.percentile {
+            Some(p) if !(0.0..=1.0).contains(&p) => {
+                return Err(datafusion::error::DataFusionError::Execution(
+                    "ArgumentError: NumberOutOfRange - percentileCont(): percentile value must be between 0.0 and 1.0".to_string(),
+                ));
+            }
+            Some(p) => p,
+            None => 0.0,
+        };
+        if self.values.is_empty() {
+            return Ok(ScalarValue::Float64(None));
+        }
+        self.values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let n = self.values.len();
+        if n == 1 {
+            return Ok(ScalarValue::Float64(Some(self.values[0])));
+        }
+        let pos = pct * (n as f64 - 1.0);
+        let lower = pos.floor() as usize;
+        let upper = pos.ceil() as usize;
+        let lower = lower.min(n - 1);
+        let upper = upper.min(n - 1);
+        if lower == upper {
+            Ok(ScalarValue::Float64(Some(self.values[lower])))
+        } else {
+            let frac = pos - lower as f64;
+            let result = self.values[lower] + frac * (self.values[upper] - self.values[lower]);
+            Ok(ScalarValue::Float64(Some(result)))
+        }
+    }
+    fn size(&self) -> usize {
+        std::mem::size_of_val(self) + self.values.capacity() * 8
+    }
+    fn state(&mut self) -> DFResult<Vec<ScalarValue>> {
+        let list_values: Vec<ScalarValue> = self.values.iter().map(|f| ScalarValue::Float64(Some(*f))).collect();
+        let list_scalar = ScalarValue::List(ScalarValue::new_list(&list_values, &DataType::Float64, true));
+        Ok(vec![
+            list_scalar,
+            ScalarValue::Float64(self.percentile),
+        ])
+    }
+    fn merge_batch(&mut self, states: &[ArrayRef]) -> DFResult<()> {
+        let list_arr = &states[0];
+        let pct_arr = &states[1];
+        if self.percentile.is_none()
+            && let Some(f64_arr) = pct_arr.as_any().downcast_ref::<Float64Array>()
+        {
+            for i in 0..f64_arr.len() {
+                if !f64_arr.is_null(i) {
+                    self.percentile = Some(f64_arr.value(i));
+                    break;
+                }
+            }
+        }
+        if let Some(list_array) = list_arr.as_any().downcast_ref::<arrow_array::ListArray>() {
+            for i in 0..list_array.len() {
+                if list_array.is_null(i) {
+                    continue;
+                }
+                let inner = list_array.value(i);
+                if let Some(f64_arr) = inner.as_any().downcast_ref::<Float64Array>() {
+                    for j in 0..f64_arr.len() {
+                        if !f64_arr.is_null(j) {
+                            self.values.push(f64_arr.value(j));
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+pub(crate) fn create_cypher_percentile_disc_udaf() -> AggregateUDF {
+    AggregateUDF::from(CypherPercentileDiscUdaf::new())
+}
+
+pub(crate) fn create_cypher_percentile_cont_udaf() -> AggregateUDF {
+    AggregateUDF::from(CypherPercentileContUdaf::new())
 }
 
 #[cfg(test)]

@@ -1356,16 +1356,7 @@ impl HybridPhysicalPlanner {
         let input_plan = self.plan_internal(input, all_properties)?;
 
         let adj_direction = convert_direction(direction);
-        let source_vid_col = format!("{}._vid", source_variable);
-        let source_col = if input_plan
-            .schema()
-            .column_with_name(&source_vid_col)
-            .is_some()
-        {
-            source_vid_col
-        } else {
-            source_variable.to_string()
-        };
+        let (input_plan, source_col) = Self::resolve_source_vid_col(input_plan, source_variable)?;
 
         let traverse_plan: Arc<dyn ExecutionPlan> = if !is_variable_length {
             // Extract edge properties for pushdown hydration, expanding "*" wildcards
@@ -1790,16 +1781,7 @@ impl HybridPhysicalPlanner {
         let input_plan = self.plan_internal(input, all_properties)?;
 
         let adj_direction = convert_direction(direction);
-        let source_vid_col = format!("{}._vid", source_variable);
-        let source_col = if input_plan
-            .schema()
-            .column_with_name(&source_vid_col)
-            .is_some()
-        {
-            source_vid_col
-        } else {
-            source_variable.to_string()
-        };
+        let (input_plan, source_col) = Self::resolve_source_vid_col(input_plan, source_variable)?;
 
         // Check if target variable is already bound (for patterns where target is in scope)
         let target_vid_col = format!("{}._vid", target_variable);
@@ -1947,16 +1929,7 @@ impl HybridPhysicalPlanner {
         let input_plan = self.plan_internal(input, all_properties)?;
 
         let adj_direction = convert_direction(direction);
-        let source_vid_col = format!("{}._vid", source_variable);
-        let source_col = if input_plan
-            .schema()
-            .column_with_name(&source_vid_col)
-            .is_some()
-        {
-            source_vid_col
-        } else {
-            source_variable.to_string()
-        };
+        let (input_plan, source_col) = Self::resolve_source_vid_col(input_plan, source_variable)?;
 
         // Check if target variable is already bound (for patterns where target is in scope)
         let target_vid_col = format!("{}._vid", target_variable);
@@ -2442,42 +2415,94 @@ impl HybridPhysicalPlanner {
                     // For count(*) or count(variable) where variable is a node/edge
                     // (not a property), translate to count(lit(1)) since the variable
                     // itself has no column in the scan schema.
-                    if matches!(
-                        args.first(),
-                        Some(uni_cypher::ast::Expr::Variable(_))
-                            | Some(uni_cypher::ast::Expr::Wildcard)
-                    ) {
+                    // Exception: COUNT(DISTINCT variable) needs the actual column
+                    // reference so that null rows (from OPTIONAL MATCH) are excluded.
+                    if matches!(args.first(), Some(uni_cypher::ast::Expr::Wildcard)) {
                         count(datafusion::logical_expr::lit(1))
+                    } else if matches!(args.first(), Some(uni_cypher::ast::Expr::Variable(_))) {
+                        if *distinct {
+                            count(get_arg()?)
+                        } else {
+                            count(datafusion::logical_expr::lit(1))
+                        }
                     } else {
                         count(get_arg()?)
                     }
                 }
-                "sum" => sum(datafusion::logical_expr::cast(
-                    get_arg()?,
-                    datafusion::arrow::datatypes::DataType::Float64,
-                )),
-                "avg" => avg(datafusion::logical_expr::cast(
-                    get_arg()?,
-                    datafusion::arrow::datatypes::DataType::Float64,
-                )),
-                "min" => min(get_arg()?),
-                "max" => max(get_arg()?),
-                "collect" => {
-                    // Cypher collect() must skip null values per the OpenCypher spec:
-                    // "the list of aggregated values is the list of candidate values
-                    // with all null values removed"
-                    use datafusion::prelude::ExprFunctionExt;
+                "sum" => {
                     let arg = get_arg()?;
-                    datafusion::functions_aggregate::array_agg::array_agg(arg.clone())
-                        .filter(arg.is_not_null())
-                        .build()
-                        .map_err(|e| anyhow!("{}", e))?
+                    if self.is_large_binary_col(&arg, schema) {
+                        let udaf = Arc::new(crate::query::df_udfs::create_cypher_sum_udaf());
+                        udaf.call(vec![arg])
+                    } else {
+                        // Cast to Int64 for native sum (DataFusion doesn't support Int32 sum)
+                        use datafusion::logical_expr::Cast;
+                        sum(DfExpr::Cast(Cast::new(Box::new(arg), datafusion::arrow::datatypes::DataType::Int64)))
+                    }
+                }
+                "avg" => {
+                    let arg = get_arg()?;
+                    if self.is_large_binary_col(&arg, schema) {
+                        let coerced = crate::query::df_udfs::cypher_to_float64_expr(arg);
+                        avg(coerced)
+                    } else {
+                        use datafusion::logical_expr::Cast;
+                        avg(DfExpr::Cast(Cast::new(Box::new(arg), datafusion::arrow::datatypes::DataType::Float64)))
+                    }
+                }
+                "min" => {
+                    // Use Cypher-aware min for LargeBinary columns (mixed types)
+                    let arg = get_arg()?;
+                    if self.is_large_binary_col(&arg, schema) {
+                        let udaf = Arc::new(crate::query::df_udfs::create_cypher_min_udaf());
+                        udaf.call(vec![arg])
+                    } else {
+                        min(arg)
+                    }
+                }
+                "max" => {
+                    // Use Cypher-aware max for LargeBinary columns (mixed types)
+                    let arg = get_arg()?;
+                    if self.is_large_binary_col(&arg, schema) {
+                        let udaf = Arc::new(crate::query::df_udfs::create_cypher_max_udaf());
+                        udaf.call(vec![arg])
+                    } else {
+                        max(arg)
+                    }
+                }
+                "percentiledisc" => {
+                    if args.len() != 2 {
+                        return Err(anyhow!("percentileDisc() requires exactly 2 arguments"));
+                    }
+                    let expr_arg = cypher_expr_to_df(&args[0], Some(ctx))?;
+                    let pct_arg = cypher_expr_to_df(&args[1], Some(ctx))?;
+                    let coerced = crate::query::df_udfs::cypher_to_float64_expr(expr_arg);
+                    let udaf = Arc::new(crate::query::df_udfs::create_cypher_percentile_disc_udaf());
+                    udaf.call(vec![coerced, pct_arg])
+                }
+                "percentilecont" => {
+                    if args.len() != 2 {
+                        return Err(anyhow!("percentileCont() requires exactly 2 arguments"));
+                    }
+                    let expr_arg = cypher_expr_to_df(&args[0], Some(ctx))?;
+                    let pct_arg = cypher_expr_to_df(&args[1], Some(ctx))?;
+                    let coerced = crate::query::df_udfs::cypher_to_float64_expr(expr_arg);
+                    let udaf = Arc::new(crate::query::df_udfs::create_cypher_percentile_cont_udaf());
+                    udaf.call(vec![coerced, pct_arg])
+                }
+                "collect" => {
+                    // Use custom Cypher collect UDAF that filters nulls and returns
+                    // empty list (not null) when all inputs are null.
+                    let arg = get_arg()?;
+                    crate::query::df_udfs::create_cypher_collect_expr(arg, *distinct)
                 }
                 _ => return Err(anyhow!("Unsupported aggregate function: {}", name)),
             };
 
-            // Apply DISTINCT if needed
-            let df_agg = if *distinct {
+            // Apply DISTINCT if needed (collect/percentile handle their own distinct)
+            let df_agg = if *distinct
+                && !matches!(name_lower.as_str(), "collect" | "percentiledisc" | "percentilecont")
+            {
                 use datafusion::prelude::ExprFunctionExt;
                 df_agg.distinct().build().map_err(|e| anyhow!("{}", e))?
             } else {
@@ -3276,6 +3301,122 @@ impl HybridPhysicalPlanner {
             state.execution_props(),
         )?;
         Ok((agg_expr, filter))
+    }
+
+    /// Resolve the source VID column for traversal, adding a struct field extraction
+    /// projection if the source variable is a struct column (e.g., after WITH aggregation).
+    ///
+    /// Returns the (possibly modified) input plan and the column name to use as the source VID.
+    fn resolve_source_vid_col(
+        input_plan: Arc<dyn ExecutionPlan>,
+        source_variable: &str,
+    ) -> Result<(Arc<dyn ExecutionPlan>, String)> {
+        let source_vid_col = format!("{}._vid", source_variable);
+        if input_plan.schema().column_with_name(&source_vid_col).is_some() {
+            return Ok((input_plan, source_vid_col));
+        }
+        // Check if the variable is a struct column (entity after WITH aggregation).
+        // If so, add a projection to extract _vid from the struct.
+        if let Ok(field) = input_plan.schema().field_with_name(source_variable)
+            && matches!(field.data_type(), datafusion::arrow::datatypes::DataType::Struct(_))
+        {
+            let enriched = Self::extract_struct_identity_columns(input_plan, source_variable)?;
+            return Ok((enriched, format!("{}._vid", source_variable)));
+        }
+        Ok((input_plan, source_variable.to_string()))
+    }
+
+    /// Add a projection that extracts `{variable}._vid` and `{variable}._labels` from
+    /// a struct column named `{variable}`. This is needed when an entity variable
+    /// has been passed through a WITH + aggregation and exists as a struct rather
+    /// than flat columns.
+    fn extract_struct_identity_columns(
+        input: Arc<dyn ExecutionPlan>,
+        variable: &str,
+    ) -> Result<Arc<dyn ExecutionPlan>> {
+        use datafusion::common::ScalarValue;
+        use datafusion::physical_plan::projection::ProjectionExec;
+
+        let schema = input.schema();
+        let mut proj_exprs: Vec<(Arc<dyn datafusion::physical_expr::PhysicalExpr>, String)> =
+            Vec::new();
+
+        // Keep all existing columns
+        for (i, field) in schema.fields().iter().enumerate() {
+            let col_expr = Arc::new(datafusion::physical_expr::expressions::Column::new(
+                field.name(),
+                i,
+            ));
+            proj_exprs.push((col_expr, field.name().clone()));
+        }
+
+        // Find the struct column and extract identity fields using get_field UDF
+        if let Some((struct_idx, struct_field)) = schema
+            .fields()
+            .iter()
+            .enumerate()
+            .find(|(_, f)| f.name() == variable)
+            && let datafusion::arrow::datatypes::DataType::Struct(fields) =
+                struct_field.data_type()
+        {
+            let struct_col: Arc<dyn datafusion::physical_expr::PhysicalExpr> = Arc::new(
+                datafusion::physical_expr::expressions::Column::new(variable, struct_idx),
+            );
+            let get_field_udf: Arc<datafusion::logical_expr::ScalarUDF> =
+                Arc::new(datafusion::logical_expr::ScalarUDF::from(
+                    datafusion::functions::core::getfield::GetFieldFunc::new(),
+                ));
+
+            // Extract _vid field
+            if fields.iter().any(|f| f.name() == "_vid") {
+                let field_name: Arc<dyn datafusion::physical_expr::PhysicalExpr> = Arc::new(
+                    datafusion::physical_expr::expressions::Literal::new(
+                        ScalarValue::Utf8(Some("_vid".to_string())),
+                    ),
+                );
+                let vid_expr = Arc::new(
+                    datafusion::physical_expr::ScalarFunctionExpr::try_new(
+                        get_field_udf.clone(),
+                        vec![struct_col.clone(), field_name],
+                        schema.as_ref(),
+                        Arc::new(datafusion::common::config::ConfigOptions::default()),
+                    )?,
+                );
+                proj_exprs.push((vid_expr, format!("{}._vid", variable)));
+            }
+
+            // Extract _labels field
+            if fields.iter().any(|f| f.name() == "_labels") {
+                let field_name: Arc<dyn datafusion::physical_expr::PhysicalExpr> = Arc::new(
+                    datafusion::physical_expr::expressions::Literal::new(
+                        ScalarValue::Utf8(Some("_labels".to_string())),
+                    ),
+                );
+                let labels_expr = Arc::new(
+                    datafusion::physical_expr::ScalarFunctionExpr::try_new(
+                        get_field_udf,
+                        vec![struct_col, field_name],
+                        schema.as_ref(),
+                        Arc::new(datafusion::common::config::ConfigOptions::default()),
+                    )?,
+                );
+                proj_exprs.push((labels_expr, format!("{}._labels", variable)));
+            }
+        }
+
+        Ok(Arc::new(ProjectionExec::try_new(proj_exprs, input)?))
+    }
+
+    /// Check if a DataFusion expression refers to a LargeBinary column in the schema.
+    fn is_large_binary_col(&self, expr: &DfExpr, schema: &SchemaRef) -> bool {
+        if let DfExpr::Column(col) = expr
+            && let Ok(field) = schema.field_with_name(&col.name)
+        {
+            return matches!(field.data_type(), datafusion::arrow::datatypes::DataType::LargeBinary);
+        }
+        // For any other expression type, conservatively return true
+        // since schemaless properties are stored as LargeBinary
+        true
     }
 }
 

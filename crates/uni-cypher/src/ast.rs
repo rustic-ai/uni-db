@@ -1248,8 +1248,8 @@ impl Expr {
                         | "collect"
                         | "stdev"
                         | "stdevp"
-                        | "percentileDisc"
-                        | "percentileCont"
+                        | "percentiledisc"
+                        | "percentilecont"
                 )
             }
             Expr::CountSubquery(_) => true,
