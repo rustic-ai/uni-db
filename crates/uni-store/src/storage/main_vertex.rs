@@ -26,7 +26,7 @@ use arrow_schema::{DataType, Field, Schema as ArrowSchema, TimeUnit};
 use futures::TryStreamExt;
 use lancedb::Table;
 use lancedb::index::Index as LanceDbIndex;
-use lancedb::index::scalar::BTreeIndexBuilder;
+use lancedb::index::scalar::{BTreeIndexBuilder, LabelListIndexBuilder};
 use lancedb::query::{ExecutableQuery, QueryBase};
 use sha3::{Digest, Sha3_256};
 use std::collections::HashMap;
@@ -279,6 +279,24 @@ impl MainVertexDataset {
                 .await
             {
                 log::warn!("Failed to create _uid index for main vertices: {}", e);
+            }
+        }
+
+        // Ensure labels LABEL_LIST index (for array_contains() queries)
+        if !indices
+            .iter()
+            .any(|idx| idx.columns.contains(&"labels".to_string()))
+        {
+            log::info!("Creating labels LABEL_LIST index for main vertices table");
+            if let Err(e) = table
+                .create_index(
+                    &["labels"],
+                    LanceDbIndex::LabelList(LabelListIndexBuilder::default()),
+                )
+                .execute()
+                .await
+            {
+                log::warn!("Failed to create labels index for main vertices: {}", e);
             }
         }
 
