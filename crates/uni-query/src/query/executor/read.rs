@@ -1318,29 +1318,44 @@ impl Executor {
                     if let Value::List(arr) = &arr_val {
                         let len = arr.len();
 
-                        // Evaluate start index (default to 0)
+                        // Evaluate start index (default to 0), null → null result
                         let start_idx = if let Some(s) = start {
                             let v = this
                                 .evaluate_expr(s, row, prop_manager, params, ctx)
                                 .await?;
-                            v.as_i64().unwrap_or(0).max(0) as usize
+                            if v.is_null() {
+                                return Ok(Value::Null);
+                            }
+                            let raw = v.as_i64().unwrap_or(0);
+                            if raw < 0 {
+                                (len as i64 + raw).max(0) as usize
+                            } else {
+                                (raw as usize).min(len)
+                            }
                         } else {
                             0
                         };
 
-                        // Evaluate end index (default to length)
+                        // Evaluate end index (default to length), null → null result
                         let end_idx = if let Some(e) = end {
                             let v = this
                                 .evaluate_expr(e, row, prop_manager, params, ctx)
                                 .await?;
-                            let idx = v.as_i64().unwrap_or(len as i64);
-                            idx.min(len as i64).max(0) as usize
+                            if v.is_null() {
+                                return Ok(Value::Null);
+                            }
+                            let raw = v.as_i64().unwrap_or(len as i64);
+                            if raw < 0 {
+                                (len as i64 + raw).max(0) as usize
+                            } else {
+                                (raw as usize).min(len)
+                            }
                         } else {
                             len
                         };
 
                         // Return sliced array
-                        if start_idx >= len || start_idx >= end_idx {
+                        if start_idx >= end_idx {
                             return Ok(Value::List(vec![]));
                         }
                         let end_idx = end_idx.min(len);

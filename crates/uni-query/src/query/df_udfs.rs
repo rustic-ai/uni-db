@@ -44,6 +44,8 @@ use uni_common::Value;
 use uni_cypher::ast::BinaryOp;
 use uni_store::storage::arrow_convert::values_to_array;
 
+use super::expr_eval::cypher_eq;
+
 /// Macro to implement common UDF trait boilerplate.
 ///
 /// Implements PartialEq, Eq, and Hash based on the UDF name.
@@ -851,6 +853,29 @@ impl ScalarUDFImpl for RelationshipsUdf {
 // range(start, end, [step]) -> List<Int64>
 // ============================================================================
 
+/// Extract an i64 from a ColumnarValue, coercing from any integer type.
+/// Rejects floats, booleans, strings, lists, and maps with `InvalidArgumentType`.
+fn extract_i64_range_arg(arg: &ColumnarValue, name: &str) -> DFResult<i64> {
+    match arg {
+        ColumnarValue::Scalar(sv) => match sv {
+            ScalarValue::Int8(Some(v)) => Ok(*v as i64),
+            ScalarValue::Int16(Some(v)) => Ok(*v as i64),
+            ScalarValue::Int32(Some(v)) => Ok(*v as i64),
+            ScalarValue::Int64(Some(v)) => Ok(*v),
+            ScalarValue::UInt8(Some(v)) => Ok(*v as i64),
+            ScalarValue::UInt16(Some(v)) => Ok(*v as i64),
+            ScalarValue::UInt32(Some(v)) => Ok(*v as i64),
+            ScalarValue::UInt64(Some(v)) => Ok(*v as i64),
+            _ => Err(datafusion::error::DataFusionError::Execution(format!(
+                "ArgumentError: InvalidArgumentType - range() {} must be an integer", name
+            ))),
+        },
+        _ => Err(datafusion::error::DataFusionError::Execution(format!(
+            "ArgumentError: InvalidArgumentType - range() {} must be an integer", name
+        ))),
+    }
+}
+
 /// Create the `range` UDF for generating integer ranges.
 pub fn create_range_udf() -> ScalarUDF {
     ScalarUDF::new_from_impl(RangeUdf::new())
@@ -864,11 +889,8 @@ struct RangeUdf {
 impl RangeUdf {
     fn new() -> Self {
         Self {
-            signature: Signature::new(
-                TypeSignature::OneOf(vec![
-                    TypeSignature::Exact(vec![DataType::Int64, DataType::Int64]),
-                    TypeSignature::Exact(vec![DataType::Int64, DataType::Int64, DataType::Int64]),
-                ]),
+            signature: Signature::one_of(
+                vec![TypeSignature::Any(2), TypeSignature::Any(3)],
                 Volatility::Immutable,
             ),
         }
@@ -906,34 +928,11 @@ impl ScalarUDFImpl for RangeUdf {
         // range() handles its own array extraction for now as it's a bit special
         // but we only support Scalar arguments for range() in practice for now.
 
-        // Extract scalar values
-        let start = match &args.args[0] {
-            ColumnarValue::Scalar(datafusion::common::ScalarValue::Int64(Some(v))) => *v,
-            _ => {
-                return Err(datafusion::error::DataFusionError::Execution(
-                    "range(): start must be an integer".to_string(),
-                ));
-            }
-        };
-
-        let end = match &args.args[1] {
-            ColumnarValue::Scalar(datafusion::common::ScalarValue::Int64(Some(v))) => *v,
-            _ => {
-                return Err(datafusion::error::DataFusionError::Execution(
-                    "range(): end must be an integer".to_string(),
-                ));
-            }
-        };
-
+        // Extract scalar values with flexible integer coercion
+        let start = extract_i64_range_arg(&args.args[0], "start")?;
+        let end = extract_i64_range_arg(&args.args[1], "end")?;
         let step = if args.args.len() == 3 {
-            match &args.args[2] {
-                ColumnarValue::Scalar(datafusion::common::ScalarValue::Int64(Some(v))) => *v,
-                _ => {
-                    return Err(datafusion::error::DataFusionError::Execution(
-                        "range(): step must be an integer".to_string(),
-                    ));
-                }
-            }
+            extract_i64_range_arg(&args.args[2], "step")?
         } else {
             1
         };
@@ -3526,33 +3525,22 @@ impl ScalarUDFImpl for CypherInUdf {
                 };
             }
 
-            // Check for exact match
+            // 3-valued comparison: cypher_eq returns Some(true/false) or None (indeterminate)
             let mut has_null = false;
             for item in items {
-                if item.is_null() {
-                    has_null = true;
-                    continue;
-                }
-                if cypher_values_equal(element, item) {
-                    return Ok(Value::Bool(true));
+                match cypher_eq(element, item) {
+                    Some(true) => return Ok(Value::Bool(true)),
+                    None => has_null = true,
+                    Some(false) => {}
                 }
             }
 
             if has_null {
-                Ok(Value::Null) // not found but list has null → null
+                Ok(Value::Null) // not found but comparison was indeterminate → null
             } else {
                 Ok(Value::Bool(false))
             }
         })
-    }
-}
-
-/// Cypher equality comparison for IN checks.
-/// Handles cross-type numeric comparison (Int vs Float).
-fn cypher_values_equal(a: &Value, b: &Value) -> bool {
-    match (a, b) {
-        (Value::Int(i), Value::Float(f)) | (Value::Float(f), Value::Int(i)) => (*i as f64) == *f,
-        _ => a == b,
     }
 }
 
@@ -3767,6 +3755,7 @@ impl ScalarUDFImpl for CypherListSliceUdf {
                     "_cypher_list_slice(): requires 3 arguments (list, start, end)".to_string(),
                 ));
             }
+            // Null list → null
             if vals[0].is_null() {
                 return Ok(Value::Null);
             }
@@ -3779,21 +3768,39 @@ impl ScalarUDFImpl for CypherListSliceUdf {
                     )));
                 }
             };
-            // start and end are 1-based inclusive (already converted from Cypher's 0-based exclusive)
-            let start = match &vals[1] {
-                Value::Int(i) => (*i as usize).saturating_sub(1), // 1-based to 0-based
+            // Null bounds → null result
+            if vals[1].is_null() || vals[2].is_null() {
+                return Ok(Value::Null);
+            }
+
+            let len = list.len() as i64;
+            let raw_start = match &vals[1] {
+                Value::Int(i) => *i,
                 _ => 0,
             };
-            let end = match &vals[2] {
-                Value::Int(i) => *i as usize, // 1-based inclusive end == 0-based exclusive end
-                _ => list.len(),
+            let raw_end = match &vals[2] {
+                Value::Int(i) => *i,
+                _ => len,
             };
-            let start = start.min(list.len());
-            let end = end.min(list.len());
+
+            // Resolve negative indices: if idx < 0 → len + idx (clamp to 0)
+            let start = if raw_start < 0 {
+                (len + raw_start).max(0) as usize
+            } else {
+                (raw_start).min(len) as usize
+            };
+            let end = if raw_end == i64::MAX {
+                len as usize
+            } else if raw_end < 0 {
+                (len + raw_end).max(0) as usize
+            } else {
+                (raw_end).min(len) as usize
+            };
+
             if start >= end {
                 return Ok(Value::List(vec![]));
             }
-            Ok(Value::List(list[start..end].to_vec()))
+            Ok(Value::List(list[start..end.min(list.len())].to_vec()))
         })
     }
 }

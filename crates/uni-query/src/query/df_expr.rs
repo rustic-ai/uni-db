@@ -227,42 +227,26 @@ pub fn cypher_expr_to_df(expr: &Expr, context: Option<&TranslationContext>) -> R
 
         Expr::ArraySlice { array, start, end } => {
             // Cypher uses 0-based slicing: [start..end) (end is exclusive)
-            // DataFusion array_slice uses 1-based indexing: slice(arr, start, end)
+            // Pass raw 0-based indices to _cypher_list_slice which handles
+            // null bounds, negative indices, and clamping.
             let array_expr = cypher_expr_to_df(array, context)?;
 
-            let start_expr = if let Some(s) = start {
-                let s_expr = cypher_expr_to_df(s, context)?;
-                // Convert 0-based to 1-based
-                s_expr + lit(1i64)
-            } else {
-                // Default to start from beginning
-                lit(1i64)
+            let start_expr = match start {
+                Some(s) => cypher_expr_to_df(s, context)?,
+                None => lit(0i64),
             };
 
-            let end_expr = if let Some(e) = end {
-                // Cypher end is exclusive, DataFusion end is inclusive
-                // So we don't need to adjust (Cypher's exclusive end == DataFusion's inclusive end - 1 + 1)
-                cypher_expr_to_df(e, context)?
-            } else {
-                // Slice to end - use array_length (cast UInt64 → Int64 for array_slice compatibility)
-                cast_expr(
-                    datafusion::functions_nested::expr_fn::array_length(array_expr.clone()),
-                    datafusion::arrow::datatypes::DataType::Int64,
-                )
+            let end_expr = match end {
+                Some(e) => cypher_expr_to_df(e, context)?,
+                None => lit(i64::MAX),
             };
 
-            // If the array is CypherValue-encoded (LargeBinary), use _cypher_list_slice UDF
-            // instead of DataFusion's array_slice which rejects LargeBinary input
-            if is_cypher_list_expr(&array_expr) {
-                Ok(dummy_udf_expr(
-                    "_cypher_list_slice",
-                    vec![array_expr, start_expr, end_expr],
-                ))
-            } else {
-                Ok(datafusion::functions_nested::expr_fn::array_slice(
-                    array_expr, start_expr, end_expr, None,
-                ))
-            }
+            // Always use _cypher_list_slice UDF — it handles CypherValue-encoded
+            // lists, null bounds, and negative index resolution correctly.
+            Ok(dummy_udf_expr(
+                "_cypher_list_slice",
+                vec![array_expr, start_expr, end_expr],
+            ))
         }
 
         Expr::Parameter(name) => {

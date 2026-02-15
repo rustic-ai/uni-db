@@ -396,6 +396,17 @@ fn validate_function_call(name: &str, args: &[Expr], vars_in_scope: &[VariableIn
         ));
     }
 
+    // size() does NOT accept Path arguments (length() on paths IS valid — returns relationship count)
+    if name_lower == "size"
+        && let Some(Expr::Variable(var_name)) = args.first()
+        && let Some(info) = find_var_in_scope(vars_in_scope, var_name)
+        && info.var_type == VariableType::Path
+    {
+        return Err(anyhow!(
+            "SyntaxError: InvalidArgumentType - size() requires a string, list, or map argument"
+        ));
+    }
+
     Ok(())
 }
 
