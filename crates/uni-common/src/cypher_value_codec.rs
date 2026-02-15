@@ -158,7 +158,7 @@ pub fn decode(bytes: &[u8]) -> Result<Value, UniError> {
             }
             Ok(Value::Node(Node {
                 vid: np.vid,
-                label: np.label,
+                labels: np.labels,
                 properties: props,
             }))
         }
@@ -385,7 +385,7 @@ fn encode_to_buf(value: &Value, buf: &mut Vec<u8>) {
                 .collect();
             let payload = NodePayload {
                 vid: node.vid,
-                label: node.label.clone(),
+                labels: node.labels.clone(),
                 properties: props_blobs,
             };
             rmp_serde::encode::write(buf, &payload).expect("node encode failed");
@@ -438,7 +438,7 @@ fn encode_to_buf(value: &Value, buf: &mut Vec<u8>) {
 #[derive(Serialize, Deserialize)]
 struct NodePayload {
     vid: Vid,
-    label: String,
+    labels: Vec<String>,
     properties: Vec<(String, Vec<u8>)>,
 }
 
@@ -576,7 +576,7 @@ mod tests {
         props.insert("age".to_string(), Value::Int(30));
         let v = Value::Node(Node {
             vid: Vid::from(123),
-            label: "Person".to_string(),
+            labels: vec!["Person".to_string()],
             properties: props,
         });
         let bytes = encode(&v);
@@ -607,7 +607,7 @@ mod tests {
         let v = Value::Path(Path {
             nodes: vec![Node {
                 vid: Vid::from(1),
-                label: "A".to_string(),
+                labels: vec!["A".to_string()],
                 properties: HashMap::new(),
             }],
             edges: vec![Edge {

@@ -1089,8 +1089,8 @@ impl Executor {
                         if prop_name == "_vid" || prop_name == "_id" {
                             return Ok(Value::Int(node.vid.as_u64() as i64));
                         }
-                        if prop_name == "_label" || prop_name == "_labels" {
-                            return Ok(Value::String(node.label.clone()));
+                        if prop_name == "_labels" {
+                            return Ok(Value::List(node.labels.iter().map(|l| Value::String(l.clone())).collect()));
                         }
                         // Check in-memory properties first
                         if let Some(val) = node.properties.get(prop_name.as_str()) {
@@ -1741,14 +1741,10 @@ impl Executor {
                         let val = this
                             .evaluate_expr(&args[0], row, prop_manager, params, ctx)
                             .await?;
-                        if let Value::Map(map) = &val {
-                            if let Some(labels_val) = map.get("_labels") {
-                                return Ok(labels_val.clone());
-                            }
-                            // Single label case - return as array
-                            if let Some(label_val) = map.get("_label") {
-                                return Ok(Value::List(vec![label_val.clone()]));
-                            }
+                        if let Value::Map(map) = &val
+                            && let Some(labels_val) = map.get("_labels")
+                        {
+                            return Ok(labels_val.clone());
                         }
                         return Ok(Value::Null);
                     }
@@ -1840,11 +1836,7 @@ impl Executor {
                         let has_label = match &node_val {
                             // Handle proper Value::Node type (from result normalization)
                             Value::Map(map) if map.contains_key("_vid") => {
-                                if let Some(Value::String(label_str)) = map.get("_label") {
-                                    // Labels may be colon-joined (e.g., "Person:Employee")
-                                    label_str == label_to_check
-                                        || label_str.split(':').any(|l| l == label_to_check)
-                                } else if let Some(Value::List(labels_arr)) = map.get("_labels") {
+                                if let Some(Value::List(labels_arr)) = map.get("_labels") {
                                     labels_arr
                                         .iter()
                                         .any(|l| l.as_str() == Some(label_to_check))
@@ -1858,10 +1850,6 @@ impl Executor {
                                     labels_arr
                                         .iter()
                                         .any(|l| l.as_str() == Some(label_to_check))
-                                } else if let Some(Value::String(label_str)) = map.get("_label") {
-                                    // Labels may be colon-joined (e.g., "Person:Employee")
-                                    label_str == label_to_check
-                                        || label_str.split(':').any(|l| l == label_to_check)
                                 } else {
                                     false
                                 }
@@ -2123,10 +2111,6 @@ impl Executor {
                                         labels_arr
                                             .iter()
                                             .any(|l| l.as_str() == Some(label_to_check.as_str()))
-                                    } else if let Some(Value::String(label_str)) = map.get("_label")
-                                    {
-                                        label_str == label_to_check
-                                            || label_str.split(':').any(|l| l == label_to_check)
                                     } else {
                                         false
                                     }
@@ -2452,9 +2436,6 @@ impl Executor {
                             let mut props_json: HashMap<String, Value> =
                                 props.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
                             props_json.insert("_vid".to_string(), Value::Int(vid.as_u64() as i64));
-                            props_json
-                                .insert("_label".to_string(), Value::String(label_name.clone()));
-
                             // Add full list of labels
                             if let Some(labels) = labels_map.get(&vid) {
                                 props_json.insert(
@@ -2510,8 +2491,8 @@ impl Executor {
                                 .cloned()
                                 .unwrap_or_else(|| "Unknown".to_string());
                             props_json.insert(
-                                "_label".to_string(),
-                                Value::String(label_name.to_string()),
+                                "_labels".to_string(),
+                                Value::List(vec![Value::String(label_name.to_string())]),
                             );
 
                             let mut map = HashMap::new();
@@ -2569,7 +2550,6 @@ impl Executor {
                         let mut props_json: HashMap<String, Value> = props_opt.unwrap_or_default();
 
                         props_json.insert("_vid".to_string(), Value::Int(vid.as_u64() as i64));
-                        props_json.insert("_label".to_string(), Value::String(labels.join(":")));
                         props_json.insert(
                             "_labels".to_string(),
                             Value::List(labels.iter().map(|l| Value::String(l.clone())).collect()),
@@ -2651,8 +2631,6 @@ impl Executor {
                         let mut props_json: HashMap<String, Value> = props_opt.unwrap_or_default();
 
                         props_json.insert("_vid".to_string(), Value::Int(vid.as_u64() as i64));
-                        props_json
-                            .insert("_label".to_string(), Value::String(actual_labels.join(":")));
                         props_json.insert(
                             "_labels".to_string(),
                             Value::List(
@@ -3462,7 +3440,7 @@ impl Executor {
                                 .iter()
                                 .map(|v| crate::types::Node {
                                     vid: *v,
-                                    label: String::new(),
+                                    labels: vec![],
                                     properties: HashMap::new(),
                                 })
                                 .collect();
@@ -3576,7 +3554,7 @@ impl Executor {
                         let node_label = label.as_str().unwrap_or("").to_string();
                         let path_node = crate::types::Node {
                             vid: node_vid,
-                            label: node_label,
+                            labels: if node_label.is_empty() { vec![] } else { vec![node_label] },
                             properties: HashMap::new(),
                         };
 
@@ -4023,7 +4001,7 @@ impl Executor {
                     .await?
                     .unwrap_or_default()
                 };
-                target_json.insert("_label".to_string(), Value::String(target_labels.join(":")));
+                target_json.insert("_labels".to_string(), Value::List(target_labels.iter().map(|l| Value::String(l.clone())).collect()));
 
                 new_row.insert(target_variable.to_string(), Value::Map(target_json));
 
@@ -4044,12 +4022,12 @@ impl Executor {
                         nodes: vec![
                             crate::types::Node {
                                 vid: source_vid,
-                                label: String::new(),
+                                labels: vec![],
                                 properties: HashMap::new(),
                             },
                             crate::types::Node {
                                 vid: target_vid,
-                                label: String::new(),
+                                labels: vec![],
                                 properties: HashMap::new(),
                             },
                         ],
@@ -4327,7 +4305,7 @@ impl Executor {
                     let path = crate::types::Path {
                         nodes: vec![crate::types::Node {
                             vid: source_vid,
-                            label: source_labels.join(":"),
+                            labels: source_labels.clone(),
                             properties: target_json
                                 .into_iter()
                                 .filter(|(k, _)| !k.starts_with('_'))
@@ -4456,8 +4434,8 @@ impl Executor {
                         target_json
                             .insert("_vid".to_string(), Value::Int(neighbor_vid.as_u64() as i64));
                         target_json.insert(
-                            "_label".to_string(),
-                            Value::String(neighbor_labels.join(":")),
+                            "_labels".to_string(),
+                            Value::List(neighbor_labels.iter().map(|l| Value::String(l.clone())).collect()),
                         );
                         new_row.insert(target_variable.to_string(), Value::Map(target_json));
 
@@ -4488,7 +4466,7 @@ impl Executor {
                                 .iter()
                                 .map(|(vid, label, props)| crate::types::Node {
                                     vid: *vid,
-                                    label: label.clone(),
+                                    labels: label.split(':').filter(|s| !s.is_empty()).map(String::from).collect(),
                                     properties: props
                                         .iter()
                                         .filter(|(k, _)| !k.starts_with('_'))
@@ -5133,8 +5111,12 @@ impl Executor {
         let target_obj = Value::Map(HashMap::from([
             ("_vid".to_string(), Value::Int(target_vid.as_u64() as i64)),
             (
-                "_label".to_string(),
-                Value::String(target_label_name.unwrap_or("").to_string()),
+                "_labels".to_string(),
+                if let Some(lbl) = target_label_name {
+                    Value::List(vec![Value::String(lbl.to_string())])
+                } else {
+                    Value::List(vec![])
+                },
             ),
         ]));
         new_m.insert(target_variable.to_string(), target_obj);
@@ -5223,12 +5205,16 @@ impl Executor {
                                     })
                                     .map(Vid::from)
                                     .unwrap_or_else(|| Vid::from(0u64));
-                                let label = node_obj
-                                    .get("label")
-                                    .or_else(|| node_obj.get("_label"))
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("")
-                                    .to_string();
+                                let labels = if let Some(Value::List(labels_arr)) = node_obj.get("_labels") {
+                                    labels_arr.iter().filter_map(|v| v.as_str().map(String::from)).collect()
+                                } else if let Some(label_val) = node_obj.get("label") {
+                                    match label_val.as_str() {
+                                        Some(s) if !s.is_empty() => vec![s.to_string()],
+                                        _ => vec![],
+                                    }
+                                } else {
+                                    vec![]
+                                };
                                 // Properties are already in the node object
                                 let mut properties = HashMap::new();
                                 if let Some(Value::Map(props)) = node_obj.get("properties") {
@@ -5238,7 +5224,7 @@ impl Executor {
                                 }
                                 nodes.push(crate::types::Node {
                                     vid,
-                                    label,
+                                    labels,
                                     properties,
                                 });
                             }
@@ -5298,7 +5284,7 @@ impl Executor {
                         // Existing value is not a valid path structure, start fresh
                         let path_nodes = vec![crate::types::Node {
                             vid: source_vid,
-                            label: String::new(),
+                            labels: vec![],
                             properties: HashMap::new(),
                         }];
                         (path_nodes, Vec::new(), source_vid)
@@ -5307,7 +5293,7 @@ impl Executor {
                     // No existing path - start from source_vid
                     let path_nodes = vec![crate::types::Node {
                         vid: source_vid,
-                        label: String::new(),
+                        labels: vec![],
                         properties: HashMap::new(),
                     }];
                     (path_nodes, Vec::new(), source_vid)
@@ -5376,7 +5362,7 @@ impl Executor {
 
                         path_nodes.push(crate::types::Node {
                             vid: neighbor,
-                            label: String::new(),
+                            labels: vec![],
                             properties: HashMap::new(),
                         });
 
@@ -5459,7 +5445,7 @@ impl Executor {
                     // Update nodes in Value::Path directly
                     for node in &mut path.nodes {
                         if let Some(label) = vid_labels.get(&node.vid) {
-                            node.label = label.clone();
+                            node.labels = label.split(':').filter(|s| !s.is_empty()).map(String::from).collect();
                         }
                         if let Some(props) = vertex_props.get(&node.vid) {
                             node.properties = props.clone();
@@ -5734,7 +5720,7 @@ impl Executor {
             };
 
             if let Some(label) = vid_labels.get(&vid) {
-                node_obj.insert("_label".to_string(), Value::String(label.clone()));
+                node_obj.insert("_labels".to_string(), Value::List(label.split(':').filter(|s| !s.is_empty()).map(|s| Value::String(s.to_string())).collect()));
             }
 
             if let Some(props) = vertex_props.get(&vid) {
@@ -7292,7 +7278,7 @@ impl Executor {
             let props_opt = prop_manager.get_all_vertex_props_with_ctx(vid, ctx).await?;
             if let Some(mut props_json) = props_opt {
                 props_json.insert("_vid".to_string(), Value::Int(vid.as_u64() as i64));
-                props_json.insert("_label".to_string(), Value::String(label_name.to_string()));
+                props_json.insert("_labels".to_string(), Value::List(vec![Value::String(label_name.to_string())]));
 
                 let mut row = HashMap::new();
                 row.insert(variable.to_string(), Value::Map(props_json));

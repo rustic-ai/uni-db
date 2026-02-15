@@ -175,16 +175,13 @@ fn node(input: &str) -> IResult<&str, Node> {
     let (input, _) = multispace0(input)?;
     let (input, _) = char(')')(input)?;
 
-    // Concatenate labels with ':' separator
-    let label = label_list
-        .map(|labels| labels.join(":"))
-        .unwrap_or_default();
+    let labels = label_list.unwrap_or_default();
 
     Ok((
         input,
         Node {
             vid: Vid::from(0),
-            label,
+            labels,
             properties: properties.unwrap_or_default(),
         },
     ))
@@ -365,7 +362,7 @@ mod tests {
     #[test]
     fn test_parse_multi_label_node() {
         if let Value::Node(node) = parse_value("(:A:B:C)").unwrap() {
-            assert_eq!(node.label, "A:B:C");
+            assert_eq!(node.labels, vec!["A".to_string(), "B".to_string(), "C".to_string()]);
             assert!(node.properties.is_empty());
         } else {
             panic!("Expected node");
@@ -375,7 +372,7 @@ mod tests {
     #[test]
     fn test_parse_multi_label_with_props() {
         if let Value::Node(node) = parse_value("(:A:B {name: 'test'})").unwrap() {
-            assert_eq!(node.label, "A:B");
+            assert_eq!(node.labels, vec!["A".to_string(), "B".to_string()]);
             assert_eq!(node.properties.len(), 1);
         } else {
             panic!("Expected node");
@@ -385,7 +382,7 @@ mod tests {
     #[test]
     fn test_parse_single_label() {
         if let Value::Node(node) = parse_value("(:Person)").unwrap() {
-            assert_eq!(node.label, "Person");
+            assert_eq!(node.labels, vec!["Person".to_string()]);
         } else {
             panic!("Expected node");
         }
@@ -394,7 +391,7 @@ mod tests {
     #[test]
     fn test_parse_unlabeled_node() {
         if let Value::Node(node) = parse_value("()").unwrap() {
-            assert_eq!(node.label, "");
+            assert_eq!(node.labels, Vec::<String>::new());
         } else {
             panic!("Expected node");
         }
@@ -466,8 +463,8 @@ mod tests {
         if let Value::Path(path) = parse_value("<(:A)-[:KNOWS]->(:B)>").unwrap() {
             assert_eq!(path.nodes.len(), 2);
             assert_eq!(path.edges.len(), 1);
-            assert_eq!(path.nodes[0].label, "A");
-            assert_eq!(path.nodes[1].label, "B");
+            assert_eq!(path.nodes[0].labels, vec!["A".to_string()]);
+            assert_eq!(path.nodes[1].labels, vec!["B".to_string()]);
             assert_eq!(path.edges[0].edge_type, "KNOWS");
         } else {
             panic!("Expected path");
@@ -509,8 +506,8 @@ mod tests {
         if let Value::Path(path) = parse_value("<(:B)<-[:KNOWS]-(:A)>").unwrap() {
             assert_eq!(path.nodes.len(), 2);
             assert_eq!(path.edges.len(), 1);
-            assert_eq!(path.nodes[0].label, "B");
-            assert_eq!(path.nodes[1].label, "A");
+            assert_eq!(path.nodes[0].labels, vec!["B".to_string()]);
+            assert_eq!(path.nodes[1].labels, vec!["A".to_string()]);
         } else {
             panic!("Expected path");
         }
@@ -520,8 +517,8 @@ mod tests {
     fn test_parse_path_with_multi_label_nodes() {
         if let Value::Path(path) = parse_value("<(:A:B)-[:R]->(:C:D)>").unwrap() {
             assert_eq!(path.nodes.len(), 2);
-            assert_eq!(path.nodes[0].label, "A:B");
-            assert_eq!(path.nodes[1].label, "C:D");
+            assert_eq!(path.nodes[0].labels, vec!["A".to_string(), "B".to_string()]);
+            assert_eq!(path.nodes[1].labels, vec!["C".to_string(), "D".to_string()]);
         } else {
             panic!("Expected path");
         }

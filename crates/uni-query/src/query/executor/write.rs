@@ -34,12 +34,6 @@ impl Executor {
                     return Some(labels);
                 }
             }
-            // Fallback to _label (singular string) - used by scan results
-            if let Some(Value::String(label)) = map.get("_label")
-                && !label.is_empty()
-            {
-                return Some(vec![label.clone()]);
-            }
         }
         None
     }

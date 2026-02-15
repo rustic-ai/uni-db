@@ -209,7 +209,7 @@ impl fmt::Display for Value {
                 }
                 write!(f, "}}")
             }
-            Value::Node(n) => write!(f, "(:{} {{vid: {}}})", n.label, n.vid),
+            Value::Node(n) => write!(f, "(:{} {{vid: {}}})", n.labels.join(":"), n.vid),
             Value::Edge(e) => write!(f, "-[:{}]-", e.edge_type),
             Value::Path(p) => write!(
                 f,
@@ -278,13 +278,13 @@ fn hash_map<H: Hasher>(m: &HashMap<String, Value>, state: &mut H) {
     }
 }
 
-/// Graph node with identity, label, and properties.
+/// Graph node with identity, labels, and properties.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Node {
     /// Internal vertex identifier.
     pub vid: Vid,
-    /// Node label.
-    pub label: String,
+    /// Node labels (multi-label support).
+    pub labels: Vec<String>,
     /// Property key-value pairs.
     pub properties: HashMap<String, Value>,
 }
@@ -292,7 +292,9 @@ pub struct Node {
 impl Hash for Node {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.vid.hash(state);
-        self.label.hash(state);
+        let mut sorted_labels = self.labels.clone();
+        sorted_labels.sort();
+        sorted_labels.hash(state);
         hash_map(&self.properties, state);
     }
 }
@@ -709,16 +711,31 @@ impl TryFrom<&Value> for Node {
             Value::Node(n) => Ok(n.clone()),
             Value::Map(m) => {
                 let vid_val = get_with_fallback(m, &["_id", "vid"]);
-                let label_val = get_with_fallback(m, &["_label", "label"]);
                 let props_val = m.get("properties");
 
-                let (Some(v), Some(l), Some(p)) = (vid_val, label_val, props_val) else {
+                let (Some(v), Some(p)) = (vid_val, props_val) else {
                     return Err(type_error("Node Map", value));
+                };
+
+                // Extract labels from _labels key (List<String>)
+                let labels = if let Some(Value::List(label_list)) = m.get("_labels") {
+                    label_list
+                        .iter()
+                        .filter_map(|v| {
+                            if let Value::String(s) = v {
+                                Some(s.clone())
+                            } else {
+                                None
+                            }
+                        })
+                        .collect()
+                } else {
+                    Vec::new()
                 };
 
                 Ok(Node {
                     vid: Vid::try_from(v)?,
-                    label: String::try_from(l)?,
+                    labels,
                     properties: extract_properties(p),
                 })
             }
@@ -894,7 +911,15 @@ impl From<Value> for serde_json::Value {
                     "_id".to_string(),
                     serde_json::Value::String(n.vid.to_string()),
                 );
-                map.insert("_label".to_string(), serde_json::Value::String(n.label));
+                map.insert(
+                    "_labels".to_string(),
+                    serde_json::Value::Array(
+                        n.labels
+                            .into_iter()
+                            .map(serde_json::Value::String)
+                            .collect(),
+                    ),
+                );
                 let props: serde_json::Value = Value::Map(n.properties).into();
                 map.insert("properties".to_string(), props);
                 serde_json::Value::Object(map)

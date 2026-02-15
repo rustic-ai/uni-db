@@ -177,11 +177,11 @@ pub fn extract_vids_from_cypher_value_column(col: &dyn Array) -> DFResult<arrow_
 /// Build the standard node struct fields for path structures.
 ///
 /// Used when materializing path objects containing nodes.
-/// Fields: `_vid`, `_label`, `properties`
+/// Fields: `_vid`, `_labels`, `properties`
 pub fn node_struct_fields() -> arrow_schema::Fields {
     arrow_schema::Fields::from(vec![
         Field::new("_vid", DataType::UInt64, false),
-        Field::new("_label", DataType::Utf8, true),
+        Field::new("_labels", DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))), true),
         Field::new("properties", DataType::LargeBinary, true),
     ])
 }
@@ -267,12 +267,12 @@ pub fn new_edge_list_builder()
 /// fields match `node_struct_fields()`.
 pub fn new_node_list_builder()
 -> arrow_array::builder::ListBuilder<arrow_array::builder::StructBuilder> {
-    use arrow_array::builder::{LargeBinaryBuilder, StringBuilder, StructBuilder, UInt64Builder};
+    use arrow_array::builder::{LargeBinaryBuilder, ListBuilder, StringBuilder, StructBuilder, UInt64Builder};
     arrow_array::builder::ListBuilder::new(StructBuilder::new(
         node_struct_fields(),
         vec![
             Box::new(UInt64Builder::new()),
-            Box::new(StringBuilder::new()),
+            Box::new(ListBuilder::new(StringBuilder::new())),
             Box::new(LargeBinaryBuilder::new()),
         ],
     ))
@@ -324,7 +324,7 @@ pub fn append_edge_to_struct(
 
 /// Append a single node to a node struct builder.
 ///
-/// Writes `_vid`, `_label`, and `properties` fields, then appends the struct
+/// Writes `_vid`, `_labels`, and `properties` fields, then appends the struct
 /// row. The `query_ctx` is used to look up labels and properties from the L0
 /// visibility chain.
 pub fn append_node_to_struct(
@@ -332,7 +332,7 @@ pub fn append_node_to_struct(
     vid: uni_common::core::id::Vid,
     query_ctx: &uni_store::runtime::context::QueryContext,
 ) {
-    use arrow_array::builder::{LargeBinaryBuilder, StringBuilder, UInt64Builder};
+    use arrow_array::builder::{LargeBinaryBuilder, ListBuilder, StringBuilder, UInt64Builder};
     use uni_store::runtime::l0_visibility;
 
     struct_builder
@@ -340,11 +340,15 @@ pub fn append_node_to_struct(
         .unwrap()
         .append_value(vid.as_u64());
     let labels = l0_visibility::get_vertex_labels(vid, query_ctx);
-    let label_builder = struct_builder.field_builder::<StringBuilder>(1).unwrap();
-    if let Some(label) = labels.first() {
-        label_builder.append_value(label);
+    let labels_builder = struct_builder.field_builder::<ListBuilder<StringBuilder>>(1).unwrap();
+    if labels.is_empty() {
+        labels_builder.append(true); // empty list
     } else {
-        label_builder.append_null();
+        let values = labels_builder.values();
+        for lbl in &labels {
+            values.append_value(lbl);
+        }
+        labels_builder.append(true);
     }
     let props_builder = struct_builder
         .field_builder::<LargeBinaryBuilder>(2)

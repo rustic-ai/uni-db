@@ -176,8 +176,8 @@ impl GraphProcedureCallExec {
                             ));
                             fields.push(Field::new(output_name, DataType::Utf8, false));
                             fields.push(Field::new(
-                                format!("{}._label", output_name),
-                                DataType::Utf8,
+                                format!("{}._labels", output_name),
+                                DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
                                 true,
                             ));
 
@@ -882,12 +882,13 @@ async fn build_search_result_batch(
                 columns.push(Arc::new(var_builder.finish()));
                 field_idx += 1;
 
-                // _label column
-                let mut label_builder = StringBuilder::with_capacity(num_rows, num_rows * 20);
+                // _labels column
+                let mut labels_builder = arrow_array::builder::ListBuilder::new(StringBuilder::new());
                 for _ in 0..num_rows {
-                    label_builder.append_value(label);
+                    labels_builder.values().append_value(label);
+                    labels_builder.append(true);
                 }
-                columns.push(Arc::new(label_builder.finish()));
+                columns.push(Arc::new(labels_builder.finish()));
                 field_idx += 1;
 
                 // Property columns

@@ -4,7 +4,7 @@
 //! Result normalization - converts internal representations to user-facing types.
 //!
 //! Enforces type system invariants:
-//! - All nodes must be Value::Node (not Value::Map with _vid/_label)
+//! - All nodes must be Value::Node (not Value::Map with _vid/_labels)
 //! - All edges must be Value::Edge (not Value::Map with _eid/_type)
 //! - All paths must be Value::Path
 //! - No internal fields exposed in user-facing results
@@ -229,33 +229,23 @@ impl ResultNormalizer {
             .map(Vid::new)
             .ok_or_else(|| anyhow!("Missing or invalid _vid in node map"))?;
 
-        let label = map
-            .get("_label")
-            .or_else(|| map.get("label"))
-            .and_then(Self::value_to_string)
-            .or_else(|| {
-                // Handle _labels (List<String>) from structural projection — join all labels
-                if let Some(Value::List(labels)) = map.get("_labels") {
-                    let label_strs: Vec<&str> = labels
-                        .iter()
-                        .filter_map(|v| {
-                            if let Value::String(s) = v {
-                                Some(s.as_str())
-                            } else {
-                                None
-                            }
-                        })
-                        .collect();
-                    if label_strs.is_empty() {
-                        None
+        let labels = if let Some(Value::List(label_list)) = map.get("_labels") {
+            label_list
+                .iter()
+                .filter_map(|v| {
+                    if let Value::String(s) = v {
+                        Some(s.clone())
                     } else {
-                        Some(label_strs.join(":"))
+                        None
                     }
-                } else {
-                    None
-                }
-            })
-            .unwrap_or_default();
+                })
+                .collect()
+        } else if let Some(Value::String(s)) = map.get("_labels") {
+            // Single string fallback for backwards compat within same session
+            if s.is_empty() { vec![] } else { vec![s.clone()] }
+        } else {
+            Vec::new()
+        };
 
         // Try to extract properties from a dedicated "properties" field (LargeBinary/JSON)
         // If not present or not parseable, fall back to extracting from inline fields
@@ -263,7 +253,7 @@ impl ResultNormalizer {
 
         Ok(Value::Node(Node {
             vid,
-            label,
+            labels,
             properties,
         }))
     }
@@ -372,7 +362,10 @@ mod tests {
     fn test_normalize_node_map() {
         let mut map = HashMap::new();
         map.insert("_vid".to_string(), Value::Int(123));
-        map.insert("_label".to_string(), Value::String("Person".to_string()));
+        map.insert(
+            "_labels".to_string(),
+            Value::List(vec![Value::String("Person".to_string())]),
+        );
         map.insert("name".to_string(), Value::String("Alice".to_string()));
         map.insert("age".to_string(), Value::Int(30));
 
@@ -381,7 +374,7 @@ mod tests {
         match result {
             Value::Node(node) => {
                 assert_eq!(node.vid.as_u64(), 123);
-                assert_eq!(node.label, "Person");
+                assert_eq!(node.labels, vec!["Person".to_string()]);
                 assert_eq!(
                     node.properties.get("name"),
                     Some(&Value::String("Alice".to_string()))
@@ -389,7 +382,7 @@ mod tests {
                 assert_eq!(node.properties.get("age"), Some(&Value::Int(30)));
                 // Internal fields should be stripped
                 assert!(!node.properties.contains_key("_vid"));
-                assert!(!node.properties.contains_key("_label"));
+                assert!(!node.properties.contains_key("_labels"));
             }
             _ => panic!("Expected Node variant"),
         }
@@ -425,7 +418,10 @@ mod tests {
     fn test_normalize_nested_structures() {
         let mut inner_map = HashMap::new();
         inner_map.insert("_vid".to_string(), Value::Int(100));
-        inner_map.insert("_label".to_string(), Value::String("Node".to_string()));
+        inner_map.insert(
+            "_labels".to_string(),
+            Value::List(vec![Value::String("Node".to_string())]),
+        );
 
         let list = vec![Value::Map(inner_map.clone()), Value::Int(42)];
 
@@ -462,7 +458,10 @@ mod tests {
     fn test_normalize_row() {
         let mut node_map = HashMap::new();
         node_map.insert("_vid".to_string(), Value::Int(123));
-        node_map.insert("_label".to_string(), Value::String("Person".to_string()));
+        node_map.insert(
+            "_labels".to_string(),
+            Value::List(vec![Value::String("Person".to_string())]),
+        );
         node_map.insert("name".to_string(), Value::String("Alice".to_string()));
 
         let mut row = HashMap::new();
@@ -478,7 +477,7 @@ mod tests {
     #[test]
     fn test_map_with_vid_at_top_level_becomes_node() {
         // At top level, a map with _vid is detected as a node
-        // (even without _label - label defaults to empty string)
+        // (even without _labels - labels defaults to empty vec)
         let mut map = HashMap::new();
         map.insert("_vid".to_string(), Value::Int(123));
         map.insert("name".to_string(), Value::String("test".to_string()));
@@ -488,7 +487,7 @@ mod tests {
         match result {
             Value::Node(node) => {
                 assert_eq!(node.vid.as_u64(), 123);
-                assert_eq!(node.label, ""); // Default empty label
+                assert!(node.labels.is_empty()); // Default empty labels
                 assert_eq!(
                     node.properties.get("name"),
                     Some(&Value::String("test".to_string()))
@@ -508,7 +507,10 @@ mod tests {
 
         let mut node_map = HashMap::new();
         node_map.insert("_vid".to_string(), Value::Int(123));
-        node_map.insert("_label".to_string(), Value::String("Person".to_string()));
+        node_map.insert(
+            "_labels".to_string(),
+            Value::List(vec![Value::String("Person".to_string())]),
+        );
         node_map.insert("metadata".to_string(), Value::Map(nested));
 
         let result = ResultNormalizer::normalize_value(Value::Map(node_map)).unwrap();
@@ -516,7 +518,7 @@ mod tests {
         match result {
             Value::Node(node) => {
                 assert_eq!(node.vid.as_u64(), 123);
-                assert_eq!(node.label, "Person");
+                assert_eq!(node.labels, vec!["Person".to_string()]);
                 // The nested map should remain a Map, NOT become a Node
                 match node.properties.get("metadata") {
                     Some(Value::Map(m)) => {
@@ -565,7 +567,10 @@ mod tests {
     fn test_normalize_node_prunes_null_properties() {
         let mut map = HashMap::new();
         map.insert("_vid".to_string(), Value::Int(1));
-        map.insert("_label".to_string(), Value::String("Person".to_string()));
+        map.insert(
+            "_labels".to_string(),
+            Value::List(vec![Value::String("Person".to_string())]),
+        );
         map.insert("name".to_string(), Value::String("Alice".to_string()));
         map.insert("age".to_string(), Value::Null);
 

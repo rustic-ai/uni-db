@@ -475,7 +475,7 @@ impl Executor {
                                 let mut node_obj = HashMap::new();
                                 node_obj
                                     .insert("_vid".to_string(), Value::Int(vid.as_u64() as i64));
-                                node_obj.insert("_label".to_string(), Value::String(label.clone()));
+                                node_obj.insert("_labels".to_string(), Value::List(vec![Value::String(label.clone())]));
 
                                 // Flatten properties into top level
                                 for (key, val) in properties {
@@ -621,7 +621,7 @@ impl Executor {
                                 let mut node_obj = HashMap::new();
                                 node_obj
                                     .insert("_vid".to_string(), Value::Int(vid.as_u64() as i64));
-                                node_obj.insert("_label".to_string(), Value::String(label.clone()));
+                                node_obj.insert("_labels".to_string(), Value::List(vec![Value::String(label.clone())]));
 
                                 for (key, val) in properties {
                                     node_obj.insert(key, val);
@@ -884,7 +884,7 @@ impl Executor {
                                 let mut node_obj = HashMap::new();
                                 node_obj
                                     .insert("_vid".to_string(), Value::Int(vid.as_u64() as i64));
-                                node_obj.insert("_label".to_string(), Value::String(label.clone()));
+                                node_obj.insert("_labels".to_string(), Value::List(vec![Value::String(label.clone())]));
 
                                 for (key, val) in properties {
                                     node_obj.insert(key, val);

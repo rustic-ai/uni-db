@@ -652,7 +652,7 @@ impl PatternComprehensionExecExpr {
 
         let node_struct_fields = vec![
             Arc::new(Field::new("_vid", DataType::UInt64, false)),
-            Arc::new(Field::new("_label", DataType::Utf8, true)),
+            Arc::new(Field::new("_labels", DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))), true)),
             Arc::new(Field::new("properties", DataType::LargeBinary, true)),
         ];
         let edge_struct_fields = vec![
@@ -667,7 +667,7 @@ impl PatternComprehensionExecExpr {
             node_struct_fields,
             vec![
                 Box::new(UInt64Builder::new()),
-                Box::new(StringBuilder::new()),
+                Box::new(ListBuilder::new(StringBuilder::new())),
                 Box::new(LargeBinaryBuilder::new()),
             ],
         ));
@@ -757,20 +757,19 @@ impl PatternComprehensionExecExpr {
         vid: Vid,
         query_ctx: &QueryContext,
     ) {
-        use arrow_array::builder::{LargeBinaryBuilder, StringBuilder, UInt64Builder};
+        use arrow_array::builder::{LargeBinaryBuilder, ListBuilder, StringBuilder, UInt64Builder};
 
         nodes_struct
             .field_builder::<UInt64Builder>(0)
             .unwrap()
             .append_value(vid.as_u64());
 
-        let labels = l0_visibility::get_vertex_labels(vid, query_ctx);
-        let label_builder = nodes_struct.field_builder::<StringBuilder>(1).unwrap();
-        if let Some(label) = labels.first() {
-            label_builder.append_value(label);
-        } else {
-            label_builder.append_null();
+        let all_labels = l0_visibility::get_vertex_labels(vid, query_ctx);
+        let labels_builder = nodes_struct.field_builder::<ListBuilder<StringBuilder>>(1).unwrap();
+        for lbl in &all_labels {
+            labels_builder.values().append_value(lbl);
         }
+        labels_builder.append(true);
 
         let props_builder = nodes_struct.field_builder::<LargeBinaryBuilder>(2).unwrap();
         if let Some(props) = l0_visibility::get_vertex_properties(vid, query_ctx) {

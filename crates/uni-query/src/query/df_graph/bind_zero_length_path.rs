@@ -112,10 +112,10 @@ impl BindZeroLengthPathExec {
             .map(|f| f.as_ref().clone())
             .collect();
 
-        // Node struct fields: _vid, _label, properties (as LargeBinary/JSON)
+        // Node struct fields: _vid, _labels, properties (as LargeBinary/JSON)
         let node_struct_fields = Fields::from(vec![
             Field::new("_vid", DataType::UInt64, false),
-            Field::new("_label", DataType::Utf8, true),
+            Field::new("_labels", DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))), true),
             Field::new("properties", DataType::LargeBinary, true),
         ]);
         let node_item = Field::new("item", DataType::Struct(node_struct_fields), true);
@@ -264,12 +264,11 @@ impl BindZeroLengthPathStream {
         let query_ctx = self.graph_ctx.query_context();
 
         let vid_col_name = format!("{}._vid", self.node_variable);
-        let label_col_name = format!("{}._label", self.node_variable);
 
         // Create builders for nodes and empty edges
         let node_struct_fields = Fields::from(vec![
             Field::new("_vid", DataType::UInt64, false),
-            Field::new("_label", DataType::Utf8, true),
+            Field::new("_labels", DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))), true),
             Field::new("properties", DataType::LargeBinary, true),
         ]);
         let edge_struct_fields = Fields::from(vec![
@@ -280,8 +279,14 @@ impl BindZeroLengthPathStream {
             Field::new("properties", DataType::LargeBinary, true),
         ]);
 
-        let mut nodes_builder =
-            ListBuilder::new(StructBuilder::from_fields(node_struct_fields, num_rows));
+        let mut nodes_builder = ListBuilder::new(StructBuilder::new(
+            node_struct_fields,
+            vec![
+                Box::new(UInt64Builder::new()),
+                Box::new(ListBuilder::new(StringBuilder::new())),
+                Box::new(LargeBinaryBuilder::new()),
+            ],
+        ));
         let mut rels_builder = ListBuilder::new(StructBuilder::from_fields(edge_struct_fields, 0));
         let mut path_validity = Vec::with_capacity(num_rows);
 
@@ -293,13 +298,6 @@ impl BindZeroLengthPathStream {
                 |arr: &arrow_array::UInt64Array, i| uni_common::core::id::Vid::from(arr.value(i)),
             );
 
-            let label: Option<String> = extract_column_value(
-                &batch,
-                &label_col_name,
-                row_idx,
-                |arr: &arrow_array::StringArray, i| arr.value(i).to_string(),
-            );
-
             if vid.is_none() {
                 nodes_builder.append(false);
                 rels_builder.append(false);
@@ -307,7 +305,7 @@ impl BindZeroLengthPathStream {
                 continue;
             }
 
-            self.append_node_to_builder(&mut nodes_builder, vid, label, &query_ctx);
+            self.append_node_to_builder(&mut nodes_builder, vid, &query_ctx);
             rels_builder.append(true);
             path_validity.push(true);
         }
@@ -339,23 +337,18 @@ impl BindZeroLengthPathStream {
         &self,
         nodes_builder: &mut ListBuilder<StructBuilder>,
         vid: Option<uni_common::core::id::Vid>,
-        label: Option<String>,
         query_ctx: &uni_store::QueryContext,
     ) {
         let nodes_struct = nodes_builder.values();
 
-        let (vid_value, label_value, props_json) = match vid {
+        let (vid_value, all_labels, props_json) = match vid {
             Some(v) => {
-                let resolved_label = label.or_else(|| {
-                    l0_visibility::get_vertex_labels(v, query_ctx)
-                        .first()
-                        .cloned()
-                });
+                let labels = l0_visibility::get_vertex_labels(v, query_ctx);
                 let props = l0_visibility::get_vertex_properties(v, query_ctx)
                     .map(|p| super::common::encode_props_to_cv(&p));
-                (v.as_u64(), resolved_label, props)
+                (v.as_u64(), labels, props)
             }
-            None => (0, None, None),
+            None => (0, vec![], None),
         };
 
         nodes_struct
@@ -363,11 +356,11 @@ impl BindZeroLengthPathStream {
             .unwrap()
             .append_value(vid_value);
 
-        let label_builder = nodes_struct.field_builder::<StringBuilder>(1).unwrap();
-        match label_value {
-            Some(l) => label_builder.append_value(&l),
-            None => label_builder.append_null(),
+        let labels_builder = nodes_struct.field_builder::<ListBuilder<StringBuilder>>(1).unwrap();
+        for lbl in &all_labels {
+            labels_builder.values().append_value(lbl);
         }
+        labels_builder.append(true);
 
         let props_builder = nodes_struct.field_builder::<LargeBinaryBuilder>(2).unwrap();
         match props_json {

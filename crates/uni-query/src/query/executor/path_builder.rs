@@ -118,7 +118,7 @@ mod tests {
         properties.insert("name".to_string(), Value::String(name.to_string()));
         Node {
             vid: Vid::new(vid),
-            label: label.to_string(),
+            labels: vec![label.to_string()],
             properties,
         }
     }

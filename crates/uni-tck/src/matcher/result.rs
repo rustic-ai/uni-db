@@ -347,13 +347,10 @@ fn maps_equal_ignoring_list_order(a: &HashMap<String, Value>, b: &HashMap<String
 }
 
 fn nodes_equal_ignoring_list_order(a: &Node, b: &Node) -> bool {
-    let a_labels: Vec<&str> = a.label.split(':').filter(|s| !s.is_empty()).collect();
-    let b_labels: Vec<&str> = b.label.split(':').filter(|s| !s.is_empty()).collect();
-
-    let labels_match = if a_labels.is_empty() && b_labels.is_empty() {
+    let labels_match = if a.labels.is_empty() && b.labels.is_empty() {
         true
     } else {
-        a_labels.len() == b_labels.len() && a_labels.iter().all(|l| b_labels.contains(l))
+        a.labels.len() == b.labels.len() && a.labels.iter().all(|l| b.labels.contains(l))
     };
 
     labels_match && maps_equal_ignoring_list_order(&a.properties, &b.properties)
@@ -384,15 +381,10 @@ fn maps_equal(a: &HashMap<String, Value>, b: &HashMap<String, Value>) -> bool {
 }
 
 fn nodes_equal(a: &Node, b: &Node) -> bool {
-    // Split labels on ':' and compare as sets for multi-label nodes
-    let a_labels: Vec<&str> = a.label.split(':').filter(|s| !s.is_empty()).collect();
-    let b_labels: Vec<&str> = b.label.split(':').filter(|s| !s.is_empty()).collect();
-
-    // Labels must match exactly (same set, order doesn't matter)
-    let labels_match = if a_labels.is_empty() && b_labels.is_empty() {
+    let labels_match = if a.labels.is_empty() && b.labels.is_empty() {
         true
     } else {
-        a_labels.len() == b_labels.len() && a_labels.iter().all(|l| b_labels.contains(l))
+        a.labels.len() == b.labels.len() && a.labels.iter().all(|l| b.labels.contains(l))
     };
 
     labels_match && maps_equal(&a.properties, &b.properties)
@@ -454,12 +446,12 @@ mod tests {
         use uni_common::core::id::Vid;
         let node1 = Node {
             vid: Vid::from(1),
-            label: "Person".to_string(),
+            labels: vec!["Person".to_string()],
             properties: HashMap::new(),
         };
         let node2 = Node {
             vid: Vid::from(2),
-            label: "Person".to_string(),
+            labels: vec!["Person".to_string()],
             properties: HashMap::new(),
         };
         assert!(nodes_equal(&node1, &node2));
@@ -470,12 +462,12 @@ mod tests {
         use uni_common::core::id::Vid;
         let node1 = Node {
             vid: Vid::from(1),
-            label: "A:B:C".to_string(),
+            labels: vec!["A".to_string(), "B".to_string(), "C".to_string()],
             properties: HashMap::new(),
         };
         let node2 = Node {
             vid: Vid::from(2),
-            label: "A:B:C".to_string(),
+            labels: vec!["A".to_string(), "B".to_string(), "C".to_string()],
             properties: HashMap::new(),
         };
         assert!(nodes_equal(&node1, &node2));
@@ -486,12 +478,12 @@ mod tests {
         use uni_common::core::id::Vid;
         let node1 = Node {
             vid: Vid::from(1),
-            label: "A:B:C".to_string(),
+            labels: vec!["A".to_string(), "B".to_string(), "C".to_string()],
             properties: HashMap::new(),
         };
         let node2 = Node {
             vid: Vid::from(2),
-            label: "C:B:A".to_string(),
+            labels: vec!["C".to_string(), "B".to_string(), "A".to_string()],
             properties: HashMap::new(),
         };
         assert!(nodes_equal(&node1, &node2));
@@ -502,12 +494,12 @@ mod tests {
         use uni_common::core::id::Vid;
         let node1 = Node {
             vid: Vid::from(1),
-            label: "A:B".to_string(),
+            labels: vec!["A".to_string(), "B".to_string()],
             properties: HashMap::new(),
         };
         let node2 = Node {
             vid: Vid::from(2),
-            label: "A:C".to_string(),
+            labels: vec!["A".to_string(), "C".to_string()],
             properties: HashMap::new(),
         };
         assert!(!nodes_equal(&node1, &node2));
@@ -518,12 +510,12 @@ mod tests {
         use uni_common::core::id::Vid;
         let node1 = Node {
             vid: Vid::from(1),
-            label: "".to_string(),
+            labels: vec![],
             properties: HashMap::new(),
         };
         let node2 = Node {
             vid: Vid::from(2),
-            label: "".to_string(),
+            labels: vec![],
             properties: HashMap::new(),
         };
         assert!(nodes_equal(&node1, &node2));

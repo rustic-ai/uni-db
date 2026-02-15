@@ -30,7 +30,7 @@ async fn test_match_returns_node_type() -> Result<()> {
     let node1 = results.rows[0].value("n").unwrap();
     match node1 {
         Value::Node(node) => {
-            assert_eq!(node.label, "Person");
+            assert_eq!(node.labels, vec!["Person".to_string()]);
             assert_eq!(
                 node.properties.get("name"),
                 Some(&Value::String("Alice".to_string()))
@@ -38,7 +38,7 @@ async fn test_match_returns_node_type() -> Result<()> {
             assert_eq!(node.properties.get("age"), Some(&Value::Int(30)));
             // Verify internal fields are NOT in properties
             assert!(!node.properties.contains_key("_vid"));
-            assert!(!node.properties.contains_key("_label"));
+            assert!(!node.properties.contains_key("_labels"));
         }
         other => panic!("Expected Value::Node, got {:?}", other),
     }
@@ -47,7 +47,7 @@ async fn test_match_returns_node_type() -> Result<()> {
     let node2 = results.rows[1].value("n").unwrap();
     match node2 {
         Value::Node(node) => {
-            assert_eq!(node.label, "Person");
+            assert_eq!(node.labels, vec!["Person".to_string()]);
             assert_eq!(
                 node.properties.get("name"),
                 Some(&Value::String("Bob".to_string()))
@@ -90,7 +90,7 @@ async fn test_match_with_edge_returns_proper_types() -> Result<()> {
     // Check node a
     match row.value("a").unwrap() {
         Value::Node(node) => {
-            assert_eq!(node.label, "Person");
+            assert_eq!(node.labels, vec!["Person".to_string()]);
             assert_eq!(
                 node.properties.get("name"),
                 Some(&Value::String("Alice".to_string()))
@@ -113,7 +113,7 @@ async fn test_match_with_edge_returns_proper_types() -> Result<()> {
     // Check node b
     match row.value("b").unwrap() {
         Value::Node(node) => {
-            assert_eq!(node.label, "Person");
+            assert_eq!(node.labels, vec!["Person".to_string()]);
             assert_eq!(
                 node.properties.get("name"),
                 Some(&Value::String("Bob".to_string()))

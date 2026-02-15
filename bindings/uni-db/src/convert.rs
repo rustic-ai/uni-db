@@ -36,7 +36,7 @@ pub fn value_to_py(py: Python, value: &Value) -> PyResult<Py<PyAny>> {
         Value::Node(n) => {
             let dict = PyDict::new(py);
             dict.set_item("_id", n.vid.to_string())?;
-            dict.set_item("_label", &n.label)?;
+            dict.set_item("_labels", &n.labels)?;
             for (k, v) in &n.properties {
                 dict.set_item(k, value_to_py(py, v)?)?;
             }

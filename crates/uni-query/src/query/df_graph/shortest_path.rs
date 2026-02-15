@@ -398,7 +398,7 @@ impl GraphShortestPathStream {
         // Build the path struct column (nodes + relationships)
         let node_struct_fields = Fields::from(vec![
             Field::new("_vid", DataType::UInt64, false),
-            Field::new("_label", DataType::Utf8, true),
+            Field::new("_labels", DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))), true),
             Field::new("properties", DataType::LargeBinary, true),
         ]);
         let edge_struct_fields = Fields::from(vec![
@@ -409,8 +409,14 @@ impl GraphShortestPathStream {
             Field::new("properties", DataType::LargeBinary, true),
         ]);
 
-        let mut nodes_builder =
-            ListBuilder::new(StructBuilder::from_fields(node_struct_fields, num_rows));
+        let mut nodes_builder = ListBuilder::new(StructBuilder::new(
+            node_struct_fields,
+            vec![
+                Box::new(UInt64Builder::new()),
+                Box::new(ListBuilder::new(StringBuilder::new())),
+                Box::new(LargeBinaryBuilder::new()),
+            ],
+        ));
         let mut rels_builder =
             ListBuilder::new(StructBuilder::from_fields(edge_struct_fields, num_rows));
         let mut path_validity = Vec::with_capacity(num_rows);
@@ -420,9 +426,7 @@ impl GraphShortestPathStream {
                 Some(vids) => {
                     // Add all nodes
                     for &vid in vids {
-                        let label = l0_visibility::get_vertex_labels(vid, &query_ctx)
-                            .first()
-                            .cloned();
+                        let all_labels = l0_visibility::get_vertex_labels(vid, &query_ctx);
                         let props = l0_visibility::get_vertex_properties(vid, &query_ctx)
                             .map(|p| super::common::encode_props_to_cv(&p));
 
@@ -430,11 +434,11 @@ impl GraphShortestPathStream {
                         ns.field_builder::<UInt64Builder>(0)
                             .unwrap()
                             .append_value(vid.as_u64());
-                        let lb = ns.field_builder::<StringBuilder>(1).unwrap();
-                        match &label {
-                            Some(l) => lb.append_value(l),
-                            None => lb.append_null(),
+                        let lb = ns.field_builder::<ListBuilder<StringBuilder>>(1).unwrap();
+                        for lbl in &all_labels {
+                            lb.values().append_value(lbl);
                         }
+                        lb.append(true);
                         let pb = ns.field_builder::<LargeBinaryBuilder>(2).unwrap();
                         match &props {
                             Some(json) => pb.append_value(json),

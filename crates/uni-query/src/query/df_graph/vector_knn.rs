@@ -164,6 +164,11 @@ impl GraphVectorKnnExec {
         let mut fields = vec![
             Field::new(format!("{}._vid", variable), DataType::UInt64, false),
             Field::new(variable, DataType::Utf8, false),
+            Field::new(
+                format!("{}._labels", variable),
+                DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
+                true,
+            ),
             Field::new(format!("{}._score", variable), DataType::Float32, true),
         ];
 
@@ -519,6 +524,13 @@ async fn build_result_batch(
         var_builder.append_value(vid.to_string());
     }
 
+    // Build _labels column
+    let mut labels_builder = arrow_array::builder::ListBuilder::new(StringBuilder::new());
+    for _vid in vids {
+        labels_builder.values().append_value(label_name);
+        labels_builder.append(true);
+    }
+
     // Build score column
     let mut score_builder = Float32Builder::with_capacity(num_rows);
     for &score in scores {
@@ -528,6 +540,7 @@ async fn build_result_batch(
     let mut columns: Vec<ArrayRef> = vec![
         Arc::new(vid_builder.finish()),
         Arc::new(var_builder.finish()),
+        Arc::new(labels_builder.finish()),
         Arc::new(score_builder.finish()),
     ];
 
@@ -566,10 +579,11 @@ mod tests {
     fn test_build_schema() {
         let schema = GraphVectorKnnExec::build_schema("n", &[], None);
 
-        assert_eq!(schema.fields().len(), 3);
+        assert_eq!(schema.fields().len(), 4);
         assert_eq!(schema.field(0).name(), "n._vid");
         assert_eq!(schema.field(1).name(), "n");
-        assert_eq!(schema.field(2).name(), "n._score");
+        assert_eq!(schema.field(2).name(), "n._labels");
+        assert_eq!(schema.field(3).name(), "n._score");
     }
 
     #[test]
