@@ -47,7 +47,7 @@ async fn test_cypher_aggregation() -> anyhow::Result<()> {
     // 3: 40
     let lancedb_store = storage.lancedb_store();
     let vertex_ds = storage.vertex_dataset("Person")?;
-    // Columns: _vid, _uid, _deleted, _version, ext_id, _created_at, _updated_at, age, overflow_json
+    // Columns: _vid, _uid, _deleted, _version, ext_id, _labels, _created_at, _updated_at, age, overflow_json
     let batch = RecordBatch::try_new(
         vertex_ds.get_arrow_schema(&schema_manager.schema())?,
         vec![
@@ -65,6 +65,15 @@ async fn test_cypher_aggregation() -> anyhow::Result<()> {
             Arc::new(BooleanArray::from(vec![false; 4])),
             Arc::new(UInt64Array::from(vec![1; 4])),
             Arc::new(StringArray::from(vec![None::<&str>; 4])), // ext_id
+            // _labels
+            {
+                let mut lb = arrow_array::builder::ListBuilder::new(arrow_array::builder::StringBuilder::new());
+                for _ in 0..4 {
+                    lb.values().append_value("Person");
+                    lb.append(true);
+                }
+                Arc::new(lb.finish())
+            },
             Arc::new(TimestampMicrosecondArray::from(vec![None::<i64>; 4]).with_timezone("UTC")), // _created_at
             Arc::new(TimestampMicrosecondArray::from(vec![None::<i64>; 4]).with_timezone("UTC")), // _updated_at
             Arc::new(Int32Array::from(vec![20, 30, 20, 40])), // age
@@ -80,7 +89,7 @@ async fn test_cypher_aggregation() -> anyhow::Result<()> {
     // 1: 20.0
     // 2: 30.0
     let order_ds = storage.vertex_dataset("Order")?;
-    // Columns: _vid, _uid, _deleted, _version, ext_id, _created_at, _updated_at, amount, overflow_json
+    // Columns: _vid, _uid, _deleted, _version, ext_id, _labels, _created_at, _updated_at, amount, overflow_json
     let batch = RecordBatch::try_new(
         order_ds.get_arrow_schema(&schema_manager.schema())?,
         vec![
@@ -97,6 +106,15 @@ async fn test_cypher_aggregation() -> anyhow::Result<()> {
             Arc::new(BooleanArray::from(vec![false; 3])),
             Arc::new(UInt64Array::from(vec![1; 3])),
             Arc::new(StringArray::from(vec![None::<&str>; 3])), // ext_id
+            // _labels
+            {
+                let mut lb = arrow_array::builder::ListBuilder::new(arrow_array::builder::StringBuilder::new());
+                for _ in 0..3 {
+                    lb.values().append_value("Order");
+                    lb.append(true);
+                }
+                Arc::new(lb.finish())
+            },
             Arc::new(TimestampMicrosecondArray::from(vec![None::<i64>; 3]).with_timezone("UTC")), // _created_at
             Arc::new(TimestampMicrosecondArray::from(vec![None::<i64>; 3]).with_timezone("UTC")), // _updated_at
             Arc::new(Float64Array::from(vec![10.0, 20.0, 30.0])), // amount

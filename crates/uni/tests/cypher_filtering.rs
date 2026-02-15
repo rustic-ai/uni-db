@@ -56,7 +56,7 @@ async fn test_cypher_filtering() -> anyhow::Result<()> {
     let vertex_ds = storage.vertex_dataset("Person")?;
     let arrow_schema = vertex_ds.get_arrow_schema(&schema_manager.schema())?;
 
-    // Columns: _vid, _uid, _deleted, _version, ext_id, _created_at, _updated_at, active, age, name, overflow_json
+    // Columns: _vid, _uid, _deleted, _version, ext_id, _labels, _created_at, _updated_at, active, age, name, overflow_json
     let batch = RecordBatch::try_new(
         arrow_schema,
         vec![
@@ -73,6 +73,15 @@ async fn test_cypher_filtering() -> anyhow::Result<()> {
             Arc::new(BooleanArray::from(vec![false, false, false])), // _deleted
             Arc::new(UInt64Array::from(vec![1, 1, 1])),
             Arc::new(StringArray::from(vec![None::<&str>; 3])), // ext_id
+            // _labels
+            {
+                let mut lb = arrow_array::builder::ListBuilder::new(arrow_array::builder::StringBuilder::new());
+                for _ in 0..3 {
+                    lb.values().append_value("Person");
+                    lb.append(true);
+                }
+                Arc::new(lb.finish())
+            },
             Arc::new(TimestampMicrosecondArray::from(vec![None::<i64>; 3]).with_timezone("UTC")), // _created_at
             Arc::new(TimestampMicrosecondArray::from(vec![None::<i64>; 3]).with_timezone("UTC")), // _updated_at
             Arc::new(BooleanArray::from(vec![true, false, true])), // active

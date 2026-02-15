@@ -86,6 +86,15 @@ async fn test_vector_search() -> anyhow::Result<()> {
             Arc::new(deleted),
             Arc::new(versions),
             Arc::new(StringArray::from(vec![None::<&str>; 3])), // ext_id
+            // _labels
+            {
+                let mut lb = arrow_array::builder::ListBuilder::new(arrow_array::builder::StringBuilder::new());
+                for _ in 0..3 {
+                    lb.values().append_value("Item");
+                    lb.append(true);
+                }
+                Arc::new(lb.finish())
+            },
             Arc::new(TimestampMicrosecondArray::from(vec![None::<i64>; 3]).with_timezone("UTC")), // _created_at
             Arc::new(TimestampMicrosecondArray::from(vec![None::<i64>; 3]).with_timezone("UTC")), // _updated_at
             Arc::new(vectors), // embedding
@@ -179,6 +188,15 @@ async fn write_vectors_to_lancedb(
             Arc::new(arrow_array::BooleanArray::from(vec![false; n])),
             Arc::new(UInt64Array::from(vec![1u64; n])),
             Arc::new(StringArray::from(vec![None::<&str>; n])),
+            // _labels
+            {
+                let mut lb = arrow_array::builder::ListBuilder::new(arrow_array::builder::StringBuilder::new());
+                for _ in 0..n {
+                    lb.values().append_value("Item");
+                    lb.append(true);
+                }
+                Arc::new(lb.finish())
+            },
             Arc::new(TimestampMicrosecondArray::from(vec![None::<i64>; n]).with_timezone("UTC")),
             Arc::new(TimestampMicrosecondArray::from(vec![None::<i64>; n]).with_timezone("UTC")),
             Arc::new(vec_builder.finish()),

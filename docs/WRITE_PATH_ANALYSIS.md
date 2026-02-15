@@ -114,8 +114,11 @@ compaction.
 
 **Per-label vertex table (`vertices_{Label}`):**
 
-- `_vid`, `_uid`, `_deleted`, `_version`, `ext_id`, `_created_at`, `_updated_at`,
-  plus schema-defined property columns.
+- `_vid`, `_uid`, `_deleted`, `_version`, `ext_id`, `_labels`, `_created_at`,
+  `_updated_at`, plus schema-defined property columns.
+- `_labels` is a `List<Utf8>` column carrying the vertex's complete label set
+  (e.g., `["Person", "Employee"]`), ensuring multi-label information survives
+  flush and compaction.
 
 **Edge delta tables (`deltas_{Type}_fwd` / `deltas_{Type}_bwd`):**
 

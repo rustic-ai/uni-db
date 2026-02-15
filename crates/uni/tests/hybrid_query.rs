@@ -92,6 +92,15 @@ async fn test_hybrid_vector_graph_query() -> anyhow::Result<()> {
                 Arc::new(deleted),
                 Arc::new(versions),
                 Arc::new(StringArray::from(vec![None::<&str>; 2])), // ext_id
+                // _labels
+                {
+                    let mut lb = arrow_array::builder::ListBuilder::new(arrow_array::builder::StringBuilder::new());
+                    for _ in 0..2 {
+                        lb.values().append_value("Paper");
+                        lb.append(true);
+                    }
+                    Arc::new(lb.finish())
+                },
                 Arc::new(
                     TimestampMicrosecondArray::from(vec![None::<i64>; 2]).with_timezone("UTC"),
                 ), // _created_at
@@ -135,6 +144,13 @@ async fn test_hybrid_vector_graph_query() -> anyhow::Result<()> {
                 Arc::new(deleted),
                 Arc::new(versions),
                 Arc::new(StringArray::from(vec![None::<&str>; 1])), // ext_id
+                // _labels
+                {
+                    let mut lb = arrow_array::builder::ListBuilder::new(arrow_array::builder::StringBuilder::new());
+                    lb.values().append_value("Author");
+                    lb.append(true);
+                    Arc::new(lb.finish())
+                },
                 Arc::new(
                     TimestampMicrosecondArray::from(vec![None::<i64>; 1]).with_timezone("UTC"),
                 ), // _created_at

@@ -1867,7 +1867,9 @@ impl Writer {
 
         // 2. Acquire Read lock on Old L0 for flushing
         let mut entries_by_type: HashMap<u32, Vec<L1Entry>> = HashMap::new();
-        let mut vertices_by_label: HashMap<u16, Vec<(Vid, Properties, bool, u64)>> = HashMap::new();
+        // (Vid, labels, properties, deleted, version)
+        type VertexEntry = (Vid, Vec<String>, Properties, bool, u64);
+        let mut vertices_by_label: HashMap<u16, Vec<VertexEntry>> = HashMap::new();
         // Collect vertex timestamps from L0 for flushing to storage
         let mut vertex_created_at: HashMap<Vid, i64> = HashMap::new();
         let mut vertex_updated_at: HashMap<Vid, i64> = HashMap::new();
@@ -1941,11 +1943,13 @@ impl Writer {
                 }
                 // Get labels for this vertex (use first label for partitioning, or 0 if unknown)
                 if let Some(labels) = old_l0.vertex_labels.get(vid) {
+                    let all_labels: Vec<String> = labels.clone();
                     for label in labels {
                         // Look up label_id from schema
                         if let Some(label_id) = schema.label_id_by_name(label) {
                             vertices_by_label.entry(label_id).or_default().push((
                                 *vid,
+                                all_labels.clone(),
                                 props.clone(),
                                 false,
                                 version,
@@ -1958,10 +1962,12 @@ impl Writer {
                 let version = old_l0.vertex_versions.get(&vid).copied().unwrap_or(0);
                 // For tombstones, we might not have labels, try to get from vertex_labels
                 if let Some(labels) = old_l0.vertex_labels.get(&vid) {
+                    let all_labels: Vec<String> = labels.clone();
                     for label in labels {
                         if let Some(label_id) = schema.label_id_by_name(label) {
                             vertices_by_label.entry(label_id).or_default().push((
                                 vid,
+                                all_labels.clone(),
                                 HashMap::new(),
                                 true,
                                 version,
@@ -2064,7 +2070,7 @@ impl Writer {
                     let mut added: HashMap<Vid, Vec<String>> = HashMap::new();
                     let mut removed: HashSet<Vid> = HashSet::new();
 
-                    for (vid, props, deleted, _version) in &vertices {
+                    for (vid, _labels, props, deleted, _version) in &vertices {
                         if *deleted {
                             removed.insert(*vid);
                         } else if let Some(prop_value) = props.get(&cfg.property) {
@@ -2090,8 +2096,8 @@ impl Writer {
             let mut v_data = Vec::new();
             let mut d_data = Vec::new();
             let mut ver_data = Vec::new();
-            for (vid, props, deleted, version) in vertices {
-                v_data.push((vid, props));
+            for (vid, labels, props, deleted, version) in vertices {
+                v_data.push((vid, labels, props));
                 d_data.push(deleted);
                 ver_data.push(version);
             }

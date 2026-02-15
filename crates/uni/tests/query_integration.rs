@@ -89,6 +89,15 @@ async fn test_query_integration() -> anyhow::Result<()> {
             Arc::new(deleted),                                  // _deleted
             Arc::new(versions),                                 // _version
             Arc::new(StringArray::from(vec![None::<&str>; 2])), // ext_id
+            // _labels
+            {
+                let mut lb = arrow_array::builder::ListBuilder::new(arrow_array::builder::StringBuilder::new());
+                for _ in 0..2 {
+                    lb.values().append_value("Person");
+                    lb.append(true);
+                }
+                Arc::new(lb.finish())
+            },
             Arc::new(TimestampMicrosecondArray::from(vec![None::<i64>; 2]).with_timezone("UTC")), // _created_at
             Arc::new(TimestampMicrosecondArray::from(vec![None::<i64>; 2]).with_timezone("UTC")), // _updated_at
             Arc::new(names),                                          // name

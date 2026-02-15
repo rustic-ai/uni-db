@@ -110,7 +110,10 @@ fn test_build_overflow_json_column_filters_schema_props() -> Result<()> {
     props2.insert("age".to_string(), uni_common::Value::Int(25));
     // No overflow for Bob
 
-    let vertices = vec![(Vid::new(1), props1), (Vid::new(2), props2)];
+    let vertices = vec![
+        (Vid::new(1), vec!["Person".to_string()], props1),
+        (Vid::new(2), vec!["Person".to_string()], props2),
+    ];
 
     let deleted = vec![false, false];
     let versions = vec![1, 1];
@@ -177,7 +180,7 @@ fn test_build_overflow_json_excludes_ext_id() -> Result<()> {
         uni_common::Value::String("value".to_string()),
     ); // overflow
 
-    let vertices = vec![(Vid::new(1), props)];
+    let vertices = vec![(Vid::new(1), vec!["Person".to_string()], props)];
     let deleted = vec![false];
     let versions = vec![1];
 
@@ -217,7 +220,7 @@ fn test_empty_overflow_properties() -> Result<()> {
     );
     props.insert("age".to_string(), uni_common::Value::Int(40));
 
-    let vertices = vec![(Vid::new(1), props)];
+    let vertices = vec![(Vid::new(1), vec!["Person".to_string()], props)];
     let deleted = vec![false];
     let versions = vec![1];
 

@@ -93,19 +93,17 @@ Each vertex should represent one cohesive entity:
 
 ### Label Hierarchy Considerations
 
-Uni uses single-label vertices (encoded in VID). If you need hierarchies:
+Uni supports multi-label vertices — each vertex can have one or more labels. The complete label set is stored as a `_labels: List<Utf8>` column in every per-label table. For modelling hierarchies you can use multi-labels directly, or consider these patterns:
 
-```
-// Option 1: Property-based classification
-:Paper { paper_type: "research", venue_type: "conference" }
+```cypher
+// Option 1: Multi-label vertex (preferred)
+CREATE (p:Paper:ConferenceSubmission {title: "..."})
 
-// Option 2: Separate labels with relationships
-:Paper, :ConferenceSubmission
-(paper)-[:SUBMITTED_TO]->(conference)
+// Option 2: Property-based classification
+CREATE (:Paper {paper_type: "research", venue_type: "conference"})
 
 // Option 3: Composition via edges
-:Paper, :Category
-(paper)-[:IN_CATEGORY]->(category)
+CREATE (paper:Paper)-[:IN_CATEGORY]->(category:Category)
 ```
 
 ---

@@ -37,7 +37,7 @@ async fn test_compact_vertices_with_null_props() -> anyhow::Result<()> {
     let lancedb_store = storage.lancedb_store();
 
     // Batch 1: VID 1, name="A"
-    // Columns: _vid, _uid, _deleted, _version, ext_id, _created_at, _updated_at, name, overflow_json
+    // Columns: _vid, _uid, _deleted, _version, ext_id, _labels, _created_at, _updated_at, name, overflow_json
     let batch1 = RecordBatch::try_new(
         arrow_schema.clone(),
         vec![
@@ -46,6 +46,13 @@ async fn test_compact_vertices_with_null_props() -> anyhow::Result<()> {
             Arc::new(BooleanArray::from(vec![false])),
             Arc::new(UInt64Array::from(vec![1])),
             Arc::new(StringArray::from(vec![None::<&str>])), // ext_id
+            // _labels
+            {
+                let mut lb = arrow_array::builder::ListBuilder::new(arrow_array::builder::StringBuilder::new());
+                lb.values().append_value("Node");
+                lb.append(true);
+                Arc::new(lb.finish())
+            },
             Arc::new(TimestampMicrosecondArray::from(vec![None::<i64>]).with_timezone("UTC")), // _created_at
             Arc::new(TimestampMicrosecondArray::from(vec![None::<i64>]).with_timezone("UTC")), // _updated_at
             Arc::new(StringArray::from(vec![Some("A")])),
@@ -64,6 +71,13 @@ async fn test_compact_vertices_with_null_props() -> anyhow::Result<()> {
             Arc::new(BooleanArray::from(vec![false])),
             Arc::new(UInt64Array::from(vec![2])),
             Arc::new(StringArray::from(vec![None::<&str>])), // ext_id
+            // _labels
+            {
+                let mut lb = arrow_array::builder::ListBuilder::new(arrow_array::builder::StringBuilder::new());
+                lb.values().append_value("Node");
+                lb.append(true);
+                Arc::new(lb.finish())
+            },
             Arc::new(TimestampMicrosecondArray::from(vec![None::<i64>]).with_timezone("UTC")), // _created_at
             Arc::new(TimestampMicrosecondArray::from(vec![None::<i64>]).with_timezone("UTC")), // _updated_at
             Arc::new(StringArray::from(vec![None::<&str>])),

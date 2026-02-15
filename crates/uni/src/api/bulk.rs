@@ -691,9 +691,15 @@ impl<'a> BulkWriter<'a> {
                 updated_at.insert(*vid, now);
             }
 
+            // Convert 2-tuples to 3-tuples with labels for per-label table
+            let vertices_with_labels: Vec<(Vid, Vec<String>, Properties)> = vertices
+                .iter()
+                .map(|(vid, props)| (*vid, vec![label.to_string()], props.clone()))
+                .collect();
+
             let batch = ds
                 .build_record_batch_with_timestamps(
-                    &vertices,
+                    &vertices_with_labels,
                     &deleted,
                     &versions,
                     &schema,

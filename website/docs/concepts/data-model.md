@@ -10,7 +10,7 @@ Uni's data model has three primary entity types:
 flowchart LR
     subgraph Source["Source"]
         V1["VERTEX<br/>(Node)"]
-        P1["Properties<br/>+ Label"]
+        P1["Properties<br/>+ Labels"]
     end
 
     subgraph Relationship["Relationship"]
@@ -20,7 +20,7 @@ flowchart LR
 
     subgraph Target["Target"]
         V2["VERTEX<br/>(Node)"]
-        P2["Properties<br/>+ Label"]
+        P2["Properties<br/>+ Labels"]
     end
 
     V1 --> E --> V2
@@ -38,18 +38,21 @@ Vertices represent entities in your domain. Each vertex has:
 | Component | Description | Example |
 |-----------|-------------|---------|
 | **VID** | Internal 64-bit identifier | `0x0001_0000_0000_002A` |
-| **Label(s)** | Type classification | `:Paper`, `:Author`, `:Venue` |
+| **Label(s)** | Type classification (one or more) | `:Paper`, `:Author`, `:Person:Employee` |
 | **Properties** | Key-value attributes | `{title: "...", year: 2023}` |
 
 ### Labels
 
-Labels categorize vertices and determine their schema. A vertex has exactly one primary label (stored in VID encoding).
+Labels categorize vertices and determine their schema. A vertex can have one or more labels. Multi-label vertices are stored in each label's per-label table, and the complete label set is persisted as a `_labels: List<Utf8>` column in every per-label table.
 
 ```cypher
 // Create vertices with labels
 CREATE (p:Paper {title: "Attention Is All You Need"})
 CREATE (a:Author {name: "Ashish Vaswani"})
 CREATE (v:Venue {name: "NeurIPS", year: 2017})
+
+// Multi-label vertex
+CREATE (e:Person:Employee {name: "Alice", dept: "Engineering"})
 ```
 
 **Label Best Practices:**
@@ -451,7 +454,7 @@ RETURN COUNT(p) AS total, AVG(p.year) AS avg_year
 
 ### Schema Design
 
-1. **Choose labels carefully** — They're encoded in VIDs and can't change
+1. **Choose labels carefully** — Multi-label vertices are supported, but each label table stores only its own schema-defined columns
 2. **Keep properties typed** — Avoid overusing JSON for queryable data
 3. **Use edge types** — Don't store relationships as vertex properties
 4. **Plan for vectors** — Dimension can't change after creation

@@ -96,7 +96,7 @@ These operators use `GraphExecutionContext` (`df_graph/mod.rs`) to access:
 
 - Looks up VID in the main `vertices` table via `MainVertexDataset::find_by_ext_id`.
 - Loads properties with `PropertyManager`.
-- Resolves labels from the main table and emits `_label`.
+- Resolves labels from the main table and emits `_labels`.
 
 ### 4.4 GraphVectorKnnExec
 

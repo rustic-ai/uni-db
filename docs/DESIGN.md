@@ -24,12 +24,12 @@ Build an embedded, object-store-backed database that supports property graph wor
 - Online graph algorithms beyond traversal + pattern matching
 - Strong guarantees for cross-process concurrent writers
 - Real-time streaming updates without compaction
-- Multi-label vertices (single label per vertex in v1)
+- ~~Multi-label vertices~~ *(implemented — per-label tables now carry a `_labels: List<Utf8>` column)*
 
 ### Design Principles
 
 1. **Object-store-first**: Minimize round trips, maximize sequential reads, assume 100ms latency
-2. **Simplicity over generality**: Single-label vertices, explicit constraints, fewer options
+2. **Simplicity over generality**: Multi-label vertices with per-label storage, explicit constraints, fewer options
 3. **LSM-style writes**: Memory buffer → sorted runs → compacted base
 4. **Self-contained chunks**: One read gets everything needed, no joins across files
 5. **Custom SimpleGraph**: Lightweight in-memory graph structure; focus custom work on storage
@@ -116,7 +116,7 @@ Uni is organized as a Rust workspace with specialized crates:
 
 - **Vertices**: Labeled nodes with properties
 - **Edges**: Typed, directed relationships between vertices with properties
-- **Labels**: Each vertex has exactly one label (single-label model)
+- **Labels**: Each vertex has one or more labels (multi-label model, stored as `_labels: List<Utf8>`)
 - **Types**: Each edge has exactly one type
 
 #### Parallel Edge Policy
@@ -3987,7 +3987,7 @@ For a graph with 100M vertices and 1B edges:
 | **Denormalized edge properties** | +50% adjacency storage, but 1000x faster edge filters |
 | **Dual L1 runs (FWD + BWD)** | 2x L1 storage, but O(log n) incoming lookups |
 | **LSM-style deltas with SimpleGraph L0** | In-memory structure with property separation |
-| **Single-label vertices** | Simplicity over flexibility (multi-label deferred) |
+| **Multi-label vertices** | Per-label tables with `_labels: List<Utf8>` column for full label set |
 | **Global vid with label encoding** | Fast label extraction, limited to 65K labels |
 
 ---

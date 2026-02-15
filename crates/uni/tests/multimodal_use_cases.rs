@@ -63,6 +63,13 @@ async fn test_regional_sales_analytics() -> anyhow::Result<()> {
             Arc::new(arrow_array::BooleanArray::from(vec![false])),
             Arc::new(UInt64Array::from(vec![1])),
             Arc::new(StringArray::from(vec![None::<&str>; 1])), // ext_id
+            // _labels
+            {
+                let mut lb = arrow_array::builder::ListBuilder::new(arrow_array::builder::StringBuilder::new());
+                lb.values().append_value("Region");
+                lb.append(true);
+                Arc::new(lb.finish())
+            },
             Arc::new(TimestampMicrosecondArray::from(vec![None::<i64>; 1]).with_timezone("UTC")), // _created_at
             Arc::new(TimestampMicrosecondArray::from(vec![None::<i64>; 1]).with_timezone("UTC")), // _updated_at
             Arc::new(StringArray::from(vec!["North"])),
@@ -101,6 +108,15 @@ async fn test_regional_sales_analytics() -> anyhow::Result<()> {
             Arc::new(bool_builder.finish()),
             Arc::new(ver_builder.finish()),
             Arc::new(StringArray::from(vec![None::<&str>; num_orders])), // ext_id
+            // _labels
+            {
+                let mut lb = arrow_array::builder::ListBuilder::new(arrow_array::builder::StringBuilder::new());
+                for _ in 0..num_orders {
+                    lb.values().append_value("Order");
+                    lb.append(true);
+                }
+                Arc::new(lb.finish())
+            },
             Arc::new(
                 TimestampMicrosecondArray::from(vec![None::<i64>; num_orders]).with_timezone("UTC"),
             ), // _created_at
@@ -318,6 +334,15 @@ async fn test_document_knowledge_graph() -> anyhow::Result<()> {
             Arc::new(arrow_array::BooleanArray::from(vec![false, false, false])),
             Arc::new(UInt64Array::from(vec![1, 1, 1])),
             Arc::new(StringArray::from(vec![None::<&str>; 3])), // ext_id
+            // _labels
+            {
+                let mut lb = arrow_array::builder::ListBuilder::new(arrow_array::builder::StringBuilder::new());
+                for _ in 0..3 {
+                    lb.values().append_value("Paper");
+                    lb.append(true);
+                }
+                Arc::new(lb.finish())
+            },
             Arc::new(TimestampMicrosecondArray::from(vec![None::<i64>; 3]).with_timezone("UTC")), // _created_at
             Arc::new(TimestampMicrosecondArray::from(vec![None::<i64>; 3]).with_timezone("UTC")), // _updated_at
             Arc::new(LargeBinaryArray::from(vec![None::<&[u8]>; 3])), // overflow_json

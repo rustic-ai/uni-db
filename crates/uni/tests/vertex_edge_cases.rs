@@ -25,7 +25,7 @@ async fn test_vertex_serialization_nulls() -> anyhow::Result<()> {
     props.insert("name".to_string(), uni_db::Value::Null);
 
     let vid = Vid::new(0);
-    let vertices = vec![(vid, props)];
+    let vertices = vec![(vid, vec!["Node".to_string()], props)];
     let deleted = vec![false];
     let versions = vec![1];
 
@@ -55,7 +55,7 @@ async fn test_vertex_large_properties() -> anyhow::Result<()> {
     props.insert("data".to_string(), unival!(large_str));
 
     let vid = Vid::new(0);
-    let vertices = vec![(vid, props)];
+    let vertices = vec![(vid, vec!["Node".to_string()], props)];
     let deleted = vec![false];
     let versions = vec![1];
 

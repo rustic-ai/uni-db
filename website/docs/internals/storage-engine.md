@@ -352,6 +352,7 @@ storage/
 │   │ _deleted      │ Bool         │ Tombstone marker (soft delete)        ││
 │   │ _version      │ UInt64       │ Last modified version                 ││
 │   │ ext_id        │ String       │ External ID (extracted from props)    ││
+│   │ _labels       │ List<String> │ Complete label set (multi-label)      ││
 │   │ _created_at   │ Timestamp    │ Creation timestamp                    ││
 │   │ _updated_at   │ Timestamp    │ Last update timestamp                 ││
 │   └───────────────┴──────────────┴────────────────────────────────────────┘│

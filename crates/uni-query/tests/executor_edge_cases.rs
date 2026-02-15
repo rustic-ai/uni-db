@@ -96,7 +96,7 @@ async fn test_execute_match_with_null_properties() {
     let vertex_ds = storage.vertex_dataset("Person").unwrap();
     let arrow_schema = vertex_ds.get_arrow_schema(&schema).unwrap();
 
-    // Columns: _vid, _uid, _deleted, _version, ext_id, _created_at, _updated_at, age, name
+    // Columns: _vid, _uid, _deleted, _version, ext_id, _labels, _created_at, _updated_at, age, name
     let batch = RecordBatch::try_new(
         arrow_schema.clone(),
         vec![
@@ -113,6 +113,15 @@ async fn test_execute_match_with_null_properties() {
             Arc::new(arrow_array::BooleanArray::from(vec![false, false, false])), // _deleted
             Arc::new(arrow_array::UInt64Array::from(vec![1, 1, 1])),              // _version
             Arc::new(StringArray::from(vec![None::<&str>; 3])),                   // ext_id
+            // _labels
+            {
+                let mut lb = arrow_array::builder::ListBuilder::new(arrow_array::builder::StringBuilder::new());
+                for _ in 0..3 {
+                    lb.values().append_value("Person");
+                    lb.append(true);
+                }
+                Arc::new(lb.finish())
+            },
             Arc::new(TimestampMicrosecondArray::from(vec![None::<i64>; 3]).with_timezone("UTC")), // _created_at
             Arc::new(TimestampMicrosecondArray::from(vec![None::<i64>; 3]).with_timezone("UTC")), // _updated_at
             Arc::new(arrow_array::Int32Array::from(vec![

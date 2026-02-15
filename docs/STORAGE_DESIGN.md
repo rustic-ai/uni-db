@@ -64,6 +64,7 @@ Per-label tables store typed columns for schema-defined properties.
 | `_deleted` | Boolean | Tombstone flag |
 | `_version` | UInt64 | MVCC version |
 | `ext_id` | Utf8 | Extracted from properties |
+| `_labels` | List\<Utf8\> | Complete label set for multi-label support |
 | `_created_at` | Timestamp(utc, us) | Creation time |
 | `_updated_at` | Timestamp(utc, us) | Update time |
 | `{props}` | Typed | Schema-defined properties only |
@@ -81,9 +82,12 @@ Per-label tables store typed columns for schema-defined properties.
 - Query rewriting: WHERE clauses on overflow properties are automatically rewritten to use Lance's built-in JSONB functions (`json_get_string`, `json_get_int`, etc.) for efficient querying
 - JSONB binary format provides better performance than JSON strings and is compatible with PostgreSQL's JSONB format
 - `_uid` is computed from **label + ext_id + sorted properties**.
+- `_labels` stores the complete label set (e.g., `["Person", "Employee"]`) for
+  each vertex, enabling multi-label support. This column is preserved through
+  flush, compaction, and scan, so labels are never lost even after L0 is cleared.
 - Multi-label vertices are written to **each label table** listed in L0.
   Each table stores only its schema-defined columns; other properties are
-  ignored for that table.
+  ignored for that table. Every copy carries the full `_labels` list.
 
 ### 2.2 Main Vertex Table (`vertices`)
 

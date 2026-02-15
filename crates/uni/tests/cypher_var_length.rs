@@ -60,6 +60,15 @@ async fn test_cypher_var_length() -> anyhow::Result<()> {
             Arc::new(BooleanArray::from(vec![false; 4])),
             Arc::new(UInt64Array::from(vec![1; 4])),
             Arc::new(StringArray::from(vec![None::<&str>; 4])), // ext_id
+            // _labels
+            {
+                let mut lb = arrow_array::builder::ListBuilder::new(arrow_array::builder::StringBuilder::new());
+                for _ in 0..4 {
+                    lb.values().append_value("Person");
+                    lb.append(true);
+                }
+                Arc::new(lb.finish())
+            },
             Arc::new(TimestampMicrosecondArray::from(vec![None::<i64>; 4]).with_timezone("UTC")), // _created_at
             Arc::new(TimestampMicrosecondArray::from(vec![None::<i64>; 4]).with_timezone("UTC")), // _updated_at
             Arc::new(arrow_array::Int32Array::from(vec![0, 1, 2, 3])),

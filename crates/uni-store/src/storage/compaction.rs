@@ -4,6 +4,7 @@
 use crate::storage::delta::{L1Entry, Op};
 use crate::storage::manager::StorageManager;
 use anyhow::{Result, anyhow};
+use arrow_array::Array;
 use arrow_array::builder::{ArrayBuilder, ListBuilder, UInt64Builder};
 use arrow_array::{ListArray, RecordBatch, UInt64Array};
 use futures::TryStreamExt;
@@ -115,6 +116,7 @@ impl Compactor {
         // Vid -> (Properties, Deleted)
         let mut vertex_state: HashMap<Vid, (Properties, bool)> = HashMap::new();
         let mut vertex_versions: HashMap<Vid, u64> = HashMap::new();
+        let mut vertex_labels: HashMap<Vid, Vec<String>> = HashMap::new();
 
         let mut rows_processed = 0;
 
@@ -139,15 +141,37 @@ impl Compactor {
                 .downcast_ref::<arrow_array::BooleanArray>()
                 .unwrap();
 
-            // Extract other columns
-            // ... (similar to PropertyManager parsing) ...
-            // We need a helper to extract properties from a row.
-            // Let's iterate rows.
+            // Read _labels column (List<Utf8>) if present
+            let labels_col = batch
+                .column_by_name("_labels")
+                .and_then(|c| c.as_any().downcast_ref::<arrow_array::ListArray>());
 
             for i in 0..batch.num_rows() {
                 let vid = Vid::from(vid_col.value(i));
                 let version = ver_col.value(i);
                 let deleted = del_col.value(i);
+
+                // Extract labels from the _labels column (keep latest version's labels)
+                if let Some(list_arr) = labels_col
+                    && !list_arr.is_null(i)
+                    && version >= *vertex_versions.entry(vid).or_insert(0)
+                {
+                    let values = list_arr.value(i);
+                    if let Some(str_arr) =
+                        values.as_any().downcast_ref::<arrow_array::StringArray>()
+                    {
+                        let labels: Vec<String> = (0..str_arr.len())
+                            .filter_map(|j| {
+                                if str_arr.is_null(j) {
+                                    None
+                                } else {
+                                    Some(str_arr.value(j).to_string())
+                                }
+                            })
+                            .collect();
+                        vertex_labels.insert(vid, labels);
+                    }
+                }
 
                 let current_entry = vertex_state
                     .entry(vid)
@@ -210,7 +234,8 @@ impl Compactor {
 
         for (vid, (props, deleted)) in vertex_state {
             if !deleted {
-                valid_vertices.push((vid, props));
+                let labels = vertex_labels.remove(&vid).unwrap_or_default();
+                valid_vertices.push((vid, labels, props));
                 valid_versions.push(vertex_versions[&vid]);
                 valid_deleted.push(false);
             }

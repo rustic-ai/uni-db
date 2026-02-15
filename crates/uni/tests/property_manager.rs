@@ -52,6 +52,15 @@ async fn test_property_lookup_uses_vid_filter() -> anyhow::Result<()> {
             Arc::new(BooleanArray::from(vec![false, false])),
             Arc::new(UInt64Array::from(vec![1, 1])),
             Arc::new(StringArray::from(vec![None::<&str>; 2])), // ext_id
+            // _labels
+            {
+                let mut lb = arrow_array::builder::ListBuilder::new(arrow_array::builder::StringBuilder::new());
+                for _ in 0..2 {
+                    lb.values().append_value("Person");
+                    lb.append(true);
+                }
+                Arc::new(lb.finish())
+            },
             Arc::new(TimestampMicrosecondArray::from(vec![None::<i64>; 2]).with_timezone("UTC")), // _created_at
             Arc::new(TimestampMicrosecondArray::from(vec![None::<i64>; 2]).with_timezone("UTC")), // _updated_at
             Arc::new(StringArray::from(vec!["Bob", "Alice"])),
@@ -149,6 +158,13 @@ async fn test_list_property_storage() -> anyhow::Result<()> {
             Arc::new(BooleanArray::from(vec![false])),
             Arc::new(UInt64Array::from(vec![1])),
             Arc::new(StringArray::from(vec![None::<&str>; 1])), // ext_id
+            // _labels
+            {
+                let mut lb = arrow_array::builder::ListBuilder::new(arrow_array::builder::StringBuilder::new());
+                lb.values().append_value("Node");
+                lb.append(true);
+                Arc::new(lb.finish())
+            },
             Arc::new(TimestampMicrosecondArray::from(vec![None::<i64>; 1]).with_timezone("UTC")), // _created_at
             Arc::new(TimestampMicrosecondArray::from(vec![None::<i64>; 1]).with_timezone("UTC")), // _updated_at
             tags_arr,

@@ -5,7 +5,7 @@ use crate::lancedb::LanceDbStore;
 use crate::storage::arrow_convert::build_timestamp_column_from_vid_map;
 use crate::storage::property_builder::PropertyColumnBuilder;
 use anyhow::{Result, anyhow};
-use arrow_array::builder::{FixedSizeBinaryBuilder, StringBuilder};
+use arrow_array::builder::{FixedSizeBinaryBuilder, ListBuilder, StringBuilder};
 use arrow_array::{ArrayRef, BooleanArray, RecordBatch, UInt64Array};
 use arrow_schema::{Field, Schema as ArrowSchema, TimeUnit};
 use lance::dataset::Dataset;
@@ -85,7 +85,7 @@ impl VertexDataset {
     /// If timestamps are not provided, they default to None (null).
     pub fn build_record_batch(
         &self,
-        vertices: &[(Vid, Properties)],
+        vertices: &[(Vid, Vec<String>, Properties)],
         deleted: &[bool],
         versions: &[u64],
         schema: &Schema,
@@ -96,7 +96,7 @@ impl VertexDataset {
     /// Build a record batch with explicit timestamp metadata.
     ///
     /// # Arguments
-    /// * `vertices` - Vertex ID and properties pairs
+    /// * `vertices` - Vertex ID, labels, and properties triples
     /// * `deleted` - Deletion flags per vertex
     /// * `versions` - Version numbers per vertex
     /// * `schema` - Database schema
@@ -104,7 +104,7 @@ impl VertexDataset {
     /// * `updated_at` - Optional map of Vid -> microseconds since epoch
     pub fn build_record_batch_with_timestamps(
         &self,
-        vertices: &[(Vid, Properties)],
+        vertices: &[(Vid, Vec<String>, Properties)],
         deleted: &[bool],
         versions: &[u64],
         schema: &Schema,
@@ -114,11 +114,11 @@ impl VertexDataset {
         let arrow_schema = self.get_arrow_schema(schema)?;
         let mut columns: Vec<ArrayRef> = Vec::with_capacity(arrow_schema.fields().len());
 
-        let vids: Vec<u64> = vertices.iter().map(|(v, _)| v.as_u64()).collect();
+        let vids: Vec<u64> = vertices.iter().map(|(v, _, _)| v.as_u64()).collect();
         columns.push(Arc::new(UInt64Array::from(vids)));
 
         let mut uid_builder = FixedSizeBinaryBuilder::new(32);
-        for (_vid, props) in vertices.iter() {
+        for (_vid, _labels, props) in vertices.iter() {
             let ext_id = props.get("ext_id").and_then(|v| v.as_str());
             let uid = Self::compute_vertex_uid(&self.label, ext_id, props);
             uid_builder.append_value(uid.as_bytes())?;
@@ -130,7 +130,7 @@ impl VertexDataset {
 
         // Build ext_id column (extracted from properties as dedicated column)
         let mut ext_id_builder = StringBuilder::new();
-        for (_vid, props) in vertices.iter() {
+        for (_vid, _labels, props) in vertices.iter() {
             if let Some(ext_id_val) = props.get("ext_id").and_then(|v| v.as_str()) {
                 ext_id_builder.append_value(ext_id_val);
             } else {
@@ -139,8 +139,19 @@ impl VertexDataset {
         }
         columns.push(Arc::new(ext_id_builder.finish()));
 
+        // Build _labels column (List<Utf8>)
+        let mut labels_builder = ListBuilder::new(StringBuilder::new());
+        for (_vid, labels, _props) in vertices.iter() {
+            let values = labels_builder.values();
+            for lbl in labels {
+                values.append_value(lbl);
+            }
+            labels_builder.append(true);
+        }
+        columns.push(Arc::new(labels_builder.finish()));
+
         // Build _created_at and _updated_at columns using shared builder
-        let vids = vertices.iter().map(|(v, _)| *v);
+        let vids = vertices.iter().map(|(v, _, _)| *v);
         columns.push(build_timestamp_column_from_vid_map(
             vids.clone(),
             created_at,
@@ -150,7 +161,7 @@ impl VertexDataset {
         // Build property columns using shared builder
         let prop_columns = PropertyColumnBuilder::new(schema, &self.label, vertices.len())
             .with_deleted(deleted)
-            .build(|i| &vertices[i].1)?;
+            .build(|i| &vertices[i].2)?;
 
         columns.extend(prop_columns);
 
@@ -168,7 +179,7 @@ impl VertexDataset {
     /// columns, while overflow properties are stored in this JSON column.
     fn build_overflow_json_column(
         &self,
-        vertices: &[(Vid, Properties)],
+        vertices: &[(Vid, Vec<String>, Properties)],
         schema: &Schema,
     ) -> Result<ArrayRef> {
         use arrow_array::builder::LargeBinaryBuilder;
@@ -177,7 +188,7 @@ impl VertexDataset {
         let schema_props = schema.properties.get(&self.label);
         let mut builder = LargeBinaryBuilder::new();
 
-        for (_vid, props) in vertices {
+        for (_vid, _labels, props) in vertices {
             let mut overflow_props = HashMap::new();
 
             // Collect non-schema properties (skip ext_id, it's a system column)
@@ -215,6 +226,15 @@ impl VertexDataset {
             Field::new("_version", arrow_schema::DataType::UInt64, false),
             // New metadata columns per STORAGE_DESIGN.md
             Field::new("ext_id", arrow_schema::DataType::Utf8, true),
+            Field::new(
+                "_labels",
+                arrow_schema::DataType::List(Arc::new(Field::new(
+                    "item",
+                    arrow_schema::DataType::Utf8,
+                    true,
+                ))),
+                true,
+            ),
             Field::new(
                 "_created_at",
                 arrow_schema::DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),

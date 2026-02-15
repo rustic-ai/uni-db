@@ -33,14 +33,24 @@ async fn test_vertex_dataset_batch_writes() -> Result<()> {
     props1.insert("name".to_string(), unival!("Alice"));
 
     let schema = schema_manager.schema();
-    let batch = ds.build_record_batch(&[(vid1, props1)], &[false], &[1], &schema)?;
+    let batch = ds.build_record_batch(
+        &[(vid1, vec!["User".to_string()], props1)],
+        &[false],
+        &[1],
+        &schema,
+    )?;
     ds.write_batch_lancedb(lancedb_store, batch, &schema)
         .await?;
 
     let vid2 = Vid::new(2);
     let mut props2 = HashMap::new();
     props2.insert("name".to_string(), unival!("Bob"));
-    let batch2 = ds.build_record_batch(&[(vid2, props2)], &[false], &[1], &schema)?;
+    let batch2 = ds.build_record_batch(
+        &[(vid2, vec!["User".to_string()], props2)],
+        &[false],
+        &[1],
+        &schema,
+    )?;
     ds.write_batch_lancedb(lancedb_store, batch2, &schema)
         .await?;
 

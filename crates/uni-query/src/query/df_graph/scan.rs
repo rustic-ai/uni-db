@@ -1507,14 +1507,16 @@ fn build_l0_edge_property_column(
     build_property_column_static(&vid_keys, &props_map, prop_name, data_type)
 }
 
-/// Synthesize the `_labels` column for known-label vertices.
+/// Build the `_labels` column for known-label vertices.
 ///
-/// Each vertex gets at minimum `[label]`. Additional labels from L0 buffers
-/// are merged in.
+/// Reads `_labels` from the stored Lance batch if available. Falls back to
+/// `[label]` when the column is absent (legacy data). Additional labels from
+/// L0 buffers are merged in.
 fn build_labels_column_for_known_label(
     vid_arr: &UInt64Array,
     label: &str,
     l0_ctx: &crate::query::df_graph::L0Context,
+    batch_labels_col: Option<&arrow_array::ListArray>,
 ) -> DFResult<ArrayRef> {
     let mut labels_builder = ListBuilder::new(StringBuilder::new());
 
@@ -1522,14 +1524,43 @@ fn build_labels_column_for_known_label(
         let vid_u64 = vid_arr.value(i);
         let vid = Vid::from(vid_u64);
 
-        let mut labels = vec![label.to_string()];
+        // Start with labels from the stored _labels column, or fallback to [label]
+        let mut labels: Vec<String> = if let Some(list_arr) = batch_labels_col {
+            if !list_arr.is_null(i) {
+                let values = list_arr.value(i);
+                if let Some(str_arr) =
+                    values.as_any().downcast_ref::<arrow_array::StringArray>()
+                {
+                    (0..str_arr.len())
+                        .filter_map(|j| {
+                            if str_arr.is_null(j) {
+                                None
+                            } else {
+                                Some(str_arr.value(j).to_string())
+                            }
+                        })
+                        .collect()
+                } else {
+                    vec![label.to_string()]
+                }
+            } else {
+                vec![label.to_string()]
+            }
+        } else {
+            vec![label.to_string()]
+        };
+
+        // Ensure the scanned label is present (defensive)
+        if !labels.iter().any(|l| l == label) {
+            labels.push(label.to_string());
+        }
 
         // Check L0 buffers for additional labels
         for l0 in l0_ctx.iter_l0_buffers() {
             let guard = l0.read();
             if let Some(l0_labels) = guard.vertex_labels.get(&vid) {
                 for lbl in l0_labels {
-                    if lbl != label && !labels.contains(lbl) {
+                    if !labels.contains(lbl) {
                         labels.push(lbl.clone());
                     }
                 }
@@ -1579,8 +1610,11 @@ fn map_to_output_schema(
             datafusion::error::DataFusionError::Internal("_vid not UInt64".to_string())
         })?;
 
-    // 2. {var}._labels — must build before moving vid_col
-    let labels_col = build_labels_column_for_known_label(vid_arr, label, l0_ctx)?;
+    // 2. {var}._labels — read from stored column, overlay L0 additions
+    let batch_labels_col = batch
+        .column_by_name("_labels")
+        .and_then(|c| c.as_any().downcast_ref::<arrow_array::ListArray>());
+    let labels_col = build_labels_column_for_known_label(vid_arr, label, l0_ctx, batch_labels_col)?;
     columns.push(vid_col.clone());
     columns.push(labels_col);
 
