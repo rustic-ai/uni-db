@@ -6,7 +6,7 @@ use crate::storage::arrow_convert::build_timestamp_column;
 use crate::storage::property_builder::PropertyColumnBuilder;
 use crate::storage::value_codec::CrdtDecodeMode;
 use anyhow::{Result, anyhow};
-use arrow_array::types::TimestampMicrosecondType;
+use arrow_array::types::TimestampNanosecondType;
 use arrow_array::{Array, ArrayRef, PrimitiveArray, RecordBatch, UInt8Array, UInt64Array};
 use arrow_schema::{Field, Schema as ArrowSchema, TimeUnit};
 use futures::TryStreamExt;
@@ -87,12 +87,12 @@ impl DeltaDataset {
             // New timestamp columns per STORAGE_DESIGN.md
             Field::new(
                 "_created_at",
-                arrow_schema::DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
+                arrow_schema::DataType::Timestamp(TimeUnit::Nanosecond, Some("UTC".into())),
                 true,
             ),
             Field::new(
                 "_updated_at",
-                arrow_schema::DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
+                arrow_schema::DataType::Timestamp(TimeUnit::Nanosecond, Some("UTC".into())),
                 true,
             ),
         ];
@@ -280,11 +280,11 @@ impl DeltaDataset {
         // Try to read timestamp columns (may not exist in old data)
         let created_at_col = batch.column_by_name("_created_at").and_then(|c| {
             c.as_any()
-                .downcast_ref::<PrimitiveArray<TimestampMicrosecondType>>()
+                .downcast_ref::<PrimitiveArray<TimestampNanosecondType>>()
         });
         let updated_at_col = batch.column_by_name("_updated_at").and_then(|c| {
             c.as_any()
-                .downcast_ref::<PrimitiveArray<TimestampMicrosecondType>>()
+                .downcast_ref::<PrimitiveArray<TimestampNanosecondType>>()
         });
 
         // Prepare property columns

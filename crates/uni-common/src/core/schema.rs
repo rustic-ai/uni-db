@@ -88,14 +88,14 @@ impl DataType {
             DataType::Float64 => ArrowDataType::Float64,
             DataType::Bool => ArrowDataType::Boolean,
             DataType::Timestamp => {
-                ArrowDataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into()))
+                ArrowDataType::Timestamp(TimeUnit::Nanosecond, Some("UTC".into()))
             }
             DataType::Date => ArrowDataType::Date32,
-            DataType::Time => ArrowDataType::Time64(TimeUnit::Microsecond),
+            DataType::Time => ArrowDataType::Time64(TimeUnit::Nanosecond),
             DataType::DateTime => {
-                ArrowDataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into()))
+                ArrowDataType::Timestamp(TimeUnit::Nanosecond, Some("UTC".into()))
             }
-            DataType::Duration => ArrowDataType::Duration(TimeUnit::Microsecond),
+            DataType::Duration => ArrowDataType::LargeBinary, // Lance doesn't support Interval(MonthDayNano); use CypherValue codec
             DataType::CypherValue => ArrowDataType::LargeBinary, // MessagePack-tagged binary encoding
             DataType::Point(pt) => match pt {
                 PointType::Geographic => ArrowDataType::Struct(Fields::from(vec![

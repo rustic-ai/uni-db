@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2024-2026 Dragonscale Team
 
-use arrow_array::{LargeBinaryArray, RecordBatch, StringArray, TimestampMicrosecondArray};
+use arrow_array::{LargeBinaryArray, RecordBatch, StringArray, TimestampNanosecondArray};
 use std::sync::Arc;
 use tempfile::tempdir;
 use uni_db::core::id::Vid;
@@ -64,8 +64,8 @@ async fn test_parquet_export() -> anyhow::Result<()> {
                 }
                 Arc::new(lb.finish())
             },
-            Arc::new(TimestampMicrosecondArray::from(vec![None::<i64>; 2]).with_timezone("UTC")), // _created_at
-            Arc::new(TimestampMicrosecondArray::from(vec![None::<i64>; 2]).with_timezone("UTC")), // _updated_at
+            Arc::new(TimestampNanosecondArray::from(vec![None::<i64>; 2]).with_timezone("UTC")), // _created_at
+            Arc::new(TimestampNanosecondArray::from(vec![None::<i64>; 2]).with_timezone("UTC")), // _updated_at
             Arc::new(arrow_array::Int64Array::from(vec![30, 25])), // age
             Arc::new(arrow_array::StringArray::from(vec!["Alice", "Bob"])), // name
             Arc::new(LargeBinaryArray::from(vec![None::<&[u8]>; 2])), // overflow_json

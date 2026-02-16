@@ -10,6 +10,27 @@ use crate::query::planner::{LogicalPlan, QueryPlanner, classify_window_expressio
 use crate::query::pushdown::LanceFilterGenerator;
 use crate::types::Value;
 use anyhow::{Result, anyhow};
+
+/// Convert a `Value` to `chrono::DateTime<Utc>`, handling both `Value::Temporal` and `Value::String`.
+fn value_to_datetime_utc(val: &Value) -> Option<chrono::DateTime<chrono::Utc>> {
+    match val {
+        Value::Temporal(tv) => {
+            use uni_common::TemporalValue;
+            match tv {
+                TemporalValue::DateTime { nanos_since_epoch, .. }
+                | TemporalValue::LocalDateTime { nanos_since_epoch, .. } => {
+                    Some(chrono::DateTime::from_timestamp_nanos(*nanos_since_epoch))
+                }
+                TemporalValue::Date { days_since_epoch } => {
+                    chrono::DateTime::from_timestamp(*days_since_epoch as i64 * 86400, 0)
+                }
+                _ => None,
+            }
+        }
+        Value::String(s) => parse_datetime_utc(s).ok(),
+        _ => None,
+    }
+}
 use futures::future::BoxFuture;
 use futures::stream::{self, BoxStream, StreamExt};
 use metrics;
@@ -1185,19 +1206,33 @@ impl Executor {
                         return Ok(Value::Null);
                     }
 
-                    // Check if base_val is a temporal string and prop_name is a temporal accessor
-                    if let Value::String(s) = &base_val {
+                    // Check if base_val is a temporal value and prop_name is a temporal accessor
+                    {
                         use crate::query::datetime::{
                             eval_duration_accessor, eval_temporal_accessor, is_duration_accessor,
                             is_duration_string, is_temporal_accessor, is_temporal_string,
                         };
 
-                        if is_temporal_string(s) && is_temporal_accessor(prop_name) {
-                            return eval_temporal_accessor(s, prop_name);
+                        // Handle Value::Temporal directly (no string parsing needed)
+                        if let Value::Temporal(tv) = &base_val {
+                            if matches!(tv, uni_common::TemporalValue::Duration { .. }) {
+                                if is_duration_accessor(prop_name) {
+                                    // Convert to string for the existing accessor logic
+                                    return eval_duration_accessor(&base_val.to_string(), prop_name);
+                                }
+                            } else if is_temporal_accessor(prop_name) {
+                                return eval_temporal_accessor(&base_val.to_string(), prop_name);
+                            }
                         }
 
-                        if is_duration_string(s) && is_duration_accessor(prop_name) {
-                            return eval_duration_accessor(s, prop_name);
+                        // Handle Value::String temporal (backward compat)
+                        if let Value::String(s) = &base_val {
+                            if is_temporal_string(s) && is_temporal_accessor(prop_name) {
+                                return eval_temporal_accessor(s, prop_name);
+                            }
+                            if is_duration_string(s) && is_duration_accessor(prop_name) {
+                                return eval_duration_accessor(s, prop_name);
+                            }
                         }
                     }
 
@@ -1952,11 +1987,8 @@ impl Executor {
                             .evaluate_expr(&args[3], row, prop_manager, params, ctx)
                             .await?;
 
-                        let time_str = time_val
-                            .as_str()
-                            .ok_or(anyhow!("time argument must be string"))?;
-                        let query_time = parse_datetime_utc(time_str)
-                            .map_err(|_| anyhow!("Invalid query time format: {}", time_str))?;
+                        let query_time = value_to_datetime_utc(&time_val)
+                            .ok_or_else(|| anyhow!("time argument must be a datetime value or string"))?;
 
                         // Fetch temporal property values - supports both vertices and edges
                         let valid_from_val: Option<Value> = if let Ok(vid) =
@@ -1988,16 +2020,17 @@ impl Executor {
                         };
 
                         let valid_from = match valid_from_val {
-                            Some(Value::String(s)) => parse_datetime_utc(&s).map_err(|_| {
-                                anyhow!("Invalid datetime in {}: {}", start_prop, s)
-                            })?,
-                            Some(Value::Null) | None => return Ok(Value::Bool(false)),
-                            _ => {
-                                return Err(anyhow!(
-                                    "Property {} must be a datetime string",
-                                    start_prop
-                                ));
-                            }
+                            Some(ref v) => match value_to_datetime_utc(v) {
+                                Some(dt) => dt,
+                                None if v.is_null() => return Ok(Value::Bool(false)),
+                                None => {
+                                    return Err(anyhow!(
+                                        "Property {} must be a datetime value or string",
+                                        start_prop
+                                    ));
+                                }
+                            },
+                            None => return Ok(Value::Bool(false)),
                         };
 
                         let valid_to_val: Option<Value> = if let Ok(vid) =
@@ -2029,18 +2062,17 @@ impl Executor {
                         };
 
                         let valid_to = match valid_to_val {
-                            Some(Value::String(s)) => {
-                                Some(parse_datetime_utc(&s).map_err(|_| {
-                                    anyhow!("Invalid datetime in {}: {}", end_prop, s)
-                                })?)
-                            }
-                            Some(Value::Null) | None => None,
-                            _ => {
-                                return Err(anyhow!(
-                                    "Property {} must be a datetime string or null",
-                                    end_prop
-                                ));
-                            }
+                            Some(ref v) => match value_to_datetime_utc(v) {
+                                Some(dt) => Some(dt),
+                                None if v.is_null() => None,
+                                None => {
+                                    return Err(anyhow!(
+                                        "Property {} must be a datetime value or null",
+                                        end_prop
+                                    ));
+                                }
+                            },
+                            None => None,
                         };
 
                         let is_valid = valid_from <= query_time

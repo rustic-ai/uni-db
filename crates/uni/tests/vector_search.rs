@@ -2,7 +2,7 @@
 // Copyright 2024-2026 Dragonscale Team
 
 use arrow_array::builder::{FixedSizeBinaryBuilder, FixedSizeListBuilder, Float32Builder};
-use arrow_array::{RecordBatch, StringArray, TimestampMicrosecondArray, UInt64Array};
+use arrow_array::{RecordBatch, StringArray, TimestampNanosecondArray, UInt64Array};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tempfile::tempdir;
@@ -95,8 +95,8 @@ async fn test_vector_search() -> anyhow::Result<()> {
                 }
                 Arc::new(lb.finish())
             },
-            Arc::new(TimestampMicrosecondArray::from(vec![None::<i64>; 3]).with_timezone("UTC")), // _created_at
-            Arc::new(TimestampMicrosecondArray::from(vec![None::<i64>; 3]).with_timezone("UTC")), // _updated_at
+            Arc::new(TimestampNanosecondArray::from(vec![None::<i64>; 3]).with_timezone("UTC")), // _created_at
+            Arc::new(TimestampNanosecondArray::from(vec![None::<i64>; 3]).with_timezone("UTC")), // _updated_at
             Arc::new(vectors), // embedding
             Arc::new(arrow_array::LargeBinaryArray::from(vec![None::<&[u8]>; 3])), // overflow_json
         ],
@@ -197,8 +197,8 @@ async fn write_vectors_to_lancedb(
                 }
                 Arc::new(lb.finish())
             },
-            Arc::new(TimestampMicrosecondArray::from(vec![None::<i64>; n]).with_timezone("UTC")),
-            Arc::new(TimestampMicrosecondArray::from(vec![None::<i64>; n]).with_timezone("UTC")),
+            Arc::new(TimestampNanosecondArray::from(vec![None::<i64>; n]).with_timezone("UTC")),
+            Arc::new(TimestampNanosecondArray::from(vec![None::<i64>; n]).with_timezone("UTC")),
             Arc::new(vec_builder.finish()),
             Arc::new(arrow_array::LargeBinaryArray::from(vec![None::<&[u8]>; n])),
         ],

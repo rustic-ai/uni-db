@@ -253,6 +253,10 @@ fn values_equal(a: &Value, b: &Value) -> bool {
         (Value::Float(a), Value::Float(b)) => floats_equal(*a, *b),
         (Value::String(a), Value::String(b)) => a == b,
         (Value::Bytes(a), Value::Bytes(b)) => a == b,
+        (Value::Temporal(a), Value::Temporal(b)) => a == b,
+        // Cross-type: Temporal vs String — compare via Display
+        (Value::Temporal(_), Value::String(s)) => a.to_string() == *s,
+        (Value::String(s), Value::Temporal(_)) => *s == b.to_string(),
         (Value::List(a), Value::List(b)) => {
             a.len() == b.len() && a.iter().zip(b.iter()).all(|(av, bv)| values_equal(av, bv))
         }
@@ -294,6 +298,7 @@ fn value_sort_key(v: &Value) -> String {
         Value::Node(_) => "8:node".to_string(),
         Value::Edge(_) => "9:edge".to_string(),
         Value::Path(_) => "A:path".to_string(),
+        Value::Temporal(t) => format!("C:{}", t),
         Value::Vector(v) => format!("B:len={}", v.len()),
         _ => "Z:unknown".to_string(),
     }
@@ -327,6 +332,9 @@ fn values_equal_ignoring_list_order(a: &Value, b: &Value) -> bool {
         (Value::Node(a), Value::Node(b)) => nodes_equal_ignoring_list_order(a, b),
         (Value::Edge(a), Value::Edge(b)) => edges_equal_ignoring_list_order(a, b),
         (Value::Path(a), Value::Path(b)) => paths_equal_ignoring_list_order(a, b),
+        (Value::Temporal(a), Value::Temporal(b)) => a == b,
+        (Value::Temporal(_), Value::String(s)) => a.to_string() == *s,
+        (Value::String(s), Value::Temporal(_)) => *s == b.to_string(),
         (Value::Vector(a), Value::Vector(b)) => {
             a.len() == b.len()
                 && a.iter()

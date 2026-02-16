@@ -26,6 +26,7 @@
 
 use arrow::array::ArrayRef;
 use arrow::datatypes::DataType;
+use chrono::Offset;
 use arrow_array::{
     Array, BooleanArray, Float32Array, Float64Array, Int32Array, Int64Array, LargeBinaryArray,
     LargeStringArray, StringArray, UInt64Array,
@@ -1270,7 +1271,23 @@ impl ScalarUDFImpl for TemporalUdf {
         ) {
             Ok(DataType::Int64)
         } else {
-            Ok(DataType::Utf8)
+            match name.as_str() {
+                // Temporal constructors use LargeBinary (CypherValue codec) to preserve
+                // timezone names, Duration components, and nanosecond precision through
+                // the DataFusion pipeline. Constant-folded calls bypass UDFs entirely.
+                "datetime" | "localdatetime" | "date" | "time" | "localtime" | "duration"
+                | "date.truncate" | "time.truncate" | "datetime.truncate"
+                | "localdatetime.truncate" | "localtime.truncate"
+                | "duration.between"
+                | "datetime.fromepoch" | "datetime.fromepochmillis"
+                | "datetime.transaction" | "datetime.statement" | "datetime.realtime"
+                | "date.transaction" | "date.statement" | "date.realtime"
+                | "time.transaction" | "time.statement" | "time.realtime"
+                | "localtime.transaction" | "localtime.statement" | "localtime.realtime"
+                | "localdatetime.transaction" | "localdatetime.statement"
+                | "localdatetime.realtime" => Ok(DataType::LargeBinary),
+                _ => Ok(DataType::Utf8),
+            }
         }
     }
 
@@ -1507,8 +1524,21 @@ fn scalar_arr_to_value(arr: &dyn arrow::array::Array) -> DFResult<Value> {
     }
 }
 
+/// Resolve timezone offset from a timezone name at a given UTC nanosecond instant.
+fn resolve_timezone_offset(tz_name: &str, nanos_utc: i64) -> i32 {
+    if tz_name == "UTC" || tz_name == "Z" {
+        return 0;
+    }
+    if let Ok(tz) = tz_name.parse::<chrono_tz::Tz>() {
+        let dt = chrono::DateTime::from_timestamp_nanos(nanos_utc).with_timezone(&tz);
+        dt.offset().fix().local_minus_utc()
+    } else {
+        0
+    }
+}
+
 /// Convert a single `ScalarValue` to `uni_common::Value`.
-fn scalar_to_value(scalar: &ScalarValue) -> DFResult<Value> {
+pub(crate) fn scalar_to_value(scalar: &ScalarValue) -> DFResult<Value> {
     match scalar {
         ScalarValue::Utf8(Some(s)) | ScalarValue::LargeUtf8(Some(s)) => {
             // Try to parse as JSON ONLY if it looks like a JSON object, array or quoted string.
@@ -1552,83 +1582,129 @@ fn scalar_to_value(scalar: &ScalarValue) -> DFResult<Value> {
         ScalarValue::Int16(Some(i)) => Ok(Value::Int(*i as i64)),
         ScalarValue::Int8(Some(i)) => Ok(Value::Int(*i as i64)),
 
-        // Temporal types — convert to string representations
+        // Temporal types — convert to Value::Temporal
         ScalarValue::Date32(Some(days)) => {
-            let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
-            let date = epoch + chrono::Duration::days(*days as i64);
-            Ok(Value::String(date.format("%Y-%m-%d").to_string()))
+            Ok(Value::Temporal(uni_common::TemporalValue::Date {
+                days_since_epoch: *days,
+            }))
         }
         ScalarValue::Date64(Some(millis)) => {
-            let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
-            let date = epoch + chrono::Duration::milliseconds(*millis);
-            Ok(Value::String(date.format("%Y-%m-%d").to_string()))
+            let days = (*millis / 86_400_000) as i32;
+            Ok(Value::Temporal(uni_common::TemporalValue::Date {
+                days_since_epoch: days,
+            }))
         }
-        ScalarValue::TimestampMicrosecond(Some(micros), _) => {
-            let secs = *micros / 1_000_000;
-            let nsecs = ((*micros % 1_000_000) * 1000) as u32;
-            if let Some(dt) = chrono::DateTime::from_timestamp(secs, nsecs) {
-                Ok(Value::String(
-                    dt.format("%Y-%m-%dT%H:%M:%S%.6fZ").to_string(),
-                ))
+        ScalarValue::TimestampNanosecond(Some(nanos), tz) => {
+            if let Some(tz_str) = tz {
+                let offset = resolve_timezone_offset(tz_str.as_ref(), *nanos);
+                let tz_name = if tz_str.as_ref() == "UTC" { None } else { Some(tz_str.to_string()) };
+                Ok(Value::Temporal(uni_common::TemporalValue::DateTime {
+                    nanos_since_epoch: *nanos,
+                    offset_seconds: offset,
+                    timezone_name: tz_name,
+                }))
             } else {
-                Ok(Value::String(format!("{}us", micros)))
+                Ok(Value::Temporal(uni_common::TemporalValue::LocalDateTime {
+                    nanos_since_epoch: *nanos,
+                }))
             }
         }
-        ScalarValue::TimestampMillisecond(Some(millis), _) => {
-            let secs = *millis / 1000;
-            let nsecs = ((*millis % 1000) * 1_000_000) as u32;
-            if let Some(dt) = chrono::DateTime::from_timestamp(secs, nsecs) {
-                Ok(Value::String(
-                    dt.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string(),
-                ))
+        ScalarValue::TimestampMicrosecond(Some(micros), tz) => {
+            let nanos = *micros * 1_000;
+            if let Some(tz_str) = tz {
+                let offset = resolve_timezone_offset(tz_str.as_ref(), nanos);
+                let tz_name = if tz_str.as_ref() == "UTC" { None } else { Some(tz_str.to_string()) };
+                Ok(Value::Temporal(uni_common::TemporalValue::DateTime {
+                    nanos_since_epoch: nanos,
+                    offset_seconds: offset,
+                    timezone_name: tz_name,
+                }))
             } else {
-                Ok(Value::String(format!("{}ms", millis)))
+                Ok(Value::Temporal(uni_common::TemporalValue::LocalDateTime {
+                    nanos_since_epoch: nanos,
+                }))
             }
         }
-        ScalarValue::TimestampSecond(Some(secs), _) => {
-            if let Some(dt) = chrono::DateTime::from_timestamp(*secs, 0) {
-                Ok(Value::String(dt.format("%Y-%m-%dT%H:%M:%SZ").to_string()))
+        ScalarValue::TimestampMillisecond(Some(millis), tz) => {
+            let nanos = *millis * 1_000_000;
+            if let Some(tz_str) = tz {
+                let offset = resolve_timezone_offset(tz_str.as_ref(), nanos);
+                let tz_name = if tz_str.as_ref() == "UTC" { None } else { Some(tz_str.to_string()) };
+                Ok(Value::Temporal(uni_common::TemporalValue::DateTime {
+                    nanos_since_epoch: nanos,
+                    offset_seconds: offset,
+                    timezone_name: tz_name,
+                }))
             } else {
-                Ok(Value::String(format!("{}s", secs)))
+                Ok(Value::Temporal(uni_common::TemporalValue::LocalDateTime {
+                    nanos_since_epoch: nanos,
+                }))
             }
         }
-        ScalarValue::TimestampNanosecond(Some(nanos), _) => {
-            let secs = *nanos / 1_000_000_000;
-            let nsecs = (*nanos % 1_000_000_000) as u32;
-            if let Some(dt) = chrono::DateTime::from_timestamp(secs, nsecs) {
-                Ok(Value::String(
-                    dt.format("%Y-%m-%dT%H:%M:%S%.9fZ").to_string(),
-                ))
+        ScalarValue::TimestampSecond(Some(secs), tz) => {
+            let nanos = *secs * 1_000_000_000;
+            if let Some(tz_str) = tz {
+                let offset = resolve_timezone_offset(tz_str.as_ref(), nanos);
+                let tz_name = if tz_str.as_ref() == "UTC" { None } else { Some(tz_str.to_string()) };
+                Ok(Value::Temporal(uni_common::TemporalValue::DateTime {
+                    nanos_since_epoch: nanos,
+                    offset_seconds: offset,
+                    timezone_name: tz_name,
+                }))
             } else {
-                Ok(Value::String(format!("{}ns", nanos)))
+                Ok(Value::Temporal(uni_common::TemporalValue::LocalDateTime {
+                    nanos_since_epoch: nanos,
+                }))
             }
-        }
-        ScalarValue::Time64Microsecond(Some(micros)) => {
-            let total_secs = *micros / 1_000_000;
-            let h = total_secs / 3600;
-            let m = (total_secs % 3600) / 60;
-            let s = total_secs % 60;
-            let frac = *micros % 1_000_000;
-            Ok(Value::String(format!(
-                "{:02}:{:02}:{:02}.{:06}",
-                h, m, s, frac
-            )))
         }
         ScalarValue::Time64Nanosecond(Some(nanos)) => {
-            let total_secs = *nanos / 1_000_000_000;
-            let h = total_secs / 3600;
-            let m = (total_secs % 3600) / 60;
-            let s = total_secs % 60;
-            let frac = *nanos % 1_000_000_000;
-            Ok(Value::String(format!(
-                "{:02}:{:02}:{:02}.{:09}",
-                h, m, s, frac
-            )))
+            Ok(Value::Temporal(uni_common::TemporalValue::LocalTime {
+                nanos_since_midnight: *nanos,
+            }))
         }
-        ScalarValue::DurationMicrosecond(Some(micros)) => Ok(Value::Int(*micros)),
-        ScalarValue::DurationMillisecond(Some(millis)) => Ok(Value::Int(*millis)),
-        ScalarValue::DurationSecond(Some(secs)) => Ok(Value::Int(*secs)),
-        ScalarValue::DurationNanosecond(Some(nanos)) => Ok(Value::Int(*nanos)),
+        ScalarValue::Time64Microsecond(Some(micros)) => {
+            Ok(Value::Temporal(uni_common::TemporalValue::LocalTime {
+                nanos_since_midnight: *micros * 1_000,
+            }))
+        }
+        ScalarValue::IntervalMonthDayNano(Some(v)) => {
+            Ok(Value::Temporal(uni_common::TemporalValue::Duration {
+                months: v.months as i64,
+                days: v.days as i64,
+                nanos: v.nanoseconds,
+            }))
+        }
+        ScalarValue::DurationMicrosecond(Some(micros)) => {
+            let dur = crate::query::datetime::CypherDuration::from_micros(*micros);
+            Ok(Value::Temporal(uni_common::TemporalValue::Duration {
+                months: dur.months,
+                days: dur.days,
+                nanos: dur.nanos,
+            }))
+        }
+        ScalarValue::DurationMillisecond(Some(millis)) => {
+            let dur = crate::query::datetime::CypherDuration::from_micros(*millis * 1_000);
+            Ok(Value::Temporal(uni_common::TemporalValue::Duration {
+                months: dur.months,
+                days: dur.days,
+                nanos: dur.nanos,
+            }))
+        }
+        ScalarValue::DurationSecond(Some(secs)) => {
+            let dur = crate::query::datetime::CypherDuration::from_micros(*secs * 1_000_000);
+            Ok(Value::Temporal(uni_common::TemporalValue::Duration {
+                months: dur.months,
+                days: dur.days,
+                nanos: dur.nanos,
+            }))
+        }
+        ScalarValue::DurationNanosecond(Some(nanos)) => {
+            Ok(Value::Temporal(uni_common::TemporalValue::Duration {
+                months: 0,
+                days: 0,
+                nanos: *nanos,
+            }))
+        }
         ScalarValue::Float32(Some(f)) => Ok(Value::Float(*f as f64)),
 
         // All None variants for the above types
@@ -1658,7 +1734,8 @@ fn scalar_to_value(scalar: &ScalarValue) -> DFResult<Value> {
         | ScalarValue::DurationMicrosecond(None)
         | ScalarValue::DurationMillisecond(None)
         | ScalarValue::DurationSecond(None)
-        | ScalarValue::DurationNanosecond(None) => Ok(Value::Null),
+        | ScalarValue::DurationNanosecond(None)
+        | ScalarValue::IntervalMonthDayNano(None) => Ok(Value::Null),
         other => Err(datafusion::error::DataFusionError::Execution(format!(
             "scalar_to_value(): unsupported scalar type {other:?}"
         ))),
@@ -1673,6 +1750,28 @@ fn value_to_columnar(val: &Value) -> DFResult<ColumnarValue> {
         Value::Float(f) => ScalarValue::Float64(Some(*f)),
         Value::Bool(b) => ScalarValue::Boolean(Some(*b)),
         Value::Null => ScalarValue::Utf8(None),
+        Value::Temporal(tv) => {
+            use uni_common::TemporalValue;
+            match tv {
+                TemporalValue::Date { days_since_epoch } => ScalarValue::Date32(Some(*days_since_epoch)),
+                TemporalValue::LocalTime { nanos_since_midnight } => ScalarValue::Time64Nanosecond(Some(*nanos_since_midnight)),
+                TemporalValue::Time { nanos_since_midnight, .. } => ScalarValue::Time64Nanosecond(Some(*nanos_since_midnight)),
+                TemporalValue::LocalDateTime { nanos_since_epoch } => ScalarValue::TimestampNanosecond(Some(*nanos_since_epoch), None),
+                TemporalValue::DateTime { nanos_since_epoch, timezone_name, .. } => {
+                    let tz = timezone_name.as_deref().unwrap_or("UTC");
+                    ScalarValue::TimestampNanosecond(Some(*nanos_since_epoch), Some(tz.into()))
+                }
+                TemporalValue::Duration { months, days, nanos } => {
+                    ScalarValue::IntervalMonthDayNano(Some(
+                        arrow::datatypes::IntervalMonthDayNano {
+                            months: *months as i32,
+                            days: *days as i32,
+                            nanoseconds: *nanos,
+                        }
+                    ))
+                }
+            }
+        }
         other => {
             return Err(datafusion::error::DataFusionError::Execution(format!(
                 "value_to_columnar(): unsupported type {other:?}"

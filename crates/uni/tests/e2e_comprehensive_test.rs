@@ -428,12 +428,13 @@ mod data_type_tests {
             .await?;
         assert_eq!(result.len(), 3);
 
-        // Durations are stored as microseconds
-        let first: i64 = result.rows()[0].get("n.duration_val")?;
-        assert_eq!(first, 90_000_000); // 90 seconds in microseconds
+        // Durations are now returned as TemporalValue::Duration via LargeBinary CypherValue codec
+        // Calendar semantics (months, days) are preserved through round-trip
+        let first: String = result.rows()[0].get("n.duration_val")?;
+        assert_eq!(first, "PT1M30S"); // 90 seconds
 
-        let last: i64 = result.rows()[2].get("n.duration_val")?;
-        assert_eq!(last, 86_400_000_000); // 1 day in microseconds
+        let last: String = result.rows()[2].get("n.duration_val")?;
+        assert_eq!(last, "P1D"); // 1 day preserved (not flattened to PT24H)
 
         Ok(())
     }

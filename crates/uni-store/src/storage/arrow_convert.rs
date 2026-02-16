@@ -11,14 +11,16 @@ use anyhow::{Result, anyhow};
 use arrow_array::builder::{
     BinaryBuilder, BooleanBuilder, Date32Builder, DurationMicrosecondBuilder,
     FixedSizeBinaryBuilder, FixedSizeListBuilder, Float32Builder, Float64Builder, Int32Builder,
-    Int64Builder, ListBuilder, StringBuilder, StructBuilder, Time64MicrosecondBuilder,
-    TimestampMicrosecondBuilder, UInt64Builder,
+    Int64Builder, IntervalMonthDayNanoBuilder, LargeBinaryBuilder, ListBuilder, StringBuilder,
+    StructBuilder,
+    Time64MicrosecondBuilder, Time64NanosecondBuilder, TimestampNanosecondBuilder, UInt64Builder,
 };
 use arrow_array::{
     Array, ArrayRef, BinaryArray, BooleanArray, Date32Array, DurationMicrosecondArray,
-    FixedSizeListArray, Float32Array, Float64Array, Int32Array, Int64Array, LargeBinaryArray,
-    ListArray, StringArray, StructArray, Time64MicrosecondArray, TimestampMicrosecondArray,
-    UInt64Array,
+    FixedSizeListArray, Float32Array, Float64Array, Int32Array, Int64Array,
+    IntervalMonthDayNanoArray, LargeBinaryArray, ListArray, StringArray, StructArray,
+    Time64MicrosecondArray, Time64NanosecondArray, TimestampMicrosecondArray,
+    TimestampNanosecondArray, UInt64Array,
 };
 use arrow_schema::{DataType as ArrowDataType, Field};
 use std::sync::Arc;
@@ -45,7 +47,7 @@ where
     K: Eq + std::hash::Hash,
     I: IntoIterator<Item = K>,
 {
-    let mut builder = TimestampMicrosecondBuilder::new().with_timezone("UTC");
+    let mut builder = TimestampNanosecondBuilder::new().with_timezone("UTC");
     for id in ids {
         match timestamps.and_then(|m| m.get(&id)) {
             Some(&ts) => builder.append_value(ts),
@@ -82,7 +84,7 @@ pub fn build_timestamp_column<I>(timestamps: I) -> ArrayRef
 where
     I: IntoIterator<Item = Option<i64>>,
 {
-    let mut builder = TimestampMicrosecondBuilder::new().with_timezone("UTC");
+    let mut builder = TimestampNanosecondBuilder::new().with_timezone("UTC");
     for ts in timestamps {
         builder.append_option(ts);
     }
@@ -108,30 +110,30 @@ pub fn labels_from_list_array(list_arr: &ListArray, row: usize) -> Vec<String> {
         .collect()
 }
 
-/// Parse a datetime string into microseconds since Unix epoch.
+/// Parse a datetime string into nanoseconds since Unix epoch.
 ///
 /// Tries RFC3339, "%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%dT%H:%M%:z",
 /// and "%Y-%m-%dT%H:%MZ" formats.
-fn parse_datetime_to_micros(s: &str) -> Option<i64> {
+fn parse_datetime_to_nanos(s: &str) -> Option<i64> {
     chrono::DateTime::parse_from_rfc3339(s)
-        .map(|dt| dt.with_timezone(&chrono::Utc).timestamp_micros())
+        .map(|dt| dt.with_timezone(&chrono::Utc).timestamp_nanos_opt().unwrap_or(0))
         .or_else(|_| {
             chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S")
-                .map(|ndt| ndt.and_utc().timestamp_micros())
+                .map(|ndt| ndt.and_utc().timestamp_nanos_opt().unwrap_or(0))
         })
         .or_else(|_| {
             chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%SZ")
-                .map(|ndt| ndt.and_utc().timestamp_micros())
+                .map(|ndt| ndt.and_utc().timestamp_nanos_opt().unwrap_or(0))
         })
         .or_else(|_| {
             chrono::DateTime::parse_from_str(s, "%Y-%m-%dT%H:%M%:z")
-                .map(|dt| dt.with_timezone(&chrono::Utc).timestamp_micros())
+                .map(|dt| dt.with_timezone(&chrono::Utc).timestamp_nanos_opt().unwrap_or(0))
         })
         .ok()
         .or_else(|| {
             s.strip_suffix('Z')
                 .and_then(|base| chrono::NaiveDateTime::parse_from_str(base, "%Y-%m-%dT%H:%M").ok())
-                .map(|ndt| ndt.and_utc().timestamp_micros())
+                .map(|ndt| ndt.and_utc().timestamp_nanos_opt().unwrap_or(0))
         })
 }
 
@@ -240,56 +242,77 @@ pub fn arrow_to_value(col: &dyn Array, row: usize) -> Value {
         return Value::Map(map);
     }
 
-    // Date32 type (days since epoch) - convert to ISO date string
+    // Date32 type (days since epoch) - return as Value::Temporal
     if let Some(d) = col.as_any().downcast_ref::<Date32Array>() {
         let days = d.value(row);
-        // Convert days since Unix epoch to date string
-        let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
-        if let Some(date) = epoch.checked_add_signed(chrono::Duration::days(days as i64)) {
-            return Value::String(date.format("%Y-%m-%d").to_string());
-        }
-        return Value::Null;
+        return Value::Temporal(uni_common::TemporalValue::Date {
+            days_since_epoch: days,
+        });
     }
 
-    // Timestamp (microseconds since epoch) - convert to ISO datetime string
-    if let Some(ts) = col.as_any().downcast_ref::<TimestampMicrosecondArray>() {
-        let micros = ts.value(row);
-        if let Some(dt) = chrono::DateTime::from_timestamp_micros(micros) {
-            use chrono::Timelike;
-            if dt.nanosecond() > 0 {
-                let s = dt.format("%Y-%m-%dT%H:%M:%S").to_string();
-                let micros_part = dt.nanosecond() / 1000;
-                return Value::String(format!("{}.{:06}Z", s, micros_part));
-            } else if dt.second() == 0 {
-                return Value::String(dt.format("%Y-%m-%dT%H:%MZ").to_string());
-            } else {
-                return Value::String(dt.format("%Y-%m-%dT%H:%M:%SZ").to_string());
-            }
-        }
-        return Value::Null;
-    }
-
-    // Time64 (microseconds since midnight) - convert to ISO time string
-    if let Some(t) = col.as_any().downcast_ref::<Time64MicrosecondArray>() {
-        let micros = t.value(row);
-        let total_secs = micros / 1_000_000;
-        let hours = total_secs / 3600;
-        let minutes = (total_secs % 3600) / 60;
-        let seconds = total_secs % 60;
-        let micro_part = micros % 1_000_000;
-        if micro_part > 0 {
-            return Value::String(format!(
-                "{:02}:{:02}:{:02}.{:06}",
-                hours, minutes, seconds, micro_part
-            ));
+    // Timestamp (nanoseconds since epoch) - return as Value::Temporal
+    if let Some(ts) = col.as_any().downcast_ref::<TimestampNanosecondArray>() {
+        let nanos = ts.value(row);
+        let tz_name = ts.timezone().map(|s| s.to_string());
+        if tz_name.is_some() {
+            return Value::Temporal(uni_common::TemporalValue::DateTime {
+                nanos_since_epoch: nanos,
+                offset_seconds: 0,
+                timezone_name: tz_name,
+            });
         } else {
-            return Value::String(format!("{:02}:{:02}:{:02}", hours, minutes, seconds));
+            return Value::Temporal(uni_common::TemporalValue::LocalDateTime {
+                nanos_since_epoch: nanos,
+            });
         }
     }
 
-    // Duration (microseconds) - return as numeric for arithmetic
+    // Timestamp (microseconds since epoch) - legacy fallback, convert to nanos
+    if let Some(ts) = col.as_any().downcast_ref::<TimestampMicrosecondArray>() {
+        let nanos = ts.value(row) * 1_000; // legacy fallback: micros→nanos
+        return Value::Temporal(uni_common::TemporalValue::DateTime {
+            nanos_since_epoch: nanos,
+            offset_seconds: 0,
+            timezone_name: None,
+        });
+    }
+
+    // Time64 (nanoseconds since midnight) - return as Value::Temporal
+    if let Some(t) = col.as_any().downcast_ref::<Time64NanosecondArray>() {
+        let nanos = t.value(row);
+        return Value::Temporal(uni_common::TemporalValue::LocalTime {
+            nanos_since_midnight: nanos,
+        });
+    }
+
+    // Time64 (microseconds since midnight) - legacy fallback, convert to nanos
+    if let Some(t) = col.as_any().downcast_ref::<Time64MicrosecondArray>() {
+        let nanos = t.value(row) * 1_000; // legacy fallback: micros→nanos
+        return Value::Temporal(uni_common::TemporalValue::LocalTime {
+            nanos_since_midnight: nanos,
+        });
+    }
+
+    // IntervalMonthDayNano - return as Value::Temporal(Duration)
+    if let Some(interval) = col.as_any().downcast_ref::<IntervalMonthDayNanoArray>() {
+        let val = interval.value(row);
+        return Value::Temporal(uni_common::TemporalValue::Duration {
+            months: val.months as i64,
+            days: val.days as i64,
+            nanos: val.nanoseconds,
+        });
+    }
+
+    // Duration (microseconds) - legacy fallback, return as Value::Temporal
     if let Some(d) = col.as_any().downcast_ref::<DurationMicrosecondArray>() {
-        return Value::Int(d.value(row));
+        let micros = d.value(row);
+        // Convert flat microseconds to duration components
+        let nanos = micros * 1000;
+        return Value::Temporal(uni_common::TemporalValue::Duration {
+            months: 0,
+            days: 0,
+            nanos,
+        });
     }
 
     // LargeBinary (CypherValue MessagePack-tagged encoding)
@@ -450,15 +473,25 @@ fn values_to_fixed_size_list_f32_array(values: &[Value], size: i32) -> ArrayRef 
 }
 
 fn values_to_timestamp_array(values: &[Value], tz: Option<&Arc<str>>) -> ArrayRef {
-    let mut builder = TimestampMicrosecondBuilder::with_capacity(values.len());
+    let mut builder = TimestampNanosecondBuilder::with_capacity(values.len());
     for v in values {
         if v.is_null() {
             builder.append_null();
+        } else if let Value::Temporal(tv) = v {
+            match tv {
+                uni_common::TemporalValue::DateTime {
+                    nanos_since_epoch, ..
+                }
+                | uni_common::TemporalValue::LocalDateTime {
+                    nanos_since_epoch, ..
+                } => builder.append_value(*nanos_since_epoch),
+                _ => builder.append_null(),
+            }
         } else if let Some(n) = v.as_i64() {
             builder.append_value(n);
         } else if let Some(s) = v.as_str() {
-            match parse_datetime_to_micros(s) {
-                Some(micros) => builder.append_value(micros),
+            match parse_datetime_to_nanos(s) {
+                Some(nanos) => builder.append_value(nanos),
                 None => builder.append_null(),
             }
         } else {
@@ -467,8 +500,11 @@ fn values_to_timestamp_array(values: &[Value], tz: Option<&Arc<str>>) -> ArrayRe
     }
 
     let arr = builder.finish();
-    let tz_str = tz.map(|t| t.as_ref()).unwrap_or("UTC");
-    Arc::new(arr.with_timezone(tz_str))
+    if let Some(tz) = tz {
+        Arc::new(arr.with_timezone(tz.as_ref()))
+    } else {
+        Arc::new(arr)
+    }
 }
 
 fn values_to_large_binary_array(values: &[Value]) -> ArrayRef {
@@ -504,8 +540,120 @@ pub fn values_to_array(values: &[Value], dt: &ArrowDataType) -> Result<ArrayRef>
                 Err(anyhow!("Unsupported FixedSizeList inner type"))
             }
         }
+        ArrowDataType::Timestamp(arrow_schema::TimeUnit::Nanosecond, tz) => {
+            Ok(values_to_timestamp_array(values, tz.as_ref()))
+        }
         ArrowDataType::Timestamp(arrow_schema::TimeUnit::Microsecond, tz) => {
             Ok(values_to_timestamp_array(values, tz.as_ref()))
+        }
+        ArrowDataType::Date32 => {
+            let mut builder = Date32Builder::with_capacity(values.len());
+            for v in values {
+                if v.is_null() {
+                    builder.append_null();
+                } else if let Value::Temporal(uni_common::TemporalValue::Date { days_since_epoch }) =
+                    v
+                {
+                    builder.append_value(*days_since_epoch);
+                } else if let Some(n) = v.as_i64() {
+                    builder.append_value(n as i32);
+                } else {
+                    builder.append_null();
+                }
+            }
+            Ok(Arc::new(builder.finish()))
+        }
+        ArrowDataType::Time64(arrow_schema::TimeUnit::Nanosecond) => {
+            let mut builder = Time64NanosecondBuilder::with_capacity(values.len());
+            for v in values {
+                if v.is_null() {
+                    builder.append_null();
+                } else if let Value::Temporal(tv) = v {
+                    match tv {
+                        uni_common::TemporalValue::LocalTime {
+                            nanos_since_midnight,
+                        }
+                        | uni_common::TemporalValue::Time {
+                            nanos_since_midnight,
+                            ..
+                        } => builder.append_value(*nanos_since_midnight),
+                        _ => builder.append_null(),
+                    }
+                } else if let Some(n) = v.as_i64() {
+                    builder.append_value(n);
+                } else {
+                    builder.append_null();
+                }
+            }
+            Ok(Arc::new(builder.finish()))
+        }
+        ArrowDataType::Time64(arrow_schema::TimeUnit::Microsecond) => {
+            let mut builder = Time64MicrosecondBuilder::with_capacity(values.len());
+            for v in values {
+                if v.is_null() {
+                    builder.append_null();
+                } else if let Value::Temporal(tv) = v {
+                    match tv {
+                        uni_common::TemporalValue::LocalTime {
+                            nanos_since_midnight,
+                        }
+                        | uni_common::TemporalValue::Time {
+                            nanos_since_midnight,
+                            ..
+                        } => builder.append_value(*nanos_since_midnight / 1_000), // nanos→micros for legacy
+                        _ => builder.append_null(),
+                    }
+                } else if let Some(n) = v.as_i64() {
+                    builder.append_value(n);
+                } else {
+                    builder.append_null();
+                }
+            }
+            Ok(Arc::new(builder.finish()))
+        }
+        ArrowDataType::Interval(arrow_schema::IntervalUnit::MonthDayNano) => {
+            let mut builder = IntervalMonthDayNanoBuilder::with_capacity(values.len());
+            for v in values {
+                if v.is_null() {
+                    builder.append_null();
+                } else if let Value::Temporal(uni_common::TemporalValue::Duration {
+                    months,
+                    days,
+                    nanos,
+                }) = v
+                {
+                    builder.append_value(arrow::datatypes::IntervalMonthDayNano {
+                        months: *months as i32,
+                        days: *days as i32,
+                        nanoseconds: *nanos,
+                    });
+                } else {
+                    builder.append_null();
+                }
+            }
+            Ok(Arc::new(builder.finish()))
+        }
+        ArrowDataType::Duration(arrow_schema::TimeUnit::Microsecond) => {
+            let mut builder = DurationMicrosecondBuilder::with_capacity(values.len());
+            for v in values {
+                if v.is_null() {
+                    builder.append_null();
+                } else if let Value::Temporal(uni_common::TemporalValue::Duration {
+                    months,
+                    days,
+                    nanos,
+                }) = v
+                {
+                    let total_micros =
+                        months * 30 * 86_400_000_000i64 + days * 86_400_000_000i64 + nanos / 1_000;
+                    builder.append_value(total_micros);
+                } else if let Some(n) = v.as_i64() {
+                    builder.append_value(n);
+                } else {
+                    builder.append_null();
+                }
+            }
+            Ok(Arc::new(builder.finish()))
         }
         ArrowDataType::LargeBinary => Ok(values_to_large_binary_array(values)),
         ArrowDataType::List(field) => {
@@ -588,16 +736,20 @@ impl<'a> PropertyExtractor<'a> {
     where
         F: Fn(usize) -> Option<&'a Value>,
     {
-        let mut values = Vec::with_capacity(len);
+        let mut builder = arrow_array::builder::StringBuilder::with_capacity(len, len * 32);
         for (i, &is_deleted) in deleted.iter().enumerate().take(len) {
-            let val = get_props(i).and_then(|v| v.as_str());
-            if val.is_none() && is_deleted {
-                values.push(Some(""));
+            let prop = get_props(i);
+            if let Some(s) = prop.and_then(|v| v.as_str()) {
+                builder.append_value(s);
+            } else if let Some(Value::Temporal(tv)) = prop {
+                builder.append_value(tv.to_string());
+            } else if is_deleted {
+                builder.append_value("");
             } else {
-                values.push(val);
+                builder.append_null();
             }
         }
-        Ok(Arc::new(StringArray::from(values)))
+        Ok(Arc::new(builder.finish()))
     }
 
     fn build_int32_column<F>(&self, len: usize, deleted: &[bool], get_props: F) -> Result<ArrayRef>
@@ -646,10 +798,20 @@ impl<'a> PropertyExtractor<'a> {
             let val = get_props(i);
             let ts = if is_deleted || val.is_none() {
                 Some(0i64)
+            } else if let Some(Value::Temporal(tv)) = val {
+                match tv {
+                    uni_common::TemporalValue::DateTime {
+                        nanos_since_epoch, ..
+                    }
+                    | uni_common::TemporalValue::LocalDateTime {
+                        nanos_since_epoch, ..
+                    } => Some(*nanos_since_epoch),
+                    _ => None,
+                }
             } else if let Some(v) = val.and_then(|v| v.as_i64()) {
                 Some(v)
             } else if let Some(s) = val.and_then(|v| v.as_str()) {
-                parse_datetime_to_micros(s)
+                parse_datetime_to_nanos(s)
             } else {
                 None
             };
@@ -660,7 +822,7 @@ impl<'a> PropertyExtractor<'a> {
                 values.push(ts);
             }
         }
-        let arr = TimestampMicrosecondArray::from(values).with_timezone("UTC");
+        let arr = TimestampNanosecondArray::from(values).with_timezone("UTC");
         Ok(Arc::new(arr))
     }
 
@@ -675,6 +837,11 @@ impl<'a> PropertyExtractor<'a> {
             let val = get_props(i);
             let days = if is_deleted || val.is_none() {
                 Some(0)
+            } else if let Some(Value::Temporal(uni_common::TemporalValue::Date {
+                days_since_epoch,
+            })) = val
+            {
+                Some(*days_since_epoch)
             } else if let Some(v) = val.and_then(|v| v.as_i64()) {
                 Some(v as i32)
             } else if let Some(s) = val.and_then(|v| v.as_str()) {
@@ -701,7 +868,7 @@ impl<'a> PropertyExtractor<'a> {
     where
         F: Fn(usize) -> Option<&'a Value>,
     {
-        let mut builder = Time64MicrosecondBuilder::with_capacity(len);
+        let mut builder = Time64NanosecondBuilder::with_capacity(len);
         for (i, &is_deleted) in deleted.iter().enumerate().take(len) {
             if is_deleted {
                 builder.append_value(0);
@@ -709,17 +876,26 @@ impl<'a> PropertyExtractor<'a> {
             }
 
             let val = get_props(i);
-            let micros = if let Some(v) = val.and_then(|v| v.as_i64()) {
+            let nanos = if let Some(Value::Temporal(tv)) = val {
+                match tv {
+                    uni_common::TemporalValue::LocalTime {
+                        nanos_since_midnight,
+                    }
+                    | uni_common::TemporalValue::Time {
+                        nanos_since_midnight,
+                        ..
+                    } => Some(*nanos_since_midnight),
+                    _ => None,
+                }
+            } else if let Some(v) = val.and_then(|v| v.as_i64()) {
                 Some(v)
             } else if let Some(s) = val.and_then(|v| v.as_str()) {
-                // Try parsing time string in various formats
-                // Supported: "HH:MM", "HH:MM:SS", "HH:MM:SS.fff", etc.
                 parse_time_string_to_micros(s)
             } else {
                 None
             };
 
-            if let Some(v) = micros {
+            if let Some(v) = nanos {
                 builder.append_value(v);
             } else {
                 builder.append_null();
@@ -737,26 +913,23 @@ impl<'a> PropertyExtractor<'a> {
     where
         F: Fn(usize) -> Option<&'a Value>,
     {
-        let mut builder = DurationMicrosecondBuilder::with_capacity(len);
+        // Duration stored as LargeBinary via CypherValue codec (Lance doesn't support Interval(MonthDayNano))
+        let mut builder = LargeBinaryBuilder::with_capacity(len, len * 32);
         for (i, &is_deleted) in deleted.iter().enumerate().take(len) {
             let raw_val = get_props(i);
-            // Try to get microseconds from i64, or parse from ISO 8601 string
-            let val = raw_val.and_then(|v| {
-                v.as_i64().or_else(|| {
-                    v.as_str().and_then(|s| {
-                        // Parse ISO 8601 duration string (e.g., "PT1H30M")
-                        if s.starts_with('P') || s.starts_with('p') {
-                            parse_iso8601_duration_to_micros(s).ok()
-                        } else {
-                            None
-                        }
-                    })
-                })
-            });
-            if val.is_none() && is_deleted {
-                builder.append_value(0);
-            } else if let Some(v) = val {
-                builder.append_value(v);
+            if let Some(val @ Value::Temporal(uni_common::TemporalValue::Duration { .. })) =
+                raw_val
+            {
+                let encoded = uni_common::cypher_value_codec::encode(val);
+                builder.append_value(&encoded);
+            } else if is_deleted {
+                let zero = Value::Temporal(uni_common::TemporalValue::Duration {
+                    months: 0,
+                    days: 0,
+                    nanos: 0,
+                });
+                let encoded = uni_common::cypher_value_codec::encode(&zero);
+                builder.append_value(&encoded);
             } else {
                 builder.append_null();
             }
@@ -1165,58 +1338,6 @@ fn parse_time_string_to_micros(s: &str) -> Option<i64> {
     Some(time.num_seconds_from_midnight() as i64 * 1_000_000 + time.nanosecond() as i64 / 1000)
 }
 
-/// Parse ISO 8601 duration string to microseconds.
-///
-/// Supports formats like "PT1H30M", "P1D", "PT90S", etc.
-/// This is a simplified parser for duration storage conversion.
-fn parse_iso8601_duration_to_micros(s: &str) -> Result<i64> {
-    let s = s.trim();
-    if !s.starts_with('P') && !s.starts_with('p') {
-        return Err(anyhow!("Duration must start with 'P'"));
-    }
-
-    const MICROS_PER_SECOND: i64 = 1_000_000;
-    const MICROS_PER_MINUTE: i64 = 60 * MICROS_PER_SECOND;
-    const MICROS_PER_HOUR: i64 = 60 * MICROS_PER_MINUTE;
-    const MICROS_PER_DAY: i64 = 24 * MICROS_PER_HOUR;
-
-    let mut total_micros: i64 = 0;
-    let mut in_time_part = false;
-    let mut num_str = String::new();
-
-    for c in s[1..].chars() {
-        if c == 'T' || c == 't' {
-            in_time_part = true;
-            continue;
-        }
-
-        if c.is_ascii_digit() || c == '.' {
-            num_str.push(c);
-        } else {
-            if num_str.is_empty() {
-                continue;
-            }
-
-            let value: f64 = num_str.parse().map_err(|_| anyhow!("Invalid number"))?;
-            num_str.clear();
-
-            let micros = match c.to_ascii_uppercase() {
-                'Y' => (value * 365.25 * MICROS_PER_DAY as f64) as i64,
-                'M' if !in_time_part => (value * 30.0 * MICROS_PER_DAY as f64) as i64, // months
-                'W' => (value * 7.0 * MICROS_PER_DAY as f64) as i64,
-                'D' => (value * MICROS_PER_DAY as f64) as i64,
-                'H' => (value * MICROS_PER_HOUR as f64) as i64,
-                'M' if in_time_part => (value * MICROS_PER_MINUTE as f64) as i64, // minutes
-                'S' => (value * MICROS_PER_SECOND as f64) as i64,
-                _ => return Err(anyhow!("Unknown duration unit: {}", c)),
-            };
-            total_micros += micros;
-        }
-    }
-
-    Ok(total_micros)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1334,7 +1455,7 @@ mod tests {
 
     #[test]
     fn test_arrow_to_value_time64() {
-        // Test Time64MicrosecondArray conversion
+        // Test Time64MicrosecondArray legacy fallback (micros→nanos conversion)
         let mut builder = Time64MicrosecondBuilder::new();
         // 10:30:45 = 10*3600 + 30*60 + 45 = 37845 seconds = 37845000000 microseconds
         builder.append_value(37_845_000_000);
@@ -1345,24 +1466,17 @@ mod tests {
         builder.append_null();
 
         let arr = builder.finish();
-        assert_eq!(
-            arrow_to_value(&arr, 0),
-            Value::String("10:30:45".to_string())
-        );
-        assert_eq!(
-            arrow_to_value(&arr, 1),
-            Value::String("00:00:00".to_string())
-        );
-        assert_eq!(
-            arrow_to_value(&arr, 2),
-            Value::String("23:59:59.123456".to_string())
-        );
+        // Arrow→Value returns Value::Temporal(LocalTime) with nanos (micros * 1000)
+        assert_eq!(arrow_to_value(&arr, 0).to_string(), "10:30:45");
+        assert_eq!(arrow_to_value(&arr, 1).to_string(), "00:00:00");
+        assert_eq!(arrow_to_value(&arr, 2).to_string(), "23:59:59.123456");
         assert_eq!(arrow_to_value(&arr, 3), Value::Null);
     }
 
     #[test]
     fn test_arrow_to_value_duration() {
         // Test DurationMicrosecondArray conversion
+        // Arrow→Value now returns Value::Temporal(Duration)
         let arr = DurationMicrosecondArray::from(vec![
             Some(1_000_000),      // 1 second in microseconds
             Some(3_600_000_000),  // 1 hour
@@ -1370,9 +1484,9 @@ mod tests {
             None,
         ]);
 
-        assert_eq!(arrow_to_value(&arr, 0), Value::Int(1_000_000));
-        assert_eq!(arrow_to_value(&arr, 1), Value::Int(3_600_000_000));
-        assert_eq!(arrow_to_value(&arr, 2), Value::Int(86_400_000_000));
+        assert_eq!(arrow_to_value(&arr, 0).to_string(), "PT1S");
+        assert_eq!(arrow_to_value(&arr, 1).to_string(), "PT1H");
+        assert_eq!(arrow_to_value(&arr, 2).to_string(), "PT24H");
         assert_eq!(arrow_to_value(&arr, 3), Value::Null);
     }
 

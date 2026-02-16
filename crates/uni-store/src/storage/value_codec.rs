@@ -8,9 +8,9 @@
 
 use anyhow::{Result, anyhow};
 use arrow_array::{
-    Array, BinaryArray, BooleanArray, Date32Array, DurationMicrosecondArray, FixedSizeListArray,
-    Float32Array, Float64Array, Int32Array, Int64Array, LargeBinaryArray, ListArray, StringArray,
-    StructArray, Time64MicrosecondArray, TimestampMicrosecondArray,
+    Array, BinaryArray, BooleanArray, Date32Array, FixedSizeListArray,
+    Float32Array, Float64Array, Int32Array, Int64Array, LargeBinaryArray,
+    ListArray, StringArray, StructArray, Time64NanosecondArray, TimestampNanosecondArray,
 };
 use serde_json::Value;
 use uni_common::DataType;
@@ -212,21 +212,21 @@ pub fn value_from_column(
         DataType::Time => {
             let arr = col
                 .as_any()
-                .downcast_ref::<Time64MicrosecondArray>()
+                .downcast_ref::<Time64NanosecondArray>()
                 .ok_or_else(|| anyhow!("Invalid time64 col"))?;
             if arr.is_null(row) {
                 return Ok(Value::Null);
             }
-            let micros = arr.value(row);
-            let total_secs = micros / 1_000_000;
+            let nanos = arr.value(row);
+            let total_secs = nanos / 1_000_000_000;
             let hours = total_secs / 3600;
             let minutes = (total_secs % 3600) / 60;
             let seconds = total_secs % 60;
-            let micro_part = micros % 1_000_000;
-            if micro_part > 0 {
+            let nano_part = nanos % 1_000_000_000;
+            if nano_part > 0 {
                 Ok(Value::String(format!(
-                    "{:02}:{:02}:{:02}.{:06}",
-                    hours, minutes, seconds, micro_part
+                    "{:02}:{:02}:{:02}.{:09}",
+                    hours, minutes, seconds, nano_part
                 )))
             } else {
                 Ok(Value::String(format!(
@@ -236,29 +236,44 @@ pub fn value_from_column(
             }
         }
         DataType::Duration => {
+            // Duration is stored as LargeBinary via CypherValue codec
             let arr = col
                 .as_any()
-                .downcast_ref::<DurationMicrosecondArray>()
-                .ok_or_else(|| anyhow!("Invalid duration col"))?;
+                .downcast_ref::<LargeBinaryArray>()
+                .ok_or_else(|| anyhow!("Invalid duration col (expected LargeBinary)"))?;
             if arr.is_null(row) {
                 return Ok(Value::Null);
             }
-            Ok(serde_json::json!(arr.value(row)))
+            let bytes = arr.value(row);
+            let uni_val = uni_common::cypher_value_codec::decode(bytes)
+                .map_err(|e| anyhow!("Failed to decode duration: {}", e))?;
+            // Convert to JSON representation
+            if let uni_common::Value::Temporal(uni_common::TemporalValue::Duration {
+                months,
+                days,
+                nanos,
+            }) = &uni_val
+            {
+                Ok(serde_json::json!({
+                    "months": months,
+                    "days": days,
+                    "nanoseconds": nanos
+                }))
+            } else {
+                Ok(serde_json::json!(uni_val.to_string()))
+            }
         }
         DataType::DateTime | DataType::Timestamp => {
             let arr = col
                 .as_any()
-                .downcast_ref::<TimestampMicrosecondArray>()
+                .downcast_ref::<TimestampNanosecondArray>()
                 .ok_or_else(|| anyhow!("Invalid timestamp col"))?;
             if arr.is_null(row) {
                 return Ok(Value::Null);
             }
-            let micros = arr.value(row);
-            if let Some(dt) = chrono::DateTime::from_timestamp_micros(micros) {
-                Ok(Value::String(dt.format("%Y-%m-%dT%H:%M:%SZ").to_string()))
-            } else {
-                Ok(Value::Null)
-            }
+            let nanos = arr.value(row);
+            let dt = chrono::DateTime::from_timestamp_nanos(nanos);
+            Ok(Value::String(dt.format("%Y-%m-%dT%H:%M:%SZ").to_string()))
         }
         _ => Ok(Value::Null),
     }

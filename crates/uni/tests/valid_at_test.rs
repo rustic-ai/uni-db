@@ -14,8 +14,8 @@ async fn test_valid_at_function() -> Result<()> {
     db.schema()
         .label("Event")
         .property("id", DataType::Int64)
-        .property("valid_from", DataType::String)
-        .property_nullable("valid_to", DataType::String)
+        .property("valid_from", DataType::Timestamp)
+        .property_nullable("valid_to", DataType::Timestamp)
         .apply()
         .await?;
 
@@ -79,8 +79,8 @@ async fn test_valid_at_macro() -> Result<()> {
     db.schema()
         .label("Event")
         .property("id", DataType::Int64)
-        .property("valid_from", DataType::String)
-        .property_nullable("valid_to", DataType::String)
+        .property("valid_from", DataType::Timestamp)
+        .property_nullable("valid_to", DataType::Timestamp)
         .apply()
         .await?;
 
@@ -128,8 +128,8 @@ async fn test_valid_at_macro_custom_props() -> Result<()> {
     db.schema()
         .label("Task")
         .property("id", DataType::Int64)
-        .property("start", DataType::String)
-        .property("end", DataType::String)
+        .property("start", DataType::Timestamp)
+        .property("end", DataType::Timestamp)
         .apply()
         .await?;
 
@@ -183,8 +183,8 @@ async fn test_valid_at_edge_temporal() -> Result<()> {
 
     db.schema()
         .edge_type("EMPLOYED_BY", &["Person"], &["Company"])
-        .property("valid_from", DataType::String)
-        .property_nullable("valid_to", DataType::String)
+        .property("valid_from", DataType::Timestamp)
+        .property_nullable("valid_to", DataType::Timestamp)
         .property("role", DataType::String)
         .apply()
         .await?;
@@ -311,8 +311,8 @@ async fn test_valid_at_boundary_conditions() -> Result<()> {
     db.schema()
         .label("Contract")
         .property("id", DataType::Int64)
-        .property("valid_from", DataType::String)
-        .property_nullable("valid_to", DataType::String)
+        .property("valid_from", DataType::Timestamp)
+        .property_nullable("valid_to", DataType::Timestamp)
         .apply()
         .await?;
 
@@ -385,8 +385,8 @@ async fn test_valid_at_open_ended() -> Result<()> {
     db.schema()
         .label("Subscription")
         .property("id", DataType::Int64)
-        .property("valid_from", DataType::String)
-        .property_nullable("valid_to", DataType::String)
+        .property("valid_from", DataType::Timestamp)
+        .property_nullable("valid_to", DataType::Timestamp)
         .apply()
         .await?;
 
@@ -432,8 +432,8 @@ async fn test_valid_at_index_suggestion_function() -> Result<()> {
     db.schema()
         .label("Event")
         .property("id", DataType::Int64)
-        .property("valid_from", DataType::String)
-        .property_nullable("valid_to", DataType::String)
+        .property("valid_from", DataType::Timestamp)
+        .property_nullable("valid_to", DataType::Timestamp)
         .apply()
         .await?;
 
@@ -467,8 +467,8 @@ async fn test_valid_at_index_suggestion_macro() -> Result<()> {
     db.schema()
         .label("Contract")
         .property("id", DataType::Int64)
-        .property("valid_from", DataType::String)
-        .property_nullable("valid_to", DataType::String)
+        .property("valid_from", DataType::Timestamp)
+        .property_nullable("valid_to", DataType::Timestamp)
         .apply()
         .await?;
 
@@ -499,8 +499,8 @@ async fn test_valid_at_no_suggestion_with_index() -> Result<()> {
     db.schema()
         .label("Task")
         .property("id", DataType::Int64)
-        .property("valid_from", DataType::String)
-        .property_nullable("valid_to", DataType::String)
+        .property("valid_from", DataType::Timestamp)
+        .property_nullable("valid_to", DataType::Timestamp)
         .apply()
         .await?;
 
@@ -538,8 +538,8 @@ async fn test_valid_at_custom_prop_suggestion() -> Result<()> {
     db.schema()
         .label("Project")
         .property("id", DataType::Int64)
-        .property("start_date", DataType::String)
-        .property_nullable("end_date", DataType::String)
+        .property("start_date", DataType::Timestamp)
+        .property_nullable("end_date", DataType::Timestamp)
         .apply()
         .await?;
 

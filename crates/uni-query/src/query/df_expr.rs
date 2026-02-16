@@ -47,6 +47,51 @@ const COL_EID: &str = "_eid";
 const COL_LABELS: &str = "_labels";
 const COL_TYPE: &str = "_type";
 
+/// Normalize a datetime string literal to RFC3339 format for Arrow timestamp parsing.
+///
+/// Arrow's timestamp parser requires explicit seconds (`HH:MM:SS`), but our Cypher
+/// datetime formatting omits `:00` seconds when both seconds and nanos are zero
+/// (e.g. `2021-06-01T00:00Z`). This function inserts `:00` seconds when missing so
+/// the string can be cast to Arrow Timestamp.
+fn normalize_datetime_literal(expr: DfExpr) -> DfExpr {
+    if let DfExpr::Literal(ScalarValue::Utf8(Some(ref s)), _) = expr
+        && let Some(normalized) = normalize_datetime_str(s)
+    {
+        return lit(normalized);
+    }
+    expr
+}
+
+/// Insert `:00` seconds into a datetime string like `2021-06-01T00:00Z` that has
+/// only `HH:MM` after the `T` separator (no seconds component).
+pub(crate) fn normalize_datetime_str(s: &str) -> Option<String> {
+    // Must be at least YYYY-MM-DDTHH:MM (16 chars) with T at position 10
+    if s.len() < 16 || s.as_bytes().get(10) != Some(&b'T') {
+        return None;
+    }
+    let b = s.as_bytes();
+    if !(b[11].is_ascii_digit()
+        && b[12].is_ascii_digit()
+        && b[13] == b':'
+        && b[14].is_ascii_digit()
+        && b[15].is_ascii_digit())
+    {
+        return None;
+    }
+    // If there's already a seconds component (char at 16 is ':'), no normalization needed
+    if b.len() > 16 && b[16] == b':' {
+        return None;
+    }
+    // Insert :00 after HH:MM
+    let mut normalized = String::with_capacity(s.len() + 3);
+    normalized.push_str(&s[..16]);
+    normalized.push_str(":00");
+    if s.len() > 16 {
+        normalized.push_str(&s[16..]);
+    }
+    Some(normalized)
+}
+
 /// Infer the common Arrow DataType from a list of ScalarValues, ignoring nulls.
 fn infer_common_scalar_type(scalars: &[ScalarValue]) -> datafusion::arrow::datatypes::DataType {
     use datafusion::arrow::datatypes::DataType;
@@ -955,6 +1000,42 @@ fn value_to_scalar(value: &Value) -> Result<ScalarValue> {
                 datafusion::arrow::array::StructArray::from(fields_arrays),
             )))
         }
+        Value::Temporal(tv) => {
+            use uni_common::TemporalValue;
+            match tv {
+                TemporalValue::Date { days_since_epoch } => {
+                    Ok(ScalarValue::Date32(Some(*days_since_epoch)))
+                }
+                TemporalValue::LocalTime { nanos_since_midnight } => {
+                    Ok(ScalarValue::Time64Nanosecond(Some(*nanos_since_midnight)))
+                }
+                TemporalValue::Time {
+                    nanos_since_midnight,
+                    offset_seconds,
+                } => {
+                    // Normalize to UTC for comparison: subtract offset
+                    let utc_nanos =
+                        *nanos_since_midnight - (*offset_seconds as i64) * 1_000_000_000;
+                    Ok(ScalarValue::Time64Nanosecond(Some(utc_nanos)))
+                }
+                TemporalValue::LocalDateTime { nanos_since_epoch } => {
+                    Ok(ScalarValue::TimestampNanosecond(Some(*nanos_since_epoch), None))
+                }
+                TemporalValue::DateTime { nanos_since_epoch, timezone_name, .. } => {
+                    let tz = timezone_name.as_deref().unwrap_or("UTC");
+                    Ok(ScalarValue::TimestampNanosecond(Some(*nanos_since_epoch), Some(tz.into())))
+                }
+                TemporalValue::Duration { months, days, nanos } => {
+                    Ok(ScalarValue::IntervalMonthDayNano(Some(
+                        arrow::datatypes::IntervalMonthDayNano {
+                            months: *months as i32,
+                            days: *days as i32,
+                            nanoseconds: *nanos,
+                        }
+                    )))
+                }
+            }
+        }
         Value::Bytes(b) => Ok(ScalarValue::LargeBinary(Some(b.clone()))),
         // For complex graph types, fall back to JSON encoding
         other => {
@@ -1404,8 +1485,94 @@ fn translate_temporal_function(
         | "LOCALTIME.REALTIME"
         | "LOCALDATETIME.TRANSACTION"
         | "LOCALDATETIME.STATEMENT"
-        | "LOCALDATETIME.REALTIME" => Some(Ok(dummy_udf_expr(name, df_args))),
+        | "LOCALDATETIME.REALTIME" => {
+            // Try constant-folding first: if all args are literals, evaluate at planning time
+            if can_constant_fold(name_upper, &df_args)
+                && let Ok(folded) = try_constant_fold_temporal(name_upper, &df_args)
+            {
+                return Some(Ok(folded));
+            }
+            Some(Ok(dummy_udf_expr(name, df_args)))
+        }
         _ => None,
+    }
+}
+
+/// Check if a temporal function call can be constant-folded (all args are literals).
+fn can_constant_fold(name: &str, args: &[DfExpr]) -> bool {
+    // Clock functions return current time, never constant
+    if name.contains("TRANSACTION")
+        || name.contains("STATEMENT")
+        || name.contains("REALTIME")
+    {
+        return false;
+    }
+    // Zero-arg calls return current time/date, not constant
+    if args.is_empty() {
+        return false;
+    }
+    // All args must be constant expressions (literals or named_struct with all-literal args)
+    args.iter().all(is_constant_expr)
+}
+
+/// Check if a DataFusion expression is a constant (evaluable at planning time).
+fn is_constant_expr(expr: &DfExpr) -> bool {
+    match expr {
+        DfExpr::Literal(_, _) => true,
+        DfExpr::ScalarFunction(func) => {
+            // named_struct with all-literal args is constant
+            func.args.iter().all(is_constant_expr)
+        }
+        _ => false,
+    }
+}
+
+/// Try to constant-fold a temporal function call by evaluating it at planning time.
+/// Returns a `DfExpr::Literal` with the resulting scalar value.
+fn try_constant_fold_temporal(name: &str, args: &[DfExpr]) -> Result<DfExpr> {
+    // Extract DfExpr args → Value args
+    let val_args: Vec<Value> = args
+        .iter()
+        .map(extract_constant_value)
+        .collect::<Result<_>>()?;
+
+    // Call the temporal eval function
+    let result = crate::query::datetime::eval_datetime_function(name, &val_args)?;
+
+    // Convert Value::Temporal → ScalarValue
+    let scalar = value_to_scalar(&result)?;
+    Ok(DfExpr::Literal(scalar, None))
+}
+
+/// Extract a constant Value from a DfExpr that is known to be constant.
+fn extract_constant_value(expr: &DfExpr) -> Result<Value> {
+    use crate::query::df_udfs::scalar_to_value;
+    match expr {
+        DfExpr::Literal(sv, _) => {
+            scalar_to_value(sv).map_err(|e| anyhow::anyhow!("{}", e))
+        }
+        DfExpr::ScalarFunction(func) => {
+            // named_struct(lit("key1"), lit(val1), lit("key2"), lit(val2), ...)
+            // → Value::Map({key1: val1, key2: val2, ...})
+            let mut map = std::collections::HashMap::new();
+            let pairs: Vec<&DfExpr> = func.args.iter().collect();
+            for chunk in pairs.chunks(2) {
+                if let [key_expr, val_expr] = chunk {
+                    // Key should be a string literal
+                    let key = match key_expr {
+                        DfExpr::Literal(ScalarValue::Utf8(Some(s)), _) => s.clone(),
+                        DfExpr::Literal(ScalarValue::LargeUtf8(Some(s)), _) => s.clone(),
+                        _ => return Err(anyhow::anyhow!("Expected string key in struct")),
+                    };
+                    let val = extract_constant_value(val_expr)?;
+                    map.insert(key, val);
+                } else {
+                    return Err(anyhow::anyhow!("Odd number of args in named_struct"));
+                }
+            }
+            Ok(Value::Map(map))
+        }
+        _ => Err(anyhow::anyhow!("Cannot extract constant value from expression")),
     }
 }
 
@@ -2177,6 +2344,7 @@ pub fn apply_type_coercion(expr: &DfExpr, schema: &datafusion::common::DFSchema)
                                 ts @ DataType::Timestamp(..),
                                 DataType::Utf8 | DataType::LargeUtf8,
                             ) => {
+                                let right = normalize_datetime_literal(right);
                                 return Ok(DfExpr::BinaryExpr(
                                     datafusion::logical_expr::expr::BinaryExpr::new(
                                         Box::new(left),
@@ -2189,6 +2357,7 @@ pub fn apply_type_coercion(expr: &DfExpr, schema: &datafusion::common::DFSchema)
                                 DataType::Utf8 | DataType::LargeUtf8,
                                 ts @ DataType::Timestamp(..),
                             ) => {
+                                let left = normalize_datetime_literal(left);
                                 return Ok(DfExpr::BinaryExpr(
                                     datafusion::logical_expr::expr::BinaryExpr::new(
                                         Box::new(datafusion::logical_expr::cast(left, ts.clone())),

@@ -3,7 +3,7 @@
 
 use arrow_array::builder::{FixedSizeBinaryBuilder, ListBuilder, UInt64Builder};
 use arrow_array::{
-    LargeBinaryArray, RecordBatch, StringArray, TimestampMicrosecondArray, UInt64Array,
+    LargeBinaryArray, RecordBatch, StringArray, TimestampNanosecondArray, UInt64Array,
 };
 use std::sync::Arc;
 use tempfile::tempdir;
@@ -98,8 +98,8 @@ async fn test_query_integration() -> anyhow::Result<()> {
                 }
                 Arc::new(lb.finish())
             },
-            Arc::new(TimestampMicrosecondArray::from(vec![None::<i64>; 2]).with_timezone("UTC")), // _created_at
-            Arc::new(TimestampMicrosecondArray::from(vec![None::<i64>; 2]).with_timezone("UTC")), // _updated_at
+            Arc::new(TimestampNanosecondArray::from(vec![None::<i64>; 2]).with_timezone("UTC")), // _created_at
+            Arc::new(TimestampNanosecondArray::from(vec![None::<i64>; 2]).with_timezone("UTC")), // _updated_at
             Arc::new(names),                                          // name
             Arc::new(LargeBinaryArray::from(vec![None::<&[u8]>; 2])), // overflow_json
         ],

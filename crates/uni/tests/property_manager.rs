@@ -3,7 +3,7 @@
 
 use arrow_array::{
     BooleanArray, FixedSizeBinaryArray, LargeBinaryArray, RecordBatch, StringArray,
-    TimestampMicrosecondArray, UInt64Array,
+    TimestampNanosecondArray, UInt64Array,
 };
 use std::sync::Arc;
 use tempfile::tempdir;
@@ -61,8 +61,8 @@ async fn test_property_lookup_uses_vid_filter() -> anyhow::Result<()> {
                 }
                 Arc::new(lb.finish())
             },
-            Arc::new(TimestampMicrosecondArray::from(vec![None::<i64>; 2]).with_timezone("UTC")), // _created_at
-            Arc::new(TimestampMicrosecondArray::from(vec![None::<i64>; 2]).with_timezone("UTC")), // _updated_at
+            Arc::new(TimestampNanosecondArray::from(vec![None::<i64>; 2]).with_timezone("UTC")), // _created_at
+            Arc::new(TimestampNanosecondArray::from(vec![None::<i64>; 2]).with_timezone("UTC")), // _updated_at
             Arc::new(StringArray::from(vec!["Bob", "Alice"])),
             Arc::new(LargeBinaryArray::from(vec![None::<&[u8]>; 2])), // overflow_json
         ],
@@ -165,8 +165,8 @@ async fn test_list_property_storage() -> anyhow::Result<()> {
                 lb.append(true);
                 Arc::new(lb.finish())
             },
-            Arc::new(TimestampMicrosecondArray::from(vec![None::<i64>; 1]).with_timezone("UTC")), // _created_at
-            Arc::new(TimestampMicrosecondArray::from(vec![None::<i64>; 1]).with_timezone("UTC")), // _updated_at
+            Arc::new(TimestampNanosecondArray::from(vec![None::<i64>; 1]).with_timezone("UTC")), // _created_at
+            Arc::new(TimestampNanosecondArray::from(vec![None::<i64>; 1]).with_timezone("UTC")), // _updated_at
             tags_arr,
             Arc::new(LargeBinaryArray::from(vec![None::<&[u8]>; 1])), // overflow_json
         ],

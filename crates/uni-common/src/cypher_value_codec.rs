@@ -31,9 +31,9 @@
 //! | 9 | Edge | msgpack {eid, type, src, dst, props} |
 //! | 10 | Path | msgpack {nodes, rels} |
 //! | 11 | Date | msgpack i32 (days since epoch) |
-//! | 12 | Time | msgpack i64 (microseconds since midnight) |
-//! | 13 | DateTime | msgpack i64 (microseconds since epoch) |
-//! | 14 | Duration | msgpack i64 (microseconds) |
+//! | 12 | Time | msgpack i64 (nanoseconds since midnight) |
+//! | 13 | DateTime | msgpack i64 (nanoseconds since epoch) |
+//! | 14 | Duration | msgpack {months, days, nanos} |
 //! | 15 | Point | msgpack {srid, coords} |
 //! | 16 | Vector | msgpack array of f32 |
 //!
@@ -58,13 +58,14 @@ pub const TAG_BYTES: u8 = 7;
 pub const TAG_NODE: u8 = 8;
 pub const TAG_EDGE: u8 = 9;
 pub const TAG_PATH: u8 = 10;
-// Reserved for temporal types (not yet implemented in Value)
-// pub const TAG_DATE: u8 = 11;
-// pub const TAG_TIME: u8 = 12;
-// pub const TAG_DATETIME: u8 = 13;
-// pub const TAG_DURATION: u8 = 14;
+pub const TAG_DATE: u8 = 11;
+pub const TAG_TIME: u8 = 12;
+pub const TAG_DATETIME: u8 = 13;
+pub const TAG_DURATION: u8 = 14;
 // pub const TAG_POINT: u8 = 15;
 pub const TAG_VECTOR: u8 = 16;
+pub const TAG_LOCALTIME: u8 = 17;
+pub const TAG_LOCALDATETIME: u8 = 18;
 
 // ---------------------------------------------------------------------------
 // Public encode/decode API
@@ -219,6 +220,80 @@ pub fn decode(bytes: &[u8]) -> Result<Value, UniError> {
                 source: None,
             })?;
             Ok(Value::Vector(v))
+        }
+        TAG_DATE => {
+            let days: i32 = rmp_serde::from_slice(payload).map_err(|e| UniError::Storage {
+                message: format!("failed to decode date: {}", e),
+                source: None,
+            })?;
+            Ok(Value::Temporal(
+                crate::value::TemporalValue::Date {
+                    days_since_epoch: days,
+                },
+            ))
+        }
+        TAG_LOCALTIME => {
+            let nanos: i64 = rmp_serde::from_slice(payload).map_err(|e| UniError::Storage {
+                message: format!("failed to decode localtime: {}", e),
+                source: None,
+            })?;
+            Ok(Value::Temporal(
+                crate::value::TemporalValue::LocalTime {
+                    nanos_since_midnight: nanos,
+                },
+            ))
+        }
+        TAG_TIME => {
+            let tp: TimePayload =
+                rmp_serde::from_slice(payload).map_err(|e| UniError::Storage {
+                    message: format!("failed to decode time: {}", e),
+                    source: None,
+                })?;
+            Ok(Value::Temporal(
+                crate::value::TemporalValue::Time {
+                    nanos_since_midnight: tp.nanos,
+                    offset_seconds: tp.offset,
+                },
+            ))
+        }
+        TAG_LOCALDATETIME => {
+            let nanos: i64 = rmp_serde::from_slice(payload).map_err(|e| UniError::Storage {
+                message: format!("failed to decode localdatetime: {}", e),
+                source: None,
+            })?;
+            Ok(Value::Temporal(
+                crate::value::TemporalValue::LocalDateTime {
+                    nanos_since_epoch: nanos,
+                },
+            ))
+        }
+        TAG_DATETIME => {
+            let dp: DateTimePayload =
+                rmp_serde::from_slice(payload).map_err(|e| UniError::Storage {
+                    message: format!("failed to decode datetime: {}", e),
+                    source: None,
+                })?;
+            Ok(Value::Temporal(
+                crate::value::TemporalValue::DateTime {
+                    nanos_since_epoch: dp.nanos,
+                    offset_seconds: dp.offset,
+                    timezone_name: dp.tz_name,
+                },
+            ))
+        }
+        TAG_DURATION => {
+            let dp: DurationPayload =
+                rmp_serde::from_slice(payload).map_err(|e| UniError::Storage {
+                    message: format!("failed to decode duration: {}", e),
+                    source: None,
+                })?;
+            Ok(Value::Temporal(
+                crate::value::TemporalValue::Duration {
+                    months: dp.months,
+                    days: dp.days,
+                    nanos: dp.nanos,
+                },
+            ))
         }
         _ => Err(UniError::Storage {
             message: format!("unknown CypherValue tag: {}", tag),
@@ -428,6 +503,63 @@ fn encode_to_buf(value: &Value, buf: &mut Vec<u8>) {
             buf.push(TAG_VECTOR);
             rmp_serde::encode::write(buf, v).expect("vector encode failed");
         }
+        Value::Temporal(t) => match t {
+            crate::value::TemporalValue::Date { days_since_epoch } => {
+                buf.push(TAG_DATE);
+                rmp_serde::encode::write(buf, days_since_epoch).expect("date encode failed");
+            }
+            crate::value::TemporalValue::LocalTime {
+                nanos_since_midnight,
+            } => {
+                buf.push(TAG_LOCALTIME);
+                rmp_serde::encode::write(buf, nanos_since_midnight)
+                    .expect("localtime encode failed");
+            }
+            crate::value::TemporalValue::Time {
+                nanos_since_midnight,
+                offset_seconds,
+            } => {
+                buf.push(TAG_TIME);
+                let payload = TimePayload {
+                    nanos: *nanos_since_midnight,
+                    offset: *offset_seconds,
+                };
+                rmp_serde::encode::write(buf, &payload).expect("time encode failed");
+            }
+            crate::value::TemporalValue::LocalDateTime {
+                nanos_since_epoch,
+            } => {
+                buf.push(TAG_LOCALDATETIME);
+                rmp_serde::encode::write(buf, nanos_since_epoch)
+                    .expect("localdatetime encode failed");
+            }
+            crate::value::TemporalValue::DateTime {
+                nanos_since_epoch,
+                offset_seconds,
+                timezone_name,
+            } => {
+                buf.push(TAG_DATETIME);
+                let payload = DateTimePayload {
+                    nanos: *nanos_since_epoch,
+                    offset: *offset_seconds,
+                    tz_name: timezone_name.clone(),
+                };
+                rmp_serde::encode::write(buf, &payload).expect("datetime encode failed");
+            }
+            crate::value::TemporalValue::Duration {
+                months,
+                days,
+                nanos,
+            } => {
+                buf.push(TAG_DURATION);
+                let payload = DurationPayload {
+                    months: *months,
+                    days: *days,
+                    nanos: *nanos,
+                };
+                rmp_serde::encode::write(buf, &payload).expect("duration encode failed");
+            }
+        },
     }
 }
 
@@ -455,6 +587,26 @@ struct EdgePayload {
 struct PathPayload {
     nodes: Vec<Vec<u8>>,
     edges: Vec<Vec<u8>>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct TimePayload {
+    nanos: i64,
+    offset: i32,
+}
+
+#[derive(Serialize, Deserialize)]
+struct DateTimePayload {
+    nanos: i64,
+    offset: i32,
+    tz_name: Option<String>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct DurationPayload {
+    months: i64,
+    days: i64,
+    nanos: i64,
 }
 
 // ---------------------------------------------------------------------------

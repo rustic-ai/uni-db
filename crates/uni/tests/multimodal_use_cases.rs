@@ -2,7 +2,7 @@
 // Copyright 2024-2026 Dragonscale Team
 
 use arrow_array::{
-    LargeBinaryArray, RecordBatch, StringArray, TimestampMicrosecondArray, UInt64Array,
+    LargeBinaryArray, RecordBatch, StringArray, TimestampNanosecondArray, UInt64Array,
 };
 use std::sync::Arc;
 use tempfile::tempdir;
@@ -70,8 +70,8 @@ async fn test_regional_sales_analytics() -> anyhow::Result<()> {
                 lb.append(true);
                 Arc::new(lb.finish())
             },
-            Arc::new(TimestampMicrosecondArray::from(vec![None::<i64>; 1]).with_timezone("UTC")), // _created_at
-            Arc::new(TimestampMicrosecondArray::from(vec![None::<i64>; 1]).with_timezone("UTC")), // _updated_at
+            Arc::new(TimestampNanosecondArray::from(vec![None::<i64>; 1]).with_timezone("UTC")), // _created_at
+            Arc::new(TimestampNanosecondArray::from(vec![None::<i64>; 1]).with_timezone("UTC")), // _updated_at
             Arc::new(StringArray::from(vec!["North"])),
             Arc::new(LargeBinaryArray::from(vec![None::<&[u8]>; 1])), // overflow_json
         ],
@@ -118,10 +118,10 @@ async fn test_regional_sales_analytics() -> anyhow::Result<()> {
                 Arc::new(lb.finish())
             },
             Arc::new(
-                TimestampMicrosecondArray::from(vec![None::<i64>; num_orders]).with_timezone("UTC"),
+                TimestampNanosecondArray::from(vec![None::<i64>; num_orders]).with_timezone("UTC"),
             ), // _created_at
             Arc::new(
-                TimestampMicrosecondArray::from(vec![None::<i64>; num_orders]).with_timezone("UTC"),
+                TimestampNanosecondArray::from(vec![None::<i64>; num_orders]).with_timezone("UTC"),
             ), // _updated_at
             Arc::new(amount_builder.finish()),
             Arc::new(LargeBinaryArray::from(vec![None::<&[u8]>; num_orders])), // overflow_json
@@ -343,8 +343,8 @@ async fn test_document_knowledge_graph() -> anyhow::Result<()> {
                 }
                 Arc::new(lb.finish())
             },
-            Arc::new(TimestampMicrosecondArray::from(vec![None::<i64>; 3]).with_timezone("UTC")), // _created_at
-            Arc::new(TimestampMicrosecondArray::from(vec![None::<i64>; 3]).with_timezone("UTC")), // _updated_at
+            Arc::new(TimestampNanosecondArray::from(vec![None::<i64>; 3]).with_timezone("UTC")), // _created_at
+            Arc::new(TimestampNanosecondArray::from(vec![None::<i64>; 3]).with_timezone("UTC")), // _updated_at
             Arc::new(LargeBinaryArray::from(vec![None::<&[u8]>; 3])), // overflow_json
         ],
     )?;

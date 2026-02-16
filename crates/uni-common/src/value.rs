@@ -18,6 +18,514 @@ use std::collections::HashMap;
 use std::fmt;
 use std::hash::{Hash, Hasher};
 
+// ============================================================================
+// Temporal Value Types
+// ============================================================================
+
+/// Classification of temporal types for dispatch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TemporalType {
+    Date,
+    LocalTime,
+    Time,
+    LocalDateTime,
+    DateTime,
+    Duration,
+}
+
+/// Typed temporal value representation.
+///
+/// Stores temporal values in their native numeric form for O(1) comparisons
+/// and direct Arrow column construction, with Cypher formatting applied only
+/// at the output boundary via [`Display`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum TemporalValue {
+    /// Date: days since Unix epoch (1970-01-01). Arrow: Date32.
+    Date { days_since_epoch: i32 },
+    /// Local time (no timezone): nanoseconds since midnight. Arrow: Time64(ns).
+    LocalTime { nanos_since_midnight: i64 },
+    /// Time with timezone offset: nanoseconds since midnight + offset. Arrow: Time64(ns) + metadata.
+    Time {
+        nanos_since_midnight: i64,
+        offset_seconds: i32,
+    },
+    /// Local datetime (no timezone): nanoseconds since Unix epoch. Arrow: Timestamp(ns, None).
+    LocalDateTime { nanos_since_epoch: i64 },
+    /// Datetime with timezone: nanoseconds since Unix epoch (UTC) + offset + optional tz name.
+    /// Arrow: Timestamp(ns, Some("UTC")).
+    DateTime {
+        nanos_since_epoch: i64,
+        offset_seconds: i32,
+        timezone_name: Option<String>,
+    },
+    /// Duration with calendar semantics: months + days + nanoseconds.
+    /// Matches Cypher's duration model which preserves calendar components.
+    Duration {
+        months: i64,
+        days: i64,
+        nanos: i64,
+    },
+}
+
+impl Eq for TemporalValue {}
+
+impl Hash for TemporalValue {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        std::mem::discriminant(self).hash(state);
+        match self {
+            TemporalValue::Date { days_since_epoch } => days_since_epoch.hash(state),
+            TemporalValue::LocalTime {
+                nanos_since_midnight,
+            } => nanos_since_midnight.hash(state),
+            TemporalValue::Time {
+                nanos_since_midnight,
+                offset_seconds,
+            } => {
+                nanos_since_midnight.hash(state);
+                offset_seconds.hash(state);
+            }
+            TemporalValue::LocalDateTime {
+                nanos_since_epoch,
+            } => nanos_since_epoch.hash(state),
+            TemporalValue::DateTime {
+                nanos_since_epoch,
+                offset_seconds,
+                timezone_name,
+            } => {
+                nanos_since_epoch.hash(state);
+                offset_seconds.hash(state);
+                timezone_name.hash(state);
+            }
+            TemporalValue::Duration {
+                months,
+                days,
+                nanos,
+            } => {
+                months.hash(state);
+                days.hash(state);
+                nanos.hash(state);
+            }
+        }
+    }
+}
+
+impl TemporalValue {
+    /// Returns the temporal type classification.
+    pub fn temporal_type(&self) -> TemporalType {
+        match self {
+            TemporalValue::Date { .. } => TemporalType::Date,
+            TemporalValue::LocalTime { .. } => TemporalType::LocalTime,
+            TemporalValue::Time { .. } => TemporalType::Time,
+            TemporalValue::LocalDateTime { .. } => TemporalType::LocalDateTime,
+            TemporalValue::DateTime { .. } => TemporalType::DateTime,
+            TemporalValue::Duration { .. } => TemporalType::Duration,
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Component accessors
+    // -----------------------------------------------------------------------
+
+    /// Year component, or None for time-only/duration types.
+    pub fn year(&self) -> Option<i64> {
+        self.to_date().map(|d| d.year() as i64)
+    }
+
+    /// Month component (1-12), or None for time-only/duration types.
+    pub fn month(&self) -> Option<i64> {
+        self.to_date().map(|d| d.month() as i64)
+    }
+
+    /// Day-of-month component (1-31), or None for time-only/duration types.
+    pub fn day(&self) -> Option<i64> {
+        self.to_date().map(|d| d.day() as i64)
+    }
+
+    /// Hour component (0-23), or None for date-only types.
+    pub fn hour(&self) -> Option<i64> {
+        self.to_time().map(|t| t.hour() as i64)
+    }
+
+    /// Minute component (0-59), or None for date-only types.
+    pub fn minute(&self) -> Option<i64> {
+        self.to_time().map(|t| t.minute() as i64)
+    }
+
+    /// Second component (0-59), or None for date-only types.
+    pub fn second(&self) -> Option<i64> {
+        self.to_time().map(|t| t.second() as i64)
+    }
+
+    /// Millisecond sub-second component (0-999), or None for date-only types.
+    pub fn millisecond(&self) -> Option<i64> {
+        self.to_time()
+            .map(|t| (t.nanosecond() / 1_000_000) as i64)
+    }
+
+    /// Microsecond sub-second component (0-999_999), or None for date-only types.
+    pub fn microsecond(&self) -> Option<i64> {
+        self.to_time().map(|t| (t.nanosecond() / 1_000) as i64)
+    }
+
+    /// Nanosecond sub-second component (0-999_999_999), or None for date-only types.
+    pub fn nanosecond(&self) -> Option<i64> {
+        self.to_time().map(|t| t.nanosecond() as i64)
+    }
+
+    /// Quarter (1-4), or None for time-only/duration types.
+    pub fn quarter(&self) -> Option<i64> {
+        self.to_date()
+            .map(|d| ((d.month() - 1) / 3 + 1) as i64)
+    }
+
+    /// ISO week number (1-53), or None for time-only/duration types.
+    pub fn week(&self) -> Option<i64> {
+        self.to_date().map(|d| d.iso_week().week() as i64)
+    }
+
+    /// ISO week year, or None for time-only/duration types.
+    pub fn week_year(&self) -> Option<i64> {
+        self.to_date().map(|d| d.iso_week().year() as i64)
+    }
+
+    /// Ordinal day of year (1-366), or None for time-only/duration types.
+    pub fn ordinal_day(&self) -> Option<i64> {
+        self.to_date().map(|d| d.ordinal() as i64)
+    }
+
+    /// ISO day of week (Monday=1, Sunday=7), or None for time-only/duration types.
+    pub fn day_of_week(&self) -> Option<i64> {
+        self.to_date()
+            .map(|d| (d.weekday().num_days_from_monday() + 1) as i64)
+    }
+
+    /// Day of quarter (1-92), or None for time-only/duration types.
+    pub fn day_of_quarter(&self) -> Option<i64> {
+        self.to_date().map(|d| {
+            let quarter_start_month = ((d.month() - 1) / 3) * 3 + 1;
+            let quarter_start =
+                chrono::NaiveDate::from_ymd_opt(d.year(), quarter_start_month, 1).unwrap();
+            d.signed_duration_since(quarter_start).num_days() + 1
+        })
+    }
+
+    /// Timezone name if available (e.g., "Europe/Stockholm").
+    pub fn timezone(&self) -> Option<&str> {
+        match self {
+            TemporalValue::DateTime {
+                timezone_name: Some(name),
+                ..
+            } => Some(name.as_str()),
+            _ => None,
+        }
+    }
+
+    /// Offset string (e.g., "+01:00", "Z").
+    pub fn offset(&self) -> Option<String> {
+        match self {
+            TemporalValue::Time { offset_seconds, .. }
+            | TemporalValue::DateTime {
+                offset_seconds, ..
+            } => Some(format_offset(*offset_seconds)),
+            _ => None,
+        }
+    }
+
+    /// Offset in minutes.
+    pub fn offset_minutes(&self) -> Option<i64> {
+        match self {
+            TemporalValue::Time { offset_seconds, .. }
+            | TemporalValue::DateTime {
+                offset_seconds, ..
+            } => Some(*offset_seconds as i64 / 60),
+            _ => None,
+        }
+    }
+
+    /// Offset in seconds.
+    pub fn offset_seconds_value(&self) -> Option<i64> {
+        match self {
+            TemporalValue::Time { offset_seconds, .. }
+            | TemporalValue::DateTime {
+                offset_seconds, ..
+            } => Some(*offset_seconds as i64),
+            _ => None,
+        }
+    }
+
+    /// Epoch seconds (for datetime/localdatetime types).
+    pub fn epoch_seconds(&self) -> Option<i64> {
+        match self {
+            TemporalValue::DateTime {
+                nanos_since_epoch, ..
+            }
+            | TemporalValue::LocalDateTime {
+                nanos_since_epoch, ..
+            } => Some(nanos_since_epoch / 1_000_000_000),
+            _ => None,
+        }
+    }
+
+    /// Epoch milliseconds (for datetime/localdatetime types).
+    pub fn epoch_millis(&self) -> Option<i64> {
+        match self {
+            TemporalValue::DateTime {
+                nanos_since_epoch, ..
+            }
+            | TemporalValue::LocalDateTime {
+                nanos_since_epoch, ..
+            } => Some(nanos_since_epoch / 1_000_000),
+            _ => None,
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Internal chrono conversion helpers
+    // -----------------------------------------------------------------------
+
+    /// Extract a NaiveDate from types that have a date component.
+    pub fn to_date(&self) -> Option<chrono::NaiveDate> {
+        let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1)?;
+        match self {
+            TemporalValue::Date { days_since_epoch } => {
+                epoch.checked_add_signed(chrono::Duration::days(*days_since_epoch as i64))
+            }
+            TemporalValue::LocalDateTime {
+                nanos_since_epoch,
+            } => {
+                let dt = chrono::DateTime::from_timestamp_nanos(*nanos_since_epoch);
+                Some(dt.date_naive())
+            }
+            TemporalValue::DateTime {
+                nanos_since_epoch,
+                offset_seconds,
+                ..
+            } => {
+                // Convert UTC nanos to local time by adding offset
+                let local_nanos = nanos_since_epoch + (*offset_seconds as i64) * 1_000_000_000;
+                let dt = chrono::DateTime::from_timestamp_nanos(local_nanos);
+                Some(dt.date_naive())
+            }
+            _ => None,
+        }
+    }
+
+    /// Extract a NaiveTime from types that have a time component.
+    pub fn to_time(&self) -> Option<chrono::NaiveTime> {
+        match self {
+            TemporalValue::LocalTime {
+                nanos_since_midnight,
+            }
+            | TemporalValue::Time {
+                nanos_since_midnight,
+                ..
+            } => nanos_to_time(*nanos_since_midnight),
+            TemporalValue::LocalDateTime {
+                nanos_since_epoch,
+            } => {
+                let dt = chrono::DateTime::from_timestamp_nanos(*nanos_since_epoch);
+                Some(dt.naive_utc().time())
+            }
+            TemporalValue::DateTime {
+                nanos_since_epoch,
+                offset_seconds,
+                ..
+            } => {
+                let local_nanos = nanos_since_epoch + (*offset_seconds as i64) * 1_000_000_000;
+                let dt = chrono::DateTime::from_timestamp_nanos(local_nanos);
+                Some(dt.naive_utc().time())
+            }
+            _ => None,
+        }
+    }
+}
+
+/// Convert nanoseconds since midnight to NaiveTime.
+fn nanos_to_time(nanos: i64) -> Option<chrono::NaiveTime> {
+    let total_secs = nanos / 1_000_000_000;
+    let h = (total_secs / 3600) as u32;
+    let m = ((total_secs % 3600) / 60) as u32;
+    let s = (total_secs % 60) as u32;
+    let ns = (nanos % 1_000_000_000) as u32;
+    chrono::NaiveTime::from_hms_nano_opt(h, m, s, ns)
+}
+
+/// Format an offset in seconds as "+HH:MM" or "Z".
+fn format_offset(offset_seconds: i32) -> String {
+    if offset_seconds == 0 {
+        return "Z".to_string();
+    }
+    format_offset_numeric(offset_seconds)
+}
+
+/// Format offset always as `+HH:MM` (never as `Z`). Used for Time type per Cypher spec.
+fn format_offset_numeric(offset_seconds: i32) -> String {
+    let sign = if offset_seconds >= 0 { '+' } else { '-' };
+    let abs = offset_seconds.unsigned_abs();
+    let h = abs / 3600;
+    let m = (abs % 3600) / 60;
+    format!("{}{:02}:{:02}", sign, h, m)
+}
+
+/// Format sub-second fractional part with adaptive precision (trim trailing zeros).
+fn format_fractional(nanos: u32) -> String {
+    if nanos == 0 {
+        return String::new();
+    }
+    if nanos.is_multiple_of(1_000_000) {
+        // Millisecond precision
+        format!(".{:03}", nanos / 1_000_000)
+    } else if nanos.is_multiple_of(1_000) {
+        // Microsecond precision
+        format!(".{:06}", nanos / 1_000)
+    } else {
+        // Nanosecond precision
+        format!(".{:09}", nanos)
+    }
+}
+
+impl fmt::Display for TemporalValue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            TemporalValue::Date { days_since_epoch } => {
+                let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
+                let date = epoch + chrono::Duration::days(*days_since_epoch as i64);
+                write!(f, "{}", date.format("%Y-%m-%d"))
+            }
+            TemporalValue::LocalTime {
+                nanos_since_midnight,
+            } => {
+                let time = nanos_to_time(*nanos_since_midnight)
+                    .unwrap_or_else(|| chrono::NaiveTime::from_hms_opt(0, 0, 0).unwrap());
+                let frac = format_fractional(time.nanosecond());
+                write!(
+                    f,
+                    "{:02}:{:02}:{:02}{}",
+                    time.hour(),
+                    time.minute(),
+                    time.second(),
+                    frac
+                )
+            }
+            TemporalValue::Time {
+                nanos_since_midnight,
+                offset_seconds,
+            } => {
+                let time = nanos_to_time(*nanos_since_midnight)
+                    .unwrap_or_else(|| chrono::NaiveTime::from_hms_opt(0, 0, 0).unwrap());
+                let frac = format_fractional(time.nanosecond());
+                // Time type always uses numeric offset (+00:00), never Z
+                let tz = format_offset_numeric(*offset_seconds);
+                write!(
+                    f,
+                    "{:02}:{:02}:{:02}{}{}",
+                    time.hour(),
+                    time.minute(),
+                    time.second(),
+                    frac,
+                    tz
+                )
+            }
+            TemporalValue::LocalDateTime {
+                nanos_since_epoch,
+            } => {
+                let dt = chrono::DateTime::from_timestamp_nanos(*nanos_since_epoch);
+                let ndt = dt.naive_utc();
+                let frac = format_fractional(ndt.time().nanosecond());
+                write!(
+                    f,
+                    "{}T{:02}:{:02}:{:02}{}",
+                    ndt.date().format("%Y-%m-%d"),
+                    ndt.time().hour(),
+                    ndt.time().minute(),
+                    ndt.time().second(),
+                    frac
+                )
+            }
+            TemporalValue::DateTime {
+                nanos_since_epoch,
+                offset_seconds,
+                timezone_name,
+            } => {
+                // Display in local time (UTC nanos + offset)
+                let local_nanos =
+                    nanos_since_epoch + (*offset_seconds as i64) * 1_000_000_000;
+                let dt = chrono::DateTime::from_timestamp_nanos(local_nanos);
+                let ndt = dt.naive_utc();
+                let frac = format_fractional(ndt.time().nanosecond());
+                let tz = format_offset(*offset_seconds);
+                write!(
+                    f,
+                    "{}T{:02}:{:02}:{:02}{}{}",
+                    ndt.date().format("%Y-%m-%d"),
+                    ndt.time().hour(),
+                    ndt.time().minute(),
+                    ndt.time().second(),
+                    frac,
+                    tz
+                )?;
+                if let Some(name) = timezone_name {
+                    write!(f, "[{}]", name)?;
+                }
+                Ok(())
+            }
+            TemporalValue::Duration {
+                months,
+                days,
+                nanos,
+            } => {
+                write!(f, "P")?;
+                let years = months / 12;
+                let rem_months = months % 12;
+                if years != 0 {
+                    write!(f, "{}Y", years)?;
+                }
+                if rem_months != 0 {
+                    write!(f, "{}M", rem_months)?;
+                }
+                if *days != 0 {
+                    write!(f, "{}D", days)?;
+                }
+                // Time part
+                let abs_nanos = nanos.unsigned_abs() as i128;
+                let nanos_sign = if *nanos < 0 { -1i64 } else { 1 };
+                let total_secs = (abs_nanos / 1_000_000_000) as i64;
+                let frac_nanos = (abs_nanos % 1_000_000_000) as u32;
+                let hours = total_secs / 3600;
+                let mins = (total_secs % 3600) / 60;
+                let secs = total_secs % 60;
+
+                if hours != 0 || mins != 0 || secs != 0 || frac_nanos != 0 {
+                    write!(f, "T")?;
+                    if hours != 0 {
+                        write!(f, "{}H", hours * nanos_sign)?;
+                    }
+                    if mins != 0 {
+                        write!(f, "{}M", mins * nanos_sign)?;
+                    }
+                    if secs != 0 || frac_nanos != 0 {
+                        let frac = format_fractional(frac_nanos);
+                        if nanos_sign < 0 && (secs != 0 || frac_nanos != 0) {
+                            write!(f, "-{}{}", secs, frac)?;
+                        } else {
+                            write!(f, "{}{}", secs, frac)?;
+                        }
+                        write!(f, "S")?;
+                    }
+                } else if years == 0 && rem_months == 0 && *days == 0 {
+                    // Zero duration
+                    write!(f, "T0S")?;
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+// Use chrono traits in component accessors - needed by TemporalValue accessors
+use chrono::Datelike as _;
+use chrono::Timelike as _;
+
 /// Dynamic value type for properties, parameters, and results.
 ///
 /// Preserves the distinction between integers and floats, and includes
@@ -57,6 +565,10 @@ pub enum Value {
     // Vector
     /// Dense float vector for similarity search.
     Vector(Vec<f32>),
+
+    // Temporal
+    /// Typed temporal value (date, time, datetime, duration).
+    Temporal(TemporalValue),
 }
 
 // ---------------------------------------------------------------------------
@@ -172,6 +684,19 @@ impl Value {
             _ => None,
         }
     }
+
+    /// Returns `true` if this is a `Temporal` value.
+    pub fn is_temporal(&self) -> bool {
+        matches!(self, Value::Temporal(_))
+    }
+
+    /// Returns the temporal value reference if this is `Temporal`, otherwise `None`.
+    pub fn as_temporal(&self) -> Option<&TemporalValue> {
+        match self {
+            Value::Temporal(t) => Some(t),
+            _ => None,
+        }
+    }
 }
 
 impl fmt::Display for Value {
@@ -218,6 +743,7 @@ impl fmt::Display for Value {
                 p.edges.len()
             ),
             Value::Vector(v) => write!(f, "<vector: {} dims>", v.len()),
+            Value::Temporal(t) => write!(f, "{t}"),
         }
     }
 }
@@ -259,6 +785,7 @@ impl Hash for Value {
                     f.to_bits().hash(state);
                 }
             }
+            Value::Temporal(t) => t.hash(state),
         }
     }
 }
@@ -487,6 +1014,7 @@ impl TryFrom<&Value> for String {
             Value::Int(i) => Ok(i.to_string()),
             Value::Float(f) => Ok(f.to_string()),
             Value::Bool(b) => Ok(b.to_string()),
+            Value::Temporal(t) => Ok(t.to_string()),
             _ => Err(type_error("String", value)),
         }
     }
@@ -964,6 +1492,7 @@ impl From<Value> for serde_json::Value {
                     })
                     .collect(),
             ),
+            Value::Temporal(t) => serde_json::Value::String(t.to_string()),
         }
     }
 }

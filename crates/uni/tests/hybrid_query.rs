@@ -5,7 +5,7 @@ use arrow_array::builder::{
     FixedSizeBinaryBuilder, FixedSizeListBuilder, Float32Builder, ListBuilder, UInt64Builder,
 };
 use arrow_array::{
-    LargeBinaryArray, RecordBatch, StringArray, TimestampMicrosecondArray, UInt64Array,
+    LargeBinaryArray, RecordBatch, StringArray, TimestampNanosecondArray, UInt64Array,
 };
 use std::sync::Arc;
 use tempfile::tempdir;
@@ -102,10 +102,10 @@ async fn test_hybrid_vector_graph_query() -> anyhow::Result<()> {
                     Arc::new(lb.finish())
                 },
                 Arc::new(
-                    TimestampMicrosecondArray::from(vec![None::<i64>; 2]).with_timezone("UTC"),
+                    TimestampNanosecondArray::from(vec![None::<i64>; 2]).with_timezone("UTC"),
                 ), // _created_at
                 Arc::new(
-                    TimestampMicrosecondArray::from(vec![None::<i64>; 2]).with_timezone("UTC"),
+                    TimestampNanosecondArray::from(vec![None::<i64>; 2]).with_timezone("UTC"),
                 ), // _updated_at
                 Arc::new(vectors),
                 Arc::new(titles),
@@ -152,10 +152,10 @@ async fn test_hybrid_vector_graph_query() -> anyhow::Result<()> {
                     Arc::new(lb.finish())
                 },
                 Arc::new(
-                    TimestampMicrosecondArray::from(vec![None::<i64>; 1]).with_timezone("UTC"),
+                    TimestampNanosecondArray::from(vec![None::<i64>; 1]).with_timezone("UTC"),
                 ), // _created_at
                 Arc::new(
-                    TimestampMicrosecondArray::from(vec![None::<i64>; 1]).with_timezone("UTC"),
+                    TimestampNanosecondArray::from(vec![None::<i64>; 1]).with_timezone("UTC"),
                 ), // _updated_at
                 Arc::new(names),
                 Arc::new(LargeBinaryArray::from(vec![None::<&[u8]>; 1])), // overflow_json

@@ -3,7 +3,7 @@
 
 use arrow_array::{
     BooleanArray, Int32Array, LargeBinaryArray, RecordBatch, StringArray,
-    TimestampMicrosecondArray, UInt64Array,
+    TimestampNanosecondArray, UInt64Array,
 };
 use std::sync::Arc;
 use tempfile::tempdir;
@@ -82,8 +82,8 @@ async fn test_cypher_filtering() -> anyhow::Result<()> {
                 }
                 Arc::new(lb.finish())
             },
-            Arc::new(TimestampMicrosecondArray::from(vec![None::<i64>; 3]).with_timezone("UTC")), // _created_at
-            Arc::new(TimestampMicrosecondArray::from(vec![None::<i64>; 3]).with_timezone("UTC")), // _updated_at
+            Arc::new(TimestampNanosecondArray::from(vec![None::<i64>; 3]).with_timezone("UTC")), // _created_at
+            Arc::new(TimestampNanosecondArray::from(vec![None::<i64>; 3]).with_timezone("UTC")), // _updated_at
             Arc::new(BooleanArray::from(vec![true, false, true])), // active
             Arc::new(Int32Array::from(vec![25, 35, 40])),          // age
             Arc::new(StringArray::from(vec!["Alice", "Bob", "Charlie"])), // name

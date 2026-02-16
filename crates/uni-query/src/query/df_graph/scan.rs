@@ -27,12 +27,12 @@ use crate::query::datetime::parse_datetime_utc;
 use crate::query::df_graph::GraphExecutionContext;
 use crate::query::df_graph::common::{compute_plan_properties, labels_data_type};
 use arrow_array::builder::{
-    BinaryBuilder, BooleanBuilder, Date32Builder, DurationMicrosecondBuilder, FixedSizeListBuilder,
+    BinaryBuilder, BooleanBuilder, Date32Builder, FixedSizeListBuilder,
     Float32Builder, Float64Builder, Int32Builder, Int64Builder, ListBuilder, StringBuilder,
-    Time64MicrosecondBuilder, TimestampMicrosecondBuilder, UInt64Builder,
+    TimestampNanosecondBuilder, Time64NanosecondBuilder, UInt64Builder,
 };
 use arrow_array::{Array, ArrayRef, RecordBatch, UInt64Array};
-use arrow_schema::{DataType, Field, Fields, Schema, SchemaRef, TimeUnit};
+use arrow_schema::{DataType, Field, Fields, IntervalUnit, Schema, SchemaRef, TimeUnit};
 use chrono::{NaiveDate, NaiveTime, Timelike};
 use datafusion::common::Result as DFResult;
 use datafusion::execution::{RecordBatchStream, SendableRecordBatchStream, TaskContext};
@@ -2906,13 +2906,23 @@ pub(crate) fn build_property_column_static(
             }
             Ok(Arc::new(list_builder.finish()))
         }
-        DataType::Timestamp(TimeUnit::Microsecond, _) => {
-            // Timestamp properties stored as ISO 8601 strings or i64 microseconds
-            let mut builder = TimestampMicrosecondBuilder::new().with_timezone("UTC");
+        DataType::Timestamp(TimeUnit::Nanosecond, _) => {
+            // Timestamp properties stored as Value::Temporal, ISO 8601 strings, or i64 nanoseconds
+            let mut builder = TimestampNanosecondBuilder::new().with_timezone("UTC");
             for vid in vids {
                 match get_property_value(vid, props_map, prop_name) {
+                    Some(Value::Temporal(tv)) => match tv {
+                        uni_common::TemporalValue::DateTime { nanos_since_epoch, .. }
+                        | uni_common::TemporalValue::LocalDateTime { nanos_since_epoch, .. } => {
+                            builder.append_value(nanos_since_epoch);
+                        }
+                        uni_common::TemporalValue::Date { days_since_epoch } => {
+                            builder.append_value(days_since_epoch as i64 * 86_400_000_000_000);
+                        }
+                        _ => builder.append_null(),
+                    },
                     Some(Value::String(s)) => match parse_datetime_utc(&s) {
-                        Ok(dt) => builder.append_value(dt.timestamp_micros()),
+                        Ok(dt) => builder.append_value(dt.timestamp_nanos_opt().unwrap_or(0)),
                         Err(_) => builder.append_null(),
                     },
                     Some(Value::Int(n)) => {
@@ -2928,6 +2938,9 @@ pub(crate) fn build_property_column_static(
             let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
             for vid in vids {
                 match get_property_value(vid, props_map, prop_name) {
+                    Some(Value::Temporal(uni_common::TemporalValue::Date { days_since_epoch })) => {
+                        builder.append_value(days_since_epoch);
+                    }
                     Some(Value::String(s)) => match NaiveDate::parse_from_str(&s, "%Y-%m-%d") {
                         Ok(d) => builder.append_value((d - epoch).num_days() as i32),
                         Err(_) => builder.append_null(),
@@ -2940,18 +2953,25 @@ pub(crate) fn build_property_column_static(
             }
             Ok(Arc::new(builder.finish()))
         }
-        DataType::Time64(TimeUnit::Microsecond) => {
-            let mut builder = Time64MicrosecondBuilder::new();
+        DataType::Time64(TimeUnit::Nanosecond) => {
+            let mut builder = Time64NanosecondBuilder::new();
             for vid in vids {
                 match get_property_value(vid, props_map, prop_name) {
+                    Some(Value::Temporal(
+                        uni_common::TemporalValue::LocalTime { nanos_since_midnight }
+                        | uni_common::TemporalValue::Time { nanos_since_midnight, .. },
+                    )) => {
+                        builder.append_value(nanos_since_midnight);
+                    }
+                    Some(Value::Temporal(_)) => builder.append_null(),
                     Some(Value::String(s)) => {
                         match NaiveTime::parse_from_str(&s, "%H:%M:%S%.f")
                             .or_else(|_| NaiveTime::parse_from_str(&s, "%H:%M:%S"))
                         {
                             Ok(t) => {
-                                let micros = t.num_seconds_from_midnight() as i64 * 1_000_000
-                                    + t.nanosecond() as i64 / 1_000;
-                                builder.append_value(micros);
+                                let nanos = t.num_seconds_from_midnight() as i64 * 1_000_000_000
+                                    + t.nanosecond() as i64;
+                                builder.append_value(nanos);
                             }
                             Err(_) => builder.append_null(),
                         }
@@ -2964,24 +2984,25 @@ pub(crate) fn build_property_column_static(
             }
             Ok(Arc::new(builder.finish()))
         }
-        DataType::Duration(TimeUnit::Microsecond) => {
-            let mut builder = DurationMicrosecondBuilder::new();
+        DataType::Interval(IntervalUnit::MonthDayNano) => {
+            let mut values: Vec<Option<arrow::datatypes::IntervalMonthDayNano>> = Vec::with_capacity(vids.len());
             for vid in vids {
                 match get_property_value(vid, props_map, prop_name) {
-                    Some(Value::Int(n)) => {
-                        builder.append_value(n);
+                    Some(Value::Temporal(uni_common::TemporalValue::Duration { months, days, nanos })) => {
+                        values.push(Some(arrow::datatypes::IntervalMonthDayNano {
+                            months: months as i32,
+                            days: days as i32,
+                            nanoseconds: nanos,
+                        }));
                     }
-                    Some(Value::String(s)) => {
-                        // Try to parse ISO 8601 duration or simple duration format
-                        match crate::query::datetime::parse_duration_to_micros(&s) {
-                            Ok(us) => builder.append_value(us),
-                            Err(_) => builder.append_null(),
-                        }
+                    Some(Value::Int(_n)) => {
+                        values.push(None);
                     }
-                    _ => builder.append_null(),
+                    _ => values.push(None),
                 }
             }
-            Ok(Arc::new(builder.finish()))
+            let arr: arrow_array::IntervalMonthDayNanoArray = values.into_iter().collect();
+            Ok(Arc::new(arr))
         }
         DataType::List(inner_field) => {
             build_list_property_column(vids, props_map, prop_name, inner_field)

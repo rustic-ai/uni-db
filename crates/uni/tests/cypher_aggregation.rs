@@ -3,7 +3,7 @@
 
 use arrow_array::{
     BooleanArray, Float64Array, Int32Array, LargeBinaryArray, RecordBatch, StringArray,
-    TimestampMicrosecondArray, UInt64Array,
+    TimestampNanosecondArray, UInt64Array,
 };
 use std::sync::Arc;
 use tempfile::tempdir;
@@ -74,8 +74,8 @@ async fn test_cypher_aggregation() -> anyhow::Result<()> {
                 }
                 Arc::new(lb.finish())
             },
-            Arc::new(TimestampMicrosecondArray::from(vec![None::<i64>; 4]).with_timezone("UTC")), // _created_at
-            Arc::new(TimestampMicrosecondArray::from(vec![None::<i64>; 4]).with_timezone("UTC")), // _updated_at
+            Arc::new(TimestampNanosecondArray::from(vec![None::<i64>; 4]).with_timezone("UTC")), // _created_at
+            Arc::new(TimestampNanosecondArray::from(vec![None::<i64>; 4]).with_timezone("UTC")), // _updated_at
             Arc::new(Int32Array::from(vec![20, 30, 20, 40])), // age
             Arc::new(LargeBinaryArray::from(vec![None::<&[u8]>; 4])), // overflow_json
         ],
@@ -115,8 +115,8 @@ async fn test_cypher_aggregation() -> anyhow::Result<()> {
                 }
                 Arc::new(lb.finish())
             },
-            Arc::new(TimestampMicrosecondArray::from(vec![None::<i64>; 3]).with_timezone("UTC")), // _created_at
-            Arc::new(TimestampMicrosecondArray::from(vec![None::<i64>; 3]).with_timezone("UTC")), // _updated_at
+            Arc::new(TimestampNanosecondArray::from(vec![None::<i64>; 3]).with_timezone("UTC")), // _created_at
+            Arc::new(TimestampNanosecondArray::from(vec![None::<i64>; 3]).with_timezone("UTC")), // _updated_at
             Arc::new(Float64Array::from(vec![10.0, 20.0, 30.0])), // amount
             Arc::new(LargeBinaryArray::from(vec![None::<&[u8]>; 3])), // overflow_json
         ],

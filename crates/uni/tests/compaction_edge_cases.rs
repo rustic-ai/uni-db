@@ -3,7 +3,7 @@
 
 use arrow_array::{
     BooleanArray, FixedSizeBinaryArray, LargeBinaryArray, RecordBatch, StringArray,
-    TimestampMicrosecondArray, UInt64Array,
+    TimestampNanosecondArray, UInt64Array,
 };
 use std::sync::Arc;
 use tempfile::tempdir;
@@ -53,8 +53,8 @@ async fn test_compact_vertices_with_null_props() -> anyhow::Result<()> {
                 lb.append(true);
                 Arc::new(lb.finish())
             },
-            Arc::new(TimestampMicrosecondArray::from(vec![None::<i64>]).with_timezone("UTC")), // _created_at
-            Arc::new(TimestampMicrosecondArray::from(vec![None::<i64>]).with_timezone("UTC")), // _updated_at
+            Arc::new(TimestampNanosecondArray::from(vec![None::<i64>]).with_timezone("UTC")), // _created_at
+            Arc::new(TimestampNanosecondArray::from(vec![None::<i64>]).with_timezone("UTC")), // _updated_at
             Arc::new(StringArray::from(vec![Some("A")])),
             Arc::new(LargeBinaryArray::from(vec![None::<&[u8]>])), // overflow_json
         ],
@@ -78,8 +78,8 @@ async fn test_compact_vertices_with_null_props() -> anyhow::Result<()> {
                 lb.append(true);
                 Arc::new(lb.finish())
             },
-            Arc::new(TimestampMicrosecondArray::from(vec![None::<i64>]).with_timezone("UTC")), // _created_at
-            Arc::new(TimestampMicrosecondArray::from(vec![None::<i64>]).with_timezone("UTC")), // _updated_at
+            Arc::new(TimestampNanosecondArray::from(vec![None::<i64>]).with_timezone("UTC")), // _created_at
+            Arc::new(TimestampNanosecondArray::from(vec![None::<i64>]).with_timezone("UTC")), // _updated_at
             Arc::new(StringArray::from(vec![None::<&str>])),
             Arc::new(LargeBinaryArray::from(vec![None::<&[u8]>])), // overflow_json
         ],

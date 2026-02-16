@@ -3,7 +3,7 @@
 
 use arrow_array::builder::{ListBuilder, UInt64Builder};
 use arrow_array::{
-    BooleanArray, LargeBinaryArray, RecordBatch, StringArray, TimestampMicrosecondArray,
+    BooleanArray, LargeBinaryArray, RecordBatch, StringArray, TimestampNanosecondArray,
     UInt64Array,
 };
 use std::sync::Arc;
@@ -69,8 +69,8 @@ async fn test_cypher_var_length() -> anyhow::Result<()> {
                 }
                 Arc::new(lb.finish())
             },
-            Arc::new(TimestampMicrosecondArray::from(vec![None::<i64>; 4]).with_timezone("UTC")), // _created_at
-            Arc::new(TimestampMicrosecondArray::from(vec![None::<i64>; 4]).with_timezone("UTC")), // _updated_at
+            Arc::new(TimestampNanosecondArray::from(vec![None::<i64>; 4]).with_timezone("UTC")), // _created_at
+            Arc::new(TimestampNanosecondArray::from(vec![None::<i64>; 4]).with_timezone("UTC")), // _updated_at
             Arc::new(arrow_array::Int32Array::from(vec![0, 1, 2, 3])),
             Arc::new(LargeBinaryArray::from(vec![None::<&[u8]>; 4])), // overflow_json
         ],

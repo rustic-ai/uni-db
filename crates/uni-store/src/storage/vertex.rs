@@ -237,12 +237,12 @@ impl VertexDataset {
             ),
             Field::new(
                 "_created_at",
-                arrow_schema::DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
+                arrow_schema::DataType::Timestamp(TimeUnit::Nanosecond, Some("UTC".into())),
                 true,
             ),
             Field::new(
                 "_updated_at",
-                arrow_schema::DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
+                arrow_schema::DataType::Timestamp(TimeUnit::Nanosecond, Some("UTC".into())),
                 true,
             ),
         ];

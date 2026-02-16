@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2024-2026 Dragonscale Team
 
-use arrow_array::{RecordBatch, StringArray, TimestampMicrosecondArray};
+use arrow_array::{RecordBatch, StringArray, TimestampNanosecondArray};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tempfile::tempdir;
@@ -124,8 +124,8 @@ async fn test_execute_match_with_null_properties() {
                 }
                 Arc::new(lb.finish())
             },
-            Arc::new(TimestampMicrosecondArray::from(vec![None::<i64>; 3]).with_timezone("UTC")), // _created_at
-            Arc::new(TimestampMicrosecondArray::from(vec![None::<i64>; 3]).with_timezone("UTC")), // _updated_at
+            Arc::new(TimestampNanosecondArray::from(vec![None::<i64>; 3]).with_timezone("UTC")), // _created_at
+            Arc::new(TimestampNanosecondArray::from(vec![None::<i64>; 3]).with_timezone("UTC")), // _updated_at
             Arc::new(arrow_array::Int32Array::from(vec![
                 Some(30),
                 None,

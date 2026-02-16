@@ -60,12 +60,12 @@ impl MainEdgeDataset {
             Field::new("_version", DataType::UInt64, false),
             Field::new(
                 "_created_at",
-                DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
+                DataType::Timestamp(TimeUnit::Nanosecond, Some("UTC".into())),
                 true,
             ),
             Field::new(
                 "_updated_at",
-                DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
+                DataType::Timestamp(TimeUnit::Nanosecond, Some("UTC".into())),
                 true,
             ),
         ]))
