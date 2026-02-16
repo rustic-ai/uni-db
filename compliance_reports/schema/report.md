@@ -1,21 +1,19 @@
 # TCK Compliance Report
 
-**Generated:** 2026-02-15 17:01:53
-**Results:** `results_20260215_170153.json`
-**Compared to:** `results_20260215_120613.json`
+**Generated:** 2026-02-16 00:14:39
+**Results:** `results_20260216_001439.json`
+**Compared to:** `results_20260215_170153.json`
 
 ## Summary
 
 | Metric | Current | Previous | Delta |
 |--------|---------|----------|-------|
 | Scenarios | 3897 | 3897 |  |
-| Passed | 2870 | 3242 | -372 |
-| Failed | 1026 | 654 | +372 |
-| Pass Rate | 73.6% | 83.2% | 📉 -9.5pp |
+| Passed | 2988 | 2870 | +118 |
+| Failed | 908 | 1026 | -118 |
+| Pass Rate | 76.7% | 73.6% | 📈 +3.0pp |
 
-**🟢 Fixed:** 97 scenarios now passing
-
-**🔴 Regressions:** 469 scenarios now failing
+**🟢 Fixed:** 118 scenarios now passing
 
 ## Feature Breakdown
 
@@ -173,16 +171,16 @@
 | ❌ String4 | 1 | 0 | 1 | 0% |  |
 | ✅ String8 | 9 | 9 | 0 | 100% |  |
 | ✅ String9 | 9 | 9 | 0 | 100% |  |
-| ❌ Temporal1 | 207 | 54 | 153 | 26% | -70pp |
-| ⚠️ Temporal10 | 131 | 89 | 42 | 68% | +41pp |
-| ❌ Temporal2 | 53 | 13 | 40 | 25% | -6pp |
-| ❌ Temporal3 | 183 | 44 | 139 | 24% | -15pp |
-| ⚠️ Temporal4 | 39 | 27 | 12 | 69% | -23pp |
+| ❌ Temporal1 | 207 | 85 | 122 | 41% | +15pp |
+| ⚠️ Temporal10 | 131 | 99 | 32 | 76% | +8pp |
+| ❌ Temporal2 | 53 | 16 | 37 | 30% | +6pp |
+| ❌ Temporal3 | 183 | 47 | 136 | 26% | +2pp |
+| ✅ Temporal4 | 39 | 39 | 0 | 100% | +31pp |
 | ❌ Temporal5 | 7 | 0 | 7 | 0% |  |
-| ❌ Temporal6 | 17 | 3 | 14 | 18% | -82pp |
-| ✅ Temporal7 | 18 | 18 | 0 | 100% | +6pp |
-| ⚠️ Temporal8 | 27 | 21 | 6 | 78% | +78pp |
-| ❌ Temporal9 | 322 | 80 | 242 | 25% | -75pp |
+| ❌ Temporal6 | 17 | 3 | 14 | 18% |  |
+| ✅ Temporal7 | 18 | 18 | 0 | 100% |  |
+| ⚠️ Temporal8 | 27 | 21 | 6 | 78% |  |
+| ❌ Temporal9 | 322 | 139 | 183 | 43% | +18pp |
 | ✅ TriadicSelection1 | 19 | 19 | 0 | 100% |  |
 | ✅ TypeConversion1 | 10 | 9 | 1 | 90% |  |
 | ⚠️ TypeConversion2 | 12 | 7 | 5 | 58% |  |
@@ -199,7 +197,7 @@
 | ✅ With5 | 2 | 2 | 0 | 100% |  |
 | ⚠️ With6 | 9 | 6 | 3 | 67% |  |
 | ✅ With7 | 2 | 2 | 0 | 100% |  |
-| ❌ WithOrderBy1 | 96 | 42 | 54 | 44% | -7pp |
+| ❌ WithOrderBy1 | 96 | 42 | 54 | 44% |  |
 | ❌ WithOrderBy2 | 83 | 25 | 58 | 30% |  |
 | ⚠️ WithOrderBy3 | 93 | 65 | 28 | 70% |  |
 | ⚠️ WithOrderBy4 | 20 | 14 | 6 | 70% |  |
@@ -214,45 +212,11 @@
 | ✅ WithWhere6 | 1 | 1 | 0 | 100% |  |
 | ✅ WithWhere7 | 3 | 3 | 0 | 100% |  |
 
-## 🔴 Regressions
+## 🟢 Newly Passing
 
-Scenarios that were passing but are now failing:
+Scenarios that were failing but are now passing:
 
-- **Temporal1** — [10] Should construct date time with named time zone (line 336)
-- **Temporal1** — [10] Should construct date time with named time zone (line 337)
-- **Temporal1** — [10] Should construct date time with named time zone (line 338)
-- **Temporal1** — [10] Should construct date time with named time zone (line 339)
-- **Temporal1** — [10] Should construct date time with named time zone (line 340)
-- **Temporal1** — [10] Should construct date time with named time zone (line 341)
-- **Temporal1** — [10] Should construct date time with named time zone (line 342)
-- **Temporal1** — [10] Should construct date time with named time zone (line 343)
-- **Temporal1** — [10] Should construct date time with named time zone (line 344)
-- **Temporal1** — [10] Should construct date time with named time zone (line 345)
-- **Temporal1** — [10] Should construct date time with named time zone (line 346)
-- **Temporal1** — [10] Should construct date time with named time zone (line 347)
-- **Temporal1** — [10] Should construct date time with named time zone (line 348)
-- **Temporal1** — [10] Should construct date time with named time zone (line 349)
-- **Temporal1** — [10] Should construct date time with named time zone (line 350)
-- **Temporal1** — [10] Should construct date time with named time zone (line 351)
-- **Temporal1** — [10] Should construct date time with named time zone (line 352)
-- **Temporal1** — [10] Should construct date time with named time zone (line 353)
-- **Temporal1** — [10] Should construct date time with named time zone (line 354)
-- **Temporal1** — [10] Should construct date time with named time zone (line 355)
-- **Temporal1** — [10] Should construct date time with named time zone (line 356)
-- **Temporal1** — [10] Should construct date time with named time zone (line 357)
-- **Temporal1** — [10] Should construct date time with named time zone (line 358)
-- **Temporal1** — [10] Should construct date time with named time zone (line 359)
-- **Temporal1** — [10] Should construct date time with named time zone (line 360)
-- **Temporal1** — [10] Should construct date time with named time zone (line 361)
-- **Temporal1** — [10] Should construct date time with named time zone (line 362)
-- **Temporal1** — [10] Should construct date time with named time zone (line 363)
-- **Temporal1** — [10] Should construct date time with named time zone (line 364)
-- **Temporal1** — [11] Should construct date time from epoch (line 366)
 - **Temporal1** — [12] Should construct duration (line 393)
-- **Temporal1** — [13] Should construct temporal with time offset with second precision (line 414)
-- **Temporal1** — [13] Should construct temporal with time offset with second precision (line 415)
-- **Temporal1** — [13] Should construct temporal with time offset with second precision (line 416)
-- **Temporal1** — [13] Should construct temporal with time offset with second precision (line 417)
 - **Temporal1** — [2] Should construct week localdatetime (line 75)
 - **Temporal1** — [2] Should construct week localdatetime (line 76)
 - **Temporal1** — [2] Should construct week localdatetime (line 77)
@@ -268,29 +232,8 @@ Scenarios that were passing but are now failing:
 - **Temporal1** — [2] Should construct week localdatetime (line 87)
 - **Temporal1** — [2] Should construct week localdatetime (line 88)
 - **Temporal1** — [2] Should construct week localdatetime (line 89)
-- **Temporal1** — [3] Should construct week datetime (line 104)
-- **Temporal1** — [3] Should construct week datetime (line 105)
-- **Temporal1** — [3] Should construct week datetime (line 106)
-- **Temporal1** — [3] Should construct week datetime (line 107)
-- **Temporal1** — [3] Should construct week datetime (line 108)
-- **Temporal1** — [3] Should construct week datetime (line 109)
-- **Temporal1** — [3] Should construct week datetime (line 110)
-- **Temporal1** — [3] Should construct week datetime (line 111)
-- **Temporal1** — [3] Should construct week datetime (line 112)
-- **Temporal1** — [3] Should construct week datetime (line 113)
-- **Temporal1** — [3] Should construct week datetime (line 114)
-- **Temporal1** — [3] Should construct week datetime (line 115)
-- **Temporal1** — [3] Should construct week datetime (line 116)
-- **Temporal1** — [3] Should construct week datetime (line 117)
-- **Temporal1** — [3] Should construct week datetime (line 118)
 - **Temporal1** — [5] Should construct local time (line 160)
 - **Temporal1** — [5] Should construct local time (line 161)
-- **Temporal1** — [6] Should construct time (line 184)
-- **Temporal1** — [6] Should construct time (line 185)
-- **Temporal1** — [6] Should construct time (line 186)
-- **Temporal1** — [6] Should construct time (line 187)
-- **Temporal1** — [6] Should construct time (line 188)
-- **Temporal1** — [6] Should construct time (line 189)
 - **Temporal1** — [7] Should construct local date time (line 210)
 - **Temporal1** — [7] Should construct local date time (line 211)
 - **Temporal1** — [7] Should construct local date time (line 212)
@@ -304,245 +247,34 @@ Scenarios that were passing but are now failing:
 - **Temporal1** — [7] Should construct local date time (line 232)
 - **Temporal1** — [7] Should construct local date time (line 233)
 - **Temporal1** — [7] Should construct local date time (line 234)
-- **Temporal1** — [8] Should construct date time with default time zone (line 249)
-- **Temporal1** — [8] Should construct date time with default time zone (line 250)
-- **Temporal1** — [8] Should construct date time with default time zone (line 251)
-- **Temporal1** — [8] Should construct date time with default time zone (line 252)
-- **Temporal1** — [8] Should construct date time with default time zone (line 253)
-- **Temporal1** — [8] Should construct date time with default time zone (line 254)
-- **Temporal1** — [8] Should construct date time with default time zone (line 255)
-- **Temporal1** — [8] Should construct date time with default time zone (line 256)
-- **Temporal1** — [8] Should construct date time with default time zone (line 257)
-- **Temporal1** — [8] Should construct date time with default time zone (line 258)
-- **Temporal1** — [8] Should construct date time with default time zone (line 259)
-- **Temporal1** — [8] Should construct date time with default time zone (line 260)
-- **Temporal1** — [8] Should construct date time with default time zone (line 261)
-- **Temporal1** — [8] Should construct date time with default time zone (line 262)
-- **Temporal1** — [8] Should construct date time with default time zone (line 263)
-- **Temporal1** — [8] Should construct date time with default time zone (line 264)
-- **Temporal1** — [8] Should construct date time with default time zone (line 265)
-- **Temporal1** — [8] Should construct date time with default time zone (line 266)
-- **Temporal1** — [8] Should construct date time with default time zone (line 267)
-- **Temporal1** — [8] Should construct date time with default time zone (line 268)
-- **Temporal1** — [8] Should construct date time with default time zone (line 269)
-- **Temporal1** — [8] Should construct date time with default time zone (line 270)
-- **Temporal1** — [8] Should construct date time with default time zone (line 271)
-- **Temporal1** — [8] Should construct date time with default time zone (line 272)
-- **Temporal1** — [8] Should construct date time with default time zone (line 273)
-- **Temporal1** — [8] Should construct date time with default time zone (line 274)
-- **Temporal1** — [8] Should construct date time with default time zone (line 275)
-- **Temporal1** — [8] Should construct date time with default time zone (line 276)
-- **Temporal1** — [8] Should construct date time with default time zone (line 277)
-- **Temporal1** — [8] Should construct date time with default time zone (line 278)
-- **Temporal1** — [9] Should construct date time with offset time zone (line 293)
-- **Temporal1** — [9] Should construct date time with offset time zone (line 294)
-- **Temporal1** — [9] Should construct date time with offset time zone (line 295)
-- **Temporal1** — [9] Should construct date time with offset time zone (line 296)
-- **Temporal1** — [9] Should construct date time with offset time zone (line 297)
-- **Temporal1** — [9] Should construct date time with offset time zone (line 298)
-- **Temporal1** — [9] Should construct date time with offset time zone (line 299)
-- **Temporal1** — [9] Should construct date time with offset time zone (line 300)
-- **Temporal1** — [9] Should construct date time with offset time zone (line 301)
-- **Temporal1** — [9] Should construct date time with offset time zone (line 302)
-- **Temporal1** — [9] Should construct date time with offset time zone (line 303)
-- **Temporal1** — [9] Should construct date time with offset time zone (line 304)
-- **Temporal1** — [9] Should construct date time with offset time zone (line 305)
-- **Temporal1** — [9] Should construct date time with offset time zone (line 306)
-- **Temporal1** — [9] Should construct date time with offset time zone (line 307)
-- **Temporal1** — [9] Should construct date time with offset time zone (line 308)
-- **Temporal1** — [9] Should construct date time with offset time zone (line 309)
-- **Temporal1** — [9] Should construct date time with offset time zone (line 310)
-- **Temporal1** — [9] Should construct date time with offset time zone (line 311)
-- **Temporal1** — [9] Should construct date time with offset time zone (line 312)
-- **Temporal1** — [9] Should construct date time with offset time zone (line 313)
-- **Temporal1** — [9] Should construct date time with offset time zone (line 314)
-- **Temporal1** — [9] Should construct date time with offset time zone (line 315)
-- **Temporal1** — [9] Should construct date time with offset time zone (line 316)
-- **Temporal1** — [9] Should construct date time with offset time zone (line 317)
-- **Temporal1** — [9] Should construct date time with offset time zone (line 318)
-- **Temporal1** — [9] Should construct date time with offset time zone (line 319)
-- **Temporal1** — [9] Should construct date time with offset time zone (line 320)
-- **Temporal1** — [9] Should construct date time with offset time zone (line 321)
-- **Temporal10** — [1] Should split between boundaries correctly (line 47)
-- **Temporal10** — [1] Should split between boundaries correctly (line 48)
-- **Temporal10** — [1] Should split between boundaries correctly (line 49)
-- **Temporal10** — [1] Should split between boundaries correctly (line 50)
-- **Temporal10** — [1] Should split between boundaries correctly (line 51)
-- **Temporal10** — [1] Should split between boundaries correctly (line 52)
-- **Temporal10** — [2] Should compute duration between two temporals (line 69)
-- **Temporal10** — [2] Should compute duration between two temporals (line 71)
-- **Temporal10** — [2] Should compute duration between two temporals (line 74)
-- **Temporal10** — [2] Should compute duration between two temporals (line 76)
-- **Temporal10** — [2] Should compute duration between two temporals (line 84)
-- **Temporal10** — [2] Should compute duration between two temporals (line 86)
-- **Temporal10** — [2] Should compute duration between two temporals (line 87)
-- **Temporal10** — [2] Should compute duration between two temporals (line 88)
-- **Temporal10** — [2] Should compute duration between two temporals (line 90)
+- **Temporal10** — [11] Should handle when seconds and subseconds have different signs (line 287)
+- **Temporal10** — [11] Should handle when seconds and subseconds have different signs (line 288)
+- **Temporal10** — [11] Should handle when seconds and subseconds have different signs (line 289)
+- **Temporal10** — [11] Should handle when seconds and subseconds have different signs (line 290)
+- **Temporal10** — [11] Should handle when seconds and subseconds have different signs (line 291)
+- **Temporal10** — [11] Should handle when seconds and subseconds have different signs (line 292)
+- **Temporal10** — [11] Should handle when seconds and subseconds have different signs (line 293)
+- **Temporal10** — [11] Should handle when seconds and subseconds have different signs (line 294)
+- **Temporal10** — [11] Should handle when seconds and subseconds have different signs (line 295)
+- **Temporal10** — [11] Should handle when seconds and subseconds have different signs (line 296)
 - **Temporal2** — [2] Should parse local time from string (line 75)
-- **Temporal2** — [3] Should parse time from string (line 92)
-- **Temporal2** — [3] Should parse time from string (line 94)
-- **Temporal2** — [5] Should parse date time from string (line 135)
-- **Temporal2** — [6] Should parse date time with named time zone from string (line 157)
-- **Temporal2** — [6] Should parse date time with named time zone from string (line 158)
-- **Temporal2** — [6] Should parse date time with named time zone from string (line 159)
-- **Temporal2** — [6] Should parse date time with named time zone from string (line 160)
-- **Temporal2** — [6] Should parse date time with named time zone from string (line 161)
-- **Temporal3** — [11] Should datetime into date time (line 369)
+- **Temporal2** — [2] Should parse local time from string (line 76)
+- **Temporal2** — [4] Should parse local date time from string (line 118)
 - **Temporal3** — [11] Should datetime into date time (line 374)
-- **Temporal3** — [11] Should datetime into date time (line 375)
-- **Temporal3** — [11] Should datetime into date time (line 377)
-- **Temporal3** — [1] Should select date (line 53)
-- **Temporal3** — [1] Should select date (line 60)
-- **Temporal3** — [2] Should select local time (line 85)
-- **Temporal3** — [2] Should select local time (line 86)
-- **Temporal3** — [2] Should select local time (line 87)
-- **Temporal3** — [2] Should select local time (line 88)
-- **Temporal3** — [2] Should select local time (line 89)
-- **Temporal3** — [2] Should select local time (line 90)
-- **Temporal3** — [2] Should select local time (line 91)
-- **Temporal3** — [2] Should select local time (line 92)
-- **Temporal3** — [2] Should select local time (line 93)
-- **Temporal3** — [3] Should select time (line 114)
-- **Temporal3** — [3] Should select time (line 115)
-- **Temporal3** — [3] Should select time (line 117)
-- **Temporal3** — [3] Should select time (line 121)
-- **Temporal3** — [3] Should select time (line 123)
-- **Temporal3** — [3] Should select time (line 124)
-- **Temporal3** — [3] Should select time (line 125)
-- **Temporal3** — [3] Should select time (line 127)
-- **Temporal3** — [6] Should select date and time into local date time (line 210)
-- **Temporal3** — [6] Should select date and time into local date time (line 211)
-- **Temporal3** — [7] Should select datetime into local date time (line 230)
-- **Temporal3** — [7] Should select datetime into local date time (line 231)
-- **Temporal3** — [7] Should select datetime into local date time (line 232)
+- **Temporal3** — [3] Should select time (line 110)
+- **Temporal3** — [3] Should select time (line 112)
 - **Temporal4** — [10] Should store date time array (line 266)
 - **Temporal4** — [10] Should store date time array (line 267)
 - **Temporal4** — [3] Should store local time (line 102)
 - **Temporal4** — [4] Should store local time array (line 125)
 - **Temporal4** — [4] Should store local time array (line 126)
+- **Temporal4** — [5] Should store time (line 149)
+- **Temporal4** — [6] Should store time array (line 172)
+- **Temporal4** — [6] Should store time array (line 173)
 - **Temporal4** — [7] Should store local date time (line 196)
 - **Temporal4** — [8] Should store local date time array (line 219)
 - **Temporal4** — [8] Should store local date time array (line 220)
 - **Temporal4** — [9] Should store date time (line 243)
-- **Temporal6** — [3] Should serialize time (line 57)
-- **Temporal6** — [5] Should serialize date time (line 81)
-- **Temporal6** — [6] Should serialize duration (line 107)
-- **Temporal6** — [6] Should serialize duration (line 108)
-- **Temporal6** — [6] Should serialize duration (line 109)
-- **Temporal6** — [6] Should serialize duration (line 110)
-- **Temporal6** — [6] Should serialize duration (line 111)
-- **Temporal6** — [6] Should serialize duration (line 112)
-- **Temporal6** — [6] Should serialize duration (line 113)
-- **Temporal6** — [6] Should serialize duration (line 114)
-- **Temporal6** — [6] Should serialize duration (line 115)
-- **Temporal6** — [6] Should serialize duration (line 116)
-- **Temporal6** — [6] Should serialize duration (line 117)
-- **Temporal6** — [7] Should serialize timezones correctly (line 119)
-- **Temporal9** — [2] Should truncate datetime (line 111)
-- **Temporal9** — [2] Should truncate datetime (line 112)
-- **Temporal9** — [2] Should truncate datetime (line 113)
-- **Temporal9** — [2] Should truncate datetime (line 114)
-- **Temporal9** — [2] Should truncate datetime (line 115)
-- **Temporal9** — [2] Should truncate datetime (line 116)
-- **Temporal9** — [2] Should truncate datetime (line 117)
-- **Temporal9** — [2] Should truncate datetime (line 118)
-- **Temporal9** — [2] Should truncate datetime (line 119)
-- **Temporal9** — [2] Should truncate datetime (line 120)
-- **Temporal9** — [2] Should truncate datetime (line 121)
-- **Temporal9** — [2] Should truncate datetime (line 122)
-- **Temporal9** — [2] Should truncate datetime (line 123)
-- **Temporal9** — [2] Should truncate datetime (line 124)
-- **Temporal9** — [2] Should truncate datetime (line 125)
-- **Temporal9** — [2] Should truncate datetime (line 126)
-- **Temporal9** — [2] Should truncate datetime (line 127)
-- **Temporal9** — [2] Should truncate datetime (line 128)
-- **Temporal9** — [2] Should truncate datetime (line 129)
-- **Temporal9** — [2] Should truncate datetime (line 130)
-- **Temporal9** — [2] Should truncate datetime (line 131)
-- **Temporal9** — [2] Should truncate datetime (line 132)
-- **Temporal9** — [2] Should truncate datetime (line 133)
-- **Temporal9** — [2] Should truncate datetime (line 134)
-- **Temporal9** — [2] Should truncate datetime (line 135)
-- **Temporal9** — [2] Should truncate datetime (line 136)
-- **Temporal9** — [2] Should truncate datetime (line 137)
-- **Temporal9** — [2] Should truncate datetime (line 138)
-- **Temporal9** — [2] Should truncate datetime (line 139)
-- **Temporal9** — [2] Should truncate datetime (line 140)
-- **Temporal9** — [2] Should truncate datetime (line 141)
-- **Temporal9** — [2] Should truncate datetime (line 142)
-- **Temporal9** — [2] Should truncate datetime (line 143)
-- **Temporal9** — [2] Should truncate datetime (line 144)
-- **Temporal9** — [2] Should truncate datetime (line 145)
-- **Temporal9** — [2] Should truncate datetime (line 146)
-- **Temporal9** — [2] Should truncate datetime (line 147)
-- **Temporal9** — [2] Should truncate datetime (line 148)
-- **Temporal9** — [2] Should truncate datetime (line 149)
-- **Temporal9** — [2] Should truncate datetime (line 150)
-- **Temporal9** — [2] Should truncate datetime (line 151)
-- **Temporal9** — [2] Should truncate datetime (line 152)
-- **Temporal9** — [2] Should truncate datetime (line 153)
-- **Temporal9** — [2] Should truncate datetime (line 154)
-- **Temporal9** — [2] Should truncate datetime (line 155)
-- **Temporal9** — [2] Should truncate datetime (line 156)
-- **Temporal9** — [2] Should truncate datetime (line 157)
-- **Temporal9** — [2] Should truncate datetime (line 158)
-- **Temporal9** — [2] Should truncate datetime (line 159)
-- **Temporal9** — [2] Should truncate datetime (line 160)
-- **Temporal9** — [2] Should truncate datetime (line 161)
-- **Temporal9** — [2] Should truncate datetime (line 162)
-- **Temporal9** — [2] Should truncate datetime (line 163)
-- **Temporal9** — [2] Should truncate datetime (line 164)
-- **Temporal9** — [2] Should truncate datetime (line 165)
-- **Temporal9** — [2] Should truncate datetime (line 166)
-- **Temporal9** — [2] Should truncate datetime (line 167)
-- **Temporal9** — [2] Should truncate datetime (line 168)
-- **Temporal9** — [2] Should truncate datetime (line 169)
-- **Temporal9** — [2] Should truncate datetime (line 170)
-- **Temporal9** — [2] Should truncate datetime (line 171)
-- **Temporal9** — [2] Should truncate datetime (line 172)
-- **Temporal9** — [2] Should truncate datetime (line 173)
-- **Temporal9** — [2] Should truncate datetime (line 174)
-- **Temporal9** — [2] Should truncate datetime (line 175)
-- **Temporal9** — [2] Should truncate datetime (line 176)
-- **Temporal9** — [2] Should truncate datetime (line 177)
-- **Temporal9** — [2] Should truncate datetime (line 178)
-- **Temporal9** — [2] Should truncate datetime (line 179)
-- **Temporal9** — [2] Should truncate datetime (line 180)
-- **Temporal9** — [2] Should truncate datetime (line 181)
-- **Temporal9** — [2] Should truncate datetime (line 182)
-- **Temporal9** — [2] Should truncate datetime (line 183)
-- **Temporal9** — [2] Should truncate datetime (line 184)
-- **Temporal9** — [2] Should truncate datetime (line 185)
-- **Temporal9** — [2] Should truncate datetime (line 186)
-- **Temporal9** — [2] Should truncate datetime (line 187)
-- **Temporal9** — [2] Should truncate datetime (line 188)
-- **Temporal9** — [2] Should truncate datetime (line 189)
-- **Temporal9** — [2] Should truncate datetime (line 190)
-- **Temporal9** — [2] Should truncate datetime (line 191)
-- **Temporal9** — [2] Should truncate datetime (line 192)
-- **Temporal9** — [2] Should truncate datetime (line 193)
-- **Temporal9** — [2] Should truncate datetime (line 194)
-- **Temporal9** — [2] Should truncate datetime (line 195)
-- **Temporal9** — [2] Should truncate datetime (line 196)
-- **Temporal9** — [2] Should truncate datetime (line 197)
-- **Temporal9** — [2] Should truncate datetime (line 198)
-- **Temporal9** — [2] Should truncate datetime (line 199)
-- **Temporal9** — [2] Should truncate datetime (line 200)
-- **Temporal9** — [2] Should truncate datetime (line 201)
-- **Temporal9** — [2] Should truncate datetime (line 202)
-- **Temporal9** — [2] Should truncate datetime (line 203)
-- **Temporal9** — [2] Should truncate datetime (line 204)
-- **Temporal9** — [2] Should truncate datetime (line 205)
-- **Temporal9** — [2] Should truncate datetime (line 206)
-- **Temporal9** — [2] Should truncate datetime (line 207)
-- **Temporal9** — [2] Should truncate datetime (line 208)
-- **Temporal9** — [2] Should truncate datetime (line 209)
-- **Temporal9** — [2] Should truncate datetime (line 210)
-- **Temporal9** — [2] Should truncate datetime (line 211)
-- **Temporal9** — [2] Should truncate datetime (line 212)
-- **Temporal9** — [2] Should truncate datetime (line 213)
-- **Temporal9** — [2] Should truncate datetime (line 214)
-- **Temporal9** — [2] Should truncate datetime (line 215)
 - **Temporal9** — [3] Should truncate localdatetime (line 230)
 - **Temporal9** — [3] Should truncate localdatetime (line 231)
 - **Temporal9** — [3] Should truncate localdatetime (line 232)
@@ -594,201 +326,14 @@ Scenarios that were passing but are now failing:
 - **Temporal9** — [3] Should truncate localdatetime (line 279)
 - **Temporal9** — [3] Should truncate localdatetime (line 281)
 - **Temporal9** — [3] Should truncate localdatetime (line 283)
-- **Temporal9** — [3] Should truncate localdatetime (line 284)
-- **Temporal9** — [3] Should truncate localdatetime (line 285)
 - **Temporal9** — [3] Should truncate localdatetime (line 287)
-- **Temporal9** — [3] Should truncate localdatetime (line 288)
-- **Temporal9** — [3] Should truncate localdatetime (line 289)
 - **Temporal9** — [3] Should truncate localdatetime (line 291)
-- **Temporal9** — [3] Should truncate localdatetime (line 292)
-- **Temporal9** — [3] Should truncate localdatetime (line 293)
-- **Temporal9** — [3] Should truncate localdatetime (line 296)
-- **Temporal9** — [3] Should truncate localdatetime (line 297)
-- **Temporal9** — [3] Should truncate localdatetime (line 300)
-- **Temporal9** — [3] Should truncate localdatetime (line 301)
 - **Temporal9** — [4] Should truncate localtime (line 319)
 - **Temporal9** — [4] Should truncate localtime (line 321)
-- **Temporal9** — [4] Should truncate localtime (line 322)
-- **Temporal9** — [4] Should truncate localtime (line 323)
 - **Temporal9** — [4] Should truncate localtime (line 325)
 - **Temporal9** — [4] Should truncate localtime (line 327)
-- **Temporal9** — [4] Should truncate localtime (line 328)
-- **Temporal9** — [4] Should truncate localtime (line 329)
-- **Temporal9** — [4] Should truncate localtime (line 330)
-- **Temporal9** — [4] Should truncate localtime (line 331)
 - **Temporal9** — [4] Should truncate localtime (line 333)
 - **Temporal9** — [4] Should truncate localtime (line 335)
-- **Temporal9** — [4] Should truncate localtime (line 336)
-- **Temporal9** — [4] Should truncate localtime (line 337)
-- **Temporal9** — [4] Should truncate localtime (line 338)
-- **Temporal9** — [4] Should truncate localtime (line 339)
-- **Temporal9** — [4] Should truncate localtime (line 344)
-- **Temporal9** — [4] Should truncate localtime (line 345)
-- **Temporal9** — [4] Should truncate localtime (line 346)
-- **Temporal9** — [4] Should truncate localtime (line 347)
-- **Temporal9** — [4] Should truncate localtime (line 352)
-- **Temporal9** — [4] Should truncate localtime (line 353)
-- **Temporal9** — [4] Should truncate localtime (line 354)
-- **Temporal9** — [4] Should truncate localtime (line 355)
-- **Temporal9** — [4] Should truncate localtime (line 360)
-- **Temporal9** — [4] Should truncate localtime (line 361)
-- **Temporal9** — [5] Should truncate time (line 376)
-- **Temporal9** — [5] Should truncate time (line 377)
-- **Temporal9** — [5] Should truncate time (line 378)
-- **Temporal9** — [5] Should truncate time (line 379)
-- **Temporal9** — [5] Should truncate time (line 380)
-- **Temporal9** — [5] Should truncate time (line 381)
-- **Temporal9** — [5] Should truncate time (line 382)
-- **Temporal9** — [5] Should truncate time (line 383)
-- **Temporal9** — [5] Should truncate time (line 384)
-- **Temporal9** — [5] Should truncate time (line 385)
-- **Temporal9** — [5] Should truncate time (line 386)
-- **Temporal9** — [5] Should truncate time (line 387)
-- **Temporal9** — [5] Should truncate time (line 388)
-- **Temporal9** — [5] Should truncate time (line 389)
-- **Temporal9** — [5] Should truncate time (line 390)
-- **Temporal9** — [5] Should truncate time (line 391)
-- **Temporal9** — [5] Should truncate time (line 392)
-- **Temporal9** — [5] Should truncate time (line 393)
-- **Temporal9** — [5] Should truncate time (line 394)
-- **Temporal9** — [5] Should truncate time (line 395)
-- **Temporal9** — [5] Should truncate time (line 396)
-- **Temporal9** — [5] Should truncate time (line 397)
-- **Temporal9** — [5] Should truncate time (line 398)
-- **Temporal9** — [5] Should truncate time (line 399)
-- **Temporal9** — [5] Should truncate time (line 400)
-- **Temporal9** — [5] Should truncate time (line 401)
-- **Temporal9** — [5] Should truncate time (line 402)
-- **Temporal9** — [5] Should truncate time (line 403)
-- **Temporal9** — [5] Should truncate time (line 404)
-- **Temporal9** — [5] Should truncate time (line 405)
-- **Temporal9** — [5] Should truncate time (line 406)
-- **Temporal9** — [5] Should truncate time (line 407)
-- **Temporal9** — [5] Should truncate time (line 408)
-- **Temporal9** — [5] Should truncate time (line 409)
-- **Temporal9** — [5] Should truncate time (line 410)
-- **Temporal9** — [5] Should truncate time (line 411)
-- **Temporal9** — [5] Should truncate time (line 412)
-- **Temporal9** — [5] Should truncate time (line 413)
-- **Temporal9** — [5] Should truncate time (line 414)
-- **Temporal9** — [5] Should truncate time (line 415)
-- **Temporal9** — [5] Should truncate time (line 416)
-- **Temporal9** — [5] Should truncate time (line 417)
-- **Temporal9** — [5] Should truncate time (line 418)
-- **Temporal9** — [5] Should truncate time (line 419)
-- **Temporal9** — [5] Should truncate time (line 420)
-- **Temporal9** — [5] Should truncate time (line 421)
-- **Temporal9** — [5] Should truncate time (line 422)
-- **Temporal9** — [5] Should truncate time (line 423)
-- **WithOrderBy1** — [39] Sort by a local date time variable projected from a node property in ascending order (line 986)
-- **WithOrderBy1** — [39] Sort by a local date time variable projected from a node property in ascending order (line 987)
-- **WithOrderBy1** — [39] Sort by a local date time variable projected from a node property in ascending order (line 988)
-- **WithOrderBy1** — [40] Sort by a local date time variable projected from a node property in descending order (line 1018)
-- **WithOrderBy1** — [40] Sort by a local date time variable projected from a node property in descending order (line 1019)
-- **WithOrderBy1** — [42] Sort by a date time variable projected from a node property in descending order (line 1081)
-- **WithOrderBy1** — [42] Sort by a date time variable projected from a node property in descending order (line 1082)
-
-## 🟢 Newly Passing
-
-Scenarios that were failing but are now passing:
-
-- **Temporal10** — [3] Should compute duration between two temporals in months (line 106)
-- **Temporal10** — [3] Should compute duration between two temporals in months (line 107)
-- **Temporal10** — [3] Should compute duration between two temporals in months (line 108)
-- **Temporal10** — [3] Should compute duration between two temporals in months (line 109)
-- **Temporal10** — [3] Should compute duration between two temporals in months (line 110)
-- **Temporal10** — [3] Should compute duration between two temporals in months (line 111)
-- **Temporal10** — [3] Should compute duration between two temporals in months (line 112)
-- **Temporal10** — [3] Should compute duration between two temporals in months (line 113)
-- **Temporal10** — [3] Should compute duration between two temporals in months (line 114)
-- **Temporal10** — [3] Should compute duration between two temporals in months (line 115)
-- **Temporal10** — [3] Should compute duration between two temporals in months (line 116)
-- **Temporal10** — [3] Should compute duration between two temporals in months (line 117)
-- **Temporal10** — [3] Should compute duration between two temporals in months (line 118)
-- **Temporal10** — [3] Should compute duration between two temporals in months (line 119)
-- **Temporal10** — [3] Should compute duration between two temporals in months (line 120)
-- **Temporal10** — [3] Should compute duration between two temporals in months (line 121)
-- **Temporal10** — [3] Should compute duration between two temporals in months (line 122)
-- **Temporal10** — [3] Should compute duration between two temporals in months (line 123)
-- **Temporal10** — [3] Should compute duration between two temporals in months (line 124)
-- **Temporal10** — [3] Should compute duration between two temporals in months (line 125)
-- **Temporal10** — [3] Should compute duration between two temporals in months (line 126)
-- **Temporal10** — [4] Should compute duration between two temporals in days (line 141)
-- **Temporal10** — [4] Should compute duration between two temporals in days (line 142)
-- **Temporal10** — [4] Should compute duration between two temporals in days (line 143)
-- **Temporal10** — [4] Should compute duration between two temporals in days (line 144)
-- **Temporal10** — [4] Should compute duration between two temporals in days (line 145)
-- **Temporal10** — [4] Should compute duration between two temporals in days (line 146)
-- **Temporal10** — [4] Should compute duration between two temporals in days (line 147)
-- **Temporal10** — [4] Should compute duration between two temporals in days (line 148)
-- **Temporal10** — [4] Should compute duration between two temporals in days (line 149)
-- **Temporal10** — [4] Should compute duration between two temporals in days (line 150)
-- **Temporal10** — [4] Should compute duration between two temporals in days (line 151)
-- **Temporal10** — [4] Should compute duration between two temporals in days (line 152)
-- **Temporal10** — [4] Should compute duration between two temporals in days (line 153)
-- **Temporal10** — [4] Should compute duration between two temporals in days (line 154)
-- **Temporal10** — [4] Should compute duration between two temporals in days (line 155)
-- **Temporal10** — [4] Should compute duration between two temporals in days (line 156)
-- **Temporal10** — [4] Should compute duration between two temporals in days (line 157)
-- **Temporal10** — [4] Should compute duration between two temporals in days (line 158)
-- **Temporal10** — [4] Should compute duration between two temporals in days (line 159)
-- **Temporal10** — [4] Should compute duration between two temporals in days (line 160)
-- **Temporal10** — [4] Should compute duration between two temporals in days (line 161)
-- **Temporal10** — [5] Should compute duration between two temporals in seconds (line 176)
-- **Temporal10** — [5] Should compute duration between two temporals in seconds (line 177)
-- **Temporal10** — [5] Should compute duration between two temporals in seconds (line 179)
-- **Temporal10** — [5] Should compute duration between two temporals in seconds (line 181)
-- **Temporal10** — [5] Should compute duration between two temporals in seconds (line 182)
-- **Temporal10** — [5] Should compute duration between two temporals in seconds (line 184)
-- **Temporal10** — [5] Should compute duration between two temporals in seconds (line 186)
-- **Temporal10** — [5] Should compute duration between two temporals in seconds (line 187)
-- **Temporal10** — [5] Should compute duration between two temporals in seconds (line 188)
-- **Temporal10** — [5] Should compute duration between two temporals in seconds (line 189)
-- **Temporal10** — [5] Should compute duration between two temporals in seconds (line 190)
-- **Temporal10** — [5] Should compute duration between two temporals in seconds (line 191)
-- **Temporal10** — [5] Should compute duration between two temporals in seconds (line 192)
-- **Temporal10** — [5] Should compute duration between two temporals in seconds (line 194)
-- **Temporal10** — [5] Should compute duration between two temporals in seconds (line 198)
-- **Temporal10** — [5] Should compute duration between two temporals in seconds (line 200)
-- **Temporal10** — [6] Should compute duration between if they differ only by a fraction of a second and the first comes after the second. (line 202)
-- **Temporal10** — [7] Should compute negative duration between in big units (line 226)
-- **Temporal10** — [7] Should compute negative duration between in big units (line 227)
-- **Temporal10** — [7] Should compute negative duration between in big units (line 228)
-- **Temporal10** — [7] Should compute negative duration between in big units (line 230)
-- **Temporal10** — [8] Should handle durations at daylight saving time day (line 245)
-- **Temporal10** — [8] Should handle durations at daylight saving time day (line 246)
-- **Temporal10** — [8] Should handle durations at daylight saving time day (line 247)
-- **Temporal10** — [8] Should handle durations at daylight saving time day (line 248)
-- **Temporal10** — [8] Should handle durations at daylight saving time day (line 249)
-- **Temporal10** — [8] Should handle durations at daylight saving time day (line 250)
-- **Temporal2** — [1] Should parse date from string (line 47)
-- **Temporal2** — [1] Should parse date from string (line 51)
-- **Temporal2** — [1] Should parse date from string (line 53)
-- **Temporal2** — [1] Should parse date from string (line 55)
-- **Temporal2** — [2] Should parse local time from string (line 72)
-- **Temporal2** — [2] Should parse local time from string (line 74)
-- **Temporal7** — [3] Should compare times (line 81)
-- **Temporal8** — [1] Should add or subtract duration to or from date (line 52)
-- **Temporal8** — [1] Should add or subtract duration to or from date (line 53)
-- **Temporal8** — [1] Should add or subtract duration to or from date (line 54)
-- **Temporal8** — [2] Should add or subtract duration to or from local time (line 75)
-- **Temporal8** — [2] Should add or subtract duration to or from local time (line 76)
-- **Temporal8** — [2] Should add or subtract duration to or from local time (line 77)
-- **Temporal8** — [4] Should add or subtract duration to or from local date time (line 121)
-- **Temporal8** — [4] Should add or subtract duration to or from local date time (line 122)
-- **Temporal8** — [4] Should add or subtract duration to or from local date time (line 123)
-- **Temporal8** — [6] Should add or subtract durations (line 167)
-- **Temporal8** — [6] Should add or subtract durations (line 168)
-- **Temporal8** — [6] Should add or subtract durations (line 169)
-- **Temporal8** — [6] Should add or subtract durations (line 170)
-- **Temporal8** — [6] Should add or subtract durations (line 171)
-- **Temporal8** — [6] Should add or subtract durations (line 172)
-- **Temporal8** — [6] Should add or subtract durations (line 173)
-- **Temporal8** — [6] Should add or subtract durations (line 174)
-- **Temporal8** — [6] Should add or subtract durations (line 175)
-- **Temporal8** — [7] Should multiply or divide durations by numbers (line 195)
-- **Temporal8** — [7] Should multiply or divide durations by numbers (line 196)
-- **Temporal8** — [7] Should multiply or divide durations by numbers (line 197)
 
 ## Failed Scenarios
 
@@ -1184,7 +729,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/graph/Graph4.feature:77:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("type(null)", Some(Null)), ("type(r)", Some(String(
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("type(r)", Some(String("NOT_THERE"))), ("type(null)
   ... (truncated)
   ```
 - **[4] `type()` on mixed null and non-null relationships** (line 82)
@@ -1203,11 +748,11 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/graph/Graph6.feature:90:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): Expected column '(list[1]).existing' not found in result
+      Step panicked. Captured output: Result mismatch (any order): Expected column '(list[1]).missingToo' not found in result
 [Summary]
 1 feature
 1 scenario (1 failed)
-4 
+
   ... (truncated)
   ```
 - **[6] Statically access a property of a optional non-null relationship** (line 111)
@@ -1227,11 +772,11 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/graph/Graph6.feature:151:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): Expected column '(list[1]).missing' not found in result
+      Step panicked. Captured output: Result mismatch (any order): Expected column '(list[1]).existing' not found in result
 [Summary]
 1 feature
 1 scenario (1 failed)
-4 
+4
   ... (truncated)
   ```
 
@@ -1242,7 +787,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/graph/Graph9.feature:73:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("properties(r)", Some(Map({}))), ("properties(n)", 
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("properties(null)", Some(Null)), ("properties(r)", 
   ... (truncated)
   ```
 
@@ -1357,7 +902,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/literals/Literals7.feature:295:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("literal", Some(List([Map({"id": String("000
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("literal", Some(List([Map({"batters": Map({"
   ... (truncated)
   ```
 
@@ -1368,7 +913,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/literals/Literals8.feature:294:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("literal", Some(Map({"data": List([Map({"nam
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("literal", Some(Map({"data": List([Map({"id"
   ... (truncated)
   ```
 
@@ -1379,11 +924,11 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/map/Map1.feature:65:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): Expected column '(list[1]).existing' not found in result
+      Step panicked. Captured output: Result mismatch (any order): Expected column '(list[1]).notMissing' not found in result
 [Summary]
 1 feature
 1 scenario (1 failed)
-3 step
+3 st
   ... (truncated)
   ```
 
@@ -1465,7 +1010,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/map/Map3.feature:99:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("b", Some(Bool(false))), ("c", Some(Bool(false))), ("a"
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("c", Some(Bool(false))), ("b", Some(Bool(false))), ("a"
   ... (truncated)
   ```
 
@@ -3029,126 +2574,6 @@ Scenarios that were failing but are now passing:
 
 ### Temporal1
 
-- **[2] Should construct week localdatetime** (line 75)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:68:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("d", Some(Temporal(LocalDateTime { nanos_sinc
-  ... (truncated)
-  ```
-- **[2] Should construct week localdatetime** (line 76)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:68:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("d", Some(Temporal(LocalDateTime { nanos_sinc
-  ... (truncated)
-  ```
-- **[2] Should construct week localdatetime** (line 77)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:68:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("d", Some(Temporal(LocalDateTime { nanos_sinc
-  ... (truncated)
-  ```
-- **[2] Should construct week localdatetime** (line 78)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:68:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("d", Some(Temporal(LocalDateTime { nanos_sinc
-  ... (truncated)
-  ```
-- **[2] Should construct week localdatetime** (line 79)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:68:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("d", Some(Temporal(LocalDateTime { nanos_sinc
-  ... (truncated)
-  ```
-- **[2] Should construct week localdatetime** (line 80)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:68:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("d", Some(Temporal(LocalDateTime { nanos_sinc
-  ... (truncated)
-  ```
-- **[2] Should construct week localdatetime** (line 81)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:68:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("d", Some(Temporal(LocalDateTime { nanos_sinc
-  ... (truncated)
-  ```
-- **[2] Should construct week localdatetime** (line 82)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:68:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("d", Some(Temporal(LocalDateTime { nanos_sinc
-  ... (truncated)
-  ```
-- **[2] Should construct week localdatetime** (line 83)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:68:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("d", Some(Temporal(LocalDateTime { nanos_sinc
-  ... (truncated)
-  ```
-- **[2] Should construct week localdatetime** (line 84)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:68:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("d", Some(Temporal(LocalDateTime { nanos_sinc
-  ... (truncated)
-  ```
-- **[2] Should construct week localdatetime** (line 85)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:68:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("d", Some(Temporal(LocalDateTime { nanos_sinc
-  ... (truncated)
-  ```
-- **[2] Should construct week localdatetime** (line 86)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:68:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("d", Some(Temporal(LocalDateTime { nanos_sinc
-  ... (truncated)
-  ```
-- **[2] Should construct week localdatetime** (line 87)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:68:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("d", Some(Temporal(LocalDateTime { nanos_sinc
-  ... (truncated)
-  ```
-- **[2] Should construct week localdatetime** (line 88)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:68:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("d", Some(Temporal(LocalDateTime { nanos_sinc
-  ... (truncated)
-  ```
-- **[2] Should construct week localdatetime** (line 89)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:68:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("d", Some(Temporal(LocalDateTime { nanos_sinc
-  ... (truncated)
-  ```
 - **[3] Should construct week datetime** (line 104)
   ```
   Step failed:
@@ -3269,22 +2694,6 @@ Scenarios that were failing but are now passing:
       Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("d", Some(Temporal(DateTime { nanos_since_epo
   ... (truncated)
   ```
-- **[5] Should construct local time** (line 160)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:148:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalTime { nanos_si
-  ... (truncated)
-  ```
-- **[5] Should construct local time** (line 161)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:148:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalTime { nanos_si
-  ... (truncated)
-  ```
 - **[6] Should construct time** (line 176)
   ```
   Step failed:
@@ -3395,110 +2804,6 @@ Scenarios that were failing but are now passing:
       Defined: tck/features/expressions/temporal/Temporal1.feature:169:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
       Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalTime { nanos_si
-  ... (truncated)
-  ```
-- **[7] Should construct local date time** (line 210)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:197:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalDateTime { nano
-  ... (truncated)
-  ```
-- **[7] Should construct local date time** (line 211)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:197:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalDateTime { nano
-  ... (truncated)
-  ```
-- **[7] Should construct local date time** (line 212)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:197:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalDateTime { nano
-  ... (truncated)
-  ```
-- **[7] Should construct local date time** (line 217)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:197:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalDateTime { nano
-  ... (truncated)
-  ```
-- **[7] Should construct local date time** (line 218)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:197:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalDateTime { nano
-  ... (truncated)
-  ```
-- **[7] Should construct local date time** (line 219)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:197:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalDateTime { nano
-  ... (truncated)
-  ```
-- **[7] Should construct local date time** (line 224)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:197:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalDateTime { nano
-  ... (truncated)
-  ```
-- **[7] Should construct local date time** (line 225)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:197:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalDateTime { nano
-  ... (truncated)
-  ```
-- **[7] Should construct local date time** (line 226)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:197:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalDateTime { nano
-  ... (truncated)
-  ```
-- **[7] Should construct local date time** (line 231)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:197:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalDateTime { nano
-  ... (truncated)
-  ```
-- **[7] Should construct local date time** (line 232)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:197:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalDateTime { nano
-  ... (truncated)
-  ```
-- **[7] Should construct local date time** (line 233)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:197:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalDateTime { nano
-  ... (truncated)
-  ```
-- **[7] Should construct local date time** (line 234)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:197:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalDateTime { nano
   ... (truncated)
   ```
 - **[8] Should construct date time with default time zone** (line 249)
@@ -4213,14 +3518,6 @@ Scenarios that were failing but are now passing:
       Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("d2", Some(Temporal(DateTime { nanos_since_e
   ... (truncated)
   ```
-- **[12] Should construct duration** (line 393)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:384:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(Duration { months: 0
-  ... (truncated)
-  ```
 - **[13] Should construct temporal with time offset with second precision** (line 414)
   ```
   Step failed:
@@ -4472,86 +3769,6 @@ Scenarios that were failing but are now passing:
       Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: localdatetime(): Cannot parse datetime: -999999
   ... (truncated)
   ```
-- **[11] Should handle when seconds and subseconds have different signs** (line 287)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal10.feature:280:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("duration", Some(Temporal(Duration { months
-  ... (truncated)
-  ```
-- **[11] Should handle when seconds and subseconds have different signs** (line 288)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal10.feature:280:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("duration", Some(Temporal(Duration { months
-  ... (truncated)
-  ```
-- **[11] Should handle when seconds and subseconds have different signs** (line 289)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal10.feature:280:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("duration", Some(Temporal(Duration { months
-  ... (truncated)
-  ```
-- **[11] Should handle when seconds and subseconds have different signs** (line 290)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal10.feature:280:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("duration", Some(Temporal(Duration { months
-  ... (truncated)
-  ```
-- **[11] Should handle when seconds and subseconds have different signs** (line 291)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal10.feature:280:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("duration", Some(Temporal(Duration { months
-  ... (truncated)
-  ```
-- **[11] Should handle when seconds and subseconds have different signs** (line 292)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal10.feature:280:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("duration", Some(Temporal(Duration { months
-  ... (truncated)
-  ```
-- **[11] Should handle when seconds and subseconds have different signs** (line 293)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal10.feature:280:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("duration", Some(Temporal(Duration { months
-  ... (truncated)
-  ```
-- **[11] Should handle when seconds and subseconds have different signs** (line 294)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal10.feature:280:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("duration", Some(Temporal(Duration { months
-  ... (truncated)
-  ```
-- **[11] Should handle when seconds and subseconds have different signs** (line 295)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal10.feature:280:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("duration", Some(Temporal(Duration { months
-  ... (truncated)
-  ```
-- **[11] Should handle when seconds and subseconds have different signs** (line 296)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal10.feature:280:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("duration", Some(Temporal(Duration { months
-  ... (truncated)
-  ```
 - **[12] Should compute durations with no difference** (line 311)
   ```
   Step failed:
@@ -4641,22 +3858,6 @@ Scenarios that were failing but are now passing:
       Defined: tck/features/expressions/temporal/Temporal2.feature:39:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
       Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(Date { days_since_epo
-  ... (truncated)
-  ```
-- **[2] Should parse local time from string** (line 75)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal2.feature:64:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalTime { nanos_sin
-  ... (truncated)
-  ```
-- **[2] Should parse local time from string** (line 76)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal2.feature:64:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalTime { nanos_sin
   ... (truncated)
   ```
 - **[2] Should parse local time from string** (line 77)
@@ -4753,14 +3954,6 @@ Scenarios that were failing but are now passing:
       Defined: tck/features/expressions/temporal/Temporal2.feature:107:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
       Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: localdatetime(): Cannot parse datetime: 2015T214
-  ... (truncated)
-  ```
-- **[4] Should parse local date time from string** (line 118)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal2.feature:107:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalDateTime { nano
   ... (truncated)
   ```
 - **[4] Should parse local date time from string** (line 119)
@@ -5036,22 +4229,6 @@ Scenarios that were failing but are now passing:
       Defined: tck/features/expressions/temporal/Temporal3.feature:102:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
       Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: time(): time() expects a string or map argument"
-  ... (truncated)
-  ```
-- **[3] Should select time** (line 110)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal3.feature:102:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(Time { nanos_since_m
-  ... (truncated)
-  ```
-- **[3] Should select time** (line 112)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal3.feature:102:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(Time { nanos_since_m
   ... (truncated)
   ```
 - **[3] Should select time** (line 114)
@@ -5990,14 +5167,6 @@ Scenarios that were failing but are now passing:
       Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: datetime(): datetime() expects a string or map a
   ... (truncated)
   ```
-- **[11] Should datetime into date time** (line 374)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal3.feature:362:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
 - **[11] Should datetime into date time** (line 375)
   ```
   Step failed:
@@ -6028,105 +5197,6 @@ Scenarios that were failing but are now passing:
       Defined: tck/features/expressions/temporal/Temporal3.feature:362:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
       Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-
-### Temporal4
-
-- **[3] Should store local time** (line 102)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal4.feature:96:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("n.created", Some(String("12:00:00")))]. Expe
-  ... (truncated)
-  ```
-- **[4] Should store local time array** (line 125)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal4.feature:119:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("n.dates", Some(List([String("13:00:00")])))
-  ... (truncated)
-  ```
-- **[4] Should store local time array** (line 126)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal4.feature:119:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("n.dates", Some(List([String("14:00:00"), St
-  ... (truncated)
-  ```
-- **[5] Should store time** (line 149)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal4.feature:143:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("n.created", Some(String("12:00:00+00:00")))
-  ... (truncated)
-  ```
-- **[6] Should store time array** (line 172)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal4.feature:166:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("n.dates", Some(List([String("13:00:00+00:00
-  ... (truncated)
-  ```
-- **[6] Should store time array** (line 173)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal4.feature:166:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("n.dates", Some(List([String("14:00:00+00:00
-  ... (truncated)
-  ```
-- **[7] Should store local date time** (line 196)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal4.feature:190:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("n.created", Some(String("1912-01-01T00:00:0
-  ... (truncated)
-  ```
-- **[8] Should store local date time array** (line 219)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal4.feature:213:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("n.dates", Some(List([String("1913-01-01T00:
-  ... (truncated)
-  ```
-- **[8] Should store local date time array** (line 220)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal4.feature:213:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("n.dates", Some(List([String("1914-01-01T00:
-  ... (truncated)
-  ```
-- **[9] Should store date time** (line 243)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal4.feature:237:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("n.created", Some(String("1912-01-01T00:00:0
-  ... (truncated)
-  ```
-- **[10] Should store date time array** (line 266)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal4.feature:260:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("n.dates", Some(List([String("1913-01-01T00:
-  ... (truncated)
-  ```
-- **[10] Should store date time array** (line 267)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal4.feature:260:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("n.dates", Some(List([String("1914-01-01T00:
   ... (truncated)
   ```
 
@@ -6204,7 +5274,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal6.feature:88:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("b", Some(Bool(true))), ("ts", Some(String("1
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("ts", Some(String("1984-10-11T11:31:14.645876
   ... (truncated)
   ```
 - **[6] Should serialize duration** (line 107)
@@ -6319,7 +5389,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal8.feature:91:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("sum", Some(Temporal(LocalTime { nanos_since_
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("diff", Some(Temporal(LocalTime { nanos_since
   ... (truncated)
   ```
 - **[3] Should add or subtract duration to or from time** (line 100)
@@ -6327,7 +5397,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal8.feature:91:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("sum", Some(Temporal(LocalTime { nanos_since_
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("diff", Some(Temporal(LocalTime { nanos_since
   ... (truncated)
   ```
 - **[5] Should add or subtract duration to or from date time** (line 144)
@@ -6335,7 +5405,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal8.feature:137:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("diff", Some(Temporal(DateTime { nanos_since
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("sum", Some(Temporal(DateTime { nanos_since_
   ... (truncated)
   ```
 - **[5] Should add or subtract duration to or from date time** (line 145)
@@ -7197,414 +6267,6 @@ Scenarios that were failing but are now passing:
       Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
   ... (truncated)
   ```
-- **[3] Should truncate localdatetime** (line 230)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:223:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalDateTime { nano
-  ... (truncated)
-  ```
-- **[3] Should truncate localdatetime** (line 231)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:223:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalDateTime { nano
-  ... (truncated)
-  ```
-- **[3] Should truncate localdatetime** (line 232)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:223:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalDateTime { nano
-  ... (truncated)
-  ```
-- **[3] Should truncate localdatetime** (line 233)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:223:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalDateTime { nano
-  ... (truncated)
-  ```
-- **[3] Should truncate localdatetime** (line 234)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:223:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalDateTime { nano
-  ... (truncated)
-  ```
-- **[3] Should truncate localdatetime** (line 235)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:223:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalDateTime { nano
-  ... (truncated)
-  ```
-- **[3] Should truncate localdatetime** (line 236)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:223:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalDateTime { nano
-  ... (truncated)
-  ```
-- **[3] Should truncate localdatetime** (line 237)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:223:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalDateTime { nano
-  ... (truncated)
-  ```
-- **[3] Should truncate localdatetime** (line 238)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:223:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalDateTime { nano
-  ... (truncated)
-  ```
-- **[3] Should truncate localdatetime** (line 239)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:223:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalDateTime { nano
-  ... (truncated)
-  ```
-- **[3] Should truncate localdatetime** (line 240)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:223:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalDateTime { nano
-  ... (truncated)
-  ```
-- **[3] Should truncate localdatetime** (line 241)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:223:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalDateTime { nano
-  ... (truncated)
-  ```
-- **[3] Should truncate localdatetime** (line 242)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:223:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalDateTime { nano
-  ... (truncated)
-  ```
-- **[3] Should truncate localdatetime** (line 243)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:223:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalDateTime { nano
-  ... (truncated)
-  ```
-- **[3] Should truncate localdatetime** (line 244)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:223:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalDateTime { nano
-  ... (truncated)
-  ```
-- **[3] Should truncate localdatetime** (line 245)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:223:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalDateTime { nano
-  ... (truncated)
-  ```
-- **[3] Should truncate localdatetime** (line 246)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:223:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalDateTime { nano
-  ... (truncated)
-  ```
-- **[3] Should truncate localdatetime** (line 247)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:223:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalDateTime { nano
-  ... (truncated)
-  ```
-- **[3] Should truncate localdatetime** (line 248)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:223:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalDateTime { nano
-  ... (truncated)
-  ```
-- **[3] Should truncate localdatetime** (line 249)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:223:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalDateTime { nano
-  ... (truncated)
-  ```
-- **[3] Should truncate localdatetime** (line 250)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:223:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalDateTime { nano
-  ... (truncated)
-  ```
-- **[3] Should truncate localdatetime** (line 251)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:223:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalDateTime { nano
-  ... (truncated)
-  ```
-- **[3] Should truncate localdatetime** (line 252)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:223:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalDateTime { nano
-  ... (truncated)
-  ```
-- **[3] Should truncate localdatetime** (line 253)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:223:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalDateTime { nano
-  ... (truncated)
-  ```
-- **[3] Should truncate localdatetime** (line 254)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:223:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalDateTime { nano
-  ... (truncated)
-  ```
-- **[3] Should truncate localdatetime** (line 255)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:223:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalDateTime { nano
-  ... (truncated)
-  ```
-- **[3] Should truncate localdatetime** (line 256)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:223:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalDateTime { nano
-  ... (truncated)
-  ```
-- **[3] Should truncate localdatetime** (line 257)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:223:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalDateTime { nano
-  ... (truncated)
-  ```
-- **[3] Should truncate localdatetime** (line 258)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:223:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalDateTime { nano
-  ... (truncated)
-  ```
-- **[3] Should truncate localdatetime** (line 259)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:223:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalDateTime { nano
-  ... (truncated)
-  ```
-- **[3] Should truncate localdatetime** (line 260)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:223:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalDateTime { nano
-  ... (truncated)
-  ```
-- **[3] Should truncate localdatetime** (line 261)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:223:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalDateTime { nano
-  ... (truncated)
-  ```
-- **[3] Should truncate localdatetime** (line 262)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:223:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalDateTime { nano
-  ... (truncated)
-  ```
-- **[3] Should truncate localdatetime** (line 263)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:223:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalDateTime { nano
-  ... (truncated)
-  ```
-- **[3] Should truncate localdatetime** (line 264)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:223:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalDateTime { nano
-  ... (truncated)
-  ```
-- **[3] Should truncate localdatetime** (line 265)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:223:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalDateTime { nano
-  ... (truncated)
-  ```
-- **[3] Should truncate localdatetime** (line 266)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:223:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalDateTime { nano
-  ... (truncated)
-  ```
-- **[3] Should truncate localdatetime** (line 267)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:223:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalDateTime { nano
-  ... (truncated)
-  ```
-- **[3] Should truncate localdatetime** (line 268)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:223:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalDateTime { nano
-  ... (truncated)
-  ```
-- **[3] Should truncate localdatetime** (line 269)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:223:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalDateTime { nano
-  ... (truncated)
-  ```
-- **[3] Should truncate localdatetime** (line 270)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:223:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalDateTime { nano
-  ... (truncated)
-  ```
-- **[3] Should truncate localdatetime** (line 271)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:223:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalDateTime { nano
-  ... (truncated)
-  ```
-- **[3] Should truncate localdatetime** (line 272)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:223:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalDateTime { nano
-  ... (truncated)
-  ```
-- **[3] Should truncate localdatetime** (line 273)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:223:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalDateTime { nano
-  ... (truncated)
-  ```
-- **[3] Should truncate localdatetime** (line 274)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:223:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalDateTime { nano
-  ... (truncated)
-  ```
-- **[3] Should truncate localdatetime** (line 275)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:223:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalDateTime { nano
-  ... (truncated)
-  ```
-- **[3] Should truncate localdatetime** (line 276)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:223:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalDateTime { nano
-  ... (truncated)
-  ```
-- **[3] Should truncate localdatetime** (line 277)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:223:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalDateTime { nano
-  ... (truncated)
-  ```
-- **[3] Should truncate localdatetime** (line 279)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:223:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalDateTime { nano
-  ... (truncated)
-  ```
-- **[3] Should truncate localdatetime** (line 281)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:223:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalDateTime { nano
-  ... (truncated)
-  ```
-- **[3] Should truncate localdatetime** (line 283)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:223:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalDateTime { nano
-  ... (truncated)
-  ```
 - **[3] Should truncate localdatetime** (line 284)
   ```
   Step failed:
@@ -7621,14 +6283,6 @@ Scenarios that were failing but are now passing:
       Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalDateTime { nano
   ... (truncated)
   ```
-- **[3] Should truncate localdatetime** (line 287)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:223:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalDateTime { nano
-  ... (truncated)
-  ```
 - **[3] Should truncate localdatetime** (line 288)
   ```
   Step failed:
@@ -7638,14 +6292,6 @@ Scenarios that were failing but are now passing:
   ... (truncated)
   ```
 - **[3] Should truncate localdatetime** (line 289)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:223:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalDateTime { nano
-  ... (truncated)
-  ```
-- **[3] Should truncate localdatetime** (line 291)
   ```
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal9.feature:223:5
@@ -7701,22 +6347,6 @@ Scenarios that were failing but are now passing:
       Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalDateTime { nano
   ... (truncated)
   ```
-- **[4] Should truncate localtime** (line 319)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:311:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalTime { nanos_si
-  ... (truncated)
-  ```
-- **[4] Should truncate localtime** (line 321)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:311:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalTime { nanos_si
-  ... (truncated)
-  ```
 - **[4] Should truncate localtime** (line 322)
   ```
   Step failed:
@@ -7726,22 +6356,6 @@ Scenarios that were failing but are now passing:
   ... (truncated)
   ```
 - **[4] Should truncate localtime** (line 323)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:311:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalTime { nanos_si
-  ... (truncated)
-  ```
-- **[4] Should truncate localtime** (line 325)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:311:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalTime { nanos_si
-  ... (truncated)
-  ```
-- **[4] Should truncate localtime** (line 327)
   ```
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal9.feature:311:5
@@ -7774,22 +6388,6 @@ Scenarios that were failing but are now passing:
   ... (truncated)
   ```
 - **[4] Should truncate localtime** (line 331)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:311:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalTime { nanos_si
-  ... (truncated)
-  ```
-- **[4] Should truncate localtime** (line 333)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:311:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalTime { nanos_si
-  ... (truncated)
-  ```
-- **[4] Should truncate localtime** (line 335)
   ```
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal9.feature:311:5
@@ -8858,7 +7456,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:851:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("time", Some(String("10:35:00"))), ("a", 
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 1. Actual values: [("time", Some(String("12:31:15"))), ("a", 
   ... (truncated)
   ```
 - **[35] Sort by a local time variable projected from a node property in ascending order** (line 861)
@@ -8866,7 +7464,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:851:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("a", Some(Node(Node { vid: Vid(0), labels
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 1. Actual values: [("time", Some(String("12:31:15"))), ("a", 
   ... (truncated)
   ```
 - **[35] Sort by a local time variable projected from a node property in ascending order** (line 862)
@@ -8874,7 +7472,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:851:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("time", Some(String("10:35:00"))), ("a", 
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 1. Actual values: [("a", Some(Node(Node { vid: Vid(4), labels
   ... (truncated)
   ```
 - **[36] Sort by a local time variable projected from a node property in descending order** (line 892)
@@ -8890,7 +7488,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:883:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 2. Actual values: [("a", Some(Node(Node { vid: Vid(3), labels
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 2. Actual values: [("time", Some(String("12:30:14.645876123")
   ... (truncated)
   ```
 - **[37] Sort by a time variable projected from a node property in ascending order** (line 923)
@@ -8954,7 +7552,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:977:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("datetime", Some(String("1970-01-01T00:00
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("a", Some(Node(Node { vid: Vid(2), labels
   ... (truncated)
   ```
 - **[40] Sort by a local date time variable projected from a node property in descending order** (line 1018)
@@ -9010,7 +7608,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:1072:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 2. Actual values: [("a", Some(Node(Node { vid: Vid(4), label
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 2. Actual values: [("datetime", Some(String("1980-12-11T12:3
   ... (truncated)
   ```
 - **[45] Sort order should be consistent with comparisons where comparisons are defined #Example: booleans** (line 1144)
