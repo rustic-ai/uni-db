@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2024-2026 Dragonscale Team
-// Rust guideline compliant
 
 //! Cypher-specific User Defined Functions (UDFs) for DataFusion.
 //!
@@ -2128,7 +2127,6 @@ impl ScalarUDFImpl for TypeRankUdf {
         }
 
         let arg = &args.args[0];
-        // println!("DEBUG: TypeRankUdf arg type: {:?}", arg.data_type());
         match arg {
             ColumnarValue::Scalar(s) => {
                 let rank = get_type_rank_scalar(s);
@@ -5195,10 +5193,6 @@ mod tests {
 
     // Note: Old CypherValue decode UDF tests removed - those UDFs no longer exist.
     // CypherValue operations now route through Cypher-semantic UDFs instead.
-
-    // ====================================================================
-    // _make_cypher_list UDF Tests
-    // ====================================================================
 
     // ====================================================================
     // _make_cypher_list UDF Tests

@@ -1134,9 +1134,6 @@ fn eval_time(args: &[Value]) -> Result<Value> {
     }
 }
 
-// NOTE: time_to_micros / micros_to_naive_time removed — use time_to_nanos / nanos_to_time
-// (defined below, near line 2123) which operate in nanosecond precision.
-
 fn eval_localtime(args: &[Value]) -> Result<Value> {
     if args.is_empty() {
         let now = chrono::Local::now().time();

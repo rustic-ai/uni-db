@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2024-2026 Dragonscale Team
-// Rust guideline compliant
 
 //! Hybrid physical planner for DataFusion integration.
 //!
@@ -1985,7 +1984,7 @@ impl HybridPhysicalPlanner {
     }
 
     /// Plan a shortest path computation.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     fn plan_shortest_path(
         &self,
         input: &LogicalPlan,
@@ -2027,45 +2026,9 @@ impl HybridPhysicalPlanner {
         let input_plan = self.plan_internal(input, all_properties)?;
         let schema = input_plan.schema();
 
-        // Check if any referenced columns are LargeBinary (schemaless CypherValue).
-        // If so, rewrite the filter to use json_get_* UDFs against _all_props.
-        let has_schemaless_cols = has_schemaless_property_columns(&schema);
-
-        if has_schemaless_cols {
-            // For schemaless CypherValue columns, always use physical compilation.
-            // This avoids logical planning coercion failures (e.g. LargeBinary vs Int64).
-            let ctx = self.translation_context_for_plan(input);
-            let session = self.session_ctx.read();
-            let state = session.state();
-            let compiler = crate::query::df_graph::expr_compiler::CypherPhysicalExprCompiler::new(
-                &state,
-                Some(&ctx),
-            )
-            .with_subquery_ctx(
-                self.graph_ctx.clone(),
-                self.schema.clone(),
-                self.session_ctx.clone(),
-                self.storage.clone(),
-                self.params.clone(),
-            );
-            let physical_predicate = compiler.compile(predicate, &schema)?;
-
-            if !optional_variables.is_empty() {
-                return Ok(Arc::new(OptionalFilterExec::new(
-                    input_plan,
-                    physical_predicate,
-                    optional_variables.clone(),
-                )));
-            }
-
-            return Ok(Arc::new(FilterExec::try_new(
-                physical_predicate,
-                input_plan,
-            )?));
-        }
-
+        // Use CypherPhysicalExprCompiler for all filters (handles both schema-typed
+        // and schemaless LargeBinary/CypherValue columns without coercion failures).
         let ctx = self.translation_context_for_plan(input);
-
         let session = self.session_ctx.read();
         let state = session.state();
         let compiler = crate::query::df_graph::expr_compiler::CypherPhysicalExprCompiler::new(
@@ -2082,9 +2045,6 @@ impl HybridPhysicalPlanner {
         let physical_predicate = compiler.compile(predicate, &schema)?;
 
         // For OPTIONAL MATCH: use OptionalFilterExec for proper NULL row preservation.
-        // Reuse the already-compiled physical_predicate (from CypherPhysicalExprCompiler)
-        // instead of re-creating via cypher_expr_to_df, which cannot handle quantifiers
-        // and other custom expressions.
         if !optional_variables.is_empty() {
             return Ok(Arc::new(OptionalFilterExec::new(
                 input_plan,
@@ -3649,15 +3609,6 @@ fn convert_direction(ast_dir: AstDirection) -> Direction {
     }
 }
 
-/// Return true when the schema contains CypherValue-encoded property columns.
-fn has_schemaless_property_columns(schema: &SchemaRef) -> bool {
-    schema.fields().iter().any(|f| {
-        f.data_type() == &arrow::datatypes::DataType::LargeBinary
-            && f.name().contains('.')
-            && !f.name().ends_with("._all_props")
-    })
-}
-
 /// Clean VLP target property list derived from planner property collection.
 ///
 /// Removes the wildcard sentinel `"*"` (not a real property), and ensures
@@ -3689,8 +3640,6 @@ fn sanitize_vlp_target_properties(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arrow_schema::{DataType, Field, Schema};
-    use std::sync::Arc;
 
     #[test]
     fn test_convert_direction() {
@@ -3706,23 +3655,6 @@ mod tests {
             convert_direction(AstDirection::Both),
             Direction::Both
         ));
-    }
-
-    #[test]
-    fn test_has_schemaless_property_columns() {
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("n._vid", DataType::UInt64, false),
-            Field::new("n.name", DataType::LargeBinary, true),
-            Field::new("n._all_props", DataType::LargeBinary, true),
-        ]));
-        assert!(has_schemaless_property_columns(&schema));
-
-        let schema_no_props = Arc::new(Schema::new(vec![
-            Field::new("n._vid", DataType::UInt64, false),
-            Field::new("n._all_props", DataType::LargeBinary, true),
-            Field::new("blob", DataType::LargeBinary, true),
-        ]));
-        assert!(!has_schemaless_property_columns(&schema_no_props));
     }
 
     #[test]

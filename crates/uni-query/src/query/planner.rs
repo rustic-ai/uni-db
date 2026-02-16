@@ -1667,7 +1667,6 @@ pub struct QueryPlanner {
 struct TraverseParams<'a> {
     rel: &'a RelationshipPattern,
     target_node: &'a NodePattern,
-    _source_part: &'a PatternElement,
     optional: bool,
     path_variable: Option<String>,
     /// All variables from this OPTIONAL MATCH pattern.
@@ -2815,8 +2814,6 @@ impl QueryPlanner {
         }
     }
 
-    // plan_foreach_body removed
-
     /// Plan a MATCH clause, handling both shortestPath and regular patterns.
     fn plan_match_clause(
         &self,
@@ -3028,10 +3025,6 @@ impl QueryPlanner {
 
         Ok(sp_plan)
     }
-    // plan_all_shortest_paths removed (merged into plan_shortest_path)
-
-    // plan_quantified_pattern removed (not yet supported in new AST)
-
     /// Plan a regular MATCH path (not shortestPath).
     fn plan_path(
         &self,
@@ -3225,7 +3218,6 @@ impl QueryPlanner {
                                         TraverseParams {
                                             rel: r,
                                             target_node: n_target,
-                                            _source_part: element,
                                             optional,
                                             path_variable: traverse_path_var,
                                             optional_pattern_vars: optional_pattern_vars.clone(),
@@ -3334,7 +3326,6 @@ impl QueryPlanner {
                         TraverseParams {
                             rel: &relationship,
                             target_node,
-                            _source_part: element,
                             optional,
                             path_variable: path_variable.clone(),
                             optional_pattern_vars: optional_pattern_vars.clone(),
@@ -3434,7 +3425,7 @@ impl QueryPlanner {
         if target_variable.is_empty() {
             target_variable = self.next_anon_var();
         }
-        let _target_is_bound =
+        let target_is_bound =
             !target_variable.is_empty() && is_var_in_scope(vars_in_scope, &target_variable);
 
         // Check for VariableTypeConflict: relationship variable used as node
@@ -3497,7 +3488,7 @@ impl QueryPlanner {
 
         // Check for VariableTypeConflict: target node variable already bound as non-Node
         // e.g., ()-[r]-()-[]-(r) where r was added as Edge, now used as target node
-        if _target_is_bound
+        if target_is_bound
             && let Some(info) = find_var_in_scope(vars_in_scope, &target_variable)
             && !info.var_type.is_compatible_with(VariableType::Node)
         {
@@ -3514,11 +3505,8 @@ impl QueryPlanner {
         if !unknown_types.is_empty() && edge_type_ids.is_empty() {
             // All types are unknown - use schemaless traversal
 
-            // Check if this is a variable-length pattern (has range specifier like *1..3)
-            let _is_variable_length = params.rel.range.is_some();
+            let is_variable_length = params.rel.range.is_some();
 
-            // For VLP patterns, default min to 1 and max to a reasonable limit.
-            // For single-hop patterns (no range), both are 1.
             const DEFAULT_MAX_HOPS: usize = 100;
             let (min_hops, max_hops) = if let Some(range) = &params.rel.range {
                 let min = range.min.unwrap_or(1) as usize;
@@ -3551,14 +3539,14 @@ impl QueryPlanner {
                     &params.target_node.properties,
                 ),
                 path_variable: path_var.clone(),
-                is_variable_length: _is_variable_length,
+                is_variable_length,
                 optional_pattern_vars: params.optional_pattern_vars.clone(),
             };
 
             // Only apply bound target filter for Imported variables (from outer scope/subquery).
             // For regular cycle patterns like (a)-[:T]->(b)-[:T]->(a), the bound check
             // uses Parameter which requires the value to be in params (subquery context).
-            if _target_is_bound
+            if target_is_bound
                 && let Some(info) = find_var_in_scope(vars_in_scope, &target_variable)
                 && info.var_type == VariableType::Imported
             {
@@ -3594,7 +3582,7 @@ impl QueryPlanner {
             // Use first label for target_label_id
             // For schemaless support, allow unknown target labels
             self.schema.get_label_case_insensitive(label_name)
-        } else if !_target_is_bound {
+        } else if !target_is_bound {
             // Infer from edge type(s)
             let unique_dsts: Vec<_> = dst_labels
                 .into_iter()
@@ -3628,19 +3616,10 @@ impl QueryPlanner {
             (1, 1)
         };
 
-        // For variable-length paths:
-        // - path_var is the named path variable (p in `p = (a)-[r*]->(b)`)
-        // - step_var (relationship variable) is not used for VLP in the current implementation
-        //   (relationship variable binding would require additional output column)
-        //
-        // For single-hop paths:
-        // - step_var is the relationship variable (r in `()-[r]->()`)
-        // - path_var is the named path variable (p in `p = ...`)
-        // For both single-hop and variable-length paths:
-        // - step_var is the relationship variable (r in `()-[r]->()` or `()-[r*]->()`)
+        // step_var is the relationship variable (r in `()-[r]->()` or `()-[r*]->()`)
         //   Single-hop: step_var holds a single edge object
         //   VLP: step_var holds a list of edge objects
-        // - path_var is the named path variable (p in `p = (a)-[r*]->(b)`)
+        // path_var is the named path variable (p in `p = (a)-[r*]->(b)`)
         let step_var = params.rel.variable.clone();
         let path_var = params.path_variable.clone();
 
@@ -3717,7 +3696,7 @@ impl QueryPlanner {
         // Only apply bound target filter for Imported variables (from outer scope/subquery).
         // For regular cycle patterns like (a)-[:T]->(b)-[:T]->(a), the bound check
         // uses Parameter which requires the value to be in params (subquery context).
-        if _target_is_bound
+        if target_is_bound
             && let Some(info) = find_var_in_scope(vars_in_scope, &target_variable)
             && info.var_type == VariableType::Imported
         {
@@ -3943,29 +3922,6 @@ impl QueryPlanner {
         }
     }
 
-    /// Plan a traverse (edge traversal between nodes).
-    fn _plan_traverse(
-        &self,
-        plan: LogicalPlan,
-        vars_in_scope: &mut Vec<VariableInfo>,
-        params: TraverseParams<'_>,
-    ) -> Result<LogicalPlan> {
-        let source_variable = match params._source_part {
-            PatternElement::Node(n) => n.variable.clone().unwrap_or_default(),
-            _ => return Err(anyhow!("Source part must be a node")),
-        };
-        // For callers outside plan_match_clause, no previous clause variables
-        let vars_before_pattern = vars_in_scope.len();
-        let (new_plan, _) = self.plan_traverse_with_source(
-            plan,
-            vars_in_scope,
-            params,
-            &source_variable,
-            vars_before_pattern,
-        )?;
-        Ok(new_plan)
-    }
-
     /// Plan a WHERE clause with vector_similarity extraction and predicate pushdown.
     ///
     /// When `optional_vars` is non-empty, the Filter will preserve rows where
@@ -4090,7 +4046,6 @@ impl QueryPlanner {
         plan: &LogicalPlan,
         vars_in_scope: &[VariableInfo],
     ) -> Result<Expr> {
-        // ... (unchanged)
         let mut rewritten = predicate.clone();
 
         for var in vars_in_scope {
@@ -4123,7 +4078,6 @@ impl QueryPlanner {
         Ok(rewritten)
     }
 
-    // ... (replace_expression unchanged) ...
     fn replace_expression(expr: Expr, schema_expr: &Expr, query_var: &str, gen_col: &str) -> Expr {
         // First, normalize schema_expr to use query_var
         let schema_var = schema_expr.extract_variable();

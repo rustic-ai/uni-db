@@ -434,8 +434,7 @@ fn eval_add(left: &Value, right: &Value) -> Result<Value> {
     // temporal string + integer microseconds
     if let Value::String(_) = left
         && right.is_number()
-        && !matches!(classify_value_temporal(left), Some(TemporalType::Duration))
-        && classify_value_temporal(left).is_some()
+        && classify_value_temporal(left).is_some_and(|t| t != TemporalType::Duration)
     {
         let dur = parse_duration_from_value(right)?;
         return add_temporal_duration_to_value(left, &dur);
@@ -443,8 +442,7 @@ fn eval_add(left: &Value, right: &Value) -> Result<Value> {
     // integer microseconds + temporal string
     if let Value::String(_) = right
         && left.is_number()
-        && !matches!(classify_value_temporal(right), Some(TemporalType::Duration))
-        && classify_value_temporal(right).is_some()
+        && classify_value_temporal(right).is_some_and(|t| t != TemporalType::Duration)
     {
         let dur = parse_duration_from_value(left)?;
         return add_temporal_duration_to_value(right, &dur);
@@ -1352,11 +1350,6 @@ fn eval_lpad(args: &[Value]) -> Result<Value> {
     } else {
         let pad_chars: Vec<char> = pad_str.chars().collect();
         if pad_chars.is_empty() {
-            // If pad string is empty, we can't pad. Return truncated or original?
-            // Postgres returns original string if pad is empty? No, it probably does nothing or errors.
-            // Let's assume standard behavior: return original if len > s.len but pad is empty?
-            // Actually, if pad is empty, we can't reach target length.
-            // Return original string?
             return Ok(Value::String(s.clone()));
         }
         let needed = len - s_chars.len();
