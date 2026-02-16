@@ -8,9 +8,7 @@
 
 use anyhow::{Result, anyhow};
 use std::cmp::Ordering;
-use uni_common::Value;
-
-use uni_common::TemporalValue;
+use uni_common::{TemporalValue, Value};
 
 use crate::query::datetime::{
     CypherDuration, TemporalType, add_cypher_duration_to_date, add_cypher_duration_to_datetime,
@@ -548,23 +546,13 @@ fn eval_mul(left: &Value, right: &Value) -> Result<Value> {
     if let Value::Temporal(TemporalValue::Duration { months, days, nanos }) = left
         && let Some(factor) = right.as_f64()
     {
-        let dur = CypherDuration::new(*months, *days, *nanos).multiply(factor);
-        return Ok(Value::Temporal(TemporalValue::Duration {
-            months: dur.months,
-            days: dur.days,
-            nanos: dur.nanos,
-        }));
+        return Ok(CypherDuration::new(*months, *days, *nanos).multiply(factor).to_temporal_value());
     }
     // number * Value::Temporal duration
     if let Value::Temporal(TemporalValue::Duration { months, days, nanos }) = right
         && let Some(factor) = left.as_f64()
     {
-        let dur = CypherDuration::new(*months, *days, *nanos).multiply(factor);
-        return Ok(Value::Temporal(TemporalValue::Duration {
-            months: dur.months,
-            days: dur.days,
-            nanos: dur.nanos,
-        }));
+        return Ok(CypherDuration::new(*months, *days, *nanos).multiply(factor).to_temporal_value());
     }
 
     // String duration * number (backward compat)
@@ -596,12 +584,7 @@ fn eval_div(left: &Value, right: &Value) -> Result<Value> {
     if let Value::Temporal(TemporalValue::Duration { months, days, nanos }) = left
         && let Some(divisor) = right.as_f64()
     {
-        let dur = CypherDuration::new(*months, *days, *nanos).divide(divisor);
-        return Ok(Value::Temporal(TemporalValue::Duration {
-            months: dur.months,
-            days: dur.days,
-            nanos: dur.nanos,
-        }));
+        return Ok(CypherDuration::new(*months, *days, *nanos).divide(divisor).to_temporal_value());
     }
 
     // String duration / number (backward compat)

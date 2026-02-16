@@ -711,7 +711,6 @@ pub(crate) fn arrow_to_json_value(array: &dyn Array, row: usize) -> Value {
 mod tests {
     use super::*;
     use arrow_array::{LargeBinaryArray, UInt64Array};
-    use std::collections::HashMap;
     use uni_cypher::ast::CypherLiteral;
 
     #[test]

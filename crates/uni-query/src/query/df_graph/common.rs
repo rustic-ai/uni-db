@@ -353,15 +353,11 @@ pub fn append_node_to_struct(
     let labels_builder = struct_builder
         .field_builder::<ListBuilder<StringBuilder>>(1)
         .unwrap();
-    if labels.is_empty() {
-        labels_builder.append(true); // empty list
-    } else {
-        let values = labels_builder.values();
-        for lbl in &labels {
-            values.append_value(lbl);
-        }
-        labels_builder.append(true);
+    let values = labels_builder.values();
+    for lbl in &labels {
+        values.append_value(lbl);
     }
+    labels_builder.append(true);
     let props_builder = struct_builder
         .field_builder::<LargeBinaryBuilder>(2)
         .unwrap();
@@ -569,39 +565,33 @@ pub fn typed_large_list_to_cv_array(
                 }
 
                 let mut map = serde_json::Map::new();
-                if let DataType::Struct(fields) = typed.data_type() {
-                    for (field_idx, field) in fields.iter().enumerate() {
-                        let col = typed.column(field_idx);
-                        let value = if col.is_null(idx) {
-                            serde_json::Value::Null
-                        } else if let Some(arr) = col.as_any().downcast_ref::<UInt64Array>() {
-                            serde_json::Value::Number(serde_json::Number::from(arr.value(idx)))
-                        } else if let Some(arr) = col.as_any().downcast_ref::<Int64Array>() {
-                            serde_json::Value::Number(serde_json::Number::from(arr.value(idx)))
-                        } else if let Some(arr) = col.as_any().downcast_ref::<Float64Array>() {
-                            serde_json::Number::from_f64(arr.value(idx))
-                                .map(serde_json::Value::Number)
-                                .unwrap_or(serde_json::Value::Null)
-                        } else if let Some(arr) = col.as_any().downcast_ref::<StringArray>() {
-                            serde_json::Value::String(arr.value(idx).to_string())
-                        } else if let Some(arr) = col.as_any().downcast_ref::<BooleanArray>() {
-                            serde_json::Value::Bool(arr.value(idx))
-                        } else if let Some(arr) =
-                            col.as_any().downcast_ref::<arrow_array::LargeBinaryArray>()
-                        {
-                            let bytes = arr.value(idx);
-                            match uni_common::cypher_value_codec::decode(bytes) {
-                                Ok(v) => {
-                                    let json_val: serde_json::Value = v.into();
-                                    json_val
-                                }
-                                Err(_) => serde_json::Value::Null,
-                            }
-                        } else {
-                            serde_json::Value::Null
-                        };
-                        map.insert(field.name().clone(), value);
-                    }
+                for (field_idx, field) in typed.fields().iter().enumerate() {
+                    let col = typed.column(field_idx);
+                    let value = if col.is_null(idx) {
+                        serde_json::Value::Null
+                    } else if let Some(arr) = col.as_any().downcast_ref::<UInt64Array>() {
+                        serde_json::Value::Number(serde_json::Number::from(arr.value(idx)))
+                    } else if let Some(arr) = col.as_any().downcast_ref::<Int64Array>() {
+                        serde_json::Value::Number(serde_json::Number::from(arr.value(idx)))
+                    } else if let Some(arr) = col.as_any().downcast_ref::<Float64Array>() {
+                        serde_json::Number::from_f64(arr.value(idx))
+                            .map(serde_json::Value::Number)
+                            .unwrap_or(serde_json::Value::Null)
+                    } else if let Some(arr) = col.as_any().downcast_ref::<StringArray>() {
+                        serde_json::Value::String(arr.value(idx).to_string())
+                    } else if let Some(arr) = col.as_any().downcast_ref::<BooleanArray>() {
+                        serde_json::Value::Bool(arr.value(idx))
+                    } else if let Some(arr) =
+                        col.as_any().downcast_ref::<arrow_array::LargeBinaryArray>()
+                    {
+                        match uni_common::cypher_value_codec::decode(arr.value(idx)) {
+                            Ok(v) => v.into(),
+                            Err(_) => serde_json::Value::Null,
+                        }
+                    } else {
+                        serde_json::Value::Null
+                    };
+                    map.insert(field.name().clone(), value);
                 }
                 serde_json::Value::Object(map)
             })
@@ -772,15 +762,9 @@ pub fn cv_array_to_large_list(
             let mut builder = datafusion::arrow::array::builder::LargeBinaryBuilder::new();
             for elems in &all_elements {
                 for elem in elems {
-                    let elem_str = serde_json::to_string(elem).unwrap_or_default();
-                    match serde_json::from_str::<serde_json::Value>(&elem_str) {
-                        Ok(json_val) => {
-                            let uni_val: uni_common::Value = json_val.into();
-                            let bytes = uni_common::cypher_value_codec::encode(&uni_val);
-                            builder.append_value(&bytes);
-                        }
-                        Err(_) => builder.append_null(),
-                    }
+                    let uni_val: uni_common::Value = elem.clone().into();
+                    let bytes = uni_common::cypher_value_codec::encode(&uni_val);
+                    builder.append_value(&bytes);
                 }
                 offsets.push(offsets.last().unwrap() + elems.len() as i64);
             }

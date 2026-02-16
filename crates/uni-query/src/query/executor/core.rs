@@ -29,11 +29,6 @@ pub(crate) enum Accumulator {
     PercentileCont { values: Vec<f64>, percentile: f64 },
 }
 
-/// Extract a numeric value from a Value as f64.
-fn as_numeric(val: &Value) -> Option<f64> {
-    val.as_f64()
-}
-
 /// Convert f64 to Value, preserving integer representation when possible.
 fn numeric_to_value(val: f64) -> Value {
     if val.fract() == 0.0 && val >= i64::MIN as f64 && val <= i64::MAX as f64 {
@@ -103,7 +98,7 @@ impl Accumulator {
                 }
             }
             Accumulator::Sum(s) => {
-                if let Some(n) = as_numeric(val) {
+                if let Some(n) = val.as_f64() {
                     *s += n;
                 }
             }
@@ -136,7 +131,7 @@ impl Accumulator {
                 }
             }
             Accumulator::Avg { sum, count } => {
-                if let Some(n) = as_numeric(val) {
+                if let Some(n) = val.as_f64() {
                     *sum += n;
                     *count += 1;
                 }
@@ -153,7 +148,7 @@ impl Accumulator {
             }
             Accumulator::PercentileDisc { values, .. }
             | Accumulator::PercentileCont { values, .. } => {
-                if let Some(n) = as_numeric(val) {
+                if let Some(n) = val.as_f64() {
                     values.push(n);
                 }
             }

@@ -318,7 +318,7 @@ pub fn is_date_value(val: &Value) -> bool {
 pub fn is_duration_value(val: &Value) -> bool {
     match val {
         Value::Temporal(TemporalValue::Duration { .. }) => true,
-        Value::String(s) => s.starts_with('P') || s.starts_with('p'),
+        Value::String(s) => is_duration_string(s),
         _ => false,
     }
 }
@@ -1918,15 +1918,6 @@ pub struct CypherDuration {
     pub nanos: i64,
 }
 
-/// Convert a CypherDuration to a Value::Temporal(TemporalValue::Duration).
-fn cypher_duration_to_temporal(dur: &CypherDuration) -> Value {
-    Value::Temporal(TemporalValue::Duration {
-        months: dur.months,
-        days: dur.days,
-        nanos: dur.nanos,
-    })
-}
-
 impl CypherDuration {
     pub fn new(months: i64, days: i64, nanos: i64) -> Self {
         Self {
@@ -1934,6 +1925,15 @@ impl CypherDuration {
             days,
             nanos,
         }
+    }
+
+    /// Convert this duration to a `Value::Temporal(TemporalValue::Duration)`.
+    pub fn to_temporal_value(&self) -> Value {
+        Value::Temporal(TemporalValue::Duration {
+            months: self.months,
+            days: self.days,
+            nanos: self.nanos,
+        })
     }
 
     /// Create from total microseconds (loses calendar semantics).
@@ -2942,7 +2942,7 @@ fn eval_duration_between(args: &[Value]) -> Result<Value> {
         let remaining_days =
             remaining_days_after_months(&start.local_date, &end.local_date, months);
         let dur = CypherDuration::new(months, remaining_days, 0);
-        return Ok(cypher_duration_to_temporal(&dur));
+        return Ok(dur.to_temporal_value());
     }
 
     // Both have date and time: calendar months + remaining time as nanos (no days).
@@ -2975,7 +2975,7 @@ fn eval_duration_between(args: &[Value]) -> Result<Value> {
             .unwrap_or(0);
 
         let dur = CypherDuration::new(months, 0, remaining_nanos);
-        return Ok(cypher_duration_to_temporal(&dur));
+        return Ok(dur.to_temporal_value());
     }
 
     // One has date+time, other is date-only: months + days + remaining time.
@@ -3007,7 +3007,7 @@ fn eval_duration_between(args: &[Value]) -> Result<Value> {
             remaining.num_nanoseconds().unwrap_or(0) - remaining_days * 86_400_000_000_000;
 
         let dur = CypherDuration::new(months, remaining_days, remaining_nanos);
-        return Ok(cypher_duration_to_temporal(&dur));
+        return Ok(dur.to_temporal_value());
     }
 
     // Cross-type: one has date, other is time-only, or both time-only.
@@ -3029,7 +3029,7 @@ fn eval_duration_between(args: &[Value]) -> Result<Value> {
     let nanos_diff = end_nanos - start_nanos;
 
     let dur = CypherDuration::new(0, 0, nanos_diff);
-    Ok(cypher_duration_to_temporal(&dur))
+    Ok(dur.to_temporal_value())
 }
 
 /// Check if a temporal type has a date component.
@@ -3093,7 +3093,7 @@ fn eval_duration_in_months(args: &[Value]) -> Result<Value> {
             }
         }
         let dur = CypherDuration::new(months, 0, 0);
-        Ok(cypher_duration_to_temporal(&dur))
+        Ok(dur.to_temporal_value())
     } else {
         Ok(Value::Temporal(TemporalValue::Duration { months: 0, days: 0, nanos: 0 }))
     }
@@ -3128,7 +3128,7 @@ fn eval_duration_in_days(args: &[Value]) -> Result<Value> {
             .ok_or_else(|| anyhow!("Duration overflow in inDays"))?;
         let days = total_nanos / 86_400_000_000_000;
         let dur = CypherDuration::new(0, days, 0);
-        Ok(cypher_duration_to_temporal(&dur))
+        Ok(dur.to_temporal_value())
     } else {
         Ok(Value::Temporal(TemporalValue::Duration { months: 0, days: 0, nanos: 0 }))
     }
@@ -3234,7 +3234,7 @@ fn eval_duration_in_seconds(args: &[Value]) -> Result<Value> {
                 .num_nanoseconds()
                 .ok_or_else(|| anyhow!("Duration overflow in inSeconds"))?;
             let dur = CypherDuration::new(0, 0, total_nanos);
-            return Ok(cypher_duration_to_temporal(&dur));
+            return Ok(dur.to_temporal_value());
         }
 
         // No named timezone: simple time difference.
@@ -3251,7 +3251,7 @@ fn eval_duration_in_seconds(args: &[Value]) -> Result<Value> {
         let s_nanos = time_to_nanos(&s_time);
         let e_nanos = time_to_nanos(&e_time);
         let dur = CypherDuration::new(0, 0, e_nanos - s_nanos);
-        return Ok(cypher_duration_to_temporal(&dur));
+        return Ok(dur.to_temporal_value());
     }
 
     // Both have date: use full datetime difference.
@@ -3263,7 +3263,7 @@ fn eval_duration_in_seconds(args: &[Value]) -> Result<Value> {
         .ok_or_else(|| anyhow!("Duration overflow in inSeconds"))?;
 
     let dur = CypherDuration::new(0, 0, total_nanos);
-    Ok(cypher_duration_to_temporal(&dur))
+    Ok(dur.to_temporal_value())
 }
 
 /// Parsed temporal value with local and UTC-normalized components.

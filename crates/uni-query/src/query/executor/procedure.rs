@@ -36,7 +36,7 @@ pub enum ProcedureValueType {
 #[derive(Debug, Clone)]
 pub struct ProcedureParam {
     /// Parameter name as declared in the procedure signature.
-    pub name: std::string::String,
+    pub name: String,
     /// Expected type for this parameter.
     pub param_type: ProcedureValueType,
 }
@@ -45,7 +45,7 @@ pub struct ProcedureParam {
 #[derive(Debug, Clone)]
 pub struct ProcedureOutput {
     /// Output column name as declared in the procedure signature.
-    pub name: std::string::String,
+    pub name: String,
     /// Type of the output column.
     pub output_type: ProcedureValueType,
 }
@@ -57,13 +57,13 @@ pub struct ProcedureOutput {
 #[derive(Debug, Clone)]
 pub struct RegisteredProcedure {
     /// Fully qualified procedure name (e.g. `test.my.proc`).
-    pub name: std::string::String,
+    pub name: String,
     /// Declared input parameters.
     pub params: Vec<ProcedureParam>,
     /// Declared output columns.
     pub outputs: Vec<ProcedureOutput>,
     /// Mock data rows keyed by column name.
-    pub data: Vec<HashMap<std::string::String, Value>>,
+    pub data: Vec<HashMap<String, Value>>,
 }
 
 /// Thread-safe registry of test procedures.
@@ -72,7 +72,7 @@ pub struct RegisteredProcedure {
 /// step definitions) and looked up by the executor at runtime.
 #[derive(Debug, Default)]
 pub struct ProcedureRegistry {
-    procedures: std::sync::RwLock<HashMap<std::string::String, RegisteredProcedure>>,
+    procedures: std::sync::RwLock<HashMap<String, RegisteredProcedure>>,
 }
 
 impl ProcedureRegistry {
@@ -153,13 +153,10 @@ fn filter_yield_items(
 /// Reciprocal Rank Fusion (RRF) for combining search results.
 /// RRF score = sum(1 / (k + rank)) for each result list.
 fn fuse_rrf(
-    vec_results: &[(uni_common::core::id::Vid, f32)],
-    fts_results: &[(uni_common::core::id::Vid, f32)],
+    vec_results: &[(Vid, f32)],
+    fts_results: &[(Vid, f32)],
     k: usize,
-) -> Vec<(uni_common::core::id::Vid, f32)> {
-    use std::collections::HashMap;
-    use uni_common::core::id::Vid;
-
+) -> Vec<(Vid, f32)> {
     let mut scores: HashMap<Vid, f32> = HashMap::new();
 
     // Add RRF scores from vector results
@@ -184,13 +181,10 @@ fn fuse_rrf(
 /// Weighted fusion: alpha * vec_score + (1 - alpha) * fts_score
 /// Both score sets should be normalized to [0, 1] range.
 fn fuse_weighted(
-    vec_results: &[(uni_common::core::id::Vid, f32)],
-    fts_results: &[(uni_common::core::id::Vid, f32)],
+    vec_results: &[(Vid, f32)],
+    fts_results: &[(Vid, f32)],
     alpha: f32,
-) -> Vec<(uni_common::core::id::Vid, f32)> {
-    use std::collections::HashMap;
-    use uni_common::core::id::Vid;
-
+) -> Vec<(Vid, f32)> {
     // Normalize vector scores (distance -> similarity)
     let vec_max = vec_results.iter().map(|(_, s)| *s).fold(f32::MIN, f32::max);
     let vec_min = vec_results.iter().map(|(_, s)| *s).fold(f32::MAX, f32::min);
