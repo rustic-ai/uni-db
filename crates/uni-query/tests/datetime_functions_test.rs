@@ -19,14 +19,14 @@ fn test_date_function() {
 
 #[test]
 fn test_time_function() {
-    // Cypher time() always includes timezone (defaults to +00:00 when unspecified).
-    // TemporalValue::Time Display always includes seconds.
+    // Cypher time() always includes timezone (defaults to Z when unspecified).
+    // TemporalValue::Time Display omits :SS when seconds and nanos are zero.
     let res = eval_scalar_function("TIME", &[unival!("10:30:00")]).unwrap();
-    assert_eq!(res.to_string(), "10:30:00+00:00");
+    assert_eq!(res.to_string(), "10:30Z");
 
     // Time with non-zero seconds includes seconds and timezone.
     let res = eval_scalar_function("TIME", &[unival!("10:30:45")]).unwrap();
-    assert_eq!(res.to_string(), "10:30:45+00:00");
+    assert_eq!(res.to_string(), "10:30:45Z");
 
     // Time with explicit timezone preserves it.
     let res = eval_scalar_function("TIME", &[unival!("10:30:45+01:00")]).unwrap();
@@ -36,13 +36,13 @@ fn test_time_function() {
 #[test]
 fn test_datetime_function() {
     // Standard Cypher datetime uses T separator (not space).
-    // TemporalValue::DateTime Display always includes seconds.
+    // TemporalValue::DateTime Display omits :SS when seconds and nanos are zero.
     let res = eval_scalar_function("DATETIME", &[unival!("2023-01-15T10:30:00Z")]).unwrap();
-    assert_eq!(res.to_string(), "2023-01-15T10:30:00Z");
+    assert_eq!(res.to_string(), "2023-01-15T10:30Z");
 
     // Datetime with explicit timezone.
     let res = eval_scalar_function("DATETIME", &[unival!("2023-01-15T10:30:00+05:00")]).unwrap();
-    assert_eq!(res.to_string(), "2023-01-15T10:30:00+05:00");
+    assert_eq!(res.to_string(), "2023-01-15T10:30+05:00");
 }
 
 #[test]
@@ -100,12 +100,12 @@ fn test_localdatetime_function() {
     let s = res.to_string();
     // Should contain T separator in display
     assert!(s.contains("T"), "Expected format with T separator");
-    assert!(s.len() >= 19, "Expected at least YYYY-MM-DDTHH:MM:SS");
+    assert!(s.len() >= 16, "Expected at least YYYY-MM-DDTHH:MM");
 
     // Should work with string argument too
-    // TemporalValue::LocalDateTime Display always includes seconds
+    // TemporalValue::LocalDateTime Display omits :SS when seconds and nanos are zero
     let res = eval_scalar_function("LOCALDATETIME", &[unival!("2023-01-15T10:30:00")]).unwrap();
-    assert_eq!(res.to_string(), "2023-01-15T10:30:00");
+    assert_eq!(res.to_string(), "2023-01-15T10:30");
 }
 
 #[test]
@@ -113,12 +113,12 @@ fn test_localtime_function() {
     // localtime() returns current local time as TemporalValue::LocalTime
     let res = eval_scalar_function("LOCALTIME", &[]).unwrap();
     let s = res.to_string();
-    // Should be in format HH:MM:SS (always includes seconds)
+    // Should be in format HH:MM or HH:MM:SS
     assert!(s.contains(":"), "Expected time format with colons");
-    assert!(s.len() >= 8, "Expected at least HH:MM:SS");
+    assert!(s.len() >= 5, "Expected at least HH:MM");
 
     // Should work with string argument too
-    // TemporalValue::LocalTime Display always includes seconds
+    // TemporalValue::LocalTime Display omits :SS when seconds and nanos are zero
     let res = eval_scalar_function("LOCALTIME", &[unival!("10:30:00")]).unwrap();
-    assert_eq!(res.to_string(), "10:30:00");
+    assert_eq!(res.to_string(), "10:30");
 }

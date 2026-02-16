@@ -395,7 +395,7 @@ mod data_type_tests {
 
         // Time values are stored as microseconds and converted back to time strings
         let first: String = result.rows()[0].get("n.time_val")?;
-        assert_eq!(first, "00:00:00");
+        assert_eq!(first, "00:00");
 
         let last: String = result.rows()[2].get("n.time_val")?;
         assert_eq!(last, "23:59:59");

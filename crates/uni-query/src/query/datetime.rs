@@ -3533,7 +3533,7 @@ mod tests {
             ("second", Value::Int(14)),
         ])])
         .unwrap();
-        assert_eq!(result.to_string(), "12:31:14+00:00");
+        assert_eq!(result.to_string(), "12:31:14Z");
     }
 
     #[test]
@@ -3571,7 +3571,7 @@ mod tests {
             ("week", Value::Int(1)),
         ])])
         .unwrap();
-        assert_eq!(result.to_string(), "1816-01-01T00:00:00");
+        assert_eq!(result.to_string(), "1816-01-01T00:00");
 
         // Week 52 of 1816
         let result = eval_localdatetime(&[map_val(vec![
@@ -3579,7 +3579,7 @@ mod tests {
             ("week", Value::Int(52)),
         ])])
         .unwrap();
-        assert_eq!(result.to_string(), "1816-12-23T00:00:00");
+        assert_eq!(result.to_string(), "1816-12-23T00:00");
 
         // Week 1 of 1817 (starts in 1816!)
         let result = eval_localdatetime(&[map_val(vec![
@@ -3587,7 +3587,7 @@ mod tests {
             ("week", Value::Int(1)),
         ])])
         .unwrap();
-        assert_eq!(result.to_string(), "1816-12-30T00:00:00");
+        assert_eq!(result.to_string(), "1816-12-30T00:00");
     }
 
     #[test]
@@ -3608,13 +3608,13 @@ mod tests {
     #[test]
     fn test_datetime_fromepoch() {
         let result = eval_datetime_fromepoch(&[Value::Int(0)]).unwrap();
-        assert_eq!(result.to_string(), "1970-01-01T00:00:00Z");
+        assert_eq!(result.to_string(), "1970-01-01T00:00Z");
     }
 
     #[test]
     fn test_datetime_fromepochmillis() {
         let result = eval_datetime_fromepochmillis(&[Value::Int(0)]).unwrap();
-        assert_eq!(result.to_string(), "1970-01-01T00:00:00Z");
+        assert_eq!(result.to_string(), "1970-01-01T00:00Z");
     }
 
     #[test]

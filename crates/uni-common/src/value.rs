@@ -358,29 +358,37 @@ fn format_offset(offset_seconds: i32) -> String {
     format_offset_numeric(offset_seconds)
 }
 
-/// Format offset always as `+HH:MM` (never as `Z`). Used for Time type per Cypher spec.
+/// Format offset always as `+HH:MM` or `+HH:MM:SS` (never as `Z`).
 fn format_offset_numeric(offset_seconds: i32) -> String {
     let sign = if offset_seconds >= 0 { '+' } else { '-' };
     let abs = offset_seconds.unsigned_abs();
     let h = abs / 3600;
     let m = (abs % 3600) / 60;
-    format!("{}{:02}:{:02}", sign, h, m)
+    let s = abs % 60;
+    if s != 0 {
+        format!("{}{:02}:{:02}:{:02}", sign, h, m, s)
+    } else {
+        format!("{}{:02}:{:02}", sign, h, m)
+    }
 }
 
-/// Format sub-second fractional part with adaptive precision (trim trailing zeros).
+/// Format sub-second fractional part, stripping all trailing zeros.
 fn format_fractional(nanos: u32) -> String {
     if nanos == 0 {
         return String::new();
     }
-    if nanos.is_multiple_of(1_000_000) {
-        // Millisecond precision
-        format!(".{:03}", nanos / 1_000_000)
-    } else if nanos.is_multiple_of(1_000) {
-        // Microsecond precision
-        format!(".{:06}", nanos / 1_000)
+    let s = format!("{:09}", nanos);
+    let trimmed = s.trim_end_matches('0');
+    format!(".{}", trimmed)
+}
+
+/// Format time as HH:MM[:SS[.n...]] — omit :SS when seconds and sub-seconds are zero.
+fn format_time_component(hour: u32, minute: u32, second: u32, nanos: u32) -> String {
+    if second == 0 && nanos == 0 {
+        format!("{:02}:{:02}", hour, minute)
     } else {
-        // Nanosecond precision
-        format!(".{:09}", nanos)
+        let frac = format_fractional(nanos);
+        format!("{:02}:{:02}:{:02}{}", hour, minute, second, frac)
     }
 }
 
@@ -397,15 +405,13 @@ impl fmt::Display for TemporalValue {
             } => {
                 let time = nanos_to_time(*nanos_since_midnight)
                     .unwrap_or_else(|| chrono::NaiveTime::from_hms_opt(0, 0, 0).unwrap());
-                let frac = format_fractional(time.nanosecond());
-                write!(
-                    f,
-                    "{:02}:{:02}:{:02}{}",
+                let time_str = format_time_component(
                     time.hour(),
                     time.minute(),
                     time.second(),
-                    frac
-                )
+                    time.nanosecond(),
+                );
+                write!(f, "{}", time_str)
             }
             TemporalValue::Time {
                 nanos_since_midnight,
@@ -413,34 +419,27 @@ impl fmt::Display for TemporalValue {
             } => {
                 let time = nanos_to_time(*nanos_since_midnight)
                     .unwrap_or_else(|| chrono::NaiveTime::from_hms_opt(0, 0, 0).unwrap());
-                let frac = format_fractional(time.nanosecond());
-                // Time type always uses numeric offset (+00:00), never Z
-                let tz = format_offset_numeric(*offset_seconds);
-                write!(
-                    f,
-                    "{:02}:{:02}:{:02}{}{}",
+                let time_str = format_time_component(
                     time.hour(),
                     time.minute(),
                     time.second(),
-                    frac,
-                    tz
-                )
+                    time.nanosecond(),
+                );
+                let tz = format_offset(*offset_seconds);
+                write!(f, "{}{}", time_str, tz)
             }
             TemporalValue::LocalDateTime {
                 nanos_since_epoch,
             } => {
                 let dt = chrono::DateTime::from_timestamp_nanos(*nanos_since_epoch);
                 let ndt = dt.naive_utc();
-                let frac = format_fractional(ndt.time().nanosecond());
-                write!(
-                    f,
-                    "{}T{:02}:{:02}:{:02}{}",
-                    ndt.date().format("%Y-%m-%d"),
+                let time_str = format_time_component(
                     ndt.time().hour(),
                     ndt.time().minute(),
                     ndt.time().second(),
-                    frac
-                )
+                    ndt.time().nanosecond(),
+                );
+                write!(f, "{}T{}", ndt.date().format("%Y-%m-%d"), time_str)
             }
             TemporalValue::DateTime {
                 nanos_since_epoch,
@@ -452,18 +451,14 @@ impl fmt::Display for TemporalValue {
                     nanos_since_epoch + (*offset_seconds as i64) * 1_000_000_000;
                 let dt = chrono::DateTime::from_timestamp_nanos(local_nanos);
                 let ndt = dt.naive_utc();
-                let frac = format_fractional(ndt.time().nanosecond());
-                let tz = format_offset(*offset_seconds);
-                write!(
-                    f,
-                    "{}T{:02}:{:02}:{:02}{}{}",
-                    ndt.date().format("%Y-%m-%d"),
+                let time_str = format_time_component(
                     ndt.time().hour(),
                     ndt.time().minute(),
                     ndt.time().second(),
-                    frac,
-                    tz
-                )?;
+                    ndt.time().nanosecond(),
+                );
+                let tz = format_offset(*offset_seconds);
+                write!(f, "{}T{}{}", ndt.date().format("%Y-%m-%d"), time_str, tz)?;
                 if let Some(name) = timezone_name {
                     write!(f, "[{}]", name)?;
                 }
@@ -1678,5 +1673,170 @@ mod tests {
 
         // They are NOT equal (different variants)
         assert_ne!(int_val, float_val);
+    }
+
+    #[test]
+    fn test_temporal_display_zero_seconds_omitted() {
+        // LocalTime: 12:00 (zero seconds omitted)
+        let lt = TemporalValue::LocalTime {
+            nanos_since_midnight: 12 * 3600 * 1_000_000_000,
+        };
+        assert_eq!(lt.to_string(), "12:00");
+
+        // LocalTime: 12:31:14 (non-zero seconds kept)
+        let lt2 = TemporalValue::LocalTime {
+            nanos_since_midnight: (12 * 3600 + 31 * 60 + 14) * 1_000_000_000,
+        };
+        assert_eq!(lt2.to_string(), "12:31:14");
+
+        // LocalTime: 00:00:00.5 (zero seconds but non-zero nanos — keep seconds)
+        let lt3 = TemporalValue::LocalTime {
+            nanos_since_midnight: 500_000_000,
+        };
+        assert_eq!(lt3.to_string(), "00:00:00.5");
+
+        // Time: 12:00Z (zero offset uses Z)
+        let t = TemporalValue::Time {
+            nanos_since_midnight: 12 * 3600 * 1_000_000_000,
+            offset_seconds: 0,
+        };
+        assert_eq!(t.to_string(), "12:00Z");
+
+        // Time: 12:31:14+01:00 (non-zero offset)
+        let t2 = TemporalValue::Time {
+            nanos_since_midnight: (12 * 3600 + 31 * 60 + 14) * 1_000_000_000,
+            offset_seconds: 3600,
+        };
+        assert_eq!(t2.to_string(), "12:31:14+01:00");
+
+        // LocalDateTime: 1984-10-11T12:31 (zero seconds omitted)
+        let epoch_nanos = chrono::NaiveDate::from_ymd_opt(1984, 10, 11)
+            .unwrap()
+            .and_hms_opt(12, 31, 0)
+            .unwrap()
+            .and_utc()
+            .timestamp_nanos_opt()
+            .unwrap();
+        let ldt = TemporalValue::LocalDateTime {
+            nanos_since_epoch: epoch_nanos,
+        };
+        assert_eq!(ldt.to_string(), "1984-10-11T12:31");
+
+        // DateTime: 1984-10-11T12:31+01:00 (zero seconds, with offset)
+        let utc_nanos = chrono::NaiveDate::from_ymd_opt(1984, 10, 11)
+            .unwrap()
+            .and_hms_opt(11, 31, 0)
+            .unwrap()
+            .and_utc()
+            .timestamp_nanos_opt()
+            .unwrap();
+        let dt = TemporalValue::DateTime {
+            nanos_since_epoch: utc_nanos,
+            offset_seconds: 3600,
+            timezone_name: None,
+        };
+        assert_eq!(dt.to_string(), "1984-10-11T12:31+01:00");
+
+        // DateTime: 2015-07-21T21:40:32.142+01:00 (non-zero seconds with fractional)
+        let utc_nanos2 = chrono::NaiveDate::from_ymd_opt(2015, 7, 21)
+            .unwrap()
+            .and_hms_nano_opt(20, 40, 32, 142_000_000)
+            .unwrap()
+            .and_utc()
+            .timestamp_nanos_opt()
+            .unwrap();
+        let dt2 = TemporalValue::DateTime {
+            nanos_since_epoch: utc_nanos2,
+            offset_seconds: 3600,
+            timezone_name: None,
+        };
+        assert_eq!(dt2.to_string(), "2015-07-21T21:40:32.142+01:00");
+
+        // DateTime: 1984-10-11T12:31Z (zero offset uses Z)
+        let utc_nanos3 = chrono::NaiveDate::from_ymd_opt(1984, 10, 11)
+            .unwrap()
+            .and_hms_opt(12, 31, 0)
+            .unwrap()
+            .and_utc()
+            .timestamp_nanos_opt()
+            .unwrap();
+        let dt3 = TemporalValue::DateTime {
+            nanos_since_epoch: utc_nanos3,
+            offset_seconds: 0,
+            timezone_name: None,
+        };
+        assert_eq!(dt3.to_string(), "1984-10-11T12:31Z");
+    }
+
+    #[test]
+    fn test_temporal_display_fractional_trailing_zeros_stripped() {
+        // Full stripping: .9 not .900
+        let d = TemporalValue::Duration {
+            months: 0,
+            days: 0,
+            nanos: 900_000_000,
+        };
+        assert_eq!(d.to_string(), "PT0.9S");
+
+        // Full stripping: .4 not .400
+        let d2 = TemporalValue::Duration {
+            months: 0,
+            days: 0,
+            nanos: 400_000_000,
+        };
+        assert_eq!(d2.to_string(), "PT0.4S");
+
+        // Millisecond precision preserved: .142
+        let d3 = TemporalValue::Duration {
+            months: 0,
+            days: 0,
+            nanos: 142_000_000,
+        };
+        assert_eq!(d3.to_string(), "PT0.142S");
+
+        // Nanosecond precision: .000000001
+        let d4 = TemporalValue::Duration {
+            months: 0,
+            days: 0,
+            nanos: 1,
+        };
+        assert_eq!(d4.to_string(), "PT0.000000001S");
+    }
+
+    #[test]
+    fn test_temporal_display_offset_second_precision() {
+        // Offset with seconds: +02:05:59
+        let t = TemporalValue::Time {
+            nanos_since_midnight: 12 * 3600 * 1_000_000_000,
+            offset_seconds: 2 * 3600 + 5 * 60 + 59,
+        };
+        assert_eq!(t.to_string(), "12:00+02:05:59");
+
+        // Negative offset with seconds: -02:05:07
+        let t2 = TemporalValue::Time {
+            nanos_since_midnight: 12 * 3600 * 1_000_000_000,
+            offset_seconds: -(2 * 3600 + 5 * 60 + 7),
+        };
+        assert_eq!(t2.to_string(), "12:00-02:05:07");
+    }
+
+    #[test]
+    fn test_temporal_display_datetime_with_timezone_name() {
+        let utc_nanos = chrono::NaiveDate::from_ymd_opt(1984, 10, 11)
+            .unwrap()
+            .and_hms_opt(11, 31, 0)
+            .unwrap()
+            .and_utc()
+            .timestamp_nanos_opt()
+            .unwrap();
+        let dt = TemporalValue::DateTime {
+            nanos_since_epoch: utc_nanos,
+            offset_seconds: 3600,
+            timezone_name: Some("Europe/Stockholm".to_string()),
+        };
+        assert_eq!(
+            dt.to_string(),
+            "1984-10-11T12:31+01:00[Europe/Stockholm]"
+        );
     }
 }

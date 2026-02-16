@@ -1468,7 +1468,7 @@ mod tests {
         let arr = builder.finish();
         // Arrow→Value returns Value::Temporal(LocalTime) with nanos (micros * 1000)
         assert_eq!(arrow_to_value(&arr, 0).to_string(), "10:30:45");
-        assert_eq!(arrow_to_value(&arr, 1).to_string(), "00:00:00");
+        assert_eq!(arrow_to_value(&arr, 1).to_string(), "00:00");
         assert_eq!(arrow_to_value(&arr, 2).to_string(), "23:59:59.123456");
         assert_eq!(arrow_to_value(&arr, 3), Value::Null);
     }
