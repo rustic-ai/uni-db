@@ -329,39 +329,9 @@ pub fn cypher_expr_to_df(expr: &Expr, context: Option<&TranslationContext>) -> R
             Ok(datafusion::functions::expr_fn::named_struct(args))
         }
 
-        Expr::IsNull(inner) => {
-            if let Expr::Variable(var) = inner.as_ref()
-                && let Some(ctx) = context
-                && let Some(kind) = ctx.variable_kinds.get(var)
-            {
-                let col_name = match kind {
-                    VariableKind::Node => format!("{}.{}", var, COL_VID),
-                    VariableKind::Edge => format!("{}.{}", var, COL_EID),
-                    VariableKind::Path | VariableKind::EdgeList => var.clone(),
-                };
-                return Ok(DfExpr::Column(Column::from_name(col_name)).is_null());
-            }
+        Expr::IsNull(inner) => translate_null_check(inner, context, true),
 
-            let inner_expr = cypher_expr_to_df(inner, context)?;
-            Ok(inner_expr.is_null())
-        }
-
-        Expr::IsNotNull(inner) => {
-            if let Expr::Variable(var) = inner.as_ref()
-                && let Some(ctx) = context
-                && let Some(kind) = ctx.variable_kinds.get(var)
-            {
-                let col_name = match kind {
-                    VariableKind::Node => format!("{}.{}", var, COL_VID),
-                    VariableKind::Edge => format!("{}.{}", var, COL_EID),
-                    VariableKind::Path | VariableKind::EdgeList => var.clone(),
-                };
-                return Ok(DfExpr::Column(Column::from_name(col_name)).is_not_null());
-            }
-
-            let inner_expr = cypher_expr_to_df(inner, context)?;
-            Ok(inner_expr.is_not_null())
-        }
+        Expr::IsNotNull(inner) => translate_null_check(inner, context, false),
 
         Expr::IsUnique(_) => {
             // IS UNIQUE is only valid in constraint definitions, not in query expressions
@@ -567,6 +537,37 @@ fn extract_variable_name(expr: &Expr) -> Result<String> {
             expr
         )),
     }
+}
+
+/// Translate IS NULL / IS NOT NULL, resolving entity variables to their identity column.
+fn translate_null_check(
+    inner: &Expr,
+    context: Option<&TranslationContext>,
+    is_null: bool,
+) -> Result<DfExpr> {
+    if let Expr::Variable(var) = inner
+        && let Some(ctx) = context
+        && let Some(kind) = ctx.variable_kinds.get(var)
+    {
+        let col_name = match kind {
+            VariableKind::Node => format!("{}.{}", var, COL_VID),
+            VariableKind::Edge => format!("{}.{}", var, COL_EID),
+            VariableKind::Path | VariableKind::EdgeList => var.clone(),
+        };
+        let col_expr = DfExpr::Column(Column::from_name(col_name));
+        return Ok(if is_null {
+            col_expr.is_null()
+        } else {
+            col_expr.is_not_null()
+        });
+    }
+
+    let inner_expr = cypher_expr_to_df(inner, context)?;
+    Ok(if is_null {
+        inner_expr.is_null()
+    } else {
+        inner_expr.is_not_null()
+    })
 }
 
 /// Translate a property access expression (e.g., `n.name`) to DataFusion.

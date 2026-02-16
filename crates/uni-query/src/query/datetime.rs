@@ -90,13 +90,10 @@ fn has_timezone_suffix(s: &str) -> bool {
         return true;
     }
     // Look for +HH:MM or -HH:MM at the end, accounting for possible [timezone]
-    let check = s;
     // Find last occurrence of + or - that could be a timezone offset
-    // Must be after the time digits (at least HH:MM:SS = 8 chars, or with fractional seconds)
-    for (i, b) in check.bytes().enumerate().rev() {
+    for (i, b) in s.bytes().enumerate().rev() {
         if b == b'+' || b == b'-' {
-            // Check if the position makes sense as timezone offset (not negative number)
-            let after = &check[i + 1..];
+            let after = &s[i + 1..];
             if after.len() >= 4
                 && after[..2].bytes().all(|b| b.is_ascii_digit())
                 && after.as_bytes().get(2) == Some(&b':')
@@ -110,30 +107,6 @@ fn has_timezone_suffix(s: &str) -> bool {
         }
     }
     false
-}
-
-/// Check if a value matches a specific temporal type.
-fn is_temporal_type(val: &Value, expected: TemporalType) -> bool {
-    match val {
-        Value::Temporal(tv) => tv.temporal_type() == expected,
-        Value::String(s) => classify_temporal(s) == Some(expected),
-        _ => false,
-    }
-}
-
-/// Check if a string value is a local time (no timezone).
-pub fn is_localtime_value(val: &Value) -> bool {
-    is_temporal_type(val, TemporalType::LocalTime)
-}
-
-/// Check if a string value is a time with timezone.
-pub fn is_time_value(val: &Value) -> bool {
-    is_temporal_type(val, TemporalType::Time)
-}
-
-/// Check if a string value is a local datetime (no timezone).
-pub fn is_localdatetime_value(val: &Value) -> bool {
-    is_temporal_type(val, TemporalType::LocalDateTime)
 }
 
 /// Parse a duration from a Value, handling temporal durations, ISO 8601 strings, and integer microseconds.

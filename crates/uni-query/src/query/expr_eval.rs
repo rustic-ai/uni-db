@@ -867,13 +867,7 @@ fn eval_head(arg: &Value) -> Result<Value> {
 
 fn eval_tail(arg: &Value) -> Result<Value> {
     match arg {
-        Value::List(arr) => {
-            if arr.is_empty() {
-                Ok(Value::List(vec![]))
-            } else {
-                Ok(Value::List(arr[1..].to_vec()))
-            }
-        }
+        Value::List(arr) => Ok(Value::List(arr.get(1..).unwrap_or_default().to_vec())),
         Value::Null => Ok(Value::Null),
         _ => Err(anyhow!("tail() expects a List")),
     }
@@ -1052,30 +1046,11 @@ fn eval_abs(arg: &Value) -> Result<Value> {
     }
 }
 
-fn eval_ceil(arg: &Value) -> Result<Value> {
-    eval_unary_numeric_op(arg, "ceil", f64::ceil)
-}
-
-fn eval_floor(arg: &Value) -> Result<Value> {
-    eval_unary_numeric_op(arg, "floor", f64::floor)
-}
-
-fn eval_round(arg: &Value) -> Result<Value> {
-    eval_unary_numeric_op(arg, "round", f64::round)
-}
-
 fn eval_sqrt(arg: &Value) -> Result<Value> {
     match arg {
-        Value::Int(i) => {
-            let f = *i as f64;
+        v if v.is_number() => {
+            let f = v.as_f64().unwrap();
             if f < 0.0 {
-                Ok(Value::Null)
-            } else {
-                Ok(Value::Float(f.sqrt()))
-            }
-        }
-        Value::Float(f) => {
-            if *f < 0.0 {
                 Ok(Value::Null)
             } else {
                 Ok(Value::Float(f.sqrt()))
@@ -1088,39 +1063,11 @@ fn eval_sqrt(arg: &Value) -> Result<Value> {
 
 fn eval_sign(arg: &Value) -> Result<Value> {
     match arg {
-        Value::Int(i) => {
-            if *i > 0 {
-                Ok(Value::Int(1))
-            } else if *i < 0 {
-                Ok(Value::Int(-1))
-            } else {
-                Ok(Value::Int(0))
-            }
-        }
-        Value::Float(f) => {
-            if *f > 0.0 {
-                Ok(Value::Int(1))
-            } else if *f < 0.0 {
-                Ok(Value::Int(-1))
-            } else {
-                Ok(Value::Int(0))
-            }
-        }
+        Value::Int(i) => Ok(Value::Int(i.signum())),
+        Value::Float(f) => Ok(Value::Int(f.signum() as i64)),
         Value::Null => Ok(Value::Null),
         _ => Err(anyhow!("sign() expects a number")),
     }
-}
-
-fn eval_log(arg: &Value) -> Result<Value> {
-    eval_unary_numeric_op(arg, "log", f64::ln)
-}
-
-fn eval_log10(arg: &Value) -> Result<Value> {
-    eval_unary_numeric_op(arg, "log10", f64::log10)
-}
-
-fn eval_exp(arg: &Value) -> Result<Value> {
-    eval_unary_numeric_op(arg, "exp", f64::exp)
 }
 
 fn eval_power(args: &[Value]) -> Result<Value> {
@@ -1151,30 +1098,6 @@ where
     }
 }
 
-fn eval_sin(arg: &Value) -> Result<Value> {
-    eval_unary_numeric_op(arg, "sin", f64::sin)
-}
-
-fn eval_cos(arg: &Value) -> Result<Value> {
-    eval_unary_numeric_op(arg, "cos", f64::cos)
-}
-
-fn eval_tan(arg: &Value) -> Result<Value> {
-    eval_unary_numeric_op(arg, "tan", f64::tan)
-}
-
-fn eval_asin(arg: &Value) -> Result<Value> {
-    eval_unary_numeric_op(arg, "asin", f64::asin)
-}
-
-fn eval_acos(arg: &Value) -> Result<Value> {
-    eval_unary_numeric_op(arg, "acos", f64::acos)
-}
-
-fn eval_atan(arg: &Value) -> Result<Value> {
-    eval_unary_numeric_op(arg, "atan", f64::atan)
-}
-
 fn eval_atan2(args: &[Value]) -> Result<Value> {
     if args.len() != 2 {
         return Err(anyhow!("atan2() requires 2 arguments"));
@@ -1190,19 +1113,6 @@ fn eval_atan2(args: &[Value]) -> Result<Value> {
     }
 }
 
-fn eval_degrees(arg: &Value) -> Result<Value> {
-    eval_unary_numeric_op(arg, "degrees", f64::to_degrees)
-}
-
-fn eval_radians(arg: &Value) -> Result<Value> {
-    eval_unary_numeric_op(arg, "radians", f64::to_radians)
-}
-
-fn eval_haversin(arg: &Value) -> Result<Value> {
-    // haversin(x) = (1 - cos(x)) / 2
-    eval_unary_numeric_op(arg, "haversin", |f| (1.0 - f.cos()) / 2.0)
-}
-
 /// Helper to require exactly one argument for a function.
 fn require_one_arg<'a>(name: &str, args: &'a [Value]) -> Result<&'a Value> {
     if args.len() != 1 {
@@ -1212,27 +1122,34 @@ fn require_one_arg<'a>(name: &str, args: &'a [Value]) -> Result<&'a Value> {
 }
 
 /// Evaluate math functions: ABS, CEIL, FLOOR, ROUND, SQRT, SIGN, LOG, LOG10, EXP, POWER, SIN, COS, TAN, etc.
+///
+/// Single-argument trig/math functions that simply delegate to `eval_unary_numeric_op`
+/// are inlined here to reduce unnecessary indirection.
 fn eval_math_function(name: &str, args: &[Value]) -> Result<Value> {
     match name {
-        // Single-argument functions
+        // Single-argument functions with dedicated implementations
         "ABS" => eval_abs(require_one_arg(name, args)?),
-        "CEIL" => eval_ceil(require_one_arg(name, args)?),
-        "FLOOR" => eval_floor(require_one_arg(name, args)?),
-        "ROUND" => eval_round(require_one_arg(name, args)?),
+        "CEIL" => eval_unary_numeric_op(require_one_arg(name, args)?, "ceil", f64::ceil),
+        "FLOOR" => eval_unary_numeric_op(require_one_arg(name, args)?, "floor", f64::floor),
+        "ROUND" => eval_unary_numeric_op(require_one_arg(name, args)?, "round", f64::round),
         "SQRT" => eval_sqrt(require_one_arg(name, args)?),
         "SIGN" => eval_sign(require_one_arg(name, args)?),
-        "LOG" => eval_log(require_one_arg(name, args)?),
-        "LOG10" => eval_log10(require_one_arg(name, args)?),
-        "EXP" => eval_exp(require_one_arg(name, args)?),
-        "SIN" => eval_sin(require_one_arg(name, args)?),
-        "COS" => eval_cos(require_one_arg(name, args)?),
-        "TAN" => eval_tan(require_one_arg(name, args)?),
-        "ASIN" => eval_asin(require_one_arg(name, args)?),
-        "ACOS" => eval_acos(require_one_arg(name, args)?),
-        "ATAN" => eval_atan(require_one_arg(name, args)?),
-        "DEGREES" => eval_degrees(require_one_arg(name, args)?),
-        "RADIANS" => eval_radians(require_one_arg(name, args)?),
-        "HAVERSIN" => eval_haversin(require_one_arg(name, args)?),
+        "LOG" => eval_unary_numeric_op(require_one_arg(name, args)?, "log", f64::ln),
+        "LOG10" => eval_unary_numeric_op(require_one_arg(name, args)?, "log10", f64::log10),
+        "EXP" => eval_unary_numeric_op(require_one_arg(name, args)?, "exp", f64::exp),
+        "SIN" => eval_unary_numeric_op(require_one_arg(name, args)?, "sin", f64::sin),
+        "COS" => eval_unary_numeric_op(require_one_arg(name, args)?, "cos", f64::cos),
+        "TAN" => eval_unary_numeric_op(require_one_arg(name, args)?, "tan", f64::tan),
+        "ASIN" => eval_unary_numeric_op(require_one_arg(name, args)?, "asin", f64::asin),
+        "ACOS" => eval_unary_numeric_op(require_one_arg(name, args)?, "acos", f64::acos),
+        "ATAN" => eval_unary_numeric_op(require_one_arg(name, args)?, "atan", f64::atan),
+        "DEGREES" => eval_unary_numeric_op(require_one_arg(name, args)?, "degrees", f64::to_degrees),
+        "RADIANS" => eval_unary_numeric_op(require_one_arg(name, args)?, "radians", f64::to_radians),
+        "HAVERSIN" => {
+            eval_unary_numeric_op(require_one_arg(name, args)?, "haversin", |f| {
+                (1.0 - f.cos()) / 2.0
+            })
+        }
         // Two-argument functions
         "POWER" | "POW" => eval_power(args),
         "ATAN2" => eval_atan2(args),
