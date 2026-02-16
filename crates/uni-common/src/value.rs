@@ -60,11 +60,7 @@ pub enum TemporalValue {
     },
     /// Duration with calendar semantics: months + days + nanoseconds.
     /// Matches Cypher's duration model which preserves calendar components.
-    Duration {
-        months: i64,
-        days: i64,
-        nanos: i64,
-    },
+    Duration { months: i64, days: i64, nanos: i64 },
 }
 
 impl Eq for TemporalValue {}
@@ -84,9 +80,7 @@ impl Hash for TemporalValue {
                 nanos_since_midnight.hash(state);
                 offset_seconds.hash(state);
             }
-            TemporalValue::LocalDateTime {
-                nanos_since_epoch,
-            } => nanos_since_epoch.hash(state),
+            TemporalValue::LocalDateTime { nanos_since_epoch } => nanos_since_epoch.hash(state),
             TemporalValue::DateTime {
                 nanos_since_epoch,
                 offset_seconds,
@@ -158,8 +152,7 @@ impl TemporalValue {
 
     /// Millisecond sub-second component (0-999), or None for date-only types.
     pub fn millisecond(&self) -> Option<i64> {
-        self.to_time()
-            .map(|t| (t.nanosecond() / 1_000_000) as i64)
+        self.to_time().map(|t| (t.nanosecond() / 1_000_000) as i64)
     }
 
     /// Microsecond sub-second component (0-999_999), or None for date-only types.
@@ -174,8 +167,7 @@ impl TemporalValue {
 
     /// Quarter (1-4), or None for time-only/duration types.
     pub fn quarter(&self) -> Option<i64> {
-        self.to_date()
-            .map(|d| ((d.month() - 1) / 3 + 1) as i64)
+        self.to_date().map(|d| ((d.month() - 1) / 3 + 1) as i64)
     }
 
     /// ISO week number (1-53), or None for time-only/duration types.
@@ -220,63 +212,51 @@ impl TemporalValue {
         }
     }
 
-    /// Offset string (e.g., "+01:00", "Z").
-    pub fn offset(&self) -> Option<String> {
+    /// Returns the raw offset in seconds for types that carry a timezone offset.
+    fn raw_offset_seconds(&self) -> Option<i32> {
         match self {
             TemporalValue::Time { offset_seconds, .. }
-            | TemporalValue::DateTime {
-                offset_seconds, ..
-            } => Some(format_offset(*offset_seconds)),
+            | TemporalValue::DateTime { offset_seconds, .. } => Some(*offset_seconds),
             _ => None,
         }
+    }
+
+    /// Offset string (e.g., "+01:00", "Z").
+    pub fn offset(&self) -> Option<String> {
+        self.raw_offset_seconds().map(format_offset)
     }
 
     /// Offset in minutes.
     pub fn offset_minutes(&self) -> Option<i64> {
-        match self {
-            TemporalValue::Time { offset_seconds, .. }
-            | TemporalValue::DateTime {
-                offset_seconds, ..
-            } => Some(*offset_seconds as i64 / 60),
-            _ => None,
-        }
+        self.raw_offset_seconds().map(|s| s as i64 / 60)
     }
 
     /// Offset in seconds.
     pub fn offset_seconds_value(&self) -> Option<i64> {
+        self.raw_offset_seconds().map(|s| s as i64)
+    }
+
+    /// Returns the raw epoch nanos for types that store nanoseconds since epoch.
+    fn raw_epoch_nanos(&self) -> Option<i64> {
         match self {
-            TemporalValue::Time { offset_seconds, .. }
-            | TemporalValue::DateTime {
-                offset_seconds, ..
-            } => Some(*offset_seconds as i64),
+            TemporalValue::DateTime {
+                nanos_since_epoch, ..
+            }
+            | TemporalValue::LocalDateTime {
+                nanos_since_epoch, ..
+            } => Some(*nanos_since_epoch),
             _ => None,
         }
     }
 
     /// Epoch seconds (for datetime/localdatetime types).
     pub fn epoch_seconds(&self) -> Option<i64> {
-        match self {
-            TemporalValue::DateTime {
-                nanos_since_epoch, ..
-            }
-            | TemporalValue::LocalDateTime {
-                nanos_since_epoch, ..
-            } => Some(nanos_since_epoch / 1_000_000_000),
-            _ => None,
-        }
+        self.raw_epoch_nanos().map(|n| n / 1_000_000_000)
     }
 
     /// Epoch milliseconds (for datetime/localdatetime types).
     pub fn epoch_millis(&self) -> Option<i64> {
-        match self {
-            TemporalValue::DateTime {
-                nanos_since_epoch, ..
-            }
-            | TemporalValue::LocalDateTime {
-                nanos_since_epoch, ..
-            } => Some(nanos_since_epoch / 1_000_000),
-            _ => None,
-        }
+        self.raw_epoch_nanos().map(|n| n / 1_000_000)
     }
 
     // -----------------------------------------------------------------------
@@ -290,9 +270,7 @@ impl TemporalValue {
             TemporalValue::Date { days_since_epoch } => {
                 epoch.checked_add_signed(chrono::Duration::days(*days_since_epoch as i64))
             }
-            TemporalValue::LocalDateTime {
-                nanos_since_epoch,
-            } => {
+            TemporalValue::LocalDateTime { nanos_since_epoch } => {
                 let dt = chrono::DateTime::from_timestamp_nanos(*nanos_since_epoch);
                 Some(dt.date_naive())
             }
@@ -320,9 +298,7 @@ impl TemporalValue {
                 nanos_since_midnight,
                 ..
             } => nanos_to_time(*nanos_since_midnight),
-            TemporalValue::LocalDateTime {
-                nanos_since_epoch,
-            } => {
+            TemporalValue::LocalDateTime { nanos_since_epoch } => {
                 let dt = chrono::DateTime::from_timestamp_nanos(*nanos_since_epoch);
                 Some(dt.naive_utc().time())
             }
@@ -392,6 +368,16 @@ fn format_time_component(hour: u32, minute: u32, second: u32, nanos: u32) -> Str
     }
 }
 
+/// Format a NaiveTime as a canonical time string.
+fn format_naive_time(t: &chrono::NaiveTime) -> String {
+    format_time_component(t.hour(), t.minute(), t.second(), t.nanosecond())
+}
+
+/// Convert nanos since midnight to NaiveTime, defaulting to midnight on invalid input.
+fn nanos_to_time_or_midnight(nanos: i64) -> chrono::NaiveTime {
+    nanos_to_time(nanos).unwrap_or_else(|| chrono::NaiveTime::from_hms_opt(0, 0, 0).unwrap())
+}
+
 impl fmt::Display for TemporalValue {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -403,43 +389,29 @@ impl fmt::Display for TemporalValue {
             TemporalValue::LocalTime {
                 nanos_since_midnight,
             } => {
-                let time = nanos_to_time(*nanos_since_midnight)
-                    .unwrap_or_else(|| chrono::NaiveTime::from_hms_opt(0, 0, 0).unwrap());
-                let time_str = format_time_component(
-                    time.hour(),
-                    time.minute(),
-                    time.second(),
-                    time.nanosecond(),
-                );
-                write!(f, "{}", time_str)
+                let time = nanos_to_time_or_midnight(*nanos_since_midnight);
+                write!(f, "{}", format_naive_time(&time))
             }
             TemporalValue::Time {
                 nanos_since_midnight,
                 offset_seconds,
             } => {
-                let time = nanos_to_time(*nanos_since_midnight)
-                    .unwrap_or_else(|| chrono::NaiveTime::from_hms_opt(0, 0, 0).unwrap());
-                let time_str = format_time_component(
-                    time.hour(),
-                    time.minute(),
-                    time.second(),
-                    time.nanosecond(),
-                );
-                let tz = format_offset(*offset_seconds);
-                write!(f, "{}{}", time_str, tz)
+                let time = nanos_to_time_or_midnight(*nanos_since_midnight);
+                write!(
+                    f,
+                    "{}{}",
+                    format_naive_time(&time),
+                    format_offset(*offset_seconds)
+                )
             }
-            TemporalValue::LocalDateTime {
-                nanos_since_epoch,
-            } => {
-                let dt = chrono::DateTime::from_timestamp_nanos(*nanos_since_epoch);
-                let ndt = dt.naive_utc();
-                let time_str = format_time_component(
-                    ndt.time().hour(),
-                    ndt.time().minute(),
-                    ndt.time().second(),
-                    ndt.time().nanosecond(),
-                );
-                write!(f, "{}T{}", ndt.date().format("%Y-%m-%d"), time_str)
+            TemporalValue::LocalDateTime { nanos_since_epoch } => {
+                let ndt = chrono::DateTime::from_timestamp_nanos(*nanos_since_epoch).naive_utc();
+                write!(
+                    f,
+                    "{}T{}",
+                    ndt.date().format("%Y-%m-%d"),
+                    format_naive_time(&ndt.time())
+                )
             }
             TemporalValue::DateTime {
                 nanos_since_epoch,
@@ -447,18 +419,16 @@ impl fmt::Display for TemporalValue {
                 timezone_name,
             } => {
                 // Display in local time (UTC nanos + offset)
-                let local_nanos =
-                    nanos_since_epoch + (*offset_seconds as i64) * 1_000_000_000;
-                let dt = chrono::DateTime::from_timestamp_nanos(local_nanos);
-                let ndt = dt.naive_utc();
-                let time_str = format_time_component(
-                    ndt.time().hour(),
-                    ndt.time().minute(),
-                    ndt.time().second(),
-                    ndt.time().nanosecond(),
-                );
+                let local_nanos = nanos_since_epoch + (*offset_seconds as i64) * 1_000_000_000;
+                let ndt = chrono::DateTime::from_timestamp_nanos(local_nanos).naive_utc();
                 let tz = format_offset(*offset_seconds);
-                write!(f, "{}T{}{}", ndt.date().format("%Y-%m-%d"), time_str, tz)?;
+                write!(
+                    f,
+                    "{}T{}{}",
+                    ndt.date().format("%Y-%m-%d"),
+                    format_naive_time(&ndt.time()),
+                    tz
+                )?;
                 if let Some(name) = timezone_name {
                     write!(f, "[{}]", name)?;
                 }
@@ -761,16 +731,7 @@ impl Hash for Value {
             Value::String(s) => s.hash(state),
             Value::Bytes(b) => b.hash(state),
             Value::List(l) => l.hash(state),
-            Value::Map(m) => {
-                // Sort keys for deterministic hashing
-                let mut pairs: Vec<_> = m.iter().collect();
-                pairs.sort_by_key(|(k, _)| *k);
-                pairs.len().hash(state);
-                for (k, v) in pairs {
-                    k.hash(state);
-                    v.hash(state);
-                }
-            }
+            Value::Map(m) => hash_map(m, state),
             Value::Node(n) => n.hash(state),
             Value::Edge(e) => e.hash(state),
             Value::Path(p) => p.hash(state),
@@ -1834,9 +1795,6 @@ mod tests {
             offset_seconds: 3600,
             timezone_name: Some("Europe/Stockholm".to_string()),
         };
-        assert_eq!(
-            dt.to_string(),
-            "1984-10-11T12:31+01:00[Europe/Stockholm]"
-        );
+        assert_eq!(dt.to_string(), "1984-10-11T12:31+01:00[Europe/Stockholm]");
     }
 }

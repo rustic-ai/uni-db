@@ -219,7 +219,6 @@ pub struct Statement {
     pub clauses: Vec<Clause>,
 }
 
-// Helper enum for parser
 #[derive(Debug, Clone, PartialEq)]
 pub enum ConstraintDef {
     Unique(String),
@@ -474,13 +473,6 @@ impl CypherLiteral {
             CypherLiteral::String(s) => Value::String(s.clone()),
         }
     }
-
-    /// Deprecated: use `to_value()` instead.
-    /// Kept for backward compatibility during migration.
-    #[deprecated(note = "Use to_value() instead")]
-    pub fn to_json_value(&self) -> Value {
-        self.to_value()
-    }
 }
 
 impl std::fmt::Display for CypherLiteral {
@@ -642,6 +634,17 @@ pub enum Quantifier {
     None,
 }
 
+impl std::fmt::Display for Quantifier {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Quantifier::All => f.write_str("ALL"),
+            Quantifier::Any => f.write_str("ANY"),
+            Quantifier::Single => f.write_str("SINGLE"),
+            Quantifier::None => f.write_str("NONE"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum BinaryOp {
     Add,
@@ -666,10 +669,47 @@ pub enum BinaryOp {
     ApproxEq,
 }
 
+impl std::fmt::Display for BinaryOp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            BinaryOp::Add => "+",
+            BinaryOp::Sub => "-",
+            BinaryOp::Mul => "*",
+            BinaryOp::Div => "/",
+            BinaryOp::Mod => "%",
+            BinaryOp::Pow => "^",
+            BinaryOp::Eq => "=",
+            BinaryOp::NotEq => "<>",
+            BinaryOp::Lt => "<",
+            BinaryOp::LtEq => "<=",
+            BinaryOp::Gt => ">",
+            BinaryOp::GtEq => ">=",
+            BinaryOp::And => "AND",
+            BinaryOp::Or => "OR",
+            BinaryOp::Xor => "XOR",
+            BinaryOp::Regex => "=~",
+            BinaryOp::Contains => "CONTAINS",
+            BinaryOp::StartsWith => "STARTS WITH",
+            BinaryOp::EndsWith => "ENDS WITH",
+            BinaryOp::ApproxEq => "~=",
+        };
+        f.write_str(s)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum UnaryOp {
     Not,
     Neg,
+}
+
+impl std::fmt::Display for UnaryOp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            UnaryOp::Not => f.write_str("NOT "),
+            UnaryOp::Neg => f.write_str("-"),
+        }
+    }
 }
 
 // ============================================================================
@@ -1040,15 +1080,8 @@ impl Expr {
                     .map(|e| Box::new(e.substitute_variable(old_var, new_var))),
             },
 
-            Expr::Exists {
-                query,
-                from_pattern_predicate,
-            } => Expr::Exists {
-                query: query.clone(),
-                from_pattern_predicate: *from_pattern_predicate,
-            }, // Don't substitute inside subqueries
-            Expr::CountSubquery(query) => Expr::CountSubquery(query.clone()),
-            Expr::CollectSubquery(query) => Expr::CollectSubquery(query.clone()),
+            // Don't substitute inside subqueries
+            Expr::Exists { .. } | Expr::CountSubquery(_) | Expr::CollectSubquery(_) => self.clone(),
 
             Expr::IsNull(e) => Expr::IsNull(Box::new(e.substitute_variable(old_var, new_var))),
             Expr::IsNotNull(e) => {
@@ -1082,21 +1115,16 @@ impl Expr {
                 list,
                 predicate,
             } => {
-                // Don't substitute inside the quantifier if it shadows the variable
-                if variable == old_var {
-                    Expr::Quantifier {
-                        quantifier: *quantifier,
-                        variable: variable.clone(),
-                        list: Box::new(list.substitute_variable(old_var, new_var)),
-                        predicate: predicate.clone(),
-                    }
-                } else {
-                    Expr::Quantifier {
-                        quantifier: *quantifier,
-                        variable: variable.clone(),
-                        list: Box::new(list.substitute_variable(old_var, new_var)),
-                        predicate: Box::new(predicate.substitute_variable(old_var, new_var)),
-                    }
+                let shadowed = variable == old_var;
+                Expr::Quantifier {
+                    quantifier: *quantifier,
+                    variable: variable.clone(),
+                    list: Box::new(list.substitute_variable(old_var, new_var)),
+                    predicate: if shadowed {
+                        predicate.clone()
+                    } else {
+                        Box::new(predicate.substitute_variable(old_var, new_var))
+                    },
                 }
             }
 
@@ -1107,26 +1135,17 @@ impl Expr {
                 list,
                 expr,
             } => {
-                // Don't substitute inside the reduce if it shadows the variable or accumulator
-                let new_list = Box::new(list.substitute_variable(old_var, new_var));
-                let new_init = Box::new(init.substitute_variable(old_var, new_var));
-
-                if variable == old_var || accumulator == old_var {
-                    Expr::Reduce {
-                        accumulator: accumulator.clone(),
-                        init: new_init,
-                        variable: variable.clone(),
-                        list: new_list,
-                        expr: expr.clone(),
-                    }
-                } else {
-                    Expr::Reduce {
-                        accumulator: accumulator.clone(),
-                        init: new_init,
-                        variable: variable.clone(),
-                        list: new_list,
-                        expr: Box::new(expr.substitute_variable(old_var, new_var)),
-                    }
+                let shadowed = variable == old_var || accumulator == old_var;
+                Expr::Reduce {
+                    accumulator: accumulator.clone(),
+                    init: Box::new(init.substitute_variable(old_var, new_var)),
+                    variable: variable.clone(),
+                    list: Box::new(list.substitute_variable(old_var, new_var)),
+                    expr: if shadowed {
+                        expr.clone()
+                    } else {
+                        Box::new(expr.substitute_variable(old_var, new_var))
+                    },
                 }
             }
 
@@ -1136,25 +1155,22 @@ impl Expr {
                 where_clause,
                 map_expr,
             } => {
-                // Don't substitute inside the comprehension if it shadows the variable
-                let new_list = Box::new(list.substitute_variable(old_var, new_var));
-
-                if variable == old_var {
-                    Expr::ListComprehension {
-                        variable: variable.clone(),
-                        list: new_list,
-                        where_clause: where_clause.clone(),
-                        map_expr: map_expr.clone(),
-                    }
-                } else {
-                    Expr::ListComprehension {
-                        variable: variable.clone(),
-                        list: new_list,
-                        where_clause: where_clause
+                let shadowed = variable == old_var;
+                Expr::ListComprehension {
+                    variable: variable.clone(),
+                    list: Box::new(list.substitute_variable(old_var, new_var)),
+                    where_clause: if shadowed {
+                        where_clause.clone()
+                    } else {
+                        where_clause
                             .as_ref()
-                            .map(|e| Box::new(e.substitute_variable(old_var, new_var))),
-                        map_expr: Box::new(map_expr.substitute_variable(old_var, new_var)),
-                    }
+                            .map(|e| Box::new(e.substitute_variable(old_var, new_var)))
+                    },
+                    map_expr: if shadowed {
+                        map_expr.clone()
+                    } else {
+                        Box::new(map_expr.substitute_variable(old_var, new_var))
+                    },
                 }
             }
 
@@ -1164,24 +1180,16 @@ impl Expr {
                 where_clause,
                 map_expr,
             } => {
-                let new_where = where_clause
-                    .as_ref()
-                    .map(|e| Box::new(e.substitute_variable(old_var, new_var)));
-                let new_map = Box::new(map_expr.substitute_variable(old_var, new_var));
-
                 if path_variable.as_deref() == Some(old_var) {
-                    Expr::PatternComprehension {
-                        path_variable: path_variable.clone(),
-                        pattern: pattern.clone(),
-                        where_clause: where_clause.clone(),
-                        map_expr: map_expr.clone(),
-                    }
+                    self.clone()
                 } else {
                     Expr::PatternComprehension {
                         path_variable: path_variable.clone(),
                         pattern: pattern.clone(),
-                        where_clause: new_where,
-                        map_expr: new_map,
+                        where_clause: where_clause
+                            .as_ref()
+                            .map(|e| Box::new(e.substitute_variable(old_var, new_var))),
+                        map_expr: Box::new(map_expr.substitute_variable(old_var, new_var)),
                     }
                 }
             }
@@ -1252,8 +1260,7 @@ impl Expr {
                         | "percentilecont"
                 )
             }
-            Expr::CountSubquery(_) => true,
-            Expr::CollectSubquery(_) => true,
+            Expr::CountSubquery(_) | Expr::CollectSubquery(_) => true,
             Expr::Property(base, _) => base.is_aggregate(),
             Expr::List(exprs) => exprs.iter().any(|e| e.is_aggregate()),
             Expr::Map(entries) => entries.iter().any(|(_, v)| v.is_aggregate()),
@@ -1299,7 +1306,6 @@ impl Expr {
                 map_expr,
                 ..
             } => where_clause.as_ref().is_some_and(|e| e.is_aggregate()) || map_expr.is_aggregate(),
-            Expr::LabelCheck { .. } => false,
             _ => false,
         }
     }
@@ -1374,41 +1380,15 @@ impl Expr {
                 }
             }
             Expr::BinaryOp { left, op, right } => {
-                let op_str = match op {
-                    BinaryOp::Add => "+",
-                    BinaryOp::Sub => "-",
-                    BinaryOp::Mul => "*",
-                    BinaryOp::Div => "/",
-                    BinaryOp::Mod => "%",
-                    BinaryOp::Pow => "^",
-                    BinaryOp::Eq => "=",
-                    BinaryOp::NotEq => "<>",
-                    BinaryOp::Lt => "<",
-                    BinaryOp::LtEq => "<=",
-                    BinaryOp::Gt => ">",
-                    BinaryOp::GtEq => ">=",
-                    BinaryOp::And => "AND",
-                    BinaryOp::Or => "OR",
-                    BinaryOp::Xor => "XOR",
-                    BinaryOp::Regex => "=~",
-                    BinaryOp::Contains => "CONTAINS",
-                    BinaryOp::StartsWith => "STARTS WITH",
-                    BinaryOp::EndsWith => "ENDS WITH",
-                    BinaryOp::ApproxEq => "~=",
-                };
                 format!(
                     "{} {} {}",
                     left.to_string_repr(),
-                    op_str,
+                    op,
                     right.to_string_repr()
                 )
             }
             Expr::UnaryOp { op, expr } => {
-                let op_str = match op {
-                    UnaryOp::Not => "NOT ",
-                    UnaryOp::Neg => "-",
-                };
-                format!("{}{}", op_str, expr.to_string_repr())
+                format!("{}{}", op, expr.to_string_repr())
             }
             Expr::Case {
                 expr,
@@ -1447,8 +1427,9 @@ impl Expr {
             Expr::ArraySlice { array, start, end } => {
                 let start_str = start
                     .as_ref()
-                    .map_or("".to_string(), |e| e.to_string_repr());
-                let end_str = end.as_ref().map_or("".to_string(), |e| e.to_string_repr());
+                    .map(|e| e.to_string_repr())
+                    .unwrap_or_default();
+                let end_str = end.as_ref().map(|e| e.to_string_repr()).unwrap_or_default();
                 format!("{}[{}..{}]", array.to_string_repr(), start_str, end_str)
             }
             Expr::Quantifier {
@@ -1457,15 +1438,9 @@ impl Expr {
                 list,
                 predicate,
             } => {
-                let q_str = match quantifier {
-                    Quantifier::All => "ALL",
-                    Quantifier::Any => "ANY",
-                    Quantifier::Single => "SINGLE",
-                    Quantifier::None => "NONE",
-                };
                 format!(
                     "{}({} IN {} WHERE {})",
-                    q_str,
+                    quantifier,
                     variable,
                     list.to_string_repr(),
                     predicate.to_string_repr()

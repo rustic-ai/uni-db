@@ -2,11 +2,13 @@
 // Copyright 2024-2026 Dragonscale Team
 
 use crate::embedding::{EmbeddingService, create_embedding_service, embedding_service_key};
+use crate::runtime::context::QueryContext;
 use crate::runtime::id_allocator::IdAllocator;
 use crate::runtime::l0::L0Buffer;
 use crate::runtime::l0_manager::L0Manager;
 use crate::runtime::property_manager::PropertyManager;
 use crate::runtime::wal::WriteAheadLog;
+use crate::storage::adjacency_manager::AdjacencyManager;
 use crate::storage::delta::{L1Entry, Op};
 use crate::storage::main_edge::MainEdgeDataset;
 use crate::storage::main_vertex::MainVertexDataset;
@@ -31,8 +33,6 @@ use uuid::Uuid;
 #[derive(Clone, Debug)]
 pub struct WriterConfig {
     pub max_mutations: usize,
-    // Add throttling config here if we want to decouple from UniConfig,
-    // but the prompt says to use UniConfig.
 }
 
 impl Default for WriterConfig {
@@ -42,9 +42,6 @@ impl Default for WriterConfig {
         }
     }
 }
-
-use crate::runtime::context::QueryContext;
-use crate::storage::adjacency_manager::AdjacencyManager;
 
 pub struct Writer {
     pub l0_manager: Arc<L0Manager>,
@@ -97,7 +94,6 @@ impl Writer {
 
         let l0_manager = Arc::new(L0Manager::new(start_version, wal));
 
-        // Create PropertyManager for merging if not provided?
         let property_manager = Some(Arc::new(PropertyManager::new(
             storage.clone(),
             schema_manager.clone(),
@@ -145,7 +141,6 @@ impl Writer {
             Ok(0)
         }
     }
-    // ...
 
     /// Allocates the next VID (pure auto-increment).
     pub async fn next_vid(&self) -> Result<Vid> {
@@ -158,8 +153,7 @@ impl Writer {
         self.allocator.allocate_vids(count).await
     }
 
-    /// Allocates the next EID.
-    /// Note: In the new design, EIDs are pure auto-increment (no type embedding).
+    /// Allocates the next EID (pure auto-increment).
     pub async fn next_eid(&self, _type_id: u32) -> Result<Eid> {
         self.allocator.allocate_eid().await
     }
@@ -169,12 +163,17 @@ impl Writer {
             return Err(anyhow!("Transaction already active"));
         }
         let current_version = self.l0_manager.get_current().read().current_version;
-        // Transaction L0 doesn't have its own WAL for now?
-        // Actually, it should probably log to the same WAL?
-        // Or we log everything at COMMIT.
-        // For now, let's pass None for WAL to transaction L0.
+        // Transaction mutations are logged to WAL at COMMIT time, not during the transaction.
         self.transaction_l0 = Some(Arc::new(RwLock::new(L0Buffer::new(current_version, None))));
         Ok(())
+    }
+
+    /// Returns the active L0 buffer: the transaction L0 if a transaction is open,
+    /// otherwise the current L0 from the manager.
+    fn active_l0(&self) -> Arc<RwLock<L0Buffer>> {
+        self.transaction_l0
+            .clone()
+            .unwrap_or_else(|| self.l0_manager.get_current())
     }
 
     fn update_metrics(&self) {
@@ -282,8 +281,6 @@ impl Writer {
                     ConstraintTarget::Label(l) if l == label => {}
                     _ => continue,
                 }
-
-                // println!("DEBUG: Checking constraint {}", constraint.name);
 
                 match &constraint.constraint_type {
                     ConstraintType::Unique {
@@ -680,56 +677,29 @@ impl Writer {
     ///
     /// Returns error if another vertex with the same ext_id exists.
     async fn check_extid_globally_unique(&self, ext_id: &str, current_vid: Vid) -> Result<()> {
-        // 1. Check current L0 buffer
-        {
-            let l0 = self.l0_manager.get_current();
-            let l0_guard = l0.read();
-            for (&vid, props) in &l0_guard.vertex_properties {
-                if vid != current_vid
-                    && props.get("ext_id").and_then(|v| v.as_str()) == Some(ext_id)
-                {
-                    return Err(anyhow!(
-                        "Constraint violation: ext_id '{}' already exists (vertex {:?})",
-                        ext_id,
-                        vid
-                    ));
-                }
+        // Check L0 buffers: current, transaction, and pending flush
+        let l0_buffers_to_check: Vec<Arc<RwLock<L0Buffer>>> = {
+            let mut buffers = vec![self.l0_manager.get_current()];
+            if let Some(tx_l0) = &self.transaction_l0 {
+                buffers.push(tx_l0.clone());
+            }
+            buffers.extend(self.l0_manager.get_pending_flush());
+            buffers
+        };
+
+        for l0 in &l0_buffers_to_check {
+            if let Some(vid) =
+                Self::find_extid_in_properties(&l0.read().vertex_properties, ext_id, current_vid)
+            {
+                return Err(anyhow!(
+                    "Constraint violation: ext_id '{}' already exists (vertex {:?})",
+                    ext_id,
+                    vid
+                ));
             }
         }
 
-        // 2. Check transaction L0 if present
-        if let Some(tx_l0) = &self.transaction_l0 {
-            let guard = tx_l0.read();
-            for (&vid, props) in &guard.vertex_properties {
-                if vid != current_vid
-                    && props.get("ext_id").and_then(|v| v.as_str()) == Some(ext_id)
-                {
-                    return Err(anyhow!(
-                        "Constraint violation: ext_id '{}' already exists (vertex {:?})",
-                        ext_id,
-                        vid
-                    ));
-                }
-            }
-        }
-
-        // 3. Check pending flush L0 buffers
-        for pending_l0 in self.l0_manager.get_pending_flush() {
-            let guard = pending_l0.read();
-            for (&vid, props) in &guard.vertex_properties {
-                if vid != current_vid
-                    && props.get("ext_id").and_then(|v| v.as_str()) == Some(ext_id)
-                {
-                    return Err(anyhow!(
-                        "Constraint violation: ext_id '{}' already exists (vertex {:?})",
-                        ext_id,
-                        vid
-                    ));
-                }
-            }
-        }
-
-        // 4. Check main vertices table (if it exists)
+        // Check main vertices table (if it exists)
         let lancedb = self.storage.lancedb_store();
         if let Ok(Some(found_vid)) = MainVertexDataset::find_by_ext_id(lancedb, ext_id).await
             && found_vid != current_vid
@@ -742,6 +712,21 @@ impl Writer {
         }
 
         Ok(())
+    }
+
+    /// Search vertex properties for a duplicate ext_id, excluding `current_vid`.
+    fn find_extid_in_properties(
+        vertex_properties: &HashMap<Vid, Properties>,
+        ext_id: &str,
+        current_vid: Vid,
+    ) -> Option<Vid> {
+        vertex_properties.iter().find_map(|(&vid, props)| {
+            if vid != current_vid && props.get("ext_id").and_then(|v| v.as_str()) == Some(ext_id) {
+                Some(vid)
+            } else {
+                None
+            }
+        })
     }
 
     /// Helper to get vertex labels from L0 buffer.
@@ -800,12 +785,7 @@ impl Writer {
     /// Set the type name for an edge (used for schemaless edge types).
     /// This is called during CREATE for edge types not found in the schema.
     pub fn set_edge_type(&self, eid: Eid, type_name: String) {
-        let l0 = if let Some(tx_l0) = &self.transaction_l0 {
-            tx_l0.clone()
-        } else {
-            self.l0_manager.get_current()
-        };
-        l0.write().set_edge_type(eid, type_name);
+        self.active_l0().write().set_edge_type(eid, type_name);
     }
 
     /// Evaluate a simple CHECK constraint expression.
@@ -868,10 +848,18 @@ impl Writer {
         match op {
             "=" | "==" => Ok(prop_val == &target_val),
             "!=" | "<>" => Ok(prop_val != &target_val),
-            ">" => self.compare_values(prop_val, &target_val).map(|c| c > 0),
-            "<" => self.compare_values(prop_val, &target_val).map(|c| c < 0),
-            ">=" => self.compare_values(prop_val, &target_val).map(|c| c >= 0),
-            "<=" => self.compare_values(prop_val, &target_val).map(|c| c <= 0),
+            ">" => self
+                .compare_values(prop_val, &target_val)
+                .map(|o| o.is_gt()),
+            "<" => self
+                .compare_values(prop_val, &target_val)
+                .map(|o| o.is_lt()),
+            ">=" => self
+                .compare_values(prop_val, &target_val)
+                .map(|o| o.is_ge()),
+            "<=" => self
+                .compare_values(prop_val, &target_val)
+                .map(|o| o.is_le()),
             _ => {
                 log::warn!("Unsupported operator '{}' in CHECK constraint", op);
                 Ok(true)
@@ -879,49 +867,40 @@ impl Writer {
         }
     }
 
-    fn compare_values(&self, a: &Value, b: &Value) -> Result<i8> {
+    fn compare_values(&self, a: &Value, b: &Value) -> Result<std::cmp::Ordering> {
+        use std::cmp::Ordering;
+
+        fn cmp_f64(x: f64, y: f64) -> Ordering {
+            x.partial_cmp(&y).unwrap_or(Ordering::Equal)
+        }
+
         match (a, b) {
-            (Value::Int(n1), Value::Int(n2)) => Ok(n1.cmp(n2) as i8),
-            (Value::Float(f1), Value::Float(f2)) => {
-                if f1 < f2 {
-                    Ok(-1)
-                } else if f1 > f2 {
-                    Ok(1)
-                } else {
-                    Ok(0)
-                }
-            }
-            (Value::Int(n), Value::Float(f)) => {
-                let nf = *n as f64;
-                if nf < *f {
-                    Ok(-1)
-                } else if nf > *f {
-                    Ok(1)
-                } else {
-                    Ok(0)
-                }
-            }
-            (Value::Float(f), Value::Int(n)) => {
-                let nf = *n as f64;
-                if *f < nf {
-                    Ok(-1)
-                } else if *f > nf {
-                    Ok(1)
-                } else {
-                    Ok(0)
-                }
-            }
-            (Value::String(s1), Value::String(s2)) => match s1.cmp(s2) {
-                std::cmp::Ordering::Less => Ok(-1),
-                std::cmp::Ordering::Greater => Ok(1),
-                std::cmp::Ordering::Equal => Ok(0),
-            },
+            (Value::Int(n1), Value::Int(n2)) => Ok(n1.cmp(n2)),
+            (Value::Float(f1), Value::Float(f2)) => Ok(cmp_f64(*f1, *f2)),
+            (Value::Int(n), Value::Float(f)) => Ok(cmp_f64(*n as f64, *f)),
+            (Value::Float(f), Value::Int(n)) => Ok(cmp_f64(*f, *n as f64)),
+            (Value::String(s1), Value::String(s2)) => Ok(s1.cmp(s2)),
             _ => Err(anyhow!(
                 "Cannot compare incompatible types: {:?} vs {:?}",
                 a,
                 b
             )),
         }
+    }
+
+    /// Check whether any vertex in the given property map matches all key-value pairs,
+    /// excluding `current_vid`.
+    fn l0_has_duplicate_key(
+        vertex_properties: &HashMap<Vid, Properties>,
+        key_values: &[(String, Value)],
+        current_vid: Vid,
+    ) -> bool {
+        vertex_properties.iter().any(|(&vid, props)| {
+            vid != current_vid
+                && key_values
+                    .iter()
+                    .all(|(prop, val)| props.get(prop).is_some_and(|v| v == val))
+        })
     }
 
     async fn check_unique_constraint_multi(
@@ -934,55 +913,22 @@ impl Writer {
         {
             let l0 = self.l0_manager.get_current();
             let l0_guard = l0.read();
-
-            for (vid, props) in &l0_guard.vertex_properties {
-                if *vid != current_vid {
-                    let mut match_all = true;
-                    for (prop, val) in key_values {
-                        if let Some(v) = props.get(prop) {
-                            if v != val {
-                                match_all = false;
-                                break;
-                            }
-                        } else {
-                            match_all = false; // Property missing in other node
-                            break;
-                        }
-                    }
-                    if match_all {
-                        return Err(anyhow!(
-                            "Constraint violation: Duplicate composite key for label '{}'",
-                            label
-                        ));
-                    }
-                }
+            if Self::l0_has_duplicate_key(&l0_guard.vertex_properties, key_values, current_vid) {
+                return Err(anyhow!(
+                    "Constraint violation: Duplicate composite key for label '{}'",
+                    label
+                ));
             }
         }
 
         // Check Transaction L0
         if let Some(tx_l0) = &self.transaction_l0 {
             let tx_l0_guard = tx_l0.read();
-            for (vid, props) in &tx_l0_guard.vertex_properties {
-                if *vid != current_vid {
-                    let mut match_all = true;
-                    for (prop, val) in key_values {
-                        if let Some(v) = props.get(prop) {
-                            if v != val {
-                                match_all = false;
-                                break;
-                            }
-                        } else {
-                            match_all = false;
-                            break;
-                        }
-                    }
-                    if match_all {
-                        return Err(anyhow!(
-                            "Constraint violation: Duplicate composite key for label '{}' (in tx)",
-                            label
-                        ));
-                    }
-                }
+            if Self::l0_has_duplicate_key(&tx_l0_guard.vertex_properties, key_values, current_vid) {
+                return Err(anyhow!(
+                    "Constraint violation: Duplicate composite key for label '{}' (in tx)",
+                    label
+                ));
             }
         }
 
@@ -1040,7 +986,6 @@ impl Writer {
             let excess = std::cmp::min(excess, 31);
             let multiplier = 2_u32.pow(excess as u32);
             let delay = throttle.base_delay * multiplier;
-            // log::debug!("Write throttled: {}ms delay", delay.as_millis());
             tokio::time::sleep(delay).await;
         }
         Ok(())
@@ -1178,15 +1123,10 @@ impl Writer {
         self.prepare_vertex_upsert(vid, &mut properties, labels.first().map(|s| s.as_str()))
             .await?;
 
-        let l0 = if let Some(tx_l0) = &self.transaction_l0 {
-            tx_l0.clone()
-        } else {
-            self.l0_manager.get_current()
-        };
-
         // Clone properties before moving into L0 to return them (includes auto-generated embeddings)
         let properties_copy = properties.clone();
-        l0.write()
+        self.active_l0()
+            .write()
             .insert_vertex_with_labels(vid, properties, labels);
         metrics::counter!("uni_l0_buffer_mutations_total").increment(1);
         self.update_metrics();
@@ -1383,11 +1323,7 @@ impl Writer {
     pub async fn delete_vertex(&mut self, vid: Vid, labels: Option<Vec<String>>) -> Result<()> {
         let start = std::time::Instant::now();
         self.check_write_pressure().await?;
-        let l0 = if let Some(tx_l0) = &self.transaction_l0 {
-            tx_l0.clone()
-        } else {
-            self.l0_manager.get_current()
-        };
+        let l0 = self.active_l0();
 
         // Before deleting, ensure we have the vertex's labels stored in L0
         // so the tombstone can be properly flushed to the correct label datasets.
@@ -1486,20 +1422,15 @@ impl Writer {
             for row_idx in 0..batch.num_rows() {
                 let version = version_array.value(row_idx);
 
-                // Check if this is the highest version we've seen
-                if max_version.is_none() || version > max_version.unwrap() {
+                if max_version.is_none_or(|mv| version > mv) {
                     is_deleted = deleted_array.value(row_idx);
 
-                    // Extract labels from the list array
                     let labels_list = labels_array.value(row_idx);
                     let string_array = labels_list.as_string::<i32>();
-
-                    let mut vertex_labels = Vec::new();
-                    for i in 0..string_array.len() {
-                        if !string_array.is_null(i) {
-                            vertex_labels.push(string_array.value(i).to_string());
-                        }
-                    }
+                    let vertex_labels: Vec<String> = (0..string_array.len())
+                        .filter(|&i| !string_array.is_null(i))
+                        .map(|i| string_array.value(i).to_string())
+                        .collect();
 
                     max_version = Some(version);
                     labels = Some(vertex_labels);
@@ -1524,17 +1455,12 @@ impl Writer {
         self.check_write_pressure().await?;
         self.prepare_edge_upsert(eid, &mut properties).await?;
 
-        let l0 = if let Some(tx_l0) = &self.transaction_l0 {
-            tx_l0.clone()
-        } else {
-            self.l0_manager.get_current()
-        };
-
+        let l0 = self.active_l0();
         l0.write()
             .insert_edge(src_vid, dst_vid, edge_type, eid, properties)?;
 
         // Dual-write to AdjacencyManager overlay (survives flush).
-        // Skip for transaction-local L0 — transaction edges are overlaid separately.
+        // Skip for transaction-local L0 -- transaction edges are overlaid separately.
         if self.transaction_l0.is_none() {
             let version = l0.read().current_version;
             self.adjacency_manager
@@ -1563,11 +1489,7 @@ impl Writer {
     ) -> Result<()> {
         let start = std::time::Instant::now();
         self.check_write_pressure().await?;
-        let l0 = if let Some(tx_l0) = &self.transaction_l0 {
-            tx_l0.clone()
-        } else {
-            self.l0_manager.get_current()
-        };
+        let l0 = self.active_l0();
 
         l0.write().delete_edge(eid, src_vid, dst_vid, edge_type)?;
 
@@ -1936,24 +1858,25 @@ impl Writer {
             // Helper: fan-out a single vertex entry into per-label buckets.
             // Each per-label table row carries the full label set so multi-label
             // info is preserved after flush.
-            let push_vertex_to_labels = |vid: Vid,
-                                         all_labels: &[String],
-                                         props: Properties,
-                                         deleted: bool,
-                                         version: u64,
-                                         out: &mut HashMap<u16, Vec<VertexEntry>>| {
-                for label in all_labels {
-                    if let Some(label_id) = schema.label_id_by_name(label) {
-                        out.entry(label_id).or_default().push((
-                            vid,
-                            all_labels.to_vec(),
-                            props.clone(),
-                            deleted,
-                            version,
-                        ));
+            let push_vertex_to_labels =
+                |vid: Vid,
+                 all_labels: &[String],
+                 props: Properties,
+                 deleted: bool,
+                 version: u64,
+                 out: &mut HashMap<u16, Vec<VertexEntry>>| {
+                    for label in all_labels {
+                        if let Some(label_id) = schema.label_id_by_name(label) {
+                            out.entry(label_id).or_default().push((
+                                vid,
+                                all_labels.to_vec(),
+                                props.clone(),
+                                deleted,
+                                version,
+                            ));
+                        }
                     }
-                }
-            };
+                };
 
             for (vid, props) in &old_l0.vertex_properties {
                 let version = old_l0.vertex_versions.get(vid).copied().unwrap_or(0);
@@ -2230,22 +2153,14 @@ impl Writer {
             // Collect all vertices from vertex_properties
             for (vid, props) in &old_l0.vertex_properties {
                 let version = old_l0.vertex_versions.get(vid).copied().unwrap_or(0);
-                let labels = old_l0
-                    .vertex_labels
-                    .get(vid)
-                    .cloned()
-                    .unwrap_or_else(Vec::new);
+                let labels = old_l0.vertex_labels.get(vid).cloned().unwrap_or_default();
                 vertices.push((*vid, labels, props.clone(), false, version));
             }
 
             // Collect tombstones
             for &vid in &old_l0.vertex_tombstones {
                 let version = old_l0.vertex_versions.get(&vid).copied().unwrap_or(0);
-                let labels = old_l0
-                    .vertex_labels
-                    .get(&vid)
-                    .cloned()
-                    .unwrap_or_else(Vec::new);
+                let labels = old_l0.vertex_labels.get(&vid).cloned().unwrap_or_default();
                 vertices.push((vid, labels, HashMap::new(), true, version));
             }
 

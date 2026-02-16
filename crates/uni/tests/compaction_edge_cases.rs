@@ -48,7 +48,9 @@ async fn test_compact_vertices_with_null_props() -> anyhow::Result<()> {
             Arc::new(StringArray::from(vec![None::<&str>])), // ext_id
             // _labels
             {
-                let mut lb = arrow_array::builder::ListBuilder::new(arrow_array::builder::StringBuilder::new());
+                let mut lb = arrow_array::builder::ListBuilder::new(
+                    arrow_array::builder::StringBuilder::new(),
+                );
                 lb.values().append_value("Node");
                 lb.append(true);
                 Arc::new(lb.finish())
@@ -73,7 +75,9 @@ async fn test_compact_vertices_with_null_props() -> anyhow::Result<()> {
             Arc::new(StringArray::from(vec![None::<&str>])), // ext_id
             // _labels
             {
-                let mut lb = arrow_array::builder::ListBuilder::new(arrow_array::builder::StringBuilder::new());
+                let mut lb = arrow_array::builder::ListBuilder::new(
+                    arrow_array::builder::StringBuilder::new(),
+                );
                 lb.values().append_value("Node");
                 lb.append(true);
                 Arc::new(lb.finish())

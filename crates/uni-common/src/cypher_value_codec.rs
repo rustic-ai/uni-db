@@ -226,22 +226,18 @@ pub fn decode(bytes: &[u8]) -> Result<Value, UniError> {
                 message: format!("failed to decode date: {}", e),
                 source: None,
             })?;
-            Ok(Value::Temporal(
-                crate::value::TemporalValue::Date {
-                    days_since_epoch: days,
-                },
-            ))
+            Ok(Value::Temporal(crate::value::TemporalValue::Date {
+                days_since_epoch: days,
+            }))
         }
         TAG_LOCALTIME => {
             let nanos: i64 = rmp_serde::from_slice(payload).map_err(|e| UniError::Storage {
                 message: format!("failed to decode localtime: {}", e),
                 source: None,
             })?;
-            Ok(Value::Temporal(
-                crate::value::TemporalValue::LocalTime {
-                    nanos_since_midnight: nanos,
-                },
-            ))
+            Ok(Value::Temporal(crate::value::TemporalValue::LocalTime {
+                nanos_since_midnight: nanos,
+            }))
         }
         TAG_TIME => {
             let tp: TimePayload =
@@ -249,12 +245,10 @@ pub fn decode(bytes: &[u8]) -> Result<Value, UniError> {
                     message: format!("failed to decode time: {}", e),
                     source: None,
                 })?;
-            Ok(Value::Temporal(
-                crate::value::TemporalValue::Time {
-                    nanos_since_midnight: tp.nanos,
-                    offset_seconds: tp.offset,
-                },
-            ))
+            Ok(Value::Temporal(crate::value::TemporalValue::Time {
+                nanos_since_midnight: tp.nanos,
+                offset_seconds: tp.offset,
+            }))
         }
         TAG_LOCALDATETIME => {
             let nanos: i64 = rmp_serde::from_slice(payload).map_err(|e| UniError::Storage {
@@ -273,13 +267,11 @@ pub fn decode(bytes: &[u8]) -> Result<Value, UniError> {
                     message: format!("failed to decode datetime: {}", e),
                     source: None,
                 })?;
-            Ok(Value::Temporal(
-                crate::value::TemporalValue::DateTime {
-                    nanos_since_epoch: dp.nanos,
-                    offset_seconds: dp.offset,
-                    timezone_name: dp.tz_name,
-                },
-            ))
+            Ok(Value::Temporal(crate::value::TemporalValue::DateTime {
+                nanos_since_epoch: dp.nanos,
+                offset_seconds: dp.offset,
+                timezone_name: dp.tz_name,
+            }))
         }
         TAG_DURATION => {
             let dp: DurationPayload =
@@ -287,13 +279,11 @@ pub fn decode(bytes: &[u8]) -> Result<Value, UniError> {
                     message: format!("failed to decode duration: {}", e),
                     source: None,
                 })?;
-            Ok(Value::Temporal(
-                crate::value::TemporalValue::Duration {
-                    months: dp.months,
-                    days: dp.days,
-                    nanos: dp.nanos,
-                },
-            ))
+            Ok(Value::Temporal(crate::value::TemporalValue::Duration {
+                months: dp.months,
+                days: dp.days,
+                nanos: dp.nanos,
+            }))
         }
         _ => Err(UniError::Storage {
             message: format!("unknown CypherValue tag: {}", tag),
@@ -526,9 +516,7 @@ fn encode_to_buf(value: &Value, buf: &mut Vec<u8>) {
                 };
                 rmp_serde::encode::write(buf, &payload).expect("time encode failed");
             }
-            crate::value::TemporalValue::LocalDateTime {
-                nanos_since_epoch,
-            } => {
+            crate::value::TemporalValue::LocalDateTime { nanos_since_epoch } => {
                 buf.push(TAG_LOCALDATETIME);
                 rmp_serde::encode::write(buf, nanos_since_epoch)
                     .expect("localdatetime encode failed");

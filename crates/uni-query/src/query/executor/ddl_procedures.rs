@@ -344,10 +344,7 @@ async fn create_index_internal(
         0
     };
 
-    println!(
-        "DEBUG: create_index_internal count for {}: {}",
-        label, count
-    );
+    tracing::debug!("create_index_internal count for {}: {}", label, count);
 
     if count > 0 {
         let idx_mgr = IndexManager::new(

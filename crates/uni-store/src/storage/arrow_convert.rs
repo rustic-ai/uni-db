@@ -9,11 +9,11 @@
 
 use anyhow::{Result, anyhow};
 use arrow_array::builder::{
-    BinaryBuilder, BooleanBuilder, Date32Builder, DurationMicrosecondBuilder,
+    BinaryBuilder, BooleanBufferBuilder, BooleanBuilder, Date32Builder, DurationMicrosecondBuilder,
     FixedSizeBinaryBuilder, FixedSizeListBuilder, Float32Builder, Float64Builder, Int32Builder,
     Int64Builder, IntervalMonthDayNanoBuilder, LargeBinaryBuilder, ListBuilder, StringBuilder,
-    StructBuilder,
-    Time64MicrosecondBuilder, Time64NanosecondBuilder, TimestampNanosecondBuilder, UInt64Builder,
+    StructBuilder, Time64MicrosecondBuilder, Time64NanosecondBuilder, TimestampNanosecondBuilder,
+    UInt64Builder,
 };
 use arrow_array::{
     Array, ArrayRef, BinaryArray, BooleanArray, Date32Array, DurationMicrosecondArray,
@@ -23,21 +23,17 @@ use arrow_array::{
     TimestampNanosecondArray, UInt64Array,
 };
 use arrow_schema::{DataType as ArrowDataType, Field};
+use std::collections::HashMap;
 use std::sync::Arc;
 use uni_common::DataType;
 use uni_common::Value;
+use uni_common::core::id::{Eid, Vid};
+use uni_common::core::schema;
 use uni_crdt::Crdt;
 
-// ============================================================================
-// Timestamp Column Builders
-// ============================================================================
-
-use std::collections::HashMap;
-use uni_common::core::id::{Eid, Vid};
-
-/// Build a timestamp column from a map of ID -> timestamp (microseconds).
+/// Build a timestamp column from a map of ID -> timestamp (nanoseconds).
 ///
-/// This is a shared utility for building `_created_at` and `_updated_at` columns
+/// Shared utility for building `_created_at` and `_updated_at` columns
 /// in vertex and edge tables. Works with any hashable ID type (Vid, Eid, etc.).
 fn build_timestamp_column_from_id_map<K, I>(
     ids: I,
@@ -116,7 +112,11 @@ pub fn labels_from_list_array(list_arr: &ListArray, row: usize) -> Vec<String> {
 /// and "%Y-%m-%dT%H:%MZ" formats.
 fn parse_datetime_to_nanos(s: &str) -> Option<i64> {
     chrono::DateTime::parse_from_rfc3339(s)
-        .map(|dt| dt.with_timezone(&chrono::Utc).timestamp_nanos_opt().unwrap_or(0))
+        .map(|dt| {
+            dt.with_timezone(&chrono::Utc)
+                .timestamp_nanos_opt()
+                .unwrap_or(0)
+        })
         .or_else(|_| {
             chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S")
                 .map(|ndt| ndt.and_utc().timestamp_nanos_opt().unwrap_or(0))
@@ -126,8 +126,11 @@ fn parse_datetime_to_nanos(s: &str) -> Option<i64> {
                 .map(|ndt| ndt.and_utc().timestamp_nanos_opt().unwrap_or(0))
         })
         .or_else(|_| {
-            chrono::DateTime::parse_from_str(s, "%Y-%m-%dT%H:%M%:z")
-                .map(|dt| dt.with_timezone(&chrono::Utc).timestamp_nanos_opt().unwrap_or(0))
+            chrono::DateTime::parse_from_str(s, "%Y-%m-%dT%H:%M%:z").map(|dt| {
+                dt.with_timezone(&chrono::Utc)
+                    .timestamp_nanos_opt()
+                    .unwrap_or(0)
+            })
         })
         .ok()
         .or_else(|| {
@@ -152,20 +155,107 @@ fn try_reconstruct_map(arr: &ArrayRef) -> Option<HashMap<String, Value>> {
     let val_col = structs.column(1);
     let mut map = HashMap::new();
     for i in 0..structs.len() {
-        if let Value::String(k) = arrow_to_value(key_col.as_ref(), i) {
-            map.insert(k, arrow_to_value(val_col.as_ref(), i));
+        if let Value::String(k) = arrow_to_value(key_col.as_ref(), i, None) {
+            map.insert(k, arrow_to_value(val_col.as_ref(), i, None));
         }
     }
     Some(map)
 }
 
-/// Convert an Arrow array element at a given row index to a JSON Value.
+/// Convert all elements of an Arrow array into a `Vec<Value>`.
+fn array_to_value_list(arr: &ArrayRef) -> Vec<Value> {
+    (0..arr.len())
+        .map(|i| arrow_to_value(arr.as_ref(), i, None))
+        .collect()
+}
+
+/// Convert an Arrow array value at a given row index to a Uni Value.
 ///
-/// This function handles all common Arrow types and recursively processes
-/// nested structures like Lists and Structs.
-pub fn arrow_to_value(col: &dyn Array, row: usize) -> Value {
+/// Handles all common Arrow types and recursively processes nested structures
+/// like Lists and Structs. The optional `data_type` parameter provides schema
+/// context for decoding DateTime and Time struct arrays; when provided, it
+/// takes precedence over runtime type detection.
+pub fn arrow_to_value(col: &dyn Array, row: usize, data_type: Option<&DataType>) -> Value {
     if col.is_null(row) {
         return Value::Null;
+    }
+
+    // Schema-driven decode for DateTime and Time structs
+    if let Some(dt) = data_type {
+        match dt {
+            DataType::DateTime => {
+                // Expect StructArray with three fields
+                if let Some(struct_arr) = col.as_any().downcast_ref::<StructArray>()
+                    && let (Some(nanos_col), Some(offset_col), Some(tz_col)) = (
+                        struct_arr.column_by_name("nanos_since_epoch"),
+                        struct_arr.column_by_name("offset_seconds"),
+                        struct_arr.column_by_name("timezone_name"),
+                    )
+                    && let (Some(nanos_arr), Some(offset_arr), Some(tz_arr)) = (
+                        nanos_col
+                            .as_any()
+                            .downcast_ref::<TimestampNanosecondArray>(),
+                        offset_col.as_any().downcast_ref::<Int32Array>(),
+                        tz_col.as_any().downcast_ref::<StringArray>(),
+                    )
+                {
+                    if nanos_arr.is_null(row) || offset_arr.is_null(row) {
+                        return Value::Null;
+                    }
+                    let nanos = nanos_arr.value(row);
+                    let offset = offset_arr.value(row);
+                    let tz_name = (!tz_arr.is_null(row)).then(|| tz_arr.value(row).to_string());
+                    return Value::Temporal(uni_common::TemporalValue::DateTime {
+                        nanos_since_epoch: nanos,
+                        offset_seconds: offset,
+                        timezone_name: tz_name,
+                    });
+                }
+                // Fall back to old schema migration: TimestampNanosecond → DateTime with offset=0
+                if let Some(ts) = col.as_any().downcast_ref::<TimestampNanosecondArray>() {
+                    let nanos = ts.value(row);
+                    let tz_name = ts.timezone().map(|s| s.to_string());
+                    return Value::Temporal(uni_common::TemporalValue::DateTime {
+                        nanos_since_epoch: nanos,
+                        offset_seconds: 0,
+                        timezone_name: tz_name,
+                    });
+                }
+            }
+            DataType::Time => {
+                // Expect StructArray with two fields
+                if let Some(struct_arr) = col.as_any().downcast_ref::<StructArray>()
+                    && let (Some(nanos_col), Some(offset_col)) = (
+                        struct_arr.column_by_name("nanos_since_midnight"),
+                        struct_arr.column_by_name("offset_seconds"),
+                    )
+                    && let (Some(nanos_arr), Some(offset_arr)) = (
+                        nanos_col.as_any().downcast_ref::<Time64NanosecondArray>(),
+                        offset_col.as_any().downcast_ref::<Int32Array>(),
+                    )
+                {
+                    // Check field-level nulls before calling .value()
+                    if nanos_arr.is_null(row) || offset_arr.is_null(row) {
+                        return Value::Null;
+                    }
+                    let nanos = nanos_arr.value(row);
+                    let offset = offset_arr.value(row);
+                    return Value::Temporal(uni_common::TemporalValue::Time {
+                        nanos_since_midnight: nanos,
+                        offset_seconds: offset,
+                    });
+                }
+                // Fall back to old schema: Time64Nanosecond → Time with offset=0
+                if let Some(t) = col.as_any().downcast_ref::<Time64NanosecondArray>() {
+                    let nanos = t.value(row);
+                    return Value::Temporal(uni_common::TemporalValue::Time {
+                        nanos_since_midnight: nanos,
+                        offset_seconds: 0,
+                    });
+                }
+            }
+            _ => {}
+        }
     }
 
     // String types
@@ -199,12 +289,7 @@ pub fn arrow_to_value(col: &dyn Array, row: usize) -> Value {
 
     // Fixed-size list (vectors)
     if let Some(list) = col.as_any().downcast_ref::<FixedSizeListArray>() {
-        let arr = list.value(row);
-        let mut vals = Vec::with_capacity(arr.len());
-        for i in 0..arr.len() {
-            vals.push(arrow_to_value(arr.as_ref(), i));
-        }
-        return Value::List(vals);
+        return Value::List(array_to_value_list(&list.value(row)));
     }
 
     // Variable-size list
@@ -216,28 +301,22 @@ pub fn arrow_to_value(col: &dyn Array, row: usize) -> Value {
             return Value::Map(obj);
         }
 
-        let mut vals = Vec::with_capacity(arr.len());
-        for i in 0..arr.len() {
-            vals.push(arrow_to_value(arr.as_ref(), i));
-        }
-        return Value::List(vals);
+        return Value::List(array_to_value_list(&arr));
     }
 
     // Large list (variable-size list with i64 offsets)
     if let Some(list) = col.as_any().downcast_ref::<arrow_array::LargeListArray>() {
-        let arr = list.value(row);
-        let mut vals = Vec::with_capacity(arr.len());
-        for i in 0..arr.len() {
-            vals.push(arrow_to_value(arr.as_ref(), i));
-        }
-        return Value::List(vals);
+        return Value::List(array_to_value_list(&list.value(row)));
     }
 
     // Struct type
     if let Some(s) = col.as_any().downcast_ref::<StructArray>() {
         let mut map = HashMap::new();
         for (field, child) in s.fields().iter().zip(s.columns()) {
-            map.insert(field.name().clone(), arrow_to_value(child.as_ref(), row));
+            map.insert(
+                field.name().clone(),
+                arrow_to_value(child.as_ref(), row, None),
+            );
         }
         return Value::Map(map);
     }
@@ -250,21 +329,19 @@ pub fn arrow_to_value(col: &dyn Array, row: usize) -> Value {
         });
     }
 
-    // Timestamp (nanoseconds since epoch) - return as Value::Temporal
+    // Timestamp (nanoseconds since epoch) - timezone presence determines DateTime vs LocalDateTime
     if let Some(ts) = col.as_any().downcast_ref::<TimestampNanosecondArray>() {
         let nanos = ts.value(row);
-        let tz_name = ts.timezone().map(|s| s.to_string());
-        if tz_name.is_some() {
-            return Value::Temporal(uni_common::TemporalValue::DateTime {
+        return match ts.timezone() {
+            Some(tz) => Value::Temporal(uni_common::TemporalValue::DateTime {
                 nanos_since_epoch: nanos,
                 offset_seconds: 0,
-                timezone_name: tz_name,
-            });
-        } else {
-            return Value::Temporal(uni_common::TemporalValue::LocalDateTime {
+                timezone_name: Some(tz.to_string()),
+            }),
+            None => Value::Temporal(uni_common::TemporalValue::LocalDateTime {
                 nanos_since_epoch: nanos,
-            });
-        }
+            }),
+        };
     }
 
     // Timestamp (microseconds since epoch) - legacy fallback, convert to nanos
@@ -340,10 +417,6 @@ pub fn arrow_to_value(col: &dyn Array, row: usize) -> Value {
     // Fallback
     Value::Null
 }
-
-// ============================================================================
-// Helper functions for values_to_array to reduce CC
-// ============================================================================
 
 fn values_to_uint64_array(values: &[Value]) -> ArrayRef {
     let mut builder = UInt64Builder::with_capacity(values.len());
@@ -507,6 +580,83 @@ fn values_to_timestamp_array(values: &[Value], tz: Option<&Arc<str>>) -> ArrayRe
     }
 }
 
+/// Build a DateTime struct array from values.
+///
+/// Encodes DateTime as a 3-field struct: (nanos_since_epoch, offset_seconds, timezone_name).
+/// This preserves timezone offset information that was previously lost with TimestampNanosecond encoding.
+fn values_to_datetime_struct_array(values: &[Value]) -> ArrayRef {
+    let mut nanos_builder = TimestampNanosecondBuilder::with_capacity(values.len());
+    let mut offset_builder = Int32Builder::with_capacity(values.len());
+    let mut tz_builder = StringBuilder::with_capacity(values.len(), values.len() * 20);
+    let mut null_buffer = BooleanBufferBuilder::new(values.len());
+
+    for v in values {
+        if let Value::Temporal(uni_common::TemporalValue::DateTime {
+            nanos_since_epoch,
+            offset_seconds,
+            timezone_name,
+        }) = v
+        {
+            nanos_builder.append_value(*nanos_since_epoch);
+            offset_builder.append_value(*offset_seconds);
+            tz_builder.append_option(timezone_name.as_deref());
+            null_buffer.append(true);
+        } else {
+            nanos_builder.append_null();
+            offset_builder.append_null();
+            tz_builder.append_null();
+            null_buffer.append(false);
+        }
+    }
+
+    let struct_arr = StructArray::new(
+        schema::datetime_struct_fields(),
+        vec![
+            Arc::new(nanos_builder.finish()) as ArrayRef,
+            Arc::new(offset_builder.finish()) as ArrayRef,
+            Arc::new(tz_builder.finish()) as ArrayRef,
+        ],
+        Some(null_buffer.finish().into()),
+    );
+    Arc::new(struct_arr)
+}
+
+/// Build a Time struct array from values.
+///
+/// Encodes Time as a 2-field struct: (nanos_since_midnight, offset_seconds).
+/// This preserves timezone offset information that was previously lost with Time64Nanosecond encoding.
+fn values_to_time_struct_array(values: &[Value]) -> ArrayRef {
+    let mut nanos_builder = Time64NanosecondBuilder::with_capacity(values.len());
+    let mut offset_builder = Int32Builder::with_capacity(values.len());
+    let mut null_buffer = BooleanBufferBuilder::new(values.len());
+
+    for v in values {
+        if let Value::Temporal(uni_common::TemporalValue::Time {
+            nanos_since_midnight,
+            offset_seconds,
+        }) = v
+        {
+            nanos_builder.append_value(*nanos_since_midnight);
+            offset_builder.append_value(*offset_seconds);
+            null_buffer.append(true);
+        } else {
+            nanos_builder.append_null();
+            offset_builder.append_null();
+            null_buffer.append(false);
+        }
+    }
+
+    let struct_arr = StructArray::new(
+        schema::time_struct_fields(),
+        vec![
+            Arc::new(nanos_builder.finish()) as ArrayRef,
+            Arc::new(offset_builder.finish()) as ArrayRef,
+        ],
+        Some(null_buffer.finish().into()),
+    );
+    Arc::new(struct_arr)
+}
+
 fn values_to_large_binary_array(values: &[Value]) -> ArrayRef {
     let mut builder =
         arrow_array::builder::LargeBinaryBuilder::with_capacity(values.len(), values.len() * 64);
@@ -551,8 +701,9 @@ pub fn values_to_array(values: &[Value], dt: &ArrowDataType) -> Result<ArrayRef>
             for v in values {
                 if v.is_null() {
                     builder.append_null();
-                } else if let Value::Temporal(uni_common::TemporalValue::Date { days_since_epoch }) =
-                    v
+                } else if let Value::Temporal(uni_common::TemporalValue::Date {
+                    days_since_epoch,
+                }) = v
                 {
                     builder.append_value(*days_since_epoch);
                 } else if let Some(n) = v.as_i64() {
@@ -681,22 +832,24 @@ pub fn values_to_array(values: &[Value], dt: &ArrowDataType) -> Result<ArrayRef>
                 ))
             }
         }
+        ArrowDataType::Struct(_) if schema::is_datetime_struct(dt) => {
+            Ok(values_to_datetime_struct_array(values))
+        }
+        ArrowDataType::Struct(_) if schema::is_time_struct(dt) => {
+            Ok(values_to_time_struct_array(values))
+        }
         _ => Err(anyhow!("Unsupported type for conversion: {:?}", dt)),
     }
 }
 
 /// Property value extractor for building Arrow columns from entity properties.
 pub struct PropertyExtractor<'a> {
-    _name: &'a str,
     data_type: &'a DataType,
 }
 
 impl<'a> PropertyExtractor<'a> {
-    pub fn new(name: &'a str, data_type: &'a DataType) -> Self {
-        Self {
-            _name: name,
-            data_type,
-        }
+    pub fn new(_name: &'a str, data_type: &'a DataType) -> Self {
+        Self { data_type }
     }
 
     /// Build an Arrow column from a slice of property maps.
@@ -719,11 +872,10 @@ impl<'a> PropertyExtractor<'a> {
             DataType::List(inner) => self.build_list_column(len, deleted, get_props, inner),
             DataType::Map(key, value) => self.build_map_column(len, deleted, get_props, key, value),
             DataType::Crdt(_) => self.build_crdt_column(len, deleted, get_props),
-            DataType::DateTime | DataType::Timestamp => {
-                self.build_timestamp_column(len, deleted, get_props)
-            }
+            DataType::DateTime => self.build_datetime_struct_column(len, deleted, get_props),
+            DataType::Timestamp => self.build_timestamp_column(len, deleted, get_props),
             DataType::Date => self.build_date32_column(len, deleted, get_props),
-            DataType::Time => self.build_time64_column(len, deleted, get_props),
+            DataType::Time => self.build_time_struct_column(len, deleted, get_props),
             DataType::Duration => self.build_duration_column(len, deleted, get_props),
             _ => Err(anyhow!(
                 "Unsupported data type for arrow conversion: {:?}",
@@ -826,6 +978,51 @@ impl<'a> PropertyExtractor<'a> {
         Ok(Arc::new(arr))
     }
 
+    fn build_datetime_struct_column<F>(
+        &self,
+        len: usize,
+        deleted: &[bool],
+        get_props: F,
+    ) -> Result<ArrayRef>
+    where
+        F: Fn(usize) -> Option<&'a Value>,
+    {
+        let values = self.collect_values_or_null(len, deleted, &get_props);
+        Ok(values_to_datetime_struct_array(&values))
+    }
+
+    fn build_time_struct_column<F>(
+        &self,
+        len: usize,
+        deleted: &[bool],
+        get_props: F,
+    ) -> Result<ArrayRef>
+    where
+        F: Fn(usize) -> Option<&'a Value>,
+    {
+        let values = self.collect_values_or_null(len, deleted, &get_props);
+        Ok(values_to_time_struct_array(&values))
+    }
+
+    /// Collect property values into a Vec, substituting `Value::Null` for deleted or missing entries.
+    fn collect_values_or_null<F>(&self, len: usize, deleted: &[bool], get_props: &F) -> Vec<Value>
+    where
+        F: Fn(usize) -> Option<&'a Value>,
+    {
+        deleted
+            .iter()
+            .enumerate()
+            .take(len)
+            .map(|(i, &is_deleted)| {
+                if is_deleted {
+                    Value::Null
+                } else {
+                    get_props(i).cloned().unwrap_or(Value::Null)
+                }
+            })
+            .collect()
+    }
+
     fn build_date32_column<F>(&self, len: usize, deleted: &[bool], get_props: F) -> Result<ArrayRef>
     where
         F: Fn(usize) -> Option<&'a Value>,
@@ -864,46 +1061,6 @@ impl<'a> PropertyExtractor<'a> {
         Ok(Arc::new(builder.finish()))
     }
 
-    fn build_time64_column<F>(&self, len: usize, deleted: &[bool], get_props: F) -> Result<ArrayRef>
-    where
-        F: Fn(usize) -> Option<&'a Value>,
-    {
-        let mut builder = Time64NanosecondBuilder::with_capacity(len);
-        for (i, &is_deleted) in deleted.iter().enumerate().take(len) {
-            if is_deleted {
-                builder.append_value(0);
-                continue;
-            }
-
-            let val = get_props(i);
-            let nanos = if let Some(Value::Temporal(tv)) = val {
-                match tv {
-                    uni_common::TemporalValue::LocalTime {
-                        nanos_since_midnight,
-                    }
-                    | uni_common::TemporalValue::Time {
-                        nanos_since_midnight,
-                        ..
-                    } => Some(*nanos_since_midnight),
-                    _ => None,
-                }
-            } else if let Some(v) = val.and_then(|v| v.as_i64()) {
-                Some(v)
-            } else if let Some(s) = val.and_then(|v| v.as_str()) {
-                parse_time_string_to_micros(s)
-            } else {
-                None
-            };
-
-            if let Some(v) = nanos {
-                builder.append_value(v);
-            } else {
-                builder.append_null();
-            }
-        }
-        Ok(Arc::new(builder.finish()))
-    }
-
     fn build_duration_column<F>(
         &self,
         len: usize,
@@ -917,8 +1074,7 @@ impl<'a> PropertyExtractor<'a> {
         let mut builder = LargeBinaryBuilder::with_capacity(len, len * 32);
         for (i, &is_deleted) in deleted.iter().enumerate().take(len) {
             let raw_val = get_props(i);
-            if let Some(val @ Value::Temporal(uni_common::TemporalValue::Duration { .. })) =
-                raw_val
+            if let Some(val @ Value::Temporal(uni_common::TemporalValue::Duration { .. })) = raw_val
             {
                 let encoded = uni_common::cypher_value_codec::encode(val);
                 builder.append_value(&encoded);
@@ -1303,81 +1459,53 @@ pub fn build_edge_column<'a>(
     extractor.build_column(len, &deleted, get_props)
 }
 
-/// Strip a timezone suffix ("Z", "+HH:MM", "-HH:MM") from a time string.
-///
-/// Arrow Time64 stores offset-naive microseconds since midnight, so timezone
-/// information must be removed before parsing.
-fn strip_timezone_suffix(s: &str) -> &str {
-    if let Some(bare) = s.strip_suffix('Z') {
-        return bare;
-    }
-    let bytes = s.as_bytes();
-    if bytes.len() >= 6 {
-        let sign_pos = bytes.len() - 6;
-        if (bytes[sign_pos] == b'+' || bytes[sign_pos] == b'-') && bytes[sign_pos + 3] == b':' {
-            return &s[..sign_pos];
-        }
-    }
-    s
-}
-
-/// Parse a time string to microseconds since midnight.
-///
-/// Supports formats: "HH:MM", "HH:MM:SS", "HH:MM:SS.fff", etc.
-/// Timezone suffixes ("Z", "+HH:MM", "-HH:MM") are stripped before parsing.
-fn parse_time_string_to_micros(s: &str) -> Option<i64> {
-    use chrono::Timelike;
-
-    let bare = strip_timezone_suffix(s);
-
-    let time = chrono::NaiveTime::parse_from_str(bare, "%H:%M:%S%.f")
-        .or_else(|_| chrono::NaiveTime::parse_from_str(bare, "%H:%M:%S"))
-        .or_else(|_| chrono::NaiveTime::parse_from_str(bare, "%H:%M"))
-        .ok()?;
-
-    Some(time.num_seconds_from_midnight() as i64 * 1_000_000 + time.nanosecond() as i64 / 1000)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use arrow_array::{
-        DurationMicrosecondArray,
-        builder::{BinaryBuilder, Time64MicrosecondBuilder},
+        Array, DurationMicrosecondArray,
+        builder::{BinaryBuilder, Time64MicrosecondBuilder, TimestampNanosecondBuilder},
     };
     use std::collections::HashMap;
+    use uni_common::TemporalValue;
     use uni_crdt::{Crdt, GCounter};
 
     #[test]
     fn test_arrow_to_value_string() {
         let arr = StringArray::from(vec![Some("hello"), None, Some("world")]);
-        assert_eq!(arrow_to_value(&arr, 0), Value::String("hello".to_string()));
-        assert_eq!(arrow_to_value(&arr, 1), Value::Null);
-        assert_eq!(arrow_to_value(&arr, 2), Value::String("world".to_string()));
+        assert_eq!(
+            arrow_to_value(&arr, 0, None),
+            Value::String("hello".to_string())
+        );
+        assert_eq!(arrow_to_value(&arr, 1, None), Value::Null);
+        assert_eq!(
+            arrow_to_value(&arr, 2, None),
+            Value::String("world".to_string())
+        );
     }
 
     #[test]
     fn test_arrow_to_value_int64() {
         let arr = Int64Array::from(vec![Some(42), None, Some(-10)]);
-        assert_eq!(arrow_to_value(&arr, 0), Value::Int(42));
-        assert_eq!(arrow_to_value(&arr, 1), Value::Null);
-        assert_eq!(arrow_to_value(&arr, 2), Value::Int(-10));
+        assert_eq!(arrow_to_value(&arr, 0, None), Value::Int(42));
+        assert_eq!(arrow_to_value(&arr, 1, None), Value::Null);
+        assert_eq!(arrow_to_value(&arr, 2, None), Value::Int(-10));
     }
 
     #[test]
     #[allow(clippy::approx_constant)]
     fn test_arrow_to_value_float64() {
         let arr = Float64Array::from(vec![Some(3.14), None]);
-        assert_eq!(arrow_to_value(&arr, 0), Value::Float(3.14));
-        assert_eq!(arrow_to_value(&arr, 1), Value::Null);
+        assert_eq!(arrow_to_value(&arr, 0, None), Value::Float(3.14));
+        assert_eq!(arrow_to_value(&arr, 1, None), Value::Null);
     }
 
     #[test]
     fn test_arrow_to_value_bool() {
         let arr = BooleanArray::from(vec![Some(true), Some(false), None]);
-        assert_eq!(arrow_to_value(&arr, 0), Value::Bool(true));
-        assert_eq!(arrow_to_value(&arr, 1), Value::Bool(false));
-        assert_eq!(arrow_to_value(&arr, 2), Value::Null);
+        assert_eq!(arrow_to_value(&arr, 0, None), Value::Bool(true));
+        assert_eq!(arrow_to_value(&arr, 1, None), Value::Bool(false));
+        assert_eq!(arrow_to_value(&arr, 2, None), Value::Null);
     }
 
     #[test]
@@ -1467,10 +1595,10 @@ mod tests {
 
         let arr = builder.finish();
         // Arrow→Value returns Value::Temporal(LocalTime) with nanos (micros * 1000)
-        assert_eq!(arrow_to_value(&arr, 0).to_string(), "10:30:45");
-        assert_eq!(arrow_to_value(&arr, 1).to_string(), "00:00");
-        assert_eq!(arrow_to_value(&arr, 2).to_string(), "23:59:59.123456");
-        assert_eq!(arrow_to_value(&arr, 3), Value::Null);
+        assert_eq!(arrow_to_value(&arr, 0, None).to_string(), "10:30:45");
+        assert_eq!(arrow_to_value(&arr, 1, None).to_string(), "00:00");
+        assert_eq!(arrow_to_value(&arr, 2, None).to_string(), "23:59:59.123456");
+        assert_eq!(arrow_to_value(&arr, 3, None), Value::Null);
     }
 
     #[test]
@@ -1484,10 +1612,10 @@ mod tests {
             None,
         ]);
 
-        assert_eq!(arrow_to_value(&arr, 0).to_string(), "PT1S");
-        assert_eq!(arrow_to_value(&arr, 1).to_string(), "PT1H");
-        assert_eq!(arrow_to_value(&arr, 2).to_string(), "PT24H");
-        assert_eq!(arrow_to_value(&arr, 3), Value::Null);
+        assert_eq!(arrow_to_value(&arr, 0, None).to_string(), "PT1S");
+        assert_eq!(arrow_to_value(&arr, 1, None).to_string(), "PT1H");
+        assert_eq!(arrow_to_value(&arr, 2, None).to_string(), "PT24H");
+        assert_eq!(arrow_to_value(&arr, 3, None), Value::Null);
     }
 
     #[test]
@@ -1508,13 +1636,243 @@ mod tests {
         let arr = builder.finish();
 
         // The first value should deserialize back to a map
-        let result = arrow_to_value(&arr, 0);
+        let result = arrow_to_value(&arr, 0, None);
         assert!(result.as_object().is_some());
         let obj = result.as_object().unwrap();
         // GCounter serializes with tag "t": "gc"
         assert_eq!(obj.get("t"), Some(&Value::String("gc".to_string())));
 
         // Null value should return null
-        assert_eq!(arrow_to_value(&arr, 1), Value::Null);
+        assert_eq!(arrow_to_value(&arr, 1, None), Value::Null);
+    }
+
+    #[test]
+    fn test_datetime_struct_encode_decode_roundtrip() {
+        // Test DateTime struct encoding with offset and timezone preservation
+        let values = vec![
+            Value::Temporal(TemporalValue::DateTime {
+                nanos_since_epoch: 441763200000000000, // 1984-01-01T00:00:00Z
+                offset_seconds: 3600,                  // +01:00
+                timezone_name: Some("Europe/Paris".to_string()),
+            }),
+            Value::Temporal(TemporalValue::DateTime {
+                nanos_since_epoch: 1704067200000000000, // 2024-01-01T00:00:00Z
+                offset_seconds: -18000,                 // -05:00
+                timezone_name: None,
+            }),
+            Value::Temporal(TemporalValue::DateTime {
+                nanos_since_epoch: 0, // Unix epoch
+                offset_seconds: 0,
+                timezone_name: Some("UTC".to_string()),
+            }),
+        ];
+
+        // Encode to Arrow struct
+        let arr_ref = values_to_datetime_struct_array(&values);
+        let arr = arr_ref.as_any().downcast_ref::<StructArray>().unwrap();
+        assert_eq!(arr.len(), 3);
+
+        // Decode back to Value
+        let decoded_0 = arrow_to_value(arr_ref.as_ref(), 0, Some(&DataType::DateTime));
+        let decoded_1 = arrow_to_value(arr_ref.as_ref(), 1, Some(&DataType::DateTime));
+        let decoded_2 = arrow_to_value(arr_ref.as_ref(), 2, Some(&DataType::DateTime));
+
+        // Verify round-trip preserves all fields
+        assert_eq!(decoded_0, values[0]);
+        assert_eq!(decoded_1, values[1]);
+        assert_eq!(decoded_2, values[2]);
+
+        // Verify struct field extraction
+        if let Value::Temporal(TemporalValue::DateTime {
+            nanos_since_epoch,
+            offset_seconds,
+            timezone_name,
+        }) = decoded_0
+        {
+            assert_eq!(nanos_since_epoch, 441763200000000000);
+            assert_eq!(offset_seconds, 3600);
+            assert_eq!(timezone_name, Some("Europe/Paris".to_string()));
+        } else {
+            panic!("Expected DateTime value");
+        }
+    }
+
+    #[test]
+    fn test_datetime_struct_null_handling() {
+        // Test DateTime struct with null values
+        let values = vec![
+            Value::Temporal(TemporalValue::DateTime {
+                nanos_since_epoch: 441763200000000000,
+                offset_seconds: 3600,
+                timezone_name: Some("Europe/Paris".to_string()),
+            }),
+            Value::Null,
+            Value::Temporal(TemporalValue::DateTime {
+                nanos_since_epoch: 0,
+                offset_seconds: 0,
+                timezone_name: None,
+            }),
+        ];
+
+        let arr_ref = values_to_datetime_struct_array(&values);
+        let arr = arr_ref.as_any().downcast_ref::<StructArray>().unwrap();
+        assert_eq!(arr.len(), 3);
+
+        // Check first value is valid
+        let decoded_0 = arrow_to_value(arr_ref.as_ref(), 0, Some(&DataType::DateTime));
+        assert_eq!(decoded_0, values[0]);
+
+        // Check second value is null
+        assert!(arr.is_null(1));
+        let decoded_1 = arrow_to_value(arr_ref.as_ref(), 1, Some(&DataType::DateTime));
+        assert_eq!(decoded_1, Value::Null);
+
+        // Check third value is valid
+        let decoded_2 = arrow_to_value(arr_ref.as_ref(), 2, Some(&DataType::DateTime));
+        assert_eq!(decoded_2, values[2]);
+    }
+
+    #[test]
+    fn test_datetime_struct_boundary_values() {
+        // Test boundary values: offset=0, large positive/negative offsets
+        let values = vec![
+            Value::Temporal(TemporalValue::DateTime {
+                nanos_since_epoch: 441763200000000000,
+                offset_seconds: 0, // UTC
+                timezone_name: None,
+            }),
+            Value::Temporal(TemporalValue::DateTime {
+                nanos_since_epoch: 441763200000000000,
+                offset_seconds: 43200, // +12:00 (max typical offset)
+                timezone_name: None,
+            }),
+            Value::Temporal(TemporalValue::DateTime {
+                nanos_since_epoch: 441763200000000000,
+                offset_seconds: -43200, // -12:00 (min typical offset)
+                timezone_name: None,
+            }),
+        ];
+
+        let arr_ref = values_to_datetime_struct_array(&values);
+        let arr = arr_ref.as_any().downcast_ref::<StructArray>().unwrap();
+        assert_eq!(arr.len(), 3);
+
+        // Verify round-trip for all boundary values
+        for (i, expected) in values.iter().enumerate() {
+            let decoded = arrow_to_value(arr_ref.as_ref(), i, Some(&DataType::DateTime));
+            assert_eq!(&decoded, expected);
+        }
+    }
+
+    #[test]
+    fn test_datetime_old_schema_migration() {
+        // Test backward compatibility: TimestampNanosecondArray → DateTime with offset=0
+        let mut builder = TimestampNanosecondBuilder::new().with_timezone("UTC");
+        builder.append_value(441763200000000000); // 1984-01-01T00:00:00Z
+        builder.append_value(1704067200000000000); // 2024-01-01T00:00:00Z
+        builder.append_null();
+
+        let arr = builder.finish();
+
+        // Decode with DataType::DateTime hint should migrate old schema
+        let decoded_0 = arrow_to_value(&arr, 0, Some(&DataType::DateTime));
+        let _decoded_1 = arrow_to_value(&arr, 1, Some(&DataType::DateTime));
+        let decoded_2 = arrow_to_value(&arr, 2, Some(&DataType::DateTime));
+
+        // Old schema should default to offset=0, preserve timezone
+        if let Value::Temporal(TemporalValue::DateTime {
+            nanos_since_epoch,
+            offset_seconds,
+            timezone_name,
+        }) = decoded_0
+        {
+            assert_eq!(nanos_since_epoch, 441763200000000000);
+            assert_eq!(offset_seconds, 0);
+            assert_eq!(timezone_name, Some("UTC".to_string()));
+        } else {
+            panic!("Expected DateTime value");
+        }
+
+        // Verify null handling
+        assert_eq!(decoded_2, Value::Null);
+    }
+
+    #[test]
+    fn test_time_struct_encode_decode_roundtrip() {
+        // Test Time struct encoding with offset preservation
+        let values = vec![
+            Value::Temporal(TemporalValue::Time {
+                nanos_since_midnight: 37845000000000, // 10:30:45
+                offset_seconds: 3600,                 // +01:00
+            }),
+            Value::Temporal(TemporalValue::Time {
+                nanos_since_midnight: 0, // 00:00:00
+                offset_seconds: 0,
+            }),
+            Value::Temporal(TemporalValue::Time {
+                nanos_since_midnight: 86399999999999, // 23:59:59.999999999
+                offset_seconds: -18000,               // -05:00
+            }),
+        ];
+
+        // Encode to Arrow struct
+        let arr_ref = values_to_time_struct_array(&values);
+        let arr = arr_ref.as_any().downcast_ref::<StructArray>().unwrap();
+        assert_eq!(arr.len(), 3);
+
+        // Decode back to Value
+        let decoded_0 = arrow_to_value(arr_ref.as_ref(), 0, Some(&DataType::Time));
+        let decoded_1 = arrow_to_value(arr_ref.as_ref(), 1, Some(&DataType::Time));
+        let decoded_2 = arrow_to_value(arr_ref.as_ref(), 2, Some(&DataType::Time));
+
+        // Verify round-trip preserves all fields
+        assert_eq!(decoded_0, values[0]);
+        assert_eq!(decoded_1, values[1]);
+        assert_eq!(decoded_2, values[2]);
+
+        // Verify struct field extraction
+        if let Value::Temporal(TemporalValue::Time {
+            nanos_since_midnight,
+            offset_seconds,
+        }) = decoded_0
+        {
+            assert_eq!(nanos_since_midnight, 37845000000000);
+            assert_eq!(offset_seconds, 3600);
+        } else {
+            panic!("Expected Time value");
+        }
+    }
+
+    #[test]
+    fn test_time_struct_null_handling() {
+        // Test Time struct with null values
+        let values = vec![
+            Value::Temporal(TemporalValue::Time {
+                nanos_since_midnight: 37845000000000,
+                offset_seconds: 3600,
+            }),
+            Value::Null,
+            Value::Temporal(TemporalValue::Time {
+                nanos_since_midnight: 0,
+                offset_seconds: 0,
+            }),
+        ];
+
+        let arr_ref = values_to_time_struct_array(&values);
+        let arr = arr_ref.as_any().downcast_ref::<StructArray>().unwrap();
+        assert_eq!(arr.len(), 3);
+
+        // Check first value is valid
+        let decoded_0 = arrow_to_value(arr_ref.as_ref(), 0, Some(&DataType::Time));
+        assert_eq!(decoded_0, values[0]);
+
+        // Check second value is null
+        assert!(arr.is_null(1));
+        let decoded_1 = arrow_to_value(arr_ref.as_ref(), 1, Some(&DataType::Time));
+        assert_eq!(decoded_1, Value::Null);
+
+        // Check third value is valid
+        let decoded_2 = arrow_to_value(arr_ref.as_ref(), 2, Some(&DataType::Time));
+        assert_eq!(decoded_2, values[2]);
     }
 }

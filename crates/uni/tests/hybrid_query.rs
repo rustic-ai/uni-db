@@ -94,19 +94,17 @@ async fn test_hybrid_vector_graph_query() -> anyhow::Result<()> {
                 Arc::new(StringArray::from(vec![None::<&str>; 2])), // ext_id
                 // _labels
                 {
-                    let mut lb = arrow_array::builder::ListBuilder::new(arrow_array::builder::StringBuilder::new());
+                    let mut lb = arrow_array::builder::ListBuilder::new(
+                        arrow_array::builder::StringBuilder::new(),
+                    );
                     for _ in 0..2 {
                         lb.values().append_value("Paper");
                         lb.append(true);
                     }
                     Arc::new(lb.finish())
                 },
-                Arc::new(
-                    TimestampNanosecondArray::from(vec![None::<i64>; 2]).with_timezone("UTC"),
-                ), // _created_at
-                Arc::new(
-                    TimestampNanosecondArray::from(vec![None::<i64>; 2]).with_timezone("UTC"),
-                ), // _updated_at
+                Arc::new(TimestampNanosecondArray::from(vec![None::<i64>; 2]).with_timezone("UTC")), // _created_at
+                Arc::new(TimestampNanosecondArray::from(vec![None::<i64>; 2]).with_timezone("UTC")), // _updated_at
                 Arc::new(vectors),
                 Arc::new(titles),
                 Arc::new(LargeBinaryArray::from(vec![None::<&[u8]>; 2])), // overflow_json
@@ -146,17 +144,15 @@ async fn test_hybrid_vector_graph_query() -> anyhow::Result<()> {
                 Arc::new(StringArray::from(vec![None::<&str>; 1])), // ext_id
                 // _labels
                 {
-                    let mut lb = arrow_array::builder::ListBuilder::new(arrow_array::builder::StringBuilder::new());
+                    let mut lb = arrow_array::builder::ListBuilder::new(
+                        arrow_array::builder::StringBuilder::new(),
+                    );
                     lb.values().append_value("Author");
                     lb.append(true);
                     Arc::new(lb.finish())
                 },
-                Arc::new(
-                    TimestampNanosecondArray::from(vec![None::<i64>; 1]).with_timezone("UTC"),
-                ), // _created_at
-                Arc::new(
-                    TimestampNanosecondArray::from(vec![None::<i64>; 1]).with_timezone("UTC"),
-                ), // _updated_at
+                Arc::new(TimestampNanosecondArray::from(vec![None::<i64>; 1]).with_timezone("UTC")), // _created_at
+                Arc::new(TimestampNanosecondArray::from(vec![None::<i64>; 1]).with_timezone("UTC")), // _updated_at
                 Arc::new(names),
                 Arc::new(LargeBinaryArray::from(vec![None::<&[u8]>; 1])), // overflow_json
             ],

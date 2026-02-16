@@ -27,9 +27,9 @@ use crate::query::datetime::parse_datetime_utc;
 use crate::query::df_graph::GraphExecutionContext;
 use crate::query::df_graph::common::{compute_plan_properties, labels_data_type};
 use arrow_array::builder::{
-    BinaryBuilder, BooleanBuilder, Date32Builder, FixedSizeListBuilder,
-    Float32Builder, Float64Builder, Int32Builder, Int64Builder, ListBuilder, StringBuilder,
-    TimestampNanosecondBuilder, Time64NanosecondBuilder, UInt64Builder,
+    BinaryBuilder, BooleanBuilder, Date32Builder, FixedSizeListBuilder, Float32Builder,
+    Float64Builder, Int32Builder, Int64Builder, ListBuilder, StringBuilder,
+    Time64NanosecondBuilder, TimestampNanosecondBuilder, UInt64Builder,
 };
 use arrow_array::{Array, ArrayRef, RecordBatch, UInt64Array};
 use arrow_schema::{DataType, Field, Fields, IntervalUnit, Schema, SchemaRef, TimeUnit};
@@ -2912,8 +2912,12 @@ pub(crate) fn build_property_column_static(
             for vid in vids {
                 match get_property_value(vid, props_map, prop_name) {
                     Some(Value::Temporal(tv)) => match tv {
-                        uni_common::TemporalValue::DateTime { nanos_since_epoch, .. }
-                        | uni_common::TemporalValue::LocalDateTime { nanos_since_epoch, .. } => {
+                        uni_common::TemporalValue::DateTime {
+                            nanos_since_epoch, ..
+                        }
+                        | uni_common::TemporalValue::LocalDateTime {
+                            nanos_since_epoch, ..
+                        } => {
                             builder.append_value(nanos_since_epoch);
                         }
                         uni_common::TemporalValue::Date { days_since_epoch } => {
@@ -2958,8 +2962,13 @@ pub(crate) fn build_property_column_static(
             for vid in vids {
                 match get_property_value(vid, props_map, prop_name) {
                     Some(Value::Temporal(
-                        uni_common::TemporalValue::LocalTime { nanos_since_midnight }
-                        | uni_common::TemporalValue::Time { nanos_since_midnight, .. },
+                        uni_common::TemporalValue::LocalTime {
+                            nanos_since_midnight,
+                        }
+                        | uni_common::TemporalValue::Time {
+                            nanos_since_midnight,
+                            ..
+                        },
                     )) => {
                         builder.append_value(nanos_since_midnight);
                     }
@@ -2985,10 +2994,15 @@ pub(crate) fn build_property_column_static(
             Ok(Arc::new(builder.finish()))
         }
         DataType::Interval(IntervalUnit::MonthDayNano) => {
-            let mut values: Vec<Option<arrow::datatypes::IntervalMonthDayNano>> = Vec::with_capacity(vids.len());
+            let mut values: Vec<Option<arrow::datatypes::IntervalMonthDayNano>> =
+                Vec::with_capacity(vids.len());
             for vid in vids {
                 match get_property_value(vid, props_map, prop_name) {
-                    Some(Value::Temporal(uni_common::TemporalValue::Duration { months, days, nanos })) => {
+                    Some(Value::Temporal(uni_common::TemporalValue::Duration {
+                        months,
+                        days,
+                        nanos,
+                    })) => {
                         values.push(Some(arrow::datatypes::IntervalMonthDayNano {
                             months: months as i32,
                             days: days as i32,

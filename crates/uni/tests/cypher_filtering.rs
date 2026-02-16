@@ -2,8 +2,8 @@
 // Copyright 2024-2026 Dragonscale Team
 
 use arrow_array::{
-    BooleanArray, Int32Array, LargeBinaryArray, RecordBatch, StringArray,
-    TimestampNanosecondArray, UInt64Array,
+    BooleanArray, Int32Array, LargeBinaryArray, RecordBatch, StringArray, TimestampNanosecondArray,
+    UInt64Array,
 };
 use std::sync::Arc;
 use tempfile::tempdir;
@@ -75,7 +75,9 @@ async fn test_cypher_filtering() -> anyhow::Result<()> {
             Arc::new(StringArray::from(vec![None::<&str>; 3])), // ext_id
             // _labels
             {
-                let mut lb = arrow_array::builder::ListBuilder::new(arrow_array::builder::StringBuilder::new());
+                let mut lb = arrow_array::builder::ListBuilder::new(
+                    arrow_array::builder::StringBuilder::new(),
+                );
                 for _ in 0..3 {
                     lb.values().append_value("Person");
                     lb.append(true);

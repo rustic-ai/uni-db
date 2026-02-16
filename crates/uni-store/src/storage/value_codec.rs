@@ -1,16 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2024-2026 Dragonscale Team
 
-//! Shared Arrow-to-JSON value decoding utilities.
+//! Arrow column value decoding utilities.
 //!
-//! This module provides a unified implementation for decoding Arrow column values
-//! to serde_json::Value, used by both PropertyManager and DeltaDataset.
+//! Provides a unified `value_from_column` function for decoding Arrow column
+//! values to `serde_json::Value`, used by both PropertyManager and DeltaDataset.
 
 use anyhow::{Result, anyhow};
 use arrow_array::{
-    Array, BinaryArray, BooleanArray, Date32Array, FixedSizeListArray,
-    Float32Array, Float64Array, Int32Array, Int64Array, LargeBinaryArray,
-    ListArray, StringArray, StructArray, Time64NanosecondArray, TimestampNanosecondArray,
+    Array, BinaryArray, BooleanArray, Date32Array, FixedSizeListArray, Float32Array, Float64Array,
+    Int32Array, Int64Array, LargeBinaryArray, ListArray, StringArray, StructArray,
+    Time64NanosecondArray, TimestampNanosecondArray,
 };
 use serde_json::Value;
 use uni_common::DataType;
@@ -102,10 +102,9 @@ pub fn value_from_column(
                 .downcast_ref::<Float32Array>()
                 .ok_or_else(|| anyhow!("Invalid float32 inner col for vector"))?;
 
-            let mut vec = Vec::with_capacity(float_values.len());
-            for i in 0..float_values.len() {
-                vec.push(float_values.value(i));
-            }
+            let vec: Vec<f32> = (0..float_values.len())
+                .map(|i| float_values.value(i))
+                .collect();
             Ok(serde_json::json!(vec))
         }
         DataType::CypherValue => {

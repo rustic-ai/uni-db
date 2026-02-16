@@ -51,7 +51,7 @@ use anyhow::{Result, anyhow};
 use arrow_schema::{Schema, SchemaRef};
 use datafusion::common::JoinType;
 use datafusion::execution::SessionState;
-use datafusion::logical_expr::{Expr as DfExpr, SortExpr as DfSortExpr};
+use datafusion::logical_expr::{Expr as DfExpr, ExprSchemable, SortExpr as DfSortExpr};
 use datafusion::physical_expr::{create_physical_expr, create_physical_sort_exprs};
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion::physical_plan::aggregates::{AggregateExec, AggregateMode, PhysicalGroupBy};
@@ -2273,19 +2273,45 @@ impl HybridPhysicalPlanner {
         // Translate group by expressions
         let mut group_exprs: Vec<(Arc<dyn datafusion::physical_expr::PhysicalExpr>, String)> =
             Vec::new();
-        let compiler = crate::query::df_graph::expr_compiler::CypherPhysicalExprCompiler::new(
-            &state,
-            Some(&ctx),
-        )
-        .with_subquery_ctx(
-            self.graph_ctx.clone(),
-            self.schema.clone(),
-            self.session_ctx.clone(),
-            self.storage.clone(),
-            self.params.clone(),
-        );
         for expr in group_by {
-            let physical_expr = compiler.compile(expr, &schema)?;
+            // DateTime/Time struct grouping: group by nanos_since_epoch/nanos_since_midnight
+            // Two DateTimes with same UTC but different offsets should be in the same group
+            let mut df_expr = cypher_expr_to_df(expr, Some(&ctx))?;
+            if let Ok(expr_type) = df_expr.get_type(&datafusion::common::DFSchema::try_from(
+                schema.as_ref().clone(),
+            )?) {
+                if uni_common::core::schema::is_datetime_struct(&expr_type) {
+                    use datafusion::logical_expr::ScalarUDF;
+                    df_expr = datafusion::logical_expr::Expr::ScalarFunction(
+                        datafusion::logical_expr::expr::ScalarFunction::new_udf(
+                            Arc::new(ScalarUDF::from(
+                                datafusion::functions::core::getfield::GetFieldFunc::new(),
+                            )),
+                            vec![df_expr, datafusion::logical_expr::lit("nanos_since_epoch")],
+                        ),
+                    );
+                } else if uni_common::core::schema::is_time_struct(&expr_type) {
+                    use datafusion::logical_expr::ScalarUDF;
+                    df_expr = datafusion::logical_expr::Expr::ScalarFunction(
+                        datafusion::logical_expr::expr::ScalarFunction::new_udf(
+                            Arc::new(ScalarUDF::from(
+                                datafusion::functions::core::getfield::GetFieldFunc::new(),
+                            )),
+                            vec![
+                                df_expr,
+                                datafusion::logical_expr::lit("nanos_since_midnight"),
+                            ],
+                        ),
+                    );
+                }
+            }
+
+            // Convert logical expression to physical
+            let physical_expr = create_physical_expr(
+                &df_expr,
+                &datafusion::common::DFSchema::try_from(schema.as_ref().clone())?,
+                state.execution_props(),
+            )?;
             let name = expr.to_string_repr();
             group_exprs.push((physical_expr, name));
         }
@@ -2401,14 +2427,24 @@ impl HybridPhysicalPlanner {
                         let is_float = if let DfExpr::Column(col) = &arg
                             && let Ok(field) = schema.field_with_name(&col.name)
                         {
-                            matches!(field.data_type(), datafusion::arrow::datatypes::DataType::Float32 | datafusion::arrow::datatypes::DataType::Float64)
+                            matches!(
+                                field.data_type(),
+                                datafusion::arrow::datatypes::DataType::Float32
+                                    | datafusion::arrow::datatypes::DataType::Float64
+                            )
                         } else {
                             false
                         };
                         if is_float {
-                            sum(DfExpr::Cast(Cast::new(Box::new(arg), datafusion::arrow::datatypes::DataType::Float64)))
+                            sum(DfExpr::Cast(Cast::new(
+                                Box::new(arg),
+                                datafusion::arrow::datatypes::DataType::Float64,
+                            )))
                         } else {
-                            sum(DfExpr::Cast(Cast::new(Box::new(arg), datafusion::arrow::datatypes::DataType::Int64)))
+                            sum(DfExpr::Cast(Cast::new(
+                                Box::new(arg),
+                                datafusion::arrow::datatypes::DataType::Int64,
+                            )))
                         }
                     }
                 }
@@ -2419,12 +2455,46 @@ impl HybridPhysicalPlanner {
                         avg(coerced)
                     } else {
                         use datafusion::logical_expr::Cast;
-                        avg(DfExpr::Cast(Cast::new(Box::new(arg), datafusion::arrow::datatypes::DataType::Float64)))
+                        avg(DfExpr::Cast(Cast::new(
+                            Box::new(arg),
+                            datafusion::arrow::datatypes::DataType::Float64,
+                        )))
                     }
                 }
                 "min" => {
                     // Use Cypher-aware min for LargeBinary columns (mixed types)
-                    let arg = get_arg()?;
+                    let mut arg = get_arg()?;
+
+                    // DateTime/Time struct: apply min to nanos field
+                    if let Ok(arg_type) = arg.get_type(&datafusion::common::DFSchema::try_from(
+                        schema.as_ref().clone(),
+                    )?) {
+                        if uni_common::core::schema::is_datetime_struct(&arg_type) {
+                            use datafusion::logical_expr::ScalarUDF;
+                            arg = datafusion::logical_expr::Expr::ScalarFunction(
+                                datafusion::logical_expr::expr::ScalarFunction::new_udf(
+                                    Arc::new(ScalarUDF::from(
+                                        datafusion::functions::core::getfield::GetFieldFunc::new(),
+                                    )),
+                                    vec![arg, datafusion::logical_expr::lit("nanos_since_epoch")],
+                                ),
+                            );
+                        } else if uni_common::core::schema::is_time_struct(&arg_type) {
+                            use datafusion::logical_expr::ScalarUDF;
+                            arg = datafusion::logical_expr::Expr::ScalarFunction(
+                                datafusion::logical_expr::expr::ScalarFunction::new_udf(
+                                    Arc::new(ScalarUDF::from(
+                                        datafusion::functions::core::getfield::GetFieldFunc::new(),
+                                    )),
+                                    vec![
+                                        arg,
+                                        datafusion::logical_expr::lit("nanos_since_midnight"),
+                                    ],
+                                ),
+                            );
+                        }
+                    }
+
                     if self.is_large_binary_col(&arg, schema) {
                         let udaf = Arc::new(crate::query::df_udfs::create_cypher_min_udaf());
                         udaf.call(vec![arg])
@@ -2434,7 +2504,38 @@ impl HybridPhysicalPlanner {
                 }
                 "max" => {
                     // Use Cypher-aware max for LargeBinary columns (mixed types)
-                    let arg = get_arg()?;
+                    let mut arg = get_arg()?;
+
+                    // DateTime/Time struct: apply max to nanos field
+                    if let Ok(arg_type) = arg.get_type(&datafusion::common::DFSchema::try_from(
+                        schema.as_ref().clone(),
+                    )?) {
+                        if uni_common::core::schema::is_datetime_struct(&arg_type) {
+                            use datafusion::logical_expr::ScalarUDF;
+                            arg = datafusion::logical_expr::Expr::ScalarFunction(
+                                datafusion::logical_expr::expr::ScalarFunction::new_udf(
+                                    Arc::new(ScalarUDF::from(
+                                        datafusion::functions::core::getfield::GetFieldFunc::new(),
+                                    )),
+                                    vec![arg, datafusion::logical_expr::lit("nanos_since_epoch")],
+                                ),
+                            );
+                        } else if uni_common::core::schema::is_time_struct(&arg_type) {
+                            use datafusion::logical_expr::ScalarUDF;
+                            arg = datafusion::logical_expr::Expr::ScalarFunction(
+                                datafusion::logical_expr::expr::ScalarFunction::new_udf(
+                                    Arc::new(ScalarUDF::from(
+                                        datafusion::functions::core::getfield::GetFieldFunc::new(),
+                                    )),
+                                    vec![
+                                        arg,
+                                        datafusion::logical_expr::lit("nanos_since_midnight"),
+                                    ],
+                                ),
+                            );
+                        }
+                    }
+
                     if self.is_large_binary_col(&arg, schema) {
                         let udaf = Arc::new(crate::query::df_udfs::create_cypher_max_udaf());
                         udaf.call(vec![arg])
@@ -2449,7 +2550,8 @@ impl HybridPhysicalPlanner {
                     let expr_arg = cypher_expr_to_df(&args[0], Some(ctx))?;
                     let pct_arg = cypher_expr_to_df(&args[1], Some(ctx))?;
                     let coerced = crate::query::df_udfs::cypher_to_float64_expr(expr_arg);
-                    let udaf = Arc::new(crate::query::df_udfs::create_cypher_percentile_disc_udaf());
+                    let udaf =
+                        Arc::new(crate::query::df_udfs::create_cypher_percentile_disc_udaf());
                     udaf.call(vec![coerced, pct_arg])
                 }
                 "percentilecont" => {
@@ -2459,7 +2561,8 @@ impl HybridPhysicalPlanner {
                     let expr_arg = cypher_expr_to_df(&args[0], Some(ctx))?;
                     let pct_arg = cypher_expr_to_df(&args[1], Some(ctx))?;
                     let coerced = crate::query::df_udfs::cypher_to_float64_expr(expr_arg);
-                    let udaf = Arc::new(crate::query::df_udfs::create_cypher_percentile_cont_udaf());
+                    let udaf =
+                        Arc::new(crate::query::df_udfs::create_cypher_percentile_cont_udaf());
                     udaf.call(vec![coerced, pct_arg])
                 }
                 "collect" => {
@@ -2473,8 +2576,10 @@ impl HybridPhysicalPlanner {
 
             // Apply DISTINCT if needed (collect/percentile handle their own distinct)
             let df_agg = if *distinct
-                && !matches!(name_lower.as_str(), "collect" | "percentiledisc" | "percentilecont")
-            {
+                && !matches!(
+                    name_lower.as_str(),
+                    "collect" | "percentiledisc" | "percentilecont"
+                ) {
                 use datafusion::prelude::ExprFunctionExt;
                 df_agg.distinct().build().map_err(|e| anyhow!("{}", e))?
             } else {
@@ -2633,7 +2738,41 @@ impl HybridPhysicalPlanner {
             }
 
             let df_expr = cypher_expr_to_df(&sort_expr, Some(&ctx))?;
-            let df_expr = Self::resolve_udfs(&df_expr, &session.state())?;
+            let mut df_expr = Self::resolve_udfs(&df_expr, &session.state())?;
+
+            // DateTime/Time struct sorting: replace with nanos_since_epoch/nanos_since_midnight
+            // to ensure sorting by UTC instant, not struct byte ordering
+            if let Ok(expr_type) = df_expr.get_type(&datafusion::common::DFSchema::try_from(
+                schema.as_ref().clone(),
+            )?) {
+                if uni_common::core::schema::is_datetime_struct(&expr_type) {
+                    // Sort by nanos_since_epoch for DateTime
+                    use datafusion::logical_expr::ScalarUDF;
+                    df_expr = datafusion::logical_expr::Expr::ScalarFunction(
+                        datafusion::logical_expr::expr::ScalarFunction::new_udf(
+                            Arc::new(ScalarUDF::from(
+                                datafusion::functions::core::getfield::GetFieldFunc::new(),
+                            )),
+                            vec![df_expr, datafusion::logical_expr::lit("nanos_since_epoch")],
+                        ),
+                    );
+                } else if uni_common::core::schema::is_time_struct(&expr_type) {
+                    // Sort by nanos_since_midnight for Time
+                    use datafusion::logical_expr::ScalarUDF;
+                    df_expr = datafusion::logical_expr::Expr::ScalarFunction(
+                        datafusion::logical_expr::expr::ScalarFunction::new_udf(
+                            Arc::new(ScalarUDF::from(
+                                datafusion::functions::core::getfield::GetFieldFunc::new(),
+                            )),
+                            vec![
+                                df_expr,
+                                datafusion::logical_expr::lit("nanos_since_midnight"),
+                            ],
+                        ),
+                    );
+                }
+            }
+
             let asc = item.ascending;
             let nulls_first = !asc; // Standard SQL behavior: nulls last for ASC, first for DESC
 
@@ -3284,13 +3423,20 @@ impl HybridPhysicalPlanner {
         source_variable: &str,
     ) -> Result<(Arc<dyn ExecutionPlan>, String)> {
         let source_vid_col = format!("{}._vid", source_variable);
-        if input_plan.schema().column_with_name(&source_vid_col).is_some() {
+        if input_plan
+            .schema()
+            .column_with_name(&source_vid_col)
+            .is_some()
+        {
             return Ok((input_plan, source_vid_col));
         }
         // Check if the variable is a struct column (entity after WITH aggregation).
         // If so, add a projection to extract _vid from the struct.
         if let Ok(field) = input_plan.schema().field_with_name(source_variable)
-            && matches!(field.data_type(), datafusion::arrow::datatypes::DataType::Struct(_))
+            && matches!(
+                field.data_type(),
+                datafusion::arrow::datatypes::DataType::Struct(_)
+            )
         {
             let enriched = Self::extract_struct_identity_columns(input_plan, source_variable)?;
             return Ok((enriched, format!("{}._vid", source_variable)));
@@ -3328,8 +3474,7 @@ impl HybridPhysicalPlanner {
             .iter()
             .enumerate()
             .find(|(_, f)| f.name() == variable)
-            && let datafusion::arrow::datatypes::DataType::Struct(fields) =
-                struct_field.data_type()
+            && let datafusion::arrow::datatypes::DataType::Struct(fields) = struct_field.data_type()
         {
             let struct_col: Arc<dyn datafusion::physical_expr::PhysicalExpr> = Arc::new(
                 datafusion::physical_expr::expressions::Column::new(variable, struct_idx),
@@ -3341,37 +3486,31 @@ impl HybridPhysicalPlanner {
 
             // Extract _vid field
             if fields.iter().any(|f| f.name() == "_vid") {
-                let field_name: Arc<dyn datafusion::physical_expr::PhysicalExpr> = Arc::new(
-                    datafusion::physical_expr::expressions::Literal::new(
+                let field_name: Arc<dyn datafusion::physical_expr::PhysicalExpr> =
+                    Arc::new(datafusion::physical_expr::expressions::Literal::new(
                         ScalarValue::Utf8(Some("_vid".to_string())),
-                    ),
-                );
-                let vid_expr = Arc::new(
-                    datafusion::physical_expr::ScalarFunctionExpr::try_new(
-                        get_field_udf.clone(),
-                        vec![struct_col.clone(), field_name],
-                        schema.as_ref(),
-                        Arc::new(datafusion::common::config::ConfigOptions::default()),
-                    )?,
-                );
+                    ));
+                let vid_expr = Arc::new(datafusion::physical_expr::ScalarFunctionExpr::try_new(
+                    get_field_udf.clone(),
+                    vec![struct_col.clone(), field_name],
+                    schema.as_ref(),
+                    Arc::new(datafusion::common::config::ConfigOptions::default()),
+                )?);
                 proj_exprs.push((vid_expr, format!("{}._vid", variable)));
             }
 
             // Extract _labels field
             if fields.iter().any(|f| f.name() == "_labels") {
-                let field_name: Arc<dyn datafusion::physical_expr::PhysicalExpr> = Arc::new(
-                    datafusion::physical_expr::expressions::Literal::new(
+                let field_name: Arc<dyn datafusion::physical_expr::PhysicalExpr> =
+                    Arc::new(datafusion::physical_expr::expressions::Literal::new(
                         ScalarValue::Utf8(Some("_labels".to_string())),
-                    ),
-                );
-                let labels_expr = Arc::new(
-                    datafusion::physical_expr::ScalarFunctionExpr::try_new(
-                        get_field_udf,
-                        vec![struct_col, field_name],
-                        schema.as_ref(),
-                        Arc::new(datafusion::common::config::ConfigOptions::default()),
-                    )?,
-                );
+                    ));
+                let labels_expr = Arc::new(datafusion::physical_expr::ScalarFunctionExpr::try_new(
+                    get_field_udf,
+                    vec![struct_col, field_name],
+                    schema.as_ref(),
+                    Arc::new(datafusion::common::config::ConfigOptions::default()),
+                )?);
                 proj_exprs.push((labels_expr, format!("{}._labels", variable)));
             }
         }
@@ -3384,7 +3523,10 @@ impl HybridPhysicalPlanner {
         if let DfExpr::Column(col) = expr
             && let Ok(field) = schema.field_with_name(&col.name)
         {
-            return matches!(field.data_type(), datafusion::arrow::datatypes::DataType::LargeBinary);
+            return matches!(
+                field.data_type(),
+                datafusion::arrow::datatypes::DataType::LargeBinary
+            );
         }
         // For any other expression type, conservatively return true
         // since schemaless properties are stored as LargeBinary

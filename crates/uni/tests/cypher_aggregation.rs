@@ -67,7 +67,9 @@ async fn test_cypher_aggregation() -> anyhow::Result<()> {
             Arc::new(StringArray::from(vec![None::<&str>; 4])), // ext_id
             // _labels
             {
-                let mut lb = arrow_array::builder::ListBuilder::new(arrow_array::builder::StringBuilder::new());
+                let mut lb = arrow_array::builder::ListBuilder::new(
+                    arrow_array::builder::StringBuilder::new(),
+                );
                 for _ in 0..4 {
                     lb.values().append_value("Person");
                     lb.append(true);
@@ -108,7 +110,9 @@ async fn test_cypher_aggregation() -> anyhow::Result<()> {
             Arc::new(StringArray::from(vec![None::<&str>; 3])), // ext_id
             // _labels
             {
-                let mut lb = arrow_array::builder::ListBuilder::new(arrow_array::builder::StringBuilder::new());
+                let mut lb = arrow_array::builder::ListBuilder::new(
+                    arrow_array::builder::StringBuilder::new(),
+                );
                 for _ in 0..3 {
                     lb.values().append_value("Order");
                     lb.append(true);

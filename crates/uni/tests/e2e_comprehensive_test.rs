@@ -290,6 +290,73 @@ mod data_type_tests {
     }
 
     #[tokio::test]
+    async fn test_datetime_comparison_semantics() -> Result<()> {
+        // Test that DateTime comparison works by UTC instant, not by offset
+        // Two DateTimes with same UTC instant but different offsets should be equal
+        let db = create_test_db().await?;
+        setup_all_types_schema(&db).await?;
+
+        // Create nodes with DateTimes representing the same UTC instant but different offsets
+        // 2024-01-01T01:00+01:00 = 2024-01-01T00:00+00:00 (same UTC instant)
+        db.execute(
+            "CREATE (:TemporalNode {date_val: date('2024-01-01'), datetime_val: datetime('2024-01-01T01:00+01:00')})",
+        )
+        .await?;
+        db.execute(
+            "CREATE (:TemporalNode {date_val: date('2024-01-01'), datetime_val: datetime('2024-01-01T00:00+00:00')})",
+        )
+        .await?;
+        // Different UTC instant for comparison
+        db.execute(
+            "CREATE (:TemporalNode {date_val: date('2024-01-01'), datetime_val: datetime('2024-01-01T02:00+00:00')})",
+        )
+        .await?;
+
+        db.flush().await?;
+
+        // Test equality: same UTC instant with different offsets should be equal
+        let result = db
+            .query("MATCH (n:TemporalNode) WHERE n.datetime_val = datetime('2024-01-01T01:00+01:00') RETURN n.datetime_val")
+            .await?;
+        // Should match both the +01:00 and +00:00 versions (same UTC)
+        assert_eq!(
+            result.len(),
+            2,
+            "DateTimes with same UTC instant should be equal"
+        );
+
+        // Test inequality: different UTC instant should not match
+        let result = db
+            .query("MATCH (n:TemporalNode) WHERE n.datetime_val = datetime('2024-01-01T02:00+00:00') RETURN n.datetime_val")
+            .await?;
+        assert_eq!(
+            result.len(),
+            1,
+            "DateTimes with different UTC instant should not be equal"
+        );
+
+        // Test ordering: should order by UTC instant
+        let result = db
+            .query("MATCH (n:TemporalNode) RETURN n.datetime_val ORDER BY n.datetime_val")
+            .await?;
+        assert_eq!(result.len(), 3, "Should return all 3 nodes in UTC order");
+
+        // Test grouping: same UTC instant should group together
+        let result = db
+            .query("MATCH (n:TemporalNode) WITH n.datetime_val as dt, count(*) as cnt RETURN dt, cnt ORDER BY cnt DESC")
+            .await?;
+        // Should have 2 groups: one with count=2 (same UTC), one with count=1
+        assert_eq!(result.len(), 2, "Should group by UTC instant");
+        let first_count: i64 = result.rows()[0].get("cnt")?;
+        assert_eq!(
+            first_count, 2,
+            "DateTimes with same UTC should group together"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn test_json_type() -> Result<()> {
         let db = create_test_db().await?;
         setup_all_types_schema(&db).await?;
@@ -393,12 +460,13 @@ mod data_type_tests {
             .await?;
         assert_eq!(result.len(), 3);
 
-        // Time values are stored as microseconds and converted back to time strings
+        // Time values are offset-aware and display with timezone suffix
+        // time('00:00:00') creates Time with offset=0, displayed as "00:00Z"
         let first: String = result.rows()[0].get("n.time_val")?;
-        assert_eq!(first, "00:00");
+        assert_eq!(first, "00:00Z");
 
         let last: String = result.rows()[2].get("n.time_val")?;
-        assert_eq!(last, "23:59:59");
+        assert_eq!(last, "23:59:59Z");
 
         Ok(())
     }

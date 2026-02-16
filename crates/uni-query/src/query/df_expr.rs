@@ -46,6 +46,63 @@ const COL_EID: &str = "_eid";
 const COL_LABELS: &str = "_labels";
 const COL_TYPE: &str = "_type";
 
+/// Check if an Arrow DataType is the canonical DateTime struct.
+fn is_datetime_struct_type(dt: &datafusion::arrow::datatypes::DataType) -> bool {
+    uni_common::core::schema::is_datetime_struct(dt)
+}
+
+/// Check if an Arrow DataType is the canonical Time struct.
+fn is_time_struct_type(dt: &datafusion::arrow::datatypes::DataType) -> bool {
+    uni_common::core::schema::is_time_struct(dt)
+}
+
+/// Extract a named field from a struct expression using DataFusion's `get_field` function.
+fn struct_getfield(expr: DfExpr, field_name: &str) -> DfExpr {
+    use datafusion::logical_expr::ScalarUDF;
+    DfExpr::ScalarFunction(datafusion::logical_expr::expr::ScalarFunction::new_udf(
+        Arc::new(ScalarUDF::from(
+            datafusion::functions::core::getfield::GetFieldFunc::new(),
+        )),
+        vec![expr, lit(field_name)],
+    ))
+}
+
+/// Extract the `nanos_since_epoch` field from a DateTime struct expression.
+fn extract_datetime_nanos(expr: DfExpr) -> DfExpr {
+    struct_getfield(expr, "nanos_since_epoch")
+}
+
+/// Extract the UTC-normalized time in nanoseconds from a Time struct expression.
+///
+/// Cypher Time stores `nanos_since_midnight` as *local* time nanoseconds. To compare
+/// two Times correctly, we need to normalize to UTC by computing:
+/// `nanos_since_midnight - (offset_seconds * 1_000_000_000)`
+///
+/// This ensures that `12:00+01:00` and `11:00Z` (same UTC instant) are equal.
+fn extract_time_nanos(expr: DfExpr) -> DfExpr {
+    use datafusion::logical_expr::Operator;
+
+    let nanos_local = struct_getfield(expr.clone(), "nanos_since_midnight");
+    let offset_seconds = struct_getfield(expr, "offset_seconds");
+
+    // Normalize to UTC: nanos_since_midnight - (offset_seconds * 1_000_000_000)
+    // Cast offset_seconds (Int32) to Int64, multiply by 1B, subtract from nanos
+    let offset_nanos = DfExpr::BinaryExpr(datafusion::logical_expr::expr::BinaryExpr::new(
+        Box::new(cast_expr(
+            offset_seconds,
+            datafusion::arrow::datatypes::DataType::Int64,
+        )),
+        Operator::Multiply,
+        Box::new(lit(1_000_000_000_i64)),
+    ));
+
+    DfExpr::BinaryExpr(datafusion::logical_expr::expr::BinaryExpr::new(
+        Box::new(nanos_local),
+        Operator::Minus,
+        Box::new(offset_nanos),
+    ))
+}
+
 /// Normalize a datetime string literal to RFC3339 format for Arrow timestamp parsing.
 ///
 /// Arrow's timestamp parser requires explicit seconds (`HH:MM:SS`), but our Cypher
@@ -1006,34 +1063,80 @@ fn value_to_scalar(value: &Value) -> Result<ScalarValue> {
                 TemporalValue::Date { days_since_epoch } => {
                     Ok(ScalarValue::Date32(Some(*days_since_epoch)))
                 }
-                TemporalValue::LocalTime { nanos_since_midnight } => {
-                    Ok(ScalarValue::Time64Nanosecond(Some(*nanos_since_midnight)))
-                }
+                TemporalValue::LocalTime {
+                    nanos_since_midnight,
+                } => Ok(ScalarValue::Time64Nanosecond(Some(*nanos_since_midnight))),
                 TemporalValue::Time {
                     nanos_since_midnight,
                     offset_seconds,
                 } => {
-                    // Normalize to UTC for comparison: subtract offset
-                    let utc_nanos =
-                        *nanos_since_midnight - (*offset_seconds as i64) * 1_000_000_000;
-                    Ok(ScalarValue::Time64Nanosecond(Some(utc_nanos)))
+                    // Build single-row StructArray for ScalarValue
+                    use arrow::array::{ArrayRef, Int32Array, StructArray, Time64NanosecondArray};
+                    use arrow::datatypes::{DataType as ArrowDataType, Field, Fields, TimeUnit};
+
+                    let nanos_arr =
+                        Arc::new(Time64NanosecondArray::from(vec![*nanos_since_midnight]))
+                            as ArrayRef;
+                    let offset_arr = Arc::new(Int32Array::from(vec![*offset_seconds])) as ArrayRef;
+
+                    let fields = Fields::from(vec![
+                        Field::new(
+                            "nanos_since_midnight",
+                            ArrowDataType::Time64(TimeUnit::Nanosecond),
+                            true,
+                        ),
+                        Field::new("offset_seconds", ArrowDataType::Int32, true),
+                    ]);
+
+                    let struct_arr = StructArray::new(fields, vec![nanos_arr, offset_arr], None);
+                    Ok(ScalarValue::Struct(Arc::new(struct_arr)))
                 }
-                TemporalValue::LocalDateTime { nanos_since_epoch } => {
-                    Ok(ScalarValue::TimestampNanosecond(Some(*nanos_since_epoch), None))
+                TemporalValue::LocalDateTime { nanos_since_epoch } => Ok(
+                    ScalarValue::TimestampNanosecond(Some(*nanos_since_epoch), None),
+                ),
+                TemporalValue::DateTime {
+                    nanos_since_epoch,
+                    offset_seconds,
+                    timezone_name,
+                } => {
+                    // Build single-row StructArray for ScalarValue
+                    use arrow::array::{
+                        ArrayRef, Int32Array, StringArray, StructArray, TimestampNanosecondArray,
+                    };
+                    use arrow::datatypes::{DataType as ArrowDataType, Field, Fields, TimeUnit};
+
+                    let nanos_arr =
+                        Arc::new(TimestampNanosecondArray::from(vec![*nanos_since_epoch]))
+                            as ArrayRef;
+                    let offset_arr = Arc::new(Int32Array::from(vec![*offset_seconds])) as ArrayRef;
+                    let tz_arr =
+                        Arc::new(StringArray::from(vec![timezone_name.clone()])) as ArrayRef;
+
+                    let fields = Fields::from(vec![
+                        Field::new(
+                            "nanos_since_epoch",
+                            ArrowDataType::Timestamp(TimeUnit::Nanosecond, None),
+                            true,
+                        ),
+                        Field::new("offset_seconds", ArrowDataType::Int32, true),
+                        Field::new("timezone_name", ArrowDataType::Utf8, true),
+                    ]);
+
+                    let struct_arr =
+                        StructArray::new(fields, vec![nanos_arr, offset_arr, tz_arr], None);
+                    Ok(ScalarValue::Struct(Arc::new(struct_arr)))
                 }
-                TemporalValue::DateTime { nanos_since_epoch, timezone_name, .. } => {
-                    let tz = timezone_name.as_deref().unwrap_or("UTC");
-                    Ok(ScalarValue::TimestampNanosecond(Some(*nanos_since_epoch), Some(tz.into())))
-                }
-                TemporalValue::Duration { months, days, nanos } => {
-                    Ok(ScalarValue::IntervalMonthDayNano(Some(
-                        arrow::datatypes::IntervalMonthDayNano {
-                            months: *months as i32,
-                            days: *days as i32,
-                            nanoseconds: *nanos,
-                        }
-                    )))
-                }
+                TemporalValue::Duration {
+                    months,
+                    days,
+                    nanos,
+                } => Ok(ScalarValue::IntervalMonthDayNano(Some(
+                    arrow::datatypes::IntervalMonthDayNano {
+                        months: *months as i32,
+                        days: *days as i32,
+                        nanoseconds: *nanos,
+                    },
+                ))),
             }
         }
         Value::Bytes(b) => Ok(ScalarValue::LargeBinary(Some(b.clone()))),
@@ -1141,6 +1244,45 @@ fn cast_expr(expr: DfExpr, data_type: datafusion::arrow::datatypes::DataType) ->
     })
 }
 
+/// Build a `BinaryExpr` from left, operator, and right expressions.
+fn binary_expr(left: DfExpr, op: datafusion::logical_expr::Operator, right: DfExpr) -> DfExpr {
+    DfExpr::BinaryExpr(datafusion::logical_expr::expr::BinaryExpr::new(
+        Box::new(left),
+        op,
+        Box::new(right),
+    ))
+}
+
+/// Map a comparison operator to its `_cypher_*` UDF name.
+///
+/// Returns `None` for non-comparison operators, allowing callers to decide
+/// whether to `unreachable!()` or fall through.
+fn comparison_udf_name(op: datafusion::logical_expr::Operator) -> Option<&'static str> {
+    use datafusion::logical_expr::Operator;
+    match op {
+        Operator::Eq => Some("_cypher_equal"),
+        Operator::NotEq => Some("_cypher_not_equal"),
+        Operator::Lt => Some("_cypher_lt"),
+        Operator::LtEq => Some("_cypher_lt_eq"),
+        Operator::Gt => Some("_cypher_gt"),
+        Operator::GtEq => Some("_cypher_gt_eq"),
+        _ => None,
+    }
+}
+
+/// Map an arithmetic operator to its `_cypher_*` UDF name.
+fn arithmetic_udf_name(op: datafusion::logical_expr::Operator) -> Option<&'static str> {
+    use datafusion::logical_expr::Operator;
+    match op {
+        Operator::Plus => Some("_cypher_add"),
+        Operator::Minus => Some("_cypher_sub"),
+        Operator::Multiply => Some("_cypher_mul"),
+        Operator::Divide => Some("_cypher_div"),
+        Operator::Modulo => Some("_cypher_mod"),
+        _ => None,
+    }
+}
+
 /// Apply a single-argument math function with Float64 casting.
 ///
 /// This is a common pattern for trig functions and other math operations
@@ -1194,7 +1336,11 @@ fn translate_aggregate_function(
         "SUM" => {
             check1!("SUM");
             let udaf = Arc::new(crate::query::df_udfs::create_cypher_sum_udaf());
-            Some(maybe_distinct(udaf.call(vec![first_arg(df_args)]), distinct, "SUM"))
+            Some(maybe_distinct(
+                udaf.call(vec![first_arg(df_args)]),
+                distinct,
+                "SUM",
+            ))
         }
         "AVG" => {
             check1!("AVG");
@@ -1214,7 +1360,9 @@ fn translate_aggregate_function(
         }
         "PERCENTILEDISC" => {
             if df_args.len() != 2 {
-                return Some(Err(anyhow!("percentileDisc() requires exactly 2 arguments")));
+                return Some(Err(anyhow!(
+                    "percentileDisc() requires exactly 2 arguments"
+                )));
             }
             let coerced = crate::query::df_udfs::cypher_to_float64_expr(df_args[0].clone());
             let udaf = Arc::new(crate::query::df_udfs::create_cypher_percentile_disc_udaf());
@@ -1222,7 +1370,9 @@ fn translate_aggregate_function(
         }
         "PERCENTILECONT" => {
             if df_args.len() != 2 {
-                return Some(Err(anyhow!("percentileCont() requires exactly 2 arguments")));
+                return Some(Err(anyhow!(
+                    "percentileCont() requires exactly 2 arguments"
+                )));
             }
             let coerced = crate::query::df_udfs::cypher_to_float64_expr(df_args[0].clone());
             let udaf = Arc::new(crate::query::df_udfs::create_cypher_percentile_cont_udaf());
@@ -1501,10 +1651,7 @@ fn translate_temporal_function(
 /// Check if a temporal function call can be constant-folded (all args are literals).
 fn can_constant_fold(name: &str, args: &[DfExpr]) -> bool {
     // Clock functions return current time, never constant
-    if name.contains("TRANSACTION")
-        || name.contains("STATEMENT")
-        || name.contains("REALTIME")
-    {
+    if name.contains("TRANSACTION") || name.contains("STATEMENT") || name.contains("REALTIME") {
         return false;
     }
     // Zero-arg calls return current time/date, not constant
@@ -1548,9 +1695,7 @@ fn try_constant_fold_temporal(name: &str, args: &[DfExpr]) -> Result<DfExpr> {
 fn extract_constant_value(expr: &DfExpr) -> Result<Value> {
     use crate::query::df_udfs::scalar_to_value;
     match expr {
-        DfExpr::Literal(sv, _) => {
-            scalar_to_value(sv).map_err(|e| anyhow::anyhow!("{}", e))
-        }
+        DfExpr::Literal(sv, _) => scalar_to_value(sv).map_err(|e| anyhow::anyhow!("{}", e)),
         DfExpr::ScalarFunction(func) => {
             // named_struct(lit("key1"), lit(val1), lit("key2"), lit(val2), ...)
             // → Value::Map({key1: val1, key2: val2, ...})
@@ -1572,7 +1717,9 @@ fn extract_constant_value(expr: &DfExpr) -> Result<Value> {
             }
             Ok(Value::Map(map))
         }
-        _ => Err(anyhow::anyhow!("Cannot extract constant value from expression")),
+        _ => Err(anyhow::anyhow!(
+            "Cannot extract constant value from expression"
+        )),
     }
 }
 
@@ -2127,13 +2274,7 @@ pub fn apply_type_coercion(expr: &DfExpr, schema: &datafusion::common::DFSchema)
                     } else {
                         right
                     };
-                    return Ok(DfExpr::BinaryExpr(
-                        datafusion::logical_expr::expr::BinaryExpr::new(
-                            Box::new(coerced_left),
-                            binary.op,
-                            Box::new(coerced_right),
-                        ),
-                    ));
+                    return Ok(binary_expr(coerced_left, binary.op, coerced_right));
                 }
             }
 
@@ -2178,13 +2319,7 @@ pub fn apply_type_coercion(expr: &DfExpr, schema: &datafusion::common::DFSchema)
                         } else {
                             right
                         };
-                        return Ok(DfExpr::BinaryExpr(
-                            datafusion::logical_expr::expr::BinaryExpr::new(
-                                Box::new(coerced_left),
-                                binary.op,
-                                Box::new(coerced_right),
-                            ),
-                        ));
+                        return Ok(binary_expr(coerced_left, binary.op, coerced_right));
                     }
                 }
 
@@ -2215,99 +2350,97 @@ pub fn apply_type_coercion(expr: &DfExpr, schema: &datafusion::common::DFSchema)
                         // to the CypherValue decode path below
                     }
 
-                    if left_is_lb && right_is_lb && is_comparison {
-                        // Both LargeBinary: route comparison to _cypher_* UDFs
-                        let udf_name = match binary.op {
-                            Operator::Eq => "_cypher_equal",
-                            Operator::NotEq => "_cypher_not_equal",
-                            Operator::Lt => "_cypher_lt",
-                            Operator::LtEq => "_cypher_lt_eq",
-                            Operator::Gt => "_cypher_gt",
-                            Operator::GtEq => "_cypher_gt_eq",
-                            _ => unreachable!(),
-                        };
-                        return Ok(dummy_udf_expr(udf_name, vec![left, right]));
-                    }
-
-                    // Mixed LB/typed comparisons: route through Cypher comparison UDFs
-                    // The expression compiler will encode typed literals to CypherValue at compile time
+                    // LargeBinary comparisons (both-LB or mixed LB/typed):
+                    // route through _cypher_* comparison UDFs
                     if (left_is_lb || right_is_lb) && is_comparison {
-                        let udf_name = match binary.op {
-                            Operator::Eq => "_cypher_equal",
-                            Operator::NotEq => "_cypher_not_equal",
-                            Operator::Lt => "_cypher_lt",
-                            Operator::LtEq => "_cypher_lt_eq",
-                            Operator::Gt => "_cypher_gt",
-                            Operator::GtEq => "_cypher_gt_eq",
-                            _ => {
-                                // Not a comparison op we handle - fall through
-                                return Ok(DfExpr::BinaryExpr(binary.clone()));
-                            }
-                        };
-                        return Ok(dummy_udf_expr(udf_name, vec![left, right]));
+                        if let Some(udf_name) = comparison_udf_name(binary.op) {
+                            return Ok(dummy_udf_expr(udf_name, vec![left, right]));
+                        }
+                        return Ok(binary_expr(left, binary.op, right));
                     }
 
                     // Mixed LB/typed arithmetic: route through CypherValue arithmetic UDFs
                     if (left_is_lb || right_is_lb) && is_arithmetic {
-                        let udf_name = match binary.op {
-                            Operator::Plus => "_cypher_add",
-                            Operator::Minus => "_cypher_sub",
-                            Operator::Multiply => "_cypher_mul",
-                            Operator::Divide => "_cypher_div",
-                            Operator::Modulo => "_cypher_mod",
-                            _ => unreachable!(),
-                        };
+                        let udf_name = arithmetic_udf_name(binary.op)
+                            .expect("is_arithmetic guarantees a valid arithmetic operator");
                         return Ok(dummy_udf_expr(udf_name, vec![left, right]));
                     }
 
-                    // Struct (map/node/edge) comparisons: route to _cypher_equal UDFs
-                    // which handle identity-based comparison (_vid/_eid) and null-in-map semantics.
-                    if matches!(lt, DataType::Struct(_))
-                        && matches!(rt, DataType::Struct(_))
-                        && is_comparison
-                    {
-                        let udf_name = match binary.op {
-                            Operator::Eq => "_cypher_equal",
-                            Operator::NotEq => "_cypher_not_equal",
-                            // Cypher doesn't define ordering for maps/nodes/edges
-                            _ => {
-                                return Ok(lit(ScalarValue::Boolean(None)));
-                            }
-                        };
-                        return Ok(dummy_udf_expr(udf_name, vec![left, right]));
+                    // DateTime struct comparisons: compare nanos_since_epoch fields.
+                    // Per Cypher semantics, two DateTimes with the same UTC instant but different
+                    // offsets/timezones are equal.
+                    if is_datetime_struct_type(lt) && is_datetime_struct_type(rt) && is_comparison {
+                        return Ok(binary_expr(
+                            extract_datetime_nanos(left),
+                            binary.op,
+                            extract_datetime_nanos(right),
+                        ));
                     }
 
-                    // LargeBinary vs Struct comparison: route to _cypher_equal for
-                    // cross-format map equality (e.g., {} encoded as CypherValue vs {k: null} as Struct)
+                    // Time struct comparisons: compare UTC-normalized nanos
+                    if is_time_struct_type(lt) && is_time_struct_type(rt) && is_comparison {
+                        return Ok(binary_expr(
+                            extract_time_nanos(left),
+                            binary.op,
+                            extract_time_nanos(right),
+                        ));
+                    }
+
+                    // Mixed Timestamp ↔ DateTime struct comparisons.
+                    // Handle comparisons between system timestamps (like _created_at, _valid_from)
+                    // and DateTime struct properties. Extract nanos from struct and compare.
+                    use datafusion::arrow::datatypes::TimeUnit;
+                    let left_is_ts = matches!(lt, DataType::Timestamp(TimeUnit::Nanosecond, _));
+                    let right_is_ts = matches!(rt, DataType::Timestamp(TimeUnit::Nanosecond, _));
+
                     if is_comparison
-                        && ((matches!(lt, DataType::LargeBinary)
-                            && matches!(rt, DataType::Struct(_)))
-                            || (matches!(lt, DataType::Struct(_))
-                                && matches!(rt, DataType::LargeBinary)))
+                        && ((left_is_ts && is_datetime_struct_type(rt))
+                            || (is_datetime_struct_type(lt) && right_is_ts))
                     {
-                        let udf_name = match binary.op {
-                            Operator::Eq => "_cypher_equal",
-                            Operator::NotEq => "_cypher_not_equal",
-                            _ => {
-                                return Ok(lit(ScalarValue::Boolean(None)));
-                            }
+                        let left_nanos = if is_datetime_struct_type(lt) {
+                            extract_datetime_nanos(left)
+                        } else {
+                            left
                         };
-                        return Ok(dummy_udf_expr(udf_name, vec![left, right]));
+                        let right_nanos = if is_datetime_struct_type(rt) {
+                            extract_datetime_nanos(right)
+                        } else {
+                            right
+                        };
+
+                        // Cast both sides to Timestamp(Nanosecond, None) to avoid timezone mismatch.
+                        // The nanos values are already UTC instants, timezone is just metadata.
+                        let ts_type = DataType::Timestamp(TimeUnit::Nanosecond, None);
+                        return Ok(binary_expr(
+                            cast_expr(left_nanos, ts_type.clone()),
+                            binary.op,
+                            cast_expr(right_nanos, ts_type),
+                        ));
+                    }
+
+                    // Struct or LargeBinary/Struct comparisons: route to _cypher_equal UDFs
+                    // which handle identity-based comparison (_vid/_eid) and null-in-map semantics.
+                    let either_struct =
+                        matches!(lt, DataType::Struct(_)) || matches!(rt, DataType::Struct(_));
+                    let either_lb_or_struct = (matches!(lt, DataType::LargeBinary)
+                        || matches!(lt, DataType::Struct(_)))
+                        && (matches!(rt, DataType::LargeBinary)
+                            || matches!(rt, DataType::Struct(_)));
+
+                    if is_comparison && either_struct && either_lb_or_struct {
+                        if let Some(udf_name) = comparison_udf_name(binary.op) {
+                            return Ok(dummy_udf_expr(udf_name, vec![left, right]));
+                        }
+                        // Cypher doesn't define ordering for maps/nodes/edges
+                        return Ok(lit(ScalarValue::Boolean(None)));
                     }
                 }
 
                 // NaN-aware comparisons: when a division expression is involved,
                 // route to _cypher_* UDFs which handle NaN correctly (NaN != NaN, NaN not ordered).
                 if is_comparison && (contains_division(&left) || contains_division(&right)) {
-                    let udf_name = match binary.op {
-                        Operator::Eq => "_cypher_equal",
-                        Operator::NotEq => "_cypher_not_equal",
-                        Operator::Lt => "_cypher_lt",
-                        Operator::LtEq => "_cypher_lt_eq",
-                        Operator::Gt => "_cypher_gt",
-                        Operator::GtEq => "_cypher_gt_eq",
-                        _ => unreachable!(),
-                    };
+                    let udf_name = comparison_udf_name(binary.op)
+                        .expect("is_comparison guarantees a valid comparison operator");
                     return Ok(dummy_udf_expr(udf_name, vec![left, right]));
                 }
 
@@ -2316,7 +2449,6 @@ pub fn apply_type_coercion(expr: &DfExpr, schema: &datafusion::common::DFSchema)
                 {
                     // 1. Numeric Coercion
                     if lt.is_numeric() && rt.is_numeric() {
-                        // Coerce to the wider numeric type
                         let target = wider_numeric_type(lt, rt);
                         let coerced_left = if *lt != target {
                             datafusion::logical_expr::cast(left, target.clone())
@@ -2328,13 +2460,7 @@ pub fn apply_type_coercion(expr: &DfExpr, schema: &datafusion::common::DFSchema)
                         } else {
                             right
                         };
-                        return Ok(DfExpr::BinaryExpr(
-                            datafusion::logical_expr::expr::BinaryExpr::new(
-                                Box::new(coerced_left),
-                                binary.op,
-                                Box::new(coerced_right),
-                            ),
-                        ));
+                        return Ok(binary_expr(coerced_left, binary.op, coerced_right));
                     }
 
                     // 2. Timestamp vs Utf8: cast Utf8 side to the Timestamp type
@@ -2345,12 +2471,10 @@ pub fn apply_type_coercion(expr: &DfExpr, schema: &datafusion::common::DFSchema)
                                 DataType::Utf8 | DataType::LargeUtf8,
                             ) => {
                                 let right = normalize_datetime_literal(right);
-                                return Ok(DfExpr::BinaryExpr(
-                                    datafusion::logical_expr::expr::BinaryExpr::new(
-                                        Box::new(left),
-                                        binary.op,
-                                        Box::new(datafusion::logical_expr::cast(right, ts.clone())),
-                                    ),
+                                return Ok(binary_expr(
+                                    left,
+                                    binary.op,
+                                    datafusion::logical_expr::cast(right, ts.clone()),
                                 ));
                             }
                             (
@@ -2358,12 +2482,10 @@ pub fn apply_type_coercion(expr: &DfExpr, schema: &datafusion::common::DFSchema)
                                 ts @ DataType::Timestamp(..),
                             ) => {
                                 let left = normalize_datetime_literal(left);
-                                return Ok(DfExpr::BinaryExpr(
-                                    datafusion::logical_expr::expr::BinaryExpr::new(
-                                        Box::new(datafusion::logical_expr::cast(left, ts.clone())),
-                                        binary.op,
-                                        Box::new(right),
-                                    ),
+                                return Ok(binary_expr(
+                                    datafusion::logical_expr::cast(left, ts.clone()),
+                                    binary.op,
+                                    right,
                                 ));
                             }
                             _ => {}
@@ -2384,15 +2506,10 @@ pub fn apply_type_coercion(expr: &DfExpr, schema: &datafusion::common::DFSchema)
                                     target_inner,
                                     true,
                                 )));
-                            let coerced_left =
-                                datafusion::logical_expr::cast(left, target_type.clone());
-                            let coerced_right = datafusion::logical_expr::cast(right, target_type);
-                            return Ok(DfExpr::BinaryExpr(
-                                datafusion::logical_expr::expr::BinaryExpr::new(
-                                    Box::new(coerced_left),
-                                    binary.op,
-                                    Box::new(coerced_right),
-                                ),
+                            return Ok(binary_expr(
+                                datafusion::logical_expr::cast(left, target_type.clone()),
+                                binary.op,
+                                datafusion::logical_expr::cast(right, target_type),
                             ));
                         }
                     }
@@ -2480,22 +2597,13 @@ pub fn apply_type_coercion(expr: &DfExpr, schema: &datafusion::common::DFSchema)
                     && matches!(lt, DataType::List(_) | DataType::LargeList(_))
                     && matches!(rt, DataType::List(_) | DataType::LargeList(_))
                 {
-                    let udf_name = if binary.op == Operator::Eq {
-                        "_cypher_equal"
-                    } else {
-                        "_cypher_not_equal"
-                    };
+                    let udf_name = comparison_udf_name(binary.op)
+                        .expect("Eq|NotEq is always a valid comparison operator");
                     return Ok(dummy_udf_expr(udf_name, vec![left, right]));
                 }
             }
 
-            Ok(DfExpr::BinaryExpr(
-                datafusion::logical_expr::expr::BinaryExpr::new(
-                    Box::new(left),
-                    binary.op,
-                    Box::new(right),
-                ),
-            ))
+            Ok(binary_expr(left, binary.op, right))
         }
         DfExpr::ScalarFunction(func) => {
             // Recursively coerce arguments
@@ -2506,7 +2614,6 @@ pub fn apply_type_coercion(expr: &DfExpr, schema: &datafusion::common::DFSchema)
                 .collect::<Result<Vec<_>>>()?;
 
             if func.func.name().eq_ignore_ascii_case("coalesce") && coerced_args.len() > 1 {
-                use datafusion::logical_expr::ExprSchemable;
                 let types: Vec<_> = coerced_args
                     .iter()
                     .filter_map(|a| a.get_type(schema).ok())
@@ -2621,6 +2728,10 @@ pub fn apply_type_coercion(expr: &DfExpr, schema: &datafusion::common::DFSchema)
 #[cfg(test)]
 mod tests {
     use super::*;
+    use arrow_array::{
+        Array, Int32Array, StringArray, Time64NanosecondArray, TimestampNanosecondArray,
+    };
+    use uni_common::TemporalValue;
     #[test]
     fn test_literal_translation() {
         let expr = Expr::Literal(CypherLiteral::Integer(42));
@@ -3351,5 +3462,148 @@ mod tests {
             matches!(scalar, ScalarValue::Null),
             "expected untyped Null scalar for Value::Null"
         );
+    }
+
+    #[test]
+    fn test_value_to_scalar_datetime_produces_struct() {
+        // Test that DateTime produces correct 3-field Struct
+        let datetime = Value::Temporal(TemporalValue::DateTime {
+            nanos_since_epoch: 441763200000000000, // 1984-01-01T00:00:00Z
+            offset_seconds: 3600,                  // +01:00
+            timezone_name: Some("Europe/Paris".to_string()),
+        });
+
+        let scalar = value_to_scalar(&datetime).unwrap();
+
+        // Should produce ScalarValue::Struct with 3 fields
+        if let ScalarValue::Struct(struct_arr) = scalar {
+            assert_eq!(struct_arr.len(), 1, "expected single-row struct array");
+            assert_eq!(struct_arr.num_columns(), 3, "expected 3 fields");
+
+            // Verify field names
+            let fields = struct_arr.fields();
+            assert_eq!(fields[0].name(), "nanos_since_epoch");
+            assert_eq!(fields[1].name(), "offset_seconds");
+            assert_eq!(fields[2].name(), "timezone_name");
+
+            // Verify field values
+            let nanos_col = struct_arr.column(0);
+            let offset_col = struct_arr.column(1);
+            let tz_col = struct_arr.column(2);
+
+            if let Some(nanos_arr) = nanos_col
+                .as_any()
+                .downcast_ref::<TimestampNanosecondArray>()
+            {
+                assert_eq!(nanos_arr.value(0), 441763200000000000);
+            } else {
+                panic!("Expected TimestampNanosecondArray for nanos field");
+            }
+
+            if let Some(offset_arr) = offset_col.as_any().downcast_ref::<Int32Array>() {
+                assert_eq!(offset_arr.value(0), 3600);
+            } else {
+                panic!("Expected Int32Array for offset field");
+            }
+
+            if let Some(tz_arr) = tz_col.as_any().downcast_ref::<StringArray>() {
+                assert_eq!(tz_arr.value(0), "Europe/Paris");
+            } else {
+                panic!("Expected StringArray for timezone_name field");
+            }
+        } else {
+            panic!(
+                "Expected ScalarValue::Struct for DateTime, got {:?}",
+                scalar
+            );
+        }
+    }
+
+    #[test]
+    fn test_value_to_scalar_datetime_with_null_timezone() {
+        // Test DateTime with no timezone name (offset-only)
+        let datetime = Value::Temporal(TemporalValue::DateTime {
+            nanos_since_epoch: 1704067200000000000, // 2024-01-01T00:00:00Z
+            offset_seconds: -18000,                 // -05:00
+            timezone_name: None,
+        });
+
+        let scalar = value_to_scalar(&datetime).unwrap();
+
+        if let ScalarValue::Struct(struct_arr) = scalar {
+            assert_eq!(struct_arr.num_columns(), 3);
+
+            // Verify timezone_name is null
+            let tz_col = struct_arr.column(2);
+            if let Some(tz_arr) = tz_col.as_any().downcast_ref::<StringArray>() {
+                assert!(tz_arr.is_null(0), "expected null timezone_name");
+            } else {
+                panic!("Expected StringArray for timezone_name field");
+            }
+        } else {
+            panic!("Expected ScalarValue::Struct for DateTime");
+        }
+    }
+
+    #[test]
+    fn test_value_to_scalar_time_produces_struct() {
+        // Test that Time produces correct 2-field Struct
+        let time = Value::Temporal(TemporalValue::Time {
+            nanos_since_midnight: 37845000000000, // 10:30:45
+            offset_seconds: 3600,                 // +01:00
+        });
+
+        let scalar = value_to_scalar(&time).unwrap();
+
+        // Should produce ScalarValue::Struct with 2 fields
+        if let ScalarValue::Struct(struct_arr) = scalar {
+            assert_eq!(struct_arr.len(), 1, "expected single-row struct array");
+            assert_eq!(struct_arr.num_columns(), 2, "expected 2 fields");
+
+            // Verify field names
+            let fields = struct_arr.fields();
+            assert_eq!(fields[0].name(), "nanos_since_midnight");
+            assert_eq!(fields[1].name(), "offset_seconds");
+
+            // Verify field values
+            let nanos_col = struct_arr.column(0);
+            let offset_col = struct_arr.column(1);
+
+            if let Some(nanos_arr) = nanos_col.as_any().downcast_ref::<Time64NanosecondArray>() {
+                assert_eq!(nanos_arr.value(0), 37845000000000);
+            } else {
+                panic!("Expected Time64NanosecondArray for nanos_since_midnight field");
+            }
+
+            if let Some(offset_arr) = offset_col.as_any().downcast_ref::<Int32Array>() {
+                assert_eq!(offset_arr.value(0), 3600);
+            } else {
+                panic!("Expected Int32Array for offset field");
+            }
+        } else {
+            panic!("Expected ScalarValue::Struct for Time, got {:?}", scalar);
+        }
+    }
+
+    #[test]
+    fn test_value_to_scalar_time_boundary_values() {
+        // Test Time with boundary values
+        let midnight = Value::Temporal(TemporalValue::Time {
+            nanos_since_midnight: 0,
+            offset_seconds: 0,
+        });
+
+        let scalar = value_to_scalar(&midnight).unwrap();
+
+        if let ScalarValue::Struct(struct_arr) = scalar {
+            let nanos_col = struct_arr.column(0);
+            if let Some(nanos_arr) = nanos_col.as_any().downcast_ref::<Time64NanosecondArray>() {
+                assert_eq!(nanos_arr.value(0), 0);
+            } else {
+                panic!("Expected Time64NanosecondArray");
+            }
+        } else {
+            panic!("Expected ScalarValue::Struct for Time");
+        }
     }
 }

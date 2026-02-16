@@ -293,7 +293,9 @@ fn add_temporal_duration_to_value(val: &Value, dur: &CypherDuration) -> Result<V
                 TemporalType::Time => add_cypher_duration_to_time(s, dur)?,
                 TemporalType::LocalDateTime => add_cypher_duration_to_localdatetime(s, dur)?,
                 TemporalType::DateTime => add_cypher_duration_to_datetime(s, dur)?,
-                TemporalType::Duration => return Err(anyhow!("Cannot add duration to duration this way")),
+                TemporalType::Duration => {
+                    return Err(anyhow!("Cannot add duration to duration this way"));
+                }
             };
             Ok(Value::String(result_str))
         }
@@ -364,7 +366,12 @@ fn eval_add(left: &Value, right: &Value) -> Result<Value> {
 
     // Temporal + Duration (Value::Temporal)
     if let Value::Temporal(tv) = left {
-        if let Value::Temporal(TemporalValue::Duration { months, days, nanos }) = right {
+        if let Value::Temporal(TemporalValue::Duration {
+            months,
+            days,
+            nanos,
+        }) = right
+        {
             let dur = CypherDuration::new(*months, *days, *nanos);
             return add_temporal_duration_typed(tv, &dur);
         }
@@ -379,7 +386,12 @@ fn eval_add(left: &Value, right: &Value) -> Result<Value> {
     }
     // Duration + Temporal (Value::Temporal)
     if let Value::Temporal(tv) = right {
-        if let Value::Temporal(TemporalValue::Duration { months, days, nanos }) = left {
+        if let Value::Temporal(TemporalValue::Duration {
+            months,
+            days,
+            nanos,
+        }) = left
+        {
             let dur = CypherDuration::new(*months, *days, *nanos);
             return add_temporal_duration_typed(tv, &dur);
         }
@@ -393,8 +405,19 @@ fn eval_add(left: &Value, right: &Value) -> Result<Value> {
         }
     }
     // Duration + Duration (Value::Temporal)
-    if let (Value::Temporal(TemporalValue::Duration { months: m1, days: d1, nanos: n1 }),
-            Value::Temporal(TemporalValue::Duration { months: m2, days: d2, nanos: n2 })) = (left, right) {
+    if let (
+        Value::Temporal(TemporalValue::Duration {
+            months: m1,
+            days: d1,
+            nanos: n1,
+        }),
+        Value::Temporal(TemporalValue::Duration {
+            months: m2,
+            days: d2,
+            nanos: n2,
+        }),
+    ) = (left, right)
+    {
         return Ok(Value::Temporal(TemporalValue::Duration {
             months: m1 + m2,
             days: d1 + d2,
@@ -467,7 +490,12 @@ fn eval_sub(left: &Value, right: &Value) -> Result<Value> {
 
     // Temporal - Duration (Value::Temporal)
     if let Value::Temporal(tv) = left {
-        if let Value::Temporal(TemporalValue::Duration { months, days, nanos }) = right {
+        if let Value::Temporal(TemporalValue::Duration {
+            months,
+            days,
+            nanos,
+        }) = right
+        {
             let dur = CypherDuration::new(-months, -days, -nanos);
             return add_temporal_duration_typed(tv, &dur);
         }
@@ -481,8 +509,19 @@ fn eval_sub(left: &Value, right: &Value) -> Result<Value> {
         }
     }
     // Duration - Duration (Value::Temporal)
-    if let (Value::Temporal(TemporalValue::Duration { months: m1, days: d1, nanos: n1 }),
-            Value::Temporal(TemporalValue::Duration { months: m2, days: d2, nanos: n2 })) = (left, right) {
+    if let (
+        Value::Temporal(TemporalValue::Duration {
+            months: m1,
+            days: d1,
+            nanos: n1,
+        }),
+        Value::Temporal(TemporalValue::Duration {
+            months: m2,
+            days: d2,
+            nanos: n2,
+        }),
+    ) = (left, right)
+    {
         return Ok(Value::Temporal(TemporalValue::Duration {
             months: m1 - m2,
             days: d1 - d2,
@@ -535,39 +574,53 @@ fn eval_sub(left: &Value, right: &Value) -> Result<Value> {
     eval_numeric_op(left, right, |a, b| a - b)
 }
 
+/// Extract a CypherDuration from a Value, if it is a duration type.
+///
+/// Handles both `Value::Temporal(Duration { .. })` and duration strings.
+fn extract_cypher_duration(val: &Value) -> Option<Result<(CypherDuration, bool)>> {
+    match val {
+        Value::Temporal(TemporalValue::Duration {
+            months,
+            days,
+            nanos,
+        }) => Some(Ok((CypherDuration::new(*months, *days, *nanos), true))),
+        Value::String(s) if is_duration_value(val) => {
+            Some(parse_duration_to_cypher(s).map(|d| (d, false)))
+        }
+        _ => None,
+    }
+}
+
+/// Convert a `CypherDuration` result back to the appropriate `Value` type.
+///
+/// `is_temporal` indicates whether the source was a `Value::Temporal` (returns temporal)
+/// or a `Value::String` (returns ISO 8601 string).
+fn duration_to_value(result: CypherDuration, is_temporal: bool) -> Value {
+    if is_temporal {
+        result.to_temporal_value()
+    } else {
+        Value::String(result.to_iso8601())
+    }
+}
+
 /// Evaluate multiplication with duration support.
 fn eval_mul(left: &Value, right: &Value) -> Result<Value> {
-    // Null propagation
     if left.is_null() || right.is_null() {
         return Ok(Value::Null);
     }
 
-    // Value::Temporal duration * number
-    if let Value::Temporal(TemporalValue::Duration { months, days, nanos }) = left
+    // duration * number (either side)
+    if let Some(dur_result) = extract_cypher_duration(left)
         && let Some(factor) = right.as_f64()
     {
-        return Ok(CypherDuration::new(*months, *days, *nanos).multiply(factor).to_temporal_value());
+        let (dur, is_temporal) = dur_result?;
+        return Ok(duration_to_value(dur.multiply(factor), is_temporal));
     }
-    // number * Value::Temporal duration
-    if let Value::Temporal(TemporalValue::Duration { months, days, nanos }) = right
+    if let Some(dur_result) = extract_cypher_duration(right)
         && let Some(factor) = left.as_f64()
     {
-        return Ok(CypherDuration::new(*months, *days, *nanos).multiply(factor).to_temporal_value());
-    }
-
-    // String duration * number (backward compat)
-    if let (Value::String(s), Some(factor)) = (left, right.as_f64())
-        && is_duration_value(left)
-    {
-        let dur = parse_duration_to_cypher(s)?;
-        return Ok(Value::String(dur.multiply(factor).to_iso8601()));
-    }
-    // number * string duration
-    if let (Some(factor), Value::String(s)) = (left.as_f64(), right)
-        && is_duration_value(right)
-    {
-        let dur = parse_duration_to_cypher(s)?;
-        return Ok(Value::String(dur.multiply(factor).to_iso8601()));
+        let (dur, is_temporal) = dur_result?;
+        return Ok(duration_to_value(dur.multiply(factor), is_temporal));
     }
 
     eval_numeric_op(left, right, |a, b| a * b)
@@ -575,24 +628,16 @@ fn eval_mul(left: &Value, right: &Value) -> Result<Value> {
 
 /// Evaluate division with duration support.
 fn eval_div(left: &Value, right: &Value) -> Result<Value> {
-    // Null propagation
     if left.is_null() || right.is_null() {
         return Ok(Value::Null);
     }
 
-    // Value::Temporal duration / number
-    if let Value::Temporal(TemporalValue::Duration { months, days, nanos }) = left
+    // duration / number (left side only -- division is not commutative)
+    if let Some(dur_result) = extract_cypher_duration(left)
         && let Some(divisor) = right.as_f64()
     {
-        return Ok(CypherDuration::new(*months, *days, *nanos).divide(divisor).to_temporal_value());
-    }
-
-    // String duration / number (backward compat)
-    if let (Value::String(s), Some(divisor)) = (left, right.as_f64())
-        && is_duration_value(left)
-    {
-        let dur = parse_duration_to_cypher(s)?;
-        return Ok(Value::String(dur.divide(divisor).to_iso8601()));
+        let (dur, is_temporal) = dur_result?;
+        return Ok(duration_to_value(dur.divide(divisor), is_temporal));
     }
 
     eval_numeric_op(left, right, |a, b| a / b)
@@ -711,23 +756,55 @@ fn cypher_partial_cmp(left: &Value, right: &Value) -> Option<Ordering> {
 /// Compare two TemporalValues directly using numeric representation.
 fn temporal_partial_cmp(left: &TemporalValue, right: &TemporalValue) -> Option<Ordering> {
     match (left, right) {
-        (TemporalValue::Date { days_since_epoch: l }, TemporalValue::Date { days_since_epoch: r }) => {
-            Some(l.cmp(r))
-        }
-        (TemporalValue::LocalTime { nanos_since_midnight: l }, TemporalValue::LocalTime { nanos_since_midnight: r }) => {
-            Some(l.cmp(r))
-        }
-        (TemporalValue::Time { nanos_since_midnight: lm, offset_seconds: lo },
-         TemporalValue::Time { nanos_since_midnight: rm, offset_seconds: ro }) => {
+        (
+            TemporalValue::Date {
+                days_since_epoch: l,
+            },
+            TemporalValue::Date {
+                days_since_epoch: r,
+            },
+        ) => Some(l.cmp(r)),
+        (
+            TemporalValue::LocalTime {
+                nanos_since_midnight: l,
+            },
+            TemporalValue::LocalTime {
+                nanos_since_midnight: r,
+            },
+        ) => Some(l.cmp(r)),
+        (
+            TemporalValue::Time {
+                nanos_since_midnight: lm,
+                offset_seconds: lo,
+            },
+            TemporalValue::Time {
+                nanos_since_midnight: rm,
+                offset_seconds: ro,
+            },
+        ) => {
             // Compare in UTC: local_nanos - offset
             let l_utc = *lm as i128 - (*lo as i128) * 1_000_000_000;
             let r_utc = *rm as i128 - (*ro as i128) * 1_000_000_000;
             Some(l_utc.cmp(&r_utc))
         }
-        (TemporalValue::LocalDateTime { nanos_since_epoch: l }, TemporalValue::LocalDateTime { nanos_since_epoch: r }) => {
-            Some(l.cmp(r))
-        }
-        (TemporalValue::DateTime { nanos_since_epoch: l, .. }, TemporalValue::DateTime { nanos_since_epoch: r, .. }) => {
+        (
+            TemporalValue::LocalDateTime {
+                nanos_since_epoch: l,
+            },
+            TemporalValue::LocalDateTime {
+                nanos_since_epoch: r,
+            },
+        ) => Some(l.cmp(r)),
+        (
+            TemporalValue::DateTime {
+                nanos_since_epoch: l,
+                ..
+            },
+            TemporalValue::DateTime {
+                nanos_since_epoch: r,
+                ..
+            },
+        ) => {
             // Both are in UTC, so direct comparison
             Some(l.cmp(r))
         }
@@ -1124,13 +1201,15 @@ fn eval_math_function(name: &str, args: &[Value]) -> Result<Value> {
         "ASIN" => eval_unary_numeric_op(require_one_arg(name, args)?, "asin", f64::asin),
         "ACOS" => eval_unary_numeric_op(require_one_arg(name, args)?, "acos", f64::acos),
         "ATAN" => eval_unary_numeric_op(require_one_arg(name, args)?, "atan", f64::atan),
-        "DEGREES" => eval_unary_numeric_op(require_one_arg(name, args)?, "degrees", f64::to_degrees),
-        "RADIANS" => eval_unary_numeric_op(require_one_arg(name, args)?, "radians", f64::to_radians),
-        "HAVERSIN" => {
-            eval_unary_numeric_op(require_one_arg(name, args)?, "haversin", |f| {
-                (1.0 - f.cos()) / 2.0
-            })
+        "DEGREES" => {
+            eval_unary_numeric_op(require_one_arg(name, args)?, "degrees", f64::to_degrees)
         }
+        "RADIANS" => {
+            eval_unary_numeric_op(require_one_arg(name, args)?, "radians", f64::to_radians)
+        }
+        "HAVERSIN" => eval_unary_numeric_op(require_one_arg(name, args)?, "haversin", |f| {
+            (1.0 - f.cos()) / 2.0
+        }),
         // Two-argument functions
         "POWER" | "POW" => eval_power(args),
         "ATAN2" => eval_atan2(args),
@@ -1298,30 +1377,48 @@ fn eval_right(args: &[Value]) -> Result<Value> {
     }
 }
 
-fn eval_lpad(args: &[Value]) -> Result<Value> {
+/// Shared implementation for lpad/rpad. `pad_left` controls direction.
+fn eval_pad(func_name: &str, args: &[Value], pad_left: bool) -> Result<Value> {
     if args.len() < 2 || args.len() > 3 {
-        return Err(anyhow!("lpad() requires 2 or 3 arguments"));
+        return Err(anyhow!("{}() requires 2 or 3 arguments", func_name));
     }
     let s = match &args[0] {
         Value::String(s) => s,
         Value::Null => return Ok(Value::Null),
-        _ => return Err(anyhow!("lpad() expects a string as first argument")),
+        _ => {
+            return Err(anyhow!(
+                "{}() expects a string as first argument",
+                func_name
+            ));
+        }
     };
     let len = match &args[1] {
         Value::Int(n) => *n as usize,
         Value::Float(f) => *f as i64 as usize,
         Value::Null => return Ok(Value::Null),
-        _ => return Err(anyhow!("lpad() expects an integer as second argument")),
+        _ => {
+            return Err(anyhow!(
+                "{}() expects an integer as second argument",
+                func_name
+            ));
+        }
     };
-    // Limit max length to prevent OOM
     if len > 1_000_000 {
-        return Err(anyhow!("lpad() length exceeds maximum limit of 1,000,000"));
+        return Err(anyhow!(
+            "{}() length exceeds maximum limit of 1,000,000",
+            func_name
+        ));
     }
     let pad_str = if args.len() == 3 {
         match &args[2] {
             Value::String(p) => p.as_str(),
             Value::Null => return Ok(Value::Null),
-            _ => return Err(anyhow!("lpad() expects a string as third argument")),
+            _ => {
+                return Err(anyhow!(
+                    "{}() expects a string as third argument",
+                    func_name
+                ));
+            }
         }
     } else {
         " "
@@ -1329,78 +1426,38 @@ fn eval_lpad(args: &[Value]) -> Result<Value> {
 
     let s_chars: Vec<char> = s.chars().collect();
     if s_chars.len() >= len {
-        Ok(Value::String(s_chars.into_iter().take(len).collect()))
-    } else {
-        let pad_chars: Vec<char> = pad_str.chars().collect();
-        if pad_chars.is_empty() {
-            return Ok(Value::String(s.clone()));
-        }
-        let needed = len - s_chars.len();
-        let mut result = String::with_capacity(len);
-
-        let full_pads = needed / pad_chars.len();
-        let partial_pad = needed % pad_chars.len();
-
-        for _ in 0..full_pads {
-            result.push_str(pad_str);
-        }
-        result.extend(pad_chars.into_iter().take(partial_pad));
-        result.push_str(s);
-
-        Ok(Value::String(result))
+        return Ok(Value::String(s_chars.into_iter().take(len).collect()));
     }
+
+    let pad_chars: Vec<char> = pad_str.chars().collect();
+    if pad_chars.is_empty() {
+        return Ok(Value::String(s.clone()));
+    }
+
+    let needed = len - s_chars.len();
+    let full_pads = needed / pad_chars.len();
+    let partial_pad = needed % pad_chars.len();
+
+    let mut padding = String::with_capacity(needed);
+    for _ in 0..full_pads {
+        padding.push_str(pad_str);
+    }
+    padding.extend(pad_chars.into_iter().take(partial_pad));
+
+    let result = if pad_left {
+        format!("{}{}", padding, s)
+    } else {
+        format!("{}{}", s, padding)
+    };
+    Ok(Value::String(result))
+}
+
+fn eval_lpad(args: &[Value]) -> Result<Value> {
+    eval_pad("lpad", args, true)
 }
 
 fn eval_rpad(args: &[Value]) -> Result<Value> {
-    if args.len() < 2 || args.len() > 3 {
-        return Err(anyhow!("rpad() requires 2 or 3 arguments"));
-    }
-    let s = match &args[0] {
-        Value::String(s) => s,
-        Value::Null => return Ok(Value::Null),
-        _ => return Err(anyhow!("rpad() expects a string as first argument")),
-    };
-    let len = match &args[1] {
-        Value::Int(n) => *n as usize,
-        Value::Float(f) => *f as i64 as usize,
-        Value::Null => return Ok(Value::Null),
-        _ => return Err(anyhow!("rpad() expects an integer as second argument")),
-    };
-    // Limit max length to prevent OOM
-    if len > 1_000_000 {
-        return Err(anyhow!("rpad() length exceeds maximum limit of 1,000,000"));
-    }
-    let pad_str = if args.len() == 3 {
-        match &args[2] {
-            Value::String(p) => p.as_str(),
-            Value::Null => return Ok(Value::Null),
-            _ => return Err(anyhow!("rpad() expects a string as third argument")),
-        }
-    } else {
-        " "
-    };
-
-    let s_chars: Vec<char> = s.chars().collect();
-    if s_chars.len() >= len {
-        Ok(Value::String(s_chars.into_iter().take(len).collect()))
-    } else {
-        let mut result = String::from(s);
-        let pad_chars: Vec<char> = pad_str.chars().collect();
-        if pad_chars.is_empty() {
-            return Ok(Value::String(s.clone()));
-        }
-
-        let needed = len - s_chars.len();
-        let full_pads = needed / pad_chars.len();
-        let partial_pad = needed % pad_chars.len();
-
-        for _ in 0..full_pads {
-            result.push_str(pad_str);
-        }
-        result.extend(pad_chars.into_iter().take(partial_pad));
-
-        Ok(Value::String(result))
-    }
+    eval_pad("rpad", args, false)
 }
 
 /// Evaluate string functions: TOUPPER, TOLOWER, TRIM, LTRIM, RTRIM, REVERSE, REPLACE, SPLIT, SUBSTRING, LEFT, RIGHT, LPAD, RPAD

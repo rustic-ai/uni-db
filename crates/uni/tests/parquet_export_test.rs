@@ -57,7 +57,9 @@ async fn test_parquet_export() -> anyhow::Result<()> {
             Arc::new(StringArray::from(vec![None::<&str>; 2])), // ext_id
             // _labels
             {
-                let mut lb = arrow_array::builder::ListBuilder::new(arrow_array::builder::StringBuilder::new());
+                let mut lb = arrow_array::builder::ListBuilder::new(
+                    arrow_array::builder::StringBuilder::new(),
+                );
                 for _ in 0..2 {
                     lb.values().append_value("Person");
                     lb.append(true);

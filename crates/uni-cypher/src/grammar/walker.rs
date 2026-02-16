@@ -331,6 +331,27 @@ fn build_set_clause(pair: Pair<Rule>) -> Result<Clause, ParseError> {
     Ok(Clause::Set(SetClause { items }))
 }
 
+/// Build a property access expression from a `property_expr` parse node.
+///
+/// Handles both plain (`n.prop`) and parenthesized (`(n).prop`) forms,
+/// constructing an `Expr::Property` chain.
+fn build_property_expr_chain(pair: Pair<Rule>) -> Expr {
+    let mut p_inner = pair.into_inner();
+    let first_token = p_inner.next().unwrap();
+    let var = if first_token.as_str() == "(" {
+        p_inner.next().unwrap().as_str().to_string()
+    } else {
+        first_token.as_str().to_string()
+    };
+    let mut expr = Expr::Variable(var);
+    for p in p_inner {
+        if p.as_str() != ")" {
+            expr = Expr::Property(Box::new(expr), p.as_str().to_string());
+        }
+    }
+    expr
+}
+
 fn build_set_item(pair: Pair<Rule>) -> Result<SetItem, ParseError> {
     let mut inner = pair.into_inner();
     let first = inner.next().unwrap();
@@ -367,24 +388,7 @@ fn build_set_item(pair: Pair<Rule>) -> Result<SetItem, ParseError> {
             }
         }
         Rule::property_expr => {
-            let mut p_inner = first.into_inner();
-            let first_token = p_inner.next().unwrap();
-            // Check if it's parenthesized identifier: (id) or just id
-            let var = if first_token.as_str() == "(" {
-                // Parenthesized: skip "(" and get identifier
-                p_inner.next().unwrap().as_str().to_string()
-                // Will also need to skip ")" but it's consumed automatically
-            } else {
-                first_token.as_str().to_string()
-            };
-            let mut expr = Expr::Variable(var);
-            for p in p_inner {
-                // Skip closing paren if present
-                if p.as_str() != ")" {
-                    expr = Expr::Property(Box::new(expr), p.as_str().to_string());
-                }
-            }
-
+            let expr = build_property_expr_chain(first);
             inner.next(); // eq
             let val = build_expression(inner.next().unwrap())?;
             Ok(SetItem::Property { expr, value: val })
@@ -406,25 +410,7 @@ fn build_remove_item(pair: Pair<Rule>) -> Result<RemoveItem, ParseError> {
     let mut inner = pair.into_inner();
     let first = inner.next().unwrap();
     match first.as_rule() {
-        Rule::property_expr => {
-            let mut p_inner = first.into_inner();
-            let first_token = p_inner.next().unwrap();
-            // Check if it's parenthesized identifier: (id) or just id
-            let var = if first_token.as_str() == "(" {
-                // Parenthesized: skip "(" and get identifier
-                p_inner.next().unwrap().as_str().to_string()
-            } else {
-                first_token.as_str().to_string()
-            };
-            let mut expr = Expr::Variable(var);
-            for p in p_inner {
-                // Skip closing paren if present
-                if p.as_str() != ")" {
-                    expr = Expr::Property(Box::new(expr), p.as_str().to_string());
-                }
-            }
-            Ok(RemoveItem::Property(expr))
-        }
+        Rule::property_expr => Ok(RemoveItem::Property(build_property_expr_chain(first))),
         Rule::identifier => {
             let id = first.as_str().to_string();
             let labels_pair = inner.next().unwrap();
@@ -655,7 +641,7 @@ pub fn build_expression(pair: Pair<Rule>) -> Result<Expr, ParseError> {
 fn build_binary_left_assoc(pair: Pair<Rule>, op: BinaryOp) -> Result<Expr, ParseError> {
     let mut inner = pair.into_inner();
     let mut left = build_expression(inner.next().unwrap())?;
-    while let Some(_) = inner.next() {
+    while inner.next().is_some() {
         let right = build_expression(inner.next().unwrap())?;
         left = Expr::BinaryOp {
             left: Box::new(left),
@@ -664,25 +650,6 @@ fn build_binary_left_assoc(pair: Pair<Rule>, op: BinaryOp) -> Result<Expr, Parse
         };
     }
     Ok(left)
-}
-
-#[allow(dead_code)]
-fn build_binary_right_assoc(pair: Pair<Rule>, op: BinaryOp) -> Result<Expr, ParseError> {
-    let inner: Vec<_> = pair.into_inner().collect();
-    if inner.len() == 1 {
-        return build_expression(inner.into_iter().next().unwrap());
-    }
-    let mut iter = inner.into_iter().step_by(2).rev();
-    let mut right = build_expression(iter.next().unwrap())?;
-    for left_pair in iter {
-        let left = build_expression(left_pair)?;
-        right = Expr::BinaryOp {
-            left: Box::new(left),
-            op,
-            right: Box::new(right),
-        };
-    }
-    Ok(right)
 }
 
 fn build_additive_expression(pair: Pair<Rule>) -> Result<Expr, ParseError> {
@@ -878,39 +845,8 @@ fn apply_tail_to_expr(
         }),
         Rule::VALID_AT => {
             let timestamp = build_expression(tail_inner.next().unwrap())?;
-
-            // Check if there are additional string pairs (custom property names)
-            let start_prop = if let Some(start_pair) = tail_inner.next() {
-                if start_pair.as_rule() == Rule::string {
-                    let s = start_pair.as_str();
-                    let _quote_char = s.chars().next().unwrap();
-                    let content = &s[1..s.len() - 1];
-                    Some(content.to_string())
-                } else {
-                    return Err(ParseError::new(format!(
-                        "Expected string for VALID_AT start property, got {:?}",
-                        start_pair.as_rule()
-                    )));
-                }
-            } else {
-                None
-            };
-
-            let end_prop = if let Some(end_pair) = tail_inner.next() {
-                if end_pair.as_rule() == Rule::string {
-                    let s = end_pair.as_str();
-                    let _quote_char = s.chars().next().unwrap();
-                    let content = &s[1..s.len() - 1];
-                    Some(content.to_string())
-                } else {
-                    return Err(ParseError::new(format!(
-                        "Expected string for VALID_AT end property, got {:?}",
-                        end_pair.as_rule()
-                    )));
-                }
-            } else {
-                None
-            };
+            let start_prop = tail_inner.next().map(build_string_literal).transpose()?;
+            let end_prop = tail_inner.next().map(build_string_literal).transpose()?;
 
             Ok(Expr::ValidAt {
                 entity: Box::new(left),
@@ -994,19 +930,6 @@ fn build_postfix_expression(pair: Pair<Rule>) -> Result<Expr, ParseError> {
     Ok(expr)
 }
 
-/// Extract a dotted function name from a variable or property chain expression.
-///
-/// Returns `Ok(name)` for valid function call bases, `Err` otherwise.
-fn extract_function_name(base: &Expr) -> Result<String, ParseError> {
-    match base {
-        Expr::Variable(n) => Ok(n.clone()),
-        Expr::Property(inner, prop) => {
-            extract_function_name(inner).map(|s| format!("{}.{}", s, prop))
-        }
-        _ => Err(ParseError::new(format!("Invalid call base: {:?}", base))),
-    }
-}
-
 /// Build a function call expression from the given base expression.
 fn make_function_call(
     base: &Expr,
@@ -1014,8 +937,10 @@ fn make_function_call(
     distinct: bool,
     window_spec: Option<WindowSpec>,
 ) -> Result<Expr, ParseError> {
+    let name = extract_dotted_name(base)
+        .ok_or_else(|| ParseError::new(format!("Invalid call base: {:?}", base)))?;
     Ok(Expr::FunctionCall {
-        name: extract_function_name(base)?,
+        name,
         args,
         distinct,
         window_spec,
@@ -1332,30 +1257,24 @@ fn unescape_string(s: &str, quote_char: char) -> Result<String, ParseError> {
     Ok(result)
 }
 
-/// Outcome of parsing an integer literal that may overflow `i64`.
-enum IntegerParseResult {
-    /// Value fits in a signed 64-bit integer (or is the sentinel `i64::MIN` for `MAX + 1`).
-    Integer(i64),
-}
-
 /// Parse an unsigned integer string in the given radix with overflow handling.
 ///
 /// Values that fit in `i64` are returned directly. The boundary value
 /// `i64::MAX + 1` is stored as `i64::MIN` so that [`negate_expression`]
 /// can produce the correct result for `-9223372036854775808`. Larger
 /// values result in an error.
-fn parse_integer_safe(s: &str, radix: u32) -> Result<IntegerParseResult, ParseError> {
+fn parse_integer_safe(s: &str, radix: u32) -> Result<i64, ParseError> {
     if let Ok(val) = i64::from_str_radix(s, radix) {
-        return Ok(IntegerParseResult::Integer(val));
+        return Ok(val);
     }
 
     let magnitude = u64::from_str_radix(s, radix)
         .map_err(|e| ParseError::new(format!("Invalid integer: {}", e)))?;
 
     if magnitude <= i64::MAX as u64 {
-        Ok(IntegerParseResult::Integer(magnitude as i64))
+        Ok(magnitude as i64)
     } else if magnitude == (i64::MAX as u64 + 1) {
-        Ok(IntegerParseResult::Integer(i64::MIN))
+        Ok(i64::MIN)
     } else {
         Err(ParseError::new(
             "IntegerOverflow: value too large".to_string(),
@@ -1368,22 +1287,15 @@ fn build_literal(pair: Pair<Rule>) -> Result<Expr, ParseError> {
     match inner.as_rule() {
         Rule::integer => {
             let s = inner.as_str();
-            let s_clean = s.replace('_', ""); // Remove underscores
-            let result = if s_clean.starts_with("0x") || s_clean.starts_with("0X") {
-                // Hexadecimal
+            let s_clean = s.replace('_', "");
+            let value = if s_clean.starts_with("0x") || s_clean.starts_with("0X") {
                 parse_integer_safe(&s_clean[2..], 16)?
             } else if s_clean.starts_with("0o") || s_clean.starts_with("0O") {
-                // Octal
                 parse_integer_safe(&s_clean[2..], 8)?
             } else {
-                // Decimal
                 parse_integer_safe(&s_clean, 10)?
             };
-            match result {
-                IntegerParseResult::Integer(value) => {
-                    Ok(Expr::Literal(CypherLiteral::Integer(value)))
-                }
-            }
+            Ok(Expr::Literal(CypherLiteral::Integer(value)))
         }
         Rule::float => {
             let s = inner.as_str().replace('_', ""); // Remove underscores
@@ -1737,11 +1649,7 @@ fn build_parenthesized_pattern(pair: Pair<Rule>) -> Result<PatternElement, Parse
     }
 
     // Optional path quantifier
-    let range = if let Some(quantifier) = inner.next() {
-        Some(build_path_quantifier(quantifier)?)
-    } else {
-        None
-    };
+    let range = inner.next().map(build_path_quantifier).transpose()?;
 
     // Create a PathPattern from the elements
     let path_pattern = PathPattern {
@@ -1955,41 +1863,33 @@ fn build_relationship_pattern(pair: Pair<Rule>) -> Result<RelationshipPattern, P
 // HELPERS
 // ═══════════════════════════════════════════════════════════════════════════
 
+fn build_single_return_item(pair: Pair<Rule>) -> Result<ReturnItem, ParseError> {
+    let mut inner = pair.into_inner();
+    let expr = build_expression(inner.next().unwrap())?;
+    let alias = if inner.next().is_some() {
+        // AS keyword consumed; next is the alias identifier
+        Some(inner.next().unwrap().as_str().to_string())
+    } else {
+        None
+    };
+    Ok(ReturnItem::Expr { expr, alias })
+}
+
 fn build_return_items(pair: Pair<Rule>) -> Result<Vec<ReturnItem>, ParseError> {
     let mut inner = pair.into_inner();
     let first = inner.next().unwrap();
 
     if first.as_rule() == Rule::star {
-        // RETURN *, items or just RETURN *
         let mut items = vec![ReturnItem::All];
         for p in inner {
-            let mut i = p.into_inner();
-            let expr = build_expression(i.next().unwrap())?;
-            let alias = if i.next().is_some() {
-                // AS
-                Some(i.next().unwrap().as_str().to_string())
-            } else {
-                None
-            };
-            items.push(ReturnItem::Expr { expr, alias });
+            items.push(build_single_return_item(p)?);
         }
         return Ok(items);
     }
 
-    // RETURN items (no star)
     std::iter::once(first)
         .chain(inner)
-        .map(|p| {
-            let mut i = p.into_inner();
-            let expr = build_expression(i.next().unwrap())?;
-            let alias = if i.next().is_some() {
-                // AS
-                Some(i.next().unwrap().as_str().to_string())
-            } else {
-                None
-            };
-            Ok(ReturnItem::Expr { expr, alias })
-        })
+        .map(build_single_return_item)
         .collect()
 }
 
@@ -2044,6 +1944,24 @@ fn build_properties(pair: Pair<Rule>) -> Result<Expr, ParseError> {
     }
 }
 
+/// Parse a range bound token into a non-negative u32.
+fn parse_range_bound(pair: &Pair<Rule>) -> Result<u32, ParseError> {
+    let val: i64 = pair.as_str().parse().map_err(|e| {
+        ParseError::new(format!(
+            "SyntaxError: InvalidRelationshipPattern - Invalid range bound '{}': {}",
+            pair.as_str(),
+            e
+        ))
+    })?;
+    if val < 0 {
+        return Err(ParseError::new(format!(
+            "SyntaxError: InvalidRelationshipPattern - Negative range bound '{}' is not allowed",
+            val
+        )));
+    }
+    Ok(val as u32)
+}
+
 fn build_range(pair: Pair<Rule>) -> Result<Range, ParseError> {
     let mut inner = pair.into_inner();
     inner.next(); // star
@@ -2052,58 +1970,21 @@ fn build_range(pair: Pair<Rule>) -> Result<Range, ParseError> {
 
     if let Some(first) = inner.next() {
         if first.as_rule() == Rule::integer {
-            let val: i64 = first.as_str().parse().map_err(|e| {
-                ParseError::new(format!(
-                    "SyntaxError: InvalidRelationshipPattern - Invalid range bound '{}': {}",
-                    first.as_str(),
-                    e
-                ))
-            })?;
-            if val < 0 {
-                return Err(ParseError::new(format!(
-                    "SyntaxError: InvalidRelationshipPattern - Negative range bound '{}' is not allowed",
-                    val
-                )));
-            }
-            let val = val as u32;
+            let val = parse_range_bound(&first)?;
             min = Some(val);
             if inner.next().is_some() {
+                // dot_dot consumed; check for upper bound
                 if let Some(second) = inner.next() {
-                    let val: i64 = second.as_str().parse().map_err(|e| {
-                        ParseError::new(format!(
-                            "SyntaxError: InvalidRelationshipPattern - Invalid range bound '{}': {}",
-                            second.as_str(),
-                            e
-                        ))
-                    })?;
-                    if val < 0 {
-                        return Err(ParseError::new(format!(
-                            "SyntaxError: InvalidRelationshipPattern - Negative range bound '{}' is not allowed",
-                            val
-                        )));
-                    }
-                    max = Some(val as u32);
+                    max = Some(parse_range_bound(&second)?);
                 }
             } else {
+                // No dot_dot means exact bound: *N
                 max = Some(val);
             }
         } else if first.as_rule() == Rule::dot_dot
             && let Some(second) = inner.next()
         {
-            let val: i64 = second.as_str().parse().map_err(|e| {
-                ParseError::new(format!(
-                    "SyntaxError: InvalidRelationshipPattern - Invalid range bound '{}': {}",
-                    second.as_str(),
-                    e
-                ))
-            })?;
-            if val < 0 {
-                return Err(ParseError::new(format!(
-                    "SyntaxError: InvalidRelationshipPattern - Negative range bound '{}' is not allowed",
-                    val
-                )));
-            }
-            max = Some(val as u32);
+            max = Some(parse_range_bound(&second)?);
         }
     } else {
         // [*] alone means 1 or more (OpenCypher standard default)
@@ -2655,11 +2536,7 @@ fn build_show_constraints(pair: Pair<Rule>) -> Result<SchemaCommand, ParseError>
     inner.next(); // SHOW
     inner.next(); // CONSTRAINTS
 
-    let target = if let Some(target_pair) = inner.next() {
-        Some(build_constraint_target(target_pair)?)
-    } else {
-        None
-    };
+    let target = inner.next().map(build_constraint_target).transpose()?;
 
     Ok(SchemaCommand::ShowConstraints(ShowConstraints { target }))
 }
@@ -2685,17 +2562,11 @@ fn build_show_indexes(pair: Pair<Rule>) -> Result<SchemaCommand, ParseError> {
     let mut inner = pair.into_inner();
     inner.next(); // SHOW
 
-    let filter = if let Some(p) = inner.next() {
-        if p.as_rule() == Rule::VECTOR {
-            Some("VECTOR".to_string())
-        } else if p.as_rule() == Rule::FULLTEXT {
-            Some("FULLTEXT".to_string())
-        } else {
-            None
-        }
-    } else {
-        None
-    };
+    let filter = inner.next().and_then(|p| match p.as_rule() {
+        Rule::VECTOR => Some("VECTOR".to_string()),
+        Rule::FULLTEXT => Some("FULLTEXT".to_string()),
+        _ => None,
+    });
 
     Ok(SchemaCommand::ShowIndexes(ShowIndexes { filter }))
 }

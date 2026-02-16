@@ -14,7 +14,5 @@ categories.workspace = true
 pest = "2.7"
 pest_derive = "2.7"
 serde = { workspace = true }
-serde_json = { workspace = true }
 thiserror = { workspace = true }
-regex = { workspace = true }
 uni-common = { path = "../uni-common" }

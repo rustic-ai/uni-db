@@ -152,11 +152,7 @@ fn filter_yield_items(
 
 /// Reciprocal Rank Fusion (RRF) for combining search results.
 /// RRF score = sum(1 / (k + rank)) for each result list.
-fn fuse_rrf(
-    vec_results: &[(Vid, f32)],
-    fts_results: &[(Vid, f32)],
-    k: usize,
-) -> Vec<(Vid, f32)> {
+fn fuse_rrf(vec_results: &[(Vid, f32)], fts_results: &[(Vid, f32)], k: usize) -> Vec<(Vid, f32)> {
     let mut scores: HashMap<Vid, f32> = HashMap::new();
 
     // Add RRF scores from vector results
@@ -246,14 +242,136 @@ impl Executor {
     /// - "distance", "dist", "_distance" → "distance"
     /// - "score", "_score" → "score"
     /// - anything else → "node" (treated as node variable)
-    fn map_yield_to_canonical(yield_name: &str) -> String {
-        let lower = yield_name.to_lowercase();
-        match lower.as_str() {
-            "vid" | "_vid" => "vid".to_string(),
-            "distance" | "dist" | "_distance" => "distance".to_string(),
-            "score" | "_score" => "score".to_string(),
-            _ => "node".to_string(),
+    fn map_yield_to_canonical(yield_name: &str) -> &'static str {
+        match yield_name.to_lowercase().as_str() {
+            "vid" | "_vid" => "vid",
+            "distance" | "dist" | "_distance" => "distance",
+            "score" | "_score" => "score",
+            _ => "node",
         }
+    }
+
+    /// Evaluate a procedure argument as a string, returning an error with the given description.
+    async fn eval_string_arg<'a>(
+        &'a self,
+        arg: &Expr,
+        description: &str,
+        prop_manager: &'a PropertyManager,
+        params: &'a HashMap<String, Value>,
+        ctx: Option<&'a QueryContext>,
+    ) -> Result<String> {
+        let empty_row = HashMap::new();
+        self.evaluate_expr(arg, &empty_row, prop_manager, params, ctx)
+            .await?
+            .as_str()
+            .ok_or_else(|| anyhow!("{} must be string", description))
+            .map(|s| s.to_string())
+    }
+
+    /// Evaluate a procedure argument as a usize integer.
+    async fn eval_usize_arg<'a>(
+        &'a self,
+        arg: &Expr,
+        description: &str,
+        prop_manager: &'a PropertyManager,
+        params: &'a HashMap<String, Value>,
+        ctx: Option<&'a QueryContext>,
+    ) -> Result<usize> {
+        let empty_row = HashMap::new();
+        self.evaluate_expr(arg, &empty_row, prop_manager, params, ctx)
+            .await?
+            .as_u64()
+            .ok_or_else(|| anyhow!("{} must be integer", description))
+            .map(|v| v as usize)
+    }
+
+    /// Extract an optional string filter argument at the given index.
+    ///
+    /// Returns `None` if the argument index is out of bounds or the value is null.
+    /// Returns an error if the value is present but not a string, or is an empty string.
+    async fn eval_optional_filter_arg<'a>(
+        &'a self,
+        args: &[Expr],
+        index: usize,
+        prop_manager: &'a PropertyManager,
+        params: &'a HashMap<String, Value>,
+        ctx: Option<&'a QueryContext>,
+    ) -> Result<Option<String>> {
+        if args.len() <= index {
+            return Ok(None);
+        }
+        let empty_row = HashMap::new();
+        let filter_val = self
+            .evaluate_expr(&args[index], &empty_row, prop_manager, params, ctx)
+            .await?;
+        if filter_val.is_null() {
+            return Ok(None);
+        }
+        let filter_str = filter_val
+            .as_str()
+            .ok_or_else(|| anyhow!("Filter must be a string"))?
+            .to_string();
+        if filter_str.trim().is_empty() {
+            return Err(anyhow!("Filter cannot be empty string"));
+        }
+        Ok(Some(filter_str))
+    }
+
+    /// Extract an optional non-negative threshold argument at the given index.
+    ///
+    /// Returns `None` if the argument index is out of bounds or the value is null.
+    /// Returns an error if the value is present but not a number, or is negative.
+    async fn eval_optional_threshold_arg<'a>(
+        &'a self,
+        args: &[Expr],
+        index: usize,
+        prop_manager: &'a PropertyManager,
+        params: &'a HashMap<String, Value>,
+        ctx: Option<&'a QueryContext>,
+    ) -> Result<Option<f64>> {
+        if args.len() <= index {
+            return Ok(None);
+        }
+        let empty_row = HashMap::new();
+        let threshold_val = self
+            .evaluate_expr(&args[index], &empty_row, prop_manager, params, ctx)
+            .await?;
+        if threshold_val.is_null() {
+            return Ok(None);
+        }
+        let thresh = threshold_val
+            .as_f64()
+            .ok_or_else(|| anyhow!("Threshold must be a number"))?;
+        if thresh < 0.0 {
+            return Err(anyhow!("Threshold must be non-negative, got {}", thresh));
+        }
+        Ok(Some(thresh))
+    }
+
+    /// Load a node object with all vertex properties for a given VID and label.
+    ///
+    /// Returns `None` if the vertex has been deleted. The returned map contains
+    /// `_vid`, `_labels`, and all vertex properties.
+    async fn load_node_object<'a>(
+        vid: Vid,
+        label: &str,
+        prop_manager: &'a PropertyManager,
+        ctx: Option<&'a QueryContext>,
+    ) -> Result<Option<Value>> {
+        let props_opt = prop_manager.get_all_vertex_props_with_ctx(vid, ctx).await?;
+        let Some(properties) = props_opt else {
+            return Ok(None);
+        };
+        let mut node_obj = HashMap::new();
+        node_obj.insert("_vid".to_string(), Value::Int(vid.as_u64() as i64));
+        node_obj.insert(
+            "_labels".to_string(),
+            Value::List(vec![Value::String(label.to_string())]),
+        );
+        for (key, val) in properties {
+            node_obj.insert(key, val);
+        }
+        Ok(Some(Value::Map(node_obj)))
     }
 
     pub(crate) async fn execute_procedure<'a>(
@@ -282,7 +400,7 @@ impl Executor {
                     let writer = writer_lock.read().await;
                     Some(writer.l0_manager.clone())
                 } else {
-                    self.l0_manager.as_ref().map(|m| m.clone())
+                    self.l0_manager.clone()
                 };
                 let algo_ctx = AlgoContext::new(self.storage.clone(), l0_mgr);
 
@@ -324,30 +442,21 @@ impl Executor {
         }
 
         match name {
-            // NEW: uni.vector.query (primary namespace)
-            // Supports both pre-computed vectors and auto-embedding from text
+            // uni.vector.query: Supports both pre-computed vectors and auto-embedding from text
             "uni.vector.query" => {
-                let empty_row = HashMap::new();
                 let label = self
-                    .evaluate_expr(&args[0], &empty_row, prop_manager, params, ctx)
-                    .await?
-                    .as_str()
-                    .ok_or(anyhow!("Label must be string"))?
-                    .to_string();
+                    .eval_string_arg(&args[0], "Label", prop_manager, params, ctx)
+                    .await?;
                 let property = self
-                    .evaluate_expr(&args[1], &empty_row, prop_manager, params, ctx)
-                    .await?
-                    .as_str()
-                    .ok_or(anyhow!("Property must be string"))?
-                    .to_string();
+                    .eval_string_arg(&args[1], "Property", prop_manager, params, ctx)
+                    .await?;
+                let empty_row = HashMap::new();
                 let query_val = self
                     .evaluate_expr(&args[2], &empty_row, prop_manager, params, ctx)
                     .await?;
                 let k = self
-                    .evaluate_expr(&args[3], &empty_row, prop_manager, params, ctx)
-                    .await?
-                    .as_u64()
-                    .ok_or(anyhow!("k must be integer"))? as usize;
+                    .eval_usize_arg(&args[3], "k", prop_manager, params, ctx)
+                    .await?;
 
                 // Detect if query is text (string) or pre-computed vector (array)
                 let query_vector: Vec<f32> = if let Some(query_text) = query_val.as_str() {
@@ -373,60 +482,21 @@ impl Executor {
                         .next()
                         .ok_or_else(|| anyhow!("Embedding service returned no results"))?
                 } else {
-                    // Pre-computed vector (array of floats)
                     Vec::<f32>::try_from(&query_val)?
                 };
 
-                // Extract optional filter (arg 4)
-                let filter = if args.len() > 4 {
-                    let filter_val = self
-                        .evaluate_expr(&args[4], &empty_row, prop_manager, params, ctx)
-                        .await?;
-                    if filter_val.is_null() {
-                        None
-                    } else {
-                        let filter_str = filter_val
-                            .as_str()
-                            .ok_or_else(|| anyhow!("Filter must be a string"))?
-                            .to_string();
-                        // Validate filter not empty
-                        if filter_str.trim().is_empty() {
-                            return Err(anyhow!("Filter cannot be empty string"));
-                        }
-                        Some(filter_str)
-                    }
-                } else {
-                    None
-                };
+                let filter = self
+                    .eval_optional_filter_arg(args, 4, prop_manager, params, ctx)
+                    .await?;
+                let threshold = self
+                    .eval_optional_threshold_arg(args, 5, prop_manager, params, ctx)
+                    .await?;
 
-                // Extract optional threshold (arg 5)
-                let threshold = if args.len() > 5 {
-                    let threshold_val = self
-                        .evaluate_expr(&args[5], &empty_row, prop_manager, params, ctx)
-                        .await?;
-                    if threshold_val.is_null() {
-                        None
-                    } else {
-                        let thresh = threshold_val
-                            .as_f64()
-                            .ok_or_else(|| anyhow!("Threshold must be a number"))?;
-                        // Validate threshold range
-                        if thresh < 0.0 {
-                            return Err(anyhow!("Threshold must be non-negative, got {}", thresh));
-                        }
-                        Some(thresh)
-                    }
-                } else {
-                    None
-                };
-
-                // Call storage with filter
                 let mut results = self
                     .storage
                     .vector_search(&label, &property, &query_vector, k, filter.as_deref(), ctx)
                     .await?;
 
-                // Apply threshold post-filter (on distance)
                 if let Some(max_dist) = threshold {
                     results.retain(|(_, dist)| *dist <= max_dist as f32);
                 }
@@ -435,56 +505,28 @@ impl Executor {
                 let schema_manager = self.storage.schema_manager();
 
                 for (vid, dist) in results {
-                    // Build a map of standard yields (canonical names)
                     let mut canonical_yields: IndexMap<String, Value> = IndexMap::new();
-
-                    // Calculate normalized score
                     let score = calculate_score(dist, schema_manager, &label, &property)?;
 
-                    // Always prepare standard yields
                     canonical_yields.insert("vid".to_string(), Value::Int(vid.as_u64() as i64));
                     canonical_yields.insert("distance".to_string(), Value::Float(dist as f64));
                     canonical_yields.insert("score".to_string(), Value::Float(score));
 
-                    // Load node object for node-like yields
                     let mut node_obj_opt = None;
-
-                    // 6. Map user yield names to canonical yields (flexible matching)
                     let mut result = HashMap::new();
                     for yield_name in yield_items {
                         let canonical_name = Self::map_yield_to_canonical(yield_name);
 
-                        // Handle node-like yields (anything not matching standard names)
                         if canonical_name == "node" {
-                            // Lazy-load node properties only if needed
                             if node_obj_opt.is_none() {
-                                let props_opt =
-                                    prop_manager.get_all_vertex_props_with_ctx(vid, ctx).await?;
-
-                                let Some(properties) = props_opt else {
+                                node_obj_opt =
+                                    Self::load_node_object(vid, &label, prop_manager, ctx).await?;
+                                if node_obj_opt.is_none() {
                                     continue; // Skip deleted vertices
-                                };
-
-                                // Construct map with flattened properties + _vid
-                                let mut node_obj = HashMap::new();
-                                node_obj
-                                    .insert("_vid".to_string(), Value::Int(vid.as_u64() as i64));
-                                node_obj.insert(
-                                    "_labels".to_string(),
-                                    Value::List(vec![Value::String(label.clone())]),
-                                );
-
-                                // Flatten properties into top level
-                                for (key, val) in properties {
-                                    node_obj.insert(key, val);
                                 }
-
-                                node_obj_opt = Some(Value::Map(node_obj));
                             }
-
                             result.insert(yield_name.to_lowercase(), node_obj_opt.clone().unwrap());
-                        } else if let Some(val) = canonical_yields.get(&canonical_name) {
-                            // Standard yields (vid, distance, score)
+                        } else if let Some(val) = canonical_yields.get(canonical_name) {
                             result.insert(yield_name.to_lowercase(), val.clone());
                         }
                     }
@@ -499,141 +541,68 @@ impl Executor {
             // Signature: uni.fts.query(label, property, search_term, k, filter?, threshold?)
             // YIELD vid, score, node
             "uni.fts.query" => {
-                let empty_row = HashMap::new();
                 let label = self
-                    .evaluate_expr(&args[0], &empty_row, prop_manager, params, ctx)
-                    .await?
-                    .as_str()
-                    .ok_or(anyhow!("Label must be string"))?
-                    .to_string();
+                    .eval_string_arg(&args[0], "Label", prop_manager, params, ctx)
+                    .await?;
                 let property = self
-                    .evaluate_expr(&args[1], &empty_row, prop_manager, params, ctx)
-                    .await?
-                    .as_str()
-                    .ok_or(anyhow!("Property must be string"))?
-                    .to_string();
+                    .eval_string_arg(&args[1], "Property", prop_manager, params, ctx)
+                    .await?;
                 let search_term = self
-                    .evaluate_expr(&args[2], &empty_row, prop_manager, params, ctx)
-                    .await?
-                    .as_str()
-                    .ok_or(anyhow!("Search term must be string"))?
-                    .to_string();
+                    .eval_string_arg(&args[2], "Search term", prop_manager, params, ctx)
+                    .await?;
                 let k = self
-                    .evaluate_expr(&args[3], &empty_row, prop_manager, params, ctx)
-                    .await?
-                    .as_u64()
-                    .ok_or(anyhow!("k must be integer"))? as usize;
+                    .eval_usize_arg(&args[3], "k", prop_manager, params, ctx)
+                    .await?;
+                let filter = self
+                    .eval_optional_filter_arg(args, 4, prop_manager, params, ctx)
+                    .await?;
+                let threshold = self
+                    .eval_optional_threshold_arg(args, 5, prop_manager, params, ctx)
+                    .await?;
 
-                // Extract optional filter (arg 4)
-                let filter = if args.len() > 4 {
-                    let filter_val = self
-                        .evaluate_expr(&args[4], &empty_row, prop_manager, params, ctx)
-                        .await?;
-                    if filter_val.is_null() {
-                        None
-                    } else {
-                        let filter_str = filter_val
-                            .as_str()
-                            .ok_or_else(|| anyhow!("Filter must be a string"))?
-                            .to_string();
-                        if filter_str.trim().is_empty() {
-                            return Err(anyhow!("Filter cannot be empty string"));
-                        }
-                        Some(filter_str)
-                    }
-                } else {
-                    None
-                };
-
-                // Extract optional threshold (arg 5)
-                let threshold = if args.len() > 5 {
-                    let threshold_val = self
-                        .evaluate_expr(&args[5], &empty_row, prop_manager, params, ctx)
-                        .await?;
-                    if threshold_val.is_null() {
-                        None
-                    } else {
-                        let thresh = threshold_val
-                            .as_f64()
-                            .ok_or_else(|| anyhow!("Threshold must be a number"))?;
-                        if thresh < 0.0 {
-                            return Err(anyhow!("Threshold must be non-negative, got {}", thresh));
-                        }
-                        Some(thresh)
-                    }
-                } else {
-                    None
-                };
-
-                // Call storage FTS search
                 let mut results = self
                     .storage
                     .fts_search(&label, &property, &search_term, k, filter.as_deref(), ctx)
                     .await?;
 
-                // Apply threshold post-filter (on BM25 score)
                 if let Some(min_score) = threshold {
                     results.retain(|(_, score)| *score as f64 >= min_score);
                 }
 
-                // Normalize scores to [0, 1] range relative to the best match
                 let max_score = results.iter().map(|(_, s)| *s).fold(0.0f32, f32::max);
-
                 let mut matches = Vec::new();
 
                 for (vid, raw_score) in results {
                     let mut canonical_yields: IndexMap<String, Value> = IndexMap::new();
-
-                    // Normalize score (0-1 range, relative to best match)
                     let normalized_score = if max_score > 0.0 {
                         raw_score / max_score
                     } else {
                         0.0
                     };
 
-                    // Standard yields
                     canonical_yields.insert("vid".to_string(), Value::Int(vid.as_u64() as i64));
                     canonical_yields
                         .insert("score".to_string(), Value::Float(normalized_score as f64));
                     canonical_yields
                         .insert("raw_score".to_string(), Value::Float(raw_score as f64));
 
-                    // Node object for node-like yields
                     let mut node_obj_opt = None;
-
                     let mut result = HashMap::new();
                     for yield_name in yield_items {
                         let canonical_name = Self::map_yield_to_canonical(yield_name);
 
                         if canonical_name == "node" {
-                            // Lazy-load node properties
                             if node_obj_opt.is_none() {
-                                let props_opt =
-                                    prop_manager.get_all_vertex_props_with_ctx(vid, ctx).await?;
-
-                                let Some(properties) = props_opt else {
+                                node_obj_opt =
+                                    Self::load_node_object(vid, &label, prop_manager, ctx).await?;
+                                if node_obj_opt.is_none() {
                                     continue;
-                                };
-
-                                let mut node_obj = HashMap::new();
-                                node_obj
-                                    .insert("_vid".to_string(), Value::Int(vid.as_u64() as i64));
-                                node_obj.insert(
-                                    "_labels".to_string(),
-                                    Value::List(vec![Value::String(label.clone())]),
-                                );
-
-                                for (key, val) in properties {
-                                    node_obj.insert(key, val);
                                 }
-
-                                node_obj_opt = Some(Value::Map(node_obj));
                             }
-
                             result.insert(yield_name.to_lowercase(), node_obj_opt.clone().unwrap());
                         } else if yield_name.to_lowercase() == "raw_score" {
                             result.insert("raw_score".to_string(), Value::Float(raw_score as f64));
-                        } else if let Some(val) = canonical_yields.get(&canonical_name) {
+                        } else if let Some(val) = canonical_yields.get(canonical_name) {
                             result.insert(yield_name.to_lowercase(), val.clone());
                         }
                     }
@@ -651,16 +620,10 @@ impl Executor {
             // YIELD vid, score, vector_score, fts_score, node
             "uni.search" => {
                 let empty_row = HashMap::new();
-
-                // Arg 0: label
                 let label = self
-                    .evaluate_expr(&args[0], &empty_row, prop_manager, params, ctx)
-                    .await?
-                    .as_str()
-                    .ok_or(anyhow!("Label must be string"))?
-                    .to_string();
+                    .eval_string_arg(&args[0], "Label", prop_manager, params, ctx)
+                    .await?;
 
-                // Arg 1: properties (object or string)
                 let properties_val = self
                     .evaluate_expr(&args[1], &empty_row, prop_manager, params, ctx)
                     .await?;
@@ -684,13 +647,9 @@ impl Executor {
                     ));
                 };
 
-                // Arg 2: query text
                 let query_text = self
-                    .evaluate_expr(&args[2], &empty_row, prop_manager, params, ctx)
-                    .await?
-                    .as_str()
-                    .ok_or(anyhow!("Query text must be string"))?
-                    .to_string();
+                    .eval_string_arg(&args[2], "Query text", prop_manager, params, ctx)
+                    .await?;
 
                 // Arg 3: query vector (optional, can be null)
                 let query_vector: Option<Vec<f32>> = if args.len() > 3 {
@@ -706,14 +665,11 @@ impl Executor {
                     None
                 };
 
-                // Arg 4: k
                 let k = self
-                    .evaluate_expr(&args[4], &empty_row, prop_manager, params, ctx)
-                    .await?
-                    .as_u64()
-                    .ok_or(anyhow!("k must be integer"))? as usize;
+                    .eval_usize_arg(&args[4], "k", prop_manager, params, ctx)
+                    .await?;
 
-                // Arg 5: filter (optional)
+                // Arg 5: filter (optional, less strict than vector/fts - allows empty/any type)
                 let filter = if args.len() > 5 {
                     let filter_val = self
                         .evaluate_expr(&args[5], &empty_row, prop_manager, params, ctx)
@@ -874,32 +830,16 @@ impl Executor {
 
                         if canonical_name == "node" {
                             if node_obj_opt.is_none() {
-                                let props_opt =
-                                    prop_manager.get_all_vertex_props_with_ctx(vid, ctx).await?;
-
-                                let Some(properties) = props_opt else {
+                                node_obj_opt =
+                                    Self::load_node_object(vid, &label, prop_manager, ctx).await?;
+                                if node_obj_opt.is_none() {
                                     continue;
-                                };
-
-                                let mut node_obj = HashMap::new();
-                                node_obj
-                                    .insert("_vid".to_string(), Value::Int(vid.as_u64() as i64));
-                                node_obj.insert(
-                                    "_labels".to_string(),
-                                    Value::List(vec![Value::String(label.clone())]),
-                                );
-
-                                for (key, val) in properties {
-                                    node_obj.insert(key, val);
                                 }
-
-                                node_obj_opt = Some(Value::Map(node_obj));
                             }
-
                             result.insert(yield_name.to_lowercase(), node_obj_opt.clone().unwrap());
                         } else if let Some(val) = canonical_yields.get(&yield_name.to_lowercase()) {
                             result.insert(yield_name.to_lowercase(), val.clone());
-                        } else if let Some(val) = canonical_yields.get(&canonical_name) {
+                        } else if let Some(val) = canonical_yields.get(canonical_name) {
                             result.insert(yield_name.to_lowercase(), val.clone());
                         }
                     }
@@ -962,14 +902,10 @@ impl Executor {
                 Ok(vec![filter_yield_items(full_result, yield_items)])
             }
             "uni.admin.snapshot.create" => {
-                let empty_row = HashMap::new();
                 let name = if !args.is_empty() {
                     Some(
-                        self.evaluate_expr(&args[0], &empty_row, prop_manager, params, ctx)
-                            .await?
-                            .as_str()
-                            .ok_or(anyhow!("Snapshot name must be string"))?
-                            .to_string(),
+                        self.eval_string_arg(&args[0], "Snapshot name", prop_manager, params, ctx)
+                            .await?,
                     )
                 } else {
                     None
@@ -1012,13 +948,9 @@ impl Executor {
                 Ok(results)
             }
             "uni.admin.snapshot.restore" => {
-                let empty_row = HashMap::new();
                 let id = self
-                    .evaluate_expr(&args[0], &empty_row, prop_manager, params, ctx)
-                    .await?
-                    .as_str()
-                    .ok_or(anyhow!("Snapshot ID must be string"))?
-                    .to_string();
+                    .eval_string_arg(&args[0], "Snapshot ID", prop_manager, params, ctx)
+                    .await?;
 
                 self.storage
                     .snapshot_manager()
@@ -1217,13 +1149,9 @@ impl Executor {
             }
             "uni.schema.labelInfo" => {
                 let schema = self.storage.schema_manager().schema();
-                let empty_row = HashMap::new();
                 let label_name = self
-                    .evaluate_expr(&args[0], &empty_row, prop_manager, params, ctx)
-                    .await?
-                    .as_str()
-                    .ok_or(anyhow!("Label must be string"))?
-                    .to_string();
+                    .eval_string_arg(&args[0], "Label", prop_manager, params, ctx)
+                    .await?;
 
                 let mut results = Vec::new();
                 if let Some(props) = schema.properties.get(&label_name) {
@@ -1280,11 +1208,8 @@ impl Executor {
             "uni.schema.createLabel" => {
                 let empty_row = HashMap::new();
                 let name = self
-                    .evaluate_expr(&args[0], &empty_row, prop_manager, params, ctx)
-                    .await?
-                    .as_str()
-                    .ok_or(anyhow!("Label name must be string"))?
-                    .to_string();
+                    .eval_string_arg(&args[0], "Label name", prop_manager, params, ctx)
+                    .await?;
                 let config = self
                     .evaluate_expr(&args[1], &empty_row, prop_manager, params, ctx)
                     .await?;
@@ -1299,11 +1224,8 @@ impl Executor {
             "uni.schema.createEdgeType" => {
                 let empty_row = HashMap::new();
                 let name = self
-                    .evaluate_expr(&args[0], &empty_row, prop_manager, params, ctx)
-                    .await?
-                    .as_str()
-                    .ok_or(anyhow!("Edge type name must be string"))?
-                    .to_string();
+                    .eval_string_arg(&args[0], "Edge type name", prop_manager, params, ctx)
+                    .await?;
                 let src_val = self
                     .evaluate_expr(&args[1], &empty_row, prop_manager, params, ctx)
                     .await?;
@@ -1352,17 +1274,11 @@ impl Executor {
             "uni.schema.createIndex" => {
                 let empty_row = HashMap::new();
                 let label = self
-                    .evaluate_expr(&args[0], &empty_row, prop_manager, params, ctx)
-                    .await?
-                    .as_str()
-                    .ok_or(anyhow!("Label must be string"))?
-                    .to_string();
+                    .eval_string_arg(&args[0], "Label", prop_manager, params, ctx)
+                    .await?;
                 let property = self
-                    .evaluate_expr(&args[1], &empty_row, prop_manager, params, ctx)
-                    .await?
-                    .as_str()
-                    .ok_or(anyhow!("Property must be string"))?
-                    .to_string();
+                    .eval_string_arg(&args[1], "Property", prop_manager, params, ctx)
+                    .await?;
                 let config = self
                     .evaluate_expr(&args[2], &empty_row, prop_manager, params, ctx)
                     .await?;
@@ -1376,19 +1292,13 @@ impl Executor {
                 )])])
             }
             "uni.schema.createConstraint" => {
-                let empty_row = HashMap::new();
                 let label = self
-                    .evaluate_expr(&args[0], &empty_row, prop_manager, params, ctx)
-                    .await?
-                    .as_str()
-                    .ok_or(anyhow!("Label must be string"))?
-                    .to_string();
+                    .eval_string_arg(&args[0], "Label", prop_manager, params, ctx)
+                    .await?;
                 let c_type = self
-                    .evaluate_expr(&args[1], &empty_row, prop_manager, params, ctx)
-                    .await?
-                    .as_str()
-                    .ok_or(anyhow!("Constraint type must be string"))?
-                    .to_string();
+                    .eval_string_arg(&args[1], "Constraint type", prop_manager, params, ctx)
+                    .await?;
+                let empty_row = HashMap::new();
                 let props_val = self
                     .evaluate_expr(&args[2], &empty_row, prop_manager, params, ctx)
                     .await?;
@@ -1417,14 +1327,9 @@ impl Executor {
                 )])])
             }
             "uni.schema.dropLabel" => {
-                let empty_row = HashMap::new();
                 let name = self
-                    .evaluate_expr(&args[0], &empty_row, prop_manager, params, ctx)
-                    .await?
-                    .as_str()
-                    .ok_or(anyhow!("Label name must be string"))?
-                    .to_string();
-
+                    .eval_string_arg(&args[0], "Label name", prop_manager, params, ctx)
+                    .await?;
                 let success = super::ddl_procedures::drop_label(&self.storage, &name).await?;
                 Ok(vec![HashMap::from([(
                     "success".to_string(),
@@ -1432,14 +1337,9 @@ impl Executor {
                 )])])
             }
             "uni.schema.dropEdgeType" => {
-                let empty_row = HashMap::new();
                 let name = self
-                    .evaluate_expr(&args[0], &empty_row, prop_manager, params, ctx)
-                    .await?
-                    .as_str()
-                    .ok_or(anyhow!("Edge type name must be string"))?
-                    .to_string();
-
+                    .eval_string_arg(&args[0], "Edge type name", prop_manager, params, ctx)
+                    .await?;
                 let success = super::ddl_procedures::drop_edge_type(&self.storage, &name).await?;
                 Ok(vec![HashMap::from([(
                     "success".to_string(),
@@ -1447,14 +1347,9 @@ impl Executor {
                 )])])
             }
             "uni.schema.dropIndex" => {
-                let empty_row = HashMap::new();
                 let name = self
-                    .evaluate_expr(&args[0], &empty_row, prop_manager, params, ctx)
-                    .await?
-                    .as_str()
-                    .ok_or(anyhow!("Index name must be string"))?
-                    .to_string();
-
+                    .eval_string_arg(&args[0], "Index name", prop_manager, params, ctx)
+                    .await?;
                 let success = super::ddl_procedures::drop_index(&self.storage, &name).await?;
                 Ok(vec![HashMap::from([(
                     "success".to_string(),
@@ -1462,14 +1357,9 @@ impl Executor {
                 )])])
             }
             "uni.schema.dropConstraint" => {
-                let empty_row = HashMap::new();
                 let name = self
-                    .evaluate_expr(&args[0], &empty_row, prop_manager, params, ctx)
-                    .await?
-                    .as_str()
-                    .ok_or(anyhow!("Constraint name must be string"))?
-                    .to_string();
-
+                    .eval_string_arg(&args[0], "Constraint name", prop_manager, params, ctx)
+                    .await?;
                 let success = super::ddl_procedures::drop_constraint(&self.storage, &name).await?;
                 Ok(vec![HashMap::from([(
                     "success".to_string(),

@@ -362,7 +362,10 @@ mod tests {
     #[test]
     fn test_parse_multi_label_node() {
         if let Value::Node(node) = parse_value("(:A:B:C)").unwrap() {
-            assert_eq!(node.labels, vec!["A".to_string(), "B".to_string(), "C".to_string()]);
+            assert_eq!(
+                node.labels,
+                vec!["A".to_string(), "B".to_string(), "C".to_string()]
+            );
             assert!(node.properties.is_empty());
         } else {
             panic!("Expected node");

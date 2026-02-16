@@ -54,7 +54,9 @@ async fn test_property_lookup_uses_vid_filter() -> anyhow::Result<()> {
             Arc::new(StringArray::from(vec![None::<&str>; 2])), // ext_id
             // _labels
             {
-                let mut lb = arrow_array::builder::ListBuilder::new(arrow_array::builder::StringBuilder::new());
+                let mut lb = arrow_array::builder::ListBuilder::new(
+                    arrow_array::builder::StringBuilder::new(),
+                );
                 for _ in 0..2 {
                     lb.values().append_value("Person");
                     lb.append(true);
@@ -160,7 +162,9 @@ async fn test_list_property_storage() -> anyhow::Result<()> {
             Arc::new(StringArray::from(vec![None::<&str>; 1])), // ext_id
             // _labels
             {
-                let mut lb = arrow_array::builder::ListBuilder::new(arrow_array::builder::StringBuilder::new());
+                let mut lb = arrow_array::builder::ListBuilder::new(
+                    arrow_array::builder::StringBuilder::new(),
+                );
                 lb.values().append_value("Node");
                 lb.append(true);
                 Arc::new(lb.finish())

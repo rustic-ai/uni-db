@@ -475,15 +475,19 @@ fn validate_expression_variables(expr: &Expr, vars_in_scope: &[VariableInfo]) ->
     Ok(())
 }
 
+/// Check if a function name (lowercase) is an aggregate function.
+fn is_aggregate_function_name(name: &str) -> bool {
+    matches!(
+        name.to_lowercase().as_str(),
+        "count" | "sum" | "avg" | "min" | "max" | "collect" | "stdev" | "stdevp"
+    )
+}
+
 /// Check if an expression contains any aggregate function (recursively).
 fn contains_aggregate_recursive(expr: &Expr) -> bool {
     match expr {
         Expr::FunctionCall { name, args, .. } => {
-            let is_agg = matches!(
-                name.to_lowercase().as_str(),
-                "count" | "sum" | "avg" | "min" | "max" | "collect" | "stdev" | "stdevp"
-            );
-            is_agg || args.iter().any(contains_aggregate_recursive)
+            is_aggregate_function_name(name) || args.iter().any(contains_aggregate_recursive)
         }
         Expr::BinaryOp { left, right, .. } => {
             contains_aggregate_recursive(left) || contains_aggregate_recursive(right)
@@ -517,11 +521,7 @@ fn contains_aggregate_recursive(expr: &Expr) -> bool {
 fn collect_aggregate_reprs(expr: &Expr, out: &mut HashSet<String>) {
     match expr {
         Expr::FunctionCall { name, args, .. } => {
-            let is_agg = matches!(
-                name.to_lowercase().as_str(),
-                "count" | "sum" | "avg" | "min" | "max" | "collect" | "stdev" | "stdevp"
-            );
-            if is_agg {
+            if is_aggregate_function_name(name) {
                 out.insert(expr.to_string_repr());
                 return;
             }
@@ -579,11 +579,7 @@ enum NonAggregateRef {
 fn collect_non_aggregate_refs(expr: &Expr, inside_agg: bool, out: &mut Vec<NonAggregateRef>) {
     match expr {
         Expr::FunctionCall { name, args, .. } => {
-            let is_agg = matches!(
-                name.to_lowercase().as_str(),
-                "count" | "sum" | "avg" | "min" | "max" | "collect" | "stdev" | "stdevp"
-            );
-            if is_agg {
+            if is_aggregate_function_name(name) {
                 return;
             }
             for arg in args {
@@ -830,10 +826,7 @@ fn parse_non_negative_integer(expr: &Expr, clause_name: &str) -> Result<Option<u
 /// Validate that aggregation functions are not nested.
 fn validate_no_nested_aggregation(expr: &Expr) -> Result<()> {
     if let Expr::FunctionCall { name, args, .. } = expr
-        && matches!(
-            name.to_lowercase().as_str(),
-            "count" | "sum" | "avg" | "min" | "max" | "collect" | "stdev" | "stdevp"
-        )
+        && is_aggregate_function_name(name)
     {
         for arg in args {
             if contains_aggregate_recursive(arg) {
@@ -2948,14 +2941,7 @@ impl QueryPlanner {
                 optional: false,
             };
 
-            if matches!(plan, LogicalPlan::Empty) {
-                plan = target_scan;
-            } else {
-                plan = LogicalPlan::CrossJoin {
-                    left: Box::new(plan),
-                    right: Box::new(target_scan),
-                };
-            }
+            plan = Self::join_with_plan(plan, target_scan);
             target_label_meta.id
         } else {
             if let Some(prop_filter) = self.properties_to_expr(&target_var, &target_node.properties)
@@ -3675,6 +3661,14 @@ impl QueryPlanner {
             scope_match_variables,
         };
 
+        // Pre-compute optional variables set for filter nodes in this traverse.
+        // Used by relationship property filters and bound-edge filters below.
+        let filter_optional_vars = if params.optional {
+            params.optional_pattern_vars.clone()
+        } else {
+            std::collections::HashSet::new()
+        };
+
         // Apply relationship property predicates (e.g. [r {k: v}]).
         // Use the effective step variable so rebound-edge patterns are filtered
         // before being compared against the previously bound relationship.
@@ -3685,11 +3679,7 @@ impl QueryPlanner {
             plan = LogicalPlan::Filter {
                 input: Box::new(plan),
                 predicate: edge_prop_filter,
-                optional_variables: if params.optional {
-                    params.optional_pattern_vars.clone()
-                } else {
-                    std::collections::HashSet::new()
-                },
+                optional_variables: filter_optional_vars.clone(),
             };
         }
 
@@ -3720,11 +3710,7 @@ impl QueryPlanner {
             plan = LogicalPlan::Filter {
                 input: Box::new(plan),
                 predicate: bound_check,
-                optional_variables: if params.optional {
-                    params.optional_pattern_vars.clone()
-                } else {
-                    std::collections::HashSet::new()
-                },
+                optional_variables: filter_optional_vars.clone(),
             };
         }
 
@@ -3768,11 +3754,7 @@ impl QueryPlanner {
             plan = LogicalPlan::Filter {
                 input: Box::new(plan),
                 predicate: bound_list_check,
-                optional_variables: if params.optional {
-                    params.optional_pattern_vars.clone()
-                } else {
-                    std::collections::HashSet::new()
-                },
+                optional_variables: filter_optional_vars.clone(),
             };
         }
 
@@ -3794,6 +3776,21 @@ impl QueryPlanner {
         }
 
         Ok((plan, target_variable))
+    }
+
+    /// Combine a new scan plan with an existing plan.
+    ///
+    /// If the existing plan is `Empty`, returns the new plan directly.
+    /// Otherwise, wraps them in a `CrossJoin`.
+    fn join_with_plan(existing: LogicalPlan, new: LogicalPlan) -> LogicalPlan {
+        if matches!(existing, LogicalPlan::Empty) {
+            new
+        } else {
+            LogicalPlan::CrossJoin {
+                left: Box::new(existing),
+                right: Box::new(new),
+            }
+        }
     }
 
     /// Plan an unbound node (creates a Scan, ScanAll, ScanMainByLabel, ExtIdLookup, or CrossJoin).
@@ -3850,14 +3847,7 @@ impl QueryPlanner {
                     optional,
                 };
 
-                return if matches!(plan, LogicalPlan::Empty) {
-                    Ok(ext_id_lookup)
-                } else {
-                    Ok(LogicalPlan::CrossJoin {
-                        left: Box::new(plan),
-                        right: Box::new(ext_id_lookup),
-                    })
-                };
+                return Ok(Self::join_with_plan(plan, ext_id_lookup));
             }
 
             // No ext_id: create ScanAll for unlabeled node pattern
@@ -3868,14 +3858,7 @@ impl QueryPlanner {
                 optional,
             };
 
-            return if matches!(plan, LogicalPlan::Empty) {
-                Ok(scan_all)
-            } else {
-                Ok(LogicalPlan::CrossJoin {
-                    left: Box::new(plan),
-                    right: Box::new(scan_all),
-                })
-            };
+            return Ok(Self::join_with_plan(plan, scan_all));
         }
 
         // Use first label for label_id (primary label for dataset selection)
@@ -3893,14 +3876,7 @@ impl QueryPlanner {
                 optional,
             };
 
-            if matches!(plan, LogicalPlan::Empty) {
-                Ok(scan)
-            } else {
-                Ok(LogicalPlan::CrossJoin {
-                    left: Box::new(plan),
-                    right: Box::new(scan),
-                })
-            }
+            Ok(Self::join_with_plan(plan, scan))
         } else {
             // Unknown label: use ScanMainByLabels for schemaless support
             let prop_filter = self.properties_to_expr(variable, &node.properties);
@@ -3911,14 +3887,7 @@ impl QueryPlanner {
                 optional,
             };
 
-            if matches!(plan, LogicalPlan::Empty) {
-                Ok(scan_main)
-            } else {
-                Ok(LogicalPlan::CrossJoin {
-                    left: Box::new(plan),
-                    right: Box::new(scan_main),
-                })
-            }
+            Ok(Self::join_with_plan(plan, scan_main))
         }
     }
 

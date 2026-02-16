@@ -88,7 +88,9 @@ async fn test_vector_search() -> anyhow::Result<()> {
             Arc::new(StringArray::from(vec![None::<&str>; 3])), // ext_id
             // _labels
             {
-                let mut lb = arrow_array::builder::ListBuilder::new(arrow_array::builder::StringBuilder::new());
+                let mut lb = arrow_array::builder::ListBuilder::new(
+                    arrow_array::builder::StringBuilder::new(),
+                );
                 for _ in 0..3 {
                     lb.values().append_value("Item");
                     lb.append(true);
@@ -190,7 +192,9 @@ async fn write_vectors_to_lancedb(
             Arc::new(StringArray::from(vec![None::<&str>; n])),
             // _labels
             {
-                let mut lb = arrow_array::builder::ListBuilder::new(arrow_array::builder::StringBuilder::new());
+                let mut lb = arrow_array::builder::ListBuilder::new(
+                    arrow_array::builder::StringBuilder::new(),
+                );
                 for _ in 0..n {
                     lb.values().append_value("Item");
                     lb.append(true);

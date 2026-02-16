@@ -17,10 +17,12 @@ fn value_to_datetime_utc(val: &Value) -> Option<chrono::DateTime<chrono::Utc>> {
         Value::Temporal(tv) => {
             use uni_common::TemporalValue;
             match tv {
-                TemporalValue::DateTime { nanos_since_epoch, .. }
-                | TemporalValue::LocalDateTime { nanos_since_epoch, .. } => {
-                    Some(chrono::DateTime::from_timestamp_nanos(*nanos_since_epoch))
+                TemporalValue::DateTime {
+                    nanos_since_epoch, ..
                 }
+                | TemporalValue::LocalDateTime {
+                    nanos_since_epoch, ..
+                } => Some(chrono::DateTime::from_timestamp_nanos(*nanos_since_epoch)),
                 TemporalValue::Date { days_since_epoch } => {
                     chrono::DateTime::from_timestamp(*days_since_epoch as i64 * 86400, 0)
                 }
@@ -561,7 +563,17 @@ impl Executor {
 
                 for (col_idx, field) in schema.fields().iter().enumerate() {
                     let column = batch.column(col_idx);
-                    let mut value = arrow_convert::arrow_to_value(column.as_ref(), row_idx);
+                    // Infer Uni DataType from Arrow type for DateTime/Time struct decoding
+                    let data_type =
+                        if uni_common::core::schema::is_datetime_struct(field.data_type()) {
+                            Some(&uni_common::DataType::DateTime)
+                        } else if uni_common::core::schema::is_time_struct(field.data_type()) {
+                            Some(&uni_common::DataType::Time)
+                        } else {
+                            None
+                        };
+                    let mut value =
+                        arrow_convert::arrow_to_value(column.as_ref(), row_idx, data_type);
 
                     // Check if this field contains JSON-encoded values (e.g., from UNWIND)
                     // Parse JSON string to restore the original type
@@ -1055,7 +1067,7 @@ impl Executor {
     /// Converts an Arrow array element at a given row index to a Value.
     /// Delegates to the shared implementation in arrow_convert module.
     pub(crate) fn arrow_to_value(col: &dyn Array, row: usize) -> Value {
-        arrow_convert::arrow_to_value(col, row)
+        arrow_convert::arrow_to_value(col, row, None)
     }
 
     pub(crate) fn evaluate_expr<'a>(
@@ -1218,7 +1230,10 @@ impl Executor {
                             if matches!(tv, uni_common::TemporalValue::Duration { .. }) {
                                 if is_duration_accessor(prop_name) {
                                     // Convert to string for the existing accessor logic
-                                    return eval_duration_accessor(&base_val.to_string(), prop_name);
+                                    return eval_duration_accessor(
+                                        &base_val.to_string(),
+                                        prop_name,
+                                    );
                                 }
                             } else if is_temporal_accessor(prop_name) {
                                 return eval_temporal_accessor(&base_val.to_string(), prop_name);
@@ -1343,7 +1358,10 @@ impl Executor {
                     if arr_val.is_null() {
                         return Ok(Value::Null);
                     }
-                    Err(anyhow!("TypeError: InvalidArgumentType - cannot index into {:?}", arr_val))
+                    Err(anyhow!(
+                        "TypeError: InvalidArgumentType - cannot index into {:?}",
+                        arr_val
+                    ))
                 }
                 Expr::ArraySlice { array, start, end } => {
                     let arr_val = this
@@ -1987,8 +2005,9 @@ impl Executor {
                             .evaluate_expr(&args[3], row, prop_manager, params, ctx)
                             .await?;
 
-                        let query_time = value_to_datetime_utc(&time_val)
-                            .ok_or_else(|| anyhow!("time argument must be a datetime value or string"))?;
+                        let query_time = value_to_datetime_utc(&time_val).ok_or_else(|| {
+                            anyhow!("time argument must be a datetime value or string")
+                        })?;
 
                         // Fetch temporal property values - supports both vertices and edges
                         let valid_from_val: Option<Value> = if let Ok(vid) =
@@ -6964,8 +6983,10 @@ impl Executor {
                         if target_props.contains_key(name) {
                             let col = batch.column_by_name(name).unwrap();
                             if !col.is_null(row) {
-                                let val = Self::arrow_to_value(col.as_ref(), row);
-                                // arrow_to_value might return generic JSON, we should probably ensure type match.
+                                // Look up Uni DataType from schema for proper DateTime/Time decoding
+                                let data_type = target_props.get(name).map(|pm| &pm.r#type);
+                                let val =
+                                    arrow_convert::arrow_to_value(col.as_ref(), row, data_type);
                                 props.insert(name.clone(), val);
                             }
                         }
@@ -7013,8 +7034,10 @@ impl Executor {
                         } else if name == dst_col {
                             let val = Self::arrow_to_value(col.as_ref(), row);
                             dst_vid = Some(Self::vid_from_value(&val)?);
-                        } else if target_props.get(name).is_some() {
-                            let val = Self::arrow_to_value(col.as_ref(), row);
+                        } else if let Some(pm) = target_props.get(name) {
+                            // Look up Uni DataType from schema for proper DateTime/Time decoding
+                            let val =
+                                arrow_convert::arrow_to_value(col.as_ref(), row, Some(&pm.r#type));
                             props.insert(name.clone(), val);
                         }
                     }

@@ -810,8 +810,7 @@ impl LanceFilterGenerator {
                 // Normalize datetime strings to include seconds for Arrow timestamp parsing.
                 // Our Cypher datetime formatting omits `:00` seconds (e.g. `2021-06-01T00:00Z`)
                 // but Arrow/Lance requires full `HH:MM:SS` for timestamp parsing.
-                let s = super::df_expr::normalize_datetime_str(s)
-                    .unwrap_or_else(|| s.clone());
+                let s = super::df_expr::normalize_datetime_str(s).unwrap_or_else(|| s.clone());
                 Some(format!("'{}'", s.replace("'", "''")))
             }
             Expr::Literal(CypherLiteral::Integer(i)) => Some(i.to_string()),

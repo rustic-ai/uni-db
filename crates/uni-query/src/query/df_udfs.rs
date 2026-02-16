@@ -25,11 +25,11 @@
 
 use arrow::array::ArrayRef;
 use arrow::datatypes::DataType;
-use chrono::Offset;
 use arrow_array::{
     Array, BooleanArray, Float32Array, Float64Array, Int32Array, Int64Array, LargeBinaryArray,
     LargeStringArray, StringArray, UInt64Array,
 };
+use chrono::Offset;
 use datafusion::error::Result as DFResult;
 use datafusion::logical_expr::{
     ColumnarValue, ScalarFunctionArgs, ScalarUDF, ScalarUDFImpl, Signature, TypeSignature,
@@ -866,11 +866,13 @@ fn extract_i64_range_arg(arg: &ColumnarValue, name: &str) -> DFResult<i64> {
             ScalarValue::UInt32(Some(v)) => Ok(*v as i64),
             ScalarValue::UInt64(Some(v)) => Ok(*v as i64),
             _ => Err(datafusion::error::DataFusionError::Execution(format!(
-                "ArgumentError: InvalidArgumentType - range() {} must be an integer", name
+                "ArgumentError: InvalidArgumentType - range() {} must be an integer",
+                name
             ))),
         },
         _ => Err(datafusion::error::DataFusionError::Execution(format!(
-            "ArgumentError: InvalidArgumentType - range() {} must be an integer", name
+            "ArgumentError: InvalidArgumentType - range() {} must be an integer",
+            name
         ))),
     }
 }
@@ -1273,16 +1275,34 @@ impl ScalarUDFImpl for TemporalUdf {
                 // Temporal constructors use LargeBinary (CypherValue codec) to preserve
                 // timezone names, Duration components, and nanosecond precision through
                 // the DataFusion pipeline. Constant-folded calls bypass UDFs entirely.
-                "datetime" | "localdatetime" | "date" | "time" | "localtime" | "duration"
-                | "date.truncate" | "time.truncate" | "datetime.truncate"
-                | "localdatetime.truncate" | "localtime.truncate"
+                "datetime"
+                | "localdatetime"
+                | "date"
+                | "time"
+                | "localtime"
+                | "duration"
+                | "date.truncate"
+                | "time.truncate"
+                | "datetime.truncate"
+                | "localdatetime.truncate"
+                | "localtime.truncate"
                 | "duration.between"
-                | "datetime.fromepoch" | "datetime.fromepochmillis"
-                | "datetime.transaction" | "datetime.statement" | "datetime.realtime"
-                | "date.transaction" | "date.statement" | "date.realtime"
-                | "time.transaction" | "time.statement" | "time.realtime"
-                | "localtime.transaction" | "localtime.statement" | "localtime.realtime"
-                | "localdatetime.transaction" | "localdatetime.statement"
+                | "datetime.fromepoch"
+                | "datetime.fromepochmillis"
+                | "datetime.transaction"
+                | "datetime.statement"
+                | "datetime.realtime"
+                | "date.transaction"
+                | "date.statement"
+                | "date.realtime"
+                | "time.transaction"
+                | "time.statement"
+                | "time.realtime"
+                | "localtime.transaction"
+                | "localtime.statement"
+                | "localtime.realtime"
+                | "localdatetime.transaction"
+                | "localdatetime.statement"
                 | "localdatetime.realtime" => Ok(DataType::LargeBinary),
                 _ => Ok(DataType::Utf8),
             }
@@ -1518,7 +1538,10 @@ fn scalar_arr_to_value(arr: &dyn arrow::array::Array) -> DFResult<Value> {
     if arr.is_empty() || arr.is_null(0) {
         Ok(Value::Null)
     } else {
-        Ok(uni_store::storage::arrow_convert::arrow_to_value(arr, 0))
+        // UDF outputs are CypherValue-encoded, no schema context needed
+        Ok(uni_store::storage::arrow_convert::arrow_to_value(
+            arr, 0, None,
+        ))
     }
 }
 
@@ -1546,10 +1569,7 @@ fn duration_micros_to_value(micros: i64) -> Value {
 }
 
 /// Convert a timestamp (as nanoseconds since epoch) with optional timezone to Value.
-fn timestamp_nanos_to_value(
-    nanos: i64,
-    tz: Option<&Arc<str>>,
-) -> DFResult<Value> {
+fn timestamp_nanos_to_value(nanos: i64, tz: Option<&Arc<str>>) -> DFResult<Value> {
     if let Some(tz_str) = tz {
         let offset = resolve_timezone_offset(tz_str.as_ref(), nanos);
         let tz_name = if tz_str.as_ref() == "UTC" {
@@ -1615,11 +1635,9 @@ pub(crate) fn scalar_to_value(scalar: &ScalarValue) -> DFResult<Value> {
         ScalarValue::Int8(Some(i)) => Ok(Value::Int(*i as i64)),
 
         // Temporal types — convert to Value::Temporal
-        ScalarValue::Date32(Some(days)) => {
-            Ok(Value::Temporal(uni_common::TemporalValue::Date {
-                days_since_epoch: *days,
-            }))
-        }
+        ScalarValue::Date32(Some(days)) => Ok(Value::Temporal(uni_common::TemporalValue::Date {
+            days_since_epoch: *days,
+        })),
         ScalarValue::Date64(Some(millis)) => {
             let days = (*millis / 86_400_000) as i32;
             Ok(Value::Temporal(uni_common::TemporalValue::Date {
@@ -1659,9 +1677,7 @@ pub(crate) fn scalar_to_value(scalar: &ScalarValue) -> DFResult<Value> {
         ScalarValue::DurationMillisecond(Some(millis)) => {
             Ok(duration_micros_to_value(*millis * 1_000))
         }
-        ScalarValue::DurationSecond(Some(secs)) => {
-            Ok(duration_micros_to_value(*secs * 1_000_000))
-        }
+        ScalarValue::DurationSecond(Some(secs)) => Ok(duration_micros_to_value(*secs * 1_000_000)),
         ScalarValue::DurationNanosecond(Some(nanos)) => {
             Ok(Value::Temporal(uni_common::TemporalValue::Duration {
                 months: 0,
@@ -1717,23 +1733,38 @@ fn value_to_columnar(val: &Value) -> DFResult<ColumnarValue> {
         Value::Temporal(tv) => {
             use uni_common::TemporalValue;
             match tv {
-                TemporalValue::Date { days_since_epoch } => ScalarValue::Date32(Some(*days_since_epoch)),
-                TemporalValue::LocalTime { nanos_since_midnight } => ScalarValue::Time64Nanosecond(Some(*nanos_since_midnight)),
-                TemporalValue::Time { nanos_since_midnight, .. } => ScalarValue::Time64Nanosecond(Some(*nanos_since_midnight)),
-                TemporalValue::LocalDateTime { nanos_since_epoch } => ScalarValue::TimestampNanosecond(Some(*nanos_since_epoch), None),
-                TemporalValue::DateTime { nanos_since_epoch, timezone_name, .. } => {
+                TemporalValue::Date { days_since_epoch } => {
+                    ScalarValue::Date32(Some(*days_since_epoch))
+                }
+                TemporalValue::LocalTime {
+                    nanos_since_midnight,
+                } => ScalarValue::Time64Nanosecond(Some(*nanos_since_midnight)),
+                TemporalValue::Time {
+                    nanos_since_midnight,
+                    ..
+                } => ScalarValue::Time64Nanosecond(Some(*nanos_since_midnight)),
+                TemporalValue::LocalDateTime { nanos_since_epoch } => {
+                    ScalarValue::TimestampNanosecond(Some(*nanos_since_epoch), None)
+                }
+                TemporalValue::DateTime {
+                    nanos_since_epoch,
+                    timezone_name,
+                    ..
+                } => {
                     let tz = timezone_name.as_deref().unwrap_or("UTC");
                     ScalarValue::TimestampNanosecond(Some(*nanos_since_epoch), Some(tz.into()))
                 }
-                TemporalValue::Duration { months, days, nanos } => {
-                    ScalarValue::IntervalMonthDayNano(Some(
-                        arrow::datatypes::IntervalMonthDayNano {
-                            months: *months as i32,
-                            days: *days as i32,
-                            nanoseconds: *nanos,
-                        }
-                    ))
-                }
+                TemporalValue::Duration {
+                    months,
+                    days,
+                    nanos,
+                } => ScalarValue::IntervalMonthDayNano(Some(
+                    arrow::datatypes::IntervalMonthDayNano {
+                        months: *months as i32,
+                        days: *days as i32,
+                        nanoseconds: *nanos,
+                    },
+                )),
             }
         }
         other => {
@@ -4052,10 +4083,7 @@ struct CypherToFloat64Udf {
 impl CypherToFloat64Udf {
     fn new() -> Self {
         Self {
-            signature: Signature::new(
-                TypeSignature::Any(1),
-                Volatility::Immutable,
-            ),
+            signature: Signature::new(TypeSignature::Any(1), Volatility::Immutable),
         }
     }
 }
@@ -4153,7 +4181,9 @@ fn create_cypher_to_float64_udf() -> ScalarUDF {
 }
 
 /// Helper: wrap a DataFusion expression with `_cypher_to_float64()` UDF.
-pub(crate) fn cypher_to_float64_expr(arg: datafusion::logical_expr::Expr) -> datafusion::logical_expr::Expr {
+pub(crate) fn cypher_to_float64_expr(
+    arg: datafusion::logical_expr::Expr,
+) -> datafusion::logical_expr::Expr {
     datafusion::logical_expr::Expr::ScalarFunction(
         datafusion::logical_expr::expr::ScalarFunction::new_udf(
             Arc::new(create_cypher_to_float64_udf()),
@@ -4193,17 +4223,11 @@ fn cypher_cross_type_cmp(a: &Value, b: &Value) -> std::cmp::Ordering {
     match (a, b) {
         (Value::Int(l), Value::Int(r)) => l.cmp(r),
         (Value::Float(l), Value::Float(r)) => l.partial_cmp(r).unwrap_or(Ordering::Equal),
-        (Value::Int(l), Value::Float(r)) => (*l as f64)
-            .partial_cmp(r)
-            .unwrap_or(Ordering::Equal),
-        (Value::Float(l), Value::Int(r)) => l
-            .partial_cmp(&(*r as f64))
-            .unwrap_or(Ordering::Equal),
+        (Value::Int(l), Value::Float(r)) => (*l as f64).partial_cmp(r).unwrap_or(Ordering::Equal),
+        (Value::Float(l), Value::Int(r)) => l.partial_cmp(&(*r as f64)).unwrap_or(Ordering::Equal),
         (Value::String(l), Value::String(r)) => l.cmp(r),
         (Value::Bool(l), Value::Bool(r)) => l.cmp(r),
-        (Value::List(l), Value::List(r)) => {
-            cypher_list_cmp(l, r).unwrap_or(Ordering::Equal)
-        }
+        (Value::List(l), Value::List(r)) => cypher_list_cmp(l, r).unwrap_or(Ordering::Equal),
         _ => Ordering::Equal,
     }
 }
@@ -4213,9 +4237,7 @@ fn scalar_binary_to_value(bytes: &[u8]) -> Value {
     uni_common::cypher_value_codec::decode(bytes).unwrap_or(Value::Null)
 }
 
-use datafusion::logical_expr::{
-    Accumulator as DfAccumulator, AggregateUDF, AggregateUDFImpl,
-};
+use datafusion::logical_expr::{Accumulator as DfAccumulator, AggregateUDF, AggregateUDFImpl};
 
 /// Custom UDAF for Cypher-aware min/max on LargeBinary columns.
 #[derive(Debug, Clone)]
@@ -4227,11 +4249,7 @@ struct CypherMinMaxUdaf {
 
 impl CypherMinMaxUdaf {
     fn new(is_max: bool) -> Self {
-        let name = if is_max {
-            "_cypher_max"
-        } else {
-            "_cypher_min"
-        };
+        let name = if is_max { "_cypher_max" } else { "_cypher_min" };
         Self {
             name: name.to_string(),
             signature: Signature::new(TypeSignature::Any(1), Volatility::Immutable),
@@ -4268,13 +4286,19 @@ impl AggregateUDFImpl for CypherMinMaxUdaf {
         // Return same type as input
         Ok(args.first().cloned().unwrap_or(DataType::LargeBinary))
     }
-    fn accumulator(&self, _acc_args: datafusion::logical_expr::function::AccumulatorArgs) -> DFResult<Box<dyn DfAccumulator>> {
+    fn accumulator(
+        &self,
+        _acc_args: datafusion::logical_expr::function::AccumulatorArgs,
+    ) -> DFResult<Box<dyn DfAccumulator>> {
         Ok(Box::new(CypherMinMaxAccumulator {
             current: None,
             is_max: self.is_max,
         }))
     }
-    fn state_fields(&self, args: datafusion::logical_expr::function::StateFieldsArgs) -> DFResult<Vec<Arc<arrow::datatypes::Field>>> {
+    fn state_fields(
+        &self,
+        args: datafusion::logical_expr::function::StateFieldsArgs,
+    ) -> DFResult<Vec<Arc<arrow::datatypes::Field>>> {
         Ok(vec![Arc::new(arrow::datatypes::Field::new(
             args.name,
             DataType::LargeBinary,
@@ -4324,8 +4348,9 @@ impl DfAccumulator for CypherMinMaxAccumulator {
                     if arr.is_null(i) {
                         continue;
                     }
-                    let sv = ScalarValue::try_from_array(arr, i)
-                        .map_err(|e| datafusion::error::DataFusionError::Execution(e.to_string()))?;
+                    let sv = ScalarValue::try_from_array(arr, i).map_err(|e| {
+                        datafusion::error::DataFusionError::Execution(e.to_string())
+                    })?;
                     let val = scalar_to_value(&sv)?;
                     if val.is_null() {
                         continue;
@@ -4423,7 +4448,10 @@ impl AggregateUDFImpl for CypherSumUdaf {
         // which preserves Int vs Float distinction.
         Ok(DataType::LargeBinary)
     }
-    fn accumulator(&self, _acc_args: datafusion::logical_expr::function::AccumulatorArgs) -> DFResult<Box<dyn DfAccumulator>> {
+    fn accumulator(
+        &self,
+        _acc_args: datafusion::logical_expr::function::AccumulatorArgs,
+    ) -> DFResult<Box<dyn DfAccumulator>> {
         Ok(Box::new(CypherSumAccumulator {
             sum: 0.0,
             all_ints: true,
@@ -4431,7 +4459,10 @@ impl AggregateUDFImpl for CypherSumUdaf {
             has_value: false,
         }))
     }
-    fn state_fields(&self, args: datafusion::logical_expr::function::StateFieldsArgs) -> DFResult<Vec<Arc<arrow::datatypes::Field>>> {
+    fn state_fields(
+        &self,
+        args: datafusion::logical_expr::function::StateFieldsArgs,
+    ) -> DFResult<Vec<Arc<arrow::datatypes::Field>>> {
         Ok(vec![
             Arc::new(arrow::datatypes::Field::new(
                 format!("{}_sum", args.name),
@@ -4476,7 +4507,9 @@ impl DfAccumulator for CypherSumAccumulator {
                 DataType::LargeBinary => {
                     let lb = arr.as_any().downcast_ref::<LargeBinaryArray>().unwrap();
                     let bytes = lb.value(i);
-                    use uni_common::cypher_value_codec::{TAG_INT, TAG_FLOAT, peek_tag, decode_int, decode_float};
+                    use uni_common::cypher_value_codec::{
+                        TAG_FLOAT, TAG_INT, decode_float, decode_int, peek_tag,
+                    };
                     match peek_tag(bytes) {
                         Some(TAG_INT) => {
                             if let Some(v) = decode_int(bytes) {
@@ -4605,13 +4638,19 @@ impl AggregateUDFImpl for CypherCollectUdaf {
     fn return_type(&self, _args: &[DataType]) -> DFResult<DataType> {
         Ok(DataType::LargeBinary)
     }
-    fn accumulator(&self, acc_args: datafusion::logical_expr::function::AccumulatorArgs) -> DFResult<Box<dyn DfAccumulator>> {
+    fn accumulator(
+        &self,
+        acc_args: datafusion::logical_expr::function::AccumulatorArgs,
+    ) -> DFResult<Box<dyn DfAccumulator>> {
         Ok(Box::new(CypherCollectAccumulator {
             values: Vec::new(),
             distinct: acc_args.is_distinct,
         }))
     }
-    fn state_fields(&self, args: datafusion::logical_expr::function::StateFieldsArgs) -> DFResult<Vec<Arc<arrow::datatypes::Field>>> {
+    fn state_fields(
+        &self,
+        args: datafusion::logical_expr::function::StateFieldsArgs,
+    ) -> DFResult<Vec<Arc<arrow::datatypes::Field>>> {
         Ok(vec![Arc::new(arrow::datatypes::Field::new(
             args.name,
             DataType::LargeBinary,
@@ -4704,7 +4743,10 @@ pub(crate) fn create_cypher_collect_udaf() -> AggregateUDF {
 }
 
 /// Create a Cypher collect() UDAF expression with optional distinct.
-pub(crate) fn create_cypher_collect_expr(arg: datafusion::logical_expr::Expr, distinct: bool) -> datafusion::logical_expr::Expr {
+pub(crate) fn create_cypher_collect_expr(
+    arg: datafusion::logical_expr::Expr,
+    distinct: bool,
+) -> datafusion::logical_expr::Expr {
     // We use the UDAF's call() but need to set distinct separately.
     // For now, always include arg directly - distinct is handled in the accumulator.
     let udaf = Arc::new(create_cypher_collect_udaf());
@@ -4714,7 +4756,7 @@ pub(crate) fn create_cypher_collect_expr(arg: datafusion::logical_expr::Expr, di
             datafusion::logical_expr::expr::AggregateFunction::new_udf(
                 udaf,
                 vec![arg],
-                true,  // distinct
+                true, // distinct
                 None,
                 vec![],
                 None,
@@ -4770,17 +4812,27 @@ impl AggregateUDFImpl for CypherPercentileDiscUdaf {
     fn return_type(&self, _args: &[DataType]) -> DFResult<DataType> {
         Ok(DataType::Float64)
     }
-    fn accumulator(&self, _acc_args: datafusion::logical_expr::function::AccumulatorArgs) -> DFResult<Box<dyn DfAccumulator>> {
+    fn accumulator(
+        &self,
+        _acc_args: datafusion::logical_expr::function::AccumulatorArgs,
+    ) -> DFResult<Box<dyn DfAccumulator>> {
         Ok(Box::new(CypherPercentileDiscAccumulator {
             values: Vec::new(),
             percentile: None,
         }))
     }
-    fn state_fields(&self, args: datafusion::logical_expr::function::StateFieldsArgs) -> DFResult<Vec<Arc<arrow::datatypes::Field>>> {
+    fn state_fields(
+        &self,
+        args: datafusion::logical_expr::function::StateFieldsArgs,
+    ) -> DFResult<Vec<Arc<arrow::datatypes::Field>>> {
         Ok(vec![
             Arc::new(arrow::datatypes::Field::new(
                 format!("{}_values", args.name),
-                DataType::List(Arc::new(arrow::datatypes::Field::new("item", DataType::Float64, true))),
+                DataType::List(Arc::new(arrow::datatypes::Field::new(
+                    "item",
+                    DataType::Float64,
+                    true,
+                ))),
                 true,
             )),
             Arc::new(arrow::datatypes::Field::new(
@@ -4856,7 +4908,9 @@ impl DfAccumulator for CypherPercentileDiscAccumulator {
         let pct_arr = &values[1];
         for i in 0..expr_arr.len() {
             // Extract percentile from second arg (constant for all rows)
-            if self.percentile.is_none() && let Some(p) = Self::extract_percentile(pct_arr, i) {
+            if self.percentile.is_none()
+                && let Some(p) = Self::extract_percentile(pct_arr, i)
+            {
                 if !(0.0..=1.0).contains(&p) {
                     return Err(datafusion::error::DataFusionError::Execution(
                         "ArgumentError: NumberOutOfRange - percentileDisc(): percentile value must be between 0.0 and 1.0".to_string(),
@@ -4883,7 +4937,8 @@ impl DfAccumulator for CypherPercentileDiscAccumulator {
         if self.values.is_empty() {
             return Ok(ScalarValue::Float64(None));
         }
-        self.values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        self.values
+            .sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         let n = self.values.len();
         let idx = (pct * (n as f64 - 1.0)).round() as usize;
         let idx = idx.min(n - 1);
@@ -4895,12 +4950,17 @@ impl DfAccumulator for CypherPercentileDiscAccumulator {
     }
     fn state(&mut self) -> DFResult<Vec<ScalarValue>> {
         // State: list of f64 values + percentile
-        let list_values: Vec<ScalarValue> = self.values.iter().map(|f| ScalarValue::Float64(Some(*f))).collect();
-        let list_scalar = ScalarValue::List(ScalarValue::new_list(&list_values, &DataType::Float64, true));
-        Ok(vec![
-            list_scalar,
-            ScalarValue::Float64(self.percentile),
-        ])
+        let list_values: Vec<ScalarValue> = self
+            .values
+            .iter()
+            .map(|f| ScalarValue::Float64(Some(*f)))
+            .collect();
+        let list_scalar = ScalarValue::List(ScalarValue::new_list(
+            &list_values,
+            &DataType::Float64,
+            true,
+        ));
+        Ok(vec![list_scalar, ScalarValue::Float64(self.percentile)])
     }
     fn merge_batch(&mut self, states: &[ArrayRef]) -> DFResult<()> {
         // Merge list arrays from state
@@ -4978,17 +5038,27 @@ impl AggregateUDFImpl for CypherPercentileContUdaf {
     fn return_type(&self, _args: &[DataType]) -> DFResult<DataType> {
         Ok(DataType::Float64)
     }
-    fn accumulator(&self, _acc_args: datafusion::logical_expr::function::AccumulatorArgs) -> DFResult<Box<dyn DfAccumulator>> {
+    fn accumulator(
+        &self,
+        _acc_args: datafusion::logical_expr::function::AccumulatorArgs,
+    ) -> DFResult<Box<dyn DfAccumulator>> {
         Ok(Box::new(CypherPercentileContAccumulator {
             values: Vec::new(),
             percentile: None,
         }))
     }
-    fn state_fields(&self, args: datafusion::logical_expr::function::StateFieldsArgs) -> DFResult<Vec<Arc<arrow::datatypes::Field>>> {
+    fn state_fields(
+        &self,
+        args: datafusion::logical_expr::function::StateFieldsArgs,
+    ) -> DFResult<Vec<Arc<arrow::datatypes::Field>>> {
         Ok(vec![
             Arc::new(arrow::datatypes::Field::new(
                 format!("{}_values", args.name),
-                DataType::List(Arc::new(arrow::datatypes::Field::new("item", DataType::Float64, true))),
+                DataType::List(Arc::new(arrow::datatypes::Field::new(
+                    "item",
+                    DataType::Float64,
+                    true,
+                ))),
                 true,
             )),
             Arc::new(arrow::datatypes::Field::new(
@@ -5011,7 +5081,9 @@ impl DfAccumulator for CypherPercentileContAccumulator {
         let expr_arr = &values[0];
         let pct_arr = &values[1];
         for i in 0..expr_arr.len() {
-            if self.percentile.is_none() && let Some(p) = CypherPercentileDiscAccumulator::extract_percentile(pct_arr, i) {
+            if self.percentile.is_none()
+                && let Some(p) = CypherPercentileDiscAccumulator::extract_percentile(pct_arr, i)
+            {
                 if !(0.0..=1.0).contains(&p) {
                     return Err(datafusion::error::DataFusionError::Execution(
                         "ArgumentError: NumberOutOfRange - percentileCont(): percentile value must be between 0.0 and 1.0".to_string(),
@@ -5038,7 +5110,8 @@ impl DfAccumulator for CypherPercentileContAccumulator {
         if self.values.is_empty() {
             return Ok(ScalarValue::Float64(None));
         }
-        self.values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        self.values
+            .sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         let n = self.values.len();
         if n == 1 {
             return Ok(ScalarValue::Float64(Some(self.values[0])));
@@ -5060,12 +5133,17 @@ impl DfAccumulator for CypherPercentileContAccumulator {
         std::mem::size_of_val(self) + self.values.capacity() * 8
     }
     fn state(&mut self) -> DFResult<Vec<ScalarValue>> {
-        let list_values: Vec<ScalarValue> = self.values.iter().map(|f| ScalarValue::Float64(Some(*f))).collect();
-        let list_scalar = ScalarValue::List(ScalarValue::new_list(&list_values, &DataType::Float64, true));
-        Ok(vec![
-            list_scalar,
-            ScalarValue::Float64(self.percentile),
-        ])
+        let list_values: Vec<ScalarValue> = self
+            .values
+            .iter()
+            .map(|f| ScalarValue::Float64(Some(*f)))
+            .collect();
+        let list_scalar = ScalarValue::List(ScalarValue::new_list(
+            &list_values,
+            &DataType::Float64,
+            true,
+        ));
+        Ok(vec![list_scalar, ScalarValue::Float64(self.percentile)])
     }
     fn merge_batch(&mut self, states: &[ArrayRef]) -> DFResult<()> {
         let list_arr = &states[0];

@@ -26,7 +26,51 @@ pub enum SchemaElementState {
     },
 }
 
-use arrow_schema::{DataType as ArrowDataType, Field, TimeUnit};
+use arrow_schema::{DataType as ArrowDataType, Field, Fields, TimeUnit};
+
+/// Returns the canonical struct field definitions for DateTime encoding in Arrow.
+///
+/// DateTime is encoded as a 3-field struct to preserve timezone information:
+/// - `nanos_since_epoch`: i64 nanoseconds since Unix epoch (UTC)
+/// - `offset_seconds`: i32 seconds offset from UTC (e.g., +3600 for +01:00)
+/// - `timezone_name`: Optional IANA timezone name (e.g., "America/New_York")
+pub fn datetime_struct_fields() -> Fields {
+    Fields::from(vec![
+        Field::new(
+            "nanos_since_epoch",
+            ArrowDataType::Timestamp(TimeUnit::Nanosecond, None),
+            true,
+        ),
+        Field::new("offset_seconds", ArrowDataType::Int32, true),
+        Field::new("timezone_name", ArrowDataType::Utf8, true),
+    ])
+}
+
+/// Returns the canonical struct field definitions for Time encoding in Arrow.
+///
+/// Time is encoded as a 2-field struct to preserve timezone offset:
+/// - `nanos_since_midnight`: i64 nanoseconds since midnight (0-86,399,999,999,999)
+/// - `offset_seconds`: i32 seconds offset from UTC (e.g., +3600 for +01:00)
+pub fn time_struct_fields() -> Fields {
+    Fields::from(vec![
+        Field::new(
+            "nanos_since_midnight",
+            ArrowDataType::Time64(TimeUnit::Nanosecond),
+            true,
+        ),
+        Field::new("offset_seconds", ArrowDataType::Int32, true),
+    ])
+}
+
+/// Detects if an Arrow DataType is the canonical DateTime struct.
+pub fn is_datetime_struct(arrow_dt: &ArrowDataType) -> bool {
+    matches!(arrow_dt, ArrowDataType::Struct(fields) if *fields == datetime_struct_fields())
+}
+
+/// Detects if an Arrow DataType is the canonical Time struct.
+pub fn is_time_struct(arrow_dt: &ArrowDataType) -> bool {
+    matches!(arrow_dt, ArrowDataType::Struct(fields) if *fields == time_struct_fields())
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[non_exhaustive]
@@ -70,8 +114,6 @@ pub enum DataType {
     Map(Box<DataType>, Box<DataType>),
 }
 
-use arrow_schema::Fields;
-
 impl DataType {
     // Alias for compatibility/convenience if needed, but preferable to use exact types.
     #[allow(non_upper_case_globals)]
@@ -91,10 +133,8 @@ impl DataType {
                 ArrowDataType::Timestamp(TimeUnit::Nanosecond, Some("UTC".into()))
             }
             DataType::Date => ArrowDataType::Date32,
-            DataType::Time => ArrowDataType::Time64(TimeUnit::Nanosecond),
-            DataType::DateTime => {
-                ArrowDataType::Timestamp(TimeUnit::Nanosecond, Some("UTC".into()))
-            }
+            DataType::Time => ArrowDataType::Struct(time_struct_fields()),
+            DataType::DateTime => ArrowDataType::Struct(datetime_struct_fields()),
             DataType::Duration => ArrowDataType::LargeBinary, // Lance doesn't support Interval(MonthDayNano); use CypherValue codec
             DataType::CypherValue => ArrowDataType::LargeBinary, // MessagePack-tagged binary encoding
             DataType::Point(pt) => match pt {

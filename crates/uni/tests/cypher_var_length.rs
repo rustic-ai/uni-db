@@ -3,8 +3,7 @@
 
 use arrow_array::builder::{ListBuilder, UInt64Builder};
 use arrow_array::{
-    BooleanArray, LargeBinaryArray, RecordBatch, StringArray, TimestampNanosecondArray,
-    UInt64Array,
+    BooleanArray, LargeBinaryArray, RecordBatch, StringArray, TimestampNanosecondArray, UInt64Array,
 };
 use std::sync::Arc;
 use tempfile::tempdir;
@@ -62,7 +61,9 @@ async fn test_cypher_var_length() -> anyhow::Result<()> {
             Arc::new(StringArray::from(vec![None::<&str>; 4])), // ext_id
             // _labels
             {
-                let mut lb = arrow_array::builder::ListBuilder::new(arrow_array::builder::StringBuilder::new());
+                let mut lb = arrow_array::builder::ListBuilder::new(
+                    arrow_array::builder::StringBuilder::new(),
+                );
                 for _ in 0..4 {
                     lb.values().append_value("Person");
                     lb.append(true);

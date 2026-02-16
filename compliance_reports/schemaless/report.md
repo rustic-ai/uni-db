@@ -1,19 +1,17 @@
 # TCK Compliance Report
 
-**Generated:** 2026-02-16 00:08:07
-**Results:** `results_20260216_000807.json`
-**Compared to:** `results_20260215_165741.json`
+**Generated:** 2026-02-16 15:45:21
+**Results:** `results_20260216_154521.json`
+**Compared to:** `results_20260216_140314.json`
 
 ## Summary
 
 | Metric | Current | Previous | Delta |
 |--------|---------|----------|-------|
 | Scenarios | 3897 | 3897 |  |
-| Passed | 2908 | 2790 | +118 |
-| Failed | 988 | 1106 | -118 |
-| Pass Rate | 74.6% | 71.6% | 📈 +3.0pp |
-
-**🟢 Fixed:** 118 scenarios now passing
+| Passed | 2964 | 2964 |  |
+| Failed | 932 | 932 |  |
+| Pass Rate | 76.1% | 76.1% | ➡️ +0.0pp |
 
 ## Feature Breakdown
 
@@ -121,23 +119,23 @@
 | ⚠️ Path2 | 3 | 2 | 1 | 67% |  |
 | ❌ Path3 | 3 | 1 | 2 | 33% |  |
 | ✅ Pattern1 | 39 | 39 | 0 | 100% |  |
-| ✅ Pattern2 | 11 | 11 | 0 | 100% |  |
+| ✅ Pattern2 | 11 | 9 | 2 | 82% |  |
 | ✅ Precedence1 | 72 | 72 | 0 | 100% |  |
 | ✅ Precedence2 | 26 | 26 | 0 | 100% |  |
 | ✅ Precedence3 | 11 | 11 | 0 | 100% |  |
 | ✅ Precedence4 | 12 | 12 | 0 | 100% |  |
-| ✅ Quantifier1 | 105 | 105 | 0 | 100% |  |
-| ✅ Quantifier10 | 8 | 8 | 0 | 100% |  |
-| ✅ Quantifier11 | 22 | 18 | 4 | 82% |  |
-| ✅ Quantifier12 | 17 | 17 | 0 | 100% |  |
-| ✅ Quantifier2 | 106 | 106 | 0 | 100% |  |
-| ✅ Quantifier3 | 105 | 105 | 0 | 100% |  |
-| ✅ Quantifier4 | 105 | 105 | 0 | 100% |  |
+| ✅ Quantifier1 | 105 | 104 | 1 | 99% |  |
+| ❌ Quantifier10 | 8 | 0 | 8 | 0% |  |
+| ❌ Quantifier11 | 22 | 0 | 22 | 0% |  |
+| ❌ Quantifier12 | 17 | 0 | 17 | 0% |  |
+| ✅ Quantifier2 | 106 | 105 | 1 | 99% |  |
+| ✅ Quantifier3 | 105 | 104 | 1 | 99% |  |
+| ✅ Quantifier4 | 105 | 104 | 1 | 99% |  |
 | ✅ Quantifier5 | 31 | 31 | 0 | 100% |  |
 | ✅ Quantifier6 | 21 | 21 | 0 | 100% |  |
 | ✅ Quantifier7 | 36 | 36 | 0 | 100% |  |
 | ✅ Quantifier8 | 31 | 31 | 0 | 100% |  |
-| ✅ Quantifier9 | 17 | 17 | 0 | 100% |  |
+| ❌ Quantifier9 | 17 | 0 | 17 | 0% |  |
 | ❌ Remove1 | 7 | 3 | 4 | 43% |  |
 | ✅ Remove2 | 5 | 5 | 0 | 100% |  |
 | ⚠️ Remove3 | 21 | 12 | 9 | 57% |  |
@@ -150,7 +148,7 @@
 | ⚠️ Return7 | 2 | 1 | 1 | 50% |  |
 | ✅ Return8 | 1 | 1 | 0 | 100% |  |
 | ⚠️ ReturnOrderBy1 | 12 | 8 | 4 | 67% |  |
-| ⚠️ ReturnOrderBy2 | 14 | 7 | 7 | 50% |  |
+| ❌ ReturnOrderBy2 | 14 | 6 | 8 | 43% |  |
 | ❌ ReturnOrderBy3 | 1 | 0 | 1 | 0% |  |
 | ⚠️ ReturnOrderBy4 | 2 | 1 | 1 | 50% |  |
 | ❌ ReturnOrderBy5 | 1 | 0 | 1 | 0% |  |
@@ -171,16 +169,16 @@
 | ❌ String4 | 1 | 0 | 1 | 0% |  |
 | ✅ String8 | 9 | 9 | 0 | 100% |  |
 | ✅ String9 | 9 | 9 | 0 | 100% |  |
-| ❌ Temporal1 | 207 | 85 | 122 | 41% | +15pp |
-| ⚠️ Temporal10 | 131 | 99 | 32 | 76% | +8pp |
-| ❌ Temporal2 | 53 | 16 | 37 | 30% | +6pp |
-| ❌ Temporal3 | 183 | 47 | 136 | 26% | +2pp |
-| ✅ Temporal4 | 39 | 39 | 0 | 100% | +31pp |
+| ✅ Temporal1 | 207 | 207 | 0 | 100% |  |
+| ❌ Temporal10 | 131 | 51 | 80 | 39% |  |
+| ❌ Temporal2 | 53 | 26 | 27 | 49% |  |
+| ❌ Temporal3 | 183 | 37 | 146 | 20% |  |
+| ✅ Temporal4 | 39 | 39 | 0 | 100% |  |
 | ❌ Temporal5 | 7 | 0 | 7 | 0% |  |
 | ❌ Temporal6 | 17 | 3 | 14 | 18% |  |
-| ✅ Temporal7 | 18 | 18 | 0 | 100% |  |
+| ⚠️ Temporal7 | 18 | 14 | 4 | 78% |  |
 | ⚠️ Temporal8 | 27 | 21 | 6 | 78% |  |
-| ❌ Temporal9 | 322 | 139 | 183 | 43% | +18pp |
+| ⚠️ Temporal9 | 322 | 192 | 130 | 60% |  |
 | ✅ TriadicSelection1 | 19 | 19 | 0 | 100% |  |
 | ✅ TypeConversion1 | 10 | 9 | 1 | 90% |  |
 | ⚠️ TypeConversion2 | 12 | 7 | 5 | 58% |  |
@@ -211,129 +209,6 @@
 | ✅ WithWhere5 | 4 | 4 | 0 | 100% |  |
 | ✅ WithWhere6 | 1 | 1 | 0 | 100% |  |
 | ✅ WithWhere7 | 3 | 3 | 0 | 100% |  |
-
-## 🟢 Newly Passing
-
-Scenarios that were failing but are now passing:
-
-- **Temporal1** — [12] Should construct duration (line 393)
-- **Temporal1** — [2] Should construct week localdatetime (line 75)
-- **Temporal1** — [2] Should construct week localdatetime (line 76)
-- **Temporal1** — [2] Should construct week localdatetime (line 77)
-- **Temporal1** — [2] Should construct week localdatetime (line 78)
-- **Temporal1** — [2] Should construct week localdatetime (line 79)
-- **Temporal1** — [2] Should construct week localdatetime (line 80)
-- **Temporal1** — [2] Should construct week localdatetime (line 81)
-- **Temporal1** — [2] Should construct week localdatetime (line 82)
-- **Temporal1** — [2] Should construct week localdatetime (line 83)
-- **Temporal1** — [2] Should construct week localdatetime (line 84)
-- **Temporal1** — [2] Should construct week localdatetime (line 85)
-- **Temporal1** — [2] Should construct week localdatetime (line 86)
-- **Temporal1** — [2] Should construct week localdatetime (line 87)
-- **Temporal1** — [2] Should construct week localdatetime (line 88)
-- **Temporal1** — [2] Should construct week localdatetime (line 89)
-- **Temporal1** — [5] Should construct local time (line 160)
-- **Temporal1** — [5] Should construct local time (line 161)
-- **Temporal1** — [7] Should construct local date time (line 210)
-- **Temporal1** — [7] Should construct local date time (line 211)
-- **Temporal1** — [7] Should construct local date time (line 212)
-- **Temporal1** — [7] Should construct local date time (line 217)
-- **Temporal1** — [7] Should construct local date time (line 218)
-- **Temporal1** — [7] Should construct local date time (line 219)
-- **Temporal1** — [7] Should construct local date time (line 224)
-- **Temporal1** — [7] Should construct local date time (line 225)
-- **Temporal1** — [7] Should construct local date time (line 226)
-- **Temporal1** — [7] Should construct local date time (line 231)
-- **Temporal1** — [7] Should construct local date time (line 232)
-- **Temporal1** — [7] Should construct local date time (line 233)
-- **Temporal1** — [7] Should construct local date time (line 234)
-- **Temporal10** — [11] Should handle when seconds and subseconds have different signs (line 287)
-- **Temporal10** — [11] Should handle when seconds and subseconds have different signs (line 288)
-- **Temporal10** — [11] Should handle when seconds and subseconds have different signs (line 289)
-- **Temporal10** — [11] Should handle when seconds and subseconds have different signs (line 290)
-- **Temporal10** — [11] Should handle when seconds and subseconds have different signs (line 291)
-- **Temporal10** — [11] Should handle when seconds and subseconds have different signs (line 292)
-- **Temporal10** — [11] Should handle when seconds and subseconds have different signs (line 293)
-- **Temporal10** — [11] Should handle when seconds and subseconds have different signs (line 294)
-- **Temporal10** — [11] Should handle when seconds and subseconds have different signs (line 295)
-- **Temporal10** — [11] Should handle when seconds and subseconds have different signs (line 296)
-- **Temporal2** — [2] Should parse local time from string (line 75)
-- **Temporal2** — [2] Should parse local time from string (line 76)
-- **Temporal2** — [4] Should parse local date time from string (line 118)
-- **Temporal3** — [11] Should datetime into date time (line 374)
-- **Temporal3** — [3] Should select time (line 110)
-- **Temporal3** — [3] Should select time (line 112)
-- **Temporal4** — [10] Should store date time array (line 266)
-- **Temporal4** — [10] Should store date time array (line 267)
-- **Temporal4** — [3] Should store local time (line 102)
-- **Temporal4** — [4] Should store local time array (line 125)
-- **Temporal4** — [4] Should store local time array (line 126)
-- **Temporal4** — [5] Should store time (line 149)
-- **Temporal4** — [6] Should store time array (line 172)
-- **Temporal4** — [6] Should store time array (line 173)
-- **Temporal4** — [7] Should store local date time (line 196)
-- **Temporal4** — [8] Should store local date time array (line 219)
-- **Temporal4** — [8] Should store local date time array (line 220)
-- **Temporal4** — [9] Should store date time (line 243)
-- **Temporal9** — [3] Should truncate localdatetime (line 230)
-- **Temporal9** — [3] Should truncate localdatetime (line 231)
-- **Temporal9** — [3] Should truncate localdatetime (line 232)
-- **Temporal9** — [3] Should truncate localdatetime (line 233)
-- **Temporal9** — [3] Should truncate localdatetime (line 234)
-- **Temporal9** — [3] Should truncate localdatetime (line 235)
-- **Temporal9** — [3] Should truncate localdatetime (line 236)
-- **Temporal9** — [3] Should truncate localdatetime (line 237)
-- **Temporal9** — [3] Should truncate localdatetime (line 238)
-- **Temporal9** — [3] Should truncate localdatetime (line 239)
-- **Temporal9** — [3] Should truncate localdatetime (line 240)
-- **Temporal9** — [3] Should truncate localdatetime (line 241)
-- **Temporal9** — [3] Should truncate localdatetime (line 242)
-- **Temporal9** — [3] Should truncate localdatetime (line 243)
-- **Temporal9** — [3] Should truncate localdatetime (line 244)
-- **Temporal9** — [3] Should truncate localdatetime (line 245)
-- **Temporal9** — [3] Should truncate localdatetime (line 246)
-- **Temporal9** — [3] Should truncate localdatetime (line 247)
-- **Temporal9** — [3] Should truncate localdatetime (line 248)
-- **Temporal9** — [3] Should truncate localdatetime (line 249)
-- **Temporal9** — [3] Should truncate localdatetime (line 250)
-- **Temporal9** — [3] Should truncate localdatetime (line 251)
-- **Temporal9** — [3] Should truncate localdatetime (line 252)
-- **Temporal9** — [3] Should truncate localdatetime (line 253)
-- **Temporal9** — [3] Should truncate localdatetime (line 254)
-- **Temporal9** — [3] Should truncate localdatetime (line 255)
-- **Temporal9** — [3] Should truncate localdatetime (line 256)
-- **Temporal9** — [3] Should truncate localdatetime (line 257)
-- **Temporal9** — [3] Should truncate localdatetime (line 258)
-- **Temporal9** — [3] Should truncate localdatetime (line 259)
-- **Temporal9** — [3] Should truncate localdatetime (line 260)
-- **Temporal9** — [3] Should truncate localdatetime (line 261)
-- **Temporal9** — [3] Should truncate localdatetime (line 262)
-- **Temporal9** — [3] Should truncate localdatetime (line 263)
-- **Temporal9** — [3] Should truncate localdatetime (line 264)
-- **Temporal9** — [3] Should truncate localdatetime (line 265)
-- **Temporal9** — [3] Should truncate localdatetime (line 266)
-- **Temporal9** — [3] Should truncate localdatetime (line 267)
-- **Temporal9** — [3] Should truncate localdatetime (line 268)
-- **Temporal9** — [3] Should truncate localdatetime (line 269)
-- **Temporal9** — [3] Should truncate localdatetime (line 270)
-- **Temporal9** — [3] Should truncate localdatetime (line 271)
-- **Temporal9** — [3] Should truncate localdatetime (line 272)
-- **Temporal9** — [3] Should truncate localdatetime (line 273)
-- **Temporal9** — [3] Should truncate localdatetime (line 274)
-- **Temporal9** — [3] Should truncate localdatetime (line 275)
-- **Temporal9** — [3] Should truncate localdatetime (line 276)
-- **Temporal9** — [3] Should truncate localdatetime (line 277)
-- **Temporal9** — [3] Should truncate localdatetime (line 279)
-- **Temporal9** — [3] Should truncate localdatetime (line 281)
-- **Temporal9** — [3] Should truncate localdatetime (line 283)
-- **Temporal9** — [3] Should truncate localdatetime (line 287)
-- **Temporal9** — [3] Should truncate localdatetime (line 291)
-- **Temporal9** — [4] Should truncate localtime (line 319)
-- **Temporal9** — [4] Should truncate localtime (line 321)
-- **Temporal9** — [4] Should truncate localtime (line 325)
-- **Temporal9** — [4] Should truncate localtime (line 327)
-- **Temporal9** — [4] Should truncate localtime (line 333)
-- **Temporal9** — [4] Should truncate localtime (line 335)
 
 ## Failed Scenarios
 
@@ -1001,7 +876,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/graph/Graph4.feature:77:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("type(null)", Some(Null)), ("type(r)", Some(String(
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("type(r)", Some(String("NOT_THERE"))), ("type(null)
   ... (truncated)
   ```
 - **[4] `type()` on mixed null and non-null relationships** (line 82)
@@ -1020,11 +895,11 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/graph/Graph6.feature:90:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): Expected column '(list[1]).existing' not found in result
+      Step panicked. Captured output: Result mismatch (any order): Expected column '(list[1]).missingToo' not found in result
 [Summary]
 1 feature
 1 scenario (1 failed)
-4 
+
   ... (truncated)
   ```
 - **[6] Statically access a property of a optional non-null relationship** (line 111)
@@ -1058,7 +933,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/graph/Graph9.feature:73:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("properties(null)", Some(Null)), ("properties(n)", 
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("properties(null)", Some(Null)), ("properties(r)", 
   ... (truncated)
   ```
 
@@ -1173,7 +1048,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/literals/Literals7.feature:295:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("literal", Some(List([Map({"ppu": Float(0.55
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("literal", Some(List([Map({"name": String("C
   ... (truncated)
   ```
 
@@ -1184,7 +1059,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/literals/Literals8.feature:294:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("literal", Some(Map({"data": List([Map({"typ
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("literal", Some(Map({"data": List([Map({"bat
   ... (truncated)
   ```
 
@@ -2125,18 +2000,127 @@ Scenarios that were failing but are now passing:
 
   ```
 
+### Pattern2
+
+- **[8] Use a pattern comprehension in WITH** (line 170)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/pattern/Pattern2.feature:184:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Pattern comprehensions require fallback executor (graph traversal)"
+  ... (truncated)
+  ```
+- **[9] Use a variable-length pattern comprehension in WITH** (line 190)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/pattern/Pattern2.feature:202:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Pattern comprehensions require fallback executor (graph traversal)"
+  ... (truncated)
+  ```
+
+### Quantifier1
+
+- **[9] None quantifier on list containing relationships** (line 239)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/quantifier/Quantifier1.feature:266:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "SyntaxError: UnknownFunction - Error during planning: UDF 're
+  ... (truncated)
+  ```
+
+### Quantifier10
+
+- **[1] Single quantifier is always false if the predicate is statically false and the list is not empty** (line 33)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/quantifier/Quantifier10.feature:51:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Quantifier expressions (ALL/ANY/SINGLE/NONE) require physical
+  ... (truncated)
+  ```
+- **[2] Single quantifier is always false if the predicate is statically true and the list has more than one element** (line 56)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/quantifier/Quantifier10.feature:74:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Quantifier expressions (ALL/ANY/SINGLE/NONE) require physical
+  ... (truncated)
+  ```
+- **[3] Single quantifier is always true if the predicate is statically true and the list has exactly one non-null element** (line 79)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/quantifier/Quantifier10.feature:88:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Quantifier expressions (ALL/ANY/SINGLE/NONE) require physical
+  ... (truncated)
+  ```
+- **[4] Single quantifier is always equal whether the size of the list filtered with same the predicate is one** (line 123)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/quantifier/Quantifier10.feature:116:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Quantifier expressions (ALL/ANY/SINGLE/NONE) require physica
+  ... (truncated)
+  ```
+- **[4] Single quantifier is always equal whether the size of the list filtered with same the predicate is one** (line 124)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/quantifier/Quantifier10.feature:116:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Quantifier expressions (ALL/ANY/SINGLE/NONE) require physica
+  ... (truncated)
+  ```
+- **[4] Single quantifier is always equal whether the size of the list filtered with same the predicate is one** (line 125)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/quantifier/Quantifier10.feature:116:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Quantifier expressions (ALL/ANY/SINGLE/NONE) require physica
+  ... (truncated)
+  ```
+- **[4] Single quantifier is always equal whether the size of the list filtered with same the predicate is one** (line 126)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/quantifier/Quantifier10.feature:116:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Quantifier expressions (ALL/ANY/SINGLE/NONE) require physica
+  ... (truncated)
+  ```
+- **[4] Single quantifier is always equal whether the size of the list filtered with same the predicate is one** (line 127)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/quantifier/Quantifier10.feature:116:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Quantifier expressions (ALL/ANY/SINGLE/NONE) require physica
+  ... (truncated)
+  ```
+
 ### Quantifier11
 
+- **[1] Any quantifier is always false if the predicate is statically false and the list is not empty** (line 33)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/quantifier/Quantifier11.feature:51:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Quantifier expressions (ALL/ANY/SINGLE/NONE) require physical
+  ... (truncated)
+  ```
+- **[2] Any quantifier is always true if the predicate is statically true and the list is not empty** (line 56)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/quantifier/Quantifier11.feature:74:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Quantifier expressions (ALL/ANY/SINGLE/NONE) require physical
+  ... (truncated)
+  ```
 - **[3] Any quantifier is always true if the single or the all quantifier is true** (line 109)
   ```
   Step failed:
       Defined: tck/features/expressions/quantifier/Quantifier11.feature:102:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): Row count mismatch: expected 1, got 0
-[Summary]
-1 feature
-1 scenario (1 failed)
-3 steps (
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Quantifier expressions (ALL/ANY/SINGLE/NONE) require physica
   ... (truncated)
   ```
 - **[3] Any quantifier is always true if the single or the all quantifier is true** (line 110)
@@ -2144,11 +2128,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/quantifier/Quantifier11.feature:102:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): Row count mismatch: expected 1, got 0
-[Summary]
-1 feature
-1 scenario (1 failed)
-3 steps (
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Quantifier expressions (ALL/ANY/SINGLE/NONE) require physica
   ... (truncated)
   ```
 - **[3] Any quantifier is always true if the single or the all quantifier is true** (line 111)
@@ -2156,11 +2136,15 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/quantifier/Quantifier11.feature:102:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): Row count mismatch: expected 1, got 0
-[Summary]
-1 feature
-1 scenario (1 failed)
-3 steps (
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Quantifier expressions (ALL/ANY/SINGLE/NONE) require physica
+  ... (truncated)
+  ```
+- **[3] Any quantifier is always true if the single or the all quantifier is true** (line 112)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/quantifier/Quantifier11.feature:102:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Quantifier expressions (ALL/ANY/SINGLE/NONE) require physica
   ... (truncated)
   ```
 - **[3] Any quantifier is always true if the single or the all quantifier is true** (line 113)
@@ -2168,11 +2152,438 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/quantifier/Quantifier11.feature:102:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): Row count mismatch: expected 1, got 0
-[Summary]
-1 feature
-1 scenario (1 failed)
-3 steps (
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Quantifier expressions (ALL/ANY/SINGLE/NONE) require physica
+  ... (truncated)
+  ```
+- **[4] Any quantifier is always equal the boolean negative of the none quantifier** (line 139)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/quantifier/Quantifier11.feature:132:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Quantifier expressions (ALL/ANY/SINGLE/NONE) require physica
+  ... (truncated)
+  ```
+- **[4] Any quantifier is always equal the boolean negative of the none quantifier** (line 140)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/quantifier/Quantifier11.feature:132:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Quantifier expressions (ALL/ANY/SINGLE/NONE) require physica
+  ... (truncated)
+  ```
+- **[4] Any quantifier is always equal the boolean negative of the none quantifier** (line 141)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/quantifier/Quantifier11.feature:132:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Quantifier expressions (ALL/ANY/SINGLE/NONE) require physica
+  ... (truncated)
+  ```
+- **[4] Any quantifier is always equal the boolean negative of the none quantifier** (line 142)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/quantifier/Quantifier11.feature:132:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Quantifier expressions (ALL/ANY/SINGLE/NONE) require physica
+  ... (truncated)
+  ```
+- **[4] Any quantifier is always equal the boolean negative of the none quantifier** (line 143)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/quantifier/Quantifier11.feature:132:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Quantifier expressions (ALL/ANY/SINGLE/NONE) require physica
+  ... (truncated)
+  ```
+- **[5] Any quantifier is always equal the boolean negative of the all quantifier on the boolean negative of the predicate** (line 169)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/quantifier/Quantifier11.feature:162:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Quantifier expressions (ALL/ANY/SINGLE/NONE) require physica
+  ... (truncated)
+  ```
+- **[5] Any quantifier is always equal the boolean negative of the all quantifier on the boolean negative of the predicate** (line 170)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/quantifier/Quantifier11.feature:162:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Quantifier expressions (ALL/ANY/SINGLE/NONE) require physica
+  ... (truncated)
+  ```
+- **[5] Any quantifier is always equal the boolean negative of the all quantifier on the boolean negative of the predicate** (line 171)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/quantifier/Quantifier11.feature:162:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Quantifier expressions (ALL/ANY/SINGLE/NONE) require physica
+  ... (truncated)
+  ```
+- **[5] Any quantifier is always equal the boolean negative of the all quantifier on the boolean negative of the predicate** (line 172)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/quantifier/Quantifier11.feature:162:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Quantifier expressions (ALL/ANY/SINGLE/NONE) require physica
+  ... (truncated)
+  ```
+- **[5] Any quantifier is always equal the boolean negative of the all quantifier on the boolean negative of the predicate** (line 173)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/quantifier/Quantifier11.feature:162:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Quantifier expressions (ALL/ANY/SINGLE/NONE) require physica
+  ... (truncated)
+  ```
+- **[6] Any quantifier is always equal whether the size of the list filtered with same the predicate is grater zero** (line 205)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/quantifier/Quantifier11.feature:198:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Quantifier expressions (ALL/ANY/SINGLE/NONE) require physica
+  ... (truncated)
+  ```
+- **[6] Any quantifier is always equal whether the size of the list filtered with same the predicate is grater zero** (line 206)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/quantifier/Quantifier11.feature:198:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Quantifier expressions (ALL/ANY/SINGLE/NONE) require physica
+  ... (truncated)
+  ```
+- **[6] Any quantifier is always equal whether the size of the list filtered with same the predicate is grater zero** (line 207)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/quantifier/Quantifier11.feature:198:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Quantifier expressions (ALL/ANY/SINGLE/NONE) require physica
+  ... (truncated)
+  ```
+- **[6] Any quantifier is always equal whether the size of the list filtered with same the predicate is grater zero** (line 208)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/quantifier/Quantifier11.feature:198:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Quantifier expressions (ALL/ANY/SINGLE/NONE) require physica
+  ... (truncated)
+  ```
+- **[6] Any quantifier is always equal whether the size of the list filtered with same the predicate is grater zero** (line 209)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/quantifier/Quantifier11.feature:198:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Quantifier expressions (ALL/ANY/SINGLE/NONE) require physica
+  ... (truncated)
+  ```
+
+### Quantifier12
+
+- **[1] All quantifier is always false if the predicate is statically false and the list is not empty** (line 33)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/quantifier/Quantifier12.feature:51:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Quantifier expressions (ALL/ANY/SINGLE/NONE) require physical
+  ... (truncated)
+  ```
+- **[2] All quantifier is always true if the predicate is statically true and the list is not empty** (line 56)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/quantifier/Quantifier12.feature:74:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Quantifier expressions (ALL/ANY/SINGLE/NONE) require physical
+  ... (truncated)
+  ```
+- **[3] All quantifier is always equal the none quantifier on the boolean negative of the predicate** (line 103)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/quantifier/Quantifier12.feature:96:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Quantifier expressions (ALL/ANY/SINGLE/NONE) require physical
+  ... (truncated)
+  ```
+- **[3] All quantifier is always equal the none quantifier on the boolean negative of the predicate** (line 104)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/quantifier/Quantifier12.feature:96:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Quantifier expressions (ALL/ANY/SINGLE/NONE) require physical
+  ... (truncated)
+  ```
+- **[3] All quantifier is always equal the none quantifier on the boolean negative of the predicate** (line 105)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/quantifier/Quantifier12.feature:96:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Quantifier expressions (ALL/ANY/SINGLE/NONE) require physical
+  ... (truncated)
+  ```
+- **[3] All quantifier is always equal the none quantifier on the boolean negative of the predicate** (line 106)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/quantifier/Quantifier12.feature:96:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Quantifier expressions (ALL/ANY/SINGLE/NONE) require physical
+  ... (truncated)
+  ```
+- **[3] All quantifier is always equal the none quantifier on the boolean negative of the predicate** (line 107)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/quantifier/Quantifier12.feature:96:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Quantifier expressions (ALL/ANY/SINGLE/NONE) require physical
+  ... (truncated)
+  ```
+- **[4] All quantifier is always equal the boolean negative of the any quantifier on the boolean negative of the predicate** (line 133)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/quantifier/Quantifier12.feature:126:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Quantifier expressions (ALL/ANY/SINGLE/NONE) require physica
+  ... (truncated)
+  ```
+- **[4] All quantifier is always equal the boolean negative of the any quantifier on the boolean negative of the predicate** (line 134)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/quantifier/Quantifier12.feature:126:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Quantifier expressions (ALL/ANY/SINGLE/NONE) require physica
+  ... (truncated)
+  ```
+- **[4] All quantifier is always equal the boolean negative of the any quantifier on the boolean negative of the predicate** (line 135)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/quantifier/Quantifier12.feature:126:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Quantifier expressions (ALL/ANY/SINGLE/NONE) require physica
+  ... (truncated)
+  ```
+- **[4] All quantifier is always equal the boolean negative of the any quantifier on the boolean negative of the predicate** (line 136)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/quantifier/Quantifier12.feature:126:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Quantifier expressions (ALL/ANY/SINGLE/NONE) require physica
+  ... (truncated)
+  ```
+- **[4] All quantifier is always equal the boolean negative of the any quantifier on the boolean negative of the predicate** (line 137)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/quantifier/Quantifier12.feature:126:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Quantifier expressions (ALL/ANY/SINGLE/NONE) require physica
+  ... (truncated)
+  ```
+- **[5] All quantifier is always equal whether the size of the list filtered with same the predicate is equal the size of the unfiltered list** (line 169)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/quantifier/Quantifier12.feature:162:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Quantifier expressions (ALL/ANY/SINGLE/NONE) require physica
+  ... (truncated)
+  ```
+- **[5] All quantifier is always equal whether the size of the list filtered with same the predicate is equal the size of the unfiltered list** (line 170)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/quantifier/Quantifier12.feature:162:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Quantifier expressions (ALL/ANY/SINGLE/NONE) require physica
+  ... (truncated)
+  ```
+- **[5] All quantifier is always equal whether the size of the list filtered with same the predicate is equal the size of the unfiltered list** (line 171)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/quantifier/Quantifier12.feature:162:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Quantifier expressions (ALL/ANY/SINGLE/NONE) require physica
+  ... (truncated)
+  ```
+- **[5] All quantifier is always equal whether the size of the list filtered with same the predicate is equal the size of the unfiltered list** (line 172)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/quantifier/Quantifier12.feature:162:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Quantifier expressions (ALL/ANY/SINGLE/NONE) require physica
+  ... (truncated)
+  ```
+- **[5] All quantifier is always equal whether the size of the list filtered with same the predicate is equal the size of the unfiltered list** (line 173)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/quantifier/Quantifier12.feature:162:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Quantifier expressions (ALL/ANY/SINGLE/NONE) require physica
+  ... (truncated)
+  ```
+
+### Quantifier2
+
+- **[9] Single quantifier on list containing relationships** (line 239)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/quantifier/Quantifier2.feature:266:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "SyntaxError: UnknownFunction - Error during planning: UDF 're
+  ... (truncated)
+  ```
+
+### Quantifier3
+
+- **[9] Any quantifier on list containing relationships** (line 239)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/quantifier/Quantifier3.feature:266:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "SyntaxError: UnknownFunction - Error during planning: UDF 're
+  ... (truncated)
+  ```
+
+### Quantifier4
+
+- **[9] All quantifier on list containing relationships** (line 239)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/quantifier/Quantifier4.feature:266:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "SyntaxError: UnknownFunction - Error during planning: UDF 're
+  ... (truncated)
+  ```
+
+### Quantifier9
+
+- **[1] None quantifier is always true if the predicate is statically false and the list is not empty** (line 33)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/quantifier/Quantifier9.feature:51:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Quantifier expressions (ALL/ANY/SINGLE/NONE) require physical 
+  ... (truncated)
+  ```
+- **[2] None quantifier is always false if the predicate is statically true and the list is not empty** (line 56)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/quantifier/Quantifier9.feature:74:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Quantifier expressions (ALL/ANY/SINGLE/NONE) require physical 
+  ... (truncated)
+  ```
+- **[3] None quantifier is always equal the boolean negative of the any quantifier** (line 103)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/quantifier/Quantifier9.feature:96:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Quantifier expressions (ALL/ANY/SINGLE/NONE) require physical 
+  ... (truncated)
+  ```
+- **[3] None quantifier is always equal the boolean negative of the any quantifier** (line 104)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/quantifier/Quantifier9.feature:96:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Quantifier expressions (ALL/ANY/SINGLE/NONE) require physical 
+  ... (truncated)
+  ```
+- **[3] None quantifier is always equal the boolean negative of the any quantifier** (line 105)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/quantifier/Quantifier9.feature:96:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Quantifier expressions (ALL/ANY/SINGLE/NONE) require physical 
+  ... (truncated)
+  ```
+- **[3] None quantifier is always equal the boolean negative of the any quantifier** (line 106)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/quantifier/Quantifier9.feature:96:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Quantifier expressions (ALL/ANY/SINGLE/NONE) require physical 
+  ... (truncated)
+  ```
+- **[3] None quantifier is always equal the boolean negative of the any quantifier** (line 107)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/quantifier/Quantifier9.feature:96:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Quantifier expressions (ALL/ANY/SINGLE/NONE) require physical 
+  ... (truncated)
+  ```
+- **[4] None quantifier is always equal the all quantifier on the boolean negative of the predicate** (line 133)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/quantifier/Quantifier9.feature:126:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Quantifier expressions (ALL/ANY/SINGLE/NONE) require physical
+  ... (truncated)
+  ```
+- **[4] None quantifier is always equal the all quantifier on the boolean negative of the predicate** (line 134)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/quantifier/Quantifier9.feature:126:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Quantifier expressions (ALL/ANY/SINGLE/NONE) require physical
+  ... (truncated)
+  ```
+- **[4] None quantifier is always equal the all quantifier on the boolean negative of the predicate** (line 135)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/quantifier/Quantifier9.feature:126:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Quantifier expressions (ALL/ANY/SINGLE/NONE) require physical
+  ... (truncated)
+  ```
+- **[4] None quantifier is always equal the all quantifier on the boolean negative of the predicate** (line 136)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/quantifier/Quantifier9.feature:126:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Quantifier expressions (ALL/ANY/SINGLE/NONE) require physical
+  ... (truncated)
+  ```
+- **[4] None quantifier is always equal the all quantifier on the boolean negative of the predicate** (line 137)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/quantifier/Quantifier9.feature:126:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Quantifier expressions (ALL/ANY/SINGLE/NONE) require physical
+  ... (truncated)
+  ```
+- **[5] None quantifier is always equal whether the size of the list filtered with same the predicate is zero** (line 169)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/quantifier/Quantifier9.feature:162:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Quantifier expressions (ALL/ANY/SINGLE/NONE) require physical
+  ... (truncated)
+  ```
+- **[5] None quantifier is always equal whether the size of the list filtered with same the predicate is zero** (line 170)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/quantifier/Quantifier9.feature:162:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Quantifier expressions (ALL/ANY/SINGLE/NONE) require physical
+  ... (truncated)
+  ```
+- **[5] None quantifier is always equal whether the size of the list filtered with same the predicate is zero** (line 171)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/quantifier/Quantifier9.feature:162:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Quantifier expressions (ALL/ANY/SINGLE/NONE) require physical
+  ... (truncated)
+  ```
+- **[5] None quantifier is always equal whether the size of the list filtered with same the predicate is zero** (line 172)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/quantifier/Quantifier9.feature:162:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Quantifier expressions (ALL/ANY/SINGLE/NONE) require physical
+  ... (truncated)
+  ```
+- **[5] None quantifier is always equal whether the size of the list filtered with same the predicate is zero** (line 173)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/quantifier/Quantifier9.feature:162:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Quantifier expressions (ALL/ANY/SINGLE/NONE) require physical
   ... (truncated)
   ```
 
@@ -2684,6 +3095,18 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/clauses/return-orderby/ReturnOrderBy2.feature:238:5
       Matched: crates/uni-tck/src/steps/then.rs:37:1
+      Step panicked. Captured output: No result found
+[Summary]
+1 feature
+1 scenario (1 failed)
+4 steps (3 passed, 1 failed)
+
+  ```
+- **[12] Aggregation of named paths** (line 243)
+  ```
+  Step failed:
+      Defined: tck/features/clauses/return-orderby/ReturnOrderBy2.feature:259:5
+      Matched: crates/uni-tck/src/steps/then.rs:62:1
       Step panicked. Captured output: No result found
 [Summary]
 1 feature
@@ -3281,985 +3704,6 @@ Scenarios that were failing but are now passing:
   ... (truncated)
   ```
 
-### Temporal1
-
-- **[3] Should construct week datetime** (line 104)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:97:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("d", Some(Temporal(DateTime { nanos_since_epo
-  ... (truncated)
-  ```
-- **[3] Should construct week datetime** (line 105)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:97:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("d", Some(Temporal(DateTime { nanos_since_epo
-  ... (truncated)
-  ```
-- **[3] Should construct week datetime** (line 106)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:97:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("d", Some(Temporal(DateTime { nanos_since_epo
-  ... (truncated)
-  ```
-- **[3] Should construct week datetime** (line 107)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:97:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("d", Some(Temporal(DateTime { nanos_since_epo
-  ... (truncated)
-  ```
-- **[3] Should construct week datetime** (line 108)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:97:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("d", Some(Temporal(DateTime { nanos_since_epo
-  ... (truncated)
-  ```
-- **[3] Should construct week datetime** (line 109)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:97:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("d", Some(Temporal(DateTime { nanos_since_epo
-  ... (truncated)
-  ```
-- **[3] Should construct week datetime** (line 110)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:97:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("d", Some(Temporal(DateTime { nanos_since_epo
-  ... (truncated)
-  ```
-- **[3] Should construct week datetime** (line 111)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:97:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("d", Some(Temporal(DateTime { nanos_since_epo
-  ... (truncated)
-  ```
-- **[3] Should construct week datetime** (line 112)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:97:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("d", Some(Temporal(DateTime { nanos_since_epo
-  ... (truncated)
-  ```
-- **[3] Should construct week datetime** (line 113)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:97:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("d", Some(Temporal(DateTime { nanos_since_epo
-  ... (truncated)
-  ```
-- **[3] Should construct week datetime** (line 114)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:97:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("d", Some(Temporal(DateTime { nanos_since_epo
-  ... (truncated)
-  ```
-- **[3] Should construct week datetime** (line 115)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:97:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("d", Some(Temporal(DateTime { nanos_since_epo
-  ... (truncated)
-  ```
-- **[3] Should construct week datetime** (line 116)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:97:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("d", Some(Temporal(DateTime { nanos_since_epo
-  ... (truncated)
-  ```
-- **[3] Should construct week datetime** (line 117)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:97:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("d", Some(Temporal(DateTime { nanos_since_epo
-  ... (truncated)
-  ```
-- **[3] Should construct week datetime** (line 118)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:97:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("d", Some(Temporal(DateTime { nanos_since_epo
-  ... (truncated)
-  ```
-- **[6] Should construct time** (line 176)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:169:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalTime { nanos_si
-  ... (truncated)
-  ```
-- **[6] Should construct time** (line 177)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:169:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalTime { nanos_si
-  ... (truncated)
-  ```
-- **[6] Should construct time** (line 178)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:169:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalTime { nanos_si
-  ... (truncated)
-  ```
-- **[6] Should construct time** (line 179)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:169:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalTime { nanos_si
-  ... (truncated)
-  ```
-- **[6] Should construct time** (line 180)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:169:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalTime { nanos_si
-  ... (truncated)
-  ```
-- **[6] Should construct time** (line 181)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:169:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalTime { nanos_si
-  ... (truncated)
-  ```
-- **[6] Should construct time** (line 182)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:169:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalTime { nanos_si
-  ... (truncated)
-  ```
-- **[6] Should construct time** (line 183)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:169:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalTime { nanos_si
-  ... (truncated)
-  ```
-- **[6] Should construct time** (line 184)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:169:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalTime { nanos_si
-  ... (truncated)
-  ```
-- **[6] Should construct time** (line 185)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:169:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalTime { nanos_si
-  ... (truncated)
-  ```
-- **[6] Should construct time** (line 186)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:169:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalTime { nanos_si
-  ... (truncated)
-  ```
-- **[6] Should construct time** (line 187)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:169:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalTime { nanos_si
-  ... (truncated)
-  ```
-- **[6] Should construct time** (line 188)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:169:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalTime { nanos_si
-  ... (truncated)
-  ```
-- **[6] Should construct time** (line 189)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:169:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalTime { nanos_si
-  ... (truncated)
-  ```
-- **[8] Should construct date time with default time zone** (line 249)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:242:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[8] Should construct date time with default time zone** (line 250)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:242:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[8] Should construct date time with default time zone** (line 251)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:242:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[8] Should construct date time with default time zone** (line 252)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:242:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[8] Should construct date time with default time zone** (line 253)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:242:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[8] Should construct date time with default time zone** (line 254)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:242:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[8] Should construct date time with default time zone** (line 255)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:242:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[8] Should construct date time with default time zone** (line 256)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:242:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[8] Should construct date time with default time zone** (line 257)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:242:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[8] Should construct date time with default time zone** (line 258)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:242:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[8] Should construct date time with default time zone** (line 259)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:242:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[8] Should construct date time with default time zone** (line 260)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:242:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[8] Should construct date time with default time zone** (line 261)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:242:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[8] Should construct date time with default time zone** (line 262)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:242:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[8] Should construct date time with default time zone** (line 263)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:242:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[8] Should construct date time with default time zone** (line 264)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:242:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[8] Should construct date time with default time zone** (line 265)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:242:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[8] Should construct date time with default time zone** (line 266)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:242:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[8] Should construct date time with default time zone** (line 267)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:242:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[8] Should construct date time with default time zone** (line 268)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:242:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[8] Should construct date time with default time zone** (line 269)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:242:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[8] Should construct date time with default time zone** (line 270)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:242:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[8] Should construct date time with default time zone** (line 271)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:242:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[8] Should construct date time with default time zone** (line 272)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:242:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[8] Should construct date time with default time zone** (line 273)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:242:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[8] Should construct date time with default time zone** (line 274)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:242:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[8] Should construct date time with default time zone** (line 275)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:242:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[8] Should construct date time with default time zone** (line 276)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:242:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[8] Should construct date time with default time zone** (line 277)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:242:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[8] Should construct date time with default time zone** (line 278)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:242:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[9] Should construct date time with offset time zone** (line 293)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:286:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[9] Should construct date time with offset time zone** (line 294)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:286:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[9] Should construct date time with offset time zone** (line 295)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:286:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[9] Should construct date time with offset time zone** (line 296)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:286:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[9] Should construct date time with offset time zone** (line 297)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:286:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[9] Should construct date time with offset time zone** (line 298)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:286:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[9] Should construct date time with offset time zone** (line 299)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:286:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[9] Should construct date time with offset time zone** (line 300)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:286:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[9] Should construct date time with offset time zone** (line 301)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:286:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[9] Should construct date time with offset time zone** (line 302)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:286:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[9] Should construct date time with offset time zone** (line 303)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:286:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[9] Should construct date time with offset time zone** (line 304)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:286:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[9] Should construct date time with offset time zone** (line 305)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:286:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[9] Should construct date time with offset time zone** (line 306)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:286:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[9] Should construct date time with offset time zone** (line 307)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:286:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[9] Should construct date time with offset time zone** (line 308)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:286:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[9] Should construct date time with offset time zone** (line 309)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:286:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[9] Should construct date time with offset time zone** (line 310)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:286:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[9] Should construct date time with offset time zone** (line 311)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:286:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[9] Should construct date time with offset time zone** (line 312)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:286:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[9] Should construct date time with offset time zone** (line 313)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:286:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[9] Should construct date time with offset time zone** (line 314)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:286:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[9] Should construct date time with offset time zone** (line 315)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:286:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[9] Should construct date time with offset time zone** (line 316)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:286:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[9] Should construct date time with offset time zone** (line 317)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:286:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[9] Should construct date time with offset time zone** (line 318)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:286:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[9] Should construct date time with offset time zone** (line 319)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:286:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[9] Should construct date time with offset time zone** (line 320)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:286:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[9] Should construct date time with offset time zone** (line 321)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:286:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[10] Should construct date time with named time zone** (line 336)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:329:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[10] Should construct date time with named time zone** (line 337)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:329:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[10] Should construct date time with named time zone** (line 338)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:329:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[10] Should construct date time with named time zone** (line 339)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:329:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[10] Should construct date time with named time zone** (line 340)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:329:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[10] Should construct date time with named time zone** (line 341)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:329:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[10] Should construct date time with named time zone** (line 342)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:329:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[10] Should construct date time with named time zone** (line 343)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:329:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[10] Should construct date time with named time zone** (line 344)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:329:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[10] Should construct date time with named time zone** (line 345)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:329:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[10] Should construct date time with named time zone** (line 346)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:329:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[10] Should construct date time with named time zone** (line 347)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:329:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[10] Should construct date time with named time zone** (line 348)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:329:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[10] Should construct date time with named time zone** (line 349)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:329:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[10] Should construct date time with named time zone** (line 350)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:329:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[10] Should construct date time with named time zone** (line 351)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:329:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[10] Should construct date time with named time zone** (line 352)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:329:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[10] Should construct date time with named time zone** (line 353)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:329:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[10] Should construct date time with named time zone** (line 354)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:329:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[10] Should construct date time with named time zone** (line 355)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:329:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[10] Should construct date time with named time zone** (line 356)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:329:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[10] Should construct date time with named time zone** (line 357)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:329:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[10] Should construct date time with named time zone** (line 358)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:329:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[10] Should construct date time with named time zone** (line 359)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:329:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[10] Should construct date time with named time zone** (line 360)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:329:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[10] Should construct date time with named time zone** (line 361)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:329:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[10] Should construct date time with named time zone** (line 362)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:329:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[10] Should construct date time with named time zone** (line 363)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:329:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[10] Should construct date time with named time zone** (line 364)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:329:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[11] Should construct date time from epoch** (line 366)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:373:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("d1", Some(Temporal(DateTime { nanos_since_e
-  ... (truncated)
-  ```
-- **[13] Should construct temporal with time offset with second precision** (line 414)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:407:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalTime { nanos_si
-  ... (truncated)
-  ```
-- **[13] Should construct temporal with time offset with second precision** (line 415)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:407:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalTime { nanos_si
-  ... (truncated)
-  ```
-- **[13] Should construct temporal with time offset with second precision** (line 416)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:407:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalTime { nanos_si
-  ... (truncated)
-  ```
-- **[13] Should construct temporal with time offset with second precision** (line 417)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal1.feature:407:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-
 ### Temporal10
 
 - **[1] Should split between boundaries correctly** (line 47)
@@ -4299,7 +3743,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal10.feature:40:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: _duration_property(): duration must be a string"
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: duration.between(): Expected temporal value, got
   ... (truncated)
   ```
 - **[1] Should split between boundaries correctly** (line 52)
@@ -4307,7 +3751,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal10.feature:40:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: _duration_property(): duration must be a string"
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: duration.between(): Expected temporal value, got
   ... (truncated)
   ```
 - **[2] Should compute duration between two temporals** (line 69)
@@ -4315,7 +3759,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal10.feature:60:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("duration", Some(Temporal(Duration { months:
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: duration.between(): Expected temporal value, got
   ... (truncated)
   ```
 - **[2] Should compute duration between two temporals** (line 71)
@@ -4323,7 +3767,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal10.feature:60:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("duration", Some(Temporal(Duration { months:
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: duration.between(): Expected temporal value, got
   ... (truncated)
   ```
 - **[2] Should compute duration between two temporals** (line 74)
@@ -4331,7 +3775,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal10.feature:60:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("duration", Some(Temporal(Duration { months:
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: duration.between(): Expected temporal value, got
   ... (truncated)
   ```
 - **[2] Should compute duration between two temporals** (line 76)
@@ -4339,7 +3783,47 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal10.feature:60:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("duration", Some(Temporal(Duration { months:
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: duration.between(): Expected temporal value, got
+  ... (truncated)
+  ```
+- **[2] Should compute duration between two temporals** (line 77)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/temporal/Temporal10.feature:60:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: duration.between(): Expected temporal value, got
+  ... (truncated)
+  ```
+- **[2] Should compute duration between two temporals** (line 78)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/temporal/Temporal10.feature:60:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: duration.between(): Expected temporal value, got
+  ... (truncated)
+  ```
+- **[2] Should compute duration between two temporals** (line 79)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/temporal/Temporal10.feature:60:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: duration.between(): Expected temporal value, got
+  ... (truncated)
+  ```
+- **[2] Should compute duration between two temporals** (line 80)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/temporal/Temporal10.feature:60:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: duration.between(): Expected temporal value, got
+  ... (truncated)
+  ```
+- **[2] Should compute duration between two temporals** (line 81)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/temporal/Temporal10.feature:60:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: duration.between(): Expected temporal value, got
   ... (truncated)
   ```
 - **[2] Should compute duration between two temporals** (line 84)
@@ -4347,7 +3831,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal10.feature:60:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("duration", Some(Temporal(Duration { months:
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: duration.between(): Expected temporal value, got
   ... (truncated)
   ```
 - **[2] Should compute duration between two temporals** (line 86)
@@ -4355,7 +3839,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal10.feature:60:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("duration", Some(Temporal(Duration { months:
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: duration.between(): Expected temporal value, got
   ... (truncated)
   ```
 - **[2] Should compute duration between two temporals** (line 87)
@@ -4363,7 +3847,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal10.feature:60:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("duration", Some(Temporal(Duration { months:
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: duration.between(): Expected temporal value, got
   ... (truncated)
   ```
 - **[2] Should compute duration between two temporals** (line 88)
@@ -4371,7 +3855,15 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal10.feature:60:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("duration", Some(Temporal(Duration { months:
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: duration.between(): Expected temporal value, got
+  ... (truncated)
+  ```
+- **[2] Should compute duration between two temporals** (line 89)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/temporal/Temporal10.feature:60:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: duration.between(): Expected temporal value, got
   ... (truncated)
   ```
 - **[2] Should compute duration between two temporals** (line 90)
@@ -4379,7 +3871,223 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal10.feature:60:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("duration", Some(Temporal(Duration { months:
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: duration.between(): Expected temporal value, got
+  ... (truncated)
+  ```
+- **[2] Should compute duration between two temporals** (line 91)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/temporal/Temporal10.feature:60:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: duration.between(): Expected temporal value, got
+  ... (truncated)
+  ```
+- **[3] Should compute duration between two temporals in months** (line 108)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/temporal/Temporal10.feature:99:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: duration.inmonths(): Expected temporal value, go
+  ... (truncated)
+  ```
+- **[3] Should compute duration between two temporals in months** (line 110)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/temporal/Temporal10.feature:99:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: duration.inmonths(): Expected temporal value, go
+  ... (truncated)
+  ```
+- **[3] Should compute duration between two temporals in months** (line 113)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/temporal/Temporal10.feature:99:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: duration.inmonths(): Expected temporal value, go
+  ... (truncated)
+  ```
+- **[3] Should compute duration between two temporals in months** (line 114)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/temporal/Temporal10.feature:99:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: duration.inmonths(): Expected temporal value, go
+  ... (truncated)
+  ```
+- **[3] Should compute duration between two temporals in months** (line 115)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/temporal/Temporal10.feature:99:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: duration.inmonths(): Expected temporal value, go
+  ... (truncated)
+  ```
+- **[3] Should compute duration between two temporals in months** (line 116)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/temporal/Temporal10.feature:99:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: duration.inmonths(): Expected temporal value, go
+  ... (truncated)
+  ```
+- **[3] Should compute duration between two temporals in months** (line 119)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/temporal/Temporal10.feature:99:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: duration.inmonths(): Expected temporal value, go
+  ... (truncated)
+  ```
+- **[3] Should compute duration between two temporals in months** (line 121)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/temporal/Temporal10.feature:99:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: duration.inmonths(): Expected temporal value, go
+  ... (truncated)
+  ```
+- **[3] Should compute duration between two temporals in months** (line 122)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/temporal/Temporal10.feature:99:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: duration.inmonths(): Expected temporal value, go
+  ... (truncated)
+  ```
+- **[3] Should compute duration between two temporals in months** (line 123)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/temporal/Temporal10.feature:99:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: duration.inmonths(): Expected temporal value, go
+  ... (truncated)
+  ```
+- **[3] Should compute duration between two temporals in months** (line 124)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/temporal/Temporal10.feature:99:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: duration.inmonths(): Expected temporal value, go
+  ... (truncated)
+  ```
+- **[3] Should compute duration between two temporals in months** (line 125)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/temporal/Temporal10.feature:99:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: duration.inmonths(): Expected temporal value, go
+  ... (truncated)
+  ```
+- **[3] Should compute duration between two temporals in months** (line 126)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/temporal/Temporal10.feature:99:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: duration.inmonths(): Expected temporal value, go
+  ... (truncated)
+  ```
+- **[4] Should compute duration between two temporals in days** (line 143)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/temporal/Temporal10.feature:134:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: duration.indays(): Expected temporal value, got
+  ... (truncated)
+  ```
+- **[4] Should compute duration between two temporals in days** (line 145)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/temporal/Temporal10.feature:134:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: duration.indays(): Expected temporal value, got
+  ... (truncated)
+  ```
+- **[4] Should compute duration between two temporals in days** (line 148)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/temporal/Temporal10.feature:134:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: duration.indays(): Expected temporal value, got
+  ... (truncated)
+  ```
+- **[4] Should compute duration between two temporals in days** (line 149)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/temporal/Temporal10.feature:134:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: duration.indays(): Expected temporal value, got
+  ... (truncated)
+  ```
+- **[4] Should compute duration between two temporals in days** (line 150)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/temporal/Temporal10.feature:134:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: duration.indays(): Expected temporal value, got
+  ... (truncated)
+  ```
+- **[4] Should compute duration between two temporals in days** (line 151)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/temporal/Temporal10.feature:134:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: duration.indays(): Expected temporal value, got
+  ... (truncated)
+  ```
+- **[4] Should compute duration between two temporals in days** (line 154)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/temporal/Temporal10.feature:134:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: duration.indays(): Expected temporal value, got
+  ... (truncated)
+  ```
+- **[4] Should compute duration between two temporals in days** (line 156)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/temporal/Temporal10.feature:134:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: duration.indays(): Expected temporal value, got
+  ... (truncated)
+  ```
+- **[4] Should compute duration between two temporals in days** (line 157)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/temporal/Temporal10.feature:134:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: duration.indays(): Expected temporal value, got
+  ... (truncated)
+  ```
+- **[4] Should compute duration between two temporals in days** (line 158)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/temporal/Temporal10.feature:134:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: duration.indays(): Expected temporal value, got
+  ... (truncated)
+  ```
+- **[4] Should compute duration between two temporals in days** (line 159)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/temporal/Temporal10.feature:134:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: duration.indays(): Expected temporal value, got
+  ... (truncated)
+  ```
+- **[4] Should compute duration between two temporals in days** (line 160)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/temporal/Temporal10.feature:134:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: duration.indays(): Expected temporal value, got
+  ... (truncated)
+  ```
+- **[4] Should compute duration between two temporals in days** (line 161)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/temporal/Temporal10.feature:134:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: duration.indays(): Expected temporal value, got
   ... (truncated)
   ```
 - **[5] Should compute duration between two temporals in seconds** (line 178)
@@ -4387,7 +4095,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal10.feature:169:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("duration", Some(Temporal(Duration { months
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: duration.inseconds(): Expected temporal value, 
   ... (truncated)
   ```
 - **[5] Should compute duration between two temporals in seconds** (line 180)
@@ -4395,7 +4103,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal10.feature:169:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("duration", Some(Temporal(Duration { months
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: duration.inseconds(): Expected temporal value, 
   ... (truncated)
   ```
 - **[5] Should compute duration between two temporals in seconds** (line 183)
@@ -4403,7 +4111,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal10.feature:169:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("duration", Some(Temporal(Duration { months
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: duration.inseconds(): Expected temporal value, 
   ... (truncated)
   ```
 - **[5] Should compute duration between two temporals in seconds** (line 185)
@@ -4411,7 +4119,47 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal10.feature:169:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("duration", Some(Temporal(Duration { months
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: duration.inseconds(): Expected temporal value, 
+  ... (truncated)
+  ```
+- **[5] Should compute duration between two temporals in seconds** (line 186)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/temporal/Temporal10.feature:169:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: duration.inseconds(): Expected temporal value, 
+  ... (truncated)
+  ```
+- **[5] Should compute duration between two temporals in seconds** (line 187)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/temporal/Temporal10.feature:169:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: duration.inseconds(): Expected temporal value, 
+  ... (truncated)
+  ```
+- **[5] Should compute duration between two temporals in seconds** (line 188)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/temporal/Temporal10.feature:169:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: duration.inseconds(): Expected temporal value, 
+  ... (truncated)
+  ```
+- **[5] Should compute duration between two temporals in seconds** (line 189)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/temporal/Temporal10.feature:169:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: duration.inseconds(): Expected temporal value, 
+  ... (truncated)
+  ```
+- **[5] Should compute duration between two temporals in seconds** (line 190)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/temporal/Temporal10.feature:169:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: duration.inseconds(): Expected temporal value, 
   ... (truncated)
   ```
 - **[5] Should compute duration between two temporals in seconds** (line 193)
@@ -4419,7 +4167,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal10.feature:169:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("duration", Some(Temporal(Duration { months
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: duration.inseconds(): Expected temporal value, 
   ... (truncated)
   ```
 - **[5] Should compute duration between two temporals in seconds** (line 195)
@@ -4427,7 +4175,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal10.feature:169:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("duration", Some(Temporal(Duration { months
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: duration.inseconds(): Expected temporal value, 
   ... (truncated)
   ```
 - **[5] Should compute duration between two temporals in seconds** (line 196)
@@ -4435,7 +4183,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal10.feature:169:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("duration", Some(Temporal(Duration { months
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: duration.inseconds(): Expected temporal value, 
   ... (truncated)
   ```
 - **[5] Should compute duration between two temporals in seconds** (line 197)
@@ -4443,7 +4191,15 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal10.feature:169:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("duration", Some(Temporal(Duration { months
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: duration.inseconds(): Expected temporal value, 
+  ... (truncated)
+  ```
+- **[5] Should compute duration between two temporals in seconds** (line 198)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/temporal/Temporal10.feature:169:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: duration.inseconds(): Expected temporal value, 
   ... (truncated)
   ```
 - **[5] Should compute duration between two temporals in seconds** (line 199)
@@ -4451,7 +4207,23 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal10.feature:169:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("duration", Some(Temporal(Duration { months
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: duration.inseconds(): Expected temporal value, 
+  ... (truncated)
+  ```
+- **[5] Should compute duration between two temporals in seconds** (line 200)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/temporal/Temporal10.feature:169:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: duration.inseconds(): Expected temporal value, 
+  ... (truncated)
+  ```
+- **[7] Should compute negative duration between in big units** (line 227)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/temporal/Temporal10.feature:219:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: duration.inmonths(): Expected temporal value, g
   ... (truncated)
   ```
 - **[7] Should compute negative duration between in big units** (line 229)
@@ -4459,7 +4231,63 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal10.feature:219:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("duration", Some(Temporal(Duration { months
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: duration.inmonths(): Expected temporal value, g
+  ... (truncated)
+  ```
+- **[7] Should compute negative duration between in big units** (line 230)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/temporal/Temporal10.feature:219:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: duration.inmonths(): Expected temporal value, g
+  ... (truncated)
+  ```
+- **[8] Should handle durations at daylight saving time day** (line 245)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/temporal/Temporal10.feature:238:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: duration.inseconds(): Expected temporal value, 
+  ... (truncated)
+  ```
+- **[8] Should handle durations at daylight saving time day** (line 246)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/temporal/Temporal10.feature:238:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: duration.inseconds(): Expected temporal value, 
+  ... (truncated)
+  ```
+- **[8] Should handle durations at daylight saving time day** (line 247)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/temporal/Temporal10.feature:238:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: duration.inseconds(): Expected temporal value, 
+  ... (truncated)
+  ```
+- **[8] Should handle durations at daylight saving time day** (line 248)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/temporal/Temporal10.feature:238:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: duration.inseconds(): Expected temporal value, 
+  ... (truncated)
+  ```
+- **[8] Should handle durations at daylight saving time day** (line 249)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/temporal/Temporal10.feature:238:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: duration.inseconds(): Expected temporal value, 
+  ... (truncated)
+  ```
+- **[8] Should handle durations at daylight saving time day** (line 250)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/temporal/Temporal10.feature:238:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: duration.inseconds(): Expected temporal value, 
   ... (truncated)
   ```
 - **[9] Should handle large durations** (line 252)
@@ -4577,38 +4405,6 @@ Scenarios that were failing but are now passing:
       Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: localtime(): Invalid time format", query: Some("\
   ... (truncated)
   ```
-- **[3] Should parse time from string** (line 92)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal2.feature:85:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalTime { nanos_sin
-  ... (truncated)
-  ```
-- **[3] Should parse time from string** (line 93)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal2.feature:85:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalTime { nanos_sin
-  ... (truncated)
-  ```
-- **[3] Should parse time from string** (line 94)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal2.feature:85:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalTime { nanos_sin
-  ... (truncated)
-  ```
-- **[3] Should parse time from string** (line 95)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal2.feature:85:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalTime { nanos_sin
-  ... (truncated)
-  ```
 - **[3] Should parse time from string** (line 96)
   ```
   Step failed:
@@ -4681,14 +4477,6 @@ Scenarios that were failing but are now passing:
       Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: localdatetime(): Cannot parse datetime: 2015202T
   ... (truncated)
   ```
-- **[5] Should parse date time from string** (line 135)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal2.feature:128:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
 - **[5] Should parse date time from string** (line 136)
   ```
   Step failed:
@@ -4743,46 +4531,6 @@ Scenarios that were failing but are now passing:
       Defined: tck/features/expressions/temporal/Temporal2.feature:128:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
       Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: datetime(): Cannot parse datetime: 2015202T21+18
-  ... (truncated)
-  ```
-- **[6] Should parse date time with named time zone from string** (line 157)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal2.feature:150:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[6] Should parse date time with named time zone from string** (line 158)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal2.feature:150:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[6] Should parse date time with named time zone from string** (line 159)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal2.feature:150:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[6] Should parse date time with named time zone from string** (line 160)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal2.feature:150:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[6] Should parse date time with named time zone from string** (line 161)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal2.feature:150:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
   ... (truncated)
   ```
 - **[7] Should parse duration from string** (line 177)
@@ -4849,7 +4597,47 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal3.feature:39:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: date(): date() expects a string or map argument",
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: date(): date/datetime map requires 'year' field",
+  ... (truncated)
+  ```
+- **[1] Should select date** (line 61)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/temporal/Temporal3.feature:39:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: date(): Expected temporal or string value for dat
+  ... (truncated)
+  ```
+- **[1] Should select date** (line 62)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/temporal/Temporal3.feature:39:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: date(): Expected temporal or string value for dat
+  ... (truncated)
+  ```
+- **[1] Should select date** (line 63)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/temporal/Temporal3.feature:39:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: date(): Expected temporal or string value for dat
+  ... (truncated)
+  ```
+- **[1] Should select date** (line 64)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/temporal/Temporal3.feature:39:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: date(): Expected temporal or string value for dat
+  ... (truncated)
+  ```
+- **[1] Should select date** (line 65)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/temporal/Temporal3.feature:39:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: date(): Expected temporal or string value for dat
   ... (truncated)
   ```
 - **[1] Should select date** (line 66)
@@ -4857,7 +4645,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal3.feature:39:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(Date { days_since_epo
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: date(): Expected temporal or string value for dat
   ... (truncated)
   ```
 - **[2] Should select local time** (line 85)
@@ -4873,7 +4661,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal3.feature:75:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalTime { nanos_sin
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: localtime(): time field must be a string or tempo
   ... (truncated)
   ```
 - **[2] Should select local time** (line 87)
@@ -4881,7 +4669,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal3.feature:75:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalTime { nanos_sin
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: localtime(): time field must be a string or tempo
   ... (truncated)
   ```
 - **[2] Should select local time** (line 88)
@@ -4913,7 +4701,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal3.feature:75:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: localtime(): localtime() expects a string or map 
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalTime { nanos_sin
   ... (truncated)
   ```
 - **[2] Should select local time** (line 92)
@@ -4945,7 +4733,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal3.feature:102:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: time(): time() expects a string or map argument"
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(Time { nanos_since_m
   ... (truncated)
   ```
 - **[3] Should select time** (line 115)
@@ -4953,7 +4741,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal3.feature:102:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(Time { nanos_since_m
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: time(): time field must be a string or temporal"
   ... (truncated)
   ```
 - **[3] Should select time** (line 116)
@@ -4961,7 +4749,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal3.feature:102:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(Time { nanos_since_m
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: time(): time field must be a string or temporal"
   ... (truncated)
   ```
 - **[3] Should select time** (line 117)
@@ -4969,7 +4757,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal3.feature:102:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(Time { nanos_since_m
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: time(): time field must be a string or temporal"
   ... (truncated)
   ```
 - **[3] Should select time** (line 118)
@@ -4977,7 +4765,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal3.feature:102:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(Time { nanos_since_m
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: time(): time field must be a string or temporal"
   ... (truncated)
   ```
 - **[3] Should select time** (line 119)
@@ -5025,7 +4813,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal3.feature:102:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: time(): time() expects a string or map argument"
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(Time { nanos_since_m
   ... (truncated)
   ```
 - **[3] Should select time** (line 125)
@@ -5074,6 +4862,22 @@ Scenarios that were failing but are now passing:
       Defined: tck/features/expressions/temporal/Temporal3.feature:137:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
       Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalDateTime { nano
+  ... (truncated)
+  ```
+- **[4] Should select date into local date time** (line 148)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/temporal/Temporal3.feature:137:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: localdatetime(): Expected temporal or string val
+  ... (truncated)
+  ```
+- **[4] Should select date into local date time** (line 149)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/temporal/Temporal3.feature:137:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: localdatetime(): Expected temporal or string val
   ... (truncated)
   ```
 - **[5] Should select time into local date time** (line 165)
@@ -5257,7 +5061,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal3.feature:181:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalDateTime { nano
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: localdatetime(): Expected temporal or string val
   ... (truncated)
   ```
 - **[6] Should select date and time into local date time** (line 205)
@@ -5265,7 +5069,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal3.feature:181:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalDateTime { nano
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: localdatetime(): Expected temporal or string val
   ... (truncated)
   ```
 - **[6] Should select date and time into local date time** (line 206)
@@ -5273,7 +5077,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal3.feature:181:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalDateTime { nano
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: localdatetime(): Expected temporal or string val
   ... (truncated)
   ```
 - **[6] Should select date and time into local date time** (line 207)
@@ -5281,7 +5085,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal3.feature:181:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalDateTime { nano
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: localdatetime(): Expected temporal or string val
   ... (truncated)
   ```
 - **[6] Should select date and time into local date time** (line 208)
@@ -5289,7 +5093,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal3.feature:181:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalDateTime { nano
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: localdatetime(): Expected temporal or string val
   ... (truncated)
   ```
 - **[6] Should select date and time into local date time** (line 209)
@@ -5297,7 +5101,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal3.feature:181:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalDateTime { nano
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: localdatetime(): Expected temporal or string val
   ... (truncated)
   ```
 - **[6] Should select date and time into local date time** (line 210)
@@ -5305,7 +5109,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal3.feature:181:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalDateTime { nano
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: localdatetime(): Expected temporal or string val
   ... (truncated)
   ```
 - **[6] Should select date and time into local date time** (line 211)
@@ -5313,7 +5117,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal3.feature:181:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalDateTime { nano
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: localdatetime(): Expected temporal or string val
   ... (truncated)
   ```
 - **[7] Should select datetime into local date time** (line 230)
@@ -5321,7 +5125,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal3.feature:220:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: localdatetime(): localdatetime() expects a strin
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: localdatetime(): date/datetime map requires 'yea
   ... (truncated)
   ```
 - **[7] Should select datetime into local date time** (line 231)
@@ -5329,7 +5133,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal3.feature:220:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalDateTime { nano
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: localdatetime(): Expected temporal or string val
   ... (truncated)
   ```
 - **[7] Should select datetime into local date time** (line 232)
@@ -5337,7 +5141,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal3.feature:220:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalDateTime { nano
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: localdatetime(): Expected temporal or string val
   ... (truncated)
   ```
 - **[8] Should select date into date time** (line 252)
@@ -5377,7 +5181,15 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal3.feature:241:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: datetime(): Expected temporal or string value", 
+  ... (truncated)
+  ```
+- **[8] Should select date into date time** (line 257)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/temporal/Temporal3.feature:241:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: datetime(): Expected temporal or string value", 
   ... (truncated)
   ```
 - **[8] Should select date into date time** (line 258)
@@ -5385,7 +5197,15 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal3.feature:241:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: datetime(): Expected temporal or string value", 
+  ... (truncated)
+  ```
+- **[8] Should select date into date time** (line 259)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/temporal/Temporal3.feature:241:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: datetime(): Expected temporal or string value", 
   ... (truncated)
   ```
 - **[9] Should select time into date time** (line 275)
@@ -5745,7 +5565,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal3.feature:299:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: datetime(): Expected temporal or string value", 
   ... (truncated)
   ```
 - **[10] Should select date and time into date time** (line 339)
@@ -5753,7 +5573,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal3.feature:299:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: datetime(): Expected temporal or string value", 
   ... (truncated)
   ```
 - **[10] Should select date and time into date time** (line 340)
@@ -5761,7 +5581,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal3.feature:299:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: datetime(): Expected temporal or string value", 
   ... (truncated)
   ```
 - **[10] Should select date and time into date time** (line 341)
@@ -5769,7 +5589,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal3.feature:299:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: datetime(): Expected temporal or string value", 
   ... (truncated)
   ```
 - **[10] Should select date and time into date time** (line 342)
@@ -5777,7 +5597,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal3.feature:299:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: datetime(): Expected temporal or string value", 
   ... (truncated)
   ```
 - **[10] Should select date and time into date time** (line 343)
@@ -5785,7 +5605,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal3.feature:299:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: datetime(): Expected temporal or string value", 
   ... (truncated)
   ```
 - **[10] Should select date and time into date time** (line 344)
@@ -5793,7 +5613,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal3.feature:299:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: datetime(): Expected temporal or string value", 
   ... (truncated)
   ```
 - **[10] Should select date and time into date time** (line 345)
@@ -5801,7 +5621,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal3.feature:299:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: datetime(): Expected temporal or string value", 
   ... (truncated)
   ```
 - **[10] Should select date and time into date time** (line 346)
@@ -5809,7 +5629,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal3.feature:299:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: datetime(): Expected temporal or string value", 
   ... (truncated)
   ```
 - **[10] Should select date and time into date time** (line 347)
@@ -5817,7 +5637,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal3.feature:299:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: datetime(): Expected temporal or string value", 
   ... (truncated)
   ```
 - **[10] Should select date and time into date time** (line 348)
@@ -5825,7 +5645,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal3.feature:299:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: datetime(): Expected temporal or string value", 
   ... (truncated)
   ```
 - **[10] Should select date and time into date time** (line 349)
@@ -5833,7 +5653,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal3.feature:299:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: datetime(): Expected temporal or string value", 
   ... (truncated)
   ```
 - **[10] Should select date and time into date time** (line 350)
@@ -5841,7 +5661,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal3.feature:299:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: datetime(): Expected temporal or string value", 
   ... (truncated)
   ```
 - **[10] Should select date and time into date time** (line 351)
@@ -5849,7 +5669,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal3.feature:299:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: datetime(): Expected temporal or string value", 
   ... (truncated)
   ```
 - **[10] Should select date and time into date time** (line 352)
@@ -5857,7 +5677,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal3.feature:299:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: datetime(): Expected temporal or string value", 
   ... (truncated)
   ```
 - **[10] Should select date and time into date time** (line 353)
@@ -5865,7 +5685,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal3.feature:299:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: datetime(): Expected temporal or string value", 
   ... (truncated)
   ```
 - **[11] Should datetime into date time** (line 369)
@@ -5876,12 +5696,20 @@ Scenarios that were failing but are now passing:
       Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: datetime(): datetime() expects a string or map a
   ... (truncated)
   ```
+- **[11] Should datetime into date time** (line 374)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/temporal/Temporal3.feature:362:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: datetime(): date/datetime map requires 'year' fi
+  ... (truncated)
+  ```
 - **[11] Should datetime into date time** (line 375)
   ```
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal3.feature:362:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: datetime(): Expected temporal or string value", 
   ... (truncated)
   ```
 - **[11] Should datetime into date time** (line 376)
@@ -5889,7 +5717,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal3.feature:362:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: datetime(): Expected temporal or string value", 
   ... (truncated)
   ```
 - **[11] Should datetime into date time** (line 377)
@@ -5897,7 +5725,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal3.feature:362:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: datetime(): Expected temporal or string value", 
   ... (truncated)
   ```
 - **[11] Should datetime into date time** (line 378)
@@ -5905,7 +5733,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal3.feature:362:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: datetime(): Expected temporal or string value", 
   ... (truncated)
   ```
 
@@ -5975,7 +5803,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal6.feature:64:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("b", Some(Bool(false))), ("ts", Some(String("
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "DataFusion planning failed: This feature is not implemented: Unsup
   ... (truncated)
   ```
 - **[5] Should serialize date time** (line 81)
@@ -5983,7 +5811,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal6.feature:88:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("b", Some(Bool(true))), ("ts", Some(String("1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "DataFusion planning failed: This feature is not implemented: Unsup
   ... (truncated)
   ```
 - **[6] Should serialize duration** (line 107)
@@ -6079,7 +5907,42 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal6.feature:126:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("ts", Some(String("2017-08-08T12:31:14.64587
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "DataFusion planning failed: This feature is not implemented: Unsu
+  ... (truncated)
+  ```
+
+### Temporal7
+
+- **[3] Should compare times** (line 81)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/temporal/Temporal7.feature:74:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Error during planning: Cannot coerce arithmetic expression Time64(
+  ... (truncated)
+  ```
+- **[3] Should compare times** (line 82)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/temporal/Temporal7.feature:74:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Error during planning: Cannot coerce arithmetic expression Time64(
+  ... (truncated)
+  ```
+- **[6] Should compare durations for equality** (line 134)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/temporal/Temporal7.feature:125:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Error during planning: Cannot infer common argument type for comp
+  ... (truncated)
+  ```
+- **[6] Should compare durations for equality** (line 136)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/temporal/Temporal7.feature:125:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Error during planning: Cannot infer common argument type for comp
   ... (truncated)
   ```
 
@@ -6090,7 +5953,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal8.feature:91:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("sum", Some(Temporal(LocalTime { nanos_since_
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: Invalid types for addition", query: Some("\nWITH 
   ... (truncated)
   ```
 - **[3] Should add or subtract duration to or from time** (line 99)
@@ -6098,7 +5961,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal8.feature:91:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("sum", Some(Temporal(LocalTime { nanos_since_
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: Invalid types for addition", query: Some("\nWITH 
   ... (truncated)
   ```
 - **[3] Should add or subtract duration to or from time** (line 100)
@@ -6106,7 +5969,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal8.feature:91:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("sum", Some(Temporal(LocalTime { nanos_since_
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: Invalid types for addition", query: Some("\nWITH 
   ... (truncated)
   ```
 - **[5] Should add or subtract duration to or from date time** (line 144)
@@ -6114,7 +5977,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal8.feature:137:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("diff", Some(Temporal(DateTime { nanos_since
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: Invalid types for addition", query: Some("\nWITH
   ... (truncated)
   ```
 - **[5] Should add or subtract duration to or from date time** (line 145)
@@ -6122,7 +5985,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal8.feature:137:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("sum", Some(Temporal(DateTime { nanos_since_
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: Invalid types for addition", query: Some("\nWITH
   ... (truncated)
   ```
 - **[5] Should add or subtract duration to or from date time** (line 146)
@@ -6130,34 +5993,146 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal8.feature:137:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("diff", Some(Temporal(DateTime { nanos_since
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: Invalid types for addition", query: Some("\nWITH
   ... (truncated)
   ```
 
 ### Temporal9
 
-- **[2] Should truncate datetime** (line 111)
+- **[1] Should truncate date** (line 48)
   ```
   Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:104:5
+      Defined: tck/features/expressions/temporal/Temporal9.feature:39:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: date.truncate(): truncate expects a date string",
   ... (truncated)
   ```
-- **[2] Should truncate datetime** (line 112)
+- **[1] Should truncate date** (line 49)
   ```
   Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:104:5
+      Defined: tck/features/expressions/temporal/Temporal9.feature:39:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: date.truncate(): truncate expects a date string",
   ... (truncated)
   ```
-- **[2] Should truncate datetime** (line 113)
+- **[1] Should truncate date** (line 54)
   ```
   Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:104:5
+      Defined: tck/features/expressions/temporal/Temporal9.feature:39:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: date.truncate(): truncate expects a date string",
+  ... (truncated)
+  ```
+- **[1] Should truncate date** (line 55)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/temporal/Temporal9.feature:39:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: date.truncate(): truncate expects a date string",
+  ... (truncated)
+  ```
+- **[1] Should truncate date** (line 60)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/temporal/Temporal9.feature:39:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: date.truncate(): truncate expects a date string",
+  ... (truncated)
+  ```
+- **[1] Should truncate date** (line 61)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/temporal/Temporal9.feature:39:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: date.truncate(): truncate expects a date string",
+  ... (truncated)
+  ```
+- **[1] Should truncate date** (line 66)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/temporal/Temporal9.feature:39:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: date.truncate(): truncate expects a date string",
+  ... (truncated)
+  ```
+- **[1] Should truncate date** (line 67)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/temporal/Temporal9.feature:39:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: date.truncate(): truncate expects a date string",
+  ... (truncated)
+  ```
+- **[1] Should truncate date** (line 72)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/temporal/Temporal9.feature:39:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: date.truncate(): truncate expects a date string",
+  ... (truncated)
+  ```
+- **[1] Should truncate date** (line 73)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/temporal/Temporal9.feature:39:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: date.truncate(): truncate expects a date string",
+  ... (truncated)
+  ```
+- **[1] Should truncate date** (line 78)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/temporal/Temporal9.feature:39:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: date.truncate(): truncate expects a date string",
+  ... (truncated)
+  ```
+- **[1] Should truncate date** (line 79)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/temporal/Temporal9.feature:39:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: date.truncate(): truncate expects a date string",
+  ... (truncated)
+  ```
+- **[1] Should truncate date** (line 84)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/temporal/Temporal9.feature:39:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: date.truncate(): truncate expects a date string",
+  ... (truncated)
+  ```
+- **[1] Should truncate date** (line 85)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/temporal/Temporal9.feature:39:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: date.truncate(): truncate expects a date string",
+  ... (truncated)
+  ```
+- **[1] Should truncate date** (line 90)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/temporal/Temporal9.feature:39:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: date.truncate(): truncate expects a date string",
+  ... (truncated)
+  ```
+- **[1] Should truncate date** (line 91)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/temporal/Temporal9.feature:39:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: date.truncate(): truncate expects a date string",
+  ... (truncated)
+  ```
+- **[1] Should truncate date** (line 95)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/temporal/Temporal9.feature:39:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: date.truncate(): truncate expects a date string",
   ... (truncated)
   ```
 - **[2] Should truncate datetime** (line 114)
@@ -6165,7 +6140,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal9.feature:104:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: datetime.truncate(): truncate expects a datetime
   ... (truncated)
   ```
 - **[2] Should truncate datetime** (line 115)
@@ -6173,7 +6148,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal9.feature:104:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: datetime.truncate(): truncate expects a datetime
   ... (truncated)
   ```
 - **[2] Should truncate datetime** (line 116)
@@ -6181,55 +6156,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal9.feature:104:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[2] Should truncate datetime** (line 117)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:104:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[2] Should truncate datetime** (line 118)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:104:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[2] Should truncate datetime** (line 119)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:104:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[2] Should truncate datetime** (line 120)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:104:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[2] Should truncate datetime** (line 121)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:104:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[2] Should truncate datetime** (line 122)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:104:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: datetime.truncate(): truncate expects a datetime
   ... (truncated)
   ```
 - **[2] Should truncate datetime** (line 123)
@@ -6237,7 +6164,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal9.feature:104:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: datetime.truncate(): truncate expects a datetime
   ... (truncated)
   ```
 - **[2] Should truncate datetime** (line 124)
@@ -6245,7 +6172,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal9.feature:104:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: datetime.truncate(): truncate expects a datetime
   ... (truncated)
   ```
 - **[2] Should truncate datetime** (line 125)
@@ -6253,55 +6180,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal9.feature:104:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[2] Should truncate datetime** (line 126)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:104:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[2] Should truncate datetime** (line 127)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:104:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[2] Should truncate datetime** (line 128)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:104:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[2] Should truncate datetime** (line 129)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:104:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[2] Should truncate datetime** (line 130)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:104:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[2] Should truncate datetime** (line 131)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:104:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: datetime.truncate(): truncate expects a datetime
   ... (truncated)
   ```
 - **[2] Should truncate datetime** (line 132)
@@ -6309,7 +6188,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal9.feature:104:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: datetime.truncate(): truncate expects a datetime
   ... (truncated)
   ```
 - **[2] Should truncate datetime** (line 133)
@@ -6317,7 +6196,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal9.feature:104:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: datetime.truncate(): truncate expects a datetime
   ... (truncated)
   ```
 - **[2] Should truncate datetime** (line 134)
@@ -6325,55 +6204,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal9.feature:104:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[2] Should truncate datetime** (line 135)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:104:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[2] Should truncate datetime** (line 136)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:104:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[2] Should truncate datetime** (line 137)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:104:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[2] Should truncate datetime** (line 138)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:104:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[2] Should truncate datetime** (line 139)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:104:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[2] Should truncate datetime** (line 140)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:104:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: datetime.truncate(): truncate expects a datetime
   ... (truncated)
   ```
 - **[2] Should truncate datetime** (line 141)
@@ -6381,7 +6212,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal9.feature:104:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: datetime.truncate(): truncate expects a datetime
   ... (truncated)
   ```
 - **[2] Should truncate datetime** (line 142)
@@ -6389,7 +6220,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal9.feature:104:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: datetime.truncate(): truncate expects a datetime
   ... (truncated)
   ```
 - **[2] Should truncate datetime** (line 143)
@@ -6397,55 +6228,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal9.feature:104:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[2] Should truncate datetime** (line 144)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:104:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[2] Should truncate datetime** (line 145)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:104:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[2] Should truncate datetime** (line 146)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:104:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[2] Should truncate datetime** (line 147)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:104:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[2] Should truncate datetime** (line 148)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:104:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[2] Should truncate datetime** (line 149)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:104:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: datetime.truncate(): truncate expects a datetime
   ... (truncated)
   ```
 - **[2] Should truncate datetime** (line 150)
@@ -6453,7 +6236,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal9.feature:104:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: datetime.truncate(): truncate expects a datetime
   ... (truncated)
   ```
 - **[2] Should truncate datetime** (line 151)
@@ -6461,7 +6244,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal9.feature:104:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: datetime.truncate(): truncate expects a datetime
   ... (truncated)
   ```
 - **[2] Should truncate datetime** (line 152)
@@ -6469,55 +6252,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal9.feature:104:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[2] Should truncate datetime** (line 153)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:104:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[2] Should truncate datetime** (line 154)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:104:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[2] Should truncate datetime** (line 155)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:104:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[2] Should truncate datetime** (line 156)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:104:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[2] Should truncate datetime** (line 157)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:104:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[2] Should truncate datetime** (line 158)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:104:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: datetime.truncate(): truncate expects a datetime
   ... (truncated)
   ```
 - **[2] Should truncate datetime** (line 159)
@@ -6525,7 +6260,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal9.feature:104:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: datetime.truncate(): truncate expects a datetime
   ... (truncated)
   ```
 - **[2] Should truncate datetime** (line 160)
@@ -6533,7 +6268,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal9.feature:104:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: datetime.truncate(): truncate expects a datetime
   ... (truncated)
   ```
 - **[2] Should truncate datetime** (line 161)
@@ -6541,55 +6276,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal9.feature:104:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[2] Should truncate datetime** (line 162)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:104:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[2] Should truncate datetime** (line 163)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:104:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[2] Should truncate datetime** (line 164)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:104:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[2] Should truncate datetime** (line 165)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:104:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[2] Should truncate datetime** (line 166)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:104:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[2] Should truncate datetime** (line 167)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:104:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: datetime.truncate(): truncate expects a datetime
   ... (truncated)
   ```
 - **[2] Should truncate datetime** (line 168)
@@ -6597,7 +6284,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal9.feature:104:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: datetime.truncate(): truncate expects a datetime
   ... (truncated)
   ```
 - **[2] Should truncate datetime** (line 169)
@@ -6605,7 +6292,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal9.feature:104:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: datetime.truncate(): truncate expects a datetime
   ... (truncated)
   ```
 - **[2] Should truncate datetime** (line 170)
@@ -6613,55 +6300,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal9.feature:104:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[2] Should truncate datetime** (line 171)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:104:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[2] Should truncate datetime** (line 172)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:104:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[2] Should truncate datetime** (line 173)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:104:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[2] Should truncate datetime** (line 174)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:104:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[2] Should truncate datetime** (line 175)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:104:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[2] Should truncate datetime** (line 176)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:104:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: datetime.truncate(): truncate expects a datetime
   ... (truncated)
   ```
 - **[2] Should truncate datetime** (line 177)
@@ -6669,7 +6308,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal9.feature:104:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: datetime.truncate(): truncate expects a datetime
   ... (truncated)
   ```
 - **[2] Should truncate datetime** (line 178)
@@ -6677,7 +6316,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal9.feature:104:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: datetime.truncate(): truncate expects a datetime
   ... (truncated)
   ```
 - **[2] Should truncate datetime** (line 179)
@@ -6685,55 +6324,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal9.feature:104:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[2] Should truncate datetime** (line 180)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:104:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[2] Should truncate datetime** (line 181)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:104:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[2] Should truncate datetime** (line 182)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:104:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[2] Should truncate datetime** (line 183)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:104:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[2] Should truncate datetime** (line 184)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:104:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[2] Should truncate datetime** (line 185)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:104:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: datetime.truncate(): truncate expects a datetime
   ... (truncated)
   ```
 - **[2] Should truncate datetime** (line 186)
@@ -6741,7 +6332,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal9.feature:104:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: datetime.truncate(): truncate expects a datetime
   ... (truncated)
   ```
 - **[2] Should truncate datetime** (line 187)
@@ -6749,7 +6340,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal9.feature:104:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: datetime.truncate(): truncate expects a datetime
   ... (truncated)
   ```
 - **[2] Should truncate datetime** (line 188)
@@ -6757,31 +6348,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal9.feature:104:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[2] Should truncate datetime** (line 189)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:104:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[2] Should truncate datetime** (line 190)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:104:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[2] Should truncate datetime** (line 191)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:104:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: datetime.truncate(): truncate expects a datetime
   ... (truncated)
   ```
 - **[2] Should truncate datetime** (line 192)
@@ -6789,7 +6356,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal9.feature:104:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: datetime.truncate(): truncate expects a datetime
   ... (truncated)
   ```
 - **[2] Should truncate datetime** (line 193)
@@ -6797,7 +6364,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal9.feature:104:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: datetime.truncate(): truncate expects a datetime
   ... (truncated)
   ```
 - **[2] Should truncate datetime** (line 194)
@@ -6805,31 +6372,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal9.feature:104:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[2] Should truncate datetime** (line 195)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:104:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[2] Should truncate datetime** (line 196)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:104:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[2] Should truncate datetime** (line 197)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:104:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: datetime.truncate(): truncate expects a datetime
   ... (truncated)
   ```
 - **[2] Should truncate datetime** (line 198)
@@ -6837,7 +6380,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal9.feature:104:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: datetime.truncate(): truncate expects a datetime
   ... (truncated)
   ```
 - **[2] Should truncate datetime** (line 199)
@@ -6845,7 +6388,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal9.feature:104:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: datetime.truncate(): truncate expects a datetime
   ... (truncated)
   ```
 - **[2] Should truncate datetime** (line 200)
@@ -6853,31 +6396,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal9.feature:104:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[2] Should truncate datetime** (line 201)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:104:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[2] Should truncate datetime** (line 202)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:104:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[2] Should truncate datetime** (line 203)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:104:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: datetime.truncate(): truncate expects a datetime
   ... (truncated)
   ```
 - **[2] Should truncate datetime** (line 204)
@@ -6885,7 +6404,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal9.feature:104:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: datetime.truncate(): truncate expects a datetime
   ... (truncated)
   ```
 - **[2] Should truncate datetime** (line 205)
@@ -6893,23 +6412,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal9.feature:104:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[2] Should truncate datetime** (line 206)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:104:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[2] Should truncate datetime** (line 207)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:104:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: datetime.truncate(): truncate expects a datetime
   ... (truncated)
   ```
 - **[2] Should truncate datetime** (line 208)
@@ -6917,7 +6420,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal9.feature:104:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: datetime.truncate(): truncate expects a datetime
   ... (truncated)
   ```
 - **[2] Should truncate datetime** (line 209)
@@ -6925,23 +6428,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal9.feature:104:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[2] Should truncate datetime** (line 210)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:104:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
-  ... (truncated)
-  ```
-- **[2] Should truncate datetime** (line 211)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:104:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: datetime.truncate(): truncate expects a datetime
   ... (truncated)
   ```
 - **[2] Should truncate datetime** (line 212)
@@ -6949,7 +6436,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal9.feature:104:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: datetime.truncate(): truncate expects a datetime
   ... (truncated)
   ```
 - **[2] Should truncate datetime** (line 213)
@@ -6957,23 +6444,151 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal9.feature:104:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: datetime.truncate(): truncate expects a datetime
   ... (truncated)
   ```
-- **[2] Should truncate datetime** (line 214)
+- **[3] Should truncate localdatetime** (line 232)
   ```
   Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:104:5
+      Defined: tck/features/expressions/temporal/Temporal9.feature:223:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: localdatetime.truncate(): truncate expects a dat
   ... (truncated)
   ```
-- **[2] Should truncate datetime** (line 215)
+- **[3] Should truncate localdatetime** (line 233)
   ```
   Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:104:5
+      Defined: tck/features/expressions/temporal/Temporal9.feature:223:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(DateTime { nanos_sin
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: localdatetime.truncate(): truncate expects a dat
+  ... (truncated)
+  ```
+- **[3] Should truncate localdatetime** (line 238)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/temporal/Temporal9.feature:223:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: localdatetime.truncate(): truncate expects a dat
+  ... (truncated)
+  ```
+- **[3] Should truncate localdatetime** (line 239)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/temporal/Temporal9.feature:223:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: localdatetime.truncate(): truncate expects a dat
+  ... (truncated)
+  ```
+- **[3] Should truncate localdatetime** (line 244)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/temporal/Temporal9.feature:223:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: localdatetime.truncate(): truncate expects a dat
+  ... (truncated)
+  ```
+- **[3] Should truncate localdatetime** (line 245)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/temporal/Temporal9.feature:223:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: localdatetime.truncate(): truncate expects a dat
+  ... (truncated)
+  ```
+- **[3] Should truncate localdatetime** (line 250)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/temporal/Temporal9.feature:223:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: localdatetime.truncate(): truncate expects a dat
+  ... (truncated)
+  ```
+- **[3] Should truncate localdatetime** (line 251)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/temporal/Temporal9.feature:223:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: localdatetime.truncate(): truncate expects a dat
+  ... (truncated)
+  ```
+- **[3] Should truncate localdatetime** (line 256)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/temporal/Temporal9.feature:223:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: localdatetime.truncate(): truncate expects a dat
+  ... (truncated)
+  ```
+- **[3] Should truncate localdatetime** (line 257)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/temporal/Temporal9.feature:223:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: localdatetime.truncate(): truncate expects a dat
+  ... (truncated)
+  ```
+- **[3] Should truncate localdatetime** (line 262)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/temporal/Temporal9.feature:223:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: localdatetime.truncate(): truncate expects a dat
+  ... (truncated)
+  ```
+- **[3] Should truncate localdatetime** (line 263)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/temporal/Temporal9.feature:223:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: localdatetime.truncate(): truncate expects a dat
+  ... (truncated)
+  ```
+- **[3] Should truncate localdatetime** (line 268)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/temporal/Temporal9.feature:223:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: localdatetime.truncate(): truncate expects a dat
+  ... (truncated)
+  ```
+- **[3] Should truncate localdatetime** (line 269)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/temporal/Temporal9.feature:223:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: localdatetime.truncate(): truncate expects a dat
+  ... (truncated)
+  ```
+- **[3] Should truncate localdatetime** (line 274)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/temporal/Temporal9.feature:223:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: localdatetime.truncate(): truncate expects a dat
+  ... (truncated)
+  ```
+- **[3] Should truncate localdatetime** (line 275)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/temporal/Temporal9.feature:223:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: localdatetime.truncate(): truncate expects a dat
+  ... (truncated)
+  ```
+- **[3] Should truncate localdatetime** (line 280)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/temporal/Temporal9.feature:223:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: localdatetime.truncate(): truncate expects a dat
+  ... (truncated)
+  ```
+- **[3] Should truncate localdatetime** (line 281)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/temporal/Temporal9.feature:223:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: localdatetime.truncate(): truncate expects a dat
   ... (truncated)
   ```
 - **[3] Should truncate localdatetime** (line 284)
@@ -6981,7 +6596,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal9.feature:223:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalDateTime { nano
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: localdatetime.truncate(): truncate expects a dat
   ... (truncated)
   ```
 - **[3] Should truncate localdatetime** (line 285)
@@ -6989,7 +6604,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal9.feature:223:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalDateTime { nano
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: localdatetime.truncate(): truncate expects a dat
   ... (truncated)
   ```
 - **[3] Should truncate localdatetime** (line 288)
@@ -6997,7 +6612,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal9.feature:223:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalDateTime { nano
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: localdatetime.truncate(): truncate expects a dat
   ... (truncated)
   ```
 - **[3] Should truncate localdatetime** (line 289)
@@ -7005,7 +6620,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal9.feature:223:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalDateTime { nano
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: localdatetime.truncate(): truncate expects a dat
   ... (truncated)
   ```
 - **[3] Should truncate localdatetime** (line 292)
@@ -7013,7 +6628,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal9.feature:223:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalDateTime { nano
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: localdatetime.truncate(): truncate expects a dat
   ... (truncated)
   ```
 - **[3] Should truncate localdatetime** (line 293)
@@ -7021,7 +6636,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal9.feature:223:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalDateTime { nano
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: localdatetime.truncate(): truncate expects a dat
   ... (truncated)
   ```
 - **[3] Should truncate localdatetime** (line 296)
@@ -7029,7 +6644,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal9.feature:223:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalDateTime { nano
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: localdatetime.truncate(): truncate expects a dat
   ... (truncated)
   ```
 - **[3] Should truncate localdatetime** (line 297)
@@ -7037,7 +6652,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal9.feature:223:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalDateTime { nano
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: localdatetime.truncate(): truncate expects a dat
   ... (truncated)
   ```
 - **[3] Should truncate localdatetime** (line 300)
@@ -7045,7 +6660,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal9.feature:223:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalDateTime { nano
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: localdatetime.truncate(): truncate expects a dat
   ... (truncated)
   ```
 - **[3] Should truncate localdatetime** (line 301)
@@ -7053,7 +6668,23 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal9.feature:223:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalDateTime { nano
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: localdatetime.truncate(): truncate expects a dat
+  ... (truncated)
+  ```
+- **[4] Should truncate localtime** (line 318)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/temporal/Temporal9.feature:311:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: localtime.truncate(): truncate expects a time st
+  ... (truncated)
+  ```
+- **[4] Should truncate localtime** (line 319)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/temporal/Temporal9.feature:311:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: localtime.truncate(): truncate expects a time st
   ... (truncated)
   ```
 - **[4] Should truncate localtime** (line 322)
@@ -7061,7 +6692,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal9.feature:311:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalTime { nanos_si
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: localtime.truncate(): truncate expects a time st
   ... (truncated)
   ```
 - **[4] Should truncate localtime** (line 323)
@@ -7069,7 +6700,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal9.feature:311:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalTime { nanos_si
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: localtime.truncate(): truncate expects a time st
   ... (truncated)
   ```
 - **[4] Should truncate localtime** (line 328)
@@ -7077,7 +6708,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal9.feature:311:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalTime { nanos_si
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: localtime.truncate(): truncate expects a time st
   ... (truncated)
   ```
 - **[4] Should truncate localtime** (line 329)
@@ -7085,7 +6716,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal9.feature:311:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalTime { nanos_si
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: localtime.truncate(): truncate expects a time st
   ... (truncated)
   ```
 - **[4] Should truncate localtime** (line 330)
@@ -7093,7 +6724,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal9.feature:311:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalTime { nanos_si
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: localtime.truncate(): truncate expects a time st
   ... (truncated)
   ```
 - **[4] Should truncate localtime** (line 331)
@@ -7101,7 +6732,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal9.feature:311:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalTime { nanos_si
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: localtime.truncate(): truncate expects a time st
   ... (truncated)
   ```
 - **[4] Should truncate localtime** (line 336)
@@ -7109,7 +6740,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal9.feature:311:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalTime { nanos_si
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: localtime.truncate(): truncate expects a time st
   ... (truncated)
   ```
 - **[4] Should truncate localtime** (line 337)
@@ -7117,7 +6748,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal9.feature:311:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalTime { nanos_si
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: localtime.truncate(): truncate expects a time st
   ... (truncated)
   ```
 - **[4] Should truncate localtime** (line 338)
@@ -7125,7 +6756,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal9.feature:311:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalTime { nanos_si
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: localtime.truncate(): truncate expects a time st
   ... (truncated)
   ```
 - **[4] Should truncate localtime** (line 339)
@@ -7133,7 +6764,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal9.feature:311:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalTime { nanos_si
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: localtime.truncate(): truncate expects a time st
   ... (truncated)
   ```
 - **[4] Should truncate localtime** (line 344)
@@ -7141,7 +6772,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal9.feature:311:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalTime { nanos_si
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: localtime.truncate(): truncate expects a time st
   ... (truncated)
   ```
 - **[4] Should truncate localtime** (line 345)
@@ -7149,7 +6780,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal9.feature:311:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalTime { nanos_si
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: localtime.truncate(): truncate expects a time st
   ... (truncated)
   ```
 - **[4] Should truncate localtime** (line 346)
@@ -7157,7 +6788,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal9.feature:311:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalTime { nanos_si
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: localtime.truncate(): truncate expects a time st
   ... (truncated)
   ```
 - **[4] Should truncate localtime** (line 347)
@@ -7165,7 +6796,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal9.feature:311:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalTime { nanos_si
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: localtime.truncate(): truncate expects a time st
   ... (truncated)
   ```
 - **[4] Should truncate localtime** (line 352)
@@ -7173,7 +6804,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal9.feature:311:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalTime { nanos_si
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: localtime.truncate(): truncate expects a time st
   ... (truncated)
   ```
 - **[4] Should truncate localtime** (line 353)
@@ -7181,7 +6812,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal9.feature:311:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalTime { nanos_si
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: localtime.truncate(): truncate expects a time st
   ... (truncated)
   ```
 - **[4] Should truncate localtime** (line 354)
@@ -7189,7 +6820,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal9.feature:311:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalTime { nanos_si
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: localtime.truncate(): truncate expects a time st
   ... (truncated)
   ```
 - **[4] Should truncate localtime** (line 355)
@@ -7197,7 +6828,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal9.feature:311:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalTime { nanos_si
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: localtime.truncate(): truncate expects a time st
   ... (truncated)
   ```
 - **[4] Should truncate localtime** (line 360)
@@ -7205,7 +6836,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal9.feature:311:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalTime { nanos_si
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: localtime.truncate(): truncate expects a time st
   ... (truncated)
   ```
 - **[4] Should truncate localtime** (line 361)
@@ -7213,7 +6844,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal9.feature:311:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalTime { nanos_si
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: localtime.truncate(): truncate expects a time st
   ... (truncated)
   ```
 - **[5] Should truncate time** (line 376)
@@ -7221,7 +6852,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal9.feature:369:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalTime { nanos_si
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: time.truncate(): truncate expects a time string"
   ... (truncated)
   ```
 - **[5] Should truncate time** (line 377)
@@ -7229,23 +6860,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal9.feature:369:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalTime { nanos_si
-  ... (truncated)
-  ```
-- **[5] Should truncate time** (line 378)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:369:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalTime { nanos_si
-  ... (truncated)
-  ```
-- **[5] Should truncate time** (line 379)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:369:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalTime { nanos_si
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: time.truncate(): truncate expects a time string"
   ... (truncated)
   ```
 - **[5] Should truncate time** (line 380)
@@ -7253,7 +6868,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal9.feature:369:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalTime { nanos_si
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: time.truncate(): truncate expects a time string"
   ... (truncated)
   ```
 - **[5] Should truncate time** (line 381)
@@ -7261,7 +6876,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal9.feature:369:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalTime { nanos_si
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: time.truncate(): truncate expects a time string"
   ... (truncated)
   ```
 - **[5] Should truncate time** (line 382)
@@ -7269,55 +6884,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal9.feature:369:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalTime { nanos_si
-  ... (truncated)
-  ```
-- **[5] Should truncate time** (line 383)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:369:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalTime { nanos_si
-  ... (truncated)
-  ```
-- **[5] Should truncate time** (line 384)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:369:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalTime { nanos_si
-  ... (truncated)
-  ```
-- **[5] Should truncate time** (line 385)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:369:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalTime { nanos_si
-  ... (truncated)
-  ```
-- **[5] Should truncate time** (line 386)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:369:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalTime { nanos_si
-  ... (truncated)
-  ```
-- **[5] Should truncate time** (line 387)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:369:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalTime { nanos_si
-  ... (truncated)
-  ```
-- **[5] Should truncate time** (line 388)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:369:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalTime { nanos_si
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: time.truncate(): truncate expects a time string"
   ... (truncated)
   ```
 - **[5] Should truncate time** (line 389)
@@ -7325,7 +6892,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal9.feature:369:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalTime { nanos_si
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: time.truncate(): truncate expects a time string"
   ... (truncated)
   ```
 - **[5] Should truncate time** (line 390)
@@ -7333,7 +6900,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal9.feature:369:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalTime { nanos_si
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: time.truncate(): truncate expects a time string"
   ... (truncated)
   ```
 - **[5] Should truncate time** (line 391)
@@ -7341,7 +6908,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal9.feature:369:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalTime { nanos_si
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: time.truncate(): truncate expects a time string"
   ... (truncated)
   ```
 - **[5] Should truncate time** (line 392)
@@ -7349,7 +6916,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal9.feature:369:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalTime { nanos_si
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: time.truncate(): truncate expects a time string"
   ... (truncated)
   ```
 - **[5] Should truncate time** (line 393)
@@ -7357,39 +6924,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal9.feature:369:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalTime { nanos_si
-  ... (truncated)
-  ```
-- **[5] Should truncate time** (line 394)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:369:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalTime { nanos_si
-  ... (truncated)
-  ```
-- **[5] Should truncate time** (line 395)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:369:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalTime { nanos_si
-  ... (truncated)
-  ```
-- **[5] Should truncate time** (line 396)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:369:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalTime { nanos_si
-  ... (truncated)
-  ```
-- **[5] Should truncate time** (line 397)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:369:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalTime { nanos_si
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: time.truncate(): truncate expects a time string"
   ... (truncated)
   ```
 - **[5] Should truncate time** (line 398)
@@ -7397,7 +6932,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal9.feature:369:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalTime { nanos_si
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: time.truncate(): truncate expects a time string"
   ... (truncated)
   ```
 - **[5] Should truncate time** (line 399)
@@ -7405,7 +6940,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal9.feature:369:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalTime { nanos_si
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: time.truncate(): truncate expects a time string"
   ... (truncated)
   ```
 - **[5] Should truncate time** (line 400)
@@ -7413,7 +6948,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal9.feature:369:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalTime { nanos_si
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: time.truncate(): truncate expects a time string"
   ... (truncated)
   ```
 - **[5] Should truncate time** (line 401)
@@ -7421,39 +6956,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal9.feature:369:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalTime { nanos_si
-  ... (truncated)
-  ```
-- **[5] Should truncate time** (line 402)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:369:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalTime { nanos_si
-  ... (truncated)
-  ```
-- **[5] Should truncate time** (line 403)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:369:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalTime { nanos_si
-  ... (truncated)
-  ```
-- **[5] Should truncate time** (line 404)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:369:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalTime { nanos_si
-  ... (truncated)
-  ```
-- **[5] Should truncate time** (line 405)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:369:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalTime { nanos_si
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: time.truncate(): truncate expects a time string"
   ... (truncated)
   ```
 - **[5] Should truncate time** (line 406)
@@ -7461,7 +6964,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal9.feature:369:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalTime { nanos_si
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: time.truncate(): truncate expects a time string"
   ... (truncated)
   ```
 - **[5] Should truncate time** (line 407)
@@ -7469,7 +6972,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal9.feature:369:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalTime { nanos_si
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: time.truncate(): truncate expects a time string"
   ... (truncated)
   ```
 - **[5] Should truncate time** (line 408)
@@ -7477,7 +6980,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal9.feature:369:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalTime { nanos_si
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: time.truncate(): truncate expects a time string"
   ... (truncated)
   ```
 - **[5] Should truncate time** (line 409)
@@ -7485,39 +6988,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal9.feature:369:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalTime { nanos_si
-  ... (truncated)
-  ```
-- **[5] Should truncate time** (line 410)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:369:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalTime { nanos_si
-  ... (truncated)
-  ```
-- **[5] Should truncate time** (line 411)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:369:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalTime { nanos_si
-  ... (truncated)
-  ```
-- **[5] Should truncate time** (line 412)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:369:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalTime { nanos_si
-  ... (truncated)
-  ```
-- **[5] Should truncate time** (line 413)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:369:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalTime { nanos_si
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: time.truncate(): truncate expects a time string"
   ... (truncated)
   ```
 - **[5] Should truncate time** (line 414)
@@ -7525,7 +6996,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal9.feature:369:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalTime { nanos_si
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: time.truncate(): truncate expects a time string"
   ... (truncated)
   ```
 - **[5] Should truncate time** (line 415)
@@ -7533,7 +7004,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal9.feature:369:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalTime { nanos_si
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: time.truncate(): truncate expects a time string"
   ... (truncated)
   ```
 - **[5] Should truncate time** (line 416)
@@ -7541,7 +7012,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal9.feature:369:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalTime { nanos_si
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: time.truncate(): truncate expects a time string"
   ... (truncated)
   ```
 - **[5] Should truncate time** (line 417)
@@ -7549,39 +7020,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal9.feature:369:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalTime { nanos_si
-  ... (truncated)
-  ```
-- **[5] Should truncate time** (line 418)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:369:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalTime { nanos_si
-  ... (truncated)
-  ```
-- **[5] Should truncate time** (line 419)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:369:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalTime { nanos_si
-  ... (truncated)
-  ```
-- **[5] Should truncate time** (line 420)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:369:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalTime { nanos_si
-  ... (truncated)
-  ```
-- **[5] Should truncate time** (line 421)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal9.feature:369:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalTime { nanos_si
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: time.truncate(): truncate expects a time string"
   ... (truncated)
   ```
 - **[5] Should truncate time** (line 422)
@@ -7589,7 +7028,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal9.feature:369:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalTime { nanos_si
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: time.truncate(): truncate expects a time string"
   ... (truncated)
   ```
 - **[5] Should truncate time** (line 423)
@@ -7597,7 +7036,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal9.feature:369:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Temporal(LocalTime { nanos_si
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: time.truncate(): truncate expects a time string"
   ... (truncated)
   ```
 
@@ -8101,7 +7540,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:662:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("a", Some(Node(Node { vid: Vid(3), labels
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("name", Some(String("sit"))), ("a", Some(
   ... (truncated)
   ```
 - **[29] Sort by a string variable projected from a node property in ascending order** (line 672)
@@ -8117,7 +7556,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:662:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("name", Some(String("sit"))), ("a", Some(
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("a", Some(Node(Node { vid: Vid(3), labels
   ... (truncated)
   ```
 - **[30] Sort by a string variable projected from a node property in descending order** (line 703)
@@ -8125,7 +7564,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:694:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 2. Actual values: [("a", Some(Node(Node { vid: Vid(2), labels
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 2. Actual values: [("name", Some(String("dolor"))), ("a", Som
   ... (truncated)
   ```
 - **[30] Sort by a string variable projected from a node property in descending order** (line 704)
@@ -8133,7 +7572,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:694:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 2. Actual values: [("a", Some(Node(Node { vid: Vid(2), labels
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 2. Actual values: [("name", Some(String("dolor"))), ("a", Som
   ... (truncated)
   ```
 - **[31] Sort by a list variable projected from a node property in ascending order** (line 734)
@@ -8205,7 +7644,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:883:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 2. Actual values: [("time", Some(String("12:30:14.645876123")
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 2. Actual values: [("a", Some(Node(Node { vid: Vid(3), labels
   ... (truncated)
   ```
 - **[36] Sort by a local time variable projected from a node property in descending order** (line 893)
@@ -8213,7 +7652,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:883:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 2. Actual values: [("a", Some(Node(Node { vid: Vid(3), labels
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 2. Actual values: [("time", Some(String("12:30:14.645876123")
   ... (truncated)
   ```
 - **[37] Sort by a time variable projected from a node property in ascending order** (line 923)
@@ -8221,7 +7660,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:914:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("a", Some(Node(Node { vid: Vid(0), labels
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("time", Some(String("10:35-08:00"))), ("a
   ... (truncated)
   ```
 - **[37] Sort by a time variable projected from a node property in ascending order** (line 924)
@@ -8253,7 +7692,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:946:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 2. Actual values: [("time", Some(String("12:30:14.645876123+0
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 2. Actual values: [("a", Some(Node(Node { vid: Vid(4), labels
   ... (truncated)
   ```
 - **[39] Sort by a local date time variable projected from a node property in ascending order** (line 986)
@@ -8261,7 +7700,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:977:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("datetime", Some(String("1970-01-01T00:00
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("a", Some(Node(Node { vid: Vid(2), labels
   ... (truncated)
   ```
 - **[39] Sort by a local date time variable projected from a node property in ascending order** (line 987)
@@ -8269,7 +7708,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:977:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("a", Some(Node(Node { vid: Vid(2), labels
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("datetime", Some(String("1970-01-01T00:00
   ... (truncated)
   ```
 - **[39] Sort by a local date time variable projected from a node property in ascending order** (line 988)
@@ -8293,7 +7732,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:1009:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 2. Actual values: [("a", Some(Node(Node { vid: Vid(4), label
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 2. Actual values: [("datetime", Some(String("1980-12-11T12:3
   ... (truncated)
   ```
 - **[41] Sort by a date time variable projected from a node property in ascending order** (line 1049)
@@ -8301,7 +7740,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:1040:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("datetime", Some(String("1969-12-31T12:0
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("a", Some(Node(Node { vid: Vid(2), label
   ... (truncated)
   ```
 - **[41] Sort by a date time variable projected from a node property in ascending order** (line 1050)
@@ -8309,7 +7748,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:1040:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("a", Some(Node(Node { vid: Vid(2), label
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("datetime", Some(String("1969-12-31T12:0
   ... (truncated)
   ```
 - **[41] Sort by a date time variable projected from a node property in ascending order** (line 1051)
@@ -8317,7 +7756,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:1040:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("a", Some(Node(Node { vid: Vid(2), label
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("datetime", Some(String("1969-12-31T12:0
   ... (truncated)
   ```
 - **[42] Sort by a date time variable projected from a node property in descending order** (line 1081)
@@ -8397,7 +7836,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:1137:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: ArgumentError: InvalidArgumentType - range()
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: InvalidArgumentValue: toboolean(): cannot co
   ... (truncated)
   ```
 - **[45] Sort order should be consistent with comparisons where comparisons are defined #Example: localdatetimes** (line 1152)
@@ -8413,7 +7852,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:1137:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: ArgumentError: InvalidArgumentType - range()
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: InvalidArgumentValue: toboolean(): cannot co
   ... (truncated)
   ```
 

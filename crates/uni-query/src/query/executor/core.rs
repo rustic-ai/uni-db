@@ -84,8 +84,14 @@ impl Accumulator {
             "MAX" => Accumulator::Max(None),
             "AVG" => Accumulator::Avg { sum: 0.0, count: 0 },
             "COLLECT" => Accumulator::Collect(Vec::new()),
-            "PERCENTILEDISC" => Accumulator::PercentileDisc { values: Vec::new(), percentile },
-            "PERCENTILECONT" => Accumulator::PercentileCont { values: Vec::new(), percentile },
+            "PERCENTILEDISC" => Accumulator::PercentileDisc {
+                values: Vec::new(),
+                percentile,
+            },
+            "PERCENTILECONT" => Accumulator::PercentileCont {
+                values: Vec::new(),
+                percentile,
+            },
             _ => Accumulator::Count(0),
         }
     }

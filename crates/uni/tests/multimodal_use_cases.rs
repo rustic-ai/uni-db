@@ -65,7 +65,9 @@ async fn test_regional_sales_analytics() -> anyhow::Result<()> {
             Arc::new(StringArray::from(vec![None::<&str>; 1])), // ext_id
             // _labels
             {
-                let mut lb = arrow_array::builder::ListBuilder::new(arrow_array::builder::StringBuilder::new());
+                let mut lb = arrow_array::builder::ListBuilder::new(
+                    arrow_array::builder::StringBuilder::new(),
+                );
                 lb.values().append_value("Region");
                 lb.append(true);
                 Arc::new(lb.finish())
@@ -110,7 +112,9 @@ async fn test_regional_sales_analytics() -> anyhow::Result<()> {
             Arc::new(StringArray::from(vec![None::<&str>; num_orders])), // ext_id
             // _labels
             {
-                let mut lb = arrow_array::builder::ListBuilder::new(arrow_array::builder::StringBuilder::new());
+                let mut lb = arrow_array::builder::ListBuilder::new(
+                    arrow_array::builder::StringBuilder::new(),
+                );
                 for _ in 0..num_orders {
                     lb.values().append_value("Order");
                     lb.append(true);
@@ -336,7 +340,9 @@ async fn test_document_knowledge_graph() -> anyhow::Result<()> {
             Arc::new(StringArray::from(vec![None::<&str>; 3])), // ext_id
             // _labels
             {
-                let mut lb = arrow_array::builder::ListBuilder::new(arrow_array::builder::StringBuilder::new());
+                let mut lb = arrow_array::builder::ListBuilder::new(
+                    arrow_array::builder::StringBuilder::new(),
+                );
                 for _ in 0..3 {
                     lb.values().append_value("Paper");
                     lb.append(true);
