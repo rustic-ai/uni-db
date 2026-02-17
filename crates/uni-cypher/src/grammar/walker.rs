@@ -723,6 +723,7 @@ fn build_comparison_expression(pair: Pair<Rule>) -> Result<Expr, ParseError> {
 
     let mut operands = vec![first];
     let mut ops = vec![];
+    let mut last_was_predicate = false;
 
     for tail in tails {
         let mut tail_inner = tail.into_inner();
@@ -741,17 +742,33 @@ fn build_comparison_expression(pair: Pair<Rule>) -> Result<Expr, ParseError> {
         };
 
         if let Some(op) = chain_op {
-            // It is a chainable operator.
+            // Chainable comparison operator resets the predicate flag.
             let rhs = build_expression(tail_inner.next().unwrap())?;
             ops.push(op);
             operands.push(rhs);
+            last_was_predicate = false;
         } else {
-            // It is a non-chainable operator (IS NULL, IN, etc.)
+            // Non-chainable operator (IS NULL, IN, STARTS WITH, etc.)
+            // Label predicates (identifier_or_keyword) are allowed to stack (a:A:B).
+            let is_label = rule == Rule::identifier_or_keyword;
+
+            if last_was_predicate && !is_label {
+                return Err(ParseError::new(
+                    "InvalidPredicateChain: cannot stack multiple predicates \
+                     without a comparison operator between them"
+                        .to_string(),
+                ));
+            }
+
             // Apply it to the LAST operand in the list.
             let last_idx = operands.len() - 1;
             let last = operands.remove(last_idx);
             let modified = apply_tail_to_expr(last, rule, op_pair, tail_inner)?;
+
+            // Label checks are allowed to stack; other predicates set the flag.
+            let produced_label = matches!(&modified, Expr::LabelCheck { .. });
             operands.push(modified);
+            last_was_predicate = !produced_label;
         }
     }
 
@@ -895,29 +912,46 @@ fn negate_expression(expr: Expr) -> Expr {
 
 fn build_unary_expression(pair: Pair<Rule>) -> Result<Expr, ParseError> {
     let mut inner = pair.into_inner().peekable();
-    let neg = if inner
+    let mut neg_count = 0u32;
+
+    // Consume leading plus/minus tokens
+    while inner
         .peek()
-        .map(|p| p.as_rule() == Rule::minus)
+        .map(|p| matches!(p.as_rule(), Rule::minus | Rule::plus))
         .unwrap_or(false)
     {
-        inner.next();
-        true
-    } else {
-        false
-    };
+        let p = inner.next().unwrap();
+        if p.as_rule() == Rule::minus {
+            neg_count += 1;
+        }
+        // plus is identity — skip
+    }
+
     let mut expr = build_expression(inner.next().unwrap())?;
-    if neg {
-        expr = negate_expression(expr);
-    } else {
-        // Validation: If we have a positive integer literal that equals i64::MIN,
-        // it means we parsed a magnitude of i64::MAX + 1 (9223372036854775808).
-        // Since it wasn't negated, this is a positive overflow.
+
+    if neg_count == 0 {
+        // No negation: validate no bare overflow literal
         if let Expr::Literal(CypherLiteral::Integer(i64::MIN)) = expr {
             return Err(ParseError::new(
                 "IntegerOverflow: value too large".to_string(),
             ));
         }
+    } else {
+        // Apply negate_expression for each minus
+        for _ in 0..neg_count {
+            expr = negate_expression(expr);
+        }
+        // Even negation count on the boundary value wraps back to i64::MIN,
+        // which came from parsing a magnitude that was already overflowed.
+        if neg_count.is_multiple_of(2)
+            && matches!(expr, Expr::Literal(CypherLiteral::Integer(i64::MIN)))
+        {
+            return Err(ParseError::new(
+                "IntegerOverflow: value too large".to_string(),
+            ));
+        }
     }
+
     Ok(expr)
 }
 

@@ -439,6 +439,20 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
             }
         }
 
+        // XOR and Pow: always route through compile_standard.
+        // compile_binary_op does not support these operators. The standard path
+        // correctly maps XOR → _cypher_xor UDF and Pow → power() function.
+        if matches!(op, BinaryOp::Xor | BinaryOp::Pow) {
+            return self.compile_standard(
+                &Expr::BinaryOp {
+                    left: Box::new(left.clone()),
+                    op: *op,
+                    right: Box::new(right.clone()),
+                },
+                input_schema,
+            );
+        }
+
         if Self::contains_custom_expr(left) || Self::contains_custom_expr(right) {
             let left_phy = self.compile(left, input_schema)?;
             let right_phy = self.compile(right, input_schema)?;

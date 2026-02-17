@@ -313,7 +313,7 @@ multiplicative_expression = { power_expression ~ ((star | slash | percent) ~ pow
 
 power_expression = { unary_expression ~ (caret ~ unary_expression)* }
 
-unary_expression = { minus? ~ postfix_expression }
+unary_expression = { (plus | minus)* ~ postfix_expression }
 
 postfix_expression = { primary_expression ~ postfix_suffix* }
 

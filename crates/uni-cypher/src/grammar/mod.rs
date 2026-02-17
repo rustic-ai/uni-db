@@ -334,4 +334,152 @@ mod tests {
             "expected UnexpectedSyntax, got: {msg}"
         );
     }
+
+    #[test]
+    fn test_unary_minus_double() {
+        use crate::ast::{CypherLiteral, Expr};
+        // --5 → Integer(5)
+        let expr = parse_expression("--5").expect("--5 should parse");
+        assert_eq!(expr, Expr::Literal(CypherLiteral::Integer(5)));
+    }
+
+    #[test]
+    fn test_unary_minus_single() {
+        use crate::ast::{CypherLiteral, Expr};
+        // -5 → Integer(-5)
+        let expr = parse_expression("-5").expect("-5 should parse");
+        assert_eq!(expr, Expr::Literal(CypherLiteral::Integer(-5)));
+    }
+
+    #[test]
+    fn test_unary_minus_triple() {
+        use crate::ast::{CypherLiteral, Expr};
+        // ---5 → Integer(-5)
+        let expr = parse_expression("---5").expect("---5 should parse");
+        assert_eq!(expr, Expr::Literal(CypherLiteral::Integer(-5)));
+    }
+
+    #[test]
+    fn test_unary_plus_identity() {
+        use crate::ast::{CypherLiteral, Expr};
+        // +5 → Integer(5)
+        let expr = parse_expression("+5").expect("+5 should parse");
+        assert_eq!(expr, Expr::Literal(CypherLiteral::Integer(5)));
+    }
+
+    #[test]
+    fn test_unary_plus_minus() {
+        use crate::ast::{CypherLiteral, Expr};
+        // +-5 → Integer(-5)
+        let expr = parse_expression("+-5").expect("+-5 should parse");
+        assert_eq!(expr, Expr::Literal(CypherLiteral::Integer(-5)));
+    }
+
+    #[test]
+    fn test_unary_minus_plus() {
+        use crate::ast::{CypherLiteral, Expr};
+        // -+5 → Integer(-5)
+        let expr = parse_expression("-+5").expect("-+5 should parse");
+        assert_eq!(expr, Expr::Literal(CypherLiteral::Integer(-5)));
+    }
+
+    #[test]
+    fn test_unary_double_minus_overflow() {
+        // --9223372036854775808 → overflow error
+        let result = parse_expression("--9223372036854775808");
+        assert!(
+            result.is_err(),
+            "expected overflow error, got: {:?}",
+            result
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("IntegerOverflow"),
+            "expected IntegerOverflow, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_unary_minus_i64_min() {
+        use crate::ast::{CypherLiteral, Expr};
+        // -9223372036854775808 → Integer(i64::MIN) (valid)
+        let expr = parse_expression("-9223372036854775808").expect("-i64::MIN should parse");
+        assert_eq!(expr, Expr::Literal(CypherLiteral::Integer(i64::MIN)));
+    }
+
+    #[test]
+    fn test_stacked_predicates_is_null_is_not_null() {
+        // x IS NULL IS NOT NULL → error
+        let result = parse("RETURN x IS NULL IS NOT NULL");
+        assert!(
+            result.is_err(),
+            "expected parse error for stacked IS NULL IS NOT NULL"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("InvalidPredicateChain"),
+            "expected InvalidPredicateChain, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_stacked_predicates_starts_with() {
+        // x STARTS WITH 'a' STARTS WITH 'b' → error
+        let result = parse("RETURN x STARTS WITH 'a' STARTS WITH 'b'");
+        assert!(
+            result.is_err(),
+            "expected parse error for stacked STARTS WITH"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("InvalidPredicateChain"),
+            "expected InvalidPredicateChain, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_stacked_predicates_in() {
+        // x IN [1] IN [true] → error
+        let result = parse("RETURN x IN [1] IN [true]");
+        assert!(result.is_err(), "expected parse error for stacked IN");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("InvalidPredicateChain"),
+            "expected InvalidPredicateChain, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_stacked_predicates_contains_ends_with() {
+        // x CONTAINS 'a' ENDS WITH 'b' → error
+        let result = parse("RETURN x CONTAINS 'a' ENDS WITH 'b'");
+        assert!(
+            result.is_err(),
+            "expected parse error for stacked CONTAINS/ENDS WITH"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("InvalidPredicateChain"),
+            "expected InvalidPredicateChain, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_label_stacking_allowed() {
+        // x :Person :Employee → OK (label stacking is valid)
+        // Note: label predicates in comparison context are valid
+        assert!(
+            parse("MATCH (x) WHERE x:Person:Employee RETURN x").is_ok(),
+            "label stacking should be allowed"
+        );
+    }
+
+    #[test]
+    fn test_range_chaining_allowed() {
+        // 1 < n.num < 3 → OK (required by TCK Comparison3)
+        assert!(
+            parse("MATCH (n) WHERE 1 < n.num < 3 RETURN n").is_ok(),
+            "range chaining 1 < n.num < 3 should be allowed"
+        );
+    }
 }
