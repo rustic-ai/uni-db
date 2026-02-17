@@ -19,9 +19,25 @@ async fn test_numeric_equality() {
 async fn test_cross_type_equality() {
     let db = Uni::in_memory().build().await.unwrap();
 
-    // Per openCypher spec: comparing incompatible types returns null (three-valued logic),
-    // not false. RETURN 1 = '1' AS val -> null
+    // Per CIP2016-06-14: Eq on incompatible types returns false (not null) when neither
+    // operand is null — we *know* they are not equal, so null ("unknown") is wrong.
+    // Null propagates only when an operand IS null (handled separately).
     let result = db.query("RETURN 1 = '1' AS val").await.unwrap();
+    let val = result.rows[0].value("val").unwrap();
+    assert_eq!(val, &Value::Bool(false));
+
+    // NotEq on incompatible types → true (definitively not equal).
+    let result = db.query("RETURN 1 <> '1' AS val").await.unwrap();
+    let val = result.rows[0].value("val").unwrap();
+    assert_eq!(val, &Value::Bool(true));
+
+    // Ordering on incompatible types → null (order is undefined).
+    let result = db.query("RETURN 1 < '1' AS val").await.unwrap();
+    let val = result.rows[0].value("val").unwrap();
+    assert_eq!(val, &Value::Null);
+
+    // Null operand still propagates null.
+    let result = db.query("RETURN null = 1 AS val").await.unwrap();
     let val = result.rows[0].value("val").unwrap();
     assert_eq!(val, &Value::Null);
 }

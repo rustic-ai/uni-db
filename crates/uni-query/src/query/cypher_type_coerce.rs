@@ -5,7 +5,7 @@
 //!
 //! This module implements Cypher's type coercion semantics for all expression types.
 //! It rewrites DataFusion logical expressions to handle cross-type operations correctly:
-//! - Cross-type comparisons return `null` (not Arrow errors)
+//! - Cross-type ordering comparisons return `null`; Eq/NotEq return false/true
 //! - Numeric types are widened automatically
 //! - CASE expressions with cross-type operands use equality semantics
 //! - Temporal types are normalized to UTC for comparison
@@ -43,7 +43,9 @@ pub(crate) enum TypeCompat {
     BooleanCompat,
     /// One or both sides are null type.
     NullInvolved,
-    /// Types belong to different compatibility classes. Comparison → null.
+    /// Types belong to different compatibility classes.
+    /// Per CIP2016-06-14: Eq/NotEq → false/true (definitively not equal),
+    /// ordering operators (<, <=, >, >=) → null (order undefined).
     Incomparable,
     /// At least one side has unknown/dynamic type. Need runtime UDF.
     Dynamic,
@@ -140,7 +142,9 @@ pub(crate) fn is_string_type(dt: &DataType) -> bool {
 /// Handles cross-type comparisons according to Cypher semantics:
 /// - Compatible types: native Arrow comparison (with widening if needed)
 /// - Temporal types: compare by UTC-normalized nanoseconds
-/// - Null or incomparable types: return `null` (per openCypher CIP2016-06-14)
+/// - Null involved: return `null` (per openCypher CIP2016-06-14)
+/// - Incomparable types: `Eq` → `false`, `NotEq` → `true`, ordering → `null`
+///   (CIP2016-06-14: cross-type equality is definitively false when neither operand is null)
 /// - Dynamic types: delegate to runtime UDF
 ///
 /// Works for all comparison operators: Eq, NotEq, Lt, LtEq, Gt, GtEq.
@@ -170,7 +174,15 @@ pub(crate) fn build_cypher_comparison(
             let right_nanos = super::df_expr::extract_time_nanos(right);
             binary_expr(left_nanos, op, right_nanos)
         }
-        NullInvolved | Incomparable => lit(ScalarValue::Boolean(None)),
+        NullInvolved => lit(ScalarValue::Boolean(None)),
+        Incomparable => match op {
+            // CIP2016-06-14: neither operand is null, so the answer is
+            // known — cross-type values are definitively not equal.
+            Operator::Eq => lit(false),
+            Operator::NotEq => lit(true),
+            // Ordering across incompatible type groups is undefined → null.
+            _ => lit(ScalarValue::Boolean(None)),
+        },
         Dynamic => {
             let udf_name = super::df_expr::comparison_udf_name(op)
                 .expect("comparison operator should have UDF mapping");
@@ -645,16 +657,73 @@ mod tests {
     }
 
     #[test]
-    fn test_build_cypher_comparison_incomparable_returns_null() {
+    fn test_build_cypher_comparison_incomparable_eq_returns_false() {
+        // CIP2016-06-14: cross-type Eq is definitively false, not null.
         let left = lit(ScalarValue::Utf8(Some("hello".to_string())));
         let right = lit(ScalarValue::Int64(Some(42)));
         let result =
             build_cypher_comparison(left, &DataType::Utf8, right, &DataType::Int64, Operator::Eq);
-
-        // Should return null literal
         match result {
-            DfExpr::Literal(ScalarValue::Boolean(None), _) => {} // Success
-            _ => panic!("Expected null literal for incomparable types"),
+            DfExpr::Literal(ScalarValue::Boolean(Some(false)), _) => {}
+            _ => panic!(
+                "Expected false literal for incomparable Eq, got {:?}",
+                result
+            ),
+        }
+    }
+
+    #[test]
+    fn test_build_cypher_comparison_incomparable_not_eq_returns_true() {
+        let left = lit(ScalarValue::Utf8(Some("hello".to_string())));
+        let right = lit(ScalarValue::Int64(Some(42)));
+        let result = build_cypher_comparison(
+            left,
+            &DataType::Utf8,
+            right,
+            &DataType::Int64,
+            Operator::NotEq,
+        );
+        match result {
+            DfExpr::Literal(ScalarValue::Boolean(Some(true)), _) => {}
+            _ => panic!(
+                "Expected true literal for incomparable NotEq, got {:?}",
+                result
+            ),
+        }
+    }
+
+    #[test]
+    fn test_build_cypher_comparison_incomparable_ordering_returns_null() {
+        // Ordering across incompatible type groups is undefined → null.
+        for op in [Operator::Lt, Operator::LtEq, Operator::Gt, Operator::GtEq] {
+            let left = lit(ScalarValue::Utf8(Some("hello".to_string())));
+            let right = lit(ScalarValue::Int64(Some(42)));
+            let result =
+                build_cypher_comparison(left, &DataType::Utf8, right, &DataType::Int64, op);
+            match result {
+                DfExpr::Literal(ScalarValue::Boolean(None), _) => {}
+                _ => panic!(
+                    "Expected null for incomparable ordering op {:?}, got {:?}",
+                    op, result
+                ),
+            }
+        }
+    }
+
+    #[test]
+    fn test_build_cypher_comparison_list_vs_bool_eq_returns_false() {
+        // Covers Precedence3 [6]: `[1, 2] = ([3, 4] IN [[3, 4], false])`
+        // The IN expr returns Boolean; comparing List with Boolean is Incomparable → false.
+        use datafusion::arrow::datatypes::Field;
+        use std::sync::Arc;
+        let list_type = DataType::List(Arc::new(Field::new("item", DataType::Int64, true)));
+        let left = lit(ScalarValue::Null); // placeholder — type is what matters
+        let right = lit(ScalarValue::Boolean(Some(true)));
+        let result =
+            build_cypher_comparison(left, &list_type, right, &DataType::Boolean, Operator::Eq);
+        match result {
+            DfExpr::Literal(ScalarValue::Boolean(Some(false)), _) => {}
+            _ => panic!("Expected false for List vs Boolean Eq, got {:?}", result),
         }
     }
 

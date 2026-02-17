@@ -2608,6 +2608,28 @@ pub fn apply_type_coercion(expr: &DfExpr, schema: &datafusion::common::DFSchema)
                         .expect("Eq|NotEq is always a valid comparison operator");
                     return Ok(dummy_udf_expr(udf_name, vec![left, right]));
                 }
+
+                // 7. Cross-type comparison: List vs non-List (both-List cases handled above).
+                // DataFusion cannot compare a List with a non-List type — it fails at planning
+                // time with "Cannot infer common argument type for comparison operation List(...)".
+                // Per CIP2016-06-14: cross-type Eq/NotEq are definitively false/true (not null),
+                // since neither operand is null. Ordering → null (undefined across type groups).
+                // Exception: if the non-list side has DataType::Null, leave it for DataFusion's
+                // null-propagation rules.
+                let left_is_list = matches!(left_type, DataType::List(_) | DataType::LargeList(_));
+                let right_is_list =
+                    matches!(right_type, DataType::List(_) | DataType::LargeList(_));
+                if is_comparison
+                    && (left_is_list != right_is_list)
+                    && !matches!(left_type, DataType::Null)
+                    && !matches!(right_type, DataType::Null)
+                {
+                    return Ok(match binary.op {
+                        Operator::Eq => lit(false),
+                        Operator::NotEq => lit(true),
+                        _ => lit(ScalarValue::Boolean(None)),
+                    });
+                }
             }
 
             Ok(binary_expr(left, binary.op, right))
