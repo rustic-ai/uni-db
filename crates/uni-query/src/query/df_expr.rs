@@ -1760,19 +1760,13 @@ fn translate_list_function(name_upper: &str, df_args: Vec<DfExpr>) -> Option<Res
             if let Err(e) = require_arg(&df_args, "head") {
                 return Some(Err(e));
             }
-            Some(Ok(datafusion::functions_nested::expr_fn::array_element(
-                first_arg(&df_args),
-                lit(1i64),
-            )))
+            Some(Ok(dummy_udf_expr("head", df_args)))
         }
         "LAST" => {
             if let Err(e) = require_arg(&df_args, "last") {
                 return Some(Err(e));
             }
-            Some(Ok(datafusion::functions_nested::expr_fn::array_element(
-                first_arg(&df_args),
-                lit(-1i64),
-            )))
+            Some(Ok(dummy_udf_expr("last", df_args)))
         }
         "TAIL" => {
             if let Err(e) = require_arg(&df_args, "tail") {

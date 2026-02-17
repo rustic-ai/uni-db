@@ -479,8 +479,279 @@ fn validate_expression_variables(expr: &Expr, vars_in_scope: &[VariableInfo]) ->
 fn is_aggregate_function_name(name: &str) -> bool {
     matches!(
         name.to_lowercase().as_str(),
-        "count" | "sum" | "avg" | "min" | "max" | "collect" | "stdev" | "stdevp"
+        "count"
+            | "sum"
+            | "avg"
+            | "min"
+            | "max"
+            | "collect"
+            | "stdev"
+            | "stdevp"
+            | "percentiledisc"
+            | "percentilecont"
     )
+}
+
+/// Returns true if the expression is a window function (FunctionCall with window_spec).
+fn is_window_function(expr: &Expr) -> bool {
+    matches!(
+        expr,
+        Expr::FunctionCall {
+            window_spec: Some(_),
+            ..
+        }
+    )
+}
+
+/// Returns true when `expr` reports `is_aggregate()` but is NOT itself a bare
+/// aggregate FunctionCall (or CountSubquery/CollectSubquery). In other words,
+/// the aggregate lives *inside* a wrapper expression (e.g. a ListComprehension,
+/// size() call, BinaryOp, etc.).
+fn is_compound_aggregate(expr: &Expr) -> bool {
+    if !expr.is_aggregate() {
+        return false;
+    }
+    match expr {
+        Expr::FunctionCall {
+            name, window_spec, ..
+        } => {
+            // A bare aggregate FunctionCall is NOT compound
+            if window_spec.is_some() {
+                return true; // window wrapping an aggregate — treat as compound
+            }
+            !is_aggregate_function_name(name)
+        }
+        // Subquery aggregates are "bare" (not compound)
+        Expr::CountSubquery(_) | Expr::CollectSubquery(_) => false,
+        // Everything else (ListComprehension, BinaryOp, etc.) is compound
+        _ => true,
+    }
+}
+
+/// Recursively collect all bare aggregate FunctionCall sub-expressions from
+/// `expr`. Stops recursing into the *arguments* of an aggregate (we only want
+/// the outermost aggregate boundaries).
+///
+/// For `ListComprehension`, `Quantifier`, and `Reduce`, only the `list` field
+/// is searched because the body (`map_expr`, `predicate`, `expr`) references
+/// the loop variable, not outer-scope aggregates.
+fn extract_inner_aggregates(expr: &Expr) -> Vec<Expr> {
+    let mut out = Vec::new();
+    extract_inner_aggregates_rec(expr, &mut out);
+    out
+}
+
+fn extract_inner_aggregates_rec(expr: &Expr, out: &mut Vec<Expr>) {
+    match expr {
+        Expr::FunctionCall {
+            name, window_spec, ..
+        } if window_spec.is_none() && is_aggregate_function_name(name) => {
+            // Found a bare aggregate — collect it and stop recursing
+            out.push(expr.clone());
+        }
+        Expr::CountSubquery(_) | Expr::CollectSubquery(_) => {
+            out.push(expr.clone());
+        }
+        // For list comprehension, only search the `list` source for aggregates
+        Expr::ListComprehension { list, .. } => {
+            extract_inner_aggregates_rec(list, out);
+        }
+        // For quantifier, only search the `list` source
+        Expr::Quantifier { list, .. } => {
+            extract_inner_aggregates_rec(list, out);
+        }
+        // For reduce, search `init` and `list` (not the body `expr`)
+        Expr::Reduce { init, list, .. } => {
+            extract_inner_aggregates_rec(init, out);
+            extract_inner_aggregates_rec(list, out);
+        }
+        // Standard recursive cases
+        Expr::FunctionCall { args, .. } => {
+            for arg in args {
+                extract_inner_aggregates_rec(arg, out);
+            }
+        }
+        Expr::BinaryOp { left, right, .. } => {
+            extract_inner_aggregates_rec(left, out);
+            extract_inner_aggregates_rec(right, out);
+        }
+        Expr::UnaryOp { expr: e, .. }
+        | Expr::IsNull(e)
+        | Expr::IsNotNull(e)
+        | Expr::IsUnique(e) => extract_inner_aggregates_rec(e, out),
+        Expr::Property(base, _) => extract_inner_aggregates_rec(base, out),
+        Expr::List(items) => {
+            for item in items {
+                extract_inner_aggregates_rec(item, out);
+            }
+        }
+        Expr::Case {
+            expr: case_expr,
+            when_then,
+            else_expr,
+        } => {
+            if let Some(e) = case_expr {
+                extract_inner_aggregates_rec(e, out);
+            }
+            for (w, t) in when_then {
+                extract_inner_aggregates_rec(w, out);
+                extract_inner_aggregates_rec(t, out);
+            }
+            if let Some(e) = else_expr {
+                extract_inner_aggregates_rec(e, out);
+            }
+        }
+        Expr::In {
+            expr: in_expr,
+            list,
+        } => {
+            extract_inner_aggregates_rec(in_expr, out);
+            extract_inner_aggregates_rec(list, out);
+        }
+        Expr::ArrayIndex { array, index } => {
+            extract_inner_aggregates_rec(array, out);
+            extract_inner_aggregates_rec(index, out);
+        }
+        Expr::ArraySlice { array, start, end } => {
+            extract_inner_aggregates_rec(array, out);
+            if let Some(s) = start {
+                extract_inner_aggregates_rec(s, out);
+            }
+            if let Some(e) = end {
+                extract_inner_aggregates_rec(e, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Return a copy of `expr` with every inner aggregate FunctionCall replaced by
+/// `Expr::Variable(aggregate_column_name(agg))`.
+///
+/// For `ListComprehension`/`Quantifier`/`Reduce`, only the `list` field is
+/// rewritten (the body references the loop variable, not outer-scope columns).
+fn replace_aggregates_with_columns(expr: &Expr) -> Expr {
+    match expr {
+        Expr::FunctionCall {
+            name, window_spec, ..
+        } if window_spec.is_none() && is_aggregate_function_name(name) => {
+            // Replace bare aggregate with column reference
+            Expr::Variable(aggregate_column_name(expr))
+        }
+        Expr::CountSubquery(_) | Expr::CollectSubquery(_) => {
+            Expr::Variable(aggregate_column_name(expr))
+        }
+        Expr::ListComprehension {
+            variable,
+            list,
+            where_clause,
+            map_expr,
+        } => Expr::ListComprehension {
+            variable: variable.clone(),
+            list: Box::new(replace_aggregates_with_columns(list)),
+            where_clause: where_clause.clone(), // don't touch — references loop var
+            map_expr: map_expr.clone(),          // don't touch — references loop var
+        },
+        Expr::Quantifier {
+            quantifier,
+            variable,
+            list,
+            predicate,
+        } => Expr::Quantifier {
+            quantifier: *quantifier,
+            variable: variable.clone(),
+            list: Box::new(replace_aggregates_with_columns(list)),
+            predicate: predicate.clone(), // don't touch — references loop var
+        },
+        Expr::Reduce {
+            accumulator,
+            init,
+            variable,
+            list,
+            expr: body,
+        } => Expr::Reduce {
+            accumulator: accumulator.clone(),
+            init: Box::new(replace_aggregates_with_columns(init)),
+            variable: variable.clone(),
+            list: Box::new(replace_aggregates_with_columns(list)),
+            expr: body.clone(), // don't touch — references loop var
+        },
+        Expr::FunctionCall {
+            name,
+            args,
+            distinct,
+            window_spec,
+        } => Expr::FunctionCall {
+            name: name.clone(),
+            args: args
+                .iter()
+                .map(replace_aggregates_with_columns)
+                .collect(),
+            distinct: *distinct,
+            window_spec: window_spec.clone(),
+        },
+        Expr::BinaryOp { left, op, right } => Expr::BinaryOp {
+            left: Box::new(replace_aggregates_with_columns(left)),
+            op: *op,
+            right: Box::new(replace_aggregates_with_columns(right)),
+        },
+        Expr::UnaryOp { op, expr: e } => Expr::UnaryOp {
+            op: *op,
+            expr: Box::new(replace_aggregates_with_columns(e)),
+        },
+        Expr::IsNull(e) => Expr::IsNull(Box::new(replace_aggregates_with_columns(e))),
+        Expr::IsNotNull(e) => Expr::IsNotNull(Box::new(replace_aggregates_with_columns(e))),
+        Expr::IsUnique(e) => Expr::IsUnique(Box::new(replace_aggregates_with_columns(e))),
+        Expr::Property(base, prop) => {
+            Expr::Property(Box::new(replace_aggregates_with_columns(base)), prop.clone())
+        }
+        Expr::List(items) => {
+            Expr::List(items.iter().map(replace_aggregates_with_columns).collect())
+        }
+        Expr::Case {
+            expr: case_expr,
+            when_then,
+            else_expr,
+        } => Expr::Case {
+            expr: case_expr
+                .as_ref()
+                .map(|e| Box::new(replace_aggregates_with_columns(e))),
+            when_then: when_then
+                .iter()
+                .map(|(w, t)| {
+                    (
+                        replace_aggregates_with_columns(w),
+                        replace_aggregates_with_columns(t),
+                    )
+                })
+                .collect(),
+            else_expr: else_expr
+                .as_ref()
+                .map(|e| Box::new(replace_aggregates_with_columns(e))),
+        },
+        Expr::In {
+            expr: in_expr,
+            list,
+        } => Expr::In {
+            expr: Box::new(replace_aggregates_with_columns(in_expr)),
+            list: Box::new(replace_aggregates_with_columns(list)),
+        },
+        Expr::ArrayIndex { array, index } => Expr::ArrayIndex {
+            array: Box::new(replace_aggregates_with_columns(array)),
+            index: Box::new(replace_aggregates_with_columns(index)),
+        },
+        Expr::ArraySlice { array, start, end } => Expr::ArraySlice {
+            array: Box::new(replace_aggregates_with_columns(array)),
+            start: start
+                .as_ref()
+                .map(|e| Box::new(replace_aggregates_with_columns(e))),
+            end: end
+                .as_ref()
+                .map(|e| Box::new(replace_aggregates_with_columns(e))),
+        },
+        // Leaf expressions — return as-is
+        other => other.clone(),
+    }
 }
 
 /// Check if an expression contains any aggregate function (recursively).
@@ -514,6 +785,22 @@ fn contains_aggregate_recursive(expr: &Expr) -> bool {
             contains_aggregate_recursive(expr) || contains_aggregate_recursive(list)
         }
         Expr::Property(base, _) => contains_aggregate_recursive(base),
+        Expr::ListComprehension { list, .. } => {
+            // Only check the list source — where_clause/map_expr reference the loop variable
+            contains_aggregate_recursive(list)
+        }
+        Expr::Quantifier { list, .. } => contains_aggregate_recursive(list),
+        Expr::Reduce { init, list, .. } => {
+            contains_aggregate_recursive(init) || contains_aggregate_recursive(list)
+        }
+        Expr::ArrayIndex { array, index } => {
+            contains_aggregate_recursive(array) || contains_aggregate_recursive(index)
+        }
+        Expr::ArraySlice { array, start, end } => {
+            contains_aggregate_recursive(array)
+                || start.as_deref().is_some_and(contains_aggregate_recursive)
+                || end.as_deref().is_some_and(contains_aggregate_recursive)
+        }
         _ => false,
     }
 }
@@ -563,6 +850,29 @@ fn collect_aggregate_reprs(expr: &Expr, out: &mut HashSet<String>) {
             collect_aggregate_reprs(list, out);
         }
         Expr::Property(base, _) => collect_aggregate_reprs(base, out),
+        Expr::ListComprehension { list, .. } => {
+            collect_aggregate_reprs(list, out);
+        }
+        Expr::Quantifier { list, .. } => {
+            collect_aggregate_reprs(list, out);
+        }
+        Expr::Reduce { init, list, .. } => {
+            collect_aggregate_reprs(init, out);
+            collect_aggregate_reprs(list, out);
+        }
+        Expr::ArrayIndex { array, index } => {
+            collect_aggregate_reprs(array, out);
+            collect_aggregate_reprs(index, out);
+        }
+        Expr::ArraySlice { array, start, end } => {
+            collect_aggregate_reprs(array, out);
+            if let Some(s) = start {
+                collect_aggregate_reprs(s, out);
+            }
+            if let Some(e) = end {
+                collect_aggregate_reprs(e, out);
+            }
+        }
         _ => {}
     }
 }
@@ -629,6 +939,18 @@ fn collect_non_aggregate_refs(expr: &Expr, inside_agg: bool, out: &mut Vec<NonAg
         }
         Expr::In { expr, list } => {
             collect_non_aggregate_refs(expr, inside_agg, out);
+            collect_non_aggregate_refs(list, inside_agg, out);
+        }
+        // For ListComprehension/Quantifier/Reduce, only recurse into the `list`
+        // source. The body references the loop variable, not outer-scope vars.
+        Expr::ListComprehension { list, .. } => {
+            collect_non_aggregate_refs(list, inside_agg, out);
+        }
+        Expr::Quantifier { list, .. } => {
+            collect_non_aggregate_refs(list, inside_agg, out);
+        }
+        Expr::Reduce { init, list, .. } => {
+            collect_non_aggregate_refs(init, inside_agg, out);
             collect_non_aggregate_refs(list, inside_agg, out);
         }
         _ => {}
@@ -1803,6 +2125,7 @@ impl QueryPlanner {
         let mut plan = plan;
         let mut group_by = Vec::new();
         let mut aggregates = Vec::new();
+        let mut compound_agg_exprs: Vec<Expr> = Vec::new();
         let mut has_agg = false;
         let mut projections = Vec::new();
         let mut projected_aggregate_reprs: HashSet<String> = HashSet::new();
@@ -1846,10 +2169,25 @@ impl QueryPlanner {
                         }
 
                         projections.push((expr.clone(), alias.clone()));
-                        if expr.is_aggregate() {
+                        if expr.is_aggregate() && !is_compound_aggregate(expr) {
+                            // Bare aggregate — push directly
                             has_agg = true;
                             aggregates.push(expr.clone());
                             projected_aggregate_reprs.insert(expr.to_string_repr());
+                        } else if !is_window_function(expr)
+                            && (expr.is_aggregate() || contains_aggregate_recursive(expr))
+                        {
+                            // Compound aggregate or expression containing aggregates —
+                            // extract the inner bare aggregates for the Aggregate node
+                            has_agg = true;
+                            compound_agg_exprs.push(expr.clone());
+                            for inner in extract_inner_aggregates(expr) {
+                                let repr = inner.to_string_repr();
+                                if !projected_aggregate_reprs.contains(&repr) {
+                                    aggregates.push(inner);
+                                    projected_aggregate_reprs.insert(repr);
+                                }
+                            }
                         } else if !group_by.contains(expr) {
                             group_by.push(expr.clone());
                             if matches!(expr, Expr::Variable(_) | Expr::Property(_, _)) {
@@ -1862,6 +2200,30 @@ impl QueryPlanner {
                         } else if let Expr::Variable(v) = expr {
                             projected_aliases.insert(v.clone());
                         }
+                    }
+                }
+            }
+        }
+
+        // Validate compound aggregate expressions: non-aggregate refs must be
+        // individually present in the group_by as simple variables or properties.
+        if has_agg {
+            let group_by_reprs: HashSet<String> =
+                group_by.iter().map(|e| e.to_string_repr()).collect();
+            for expr in &compound_agg_exprs {
+                let mut refs = Vec::new();
+                collect_non_aggregate_refs(expr, false, &mut refs);
+                for r in &refs {
+                    let is_covered = match r {
+                        NonAggregateRef::Var(v) => group_by_reprs.contains(v),
+                        NonAggregateRef::Property { repr, .. } => {
+                            group_by_reprs.contains(repr)
+                        }
+                    };
+                    if !is_covered {
+                        return Err(anyhow!(
+                            "SyntaxError: AmbiguousAggregationExpression - Expression mixes aggregation with non-grouped reference"
+                        ));
                     }
                 }
             }
@@ -2030,12 +2392,21 @@ impl QueryPlanner {
                     .into_iter()
                     .map(|(expr, alias)| {
                         // Check if this expression is an aggregate function
-                        if expr.is_aggregate() && !has_window_exprs {
-                            // Replace aggregate function with a column reference to its result
-                            // The column name in the Aggregate output is determined by build_aggregate_result
-                            // Use the same logic as build_aggregate_result for column naming
+                        if expr.is_aggregate()
+                            && !is_compound_aggregate(&expr)
+                            && !has_window_exprs
+                        {
+                            // Bare aggregate — replace with column reference
                             let col_name = Self::get_aggregate_column_name(&expr);
                             (Expr::Variable(col_name), alias)
+                        } else if !has_window_exprs
+                            && (is_compound_aggregate(&expr)
+                                || (!expr.is_aggregate()
+                                    && contains_aggregate_recursive(&expr)))
+                        {
+                            // Compound aggregate — replace inner aggregates with
+                            // column references, keep outer expression for Project
+                            (replace_aggregates_with_columns(&expr), alias)
                         }
                         // For grouped RETURN projections, reference the pre-computed
                         // group-by output column instead of re-evaluating the expression
@@ -4400,6 +4771,7 @@ impl QueryPlanner {
         let mut plan = plan;
         let mut group_by: Vec<Expr> = Vec::new();
         let mut aggregates: Vec<Expr> = Vec::new();
+        let mut compound_agg_exprs: Vec<Expr> = Vec::new();
         let mut has_agg = false;
         let mut projections = Vec::new();
         let mut new_vars: Vec<VariableInfo> = Vec::new();
@@ -4439,10 +4811,24 @@ impl QueryPlanner {
                         }
 
                         projections.push((expr.clone(), alias.clone()));
-                        if expr.is_aggregate() {
+                        if expr.is_aggregate() && !is_compound_aggregate(expr) {
+                            // Bare aggregate — push directly
                             has_agg = true;
                             aggregates.push(expr.clone());
                             projected_aggregate_reprs.insert(expr.to_string_repr());
+                        } else if !is_window_function(expr)
+                            && (expr.is_aggregate() || contains_aggregate_recursive(expr))
+                        {
+                            // Compound aggregate or expression containing aggregates
+                            has_agg = true;
+                            compound_agg_exprs.push(expr.clone());
+                            for inner in extract_inner_aggregates(expr) {
+                                let repr = inner.to_string_repr();
+                                if !projected_aggregate_reprs.contains(&repr) {
+                                    aggregates.push(inner);
+                                    projected_aggregate_reprs.insert(repr);
+                                }
+                            }
                         } else if !group_by.contains(expr) {
                             group_by.push(expr.clone());
                             if matches!(expr, Expr::Variable(_) | Expr::Property(_, _)) {
@@ -4498,6 +4884,30 @@ impl QueryPlanner {
             }
         }
 
+        // Validate compound aggregate expressions: non-aggregate refs must be
+        // individually present in the group_by as simple variables or properties.
+        if has_agg {
+            let group_by_reprs: HashSet<String> =
+                group_by.iter().map(|e| e.to_string_repr()).collect();
+            for expr in &compound_agg_exprs {
+                let mut refs = Vec::new();
+                collect_non_aggregate_refs(expr, false, &mut refs);
+                for r in &refs {
+                    let is_covered = match r {
+                        NonAggregateRef::Var(v) => group_by_reprs.contains(v),
+                        NonAggregateRef::Property { repr, .. } => {
+                            group_by_reprs.contains(repr)
+                        }
+                    };
+                    if !is_covered {
+                        return Err(anyhow!(
+                            "SyntaxError: AmbiguousAggregationExpression - Expression mixes aggregation with non-grouped reference"
+                        ));
+                    }
+                }
+            }
+        }
+
         if has_agg {
             plan = LogicalPlan::Aggregate {
                 input: Box::new(plan),
@@ -4510,12 +4920,18 @@ impl QueryPlanner {
             let rename_projections: Vec<(Expr, Option<String>)> = projections
                 .iter()
                 .map(|(expr, alias)| {
-                    let col_name = if expr.is_aggregate() {
-                        aggregate_column_name(expr)
+                    if expr.is_aggregate() && !is_compound_aggregate(expr) {
+                        // Bare aggregate — reference by column name
+                        (Expr::Variable(aggregate_column_name(expr)), alias.clone())
+                    } else if is_compound_aggregate(expr)
+                        || (!expr.is_aggregate() && contains_aggregate_recursive(expr))
+                    {
+                        // Compound aggregate — replace inner aggregates with
+                        // column references, keep outer expression
+                        (replace_aggregates_with_columns(expr), alias.clone())
                     } else {
-                        expr.to_string_repr()
-                    };
-                    (Expr::Variable(col_name), alias.clone())
+                        (Expr::Variable(expr.to_string_repr()), alias.clone())
+                    }
                 })
                 .collect();
             plan = LogicalPlan::Project {

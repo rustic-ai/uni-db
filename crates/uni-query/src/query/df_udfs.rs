@@ -193,6 +193,8 @@ pub fn register_cypher_udfs(ctx: &SessionContext) -> DFResult<()> {
     ctx.register_udf(create_cypher_list_append_udf());
     ctx.register_udf(create_cypher_list_slice_udf());
     ctx.register_udf(create_cypher_tail_udf());
+    ctx.register_udf(create_cypher_head_udf());
+    ctx.register_udf(create_cypher_last_udf());
     ctx.register_udf(create_cypher_reverse_udf());
     ctx.register_udf(create_cypher_list_to_cv_udf());
 
@@ -4090,6 +4092,136 @@ impl ScalarUDFImpl for CypherTailUdf {
                 }
                 other => Err(datafusion::error::DataFusionError::Execution(format!(
                     "_cypher_tail(): expected list, got {:?}",
+                    other
+                ))),
+            }
+        })
+    }
+}
+
+// ============================================================================
+// _cypher_head(list) -> LargeBinary (CypherValue)
+// ============================================================================
+
+/// Create the `_cypher_head` UDF for Cypher `head()`.
+///
+/// Returns the first element of a list. Handles LargeBinary-encoded lists.
+/// - `head([1,2,3])` → `1`
+/// - `head([])` → `null`
+/// - `head(null)` → `null`
+pub fn create_cypher_head_udf() -> ScalarUDF {
+    ScalarUDF::new_from_impl(CypherHeadUdf::new())
+}
+
+#[derive(Debug)]
+struct CypherHeadUdf {
+    signature: Signature,
+}
+
+impl CypherHeadUdf {
+    fn new() -> Self {
+        Self {
+            signature: Signature::any(1, Volatility::Immutable),
+        }
+    }
+}
+
+impl_udf_eq_hash!(CypherHeadUdf);
+
+impl ScalarUDFImpl for CypherHeadUdf {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn name(&self) -> &str {
+        "head"
+    }
+
+    fn signature(&self) -> &Signature {
+        &self.signature
+    }
+
+    fn return_type(&self, _arg_types: &[DataType]) -> DFResult<DataType> {
+        Ok(DataType::LargeBinary)
+    }
+
+    fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DFResult<ColumnarValue> {
+        invoke_cypher_udf(args, &DataType::LargeBinary, |vals| {
+            if vals.len() != 1 {
+                return Err(datafusion::error::DataFusionError::Execution(
+                    "head(): requires exactly 1 argument".to_string(),
+                ));
+            }
+            match &vals[0] {
+                Value::Null => Ok(Value::Null),
+                Value::List(l) => Ok(l.first().cloned().unwrap_or(Value::Null)),
+                other => Err(datafusion::error::DataFusionError::Execution(format!(
+                    "head(): expected list, got {:?}",
+                    other
+                ))),
+            }
+        })
+    }
+}
+
+// ============================================================================
+// _cypher_last(list) -> LargeBinary (CypherValue)
+// ============================================================================
+
+/// Create the `_cypher_last` UDF for Cypher `last()`.
+///
+/// Returns the last element of a list. Handles LargeBinary-encoded lists.
+/// - `last([1,2,3])` → `3`
+/// - `last([])` → `null`
+/// - `last(null)` → `null`
+pub fn create_cypher_last_udf() -> ScalarUDF {
+    ScalarUDF::new_from_impl(CypherLastUdf::new())
+}
+
+#[derive(Debug)]
+struct CypherLastUdf {
+    signature: Signature,
+}
+
+impl CypherLastUdf {
+    fn new() -> Self {
+        Self {
+            signature: Signature::any(1, Volatility::Immutable),
+        }
+    }
+}
+
+impl_udf_eq_hash!(CypherLastUdf);
+
+impl ScalarUDFImpl for CypherLastUdf {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn name(&self) -> &str {
+        "last"
+    }
+
+    fn signature(&self) -> &Signature {
+        &self.signature
+    }
+
+    fn return_type(&self, _arg_types: &[DataType]) -> DFResult<DataType> {
+        Ok(DataType::LargeBinary)
+    }
+
+    fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DFResult<ColumnarValue> {
+        invoke_cypher_udf(args, &DataType::LargeBinary, |vals| {
+            if vals.len() != 1 {
+                return Err(datafusion::error::DataFusionError::Execution(
+                    "last(): requires exactly 1 argument".to_string(),
+                ));
+            }
+            match &vals[0] {
+                Value::Null => Ok(Value::Null),
+                Value::List(l) => Ok(l.last().cloned().unwrap_or(Value::Null)),
+                other => Err(datafusion::error::DataFusionError::Execution(format!(
+                    "last(): expected list, got {:?}",
                     other
                 ))),
             }
