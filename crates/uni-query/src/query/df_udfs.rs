@@ -419,13 +419,18 @@ impl ScalarUDFImpl for KeysUdf {
                     // _all_props CypherValue blob.  If the map contains an _all_props
                     // sub-map, extract property names from it instead of from
                     // the top-level map (which only has system fields).
-                    let source = match map.get("_all_props") {
-                        Some(Value::Map(all)) => all,
-                        _ => map,
+                    // When _all_props is present, the input is a schemaless
+                    // entity (node/relationship).  Per the property graph model,
+                    // a null-valued property does not exist on the entity, so we
+                    // must filter it out.  For plain maps (literal or parameter),
+                    // null-valued keys are valid and must be included.
+                    let (source, is_entity) = match map.get("_all_props") {
+                        Some(Value::Map(all)) => (all, true),
+                        _ => (map, false),
                     };
                     let mut key_strings: Vec<String> = source
                         .iter()
-                        .filter(|(k, v)| !v.is_null() && !k.starts_with('_'))
+                        .filter(|(k, v)| !k.starts_with('_') && (!is_entity || !v.is_null()))
                         .map(|(k, _)| k.clone())
                         .collect();
                     key_strings.sort();
@@ -1510,7 +1515,7 @@ where
     {
         let row_args = get_value_args_for_row(&args.args, 0)?;
         let res = f(&row_args)?;
-        if matches!(output_type, DataType::LargeBinary) {
+        if matches!(output_type, DataType::LargeBinary | DataType::List(_)) {
             // Encode through array path to match UDF's declared LargeBinary return type
             let arr = values_to_array(&[res], output_type)
                 .map_err(|e| datafusion::error::DataFusionError::Execution(e.to_string()))?;
