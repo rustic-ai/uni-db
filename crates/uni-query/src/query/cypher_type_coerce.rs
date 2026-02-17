@@ -135,65 +135,15 @@ pub(crate) fn is_string_type(dt: &DataType) -> bool {
 // Equality and Comparison Builders
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-/// Builds a Cypher-correct equality or inequality expression (Eq or NotEq).
+/// Builds a Cypher-correct comparison expression for any comparison operator.
 ///
 /// Handles cross-type comparisons according to Cypher semantics:
-/// - Cross-type comparisons return `null` (not Arrow errors)
-/// - Per openCypher CIP2016-06-14: Incomparable types (e.g., `'a' = 1`) → `null`
-/// - NOT incomparable (e.g., `'a' <> 1`) also → `null` (three-valued logic)
-pub(crate) fn build_cypher_equality(
-    left: DfExpr,
-    left_type: &DataType,
-    right: DfExpr,
-    right_type: &DataType,
-    op: Operator,
-) -> DfExpr {
-    use TypeCompat::*;
-
-    match type_compat(left_type, right_type) {
-        Same | StringCompat | BooleanCompat => {
-            // Native Arrow comparison works
-            binary_expr(left, op, right)
-        }
-        NumericWidening(common) => {
-            // Cast both to common numeric type
-            let left_cast = super::df_expr::cast_expr(left, common.clone());
-            let right_cast = super::df_expr::cast_expr(right, common);
-            binary_expr(left_cast, op, right_cast)
-        }
-        DateTimeStruct => {
-            // Compare by nanos_since_epoch
-            let left_nanos = super::df_expr::extract_datetime_nanos(left);
-            let right_nanos = super::df_expr::extract_datetime_nanos(right);
-            binary_expr(left_nanos, op, right_nanos)
-        }
-        TimeStruct => {
-            // Compare by UTC-normalized nanos
-            let left_nanos = super::df_expr::extract_time_nanos(left);
-            let right_nanos = super::df_expr::extract_time_nanos(right);
-            binary_expr(left_nanos, op, right_nanos)
-        }
-        NullInvolved => {
-            // null = anything → null
-            lit(ScalarValue::Boolean(None))
-        }
-        Incomparable => {
-            // Per Cypher spec: cross-type equality/inequality always returns null
-            // (Reviewer fix 2.5: add spec reference comment)
-            lit(ScalarValue::Boolean(None))
-        }
-        Dynamic => {
-            // Unknown types at plan time — use runtime UDF
-            let udf_name =
-                super::df_expr::comparison_udf_name(op).expect("Eq/NotEq should have UDF mapping");
-            super::df_expr::dummy_udf_expr(udf_name, vec![left, right])
-        }
-    }
-}
-
-/// Builds a Cypher-correct comparison expression (Lt, LtEq, Gt, GtEq).
+/// - Compatible types: native Arrow comparison (with widening if needed)
+/// - Temporal types: compare by UTC-normalized nanoseconds
+/// - Null or incomparable types: return `null` (per openCypher CIP2016-06-14)
+/// - Dynamic types: delegate to runtime UDF
 ///
-/// Identical dispatch logic to equality, but for ordering comparisons.
+/// Works for all comparison operators: Eq, NotEq, Lt, LtEq, Gt, GtEq.
 pub(crate) fn build_cypher_comparison(
     left: DfExpr,
     left_type: &DataType,
@@ -220,13 +170,10 @@ pub(crate) fn build_cypher_comparison(
             let right_nanos = super::df_expr::extract_time_nanos(right);
             binary_expr(left_nanos, op, right_nanos)
         }
-        NullInvolved | Incomparable => {
-            // null comparisons and cross-type comparisons → null
-            lit(ScalarValue::Boolean(None))
-        }
+        NullInvolved | Incomparable => lit(ScalarValue::Boolean(None)),
         Dynamic => {
             let udf_name = super::df_expr::comparison_udf_name(op)
-                .expect("Lt/Gt/LtEq/GtEq should have UDF mapping");
+                .expect("comparison operator should have UDF mapping");
             super::df_expr::dummy_udf_expr(udf_name, vec![left, right])
         }
     }
@@ -339,23 +286,10 @@ pub(crate) fn build_cypher_plus(
 
 /// Converts a value to a string expression for concatenation.
 ///
-/// For primitives, uses cast. For temporal types, would use dedicated UDFs
-/// but we use cast as fallback for now (reviewer note 2.6).
-fn to_string_expr(expr: DfExpr, expr_type: &DataType) -> Result<DfExpr> {
-    // For primitives, just cast to Utf8
-    if is_numeric_type(expr_type) || matches!(expr_type, DataType::Boolean) {
-        return Ok(super::df_expr::cast_expr(expr, DataType::Utf8));
-    }
-
-    // For DateTime/Time, ideally we'd use _cypher_datetime_tostring / _cypher_time_tostring
-    // but those don't exist yet (reviewer note 2.6). Use cast as fallback.
-    if super::df_expr::is_datetime_struct_type(expr_type)
-        || super::df_expr::is_time_struct_type(expr_type)
-    {
-        return Ok(super::df_expr::cast_expr(expr, DataType::Utf8));
-    }
-
-    // Fallback: cast
+/// Currently uses Utf8 cast for all types. When dedicated temporal toString UDFs
+/// are added (e.g., `_cypher_datetime_tostring`), this should dispatch to them
+/// for DateTime/Time structs.
+fn to_string_expr(expr: DfExpr, _expr_type: &DataType) -> Result<DfExpr> {
     Ok(super::df_expr::cast_expr(expr, DataType::Utf8))
 }
 
@@ -370,7 +304,7 @@ fn to_string_expr(expr: DfExpr, expr_type: &DataType) -> Result<DfExpr> {
 /// Into:
 ///   `CASE WHEN operand=val1 THEN res1 WHEN operand=val2 THEN res2 ELSE res3 END`
 ///
-/// Uses `build_cypher_equality()` for each comparison to handle cross-type operands.
+/// Uses `build_cypher_comparison()` for each comparison to handle cross-type operands.
 pub(crate) fn rewrite_simple_case_to_generic(
     operand: DfExpr,
     when_then_expr: Vec<(Box<DfExpr>, Box<DfExpr>)>,
@@ -387,7 +321,7 @@ pub(crate) fn rewrite_simple_case_to_generic(
             let when_type = when
                 .get_type(schema)
                 .map_err(|e| anyhow!("Failed to get WHEN type: {}", e))?;
-            let eq_expr = build_cypher_equality(
+            let eq_expr = build_cypher_comparison(
                 operand.clone(),
                 &operand_type,
                 *when,
@@ -652,7 +586,7 @@ fn build_in_as_or_chain(
             .map_err(|e| anyhow!("Failed to get item type in OR chain: {}", e))?;
 
         let eq_expr =
-            build_cypher_equality(expr.clone(), expr_type, item, &item_type, Operator::Eq);
+            build_cypher_comparison(expr.clone(), expr_type, item, &item_type, Operator::Eq);
 
         or_chain = Some(match or_chain {
             None => eq_expr,
@@ -711,11 +645,11 @@ mod tests {
     }
 
     #[test]
-    fn test_build_cypher_equality_incomparable_returns_null() {
+    fn test_build_cypher_comparison_incomparable_returns_null() {
         let left = lit(ScalarValue::Utf8(Some("hello".to_string())));
         let right = lit(ScalarValue::Int64(Some(42)));
         let result =
-            build_cypher_equality(left, &DataType::Utf8, right, &DataType::Int64, Operator::Eq);
+            build_cypher_comparison(left, &DataType::Utf8, right, &DataType::Int64, Operator::Eq);
 
         // Should return null literal
         match result {
@@ -725,11 +659,11 @@ mod tests {
     }
 
     #[test]
-    fn test_build_cypher_equality_null_involved() {
+    fn test_build_cypher_comparison_null_involved() {
         let left = lit(ScalarValue::Null);
         let right = lit(ScalarValue::Int64(Some(42)));
         let result =
-            build_cypher_equality(left, &DataType::Null, right, &DataType::Int64, Operator::Eq);
+            build_cypher_comparison(left, &DataType::Null, right, &DataType::Int64, Operator::Eq);
 
         // Should return null literal
         match result {

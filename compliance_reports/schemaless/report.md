@@ -1,17 +1,21 @@
 # TCK Compliance Report
 
-**Generated:** 2026-02-16 15:45:21
-**Results:** `results_20260216_154521.json`
-**Compared to:** `results_20260216_140314.json`
+**Generated:** 2026-02-16 19:27:30
+**Results:** `results_20260216_192730.json`
+**Compared to:** `results_20260216_181744.json`
 
 ## Summary
 
 | Metric | Current | Previous | Delta |
 |--------|---------|----------|-------|
 | Scenarios | 3897 | 3897 |  |
-| Passed | 2964 | 2964 |  |
-| Failed | 932 | 932 |  |
-| Pass Rate | 76.1% | 76.1% | ➡️ +0.0pp |
+| Passed | 2957 | 2964 | -7 |
+| Failed | 939 | 932 | +7 |
+| Pass Rate | 75.9% | 76.1% | 📉 -0.2pp |
+
+**🟢 Fixed:** 5 scenarios now passing
+
+**🔴 Regressions:** 12 scenarios now failing
 
 ## Feature Breakdown
 
@@ -34,12 +38,12 @@
 | ✅ Call4 | 2 | 2 | 0 | 100% |  |
 | ✅ Call5 | 19 | 17 | 2 | 89% |  |
 | ⚠️ Call6 | 3 | 2 | 1 | 67% |  |
-| ✅ Comparison1 | 43 | 43 | 0 | 100% |  |
+| ✅ Comparison1 | 43 | 41 | 2 | 95% | -5pp |
 | ✅ Comparison2 | 19 | 19 | 0 | 100% |  |
 | ✅ Comparison3 | 9 | 9 | 0 | 100% |  |
 | ✅ Comparison4 | 1 | 1 | 0 | 100% |  |
 | ✅ Conditional1 | 1 | 1 | 0 | 100% |  |
-| ⚠️ Conditional2 | 12 | 9 | 3 | 75% |  |
+| ✅ Conditional2 | 12 | 12 | 0 | 100% | +25pp |
 | ✅ CountingSubgraphMatches1 | 11 | 11 | 0 | 100% |  |
 | ✅ Create1 | 20 | 19 | 1 | 95% |  |
 | ⚠️ Create2 | 24 | 19 | 5 | 79% |  |
@@ -67,7 +71,7 @@
 | ✅ List11 | 67 | 66 | 1 | 99% |  |
 | ❌ List12 | 7 | 1 | 6 | 14% |  |
 | ✅ List2 | 15 | 15 | 0 | 100% |  |
-| ✅ List3 | 7 | 7 | 0 | 100% |  |
+| ✅ List3 | 7 | 6 | 1 | 86% | -14pp |
 | ✅ List4 | 2 | 2 | 0 | 100% |  |
 | ✅ List5 | 46 | 46 | 0 | 100% |  |
 | ✅ List6 | 17 | 17 | 0 | 100% |  |
@@ -122,7 +126,7 @@
 | ✅ Pattern2 | 11 | 9 | 2 | 82% |  |
 | ✅ Precedence1 | 72 | 72 | 0 | 100% |  |
 | ✅ Precedence2 | 26 | 26 | 0 | 100% |  |
-| ✅ Precedence3 | 11 | 11 | 0 | 100% |  |
+| ❌ Precedence3 | 11 | 5 | 6 | 45% | -55pp |
 | ✅ Precedence4 | 12 | 12 | 0 | 100% |  |
 | ✅ Quantifier1 | 105 | 104 | 1 | 99% |  |
 | ❌ Quantifier10 | 8 | 0 | 8 | 0% |  |
@@ -176,7 +180,7 @@
 | ✅ Temporal4 | 39 | 39 | 0 | 100% |  |
 | ❌ Temporal5 | 7 | 0 | 7 | 0% |  |
 | ❌ Temporal6 | 17 | 3 | 14 | 18% |  |
-| ⚠️ Temporal7 | 18 | 14 | 4 | 78% |  |
+| ⚠️ Temporal7 | 18 | 13 | 5 | 72% | -6pp |
 | ⚠️ Temporal8 | 27 | 21 | 6 | 78% |  |
 | ⚠️ Temporal9 | 322 | 192 | 130 | 60% |  |
 | ✅ TriadicSelection1 | 19 | 19 | 0 | 100% |  |
@@ -209,6 +213,33 @@
 | ✅ WithWhere5 | 4 | 4 | 0 | 100% |  |
 | ✅ WithWhere6 | 1 | 1 | 0 | 100% |  |
 | ✅ WithWhere7 | 3 | 3 | 0 | 100% |  |
+
+## 🔴 Regressions
+
+Scenarios that were passing but are now failing:
+
+- **Comparison1** — [9] Equality between strings and numbers (line 209)
+- **Comparison1** — [9] Equality between strings and numbers (line 210)
+- **List3** — [1] Equality between list and literal should return false (line 33)
+- **Precedence3** — [6] List element containment takes precedence over comparison operator (line 114)
+- **Precedence3** — [6] List element containment takes precedence over comparison operator (line 115)
+- **Precedence3** — [6] List element containment takes precedence over comparison operator (line 116)
+- **Precedence3** — [6] List element containment takes precedence over comparison operator (line 117)
+- **Precedence3** — [6] List element containment takes precedence over comparison operator (line 118)
+- **Precedence3** — [6] List element containment takes precedence over comparison operator (line 119)
+- **Temporal7** — [6] Should compare durations for equality (line 132)
+- **Temporal7** — [6] Should compare durations for equality (line 133)
+- **Temporal7** — [6] Should compare durations for equality (line 135)
+
+## 🟢 Newly Passing
+
+Scenarios that were failing but are now passing:
+
+- **Conditional2** — [1] Simple cases over integers (line 63)
+- **Conditional2** — [1] Simple cases over integers (line 64)
+- **Conditional2** — [1] Simple cases over integers (line 65)
+- **Temporal7** — [3] Should compare times (line 81)
+- **Temporal7** — [3] Should compare times (line 82)
 
 ## Failed Scenarios
 
@@ -296,30 +327,22 @@
   ... (truncated)
   ```
 
-### Conditional2
+### Comparison1
 
-- **[1] Simple cases over integers** (line 63)
+- **[9] Equality between strings and numbers** (line 209)
   ```
   Step failed:
-      Defined: tck/features/expressions/conditional/Conditional2.feature:47:5
+      Defined: tck/features/expressions/comparison/Comparison1.feature:200:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Arrow error: Invalid argument error: Invalid comparison oper
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Null))]. Expected: [{"res
   ... (truncated)
   ```
-- **[1] Simple cases over integers** (line 64)
+- **[9] Equality between strings and numbers** (line 210)
   ```
   Step failed:
-      Defined: tck/features/expressions/conditional/Conditional2.feature:47:5
+      Defined: tck/features/expressions/comparison/Comparison1.feature:200:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Arrow error: Invalid argument error: Invalid comparison oper
-  ... (truncated)
-  ```
-- **[1] Simple cases over integers** (line 65)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/conditional/Conditional2.feature:47:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Arrow error: Invalid argument error: Invalid comparison oper
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("result", Some(Null))]. Expected: [{"res
   ... (truncated)
   ```
 
@@ -895,11 +918,11 @@
   Step failed:
       Defined: tck/features/expressions/graph/Graph6.feature:90:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): Expected column '(list[1]).missingToo' not found in result
+      Step panicked. Captured output: Result mismatch (any order): Expected column '(list[1]).existing' not found in result
 [Summary]
 1 feature
 1 scenario (1 failed)
-
+4 
   ... (truncated)
   ```
 - **[6] Statically access a property of a optional non-null relationship** (line 111)
@@ -933,7 +956,7 @@
   Step failed:
       Defined: tck/features/expressions/graph/Graph9.feature:73:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("properties(null)", Some(Null)), ("properties(r)", 
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("properties(r)", Some(Map({}))), ("properties(null)
   ... (truncated)
   ```
 
@@ -1007,6 +1030,17 @@
   ... (truncated)
   ```
 
+### List3
+
+- **[1] Equality between list and literal should return false** (line 33)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/list/List3.feature:39:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Error during planning: Cannot infer common argument type for comparison op
+  ... (truncated)
+  ```
+
 ### Literals5
 
 - **[27] Fail when float value is too large** (line 319)
@@ -1048,7 +1082,7 @@
   Step failed:
       Defined: tck/features/expressions/literals/Literals7.feature:295:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("literal", Some(List([Map({"name": String("C
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("literal", Some(List([Map({"ppu": Float(0.55
   ... (truncated)
   ```
 
@@ -1059,7 +1093,7 @@
   Step failed:
       Defined: tck/features/expressions/literals/Literals8.feature:294:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("literal", Some(Map({"data": List([Map({"bat
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("literal", Some(Map({"data": List([Map({"typ
   ... (truncated)
   ```
 
@@ -1070,11 +1104,11 @@
   Step failed:
       Defined: tck/features/expressions/map/Map1.feature:65:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): Expected column '(list[1]).missing' not found in result
+      Step panicked. Captured output: Result mismatch (any order): Expected column '(list[1]).notMissing' not found in result
 [Summary]
 1 feature
 1 scenario (1 failed)
-3 steps
+3 st
   ... (truncated)
   ```
 
@@ -1156,7 +1190,7 @@
   Step failed:
       Defined: tck/features/expressions/map/Map3.feature:99:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("c", Some(Bool(false))), ("a", Some(Bool(true))), ("b",
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("c", Some(Bool(false))), ("b", Some(Bool(false))), ("a"
   ... (truncated)
   ```
 
@@ -2019,6 +2053,57 @@
   ... (truncated)
   ```
 
+### Precedence3
+
+- **[6] List element containment takes precedence over comparison operator** (line 114)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/precedence/Precedence3.feature:107:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Error during planning: Cannot infer common argument type for 
+  ... (truncated)
+  ```
+- **[6] List element containment takes precedence over comparison operator** (line 115)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/precedence/Precedence3.feature:107:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Error during planning: Cannot infer common argument type for 
+  ... (truncated)
+  ```
+- **[6] List element containment takes precedence over comparison operator** (line 116)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/precedence/Precedence3.feature:107:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Error during planning: Cannot infer common argument type for 
+  ... (truncated)
+  ```
+- **[6] List element containment takes precedence over comparison operator** (line 117)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/precedence/Precedence3.feature:107:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Error during planning: Cannot infer common argument type for 
+  ... (truncated)
+  ```
+- **[6] List element containment takes precedence over comparison operator** (line 118)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/precedence/Precedence3.feature:107:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Error during planning: Cannot infer common argument type for 
+  ... (truncated)
+  ```
+- **[6] List element containment takes precedence over comparison operator** (line 119)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/precedence/Precedence3.feature:107:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Error during planning: Cannot infer common argument type for 
+  ... (truncated)
+  ```
+
 ### Quantifier1
 
 - **[9] None quantifier on list containing relationships** (line 239)
@@ -2061,7 +2146,7 @@
   Step failed:
       Defined: tck/features/expressions/quantifier/Quantifier10.feature:116:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Quantifier expressions (ALL/ANY/SINGLE/NONE) require physica
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "List comprehension input must be a list, got Utf8", query: S
   ... (truncated)
   ```
 - **[4] Single quantifier is always equal whether the size of the list filtered with same the predicate is one** (line 124)
@@ -2069,7 +2154,7 @@
   Step failed:
       Defined: tck/features/expressions/quantifier/Quantifier10.feature:116:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Quantifier expressions (ALL/ANY/SINGLE/NONE) require physica
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "List comprehension input must be a list, got Utf8", query: S
   ... (truncated)
   ```
 - **[4] Single quantifier is always equal whether the size of the list filtered with same the predicate is one** (line 125)
@@ -2077,7 +2162,7 @@
   Step failed:
       Defined: tck/features/expressions/quantifier/Quantifier10.feature:116:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Quantifier expressions (ALL/ANY/SINGLE/NONE) require physica
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "List comprehension input must be a list, got Utf8", query: S
   ... (truncated)
   ```
 - **[4] Single quantifier is always equal whether the size of the list filtered with same the predicate is one** (line 126)
@@ -2085,7 +2170,7 @@
   Step failed:
       Defined: tck/features/expressions/quantifier/Quantifier10.feature:116:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Quantifier expressions (ALL/ANY/SINGLE/NONE) require physica
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "List comprehension input must be a list, got Utf8", query: S
   ... (truncated)
   ```
 - **[4] Single quantifier is always equal whether the size of the list filtered with same the predicate is one** (line 127)
@@ -2093,7 +2178,7 @@
   Step failed:
       Defined: tck/features/expressions/quantifier/Quantifier10.feature:116:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Quantifier expressions (ALL/ANY/SINGLE/NONE) require physica
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "List comprehension input must be a list, got Utf8", query: S
   ... (truncated)
   ```
 
@@ -2120,7 +2205,7 @@
   Step failed:
       Defined: tck/features/expressions/quantifier/Quantifier11.feature:102:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Quantifier expressions (ALL/ANY/SINGLE/NONE) require physica
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "List comprehension input must be a list, got Utf8", query: S
   ... (truncated)
   ```
 - **[3] Any quantifier is always true if the single or the all quantifier is true** (line 110)
@@ -2128,7 +2213,7 @@
   Step failed:
       Defined: tck/features/expressions/quantifier/Quantifier11.feature:102:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Quantifier expressions (ALL/ANY/SINGLE/NONE) require physica
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "List comprehension input must be a list, got Utf8", query: S
   ... (truncated)
   ```
 - **[3] Any quantifier is always true if the single or the all quantifier is true** (line 111)
@@ -2136,7 +2221,7 @@
   Step failed:
       Defined: tck/features/expressions/quantifier/Quantifier11.feature:102:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Quantifier expressions (ALL/ANY/SINGLE/NONE) require physica
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "List comprehension input must be a list, got Utf8", query: S
   ... (truncated)
   ```
 - **[3] Any quantifier is always true if the single or the all quantifier is true** (line 112)
@@ -2144,7 +2229,7 @@
   Step failed:
       Defined: tck/features/expressions/quantifier/Quantifier11.feature:102:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Quantifier expressions (ALL/ANY/SINGLE/NONE) require physica
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "List comprehension input must be a list, got Utf8", query: S
   ... (truncated)
   ```
 - **[3] Any quantifier is always true if the single or the all quantifier is true** (line 113)
@@ -2152,7 +2237,7 @@
   Step failed:
       Defined: tck/features/expressions/quantifier/Quantifier11.feature:102:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Quantifier expressions (ALL/ANY/SINGLE/NONE) require physica
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "List comprehension input must be a list, got Utf8", query: S
   ... (truncated)
   ```
 - **[4] Any quantifier is always equal the boolean negative of the none quantifier** (line 139)
@@ -2240,7 +2325,7 @@
   Step failed:
       Defined: tck/features/expressions/quantifier/Quantifier11.feature:198:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Quantifier expressions (ALL/ANY/SINGLE/NONE) require physica
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "List comprehension input must be a list, got Utf8", query: S
   ... (truncated)
   ```
 - **[6] Any quantifier is always equal whether the size of the list filtered with same the predicate is grater zero** (line 206)
@@ -2248,7 +2333,7 @@
   Step failed:
       Defined: tck/features/expressions/quantifier/Quantifier11.feature:198:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Quantifier expressions (ALL/ANY/SINGLE/NONE) require physica
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "List comprehension input must be a list, got Utf8", query: S
   ... (truncated)
   ```
 - **[6] Any quantifier is always equal whether the size of the list filtered with same the predicate is grater zero** (line 207)
@@ -2256,7 +2341,7 @@
   Step failed:
       Defined: tck/features/expressions/quantifier/Quantifier11.feature:198:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Quantifier expressions (ALL/ANY/SINGLE/NONE) require physica
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "List comprehension input must be a list, got Utf8", query: S
   ... (truncated)
   ```
 - **[6] Any quantifier is always equal whether the size of the list filtered with same the predicate is grater zero** (line 208)
@@ -2264,7 +2349,7 @@
   Step failed:
       Defined: tck/features/expressions/quantifier/Quantifier11.feature:198:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Quantifier expressions (ALL/ANY/SINGLE/NONE) require physica
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "List comprehension input must be a list, got Utf8", query: S
   ... (truncated)
   ```
 - **[6] Any quantifier is always equal whether the size of the list filtered with same the predicate is grater zero** (line 209)
@@ -2272,7 +2357,7 @@
   Step failed:
       Defined: tck/features/expressions/quantifier/Quantifier11.feature:198:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Quantifier expressions (ALL/ANY/SINGLE/NONE) require physica
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "List comprehension input must be a list, got Utf8", query: S
   ... (truncated)
   ```
 
@@ -2379,7 +2464,7 @@
   Step failed:
       Defined: tck/features/expressions/quantifier/Quantifier12.feature:162:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Quantifier expressions (ALL/ANY/SINGLE/NONE) require physica
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "List comprehension input must be a list, got Utf8", query: S
   ... (truncated)
   ```
 - **[5] All quantifier is always equal whether the size of the list filtered with same the predicate is equal the size of the unfiltered list** (line 170)
@@ -2387,7 +2472,7 @@
   Step failed:
       Defined: tck/features/expressions/quantifier/Quantifier12.feature:162:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Quantifier expressions (ALL/ANY/SINGLE/NONE) require physica
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "List comprehension input must be a list, got Utf8", query: S
   ... (truncated)
   ```
 - **[5] All quantifier is always equal whether the size of the list filtered with same the predicate is equal the size of the unfiltered list** (line 171)
@@ -2395,7 +2480,7 @@
   Step failed:
       Defined: tck/features/expressions/quantifier/Quantifier12.feature:162:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Quantifier expressions (ALL/ANY/SINGLE/NONE) require physica
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "List comprehension input must be a list, got Utf8", query: S
   ... (truncated)
   ```
 - **[5] All quantifier is always equal whether the size of the list filtered with same the predicate is equal the size of the unfiltered list** (line 172)
@@ -2403,7 +2488,7 @@
   Step failed:
       Defined: tck/features/expressions/quantifier/Quantifier12.feature:162:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Quantifier expressions (ALL/ANY/SINGLE/NONE) require physica
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "List comprehension input must be a list, got Utf8", query: S
   ... (truncated)
   ```
 - **[5] All quantifier is always equal whether the size of the list filtered with same the predicate is equal the size of the unfiltered list** (line 173)
@@ -2411,7 +2496,7 @@
   Step failed:
       Defined: tck/features/expressions/quantifier/Quantifier12.feature:162:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Quantifier expressions (ALL/ANY/SINGLE/NONE) require physica
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "List comprehension input must be a list, got Utf8", query: S
   ... (truncated)
   ```
 
@@ -2551,7 +2636,7 @@
   Step failed:
       Defined: tck/features/expressions/quantifier/Quantifier9.feature:162:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Quantifier expressions (ALL/ANY/SINGLE/NONE) require physical
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "List comprehension input must be a list, got Utf8", query: So
   ... (truncated)
   ```
 - **[5] None quantifier is always equal whether the size of the list filtered with same the predicate is zero** (line 170)
@@ -2559,7 +2644,7 @@
   Step failed:
       Defined: tck/features/expressions/quantifier/Quantifier9.feature:162:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Quantifier expressions (ALL/ANY/SINGLE/NONE) require physical
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "List comprehension input must be a list, got Utf8", query: So
   ... (truncated)
   ```
 - **[5] None quantifier is always equal whether the size of the list filtered with same the predicate is zero** (line 171)
@@ -2567,7 +2652,7 @@
   Step failed:
       Defined: tck/features/expressions/quantifier/Quantifier9.feature:162:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Quantifier expressions (ALL/ANY/SINGLE/NONE) require physical
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "List comprehension input must be a list, got Utf8", query: So
   ... (truncated)
   ```
 - **[5] None quantifier is always equal whether the size of the list filtered with same the predicate is zero** (line 172)
@@ -2575,7 +2660,7 @@
   Step failed:
       Defined: tck/features/expressions/quantifier/Quantifier9.feature:162:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Quantifier expressions (ALL/ANY/SINGLE/NONE) require physical
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "List comprehension input must be a list, got Utf8", query: So
   ... (truncated)
   ```
 - **[5] None quantifier is always equal whether the size of the list filtered with same the predicate is zero** (line 173)
@@ -2583,7 +2668,7 @@
   Step failed:
       Defined: tck/features/expressions/quantifier/Quantifier9.feature:162:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Quantifier expressions (ALL/ANY/SINGLE/NONE) require physical
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "List comprehension input must be a list, got Utf8", query: So
   ... (truncated)
   ```
 
@@ -5913,20 +5998,20 @@
 
 ### Temporal7
 
-- **[3] Should compare times** (line 81)
+- **[6] Should compare durations for equality** (line 132)
   ```
   Step failed:
-      Defined: tck/features/expressions/temporal/Temporal7.feature:74:5
+      Defined: tck/features/expressions/temporal/Temporal7.feature:125:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Error during planning: Cannot coerce arithmetic expression Time64(
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("x = d", Some(Null))]. Expected: [{"x = d": 
   ... (truncated)
   ```
-- **[3] Should compare times** (line 82)
+- **[6] Should compare durations for equality** (line 133)
   ```
   Step failed:
-      Defined: tck/features/expressions/temporal/Temporal7.feature:74:5
+      Defined: tck/features/expressions/temporal/Temporal7.feature:125:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Error during planning: Cannot coerce arithmetic expression Time64(
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("x = d", Some(Null))]. Expected: [{"x = d": 
   ... (truncated)
   ```
 - **[6] Should compare durations for equality** (line 134)
@@ -5935,6 +6020,14 @@
       Defined: tck/features/expressions/temporal/Temporal7.feature:125:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
       Step panicked. Captured output: Query returned error instead of result: Query { message: "Error during planning: Cannot infer common argument type for comp
+  ... (truncated)
+  ```
+- **[6] Should compare durations for equality** (line 135)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/temporal/Temporal7.feature:125:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("x = d", Some(Null))]. Expected: [{"x = d": 
   ... (truncated)
   ```
 - **[6] Should compare durations for equality** (line 136)
@@ -7540,7 +7633,7 @@
   Step failed:
       Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:662:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("name", Some(String("sit"))), ("a", Some(
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("a", Some(Node(Node { vid: Vid(3), labels
   ... (truncated)
   ```
 - **[29] Sort by a string variable projected from a node property in ascending order** (line 672)
@@ -7548,7 +7641,7 @@
   Step failed:
       Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:662:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("name", Some(String("sit"))), ("a", Some(
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("a", Some(Node(Node { vid: Vid(3), labels
   ... (truncated)
   ```
 - **[29] Sort by a string variable projected from a node property in ascending order** (line 673)
@@ -7564,7 +7657,7 @@
   Step failed:
       Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:694:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 2. Actual values: [("name", Some(String("dolor"))), ("a", Som
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 2. Actual values: [("a", Some(Node(Node { vid: Vid(2), labels
   ... (truncated)
   ```
 - **[30] Sort by a string variable projected from a node property in descending order** (line 704)
@@ -7572,7 +7665,7 @@
   Step failed:
       Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:694:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 2. Actual values: [("name", Some(String("dolor"))), ("a", Som
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 2. Actual values: [("a", Some(Node(Node { vid: Vid(2), labels
   ... (truncated)
   ```
 - **[31] Sort by a list variable projected from a node property in ascending order** (line 734)
@@ -7620,7 +7713,7 @@
   Step failed:
       Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:851:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 1. Actual values: [("a", Some(Node(Node { vid: Vid(4), labels
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 1. Actual values: [("time", Some(String("12:31:15"))), ("a", 
   ... (truncated)
   ```
 - **[35] Sort by a local time variable projected from a node property in ascending order** (line 861)
@@ -7628,7 +7721,7 @@
   Step failed:
       Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:851:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 1. Actual values: [("time", Some(String("12:31:15"))), ("a", 
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 1. Actual values: [("a", Some(Node(Node { vid: Vid(4), labels
   ... (truncated)
   ```
 - **[35] Sort by a local time variable projected from a node property in ascending order** (line 862)
@@ -7676,7 +7769,7 @@
   Step failed:
       Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:914:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("time", Some(String("10:35-08:00"))), ("a
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("a", Some(Node(Node { vid: Vid(0), labels
   ... (truncated)
   ```
 - **[38] Sort by a time variable projected from a node property in descending order** (line 955)
@@ -7708,7 +7801,7 @@
   Step failed:
       Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:977:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("datetime", Some(String("1970-01-01T00:00
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("a", Some(Node(Node { vid: Vid(2), labels
   ... (truncated)
   ```
 - **[39] Sort by a local date time variable projected from a node property in ascending order** (line 988)
@@ -7748,7 +7841,7 @@
   Step failed:
       Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:1040:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("datetime", Some(String("1969-12-31T12:0
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("a", Some(Node(Node { vid: Vid(2), label
   ... (truncated)
   ```
 - **[41] Sort by a date time variable projected from a node property in ascending order** (line 1051)
@@ -7756,7 +7849,7 @@
   Step failed:
       Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:1040:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("datetime", Some(String("1969-12-31T12:0
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("a", Some(Node(Node { vid: Vid(2), label
   ... (truncated)
   ```
 - **[42] Sort by a date time variable projected from a node property in descending order** (line 1081)
@@ -7764,7 +7857,7 @@
   Step failed:
       Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:1072:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 2. Actual values: [("datetime", Some(String("1980-12-11T12:3
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 2. Actual values: [("a", Some(Node(Node { vid: Vid(4), label
   ... (truncated)
   ```
 - **[42] Sort by a date time variable projected from a node property in descending order** (line 1082)

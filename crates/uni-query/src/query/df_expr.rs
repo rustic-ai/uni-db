@@ -56,6 +56,20 @@ pub(crate) fn is_time_struct_type(dt: &datafusion::arrow::datatypes::DataType) -
     uni_common::core::schema::is_time_struct(dt)
 }
 
+/// Returns true if the type is a primitive (non-compound) type for coercion purposes.
+///
+/// Compound types (LargeBinary, Struct, List, LargeList) require special handling
+/// via UDFs and cannot use the standard coercion paths.
+fn is_primitive_type(dt: &datafusion::arrow::datatypes::DataType) -> bool {
+    !matches!(
+        dt,
+        datafusion::arrow::datatypes::DataType::LargeBinary
+            | datafusion::arrow::datatypes::DataType::Struct(_)
+            | datafusion::arrow::datatypes::DataType::List(_)
+            | datafusion::arrow::datatypes::DataType::LargeList(_)
+    )
+}
+
 /// Extract a named field from a struct expression using DataFusion's `get_field` function.
 pub(crate) fn struct_getfield(expr: DfExpr, field_name: &str) -> DfExpr {
     use datafusion::logical_expr::ScalarUDF;
@@ -2301,144 +2315,146 @@ pub fn apply_type_coercion(expr: &DfExpr, schema: &datafusion::common::DFSchema)
 
                 // Handle Null-typed operands: cast the null side to match the
                 // other operand's type so Arrow doesn't reject the type pair.
-                {
-                    let lt = &left_type;
-                    let rt = &right_type;
-                    let left_is_null = lt.is_null();
-                    let right_is_null = rt.is_null();
-                    if left_is_null && right_is_null {
-                        // Both null: result is always null for comparisons
-                        return Ok(lit(ScalarValue::Boolean(None)));
-                    }
-                    if left_is_null || right_is_null {
-                        let target = if left_is_null { rt } else { lt };
-                        let coerced_left = if left_is_null {
-                            datafusion::logical_expr::cast(left, target.clone())
-                        } else {
-                            left
-                        };
-                        let coerced_right = if right_is_null {
-                            datafusion::logical_expr::cast(right, target.clone())
-                        } else {
-                            right
-                        };
-                        return Ok(binary_expr(coerced_left, binary.op, coerced_right));
-                    }
+                let left_is_null = left_type.is_null();
+                let right_is_null = right_type.is_null();
+                if left_is_null && right_is_null {
+                    return Ok(lit(ScalarValue::Boolean(None)));
+                }
+                if left_is_null || right_is_null {
+                    let target = if left_is_null {
+                        &right_type
+                    } else {
+                        &left_type
+                    };
+                    let coerced_left = if left_is_null {
+                        datafusion::logical_expr::cast(left, target.clone())
+                    } else {
+                        left
+                    };
+                    let coerced_right = if right_is_null {
+                        datafusion::logical_expr::cast(right, target.clone())
+                    } else {
+                        right
+                    };
+                    return Ok(binary_expr(coerced_left, binary.op, coerced_right));
                 }
 
                 // 0. LargeBinary (CypherValue) handling — before type-mismatch check since
                 //    both-LB is same-type but still needs special handling
-                {
-                    let lt = &left_type;
-                    let rt = &right_type;
-                    let left_is_lb = matches!(lt, DataType::LargeBinary);
-                    let right_is_lb = matches!(rt, DataType::LargeBinary);
+                let left_is_lb = matches!(left_type, DataType::LargeBinary);
+                let right_is_lb = matches!(right_type, DataType::LargeBinary);
 
-                    // List concatenation / append via Plus operator
-                    if binary.op == Operator::Plus {
-                        // Both CypherValue → list concat (both could be CypherValue lists)
-                        if left_is_lb && right_is_lb {
-                            return Ok(dummy_udf_expr("_cypher_list_concat", vec![left, right]));
-                        }
-                        // Native List types → list concat or append
-                        let left_is_native_list =
-                            matches!(lt, DataType::List(_) | DataType::LargeList(_));
-                        let right_is_native_list =
-                            matches!(rt, DataType::List(_) | DataType::LargeList(_));
-                        if left_is_native_list && right_is_native_list {
-                            return Ok(dummy_udf_expr("_cypher_list_concat", vec![left, right]));
-                        }
-                        if left_is_native_list || right_is_native_list {
-                            return Ok(dummy_udf_expr("_cypher_list_append", vec![left, right]));
-                        }
-                        // LB + typed scalar (e.g., LB + Int64) falls through
-                        // to the CypherValue decode path below
+                // List concatenation / append via Plus operator
+                if binary.op == Operator::Plus {
+                    // Both CypherValue → list concat (both could be CypherValue lists)
+                    if left_is_lb && right_is_lb {
+                        return Ok(dummy_udf_expr("_cypher_list_concat", vec![left, right]));
                     }
-
-                    // LargeBinary comparisons (both-LB or mixed LB/typed):
-                    // route through _cypher_* comparison UDFs
-                    if (left_is_lb || right_is_lb) && is_comparison {
-                        if let Some(udf_name) = comparison_udf_name(binary.op) {
-                            return Ok(dummy_udf_expr(udf_name, vec![left, right]));
-                        }
-                        return Ok(binary_expr(left, binary.op, right));
+                    // Native List types → list concat or append
+                    let left_is_native_list =
+                        matches!(left_type, DataType::List(_) | DataType::LargeList(_));
+                    let right_is_native_list =
+                        matches!(right_type, DataType::List(_) | DataType::LargeList(_));
+                    if left_is_native_list && right_is_native_list {
+                        return Ok(dummy_udf_expr("_cypher_list_concat", vec![left, right]));
                     }
+                    if left_is_native_list || right_is_native_list {
+                        return Ok(dummy_udf_expr("_cypher_list_append", vec![left, right]));
+                    }
+                    // LB + typed scalar (e.g., LB + Int64) falls through
+                    // to the CypherValue decode path below
+                }
 
-                    // Mixed LB/typed arithmetic: route through CypherValue arithmetic UDFs
-                    if (left_is_lb || right_is_lb) && is_arithmetic {
-                        let udf_name = arithmetic_udf_name(binary.op)
-                            .expect("is_arithmetic guarantees a valid arithmetic operator");
+                // LargeBinary comparisons (both-LB or mixed LB/typed):
+                // route through _cypher_* comparison UDFs
+                if (left_is_lb || right_is_lb) && is_comparison {
+                    if let Some(udf_name) = comparison_udf_name(binary.op) {
                         return Ok(dummy_udf_expr(udf_name, vec![left, right]));
                     }
+                    return Ok(binary_expr(left, binary.op, right));
+                }
 
-                    // DateTime struct comparisons: compare nanos_since_epoch fields.
-                    // Per Cypher semantics, two DateTimes with the same UTC instant but different
-                    // offsets/timezones are equal.
-                    if is_datetime_struct_type(lt) && is_datetime_struct_type(rt) && is_comparison {
-                        return Ok(binary_expr(
-                            extract_datetime_nanos(left),
-                            binary.op,
-                            extract_datetime_nanos(right),
-                        ));
+                // Mixed LB/typed arithmetic: route through CypherValue arithmetic UDFs
+                if (left_is_lb || right_is_lb) && is_arithmetic {
+                    let udf_name = arithmetic_udf_name(binary.op)
+                        .expect("is_arithmetic guarantees a valid arithmetic operator");
+                    return Ok(dummy_udf_expr(udf_name, vec![left, right]));
+                }
+
+                // DateTime struct comparisons: compare nanos_since_epoch fields.
+                // Per Cypher semantics, two DateTimes with the same UTC instant but different
+                // offsets/timezones are equal.
+                if is_datetime_struct_type(&left_type)
+                    && is_datetime_struct_type(&right_type)
+                    && is_comparison
+                {
+                    return Ok(binary_expr(
+                        extract_datetime_nanos(left),
+                        binary.op,
+                        extract_datetime_nanos(right),
+                    ));
+                }
+
+                // Time struct comparisons: compare UTC-normalized nanos
+                if is_time_struct_type(&left_type)
+                    && is_time_struct_type(&right_type)
+                    && is_comparison
+                {
+                    return Ok(binary_expr(
+                        extract_time_nanos(left),
+                        binary.op,
+                        extract_time_nanos(right),
+                    ));
+                }
+
+                // Mixed Timestamp ↔ DateTime struct comparisons.
+                // Handle comparisons between system timestamps (like _created_at, _valid_from)
+                // and DateTime struct properties. Extract nanos from struct and compare.
+                use datafusion::arrow::datatypes::TimeUnit;
+                let left_is_ts = matches!(left_type, DataType::Timestamp(TimeUnit::Nanosecond, _));
+                let right_is_ts =
+                    matches!(right_type, DataType::Timestamp(TimeUnit::Nanosecond, _));
+
+                if is_comparison
+                    && ((left_is_ts && is_datetime_struct_type(&right_type))
+                        || (is_datetime_struct_type(&left_type) && right_is_ts))
+                {
+                    let left_nanos = if is_datetime_struct_type(&left_type) {
+                        extract_datetime_nanos(left)
+                    } else {
+                        left
+                    };
+                    let right_nanos = if is_datetime_struct_type(&right_type) {
+                        extract_datetime_nanos(right)
+                    } else {
+                        right
+                    };
+
+                    // Cast both sides to Timestamp(Nanosecond, None) to avoid timezone mismatch.
+                    // The nanos values are already UTC instants, timezone is just metadata.
+                    let ts_type = DataType::Timestamp(TimeUnit::Nanosecond, None);
+                    return Ok(binary_expr(
+                        cast_expr(left_nanos, ts_type.clone()),
+                        binary.op,
+                        cast_expr(right_nanos, ts_type),
+                    ));
+                }
+
+                // Struct or LargeBinary/Struct comparisons: route to _cypher_equal UDFs
+                // which handle identity-based comparison (_vid/_eid) and null-in-map semantics.
+                let either_struct = matches!(left_type, DataType::Struct(_))
+                    || matches!(right_type, DataType::Struct(_));
+                let either_lb_or_struct = (matches!(left_type, DataType::LargeBinary)
+                    || matches!(left_type, DataType::Struct(_)))
+                    && (matches!(right_type, DataType::LargeBinary)
+                        || matches!(right_type, DataType::Struct(_)));
+
+                if is_comparison && either_struct && either_lb_or_struct {
+                    if let Some(udf_name) = comparison_udf_name(binary.op) {
+                        return Ok(dummy_udf_expr(udf_name, vec![left, right]));
                     }
-
-                    // Time struct comparisons: compare UTC-normalized nanos
-                    if is_time_struct_type(lt) && is_time_struct_type(rt) && is_comparison {
-                        return Ok(binary_expr(
-                            extract_time_nanos(left),
-                            binary.op,
-                            extract_time_nanos(right),
-                        ));
-                    }
-
-                    // Mixed Timestamp ↔ DateTime struct comparisons.
-                    // Handle comparisons between system timestamps (like _created_at, _valid_from)
-                    // and DateTime struct properties. Extract nanos from struct and compare.
-                    use datafusion::arrow::datatypes::TimeUnit;
-                    let left_is_ts = matches!(lt, DataType::Timestamp(TimeUnit::Nanosecond, _));
-                    let right_is_ts = matches!(rt, DataType::Timestamp(TimeUnit::Nanosecond, _));
-
-                    if is_comparison
-                        && ((left_is_ts && is_datetime_struct_type(rt))
-                            || (is_datetime_struct_type(lt) && right_is_ts))
-                    {
-                        let left_nanos = if is_datetime_struct_type(lt) {
-                            extract_datetime_nanos(left)
-                        } else {
-                            left
-                        };
-                        let right_nanos = if is_datetime_struct_type(rt) {
-                            extract_datetime_nanos(right)
-                        } else {
-                            right
-                        };
-
-                        // Cast both sides to Timestamp(Nanosecond, None) to avoid timezone mismatch.
-                        // The nanos values are already UTC instants, timezone is just metadata.
-                        let ts_type = DataType::Timestamp(TimeUnit::Nanosecond, None);
-                        return Ok(binary_expr(
-                            cast_expr(left_nanos, ts_type.clone()),
-                            binary.op,
-                            cast_expr(right_nanos, ts_type),
-                        ));
-                    }
-
-                    // Struct or LargeBinary/Struct comparisons: route to _cypher_equal UDFs
-                    // which handle identity-based comparison (_vid/_eid) and null-in-map semantics.
-                    let either_struct =
-                        matches!(lt, DataType::Struct(_)) || matches!(rt, DataType::Struct(_));
-                    let either_lb_or_struct = (matches!(lt, DataType::LargeBinary)
-                        || matches!(lt, DataType::Struct(_)))
-                        && (matches!(rt, DataType::LargeBinary)
-                            || matches!(rt, DataType::Struct(_)));
-
-                    if is_comparison && either_struct && either_lb_or_struct {
-                        if let Some(udf_name) = comparison_udf_name(binary.op) {
-                            return Ok(dummy_udf_expr(udf_name, vec![left, right]));
-                        }
-                        // Cypher doesn't define ordering for maps/nodes/edges
-                        return Ok(lit(ScalarValue::Boolean(None)));
-                    }
+                    // Cypher doesn't define ordering for maps/nodes/edges
+                    return Ok(lit(ScalarValue::Boolean(None)));
                 }
 
                 // NaN-aware comparisons: when a division expression is involved,
@@ -2449,45 +2465,33 @@ pub fn apply_type_coercion(expr: &DfExpr, schema: &datafusion::common::DFSchema)
                     return Ok(dummy_udf_expr(udf_name, vec![left, right]));
                 }
 
-                let lt = &left_type;
-                let rt = &right_type;
-
-                // Handle Plus for string types regardless of whether lt == rt.
+                // Handle Plus for string types regardless of whether left_type == right_type.
                 // DataFusion's + operator does not support string addition; we need concat().
-                // This must be outside the lt != rt block so Utf8 + Utf8 (same type) is covered.
+                // This must be outside the type-mismatch block so Utf8 + Utf8 (same type) is covered.
                 if binary.op == Operator::Plus
-                    && (crate::query::cypher_type_coerce::is_string_type(lt)
-                        || crate::query::cypher_type_coerce::is_string_type(rt))
-                    && !matches!(
-                        lt,
-                        DataType::LargeBinary
-                            | DataType::Struct(_)
-                            | DataType::List(_)
-                            | DataType::LargeList(_)
-                    )
-                    && !matches!(
-                        rt,
-                        DataType::LargeBinary
-                            | DataType::Struct(_)
-                            | DataType::List(_)
-                            | DataType::LargeList(_)
-                    )
+                    && (crate::query::cypher_type_coerce::is_string_type(&left_type)
+                        || crate::query::cypher_type_coerce::is_string_type(&right_type))
+                    && is_primitive_type(&left_type)
+                    && is_primitive_type(&right_type)
                 {
                     return crate::query::cypher_type_coerce::build_cypher_plus(
-                        left, lt, right, rt,
+                        left,
+                        &left_type,
+                        right,
+                        &right_type,
                     );
                 }
 
-                if lt != rt {
+                if left_type != right_type {
                     // 1. Numeric Coercion
-                    if lt.is_numeric() && rt.is_numeric() {
-                        let target = wider_numeric_type(lt, rt);
-                        let coerced_left = if *lt != target {
+                    if left_type.is_numeric() && right_type.is_numeric() {
+                        let target = wider_numeric_type(&left_type, &right_type);
+                        let coerced_left = if left_type != target {
                             datafusion::logical_expr::cast(left, target.clone())
                         } else {
                             left
                         };
-                        let coerced_right = if *rt != target {
+                        let coerced_right = if right_type != target {
                             datafusion::logical_expr::cast(right, target)
                         } else {
                             right
@@ -2497,7 +2501,7 @@ pub fn apply_type_coercion(expr: &DfExpr, schema: &datafusion::common::DFSchema)
 
                     // 2. Timestamp vs Utf8: cast Utf8 side to the Timestamp type
                     if is_comparison {
-                        match (lt, rt) {
+                        match (&left_type, &right_type) {
                             (
                                 ts @ DataType::Timestamp(..),
                                 DataType::Utf8 | DataType::LargeUtf8,
@@ -2526,7 +2530,8 @@ pub fn apply_type_coercion(expr: &DfExpr, schema: &datafusion::common::DFSchema)
 
                     // 3. List comparison with different numeric inner types: coerce to wider
                     if is_comparison
-                        && let (DataType::List(l_field), DataType::List(r_field)) = (lt, rt)
+                        && let (DataType::List(l_field), DataType::List(r_field)) =
+                            (&left_type, &right_type)
                     {
                         let l_inner = l_field.data_type();
                         let r_inner = r_field.data_type();
@@ -2546,62 +2551,39 @@ pub fn apply_type_coercion(expr: &DfExpr, schema: &datafusion::common::DFSchema)
                         }
                     }
 
-                    // 4. Unified coercion for primitive types (reviewer fix 3.1)
-                    // Existing special cases (LB, DateTime struct, Timestamp mix, Struct, NaN) remain owners.
-                    // This handles all primitive type comparisons and Plus with correct Cypher semantics.
-                    if !matches!(
-                        lt,
-                        DataType::LargeBinary
-                            | DataType::Struct(_)
-                            | DataType::List(_)
-                            | DataType::LargeList(_)
-                    ) && !matches!(
-                        rt,
-                        DataType::LargeBinary
-                            | DataType::Struct(_)
-                            | DataType::List(_)
-                            | DataType::LargeList(_)
-                    ) {
-                        // Plus operator: numeric addition, string concat, etc.
+                    // 4. Unified coercion for primitive types.
+                    // Existing special cases (LB, DateTime struct, Timestamp mix, Struct, NaN) are
+                    // handled above. This handles remaining primitive type comparisons and Plus.
+                    if is_primitive_type(&left_type) && is_primitive_type(&right_type) {
                         if binary.op == Operator::Plus {
                             return crate::query::cypher_type_coerce::build_cypher_plus(
-                                left, lt, right, rt,
+                                left,
+                                &left_type,
+                                right,
+                                &right_type,
                             );
                         }
 
-                        // Comparison operators: equality and ordering
                         if is_comparison {
-                            if matches!(binary.op, Operator::Eq | Operator::NotEq) {
-                                return Ok(
-                                    crate::query::cypher_type_coerce::build_cypher_equality(
-                                        left, lt, right, rt, binary.op,
-                                    ),
-                                );
-                            }
-                            if matches!(
+                            return Ok(crate::query::cypher_type_coerce::build_cypher_comparison(
+                                left,
+                                &left_type,
+                                right,
+                                &right_type,
                                 binary.op,
-                                Operator::Lt | Operator::LtEq | Operator::Gt | Operator::GtEq
-                            ) {
-                                return Ok(
-                                    crate::query::cypher_type_coerce::build_cypher_comparison(
-                                        left, lt, right, rt, binary.op,
-                                    ),
-                                );
-                            }
+                            ));
                         }
                     }
                 }
 
                 // 5. List ordering: rewrite Lt/LtEq/Gt/GtEq on lists to _cypher_list_compare UDF
-                let lt = &left_type;
-                let rt = &right_type;
                 if is_comparison
                     && matches!(
                         binary.op,
                         Operator::Lt | Operator::LtEq | Operator::Gt | Operator::GtEq
                     )
-                    && matches!(lt, DataType::List(_) | DataType::LargeList(_))
-                    && matches!(rt, DataType::List(_) | DataType::LargeList(_))
+                    && matches!(left_type, DataType::List(_) | DataType::LargeList(_))
+                    && matches!(right_type, DataType::List(_) | DataType::LargeList(_))
                 {
                     let op_str = match binary.op {
                         Operator::Lt => "lt",
@@ -2619,8 +2601,8 @@ pub fn apply_type_coercion(expr: &DfExpr, schema: &datafusion::common::DFSchema)
                 // 6. List equality: route Eq/NotEq on lists to _cypher_equal/_cypher_not_equal
                 // for 3-valued null element comparison (e.g., [null] = [1] → null)
                 if matches!(binary.op, Operator::Eq | Operator::NotEq)
-                    && matches!(lt, DataType::List(_) | DataType::LargeList(_))
-                    && matches!(rt, DataType::List(_) | DataType::LargeList(_))
+                    && matches!(left_type, DataType::List(_) | DataType::LargeList(_))
+                    && matches!(right_type, DataType::List(_) | DataType::LargeList(_))
                 {
                     let udf_name = comparison_udf_name(binary.op)
                         .expect("Eq|NotEq is always a valid comparison operator");
