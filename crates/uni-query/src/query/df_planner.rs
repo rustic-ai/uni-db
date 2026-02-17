@@ -2271,32 +2271,47 @@ impl HybridPhysicalPlanner {
         let ctx = self.translation_context_for_plan(input);
 
         // Translate group by expressions
+        use crate::query::df_graph::expr_compiler::CypherPhysicalExprCompiler;
         let mut group_exprs: Vec<(Arc<dyn datafusion::physical_expr::PhysicalExpr>, String)> =
             Vec::new();
         for expr in group_by {
-            // DateTime/Time struct grouping: group by UTC-normalized values
-            // Two DateTimes with same UTC instant but different offsets should group together
-            let mut df_expr = cypher_expr_to_df(expr, Some(&ctx))?;
-            if let Ok(expr_type) = df_expr.get_type(&datafusion::common::DFSchema::try_from(
-                schema.as_ref().clone(),
-            )?) {
-                if uni_common::core::schema::is_datetime_struct(&expr_type) {
-                    // Group by UTC instant (nanos_since_epoch)
-                    df_expr = crate::query::df_expr::extract_datetime_nanos(df_expr);
-                } else if uni_common::core::schema::is_time_struct(&expr_type) {
-                    // Group by UTC-normalized time
-                    // extract_time_nanos does: nanos_since_midnight - (offset_seconds * 1e9)
-                    df_expr = crate::query::df_expr::extract_time_nanos(df_expr);
-                }
-            }
-
-            // Convert logical expression to physical
-            let physical_expr = create_physical_expr(
-                &df_expr,
-                &datafusion::common::DFSchema::try_from(schema.as_ref().clone())?,
-                state.execution_props(),
-            )?;
             let name = expr.to_string_repr();
+            let physical_expr = if CypherPhysicalExprCompiler::contains_custom_expr(expr) {
+                // Custom expressions (quantifiers, list comprehensions, reduce, etc.)
+                // cannot be translated via cypher_expr_to_df; compile them directly.
+                let compiler = CypherPhysicalExprCompiler::new(&state, Some(&ctx))
+                    .with_subquery_ctx(
+                        self.graph_ctx.clone(),
+                        self.schema.clone(),
+                        self.session_ctx.clone(),
+                        self.storage.clone(),
+                        self.params.clone(),
+                    );
+                compiler.compile(expr, &schema)?
+            } else {
+                // DateTime/Time struct grouping: group by UTC-normalized values
+                // Two DateTimes with same UTC instant but different offsets should group together
+                let mut df_expr = cypher_expr_to_df(expr, Some(&ctx))?;
+                if let Ok(expr_type) = df_expr.get_type(&datafusion::common::DFSchema::try_from(
+                    schema.as_ref().clone(),
+                )?) {
+                    if uni_common::core::schema::is_datetime_struct(&expr_type) {
+                        // Group by UTC instant (nanos_since_epoch)
+                        df_expr = crate::query::df_expr::extract_datetime_nanos(df_expr);
+                    } else if uni_common::core::schema::is_time_struct(&expr_type) {
+                        // Group by UTC-normalized time
+                        // extract_time_nanos does: nanos_since_midnight - (offset_seconds * 1e9)
+                        df_expr = crate::query::df_expr::extract_time_nanos(df_expr);
+                    }
+                }
+
+                // Convert logical expression to physical
+                create_physical_expr(
+                    &df_expr,
+                    &datafusion::common::DFSchema::try_from(schema.as_ref().clone())?,
+                    state.execution_props(),
+                )?
+            };
             group_exprs.push((physical_expr, name));
         }
 
