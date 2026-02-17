@@ -401,8 +401,58 @@ pub fn parse_duration_to_cypher(s: &str) -> Result<CypherDuration> {
     Ok(CypherDuration::from_micros(micros))
 }
 
+/// Parse date-time style ISO 8601 duration format (e.g., `P2012-02-02T14:37:21.545`).
+///
+/// Format: `PYYYY-MM-DDTHH:MM:SS.fff`
+fn parse_datetime_style_duration(s: &str) -> Result<CypherDuration> {
+    let body = &s[1..]; // Skip 'P'
+
+    // Split on 'T' for date and time parts
+    let (date_part, time_part) = if let Some(t_pos) = body.find('T') {
+        (&body[..t_pos], Some(&body[t_pos + 1..]))
+    } else {
+        (body, None)
+    };
+
+    // Parse date part: YYYY-MM-DD
+    let date_parts: Vec<&str> = date_part.split('-').collect();
+    if date_parts.len() != 3 {
+        return Err(anyhow!("Invalid date-time style duration date: {}", date_part));
+    }
+    let years: i64 = date_parts[0].parse().map_err(|_| anyhow!("Invalid years"))?;
+    let month_val: i64 = date_parts[1].parse().map_err(|_| anyhow!("Invalid months"))?;
+    let day_val: i64 = date_parts[2].parse().map_err(|_| anyhow!("Invalid days"))?;
+
+    let months = years * 12 + month_val;
+    let days = day_val;
+
+    // Parse time part: HH:MM:SS.fff
+    let nanos = if let Some(tp) = time_part {
+        let time_parts: Vec<&str> = tp.split(':').collect();
+        if time_parts.len() != 3 {
+            return Err(anyhow!("Invalid date-time style duration time: {}", tp));
+        }
+        let hours: f64 = time_parts[0].parse().map_err(|_| anyhow!("Invalid hours"))?;
+        let minutes: f64 = time_parts[1].parse().map_err(|_| anyhow!("Invalid minutes"))?;
+        let seconds: f64 = time_parts[2].parse().map_err(|_| anyhow!("Invalid seconds"))?;
+        (hours * 3600.0 * NANOS_PER_SECOND as f64
+            + minutes * 60.0 * NANOS_PER_SECOND as f64
+            + seconds * NANOS_PER_SECOND as f64) as i64
+    } else {
+        0
+    };
+
+    Ok(CypherDuration::new(months, days, nanos))
+}
+
 /// Parse ISO 8601 duration format to CypherDuration (preserves month/day/time components).
 fn parse_iso8601_duration_cypher(s: &str) -> Result<CypherDuration> {
+    // Detect date-time style duration: after 'P', if char at position 4 is '-' and length >= 10
+    // e.g., P2012-02-02T14:37:21.545
+    if s.len() >= 11 && s.as_bytes().get(5) == Some(&b'-') {
+        return parse_datetime_style_duration(s);
+    }
+
     let s = &s[1..]; // Skip 'P'
     let mut months: i64 = 0;
     let mut days: i64 = 0;
@@ -428,10 +478,53 @@ fn parse_iso8601_duration_cypher(s: &str) -> Result<CypherDuration> {
             num_buf.clear();
 
             match c {
-                'Y' | 'y' => months += (num * 12.0) as i64,
-                'M' if !in_time_part => months += num as i64,
-                'W' | 'w' => days += (num * 7.0) as i64,
-                'D' | 'd' => days += num as i64,
+                'Y' | 'y' => {
+                    // Cascade: whole years → months, fractional years → via average Gregorian year
+                    let whole = num.trunc() as i64;
+                    let frac = num.fract();
+                    months += whole * 12;
+                    if frac != 0.0 {
+                        // Fractional year → fractional months → cascade
+                        let frac_months = frac * 12.0;
+                        let whole_frac_months = frac_months.trunc() as i64;
+                        let frac_frac_months = frac_months.fract();
+                        months += whole_frac_months;
+                        // Cascade remaining fractional months via average Gregorian month (2,629,746 seconds)
+                        let frac_secs = frac_frac_months * 2_629_746.0;
+                        let extra_days = (frac_secs / SECONDS_PER_DAY as f64).trunc() as i64;
+                        let remaining_secs = frac_secs - (extra_days as f64 * SECONDS_PER_DAY as f64);
+                        days += extra_days;
+                        nanos += (remaining_secs * NANOS_PER_SECOND as f64) as i64;
+                    }
+                }
+                'M' if !in_time_part => {
+                    // Cascade: whole months, fractional months → days + nanos via average Gregorian month
+                    let whole = num.trunc() as i64;
+                    let frac = num.fract();
+                    months += whole;
+                    if frac != 0.0 {
+                        let frac_secs = frac * 2_629_746.0;
+                        let extra_days = (frac_secs / SECONDS_PER_DAY as f64).trunc() as i64;
+                        let remaining_secs = frac_secs - (extra_days as f64 * SECONDS_PER_DAY as f64);
+                        days += extra_days;
+                        nanos += (remaining_secs * NANOS_PER_SECOND as f64) as i64;
+                    }
+                }
+                'W' | 'w' => {
+                    // Cascade: weeks to days, fractional days to nanos
+                    let total_days_f = num * 7.0;
+                    let whole = total_days_f.trunc() as i64;
+                    let frac = total_days_f.fract();
+                    days += whole;
+                    nanos += (frac * NANOS_PER_DAY as f64) as i64;
+                }
+                'D' | 'd' => {
+                    // Cascade: whole days, fractional days to nanos
+                    let whole = num.trunc() as i64;
+                    let frac = num.fract();
+                    days += whole;
+                    nanos += (frac * NANOS_PER_DAY as f64) as i64;
+                }
                 'H' | 'h' => nanos += (num * 3600.0 * NANOS_PER_SECOND as f64) as i64,
                 'M' | 'm' if in_time_part => nanos += (num * 60.0 * NANOS_PER_SECOND as f64) as i64,
                 'S' | 's' => nanos += (num * NANOS_PER_SECOND as f64) as i64,
@@ -570,6 +663,101 @@ pub fn eval_temporal_accessor(temporal_str: &str, component: &str) -> Result<Val
         "epochmillis" => extract_epoch_millis(temporal_str),
 
         _ => Err(anyhow!("Unknown temporal component: {}", component)),
+    }
+}
+
+/// Evaluate a temporal component accessor on a `Value`.
+///
+/// Handles `Value::Temporal` (converts to string representation then delegates),
+/// `Value::String` (direct string-based extraction), and `Value::Null`.
+pub fn eval_temporal_accessor_value(val: &Value, component: &str) -> Result<Value> {
+    match val {
+        Value::Null => Ok(Value::Null),
+        Value::Temporal(tv) => {
+            // For offset-related accessors on temporal values, extract directly
+            // from the TemporalValue fields to avoid lossy string round-trip.
+            let comp_lower = component.to_lowercase();
+            match comp_lower.as_str() {
+                "timezone" => {
+                    return match tv {
+                        TemporalValue::DateTime { timezone_name, offset_seconds, .. } => {
+                            Ok(match timezone_name {
+                                Some(name) => Value::String(name.clone()),
+                                None => Value::String(format_timezone_offset(*offset_seconds)),
+                            })
+                        }
+                        TemporalValue::Time { offset_seconds, .. } => {
+                            Ok(Value::String(format_timezone_offset(*offset_seconds)))
+                        }
+                        _ => Ok(Value::Null),
+                    };
+                }
+                "offset" => {
+                    return match tv {
+                        TemporalValue::DateTime { offset_seconds, .. }
+                        | TemporalValue::Time { offset_seconds, .. } => {
+                            Ok(Value::String(format_timezone_offset(*offset_seconds)))
+                        }
+                        _ => Ok(Value::Null),
+                    };
+                }
+                "offsetminutes" => {
+                    return match tv {
+                        TemporalValue::DateTime { offset_seconds, .. }
+                        | TemporalValue::Time { offset_seconds, .. } => {
+                            Ok(Value::Int((*offset_seconds / 60) as i64))
+                        }
+                        _ => Ok(Value::Null),
+                    };
+                }
+                "offsetseconds" => {
+                    return match tv {
+                        TemporalValue::DateTime { offset_seconds, .. }
+                        | TemporalValue::Time { offset_seconds, .. } => {
+                            Ok(Value::Int(*offset_seconds as i64))
+                        }
+                        _ => Ok(Value::Null),
+                    };
+                }
+                "epochseconds" => {
+                    return match tv {
+                        TemporalValue::DateTime { nanos_since_epoch, .. } => {
+                            Ok(Value::Int(nanos_since_epoch / 1_000_000_000))
+                        }
+                        TemporalValue::LocalDateTime { nanos_since_epoch } => {
+                            Ok(Value::Int(nanos_since_epoch / 1_000_000_000))
+                        }
+                        TemporalValue::Date { days_since_epoch } => {
+                            Ok(Value::Int(*days_since_epoch as i64 * 86400))
+                        }
+                        _ => Ok(Value::Null),
+                    };
+                }
+                "epochmillis" => {
+                    return match tv {
+                        TemporalValue::DateTime { nanos_since_epoch, .. } => {
+                            Ok(Value::Int(nanos_since_epoch / 1_000_000))
+                        }
+                        TemporalValue::LocalDateTime { nanos_since_epoch } => {
+                            Ok(Value::Int(nanos_since_epoch / 1_000_000))
+                        }
+                        TemporalValue::Date { days_since_epoch } => {
+                            Ok(Value::Int(*days_since_epoch as i64 * 86400 * 1000))
+                        }
+                        _ => Ok(Value::Null),
+                    };
+                }
+                _ => {}
+            }
+            // For all other accessors, convert to string and delegate
+            let temporal_str = tv.to_string();
+            eval_temporal_accessor(&temporal_str, component)
+        }
+        Value::String(s) => eval_temporal_accessor(s, component),
+        _ => Err(anyhow!(
+            "Cannot access temporal property '{}' on non-temporal value",
+            component
+        )),
     }
 }
 
@@ -788,6 +976,7 @@ pub fn eval_duration_accessor(duration_str: &str, component: &str) -> Result<Val
     match component_lower.as_str() {
         // Total components (converted to that unit)
         "years" => Ok(Value::Int(total_months.div_euclid(12))),
+        "quarters" => Ok(Value::Int(total_months.div_euclid(3))),
         "months" => Ok(Value::Int(total_months)),
         "weeks" => Ok(Value::Int(duration.days.div_euclid(7))),
         "days" => Ok(Value::Int(duration.days)),
@@ -824,6 +1013,7 @@ pub fn is_duration_accessor(property: &str) -> bool {
     matches!(
         property_lower.as_str(),
         "years"
+            | "quarters"
             | "months"
             | "weeks"
             | "days"
@@ -867,6 +1057,16 @@ fn eval_date(args: &[Value]) -> Result<Value> {
             }))
         }
         Value::Temporal(TemporalValue::Date { .. }) => Ok(args[0].clone()),
+        // Cross-type: extract date component from any temporal with a date
+        Value::Temporal(tv) => {
+            if let Some(date) = tv.to_date() {
+                Ok(Value::Temporal(TemporalValue::Date {
+                    days_since_epoch: date_to_days_since_epoch(&date),
+                }))
+            } else {
+                Err(anyhow!("date(): temporal value has no date component"))
+            }
+        }
         Value::Map(map) => eval_date_from_map(map),
         Value::Null => Ok(Value::Null),
         _ => Err(anyhow!("date() expects a string or map argument")),
@@ -1118,7 +1318,7 @@ fn eval_time(args: &[Value]) -> Result<Value> {
 
     match &args[0] {
         Value::String(s) => {
-            let (_, time, tz_info) = parse_datetime_with_tz(s)?;
+            let (time, tz_info) = parse_time_string_with_tz(s)?;
             let offset = match tz_info {
                 Some(ref info) => info
                     .offset_for_local(&NaiveDateTime::new(Utc::now().date_naive(), time))?
@@ -1131,6 +1331,21 @@ fn eval_time(args: &[Value]) -> Result<Value> {
             }))
         }
         Value::Temporal(TemporalValue::Time { .. }) => Ok(args[0].clone()),
+        // Cross-type: extract time + offset from any temporal
+        Value::Temporal(tv) => {
+            let time = tv
+                .to_time()
+                .ok_or_else(|| anyhow!("time(): temporal value has no time component"))?;
+            let offset = match tv {
+                TemporalValue::DateTime { offset_seconds, .. } => *offset_seconds,
+                TemporalValue::Time { offset_seconds, .. } => *offset_seconds,
+                _ => 0, // LocalTime, LocalDateTime, Date → UTC
+            };
+            Ok(Value::Temporal(TemporalValue::Time {
+                nanos_since_midnight: time_to_nanos(&time),
+                offset_seconds: offset,
+            }))
+        }
         Value::Map(map) => eval_time_from_map(map, true),
         Value::Null => Ok(Value::Null),
         _ => Err(anyhow!("time() expects a string or map argument")),
@@ -1153,6 +1368,15 @@ fn eval_localtime(args: &[Value]) -> Result<Value> {
             }))
         }
         Value::Temporal(TemporalValue::LocalTime { .. }) => Ok(args[0].clone()),
+        // Cross-type: extract time from any temporal, strip timezone
+        Value::Temporal(tv) => {
+            let time = tv
+                .to_time()
+                .ok_or_else(|| anyhow!("localtime(): temporal value has no time component"))?;
+            Ok(Value::Temporal(TemporalValue::LocalTime {
+                nanos_since_midnight: time_to_nanos(&time),
+            }))
+        }
         Value::Map(map) => eval_time_from_map(map, false),
         Value::Null => Ok(Value::Null),
         _ => Err(anyhow!("localtime() expects a string or map argument")),
@@ -1214,6 +1438,24 @@ fn eval_time_from_projection(
         Value::Temporal(TemporalValue::LocalTime {
             nanos_since_midnight,
         }) => (nanos_to_time(*nanos_since_midnight), None),
+        Value::Temporal(TemporalValue::DateTime {
+            nanos_since_epoch,
+            offset_seconds,
+            ..
+        }) => {
+            // Extract time component from DateTime (use local time = UTC nanos + offset)
+            let local_nanos = nanos_since_epoch + (*offset_seconds as i64) * 1_000_000_000;
+            let dt = chrono::DateTime::from_timestamp_nanos(local_nanos);
+            (dt.naive_utc().time(), Some(*offset_seconds))
+        }
+        Value::Temporal(TemporalValue::LocalDateTime { nanos_since_epoch }) => {
+            let dt = chrono::DateTime::from_timestamp_nanos(*nanos_since_epoch);
+            (dt.naive_utc().time(), None)
+        }
+        Value::Temporal(TemporalValue::Date { .. }) => {
+            // Date has no time component, use midnight
+            (NaiveTime::from_hms_opt(0, 0, 0).unwrap(), None)
+        }
         Value::String(s) => {
             let (_, time, tz_info) = parse_datetime_with_tz(s)?;
             let offset = tz_info.as_ref().map(|tz| {
@@ -1281,6 +1523,9 @@ fn parse_time_string(s: &str) -> Result<NaiveTime> {
         .or_else(|_| NaiveTime::parse_from_str(s, "%H:%M:%S%.f"))
         .or_else(|_| NaiveTime::parse_from_str(s, "%H:%M:%S%.9f"))
         .or_else(|_| NaiveTime::parse_from_str(s, "%H:%M"))
+        // Try compact time formats (HHMMSS, HHMM, HH) before falling back to datetime parser,
+        // since 4-digit strings like "2140" are ambiguous (year vs HHMM).
+        .or_else(|e| try_parse_compact_time(s).ok_or(e))
         .or_else(|_| NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S").map(|dt| dt.time()))
         .or_else(|_| NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S%.f").map(|dt| dt.time()))
         .or_else(|_| DateTime::parse_from_rfc3339(s).map(|dt| dt.time()))
@@ -1289,6 +1534,61 @@ fn parse_time_string(s: &str) -> Result<NaiveTime> {
             parse_datetime_with_tz(s).map(|(_, time, _)| time)
         })
         .map_err(|_| anyhow!("Invalid time format"))
+}
+
+/// Parse a string as time with timezone, preferring time interpretation over date.
+///
+/// This is used by `eval_time` where the input is known to be a time value.
+/// It handles ambiguous cases like "2140-02" (compact time 21:40 with offset -02:00)
+/// that would otherwise be misinterpreted as a date (year 2140, February).
+fn parse_time_string_with_tz(s: &str) -> Result<(NaiveTime, Option<TimezoneInfo>)> {
+    // Strip bracketed timezone suffix
+    let (datetime_part, tz_name) = if let Some(bracket_pos) = s.find('[') {
+        let tz_name = s[bracket_pos + 1..s.len() - 1].to_string();
+        (&s[..bracket_pos], Some(tz_name))
+    } else {
+        (s, None)
+    };
+
+    // Try plain time formats first (no timezone)
+    if let Ok(time) = try_parse_naive_time(datetime_part) {
+        let tz_info = tz_name.map(|n| parse_timezone(&n)).transpose()?;
+        return Ok((time, tz_info));
+    }
+
+    // Try time with Z suffix
+    if let Some(base) = datetime_part.strip_suffix('Z').or_else(|| datetime_part.strip_suffix('z'))
+        && let Ok(time) = try_parse_naive_time(base)
+    {
+        let utc_tz = TimezoneInfo::FixedOffset(FixedOffset::east_opt(0).unwrap());
+        let tz_info = tz_name.map(|n| parse_timezone(&n)).transpose()?.or(Some(utc_tz));
+        return Ok((time, tz_info));
+    }
+
+    // Try splitting at + or - for timezone offset, preferring time interpretation
+    if let Some(tz_pos) = datetime_part.rfind('+').or_else(|| {
+        // For time strings, find the last '-' that's after at least HH (pos >= 2)
+        datetime_part.rfind('-').filter(|&pos| pos >= 2)
+    }) {
+        let left_part = &datetime_part[..tz_pos];
+        let tz_part = &datetime_part[tz_pos..];
+
+        if let Ok(time) = try_parse_naive_time(left_part) {
+            let tz_info = if let Some(name) = tz_name {
+                Some(parse_timezone(&name)?)
+            } else {
+                let offset = parse_timezone_offset(tz_part)?;
+                let fo = FixedOffset::east_opt(offset)
+                    .ok_or_else(|| anyhow!("Invalid timezone offset"))?;
+                Some(TimezoneInfo::FixedOffset(fo))
+            };
+            return Ok((time, tz_info));
+        }
+    }
+
+    // Fall back to full datetime parser
+    let (_, time, tz_info) = parse_datetime_with_tz(s)?;
+    Ok((time, tz_info))
 }
 
 fn build_nanoseconds(map: &HashMap<String, Value>) -> u32 {
@@ -1368,27 +1668,54 @@ fn parse_timezone_offset(tz: &str) -> Result<i32> {
         return Ok(0);
     }
 
-    // Parse +HH:MM or -HH:MM or +HH:MM:SS format
-    if tz.len() >= 5 && (tz.starts_with('+') || tz.starts_with('-')) {
+    // Must start with + or - and have at least HH (3 chars total)
+    if tz.len() >= 3 && (tz.starts_with('+') || tz.starts_with('-')) {
         let sign = if tz.starts_with('-') { -1 } else { 1 };
         let hours: i32 = tz[1..3]
             .parse()
             .map_err(|_| anyhow!("Invalid timezone hours"))?;
-        let mins: i32 = if tz.len() >= 6 {
-            tz[4..6]
-                .parse()
-                .map_err(|_| anyhow!("Invalid timezone minutes"))?
+
+        let rest = &tz[3..];
+        let (mins, secs) = if rest.is_empty() {
+            // +HH (hours-only, e.g., -02)
+            (0, 0)
+        } else if let Some(after_colon) = rest.strip_prefix(':') {
+            // Colon-separated: +HH:MM or +HH:MM:SS
+            let mins: i32 = if after_colon.len() >= 2 {
+                after_colon[..2]
+                    .parse()
+                    .map_err(|_| anyhow!("Invalid timezone minutes"))?
+            } else {
+                0
+            };
+            let secs: i32 = if after_colon.len() >= 5 && after_colon.as_bytes()[2] == b':' {
+                // +HH:MM:SS
+                after_colon[3..5]
+                    .parse()
+                    .map_err(|_| anyhow!("Invalid timezone seconds"))?
+            } else {
+                0
+            };
+            (mins, secs)
         } else {
-            0
+            // Compact no-colon: +HHMM or +HHMMSS
+            let mins: i32 = if rest.len() >= 2 {
+                rest[..2]
+                    .parse()
+                    .map_err(|_| anyhow!("Invalid timezone minutes"))?
+            } else {
+                0
+            };
+            let secs: i32 = if rest.len() >= 4 {
+                rest[2..4]
+                    .parse()
+                    .map_err(|_| anyhow!("Invalid timezone seconds"))?
+            } else {
+                0
+            };
+            (mins, secs)
         };
-        let secs: i32 = if tz.len() >= 9 {
-            // Format is +HH:MM:SS
-            tz[7..9]
-                .parse()
-                .map_err(|_| anyhow!("Invalid timezone seconds"))?
-        } else {
-            0
-        };
+
         return Ok(sign * (hours * 3600 + mins * 60 + secs));
     }
 
@@ -1430,6 +1757,25 @@ fn eval_datetime(args: &[Value]) -> Result<Value> {
             }))
         }
         Value::Temporal(TemporalValue::DateTime { .. }) => Ok(args[0].clone()),
+        // Cross-type: convert any temporal to datetime (add UTC timezone)
+        Value::Temporal(tv) => {
+            let date = tv.to_date().unwrap_or_else(|| Utc::now().date_naive());
+            let time = tv
+                .to_time()
+                .unwrap_or_else(|| NaiveTime::from_hms_opt(0, 0, 0).unwrap());
+            let ndt = NaiveDateTime::new(date, time);
+            let offset = match tv {
+                TemporalValue::Time { offset_seconds, .. } => *offset_seconds,
+                _ => 0,
+            };
+            let utc_ndt = ndt - Duration::seconds(offset as i64);
+            let utc_dt = DateTime::<Utc>::from_naive_utc_and_offset(utc_ndt, Utc);
+            Ok(Value::Temporal(TemporalValue::DateTime {
+                nanos_since_epoch: utc_dt.timestamp_nanos_opt().unwrap_or(0),
+                offset_seconds: offset,
+                timezone_name: None,
+            }))
+        }
         Value::Map(map) => eval_datetime_from_map(map, true),
         Value::Null => Ok(Value::Null),
         _ => Err(anyhow!("datetime() expects a string or map argument")),
@@ -1461,9 +1807,58 @@ fn eval_localdatetime(args: &[Value]) -> Result<Value> {
             }))
         }
         Value::Temporal(TemporalValue::LocalDateTime { .. }) => Ok(args[0].clone()),
+        // Cross-type: extract date+time, strip timezone
+        Value::Temporal(tv) => {
+            let date = tv.to_date().unwrap_or_else(|| Utc::now().date_naive());
+            let time = tv
+                .to_time()
+                .unwrap_or_else(|| NaiveTime::from_hms_opt(0, 0, 0).unwrap());
+            let ndt = NaiveDateTime::new(date, time);
+            Ok(Value::Temporal(TemporalValue::LocalDateTime {
+                nanos_since_epoch: naive_datetime_to_nanos(&ndt),
+            }))
+        }
         Value::Map(map) => eval_datetime_from_map(map, false),
         Value::Null => Ok(Value::Null),
         _ => Err(anyhow!("localdatetime() expects a string or map argument")),
+    }
+}
+
+/// Extract time and optional timezone info from a Value (temporal or string).
+fn extract_time_and_tz_from_value(val: &Value) -> Result<(NaiveTime, Option<TimezoneInfo>)> {
+    match val {
+        Value::Temporal(tv) => {
+            let time = tv
+                .to_time()
+                .unwrap_or_else(|| NaiveTime::from_hms_opt(0, 0, 0).unwrap());
+            let tz = match tv {
+                TemporalValue::DateTime {
+                    offset_seconds,
+                    timezone_name,
+                    ..
+                } => {
+                    if let Some(name) = timezone_name {
+                        Some(parse_timezone(name)?)
+                    } else {
+                        let fo = FixedOffset::east_opt(*offset_seconds)
+                            .ok_or_else(|| anyhow!("Invalid offset"))?;
+                        Some(TimezoneInfo::FixedOffset(fo))
+                    }
+                }
+                TemporalValue::Time { offset_seconds, .. } => {
+                    let fo = FixedOffset::east_opt(*offset_seconds)
+                        .ok_or_else(|| anyhow!("Invalid offset"))?;
+                    Some(TimezoneInfo::FixedOffset(fo))
+                }
+                _ => None,
+            };
+            Ok((time, tz))
+        }
+        Value::String(s) => {
+            let (_, time, tz_info) = parse_datetime_with_tz(s)?;
+            Ok((time, tz_info))
+        }
+        _ => Err(anyhow!("time must be a string or temporal")),
     }
 }
 
@@ -1480,18 +1875,60 @@ fn naive_datetime_to_nanos(ndt: &NaiveDateTime) -> i64 {
 
 fn eval_datetime_from_map(map: &HashMap<String, Value>, with_timezone: bool) -> Result<Value> {
     // Check if we have a 'datetime' field to copy from another datetime
-    if let Some(dt_val) = map.get("datetime").or(map.get("date")) {
+    if let Some(dt_val) = map.get("datetime") {
         return eval_datetime_from_projection(map, dt_val, with_timezone);
     }
 
-    // Build time part (used by all date construction methods)
-    let hour = map.get("hour").and_then(|v| v.as_i64()).unwrap_or(0) as u32;
-    let minute = map.get("minute").and_then(|v| v.as_i64()).unwrap_or(0) as u32;
-    let second = map.get("second").and_then(|v| v.as_i64()).unwrap_or(0) as u32;
-    let nanos = build_nanoseconds(map);
+    // When both 'date' and 'time' keys are present, combine them
+    if let (Some(date_val), Some(time_val)) = (map.get("date"), map.get("time")) {
+        return eval_datetime_from_date_and_time(map, date_val, time_val, with_timezone);
+    }
 
-    let time = NaiveTime::from_hms_nano_opt(hour, minute, second, nanos)
-        .ok_or_else(|| anyhow!("Invalid time in datetime map"))?;
+    // date-only projection (time defaults from the source, which is typically midnight for Date)
+    if let Some(date_val) = map.get("date") {
+        return eval_datetime_from_projection(map, date_val, with_timezone);
+    }
+
+    // Build time part: if 'time' key is present, extract from temporal/string;
+    // otherwise build from explicit hour/minute/second fields.
+    let (time, source_tz) = if let Some(time_val) = map.get("time") {
+        let (t, tz) = extract_time_and_tz_from_value(time_val)?;
+        // Apply overrides from map (hour, minute, second, etc.)
+        let hour = map
+            .get("hour")
+            .and_then(|v| v.as_i64())
+            .map(|v| v as u32)
+            .unwrap_or(t.hour());
+        let minute = map
+            .get("minute")
+            .and_then(|v| v.as_i64())
+            .map(|v| v as u32)
+            .unwrap_or(t.minute());
+        let second = map
+            .get("second")
+            .and_then(|v| v.as_i64())
+            .map(|v| v as u32)
+            .unwrap_or(t.second());
+        let nanos = if map.contains_key("millisecond")
+            || map.contains_key("microsecond")
+            || map.contains_key("nanosecond")
+        {
+            build_nanoseconds(map)
+        } else {
+            t.nanosecond()
+        };
+        let resolved_time = NaiveTime::from_hms_nano_opt(hour, minute, second, nanos)
+            .ok_or_else(|| anyhow!("Invalid time in datetime map"))?;
+        (resolved_time, tz)
+    } else {
+        let hour = map.get("hour").and_then(|v| v.as_i64()).unwrap_or(0) as u32;
+        let minute = map.get("minute").and_then(|v| v.as_i64()).unwrap_or(0) as u32;
+        let second = map.get("second").and_then(|v| v.as_i64()).unwrap_or(0) as u32;
+        let nanos = build_nanoseconds(map);
+        let t = NaiveTime::from_hms_nano_opt(hour, minute, second, nanos)
+            .ok_or_else(|| anyhow!("Invalid time in datetime map"))?;
+        (t, None::<TimezoneInfo>)
+    };
 
     // Build date part - support multiple construction modes
     let date = build_date_from_map(map)?;
@@ -1499,7 +1936,7 @@ fn eval_datetime_from_map(map: &HashMap<String, Value>, with_timezone: bool) -> 
     let ndt = NaiveDateTime::new(date, time);
 
     if with_timezone {
-        // Handle timezone
+        // Handle timezone: explicit > from time source > UTC default
         let (offset_secs, tz_name) =
             if let Some(tz_str) = map.get("timezone").and_then(|v| v.as_str()) {
                 let tz_info = parse_timezone(tz_str)?;
@@ -1508,6 +1945,9 @@ fn eval_datetime_from_map(map: &HashMap<String, Value>, with_timezone: bool) -> 
                     offset.local_minus_utc(),
                     tz_info.name().map(|s| s.to_string()),
                 )
+            } else if let Some(ref tz) = source_tz {
+                let offset = tz.offset_for_local(&ndt)?;
+                (offset.local_minus_utc(), tz.name().map(|s| s.to_string()))
             } else {
                 (0, None)
             };
@@ -1521,6 +1961,116 @@ fn eval_datetime_from_map(map: &HashMap<String, Value>, with_timezone: bool) -> 
         }))
     } else {
         // localdatetime - no timezone
+        Ok(Value::Temporal(TemporalValue::LocalDateTime {
+            nanos_since_epoch: naive_datetime_to_nanos(&ndt),
+        }))
+    }
+}
+
+/// Handle datetime construction from separate date and time sources.
+///
+/// Cypher: `datetime({date: dateVal, time: timeVal, ...overrides})`
+/// Extracts date component from dateVal, time + tz from timeVal, then applies overrides.
+fn eval_datetime_from_date_and_time(
+    map: &HashMap<String, Value>,
+    date_val: &Value,
+    time_val: &Value,
+    with_timezone: bool,
+) -> Result<Value> {
+    let source_date = temporal_or_string_to_date(date_val)?;
+    let (source_time, source_tz) = match time_val {
+        Value::Temporal(tv) => {
+            let time = tv
+                .to_time()
+                .unwrap_or_else(|| NaiveTime::from_hms_opt(0, 0, 0).unwrap());
+            let tz = match tv {
+                TemporalValue::DateTime {
+                    offset_seconds,
+                    timezone_name,
+                    ..
+                } => {
+                    if let Some(name) = timezone_name {
+                        Some(parse_timezone(name)?)
+                    } else {
+                        let fo = FixedOffset::east_opt(*offset_seconds)
+                            .ok_or_else(|| anyhow!("Invalid offset"))?;
+                        Some(TimezoneInfo::FixedOffset(fo))
+                    }
+                }
+                TemporalValue::Time { offset_seconds, .. } => {
+                    let fo = FixedOffset::east_opt(*offset_seconds)
+                        .ok_or_else(|| anyhow!("Invalid offset"))?;
+                    Some(TimezoneInfo::FixedOffset(fo))
+                }
+                _ => None,
+            };
+            (time, tz)
+        }
+        Value::String(s) => {
+            let (_, time, tz_info) = parse_datetime_with_tz(s)?;
+            (time, tz_info)
+        }
+        _ => return Err(anyhow!("time field must be a string or temporal")),
+    };
+
+    // Build date from projection overrides
+    let date = build_date_from_projection(map, &source_date)?;
+
+    // Build time from overrides
+    let hour = map
+        .get("hour")
+        .and_then(|v| v.as_i64())
+        .map(|v| v as u32)
+        .unwrap_or(source_time.hour());
+    let minute = map
+        .get("minute")
+        .and_then(|v| v.as_i64())
+        .map(|v| v as u32)
+        .unwrap_or(source_time.minute());
+    let second = map
+        .get("second")
+        .and_then(|v| v.as_i64())
+        .map(|v| v as u32)
+        .unwrap_or(source_time.second());
+
+    let nanos = if map.contains_key("millisecond")
+        || map.contains_key("microsecond")
+        || map.contains_key("nanosecond")
+    {
+        build_nanoseconds(map)
+    } else {
+        source_time.nanosecond()
+    };
+
+    let time = NaiveTime::from_hms_nano_opt(hour, minute, second, nanos)
+        .ok_or_else(|| anyhow!("Invalid time in datetime(date+time) projection"))?;
+
+    let ndt = NaiveDateTime::new(date, time);
+
+    if with_timezone {
+        let (offset_secs, tz_name) =
+            if let Some(tz_str) = map.get("timezone").and_then(|v| v.as_str()) {
+                let tz_info = parse_timezone(tz_str)?;
+                let offset = tz_info.offset_for_local(&ndt)?;
+                (
+                    offset.local_minus_utc(),
+                    tz_info.name().map(|s| s.to_string()),
+                )
+            } else if let Some(ref tz) = source_tz {
+                let offset = tz.offset_for_local(&ndt)?;
+                (offset.local_minus_utc(), tz.name().map(|s| s.to_string()))
+            } else {
+                (0, None)
+            };
+
+        let utc_ndt = ndt - Duration::seconds(offset_secs as i64);
+        let utc_dt = DateTime::<Utc>::from_naive_utc_and_offset(utc_ndt, Utc);
+        Ok(Value::Temporal(TemporalValue::DateTime {
+            nanos_since_epoch: utc_dt.timestamp_nanos_opt().unwrap_or(0),
+            offset_seconds: offset_secs,
+            timezone_name: tz_name,
+        }))
+    } else {
         Ok(Value::Temporal(TemporalValue::LocalDateTime {
             nanos_since_epoch: naive_datetime_to_nanos(&ndt),
         }))
@@ -1556,11 +2106,18 @@ fn eval_datetime_from_projection(
         .map(|v| v as u32)
         .unwrap_or(source_time.second());
 
+    // If explicit time components override the source, unspecified sub-second parts
+    // should be zero (not inherited from source), unless sub-seconds are also specified.
+    let has_explicit_time = map.contains_key("hour")
+        || map.contains_key("minute")
+        || map.contains_key("second");
     let nanos = if map.contains_key("millisecond")
         || map.contains_key("microsecond")
         || map.contains_key("nanosecond")
     {
         build_nanoseconds(map)
+    } else if has_explicit_time {
+        0 // Explicit time override → zero sub-seconds unless specified
     } else {
         source_time.nanosecond()
     };
@@ -1639,15 +2196,55 @@ fn temporal_or_string_to_components(
     }
 }
 
-/// Try parsing a compact ISO 8601 date string (no separators).
+/// Convert a 1-based ISO weekday number (1=Mon, 7=Sun) to a `chrono::Weekday`.
+fn iso_weekday(d: u32) -> Option<Weekday> {
+    match d {
+        1 => Some(Weekday::Mon),
+        2 => Some(Weekday::Tue),
+        3 => Some(Weekday::Wed),
+        4 => Some(Weekday::Thu),
+        5 => Some(Weekday::Fri),
+        6 => Some(Weekday::Sat),
+        7 => Some(Weekday::Sun),
+        _ => None,
+    }
+}
+
+/// Try parsing an ISO 8601 date string (compact or with separators).
 ///
 /// Supports:
 /// - `YYYYMMDD` (8 digits, e.g., `19840711` -> 1984-07-11)
 /// - `YYYYDDD`  (7 digits, e.g., `1984183` -> ordinal day 183 of 1984)
+/// - `YYYYMM`   (6 digits, e.g., `201507` -> 2015-07-01)
+/// - `YYYY`     (4 digits, e.g., `2015` -> 2015-01-01)
 /// - `YYYYWww`  (e.g., `1984W30` -> Monday of ISO week 30 of 1984)
 /// - `YYYYWwwD` (e.g., `1984W305` -> day 5 of ISO week 30 of 1984)
+/// - `YYYY-Www-D` / `YYYY-Www` (separator ISO week dates)
+/// - `YYYY-DDD` (separator ordinal date)
+/// - `YYYY-MM`  (separator year-month)
 fn try_parse_compact_date(s: &str) -> Option<NaiveDate> {
-    // YYYYWww or YYYYWwwD (ISO week date)
+    // 1. Separator ISO week dates: YYYY-Www-D (10 chars) or YYYY-Www (8 chars)
+    if let Some(w_pos) = s.find("-W") {
+        if w_pos == 4 {
+            let year: i32 = s[..4].parse().ok()?;
+            let after_w = &s[w_pos + 2..]; // skip "-W"
+            // YYYY-Www-D (exactly 4 chars after W: "ww-D")
+            if after_w.len() == 4 && after_w.as_bytes()[2] == b'-' {
+                let week: u32 = after_w[..2].parse().ok()?;
+                let d: u32 = after_w[3..4].parse().ok()?;
+                let weekday = iso_weekday(d)?;
+                return NaiveDate::from_isoywd_opt(year, week, weekday);
+            }
+            // YYYY-Www (exactly 2 chars after W: "ww")
+            if after_w.len() == 2 && after_w.chars().all(|c| c.is_ascii_digit()) {
+                let week: u32 = after_w.parse().ok()?;
+                return NaiveDate::from_isoywd_opt(year, week, Weekday::Mon);
+            }
+        }
+        return None;
+    }
+
+    // 2. Compact ISO week dates: YYYYWww or YYYYWwwD
     if let Some(w_pos) = s.find('W') {
         if w_pos == 4 && s.len() >= 7 {
             let year: i32 = s[..4].parse().ok()?;
@@ -1656,16 +2253,7 @@ fn try_parse_compact_date(s: &str) -> Option<NaiveDate> {
                 let week: u32 = after_w[..2].parse().ok()?;
                 let weekday = if after_w.len() == 3 {
                     let d: u32 = after_w[2..3].parse().ok()?;
-                    match d {
-                        1 => Weekday::Mon,
-                        2 => Weekday::Tue,
-                        3 => Weekday::Wed,
-                        4 => Weekday::Thu,
-                        5 => Weekday::Fri,
-                        6 => Weekday::Sat,
-                        7 => Weekday::Sun,
-                        _ => return None,
-                    }
+                    iso_weekday(d)?
                 } else {
                     Weekday::Mon
                 };
@@ -1675,7 +2263,25 @@ fn try_parse_compact_date(s: &str) -> Option<NaiveDate> {
         return None;
     }
 
-    // All-digit compact formats
+    // 3. Separator formats with dash (no W present)
+    if s.len() >= 7 && s.as_bytes()[4] == b'-' && s[..4].chars().all(|c| c.is_ascii_digit()) {
+        let year: i32 = s[..4].parse().ok()?;
+        let after_dash = &s[5..];
+
+        // YYYY-DDD (separator ordinal date): 3 trailing digits, total 8 chars
+        if after_dash.len() == 3 && after_dash.chars().all(|c| c.is_ascii_digit()) {
+            let ordinal: u32 = after_dash.parse().ok()?;
+            return NaiveDate::from_yo_opt(year, ordinal);
+        }
+
+        // YYYY-MM (separator year-month): 2 trailing digits, total 7 chars
+        if after_dash.len() == 2 && after_dash.chars().all(|c| c.is_ascii_digit()) {
+            let month: u32 = after_dash.parse().ok()?;
+            return NaiveDate::from_ymd_opt(year, month, 1);
+        }
+    }
+
+    // 4. All-digit compact formats
     if !s.chars().all(|c| c.is_ascii_digit()) {
         return None;
     }
@@ -1693,6 +2299,17 @@ fn try_parse_compact_date(s: &str) -> Option<NaiveDate> {
             let year: i32 = s[..4].parse().ok()?;
             let ordinal: u32 = s[4..7].parse().ok()?;
             NaiveDate::from_yo_opt(year, ordinal)
+        }
+        // YYYYMM (compact year-month)
+        6 => {
+            let year: i32 = s[..4].parse().ok()?;
+            let month: u32 = s[4..6].parse().ok()?;
+            NaiveDate::from_ymd_opt(year, month, 1)
+        }
+        // YYYY (year only)
+        4 => {
+            let year: i32 = s.parse().ok()?;
+            NaiveDate::from_ymd_opt(year, 1, 1)
         }
         _ => None,
     }
@@ -1747,6 +2364,14 @@ fn try_parse_compact_time(s: &str) -> Option<NaiveTime> {
             let hour: u32 = integer_part[..2].parse().ok()?;
             let min: u32 = integer_part[2..4].parse().ok()?;
             NaiveTime::from_hms_opt(hour, min, 0)
+        }
+        // HH (hour only)
+        2 => {
+            if frac_part.is_some() {
+                return None; // HH.fff doesn't make sense
+            }
+            let hour: u32 = integer_part.parse().ok()?;
+            NaiveTime::from_hms_opt(hour, 0, 0)
         }
         _ => None,
     }
@@ -1831,19 +2456,21 @@ pub fn parse_datetime_with_tz(s: &str) -> Result<(NaiveDate, NaiveTime, Option<T
 
     // Try parsing as datetime or time with non-RFC3339 timezone offset
     // (e.g., "2015-07-21T21:40:32.142+0100" or "12:31:14.645876123+01:00")
+    //
+    // By this point, all date-only formats (YYYY-MM-DD, YYYY-MM, YYYY-DDD, etc.)
+    // have already been tried and rejected. Only time-with-offset or
+    // datetime-with-offset strings reach here.
     if let Some(tz_pos) = datetime_part.rfind('+').or_else(|| {
-        // Find the last '-' that's part of timezone, not time/date.
-        // For datetimes like "2015-07-21T21:40:32-0500", the T is at pos 10;
-        // the tz '-' must be after the seconds (pos >= 19). For time-only
-        // like "12:31:14-05:00", the tz '-' is at pos 8. We require pos > 5
-        // to skip "HH:MM" hyphens while catching both cases.
+        // Find the last '-' that's part of timezone, not date.
+        // The minimum before a timezone offset is HH (2 chars for time-only)
+        // or T + HH (3 chars after T for datetime).
         datetime_part.rfind('-').filter(|&pos| {
             if let Some(t_pos) = datetime_part.find('T') {
-                // Datetime: '-' must be well after the T and seconds
-                pos > t_pos + 6
+                // Datetime: '-' must be at least T + HH after T
+                pos >= t_pos + 3
             } else {
-                // Time-only: '-' must be after at least HH:MM:SS
-                pos > 5
+                // Time-only: '-' must be after at least HH
+                pos >= 2
             }
         })
     }) {
@@ -1861,25 +2488,50 @@ pub fn parse_datetime_with_tz(s: &str) -> Result<(NaiveDate, NaiveTime, Option<T
             }
         };
 
-        // Try parsing the left part as a full datetime first
+        // Try parsing the left part as time first (for short strings like "2140", "21",
+        // "21:40", etc. that could be ambiguous with compact dates like YYYY).
+        // Only try time-first when there's no 'T' separator (pure time+offset).
+        if !left_part.contains('T')
+            && let Ok(time) = try_parse_naive_time(left_part)
+            && let Ok(tz_info) = resolve_tz(tz_name.clone(), tz_part)
+        {
+            return Ok((today, time, tz_info));
+        }
+
+        // Try parsing the left part as a full datetime
         if let Ok(ndt) = try_parse_naive_datetime(left_part) {
             let tz_info = resolve_tz(tz_name, tz_part)?;
             return Ok((ndt.date(), ndt.time(), tz_info));
         }
 
-        // Try parsing the left part as time only
-        if let Ok(time) = try_parse_naive_time(left_part) {
+        // Try parsing the left part as time only (when datetime attempt failed)
+        if left_part.contains('T')
+            && let Ok(time) = try_parse_naive_time(left_part)
+        {
             let tz_info = resolve_tz(tz_name, tz_part)?;
             return Ok((today, time, tz_info));
         }
     }
 
-    // Try parsing time with Z suffix
-    if let Some(time_part) = datetime_part.strip_suffix('Z')
-        && let Ok(time) = try_parse_naive_time(time_part)
-    {
-        let tz_info = Some(TimezoneInfo::FixedOffset(FixedOffset::east_opt(0).unwrap()));
-        return Ok((today, time, tz_info));
+    // Try parsing datetime or time with Z suffix
+    if let Some(base) = datetime_part.strip_suffix('Z').or_else(|| datetime_part.strip_suffix('z')) {
+        let utc_tz = Some(TimezoneInfo::FixedOffset(FixedOffset::east_opt(0).unwrap()));
+        // Try as datetime first (e.g., "2015-W30-2T214032.142Z")
+        if let Ok(ndt) = try_parse_naive_datetime(base) {
+            let tz_info = tz_name
+                .map(|n| parse_timezone(&n))
+                .transpose()?
+                .or(utc_tz);
+            return Ok((ndt.date(), ndt.time(), tz_info));
+        }
+        // Try as time only
+        if let Ok(time) = try_parse_naive_time(base) {
+            let tz_info = tz_name
+                .map(|n| parse_timezone(&n))
+                .transpose()?
+                .or(utc_tz);
+            return Ok((today, time, tz_info));
+        }
     }
 
     // Try parsing as plain time (no timezone offset, e.g., "14:30" or "12:31:14.645876123")
@@ -2629,9 +3281,12 @@ fn truncate_time(
                 .to_time()
                 .unwrap_or_else(|| NaiveTime::from_hms_opt(0, 0, 0).unwrap());
             let offset = match tv {
-                TemporalValue::Time { offset_seconds, .. } => Some(TimezoneInfo::FixedOffset(
-                    FixedOffset::east_opt(*offset_seconds).unwrap(),
-                )),
+                TemporalValue::Time { offset_seconds, .. }
+                | TemporalValue::DateTime { offset_seconds, .. } => {
+                    Some(TimezoneInfo::FixedOffset(
+                        FixedOffset::east_opt(*offset_seconds).unwrap(),
+                    ))
+                }
                 _ => None,
             };
             (Utc::now().date_naive(), t, offset)
