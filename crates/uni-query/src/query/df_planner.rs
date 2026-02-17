@@ -2274,35 +2274,19 @@ impl HybridPhysicalPlanner {
         let mut group_exprs: Vec<(Arc<dyn datafusion::physical_expr::PhysicalExpr>, String)> =
             Vec::new();
         for expr in group_by {
-            // DateTime/Time struct grouping: group by nanos_since_epoch/nanos_since_midnight
-            // Two DateTimes with same UTC but different offsets should be in the same group
+            // DateTime/Time struct grouping: group by UTC-normalized values
+            // Two DateTimes with same UTC instant but different offsets should group together
             let mut df_expr = cypher_expr_to_df(expr, Some(&ctx))?;
             if let Ok(expr_type) = df_expr.get_type(&datafusion::common::DFSchema::try_from(
                 schema.as_ref().clone(),
             )?) {
                 if uni_common::core::schema::is_datetime_struct(&expr_type) {
-                    use datafusion::logical_expr::ScalarUDF;
-                    df_expr = datafusion::logical_expr::Expr::ScalarFunction(
-                        datafusion::logical_expr::expr::ScalarFunction::new_udf(
-                            Arc::new(ScalarUDF::from(
-                                datafusion::functions::core::getfield::GetFieldFunc::new(),
-                            )),
-                            vec![df_expr, datafusion::logical_expr::lit("nanos_since_epoch")],
-                        ),
-                    );
+                    // Group by UTC instant (nanos_since_epoch)
+                    df_expr = crate::query::df_expr::extract_datetime_nanos(df_expr);
                 } else if uni_common::core::schema::is_time_struct(&expr_type) {
-                    use datafusion::logical_expr::ScalarUDF;
-                    df_expr = datafusion::logical_expr::Expr::ScalarFunction(
-                        datafusion::logical_expr::expr::ScalarFunction::new_udf(
-                            Arc::new(ScalarUDF::from(
-                                datafusion::functions::core::getfield::GetFieldFunc::new(),
-                            )),
-                            vec![
-                                df_expr,
-                                datafusion::logical_expr::lit("nanos_since_midnight"),
-                            ],
-                        ),
-                    );
+                    // Group by UTC-normalized time
+                    // extract_time_nanos does: nanos_since_midnight - (offset_seconds * 1e9)
+                    df_expr = crate::query::df_expr::extract_time_nanos(df_expr);
                 }
             }
 
@@ -2742,34 +2726,17 @@ impl HybridPhysicalPlanner {
 
             // DateTime/Time struct sorting: replace with nanos_since_epoch/nanos_since_midnight
             // to ensure sorting by UTC instant, not struct byte ordering
+            // Extract comparable values from temporal structs for correct sorting
             if let Ok(expr_type) = df_expr.get_type(&datafusion::common::DFSchema::try_from(
                 schema.as_ref().clone(),
             )?) {
                 if uni_common::core::schema::is_datetime_struct(&expr_type) {
-                    // Sort by nanos_since_epoch for DateTime
-                    use datafusion::logical_expr::ScalarUDF;
-                    df_expr = datafusion::logical_expr::Expr::ScalarFunction(
-                        datafusion::logical_expr::expr::ScalarFunction::new_udf(
-                            Arc::new(ScalarUDF::from(
-                                datafusion::functions::core::getfield::GetFieldFunc::new(),
-                            )),
-                            vec![df_expr, datafusion::logical_expr::lit("nanos_since_epoch")],
-                        ),
-                    );
+                    // Sort by UTC instant (nanos_since_epoch)
+                    df_expr = crate::query::df_expr::extract_datetime_nanos(df_expr);
                 } else if uni_common::core::schema::is_time_struct(&expr_type) {
-                    // Sort by nanos_since_midnight for Time
-                    use datafusion::logical_expr::ScalarUDF;
-                    df_expr = datafusion::logical_expr::Expr::ScalarFunction(
-                        datafusion::logical_expr::expr::ScalarFunction::new_udf(
-                            Arc::new(ScalarUDF::from(
-                                datafusion::functions::core::getfield::GetFieldFunc::new(),
-                            )),
-                            vec![
-                                df_expr,
-                                datafusion::logical_expr::lit("nanos_since_midnight"),
-                            ],
-                        ),
-                    );
+                    // Sort by UTC-normalized time
+                    // extract_time_nanos does: nanos_since_midnight - (offset_seconds * 1e9)
+                    df_expr = crate::query::df_expr::extract_time_nanos(df_expr);
                 }
             }
 

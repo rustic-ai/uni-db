@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2024-2026 Dragonscale Team
 
+pub mod cypher_type_coerce;
 pub mod datetime;
 pub mod df_expr;
 pub mod df_graph;

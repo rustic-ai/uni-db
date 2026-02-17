@@ -366,15 +366,32 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
                 }
             }
 
-            // CASE expression - always use custom compilation for type unification
+            // CASE expression - dispatch based on whether it contains custom expressions
             Expr::Case {
                 expr: case_operand,
                 when_then,
                 else_expr,
             } => {
-                // Always use compile_case() to handle CypherValue boolean conversion and
-                // LargeList/LargeBinary type unification
-                self.compile_case(case_operand, when_then, else_expr, input_schema)
+                // Check if operand or any branch contains custom expressions
+                let has_custom = case_operand
+                    .as_deref()
+                    .is_some_and(Self::contains_custom_expr)
+                    || when_then.iter().any(|(w, t)| {
+                        Self::contains_custom_expr(w) || Self::contains_custom_expr(t)
+                    })
+                    || else_expr.as_deref().is_some_and(Self::contains_custom_expr);
+
+                if has_custom {
+                    // Use compile_case() for CypherValue boolean conversion and
+                    // LargeList/LargeBinary type unification
+                    self.compile_case(case_operand, when_then, else_expr, input_schema)
+                } else {
+                    // Standard compilation path - goes through apply_type_coercion which handles:
+                    // 1. Simple CASE → Generic CASE rewriting with cross-type equality
+                    // 2. Type coercion for CASE result branches
+                    // 3. Numeric widening for comparisons
+                    self.compile_standard(expr, input_schema)
+                }
             }
 
             // LabelCheck: delegate to standard compilation (uses cypher_expr_to_df)

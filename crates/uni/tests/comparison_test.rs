@@ -19,10 +19,11 @@ async fn test_numeric_equality() {
 async fn test_cross_type_equality() {
     let db = Uni::in_memory().build().await.unwrap();
 
-    // RETURN 1 = '1' AS val -> false
+    // Per openCypher spec: comparing incompatible types returns null (three-valued logic),
+    // not false. RETURN 1 = '1' AS val -> null
     let result = db.query("RETURN 1 = '1' AS val").await.unwrap();
     let val = result.rows[0].value("val").unwrap();
-    assert_eq!(val, &Value::Bool(false));
+    assert_eq!(val, &Value::Null);
 }
 
 #[tokio::test]
