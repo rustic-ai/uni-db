@@ -1,19 +1,21 @@
 # TCK Compliance Report
 
-**Generated:** 2026-02-16 22:21:35
-**Results:** `results_20260216_222135.json`
-**Compared to:** `results_20260216_212054.json`
+**Generated:** 2026-02-16 23:53:22
+**Results:** `results_20260216_235322.json`
+**Compared to:** `results_20260216_222135.json`
 
 ## Summary
 
 | Metric | Current | Previous | Delta |
 |--------|---------|----------|-------|
 | Scenarios | 3897 | 3897 |  |
-| Passed | 2980 | 2969 | +11 |
-| Failed | 916 | 927 | -11 |
-| Pass Rate | 76.5% | 76.2% | 📈 +0.3pp |
+| Passed | 3029 | 2980 | +49 |
+| Failed | 867 | 916 | -49 |
+| Pass Rate | 77.7% | 76.5% | 📈 +1.3pp |
 
-**🟢 Fixed:** 11 scenarios now passing
+**🟢 Fixed:** 51 scenarios now passing
+
+**🔴 Regressions:** 2 scenarios now failing
 
 ## Feature Breakdown
 
@@ -88,12 +90,12 @@
 | ✅ Match1 | 86 | 86 | 0 | 100% |  |
 | ✅ Match2 | 86 | 85 | 1 | 99% |  |
 | ✅ Match3 | 30 | 30 | 0 | 100% |  |
-| ⚠️ Match4 | 10 | 7 | 3 | 70% |  |
+| ⚠️ Match4 | 10 | 6 | 4 | 60% | -10pp |
 | ✅ Match5 | 29 | 28 | 1 | 97% |  |
 | ✅ Match6 | 97 | 95 | 2 | 98% |  |
 | ✅ Match7 | 31 | 31 | 0 | 100% |  |
 | ⚠️ Match8 | 3 | 2 | 1 | 67% |  |
-| ✅ Match9 | 9 | 9 | 0 | 100% |  |
+| ✅ Match9 | 9 | 8 | 1 | 89% | -11pp |
 | ✅ MatchWhere1 | 15 | 14 | 1 | 93% |  |
 | ⚠️ MatchWhere2 | 2 | 1 | 1 | 50% |  |
 | ✅ MatchWhere3 | 3 | 3 | 0 | 100% |  |
@@ -121,15 +123,15 @@
 | ⚠️ Path2 | 3 | 2 | 1 | 67% |  |
 | ❌ Path3 | 3 | 1 | 2 | 33% |  |
 | ✅ Pattern1 | 39 | 39 | 0 | 100% |  |
-| ✅ Pattern2 | 11 | 11 | 0 | 100% | +18pp |
+| ✅ Pattern2 | 11 | 11 | 0 | 100% |  |
 | ✅ Precedence1 | 72 | 72 | 0 | 100% |  |
 | ✅ Precedence2 | 26 | 26 | 0 | 100% |  |
 | ✅ Precedence3 | 11 | 11 | 0 | 100% |  |
 | ✅ Precedence4 | 12 | 12 | 0 | 100% |  |
 | ✅ Quantifier1 | 105 | 104 | 1 | 99% |  |
-| ❌ Quantifier10 | 8 | 3 | 5 | 38% | +38pp |
-| ❌ Quantifier11 | 22 | 2 | 20 | 9% | +9pp |
-| ❌ Quantifier12 | 17 | 2 | 15 | 12% | +12pp |
+| ✅ Quantifier10 | 8 | 8 | 0 | 100% | +62pp |
+| ✅ Quantifier11 | 22 | 18 | 4 | 82% | +73pp |
+| ✅ Quantifier12 | 17 | 17 | 0 | 100% | +88pp |
 | ✅ Quantifier2 | 106 | 105 | 1 | 99% |  |
 | ✅ Quantifier3 | 105 | 104 | 1 | 99% |  |
 | ✅ Quantifier4 | 105 | 104 | 1 | 99% |  |
@@ -137,7 +139,7 @@
 | ✅ Quantifier6 | 21 | 21 | 0 | 100% |  |
 | ✅ Quantifier7 | 36 | 36 | 0 | 100% |  |
 | ✅ Quantifier8 | 31 | 31 | 0 | 100% |  |
-| ❌ Quantifier9 | 17 | 2 | 15 | 12% | +12pp |
+| ✅ Quantifier9 | 17 | 17 | 0 | 100% | +88pp |
 | ❌ Remove1 | 7 | 3 | 4 | 43% |  |
 | ✅ Remove2 | 5 | 5 | 0 | 100% |  |
 | ⚠️ Remove3 | 21 | 12 | 9 | 57% |  |
@@ -212,21 +214,68 @@
 | ✅ WithWhere6 | 1 | 1 | 0 | 100% |  |
 | ✅ WithWhere7 | 3 | 3 | 0 | 100% |  |
 
+## 🔴 Regressions
+
+Scenarios that were passing but are now failing:
+
+- **Match4** — [8] Matching relationships into a list and matching variable length using the list (line 176)
+- **Match9** — [6] Matching relationships into a list and matching variable length using the list, with bound nodes (line 122)
+
 ## 🟢 Newly Passing
 
 Scenarios that were failing but are now passing:
 
-- **Pattern2** — [8] Use a pattern comprehension in WITH (line 170)
-- **Pattern2** — [9] Use a variable-length pattern comprehension in WITH (line 190)
-- **Quantifier10** — [1] Single quantifier is always false if the predicate is statically false and the list is not empty (line 33)
-- **Quantifier10** — [2] Single quantifier is always false if the predicate is statically true and the list has more than one element (line 56)
-- **Quantifier10** — [3] Single quantifier is always true if the predicate is statically true and the list has exactly one non-null element (line 79)
-- **Quantifier11** — [1] Any quantifier is always false if the predicate is statically false and the list is not empty (line 33)
-- **Quantifier11** — [2] Any quantifier is always true if the predicate is statically true and the list is not empty (line 56)
-- **Quantifier12** — [1] All quantifier is always false if the predicate is statically false and the list is not empty (line 33)
-- **Quantifier12** — [2] All quantifier is always true if the predicate is statically true and the list is not empty (line 56)
-- **Quantifier9** — [1] None quantifier is always true if the predicate is statically false and the list is not empty (line 33)
-- **Quantifier9** — [2] None quantifier is always false if the predicate is statically true and the list is not empty (line 56)
+- **Quantifier10** — [4] Single quantifier is always equal whether the size of the list filtered with same the predicate is one (line 123)
+- **Quantifier10** — [4] Single quantifier is always equal whether the size of the list filtered with same the predicate is one (line 124)
+- **Quantifier10** — [4] Single quantifier is always equal whether the size of the list filtered with same the predicate is one (line 125)
+- **Quantifier10** — [4] Single quantifier is always equal whether the size of the list filtered with same the predicate is one (line 126)
+- **Quantifier10** — [4] Single quantifier is always equal whether the size of the list filtered with same the predicate is one (line 127)
+- **Quantifier11** — [3] Any quantifier is always true if the single or the all quantifier is true (line 112)
+- **Quantifier11** — [4] Any quantifier is always equal the boolean negative of the none quantifier (line 139)
+- **Quantifier11** — [4] Any quantifier is always equal the boolean negative of the none quantifier (line 140)
+- **Quantifier11** — [4] Any quantifier is always equal the boolean negative of the none quantifier (line 141)
+- **Quantifier11** — [4] Any quantifier is always equal the boolean negative of the none quantifier (line 142)
+- **Quantifier11** — [4] Any quantifier is always equal the boolean negative of the none quantifier (line 143)
+- **Quantifier11** — [5] Any quantifier is always equal the boolean negative of the all quantifier on the boolean negative of the predicate (line 169)
+- **Quantifier11** — [5] Any quantifier is always equal the boolean negative of the all quantifier on the boolean negative of the predicate (line 170)
+- **Quantifier11** — [5] Any quantifier is always equal the boolean negative of the all quantifier on the boolean negative of the predicate (line 171)
+- **Quantifier11** — [5] Any quantifier is always equal the boolean negative of the all quantifier on the boolean negative of the predicate (line 172)
+- **Quantifier11** — [5] Any quantifier is always equal the boolean negative of the all quantifier on the boolean negative of the predicate (line 173)
+- **Quantifier11** — [6] Any quantifier is always equal whether the size of the list filtered with same the predicate is grater zero (line 205)
+- **Quantifier11** — [6] Any quantifier is always equal whether the size of the list filtered with same the predicate is grater zero (line 206)
+- **Quantifier11** — [6] Any quantifier is always equal whether the size of the list filtered with same the predicate is grater zero (line 207)
+- **Quantifier11** — [6] Any quantifier is always equal whether the size of the list filtered with same the predicate is grater zero (line 208)
+- **Quantifier11** — [6] Any quantifier is always equal whether the size of the list filtered with same the predicate is grater zero (line 209)
+- **Quantifier12** — [3] All quantifier is always equal the none quantifier on the boolean negative of the predicate (line 103)
+- **Quantifier12** — [3] All quantifier is always equal the none quantifier on the boolean negative of the predicate (line 104)
+- **Quantifier12** — [3] All quantifier is always equal the none quantifier on the boolean negative of the predicate (line 105)
+- **Quantifier12** — [3] All quantifier is always equal the none quantifier on the boolean negative of the predicate (line 106)
+- **Quantifier12** — [3] All quantifier is always equal the none quantifier on the boolean negative of the predicate (line 107)
+- **Quantifier12** — [4] All quantifier is always equal the boolean negative of the any quantifier on the boolean negative of the predicate (line 133)
+- **Quantifier12** — [4] All quantifier is always equal the boolean negative of the any quantifier on the boolean negative of the predicate (line 134)
+- **Quantifier12** — [4] All quantifier is always equal the boolean negative of the any quantifier on the boolean negative of the predicate (line 135)
+- **Quantifier12** — [4] All quantifier is always equal the boolean negative of the any quantifier on the boolean negative of the predicate (line 136)
+- **Quantifier12** — [4] All quantifier is always equal the boolean negative of the any quantifier on the boolean negative of the predicate (line 137)
+- **Quantifier12** — [5] All quantifier is always equal whether the size of the list filtered with same the predicate is equal the size of the unfiltered list (line 169)
+- **Quantifier12** — [5] All quantifier is always equal whether the size of the list filtered with same the predicate is equal the size of the unfiltered list (line 170)
+- **Quantifier12** — [5] All quantifier is always equal whether the size of the list filtered with same the predicate is equal the size of the unfiltered list (line 171)
+- **Quantifier12** — [5] All quantifier is always equal whether the size of the list filtered with same the predicate is equal the size of the unfiltered list (line 172)
+- **Quantifier12** — [5] All quantifier is always equal whether the size of the list filtered with same the predicate is equal the size of the unfiltered list (line 173)
+- **Quantifier9** — [3] None quantifier is always equal the boolean negative of the any quantifier (line 103)
+- **Quantifier9** — [3] None quantifier is always equal the boolean negative of the any quantifier (line 104)
+- **Quantifier9** — [3] None quantifier is always equal the boolean negative of the any quantifier (line 105)
+- **Quantifier9** — [3] None quantifier is always equal the boolean negative of the any quantifier (line 106)
+- **Quantifier9** — [3] None quantifier is always equal the boolean negative of the any quantifier (line 107)
+- **Quantifier9** — [4] None quantifier is always equal the all quantifier on the boolean negative of the predicate (line 133)
+- **Quantifier9** — [4] None quantifier is always equal the all quantifier on the boolean negative of the predicate (line 134)
+- **Quantifier9** — [4] None quantifier is always equal the all quantifier on the boolean negative of the predicate (line 135)
+- **Quantifier9** — [4] None quantifier is always equal the all quantifier on the boolean negative of the predicate (line 136)
+- **Quantifier9** — [4] None quantifier is always equal the all quantifier on the boolean negative of the predicate (line 137)
+- **Quantifier9** — [5] None quantifier is always equal whether the size of the list filtered with same the predicate is zero (line 169)
+- **Quantifier9** — [5] None quantifier is always equal whether the size of the list filtered with same the predicate is zero (line 170)
+- **Quantifier9** — [5] None quantifier is always equal whether the size of the list filtered with same the predicate is zero (line 171)
+- **Quantifier9** — [5] None quantifier is always equal whether the size of the list filtered with same the predicate is zero (line 172)
+- **Quantifier9** — [5] None quantifier is always equal whether the size of the list filtered with same the predicate is zero (line 173)
 
 ## Failed Scenarios
 
@@ -886,11 +935,11 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/graph/Graph6.feature:90:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): Expected column '(list[1]).existing' not found in result
+      Step panicked. Captured output: Result mismatch (any order): Expected column '(list[1]).missing' not found in result
 [Summary]
 1 feature
 1 scenario (1 failed)
-4 
+4 s
   ... (truncated)
   ```
 - **[6] Statically access a property of a optional non-null relationship** (line 111)
@@ -1050,7 +1099,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/literals/Literals8.feature:294:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("literal", Some(Map({"data": List([Map({"nam
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("literal", Some(Map({"data": List([Map({"typ
   ... (truncated)
   ```
 
@@ -1061,11 +1110,11 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/map/Map1.feature:65:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): Expected column '(list[1]).missing' not found in result
+      Step panicked. Captured output: Result mismatch (any order): Expected column '(list[1]).notMissing' not found in result
 [Summary]
 1 feature
 1 scenario (1 failed)
-3 steps
+3 st
   ... (truncated)
   ```
 
@@ -1147,7 +1196,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/map/Map3.feature:99:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("a", Some(Bool(true))), ("c", Some(Bool(false))), ("b",
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("a", Some(Bool(true))), ("b", Some(Bool(false))), ("c",
   ... (truncated)
   ```
 
@@ -1201,6 +1250,18 @@ Scenarios that were failing but are now passing:
 [Summ
   ... (truncated)
   ```
+- **[8] Matching relationships into a list and matching variable length using the list** (line 176)
+  ```
+  Step failed:
+      Defined: tck/features/clauses/match/Match4.feature:192:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Result mismatch (any order): Row count mismatch: expected 1, got 0
+[Summary]
+1 feature
+1 scenario (1 failed)
+4 steps (3 passed, 1 fai
+  ... (truncated)
+  ```
 
 ### Match5
 
@@ -1248,6 +1309,21 @@ Scenarios that were failing but are now passing:
       Defined: tck/features/clauses/match/Match8.feature:70:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
       Step panicked. Captured output: Query returned error instead of result: Query { message: "Write operations not yet supported in DataFusion engine", query: Some("\nMAT
+  ... (truncated)
+  ```
+
+### Match9
+
+- **[6] Matching relationships into a list and matching variable length using the list, with bound nodes** (line 122)
+  ```
+  Step failed:
+      Defined: tck/features/clauses/match/Match9.feature:138:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Result mismatch (any order): Row count mismatch: expected 1, got 0
+[Summary]
+1 feature
+1 scenario (1 failed)
+4 steps (3 passed, 1 fai
   ... (truncated)
   ```
 
@@ -2002,49 +2078,6 @@ Scenarios that were failing but are now passing:
   ... (truncated)
   ```
 
-### Quantifier10
-
-- **[4] Single quantifier is always equal whether the size of the list filtered with same the predicate is one** (line 123)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/quantifier/Quantifier10.feature:116:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "List comprehension input must be a list, got Utf8", query: S
-  ... (truncated)
-  ```
-- **[4] Single quantifier is always equal whether the size of the list filtered with same the predicate is one** (line 124)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/quantifier/Quantifier10.feature:116:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "List comprehension input must be a list, got Utf8", query: S
-  ... (truncated)
-  ```
-- **[4] Single quantifier is always equal whether the size of the list filtered with same the predicate is one** (line 125)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/quantifier/Quantifier10.feature:116:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "List comprehension input must be a list, got Utf8", query: S
-  ... (truncated)
-  ```
-- **[4] Single quantifier is always equal whether the size of the list filtered with same the predicate is one** (line 126)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/quantifier/Quantifier10.feature:116:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "List comprehension input must be a list, got Utf8", query: S
-  ... (truncated)
-  ```
-- **[4] Single quantifier is always equal whether the size of the list filtered with same the predicate is one** (line 127)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/quantifier/Quantifier10.feature:116:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "List comprehension input must be a list, got Utf8", query: S
-  ... (truncated)
-  ```
-
 ### Quantifier11
 
 - **[3] Any quantifier is always true if the single or the all quantifier is true** (line 109)
@@ -2052,7 +2085,11 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/quantifier/Quantifier11.feature:102:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "List comprehension input must be a list, got Utf8", query: S
+      Step panicked. Captured output: Result mismatch (any order): Row count mismatch: expected 1, got 0
+[Summary]
+1 feature
+1 scenario (1 failed)
+3 steps (
   ... (truncated)
   ```
 - **[3] Any quantifier is always true if the single or the all quantifier is true** (line 110)
@@ -2060,7 +2097,11 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/quantifier/Quantifier11.feature:102:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "List comprehension input must be a list, got Utf8", query: S
+      Step panicked. Captured output: Result mismatch (any order): Row count mismatch: expected 1, got 0
+[Summary]
+1 feature
+1 scenario (1 failed)
+3 steps (
   ... (truncated)
   ```
 - **[3] Any quantifier is always true if the single or the all quantifier is true** (line 111)
@@ -2068,15 +2109,11 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/quantifier/Quantifier11.feature:102:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "List comprehension input must be a list, got Utf8", query: S
-  ... (truncated)
-  ```
-- **[3] Any quantifier is always true if the single or the all quantifier is true** (line 112)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/quantifier/Quantifier11.feature:102:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "List comprehension input must be a list, got Utf8", query: S
+      Step panicked. Captured output: Result mismatch (any order): Row count mismatch: expected 1, got 0
+[Summary]
+1 feature
+1 scenario (1 failed)
+3 steps (
   ... (truncated)
   ```
 - **[3] Any quantifier is always true if the single or the all quantifier is true** (line 113)
@@ -2084,250 +2121,11 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/quantifier/Quantifier11.feature:102:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "List comprehension input must be a list, got Utf8", query: S
-  ... (truncated)
-  ```
-- **[4] Any quantifier is always equal the boolean negative of the none quantifier** (line 139)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/quantifier/Quantifier11.feature:132:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Arrow error: Invalid argument error: Encountered non UTF-8 d
-  ... (truncated)
-  ```
-- **[4] Any quantifier is always equal the boolean negative of the none quantifier** (line 140)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/quantifier/Quantifier11.feature:132:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Arrow error: Invalid argument error: Encountered non UTF-8 d
-  ... (truncated)
-  ```
-- **[4] Any quantifier is always equal the boolean negative of the none quantifier** (line 141)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/quantifier/Quantifier11.feature:132:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Arrow error: Invalid argument error: Encountered non UTF-8 d
-  ... (truncated)
-  ```
-- **[4] Any quantifier is always equal the boolean negative of the none quantifier** (line 142)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/quantifier/Quantifier11.feature:132:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Arrow error: Invalid argument error: Encountered non UTF-8 d
-  ... (truncated)
-  ```
-- **[4] Any quantifier is always equal the boolean negative of the none quantifier** (line 143)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/quantifier/Quantifier11.feature:132:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Arrow error: Invalid argument error: Encountered non UTF-8 d
-  ... (truncated)
-  ```
-- **[5] Any quantifier is always equal the boolean negative of the all quantifier on the boolean negative of the predicate** (line 169)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/quantifier/Quantifier11.feature:162:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Arrow error: Invalid argument error: Encountered non UTF-8 d
-  ... (truncated)
-  ```
-- **[5] Any quantifier is always equal the boolean negative of the all quantifier on the boolean negative of the predicate** (line 170)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/quantifier/Quantifier11.feature:162:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Arrow error: Invalid argument error: Encountered non UTF-8 d
-  ... (truncated)
-  ```
-- **[5] Any quantifier is always equal the boolean negative of the all quantifier on the boolean negative of the predicate** (line 171)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/quantifier/Quantifier11.feature:162:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Arrow error: Invalid argument error: Encountered non UTF-8 d
-  ... (truncated)
-  ```
-- **[5] Any quantifier is always equal the boolean negative of the all quantifier on the boolean negative of the predicate** (line 172)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/quantifier/Quantifier11.feature:162:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Arrow error: Invalid argument error: Encountered non UTF-8 d
-  ... (truncated)
-  ```
-- **[5] Any quantifier is always equal the boolean negative of the all quantifier on the boolean negative of the predicate** (line 173)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/quantifier/Quantifier11.feature:162:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Arrow error: Invalid argument error: Encountered non UTF-8 d
-  ... (truncated)
-  ```
-- **[6] Any quantifier is always equal whether the size of the list filtered with same the predicate is grater zero** (line 205)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/quantifier/Quantifier11.feature:198:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "List comprehension input must be a list, got Utf8", query: S
-  ... (truncated)
-  ```
-- **[6] Any quantifier is always equal whether the size of the list filtered with same the predicate is grater zero** (line 206)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/quantifier/Quantifier11.feature:198:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "List comprehension input must be a list, got Utf8", query: S
-  ... (truncated)
-  ```
-- **[6] Any quantifier is always equal whether the size of the list filtered with same the predicate is grater zero** (line 207)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/quantifier/Quantifier11.feature:198:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "List comprehension input must be a list, got Utf8", query: S
-  ... (truncated)
-  ```
-- **[6] Any quantifier is always equal whether the size of the list filtered with same the predicate is grater zero** (line 208)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/quantifier/Quantifier11.feature:198:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "List comprehension input must be a list, got Utf8", query: S
-  ... (truncated)
-  ```
-- **[6] Any quantifier is always equal whether the size of the list filtered with same the predicate is grater zero** (line 209)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/quantifier/Quantifier11.feature:198:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "List comprehension input must be a list, got Utf8", query: S
-  ... (truncated)
-  ```
-
-### Quantifier12
-
-- **[3] All quantifier is always equal the none quantifier on the boolean negative of the predicate** (line 103)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/quantifier/Quantifier12.feature:96:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Arrow error: Invalid argument error: Encountered non UTF-8 da
-  ... (truncated)
-  ```
-- **[3] All quantifier is always equal the none quantifier on the boolean negative of the predicate** (line 104)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/quantifier/Quantifier12.feature:96:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Arrow error: Invalid argument error: Encountered non UTF-8 da
-  ... (truncated)
-  ```
-- **[3] All quantifier is always equal the none quantifier on the boolean negative of the predicate** (line 105)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/quantifier/Quantifier12.feature:96:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Arrow error: Invalid argument error: Encountered non UTF-8 da
-  ... (truncated)
-  ```
-- **[3] All quantifier is always equal the none quantifier on the boolean negative of the predicate** (line 106)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/quantifier/Quantifier12.feature:96:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Arrow error: Invalid argument error: Encountered non UTF-8 da
-  ... (truncated)
-  ```
-- **[3] All quantifier is always equal the none quantifier on the boolean negative of the predicate** (line 107)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/quantifier/Quantifier12.feature:96:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Arrow error: Invalid argument error: Encountered non UTF-8 da
-  ... (truncated)
-  ```
-- **[4] All quantifier is always equal the boolean negative of the any quantifier on the boolean negative of the predicate** (line 133)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/quantifier/Quantifier12.feature:126:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Arrow error: Invalid argument error: Encountered non UTF-8 d
-  ... (truncated)
-  ```
-- **[4] All quantifier is always equal the boolean negative of the any quantifier on the boolean negative of the predicate** (line 134)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/quantifier/Quantifier12.feature:126:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Arrow error: Invalid argument error: Encountered non UTF-8 d
-  ... (truncated)
-  ```
-- **[4] All quantifier is always equal the boolean negative of the any quantifier on the boolean negative of the predicate** (line 135)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/quantifier/Quantifier12.feature:126:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Arrow error: Invalid argument error: Encountered non UTF-8 d
-  ... (truncated)
-  ```
-- **[4] All quantifier is always equal the boolean negative of the any quantifier on the boolean negative of the predicate** (line 136)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/quantifier/Quantifier12.feature:126:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Arrow error: Invalid argument error: Encountered non UTF-8 d
-  ... (truncated)
-  ```
-- **[4] All quantifier is always equal the boolean negative of the any quantifier on the boolean negative of the predicate** (line 137)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/quantifier/Quantifier12.feature:126:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Arrow error: Invalid argument error: Encountered non UTF-8 d
-  ... (truncated)
-  ```
-- **[5] All quantifier is always equal whether the size of the list filtered with same the predicate is equal the size of the unfiltered list** (line 169)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/quantifier/Quantifier12.feature:162:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "List comprehension input must be a list, got Utf8", query: S
-  ... (truncated)
-  ```
-- **[5] All quantifier is always equal whether the size of the list filtered with same the predicate is equal the size of the unfiltered list** (line 170)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/quantifier/Quantifier12.feature:162:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "List comprehension input must be a list, got Utf8", query: S
-  ... (truncated)
-  ```
-- **[5] All quantifier is always equal whether the size of the list filtered with same the predicate is equal the size of the unfiltered list** (line 171)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/quantifier/Quantifier12.feature:162:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "List comprehension input must be a list, got Utf8", query: S
-  ... (truncated)
-  ```
-- **[5] All quantifier is always equal whether the size of the list filtered with same the predicate is equal the size of the unfiltered list** (line 172)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/quantifier/Quantifier12.feature:162:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "List comprehension input must be a list, got Utf8", query: S
-  ... (truncated)
-  ```
-- **[5] All quantifier is always equal whether the size of the list filtered with same the predicate is equal the size of the unfiltered list** (line 173)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/quantifier/Quantifier12.feature:162:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "List comprehension input must be a list, got Utf8", query: S
+      Step panicked. Captured output: Result mismatch (any order): Row count mismatch: expected 1, got 0
+[Summary]
+1 feature
+1 scenario (1 failed)
+3 steps (
   ... (truncated)
   ```
 
@@ -2361,129 +2159,6 @@ Scenarios that were failing but are now passing:
       Defined: tck/features/expressions/quantifier/Quantifier4.feature:266:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
       Step panicked. Captured output: Query returned error instead of result: Query { message: "SyntaxError: UnknownFunction - Error during planning: UDF 're
-  ... (truncated)
-  ```
-
-### Quantifier9
-
-- **[3] None quantifier is always equal the boolean negative of the any quantifier** (line 103)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/quantifier/Quantifier9.feature:96:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Arrow error: Invalid argument error: Encountered non UTF-8 dat
-  ... (truncated)
-  ```
-- **[3] None quantifier is always equal the boolean negative of the any quantifier** (line 104)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/quantifier/Quantifier9.feature:96:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Arrow error: Invalid argument error: Encountered non UTF-8 dat
-  ... (truncated)
-  ```
-- **[3] None quantifier is always equal the boolean negative of the any quantifier** (line 105)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/quantifier/Quantifier9.feature:96:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Arrow error: Invalid argument error: Encountered non UTF-8 dat
-  ... (truncated)
-  ```
-- **[3] None quantifier is always equal the boolean negative of the any quantifier** (line 106)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/quantifier/Quantifier9.feature:96:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Arrow error: Invalid argument error: Encountered non UTF-8 dat
-  ... (truncated)
-  ```
-- **[3] None quantifier is always equal the boolean negative of the any quantifier** (line 107)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/quantifier/Quantifier9.feature:96:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Arrow error: Invalid argument error: Encountered non UTF-8 dat
-  ... (truncated)
-  ```
-- **[4] None quantifier is always equal the all quantifier on the boolean negative of the predicate** (line 133)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/quantifier/Quantifier9.feature:126:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Arrow error: Invalid argument error: Encountered non UTF-8 da
-  ... (truncated)
-  ```
-- **[4] None quantifier is always equal the all quantifier on the boolean negative of the predicate** (line 134)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/quantifier/Quantifier9.feature:126:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Arrow error: Invalid argument error: Encountered non UTF-8 da
-  ... (truncated)
-  ```
-- **[4] None quantifier is always equal the all quantifier on the boolean negative of the predicate** (line 135)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/quantifier/Quantifier9.feature:126:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Arrow error: Invalid argument error: Encountered non UTF-8 da
-  ... (truncated)
-  ```
-- **[4] None quantifier is always equal the all quantifier on the boolean negative of the predicate** (line 136)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/quantifier/Quantifier9.feature:126:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Arrow error: Invalid argument error: Encountered non UTF-8 da
-  ... (truncated)
-  ```
-- **[4] None quantifier is always equal the all quantifier on the boolean negative of the predicate** (line 137)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/quantifier/Quantifier9.feature:126:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Arrow error: Invalid argument error: Encountered non UTF-8 da
-  ... (truncated)
-  ```
-- **[5] None quantifier is always equal whether the size of the list filtered with same the predicate is zero** (line 169)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/quantifier/Quantifier9.feature:162:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "List comprehension input must be a list, got Utf8", query: So
-  ... (truncated)
-  ```
-- **[5] None quantifier is always equal whether the size of the list filtered with same the predicate is zero** (line 170)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/quantifier/Quantifier9.feature:162:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "List comprehension input must be a list, got Utf8", query: So
-  ... (truncated)
-  ```
-- **[5] None quantifier is always equal whether the size of the list filtered with same the predicate is zero** (line 171)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/quantifier/Quantifier9.feature:162:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "List comprehension input must be a list, got Utf8", query: So
-  ... (truncated)
-  ```
-- **[5] None quantifier is always equal whether the size of the list filtered with same the predicate is zero** (line 172)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/quantifier/Quantifier9.feature:162:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "List comprehension input must be a list, got Utf8", query: So
-  ... (truncated)
-  ```
-- **[5] None quantifier is always equal whether the size of the list filtered with same the predicate is zero** (line 173)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/quantifier/Quantifier9.feature:162:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "List comprehension input must be a list, got Utf8", query: So
   ... (truncated)
   ```
 
@@ -7432,7 +7107,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:662:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("a", Some(Node(Node { vid: Vid(3), labels
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("name", Some(String("sit"))), ("a", Some(
   ... (truncated)
   ```
 - **[29] Sort by a string variable projected from a node property in ascending order** (line 673)
@@ -7512,7 +7187,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:851:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 1. Actual values: [("time", Some(String("12:31:15"))), ("a", 
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 1. Actual values: [("a", Some(Node(Node { vid: Vid(4), labels
   ... (truncated)
   ```
 - **[35] Sort by a local time variable projected from a node property in ascending order** (line 862)
@@ -7520,7 +7195,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:851:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 1. Actual values: [("a", Some(Node(Node { vid: Vid(4), labels
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 1. Actual values: [("time", Some(String("12:31:15"))), ("a", 
   ... (truncated)
   ```
 - **[36] Sort by a local time variable projected from a node property in descending order** (line 892)
@@ -7560,7 +7235,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:914:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("time", Some(String("10:35-08:00"))), ("a
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("a", Some(Node(Node { vid: Vid(0), labels
   ... (truncated)
   ```
 - **[38] Sort by a time variable projected from a node property in descending order** (line 955)
@@ -7568,7 +7243,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:946:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 2. Actual values: [("time", Some(String("12:30:14.645876123+0
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 2. Actual values: [("a", Some(Node(Node { vid: Vid(4), labels
   ... (truncated)
   ```
 - **[38] Sort by a time variable projected from a node property in descending order** (line 956)
@@ -7592,7 +7267,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:977:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("a", Some(Node(Node { vid: Vid(2), labels
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("datetime", Some(String("1970-01-01T00:00
   ... (truncated)
   ```
 - **[39] Sort by a local date time variable projected from a node property in ascending order** (line 988)
@@ -7600,7 +7275,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:977:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("datetime", Some(String("1970-01-01T00:00
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("a", Some(Node(Node { vid: Vid(2), labels
   ... (truncated)
   ```
 - **[40] Sort by a local date time variable projected from a node property in descending order** (line 1018)
@@ -7632,7 +7307,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:1040:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("datetime", Some(String("1969-12-31T12:0
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("a", Some(Node(Node { vid: Vid(2), label
   ... (truncated)
   ```
 - **[41] Sort by a date time variable projected from a node property in ascending order** (line 1051)
@@ -7656,7 +7331,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:1072:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 2. Actual values: [("a", Some(Node(Node { vid: Vid(4), label
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 2. Actual values: [("datetime", Some(String("1980-12-11T12:3
   ... (truncated)
   ```
 - **[45] Sort order should be consistent with comparisons where comparisons are defined #Example: booleans** (line 1144)
@@ -7704,7 +7379,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:1137:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: ArgumentError: InvalidArgumentType - range()
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: Unsupported element type for typed_large_lis
   ... (truncated)
   ```
 - **[45] Sort order should be consistent with comparisons where comparisons are defined #Example: localtimes** (line 1150)
@@ -7712,7 +7387,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:1137:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: ArgumentError: InvalidArgumentType - range()
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: Unsupported element type for typed_large_lis
   ... (truncated)
   ```
 - **[45] Sort order should be consistent with comparisons where comparisons are defined #Example: times** (line 1151)
@@ -7728,7 +7403,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:1137:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: ArgumentError: InvalidArgumentType - range()
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: Unsupported element type for typed_large_lis
   ... (truncated)
   ```
 - **[45] Sort order should be consistent with comparisons where comparisons are defined #Example: datetimes** (line 1153)

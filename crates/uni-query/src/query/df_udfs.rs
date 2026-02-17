@@ -188,12 +188,13 @@ pub fn register_cypher_udfs(ctx: &SessionContext) -> DFResult<()> {
     // Cypher IN UDF (handles json-encoded and CypherValue list types)
     ctx.register_udf(create_cypher_in_udf());
 
-    // List concatenation, append, slice, tail, and reverse UDFs
+    // List concatenation, append, slice, tail, reverse, and CV-wrapping UDFs
     ctx.register_udf(create_cypher_list_concat_udf());
     ctx.register_udf(create_cypher_list_append_udf());
     ctx.register_udf(create_cypher_list_slice_udf());
     ctx.register_udf(create_cypher_tail_udf());
     ctx.register_udf(create_cypher_reverse_udf());
+    ctx.register_udf(create_cypher_list_to_cv_udf());
 
     // Temporal extraction UDFs (year, month, day, etc.)
     for name in &["year", "month", "day", "hour", "minute", "second"] {
@@ -3962,6 +3963,64 @@ impl ScalarUDFImpl for CypherReverseUdf {
                     other
                 ))),
             }
+        })
+    }
+}
+
+// ============================================================================
+// _cypher_list_to_cv(list) -> LargeBinary (CypherValue)
+// ============================================================================
+
+/// Create the `_cypher_list_to_cv` UDF.
+///
+/// Wraps a native Arrow `List<T>` or `LargeList<T>` column as a `LargeBinary`
+/// CypherValue. Used by CASE/coalesce type coercion when branches have mixed
+/// `LargeList<T>` and `LargeBinary` types — since Arrow cannot cast between
+/// those types natively, we route through this UDF instead.
+pub fn create_cypher_list_to_cv_udf() -> ScalarUDF {
+    ScalarUDF::new_from_impl(CypherListToCvUdf::new())
+}
+
+#[derive(Debug)]
+struct CypherListToCvUdf {
+    signature: Signature,
+}
+
+impl CypherListToCvUdf {
+    fn new() -> Self {
+        Self {
+            signature: Signature::any(1, Volatility::Immutable),
+        }
+    }
+}
+
+impl_udf_eq_hash!(CypherListToCvUdf);
+
+impl ScalarUDFImpl for CypherListToCvUdf {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn name(&self) -> &str {
+        "_cypher_list_to_cv"
+    }
+
+    fn signature(&self) -> &Signature {
+        &self.signature
+    }
+
+    fn return_type(&self, _arg_types: &[DataType]) -> DFResult<DataType> {
+        Ok(DataType::LargeBinary)
+    }
+
+    fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DFResult<ColumnarValue> {
+        invoke_cypher_udf(args, &DataType::LargeBinary, |vals| {
+            if vals.len() != 1 {
+                return Err(datafusion::error::DataFusionError::Execution(
+                    "_cypher_list_to_cv(): requires exactly 1 argument".to_string(),
+                ));
+            }
+            Ok(vals[0].clone())
         })
     }
 }

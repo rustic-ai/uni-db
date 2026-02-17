@@ -1260,6 +1260,19 @@ pub(crate) fn cast_expr(expr: DfExpr, data_type: datafusion::arrow::datatypes::D
     })
 }
 
+/// Wrap a `List<T>` or `LargeList<T>` expression as a `LargeBinary` CypherValue.
+///
+/// Arrow cannot cast `List<T>` → `LargeBinary` natively, so we route through
+/// the `_cypher_list_to_cv` UDF. Used by `coerce_branch_to` when CASE branches
+/// have mixed `LargeList<T>` and `LargeBinary` types.
+pub(crate) fn list_to_large_binary_expr(expr: DfExpr) -> DfExpr {
+    use std::sync::Arc;
+    DfExpr::ScalarFunction(datafusion::logical_expr::expr::ScalarFunction::new_udf(
+        Arc::new(crate::query::df_udfs::create_cypher_list_to_cv_udf()),
+        vec![expr],
+    ))
+}
+
 /// Build a `BinaryExpr` from left, operator, and right expressions.
 fn binary_expr(left: DfExpr, op: datafusion::logical_expr::Operator, right: DfExpr) -> DfExpr {
     DfExpr::BinaryExpr(datafusion::logical_expr::expr::BinaryExpr::new(
@@ -2649,16 +2662,45 @@ pub fn apply_type_coercion(expr: &DfExpr, schema: &datafusion::common::DFSchema)
                     .collect();
                 let has_mixed_types = types.windows(2).any(|w| w[0] != w[1]);
                 if has_mixed_types {
-                    let unified_args = coerced_args
-                        .into_iter()
-                        .map(|a| datafusion::logical_expr::cast(a, DataType::Utf8))
-                        .collect();
-                    return Ok(DfExpr::ScalarFunction(
-                        datafusion::logical_expr::expr::ScalarFunction {
-                            func: func.func.clone(),
-                            args: unified_args,
-                        },
-                    ));
+                    // LargeBinary/List/LargeList family: normalize List/LargeList
+                    // args to LargeBinary so coalesce gets uniform types. Casting
+                    // LargeBinary to Utf8 would corrupt the binary-encoded data.
+                    let all_list_or_lb = types.iter().all(|t| {
+                        matches!(
+                            t,
+                            DataType::LargeBinary | DataType::List(_) | DataType::LargeList(_)
+                        )
+                    });
+                    if all_list_or_lb {
+                        let unified_args: Vec<DfExpr> = coerced_args
+                            .into_iter()
+                            .zip(types.iter())
+                            .map(|(arg, t)| {
+                                if matches!(t, DataType::List(_) | DataType::LargeList(_)) {
+                                    list_to_large_binary_expr(arg)
+                                } else {
+                                    arg
+                                }
+                            })
+                            .collect();
+                        return Ok(DfExpr::ScalarFunction(
+                            datafusion::logical_expr::expr::ScalarFunction {
+                                func: func.func.clone(),
+                                args: unified_args,
+                            },
+                        ));
+                    } else {
+                        let unified_args = coerced_args
+                            .into_iter()
+                            .map(|a| datafusion::logical_expr::cast(a, DataType::Utf8))
+                            .collect();
+                        return Ok(DfExpr::ScalarFunction(
+                            datafusion::logical_expr::expr::ScalarFunction {
+                                func: func.func.clone(),
+                                args: unified_args,
+                            },
+                        ));
+                    }
                 }
             }
 
@@ -2683,6 +2725,16 @@ pub fn apply_type_coercion(expr: &DfExpr, schema: &datafusion::common::DFSchema)
                 .iter()
                 .map(|(w, t)| {
                     let cw = apply_type_coercion(w, schema)?;
+                    // CASE WHEN <condition>: DataFusion requires the WHEN expression
+                    // to evaluate to a BooleanArray. LargeBinary columns (CypherValue-
+                    // encoded map/struct field access via index()) are not boolean arrays,
+                    // so wrap them with _cv_to_bool to decode and return a boolean.
+                    let cw = match cw.get_type(schema).ok() {
+                        Some(DataType::LargeBinary) => {
+                            dummy_udf_expr("_cv_to_bool", vec![cw])
+                        }
+                        _ => cw,
+                    };
                     let ct = apply_type_coercion(t, schema)?;
                     Ok((Box::new(cw), Box::new(ct)))
                 })

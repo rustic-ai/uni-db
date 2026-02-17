@@ -118,18 +118,12 @@ impl PhysicalExpr for ListComprehensionExecExpr {
     }
 
     fn data_type(&self, _input_schema: &Schema) -> Result<DataType> {
-        // When output elements are CypherValue (LargeBinary), produce a single CypherValue
-        // array blob instead of LargeList<LargeBinary>. This keeps the
-        // comprehension output in the canonical CypherValue domain, consistent with
-        // reverse(), list_concat(), and other CypherValue-aware operators.
-        if self.output_item_type == DataType::LargeBinary {
-            return Ok(DataType::LargeBinary);
-        }
-        Ok(DataType::LargeList(Arc::new(Field::new(
-            "item",
-            self.output_item_type.clone(),
-            true,
-        ))))
+        // Always return LargeBinary (CypherValue encoding).
+        // This is consistent with ALL other list-producing operations (reverse(),
+        // tail(), list_concat(), etc.) which always return LargeBinary. Returning
+        // LargeList<T> for typed inputs would cause type mismatches in CASE/coalesce
+        // branches when mixed with other list ops that return LargeBinary.
+        Ok(DataType::LargeBinary)
     }
 
     fn nullable(&self, _input_schema: &Schema) -> Result<bool> {
@@ -301,16 +295,12 @@ impl PhysicalExpr for ListComprehensionExecExpr {
             nulls.cloned(),
         );
 
-        // When output items are CypherValue, re-encode the LargeList<LargeBinary>
-        // into a flat LargeBinaryArray of CypherValue array blobs so that the
-        // result type matches what data_type() reports.
-        if self.output_item_type == DataType::LargeBinary {
-            let cypher_value_array =
-                crate::query::df_graph::common::large_list_of_cv_to_cv_array(&new_list)?;
-            return Ok(ColumnarValue::Array(cypher_value_array));
-        }
-
-        Ok(ColumnarValue::Array(Arc::new(new_list)))
+        // Always encode the result as LargeBinary (CypherValue), consistent with
+        // data_type(). typed_large_list_to_cv_array handles all element types
+        // (Int64, Float64, Utf8, Boolean, Struct, LargeBinary/nested CypherValue).
+        let cypher_value_array =
+            crate::query::df_graph::common::typed_large_list_to_cv_array(&new_list)?;
+        Ok(ColumnarValue::Array(cypher_value_array))
     }
 
     fn children(&self) -> Vec<&Arc<dyn PhysicalExpr>> {

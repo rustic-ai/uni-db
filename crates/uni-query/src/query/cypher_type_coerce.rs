@@ -414,8 +414,42 @@ pub(crate) fn find_common_result_type(
         return first.clone(); // All are Time structs, return first
     }
 
-    // Rule 6: Fallback → Utf8
+    // Rule 6: LargeBinary mixed with List/LargeList → LargeBinary
+    // LargeBinary is the CypherValue encoding that can represent any list.
+    // Literal lists produce native List<T> while CypherValue operations return
+    // LargeBinary. When these mix in CASE branches, use LargeBinary as the
+    // common type to avoid corrupting binary data by casting to Utf8.
+    if non_null_types
+        .iter()
+        .any(|t| matches!(t, DataType::LargeBinary))
+    {
+        let all_list_or_lb = non_null_types.iter().all(|t| {
+            matches!(
+                t,
+                DataType::LargeBinary | DataType::List(_) | DataType::LargeList(_)
+            )
+        });
+        if all_list_or_lb {
+            return DataType::LargeBinary;
+        }
+    }
+
+    // Rule 7: Fallback → Utf8
     DataType::Utf8
+}
+
+/// Coerce a single CASE branch expression from `from_type` to `target_type`.
+///
+/// Uses a UDF-based conversion when Arrow cannot perform the cast natively
+/// (e.g., `List<T>` / `LargeList<T>` → `LargeBinary`). Falls back to a
+/// standard Arrow cast for all other type pairs.
+fn coerce_branch_to(expr: DfExpr, from_type: &DataType, target_type: &DataType) -> DfExpr {
+    if matches!(target_type, DataType::LargeBinary)
+        && matches!(from_type, DataType::List(_) | DataType::LargeList(_))
+    {
+        return super::df_expr::list_to_large_binary_expr(expr);
+    }
+    super::df_expr::cast_expr(expr, target_type.clone())
 }
 
 /// Coerces all CASE result types (THEN and ELSE branches) to a common type.
@@ -450,10 +484,7 @@ pub(crate) fn coerce_case_results(
             .get_type(schema)
             .map_err(|e| anyhow!("Failed to get THEN type for cast: {}", e))?;
         if then_type != common_type {
-            *then_expr = Box::new(super::df_expr::cast_expr(
-                (**then_expr).clone(),
-                common_type.clone(),
-            ));
+            *then_expr = Box::new(coerce_branch_to((**then_expr).clone(), &then_type, &common_type));
         }
     }
 
@@ -463,10 +494,7 @@ pub(crate) fn coerce_case_results(
             .get_type(schema)
             .map_err(|e| anyhow!("Failed to get ELSE type for cast: {}", e))?;
         if else_type != common_type {
-            *else_expr = Box::new(super::df_expr::cast_expr(
-                (**else_expr).clone(),
-                common_type.clone(),
-            ));
+            *else_expr = Box::new(coerce_branch_to((**else_expr).clone(), &else_type, &common_type));
         }
     }
 
