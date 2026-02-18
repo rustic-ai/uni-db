@@ -284,7 +284,17 @@ where
 fn add_temporal_duration_to_value(val: &Value, dur: &CypherDuration) -> Result<Value> {
     match val {
         Value::Temporal(tv) => add_temporal_duration_typed(tv, dur),
+        Value::Map(map) => {
+            if let Some(tv) = temporal_from_map_wrapper(map) {
+                add_temporal_duration_typed(&tv, dur)
+            } else {
+                Err(anyhow!("Expected temporal value for duration arithmetic"))
+            }
+        }
         Value::String(s) => {
+            if let Some(tv) = temporal_from_json_wrapper_str(s) {
+                return add_temporal_duration_typed(&tv, dur);
+            }
             let ttype = classify_temporal(s)
                 .ok_or_else(|| anyhow!("Cannot classify temporal value: {}", s))?;
             let result_str = match ttype {
@@ -364,59 +374,57 @@ fn eval_add(left: &Value, right: &Value) -> Result<Value> {
         return Ok(Value::Float(l + r));
     }
 
-    // Temporal + Duration (Value::Temporal)
-    if let Value::Temporal(tv) = left {
-        if let Value::Temporal(TemporalValue::Duration {
-            months,
-            days,
-            nanos,
-        }) = right
+    // Temporal string + Duration / Duration + Temporal string
+    if let Value::String(s) = left
+        && classify_temporal(s).is_some_and(|t| t != TemporalType::Duration)
+        && let Ok(dur) = parse_duration_from_value(right)
+    {
+        return add_temporal_duration_to_value(left, &dur);
+    }
+    if let Value::String(s) = right
+        && classify_temporal(s).is_some_and(|t| t != TemporalType::Duration)
+        && let Ok(dur) = parse_duration_from_value(left)
+    {
+        return add_temporal_duration_to_value(right, &dur);
+    }
+
+    // Temporal + Duration (supports typed temporals and map-wrapped temporals)
+    if let Some(tv) = temporal_from_value(left) {
+        if !matches!(tv, TemporalValue::Duration { .. })
+            && let Ok(dur) = parse_duration_from_value(right)
         {
-            let dur = CypherDuration::new(*months, *days, *nanos);
-            return add_temporal_duration_typed(tv, &dur);
-        }
-        if is_duration_value(right) {
-            let dur = parse_duration_from_value(right)?;
-            return add_temporal_duration_typed(tv, &dur);
+            return add_temporal_duration_typed(&tv, &dur);
         }
         if right.is_number() && !matches!(tv, TemporalValue::Duration { .. }) {
             let dur = parse_duration_from_value(right)?;
-            return add_temporal_duration_typed(tv, &dur);
+            return add_temporal_duration_typed(&tv, &dur);
         }
     }
-    // Duration + Temporal (Value::Temporal)
-    if let Value::Temporal(tv) = right {
-        if let Value::Temporal(TemporalValue::Duration {
-            months,
-            days,
-            nanos,
-        }) = left
+    // Duration + Temporal
+    if let Some(tv) = temporal_from_value(right) {
+        if !matches!(tv, TemporalValue::Duration { .. })
+            && let Ok(dur) = parse_duration_from_value(left)
         {
-            let dur = CypherDuration::new(*months, *days, *nanos);
-            return add_temporal_duration_typed(tv, &dur);
-        }
-        if is_duration_value(left) {
-            let dur = parse_duration_from_value(left)?;
-            return add_temporal_duration_typed(tv, &dur);
+            return add_temporal_duration_typed(&tv, &dur);
         }
         if left.is_number() && !matches!(tv, TemporalValue::Duration { .. }) {
             let dur = parse_duration_from_value(left)?;
-            return add_temporal_duration_typed(tv, &dur);
+            return add_temporal_duration_typed(&tv, &dur);
         }
     }
-    // Duration + Duration (Value::Temporal)
+    // Duration + Duration
     if let (
-        Value::Temporal(TemporalValue::Duration {
+        Some(TemporalValue::Duration {
             months: m1,
             days: d1,
             nanos: n1,
         }),
-        Value::Temporal(TemporalValue::Duration {
+        Some(TemporalValue::Duration {
             months: m2,
             days: d2,
             nanos: n2,
         }),
-    ) = (left, right)
+    ) = (temporal_from_value(left), temporal_from_value(right))
     {
         return Ok(Value::Temporal(TemporalValue::Duration {
             months: m1 + m2,
@@ -469,7 +477,11 @@ fn eval_add(left: &Value, right: &Value) -> Result<Value> {
         return add_temporal_duration_to_value(right, &dur);
     }
 
-    Err(anyhow!("Invalid types for addition"))
+    Err(anyhow!(
+        "Invalid types for addition: left={:?}, right={:?}",
+        left,
+        right
+    ))
 }
 
 /// Classify a Value's temporal type (works for both Temporal and String).
@@ -489,7 +501,9 @@ fn eval_sub(left: &Value, right: &Value) -> Result<Value> {
     }
 
     // Temporal - Duration (Value::Temporal)
-    if let Value::Temporal(tv) = left {
+    if let Value::Temporal(tv) = left
+        && !matches!(tv, TemporalValue::Duration { .. })
+    {
         if let Value::Temporal(TemporalValue::Duration {
             months,
             days,
@@ -684,6 +698,30 @@ fn cypher_partial_cmp(left: &Value, right: &Value) -> Option<Ordering> {
         return None;
     }
 
+    let left_temporal = temporal_from_value(left);
+    let right_temporal = temporal_from_value(right);
+    if let (Some(l), Some(r)) = (&left_temporal, &right_temporal) {
+        return temporal_partial_cmp(l, r);
+    }
+    if let (Some(_), Value::String(rs)) = (&left_temporal, right) {
+        let ls = left.to_string();
+        if let (Some(lt), Some(rt)) = (classify_temporal(&ls), classify_temporal(rs))
+            && lt == rt
+        {
+            return temporal_string_cmp(&ls, rs, lt);
+        }
+        return None;
+    }
+    if let (Value::String(ls), Some(_)) = (left, &right_temporal) {
+        let rs = right.to_string();
+        if let (Some(lt), Some(rt)) = (classify_temporal(ls), classify_temporal(&rs))
+            && lt == rt
+        {
+            return temporal_string_cmp(ls, &rs, lt);
+        }
+        return None;
+    }
+
     // Exact integer ordering — avoid f64 precision loss for large i64 values
     if let (Some(l), Some(r)) = (left.as_i64(), right.as_i64()) {
         return Some(l.cmp(&r));
@@ -813,6 +851,137 @@ fn temporal_partial_cmp(left: &TemporalValue, right: &TemporalValue) -> Option<O
         // Different temporal types are not comparable
         _ => None,
     }
+}
+
+fn temporal_from_value(v: &Value) -> Option<TemporalValue> {
+    match v {
+        Value::Temporal(tv) => Some(tv.clone()),
+        Value::Map(map) => temporal_from_map_wrapper(map),
+        Value::String(s) => temporal_from_json_wrapper_str(s),
+        _ => None,
+    }
+}
+
+fn temporal_from_map_wrapper(
+    map: &std::collections::HashMap<String, Value>,
+) -> Option<TemporalValue> {
+    if map.len() != 1 {
+        return None;
+    }
+
+    let as_i32 = |v: &Value| v.as_i64().and_then(|n| i32::try_from(n).ok());
+    let as_i64 = |v: &Value| v.as_i64();
+
+    if let Some(Value::Map(inner)) = map.get("Date") {
+        let days = inner.get("days_since_epoch").and_then(as_i32)?;
+        return Some(TemporalValue::Date {
+            days_since_epoch: days,
+        });
+    }
+    if let Some(Value::Map(inner)) = map.get("LocalTime") {
+        let nanos = inner.get("nanos_since_midnight").and_then(as_i64)?;
+        return Some(TemporalValue::LocalTime {
+            nanos_since_midnight: nanos,
+        });
+    }
+    if let Some(Value::Map(inner)) = map.get("Time") {
+        let nanos = inner.get("nanos_since_midnight").and_then(as_i64)?;
+        let offset = inner.get("offset_seconds").and_then(as_i32)?;
+        return Some(TemporalValue::Time {
+            nanos_since_midnight: nanos,
+            offset_seconds: offset,
+        });
+    }
+    if let Some(Value::Map(inner)) = map.get("LocalDateTime") {
+        let nanos = inner.get("nanos_since_epoch").and_then(as_i64)?;
+        return Some(TemporalValue::LocalDateTime {
+            nanos_since_epoch: nanos,
+        });
+    }
+    if let Some(Value::Map(inner)) = map.get("DateTime") {
+        let nanos = inner.get("nanos_since_epoch").and_then(as_i64)?;
+        let offset = inner.get("offset_seconds").and_then(as_i32)?;
+        let timezone_name = match inner.get("timezone_name") {
+            Some(Value::String(s)) => Some(s.clone()),
+            _ => None,
+        };
+        return Some(TemporalValue::DateTime {
+            nanos_since_epoch: nanos,
+            offset_seconds: offset,
+            timezone_name,
+        });
+    }
+    if let Some(Value::Map(inner)) = map.get("Duration") {
+        let months = inner.get("months").and_then(as_i64)?;
+        let days = inner.get("days").and_then(as_i64)?;
+        let nanos = inner.get("nanos").and_then(as_i64)?;
+        return Some(TemporalValue::Duration {
+            months,
+            days,
+            nanos,
+        });
+    }
+    None
+}
+
+fn temporal_from_json_wrapper_str(s: &str) -> Option<TemporalValue> {
+    let parsed: serde_json::Value = serde_json::from_str(s).ok()?;
+    let obj = parsed.as_object()?;
+    if obj.len() != 1 {
+        return None;
+    }
+
+    let as_i32 = |o: &serde_json::Map<String, serde_json::Value>, key: &str| {
+        o.get(key)
+            .and_then(serde_json::Value::as_i64)
+            .and_then(|n| i32::try_from(n).ok())
+    };
+    let as_i64 = |o: &serde_json::Map<String, serde_json::Value>, key: &str| {
+        o.get(key).and_then(serde_json::Value::as_i64)
+    };
+
+    if let Some(inner) = obj.get("Date").and_then(serde_json::Value::as_object) {
+        return Some(TemporalValue::Date {
+            days_since_epoch: as_i32(inner, "days_since_epoch")?,
+        });
+    }
+    if let Some(inner) = obj.get("LocalTime").and_then(serde_json::Value::as_object) {
+        return Some(TemporalValue::LocalTime {
+            nanos_since_midnight: as_i64(inner, "nanos_since_midnight")?,
+        });
+    }
+    if let Some(inner) = obj.get("Time").and_then(serde_json::Value::as_object) {
+        return Some(TemporalValue::Time {
+            nanos_since_midnight: as_i64(inner, "nanos_since_midnight")?,
+            offset_seconds: as_i32(inner, "offset_seconds")?,
+        });
+    }
+    if let Some(inner) = obj
+        .get("LocalDateTime")
+        .and_then(serde_json::Value::as_object)
+    {
+        return Some(TemporalValue::LocalDateTime {
+            nanos_since_epoch: as_i64(inner, "nanos_since_epoch")?,
+        });
+    }
+    if let Some(inner) = obj.get("DateTime").and_then(serde_json::Value::as_object) {
+        return Some(TemporalValue::DateTime {
+            nanos_since_epoch: as_i64(inner, "nanos_since_epoch")?,
+            offset_seconds: as_i32(inner, "offset_seconds")?,
+            timezone_name: inner
+                .get("timezone_name")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string),
+        });
+    }
+    if let Some(inner) = obj.get("Duration").and_then(serde_json::Value::as_object) {
+        return Some(TemporalValue::Duration {
+            months: as_i64(inner, "months")?,
+            days: as_i64(inner, "days")?,
+            nanos: as_i64(inner, "nanos")?,
+        });
+    }
+    None
 }
 
 /// Compare two temporal strings of the same type.

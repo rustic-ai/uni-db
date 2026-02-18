@@ -37,3 +37,7 @@
 - Use Conventional Commits as in history: `feat: ...`, `fix: ...`, `docs: ...`, `chore: ...`.
 - PRs should include a short rationale, tests run, and links to related issues.
 - Update `DESIGN.md` and `CYPHER_GAPS.md` when architecture or Cypher support changes.
+
+## Agent Git Safety Rule
+- Do not perform any git action unless the user has explicitly instructed it in the current conversation turn.
+- This includes all git commands and git-related workflows (for example: `status`, `diff`, `add`, `commit`, `push`, `pull`, `checkout`, `reset`, `merge`, `rebase`, `tag`, `stash`, `cherry-pick`).

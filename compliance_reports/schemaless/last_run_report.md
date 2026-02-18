@@ -1,19 +1,19 @@
 # TCK Compliance Report
 
-**Generated:** 2026-02-18 03:09:10
-**Results:** `results_20260218_030910.json`
-**Compared to:** `results_20260218_010255.json`
+**Generated:** 2026-02-18 11:20:11
+**Results:** `results_20260218_112011.json`
+**Compared to:** `results_20260218_100905.json`
 
 ## Summary
 
 | Metric | Current | Previous | Delta |
 |--------|---------|----------|-------|
 | Scenarios | 3897 | 3897 |  |
-| Passed | 3537 | 3536 | +1 |
-| Failed | 359 | 360 | -1 |
-| Pass Rate | 90.8% | 90.7% | 📈 +0.0pp |
+| Passed | 3647 | 3636 | +11 |
+| Failed | 249 | 260 | -11 |
+| Pass Rate | 93.6% | 93.3% | 📈 +0.3pp |
 
-**🟢 Fixed:** 1 scenarios now passing
+**🟢 Fixed:** 11 scenarios now passing
 
 ## Feature Breakdown
 
@@ -51,7 +51,7 @@
 | ❌ Create6 | 14 | 6 | 8 | 43% |  |
 | ⚠️ Delete1 | 8 | 6 | 2 | 75% |  |
 | ⚠️ Delete2 | 5 | 3 | 2 | 60% |  |
-| ❌ Delete3 | 2 | 0 | 2 | 0% |  |
+| ⚠️ Delete3 | 2 | 1 | 1 | 50% |  |
 | ✅ Delete4 | 3 | 3 | 0 | 100% |  |
 | ❌ Delete5 | 9 | 2 | 7 | 22% |  |
 | ❌ Delete6 | 14 | 6 | 8 | 43% |  |
@@ -121,7 +121,7 @@
 | ⚠️ Path2 | 3 | 2 | 1 | 67% |  |
 | ❌ Path3 | 3 | 1 | 2 | 33% |  |
 | ✅ Pattern1 | 39 | 39 | 0 | 100% |  |
-| ✅ Pattern2 | 11 | 11 | 0 | 100% |  |
+| ✅ Pattern2 | 11 | 11 | 0 | 100% | +9pp |
 | ✅ Precedence1 | 72 | 72 | 0 | 100% |  |
 | ✅ Precedence2 | 26 | 26 | 0 | 100% |  |
 | ✅ Precedence3 | 11 | 11 | 0 | 100% |  |
@@ -149,12 +149,12 @@
 | ✅ Return6 | 21 | 17 | 4 | 81% |  |
 | ⚠️ Return7 | 2 | 1 | 1 | 50% |  |
 | ✅ Return8 | 1 | 1 | 0 | 100% |  |
-| ⚠️ ReturnOrderBy1 | 12 | 8 | 4 | 67% |  |
-| ⚠️ ReturnOrderBy2 | 14 | 7 | 7 | 50% |  |
-| ❌ ReturnOrderBy3 | 1 | 0 | 1 | 0% |  |
-| ⚠️ ReturnOrderBy4 | 2 | 1 | 1 | 50% |  |
+| ✅ ReturnOrderBy1 | 12 | 12 | 0 | 100% |  |
+| ✅ ReturnOrderBy2 | 14 | 14 | 0 | 100% |  |
+| ✅ ReturnOrderBy3 | 1 | 1 | 0 | 100% |  |
+| ✅ ReturnOrderBy4 | 2 | 2 | 0 | 100% |  |
 | ✅ ReturnOrderBy5 | 1 | 1 | 0 | 100% |  |
-| ❌ ReturnOrderBy6 | 5 | 2 | 3 | 40% |  |
+| ✅ ReturnOrderBy6 | 5 | 5 | 0 | 100% |  |
 | ✅ ReturnSkipLimit1 | 11 | 10 | 1 | 91% |  |
 | ✅ ReturnSkipLimit2 | 17 | 17 | 0 | 100% |  |
 | ⚠️ ReturnSkipLimit3 | 3 | 2 | 1 | 67% |  |
@@ -179,7 +179,7 @@
 | ✅ Temporal5 | 7 | 6 | 1 | 86% |  |
 | ✅ Temporal6 | 17 | 16 | 1 | 94% |  |
 | ✅ Temporal7 | 18 | 16 | 2 | 89% |  |
-| ✅ Temporal8 | 27 | 27 | 0 | 100% |  |
+| ✅ Temporal8 | 27 | 27 | 0 | 100% | +33pp |
 | ✅ Temporal9 | 322 | 322 | 0 | 100% |  |
 | ✅ TriadicSelection1 | 19 | 19 | 0 | 100% |  |
 | ✅ TypeConversion1 | 10 | 10 | 0 | 100% |  |
@@ -189,19 +189,19 @@
 | ✅ Union1 | 5 | 4 | 1 | 80% |  |
 | ✅ Union2 | 5 | 4 | 1 | 80% |  |
 | ✅ Union3 | 2 | 2 | 0 | 100% |  |
-| ✅ Unwind1 | 14 | 12 | 2 | 86% | +7pp |
+| ✅ Unwind1 | 14 | 12 | 2 | 86% |  |
 | ✅ With1 | 6 | 6 | 0 | 100% |  |
 | ✅ With2 | 2 | 2 | 0 | 100% |  |
 | ✅ With3 | 1 | 1 | 0 | 100% |  |
-| ✅ With4 | 7 | 7 | 0 | 100% |  |
+| ✅ With4 | 7 | 7 | 0 | 100% | +14pp |
 | ✅ With5 | 2 | 2 | 0 | 100% |  |
 | ✅ With6 | 9 | 9 | 0 | 100% |  |
 | ✅ With7 | 2 | 2 | 0 | 100% |  |
-| ❌ WithOrderBy1 | 96 | 47 | 49 | 49% |  |
-| ⚠️ WithOrderBy2 | 83 | 47 | 36 | 57% |  |
+| ✅ WithOrderBy1 | 96 | 96 | 0 | 100% |  |
+| ✅ WithOrderBy2 | 83 | 83 | 0 | 100% |  |
 | ✅ WithOrderBy3 | 93 | 93 | 0 | 100% |  |
-| ⚠️ WithOrderBy4 | 20 | 13 | 7 | 65% |  |
-| ⚠️ WithSkipLimit1 | 2 | 1 | 1 | 50% |  |
+| ✅ WithOrderBy4 | 20 | 20 | 0 | 100% |  |
+| ✅ WithSkipLimit1 | 2 | 2 | 0 | 100% |  |
 | ✅ WithSkipLimit2 | 4 | 4 | 0 | 100% |  |
 | ⚠️ WithSkipLimit3 | 3 | 2 | 1 | 67% |  |
 | ✅ WithWhere1 | 4 | 4 | 0 | 100% |  |
@@ -216,7 +216,17 @@
 
 Scenarios that were failing but are now passing:
 
-- **Unwind1** — [5] Unwinding a collected expression (line 94)
+- **Pattern2** — [11] Use a pattern comprehension and ORDER BY (line 226)
+- **Temporal8** — [6] Should add or subtract durations (line 167)
+- **Temporal8** — [6] Should add or subtract durations (line 168)
+- **Temporal8** — [6] Should add or subtract durations (line 169)
+- **Temporal8** — [6] Should add or subtract durations (line 170)
+- **Temporal8** — [6] Should add or subtract durations (line 171)
+- **Temporal8** — [6] Should add or subtract durations (line 172)
+- **Temporal8** — [6] Should add or subtract durations (line 173)
+- **Temporal8** — [6] Should add or subtract durations (line 174)
+- **Temporal8** — [6] Should add or subtract durations (line 175)
+- **With4** — [5] Fail when not aliasing expressions in WITH (line 102)
 
 ## Failed Scenarios
 
@@ -573,14 +583,14 @@ Scenarios that were failing but are now passing:
 - **[3] Delete relationship with bidirectional matching** (line 65)
   ```
   Step failed:
-      Defined: tck/features/clauses/delete/Delete2.feature:77:5
-      Matched: crates/uni-tck/src/steps/then.rs:9:1
-      Step panicked. Captured output: No result found
+      Defined: tck/features/clauses/delete/Delete2.feature:78:5
+      Matched: crates/uni-tck/src/steps/and.rs:27:1
+      Step panicked. Captured output: assertion `left == right` failed: Expected -properties=1, but got 0 (before=0, after=0)
+        left: 0
+       right: 1
 [Summary]
-1 feature
-1 scenario (1 failed)
-4 steps (3 passed, 1 failed)
-
+1 f
+  ... (truncated)
   ```
 - **[5] Failing when deleting a relationship type** (line 96)
   ```
@@ -600,26 +610,14 @@ Scenarios that were failing but are now passing:
 - **[1] Detach deleting paths** (line 33)
   ```
   Step failed:
-      Defined: tck/features/clauses/delete/Delete3.feature:47:5
-      Matched: crates/uni-tck/src/steps/then.rs:9:1
-      Step panicked. Captured output: No result found
+      Defined: tck/features/clauses/delete/Delete3.feature:48:5
+      Matched: crates/uni-tck/src/steps/and.rs:27:1
+      Step panicked. Captured output: assertion `left == right` failed: Expected -nodes=4, but got 0 (before=4, after=4)
+        left: 0
+       right: 4
 [Summary]
-1 feature
-1 scenario (1 failed)
-4 steps (3 passed, 1 failed)
-
-  ```
-- **[2] Delete on null path** (line 53)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/delete/Delete3.feature:60:5
-      Matched: crates/uni-tck/src/steps/then.rs:9:1
-      Step panicked. Captured output: No result found
-[Summary]
-1 feature
-1 scenario (1 failed)
-3 steps (2 passed, 1 failed)
-
+1 featur
+  ... (truncated)
   ```
 
 ### Delete5
@@ -901,10 +899,11 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/graph/Graph6.feature:151:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): Expected column '(list[1]).missingToo' not found in result
+      Step panicked. Captured output: Result mismatch (any order): Expected column '(list[1]).existing' not found in result
 [Summary]
 1 feature
 1 scenario (1 failed)
+4
   ... (truncated)
   ```
 
@@ -915,7 +914,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/graph/Graph9.feature:73:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("properties(null)", Some(Null)), ("properties(n)", 
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("properties(null)", Some(Null)), ("properties(r)", 
   ... (truncated)
   ```
 
@@ -1006,7 +1005,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/literals/Literals7.feature:295:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("literal", Some(List([Map({"batters": Map({"
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("literal", Some(List([Map({"name": String("C
   ... (truncated)
   ```
 
@@ -1017,7 +1016,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/literals/Literals8.feature:294:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("literal", Some(Map({"data": List([Map({"top
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("literal", Some(Map({"data": List([Map({"ppu
   ... (truncated)
   ```
 
@@ -2253,185 +2252,6 @@ Scenarios that were failing but are now passing:
 
   ```
 
-### ReturnOrderBy1
-
-- **[9] ORDER BY should order lists in the expected order** (line 153)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/return-orderby/ReturnOrderBy1.feature:161:5
-      Matched: crates/uni-tck/src/steps/then.rs:37:1
-      Step panicked. Captured output: Result mismatch (in order): Value mismatch at row 1 column 'lists': expected List([String("a")]), got List([Int(1)])
-  ... (truncated)
-  ```
-- **[10] ORDER BY DESC should order lists in the expected order** (line 173)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/return-orderby/ReturnOrderBy1.feature:181:5
-      Matched: crates/uni-tck/src/steps/then.rs:37:1
-      Step panicked. Captured output: Result mismatch (in order): Value mismatch at row 0 column 'lists': expected List([Null, Int(2)]), got List([String(
-  ... (truncated)
-  ```
-- **[11] ORDER BY should order distinct types in the expected order** (line 193)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/return-orderby/ReturnOrderBy1.feature:206:5
-      Matched: crates/uni-tck/src/steps/then.rs:37:1
-      Step panicked. Captured output: Failed to parse expected table: "Parse error: Parsing Error: Error { input: \"NaN\", code: Digit }"
-[Summary]
-1 feat
-  ... (truncated)
-  ```
-- **[12] ORDER BY DESC should order distinct types in the expected order** (line 220)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/return-orderby/ReturnOrderBy1.feature:233:5
-      Matched: crates/uni-tck/src/steps/then.rs:37:1
-      Step panicked. Captured output: Failed to parse expected table: "Parse error: Parsing Error: Error { input: \"NaN\", code: Digit }"
-[Summary]
-1 feat
-  ... (truncated)
-  ```
-
-### ReturnOrderBy2
-
-- **[3] Sort on aggregated function** (line 75)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/return-orderby/ReturnOrderBy2.feature:90:5
-      Matched: crates/uni-tck/src/steps/then.rs:37:1
-      Step panicked. Captured output: No result found
-[Summary]
-1 feature
-1 scenario (1 failed)
-4 steps (3 passed, 1 failed)
-
-  ```
-- **[4] Support sort and distinct** (line 98)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/return-orderby/ReturnOrderBy2.feature:112:5
-      Matched: crates/uni-tck/src/steps/then.rs:37:1
-      Step panicked. Captured output: Result mismatch (in order): Unexpected column 'a._all_props' in result
-[Summary]
-1 feature
-1 scenario (1 failed)
-4 s
-  ... (truncated)
-  ```
-- **[5] Support ordering by a property after being distinct-ified** (line 119)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/return-orderby/ReturnOrderBy2.feature:131:5
-      Matched: crates/uni-tck/src/steps/then.rs:37:1
-      Step panicked. Captured output: Result mismatch (in order): Unexpected column 'b._all_props' in result
-[Summary]
-1 feature
-1 scenario (1 failed)
-4 s
-  ... (truncated)
-  ```
-- **[6] Count star should count everything in scope** (line 136)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/return-orderby/ReturnOrderBy2.feature:148:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "SyntaxError: InvalidAggregation - This feature is not impl
-  ... (truncated)
-  ```
-- **[10] Returned columns do not change from using ORDER BY** (line 208)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/return-orderby/ReturnOrderBy2.feature:220:5
-      Matched: crates/uni-tck/src/steps/then.rs:37:1
-      Step panicked. Captured output: Result mismatch (in order): Unexpected column 'n._all_props' in result
-[Summary]
-1 feature
-1 scenario (1 failed)
-4 s
-  ... (truncated)
-  ```
-- **[12] Aggregation of named paths** (line 243)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/return-orderby/ReturnOrderBy2.feature:259:5
-      Matched: crates/uni-tck/src/steps/then.rs:62:1
-      Step panicked. Captured output: No result found
-[Summary]
-1 feature
-1 scenario (1 failed)
-4 steps (3 passed, 1 failed)
-
-  ```
-- **[13] Fail when sorting on variable removed by DISTINCT** (line 266)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/return-orderby/ReturnOrderBy2.feature:278:5
-      Matched: crates/uni-tck/src/steps/then.rs:90:1
-      Step panicked. Captured output: No error found
-[Summary]
-1 feature
-1 scenario (1 failed)
-4 steps (3 passed, 1 failed)
-
-  ```
-
-### ReturnOrderBy3
-
-- **[1] Sort on aggregate function and normal property** (line 33)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/return-orderby/ReturnOrderBy3.feature:48:5
-      Matched: crates/uni-tck/src/steps/then.rs:37:1
-      Step panicked. Captured output: No result found
-[Summary]
-1 feature
-1 scenario (1 failed)
-4 steps (3 passed, 1 failed)
-
-  ```
-
-### ReturnOrderBy4
-
-- **[1] ORDER BY of a column introduced in RETURN should return salient results in ascending order** (line 33)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/return-orderby/ReturnOrderBy4.feature:44:5
-      Matched: crates/uni-tck/src/steps/then.rs:37:1
-      Step panicked. Captured output: Result mismatch (in order): Row count mismatch: expected 2, got 0
-[Summary]
-1 feature
-1 scenario (1 failed)
-3 steps (
-  ... (truncated)
-  ```
-
-### ReturnOrderBy6
-
-- **[1] Handle constants and parameters inside an order by item which contains an aggregation expression** (line 33)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/return-orderby/ReturnOrderBy6.feature:43:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "SyntaxError: InvalidAggregation - This feature is not imple
-  ... (truncated)
-  ```
-- **[2] Handle returned aliases inside an order by item which contains an aggregation expression** (line 48)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/return-orderby/ReturnOrderBy6.feature:56:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "SyntaxError: InvalidAggregation - This feature is not imple
-  ... (truncated)
-  ```
-- **[3] Handle returned property accesses inside an order by item which contains an aggregation expression** (line 60)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/return-orderby/ReturnOrderBy6.feature:68:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "SyntaxError: InvalidAggregation - This feature is not imple
-  ... (truncated)
-  ```
-
 ### ReturnSkipLimit1
 
 - **[2] Start the result from the second row by param** (line 57)
@@ -3003,7 +2823,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal5.feature:133:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("d.quarter", Some(Int(4))), ("d.weekDay", So
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("d.microsecond", Some(Int(645876))), ("d.day
   ... (truncated)
   ```
 
@@ -3130,780 +2950,6 @@ Scenarios that were failing but are now passing:
       Defined: tck/features/clauses/unwind/Unwind1.feature:274:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
       Step panicked. Captured output: Query returned error instead of result: Query { message: "Label Person not found", query: Some("\nUNWIND $props AS prop\nMERGE (p:P
-  ... (truncated)
-  ```
-
-### WithOrderBy1
-
-- **[9] Sort lists in ascending order** (line 161)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:171:5
-      Matched: crates/uni-tck/src/steps/then.rs:37:1
-      Step panicked. Captured output: Result mismatch (in order): Value mismatch at row 1 column 'lists': expected List([String("a")]), got List([Int(1)])
-[Su
-  ... (truncated)
-  ```
-- **[10] Sort lists in descending order** (line 179)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:189:5
-      Matched: crates/uni-tck/src/steps/then.rs:37:1
-      Step panicked. Captured output: Result mismatch (in order): Value mismatch at row 0 column 'lists': expected List([Null, Int(2)]), got List([String("a")
-  ... (truncated)
-  ```
-- **[11] Sort dates in ascending order** (line 197)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:212:5
-      Matched: crates/uni-tck/src/steps/then.rs:37:1
-      Step panicked. Captured output: Result mismatch (in order): Value mismatch at row 0 column 'dates': expected String("1910-05-06"), got List([])
-[Summary
-  ... (truncated)
-  ```
-- **[12] Sort dates in descending order** (line 218)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:233:5
-      Matched: crates/uni-tck/src/steps/then.rs:37:1
-      Step panicked. Captured output: Result mismatch (in order): Value mismatch at row 0 column 'dates': expected String("1985-05-06"), got List([])
-[Summary
-  ... (truncated)
-  ```
-- **[13] Sort local times in ascending order** (line 239)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:253:5
-      Matched: crates/uni-tck/src/steps/then.rs:37:1
-      Step panicked. Captured output: Result mismatch (in order): Value mismatch at row 0 column 'localtimes': expected String("10:35"), got List([])
-[Summary
-  ... (truncated)
-  ```
-- **[14] Sort local times in descending order** (line 260)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:274:5
-      Matched: crates/uni-tck/src/steps/then.rs:37:1
-      Step panicked. Captured output: Result mismatch (in order): Value mismatch at row 0 column 'localtimes': expected String("12:35:13"), got List([])
-[Summ
-  ... (truncated)
-  ```
-- **[15] Sort times in ascending order** (line 281)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:295:5
-      Matched: crates/uni-tck/src/steps/then.rs:37:1
-      Step panicked. Captured output: Result mismatch (in order): Value mismatch at row 0 column 'times': expected String("12:35:15+05:00"), got List([])
-[Sum
-  ... (truncated)
-  ```
-- **[16] Sort times in descending order** (line 302)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:316:5
-      Matched: crates/uni-tck/src/steps/then.rs:37:1
-      Step panicked. Captured output: Result mismatch (in order): Value mismatch at row 0 column 'times': expected String("10:35-08:00"), got List([])
-[Summar
-  ... (truncated)
-  ```
-- **[17] Sort local date times in ascending order** (line 323)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:337:5
-      Matched: crates/uni-tck/src/steps/then.rs:37:1
-      Step panicked. Captured output: Result mismatch (in order): Value mismatch at row 0 column 'localdatetimes': expected String("0001-01-01T01:01:01.000000
-  ... (truncated)
-  ```
-- **[18] Sort local date times in descending order** (line 344)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:358:5
-      Matched: crates/uni-tck/src/steps/then.rs:37:1
-      Step panicked. Captured output: Result mismatch (in order): Value mismatch at row 0 column 'localdatetimes': expected String("9999-09-09T09:59:59.999999
-  ... (truncated)
-  ```
-- **[19] Sort date times in ascending order** (line 365)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:379:5
-      Matched: crates/uni-tck/src/steps/then.rs:37:1
-      Step panicked. Captured output: Result mismatch (in order): Value mismatch at row 0 column 'datetimes': expected String("0001-01-01T01:01:01.000000001-1
-  ... (truncated)
-  ```
-- **[20] Sort date times in descending order** (line 386)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:400:5
-      Matched: crates/uni-tck/src/steps/then.rs:37:1
-      Step panicked. Captured output: Result mismatch (in order): Value mismatch at row 0 column 'datetimes': expected String("9999-09-09T09:59:59.999999999+1
-  ... (truncated)
-  ```
-- **[21] Sort distinct types in ascending order** (line 407)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:422:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("types", Some(Float(NaN)))]. Expected: [{
-  ... (truncated)
-  ```
-- **[22] Sort distinct types in descending order** (line 431)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:446:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Failed to parse expected table: "Parse error: Parsing Error: Error { input: \"NaN\", code: Digit }"
-[Summary]
-1 feature
-
-  ... (truncated)
-  ```
-- **[29] Sort by a string variable projected from a node property in ascending order** (line 671)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:662:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("a", Some(Node(Node { vid: Vid(3), labels
-  ... (truncated)
-  ```
-- **[29] Sort by a string variable projected from a node property in ascending order** (line 672)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:662:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("name", Some(String("sit"))), ("a", Some(
-  ... (truncated)
-  ```
-- **[29] Sort by a string variable projected from a node property in ascending order** (line 673)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:662:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("a", Some(Node(Node { vid: Vid(3), labels
-  ... (truncated)
-  ```
-- **[30] Sort by a string variable projected from a node property in descending order** (line 703)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:694:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 2. Actual values: [("a", Some(Node(Node { vid: Vid(2), labels
-  ... (truncated)
-  ```
-- **[30] Sort by a string variable projected from a node property in descending order** (line 704)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:694:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 2. Actual values: [("a", Some(Node(Node { vid: Vid(2), labels
-  ... (truncated)
-  ```
-- **[35] Sort by a local time variable projected from a node property in ascending order** (line 860)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:851:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 1. Actual values: [("time", Some(String("12:31:15"))), ("a", 
-  ... (truncated)
-  ```
-- **[35] Sort by a local time variable projected from a node property in ascending order** (line 861)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:851:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 1. Actual values: [("time", Some(String("12:31:15"))), ("a", 
-  ... (truncated)
-  ```
-- **[35] Sort by a local time variable projected from a node property in ascending order** (line 862)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:851:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 1. Actual values: [("a", Some(Node(Node { vid: Vid(4), labels
-  ... (truncated)
-  ```
-- **[36] Sort by a local time variable projected from a node property in descending order** (line 892)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:883:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 2. Actual values: [("time", Some(String("12:30:14.645876123")
-  ... (truncated)
-  ```
-- **[36] Sort by a local time variable projected from a node property in descending order** (line 893)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:883:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 2. Actual values: [("time", Some(String("12:30:14.645876123")
-  ... (truncated)
-  ```
-- **[37] Sort by a time variable projected from a node property in ascending order** (line 923)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:914:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("a", Some(Node(Node { vid: Vid(0), labels
-  ... (truncated)
-  ```
-- **[37] Sort by a time variable projected from a node property in ascending order** (line 924)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:914:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("time", Some(String("10:35-08:00"))), ("a
-  ... (truncated)
-  ```
-- **[37] Sort by a time variable projected from a node property in ascending order** (line 925)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:914:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("time", Some(String("10:35-08:00"))), ("a
-  ... (truncated)
-  ```
-- **[38] Sort by a time variable projected from a node property in descending order** (line 955)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:946:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 2. Actual values: [("a", Some(Node(Node { vid: Vid(4), labels
-  ... (truncated)
-  ```
-- **[38] Sort by a time variable projected from a node property in descending order** (line 956)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:946:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 2. Actual values: [("time", Some(String("12:30:14.645876123+0
-  ... (truncated)
-  ```
-- **[39] Sort by a local date time variable projected from a node property in ascending order** (line 986)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:977:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("a", Some(Node(Node { vid: Vid(2), labels
-  ... (truncated)
-  ```
-- **[39] Sort by a local date time variable projected from a node property in ascending order** (line 987)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:977:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("a", Some(Node(Node { vid: Vid(2), labels
-  ... (truncated)
-  ```
-- **[39] Sort by a local date time variable projected from a node property in ascending order** (line 988)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:977:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("datetime", Some(String("1970-01-01T00:00
-  ... (truncated)
-  ```
-- **[40] Sort by a local date time variable projected from a node property in descending order** (line 1018)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:1009:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 2. Actual values: [("datetime", Some(String("1980-12-11T12:3
-  ... (truncated)
-  ```
-- **[40] Sort by a local date time variable projected from a node property in descending order** (line 1019)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:1009:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 2. Actual values: [("a", Some(Node(Node { vid: Vid(4), label
-  ... (truncated)
-  ```
-- **[41] Sort by a date time variable projected from a node property in ascending order** (line 1049)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:1040:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("a", Some(Node(Node { vid: Vid(2), label
-  ... (truncated)
-  ```
-- **[41] Sort by a date time variable projected from a node property in ascending order** (line 1050)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:1040:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("datetime", Some(String("1969-12-31T12:0
-  ... (truncated)
-  ```
-- **[41] Sort by a date time variable projected from a node property in ascending order** (line 1051)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:1040:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("datetime", Some(String("1969-12-31T12:0
-  ... (truncated)
-  ```
-- **[42] Sort by a date time variable projected from a node property in descending order** (line 1081)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:1072:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 2. Actual values: [("a", Some(Node(Node { vid: Vid(4), label
-  ... (truncated)
-  ```
-- **[42] Sort by a date time variable projected from a node property in descending order** (line 1082)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:1072:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 2. Actual values: [("a", Some(Node(Node { vid: Vid(4), label
-  ... (truncated)
-  ```
-- **[45] Sort order should be consistent with comparisons where comparisons are defined #Example: booleans** (line 1144)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:1137:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: ArgumentError: InvalidArgumentType - range()
-  ... (truncated)
-  ```
-- **[45] Sort order should be consistent with comparisons where comparisons are defined #Example: integers** (line 1145)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:1137:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: ArgumentError: InvalidArgumentType - range()
-  ... (truncated)
-  ```
-- **[45] Sort order should be consistent with comparisons where comparisons are defined #Example: floats** (line 1146)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:1137:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: ArgumentError: InvalidArgumentType - range()
-  ... (truncated)
-  ```
-- **[45] Sort order should be consistent with comparisons where comparisons are defined #Example: string** (line 1147)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:1137:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: ArgumentError: InvalidArgumentType - range()
-  ... (truncated)
-  ```
-- **[45] Sort order should be consistent with comparisons where comparisons are defined #Example: lists** (line 1148)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:1137:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: ArgumentError: InvalidArgumentType - range()
-  ... (truncated)
-  ```
-- **[45] Sort order should be consistent with comparisons where comparisons are defined #Example: dates** (line 1149)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:1137:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: Unsupported element type for typed_large_lis
-  ... (truncated)
-  ```
-- **[45] Sort order should be consistent with comparisons where comparisons are defined #Example: localtimes** (line 1150)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:1137:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: Unsupported element type for typed_large_lis
-  ... (truncated)
-  ```
-- **[45] Sort order should be consistent with comparisons where comparisons are defined #Example: times** (line 1151)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:1137:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: ArgumentError: InvalidArgumentType - range()
-  ... (truncated)
-  ```
-- **[45] Sort order should be consistent with comparisons where comparisons are defined #Example: localdatetimes** (line 1152)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:1137:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: Unsupported element type for typed_large_lis
-  ... (truncated)
-  ```
-- **[45] Sort order should be consistent with comparisons where comparisons are defined #Example: datetimes** (line 1153)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:1137:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: ArgumentError: InvalidArgumentType - range()
-  ... (truncated)
-  ```
-
-### WithOrderBy2
-
-- **[7] Sort by a string expression in ascending order** (line 244)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy2.feature:235:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Error during planning: Input was LargeBinary which is not a su
-  ... (truncated)
-  ```
-- **[7] Sort by a string expression in ascending order** (line 245)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy2.feature:235:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Error during planning: Input was LargeBinary which is not a su
-  ... (truncated)
-  ```
-- **[7] Sort by a string expression in ascending order** (line 246)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy2.feature:235:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Error during planning: Input was LargeBinary which is not a su
-  ... (truncated)
-  ```
-- **[8] Sort by a string expression in descending order** (line 275)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy2.feature:266:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Error during planning: Input was LargeBinary which is not a su
-  ... (truncated)
-  ```
-- **[8] Sort by a string expression in descending order** (line 276)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy2.feature:266:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Error during planning: Input was LargeBinary which is not a su
-  ... (truncated)
-  ```
-- **[11] Sort by a date expression in ascending order** (line 366)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy2.feature:358:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: Invalid types for addition", query: Some("\nM
-  ... (truncated)
-  ```
-- **[11] Sort by a date expression in ascending order** (line 367)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy2.feature:358:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: Invalid types for addition", query: Some("\nM
-  ... (truncated)
-  ```
-- **[11] Sort by a date expression in ascending order** (line 368)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy2.feature:358:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: Invalid types for addition", query: Some("\nM
-  ... (truncated)
-  ```
-- **[12] Sort by a date expression in descending order** (line 397)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy2.feature:389:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: Invalid types for addition", query: Some("\nM
-  ... (truncated)
-  ```
-- **[12] Sort by a date expression in descending order** (line 398)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy2.feature:389:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: Invalid types for addition", query: Some("\nM
-  ... (truncated)
-  ```
-- **[13] Sort by a local time expression in ascending order** (line 427)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy2.feature:418:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: Invalid types for addition", query: Some("\nM
-  ... (truncated)
-  ```
-- **[13] Sort by a local time expression in ascending order** (line 428)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy2.feature:418:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: Invalid types for addition", query: Some("\nM
-  ... (truncated)
-  ```
-- **[13] Sort by a local time expression in ascending order** (line 429)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy2.feature:418:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: Invalid types for addition", query: Some("\nM
-  ... (truncated)
-  ```
-- **[14] Sort by a local time expression in descending order** (line 458)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy2.feature:449:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: Invalid types for addition", query: Some("\nM
-  ... (truncated)
-  ```
-- **[14] Sort by a local time expression in descending order** (line 459)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy2.feature:449:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: Invalid types for addition", query: Some("\nM
-  ... (truncated)
-  ```
-- **[15] Sort by a time expression in ascending order** (line 488)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy2.feature:479:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: Invalid types for addition", query: Some("\nM
-  ... (truncated)
-  ```
-- **[15] Sort by a time expression in ascending order** (line 489)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy2.feature:479:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: Invalid types for addition", query: Some("\nM
-  ... (truncated)
-  ```
-- **[15] Sort by a time expression in ascending order** (line 490)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy2.feature:479:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: Invalid types for addition", query: Some("\nM
-  ... (truncated)
-  ```
-- **[16] Sort by a time expression in descending order** (line 519)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy2.feature:510:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: Invalid types for addition", query: Some("\nM
-  ... (truncated)
-  ```
-- **[16] Sort by a time expression in descending order** (line 520)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy2.feature:510:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: Invalid types for addition", query: Some("\nM
-  ... (truncated)
-  ```
-- **[17] Sort by a local date time expression in ascending order** (line 549)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy2.feature:540:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: Invalid types for addition", query: Some("\nM
-  ... (truncated)
-  ```
-- **[17] Sort by a local date time expression in ascending order** (line 550)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy2.feature:540:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: Invalid types for addition", query: Some("\nM
-  ... (truncated)
-  ```
-- **[17] Sort by a local date time expression in ascending order** (line 551)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy2.feature:540:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: Invalid types for addition", query: Some("\nM
-  ... (truncated)
-  ```
-- **[18] Sort by a local date time expression in descending order** (line 580)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy2.feature:571:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: Invalid types for addition", query: Some("\nM
-  ... (truncated)
-  ```
-- **[18] Sort by a local date time expression in descending order** (line 581)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy2.feature:571:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: Invalid types for addition", query: Some("\nM
-  ... (truncated)
-  ```
-- **[19] Sort by a date time expression in ascending order** (line 610)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy2.feature:601:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: Invalid types for addition", query: Some("\nM
-  ... (truncated)
-  ```
-- **[19] Sort by a date time expression in ascending order** (line 611)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy2.feature:601:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: Invalid types for addition", query: Some("\nM
-  ... (truncated)
-  ```
-- **[19] Sort by a date time expression in ascending order** (line 612)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy2.feature:601:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: Invalid types for addition", query: Some("\nM
-  ... (truncated)
-  ```
-- **[20] Sort by a date time expression in descending order** (line 641)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy2.feature:632:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: Invalid types for addition", query: Some("\nM
-  ... (truncated)
-  ```
-- **[20] Sort by a date time expression in descending order** (line 642)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy2.feature:632:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: Invalid types for addition", query: Some("\nM
-  ... (truncated)
-  ```
-- **[21] Sort by an expression that is only partially orderable on a non-distinct binding table** (line 670)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy2.feature:662:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Error during planning: Input was LargeBinary which is not a su
-  ... (truncated)
-  ```
-- **[21] Sort by an expression that is only partially orderable on a non-distinct binding table** (line 671)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy2.feature:662:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Error during planning: Input was LargeBinary which is not a su
-  ... (truncated)
-  ```
-- **[22] Sort by an expression that is only partially orderable on a non-distinct binding table, but used as a grouping key** (line 698)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy2.feature:691:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Schema error: No field named \"a.name\". Did you mean 'name'?.
-  ... (truncated)
-  ```
-- **[22] Sort by an expression that is only partially orderable on a non-distinct binding table, but used as a grouping key** (line 699)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy2.feature:691:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Schema error: No field named \"a.name\". Did you mean 'name'?.
-  ... (truncated)
-  ```
-- **[23] Sort by an expression that is only partially orderable on a non-distinct binding table, but used in parts as a grouping key** (line 726)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy2.feature:719:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Schema error: No field named \"a.name\". Did you mean 'name'?.
-  ... (truncated)
-  ```
-- **[23] Sort by an expression that is only partially orderable on a non-distinct binding table, but used in parts as a grouping key** (line 727)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy2.feature:719:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Schema error: No field named \"a.name\". Did you mean 'name'?.
-  ... (truncated)
-  ```
-
-### WithOrderBy4
-
-- **[11] Sort by an aggregate projection** (line 289)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy4.feature:307:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Error during planning: Cannot coerce arithmetic expression Lar
-  ... (truncated)
-  ```
-- **[12] Sort by an aliased aggregate projection** (line 313)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy4.feature:331:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Error during planning: Cannot coerce arithmetic expression Lar
-  ... (truncated)
-  ```
-- **[15] Sort by an aliased aggregate projection does allow subsequent matching** (line 378)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy4.feature:395:5
-      Matched: crates/uni-tck/src/steps/then.rs:37:1
-      Step panicked. Captured output: No result found
-[Summary]
-1 feature
-1 scenario (1 failed)
-4 steps (3 passed, 1 failed)
-
-  ```
-- **[16] Handle constants and parameters inside an order by item which contains an aggregation expression** (line 401)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy4.feature:412:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "SyntaxError: InvalidAggregation - This feature is not implemen
-  ... (truncated)
-  ```
-- **[17] Handle projected variables inside an order by item which contains an aggregation expression** (line 417)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy4.feature:426:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "SyntaxError: InvalidAggregation - This feature is not implemen
-  ... (truncated)
-  ```
-- **[18]  Handle projected property accesses inside an order by item which contains an aggregation expression** (line 430)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy4.feature:439:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Schema error: No field named \"me.age\". Did you mean 'age'?."
-  ... (truncated)
-  ```
-- **[20] Fail if more complex expressions, even if projected, are used inside an order by item which contains an aggregation expression** (line 454)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy4.feature:463:5
-      Matched: crates/uni-tck/src/steps/then.rs:90:1
-      Step panicked. Captured output: Error mismatch: Error detail mismatch: expected message to contain 'AmbiguousAggregationExpression', got 'Parse error: S
-  ... (truncated)
-  ```
-
-### WithSkipLimit1
-
-- **[1] Handle dependencies across WITH with SKIP** (line 62)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-skip-limit/WithSkipLimit1.feature:80:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): Unexpected column 'b._all_props' in result
-[Summary]
-1 feature
-1 scenario (1 failed)
-4 
   ... (truncated)
   ```
 

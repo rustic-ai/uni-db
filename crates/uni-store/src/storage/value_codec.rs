@@ -13,7 +13,7 @@ use arrow_array::{
     Time64NanosecondArray, TimestampNanosecondArray,
 };
 use serde_json::Value;
-use uni_common::DataType;
+use uni_common::{DataType, TemporalValue};
 use uni_crdt::Crdt;
 
 /// Controls how CRDT decode errors are handled.
@@ -209,6 +209,28 @@ pub fn value_from_column(
             }
         }
         DataType::Time => {
+            // Preferred schema: struct{nanos_since_midnight, offset_seconds}
+            if let Some(struct_arr) = col.as_any().downcast_ref::<StructArray>()
+                && let (Some(nanos_col), Some(offset_col)) = (
+                    struct_arr.column_by_name("nanos_since_midnight"),
+                    struct_arr.column_by_name("offset_seconds"),
+                )
+                && let (Some(nanos_arr), Some(offset_arr)) = (
+                    nanos_col.as_any().downcast_ref::<Time64NanosecondArray>(),
+                    offset_col.as_any().downcast_ref::<Int32Array>(),
+                )
+            {
+                if nanos_arr.is_null(row) || offset_arr.is_null(row) {
+                    return Ok(Value::Null);
+                }
+                let tv = TemporalValue::Time {
+                    nanos_since_midnight: nanos_arr.value(row),
+                    offset_seconds: offset_arr.value(row),
+                };
+                return Ok(Value::String(tv.to_string()));
+            }
+
+            // Legacy schema: plain time64 nanos, assume UTC offset=0
             let arr = col
                 .as_any()
                 .downcast_ref::<Time64NanosecondArray>()
@@ -216,23 +238,11 @@ pub fn value_from_column(
             if arr.is_null(row) {
                 return Ok(Value::Null);
             }
-            let nanos = arr.value(row);
-            let total_secs = nanos / 1_000_000_000;
-            let hours = total_secs / 3600;
-            let minutes = (total_secs % 3600) / 60;
-            let seconds = total_secs % 60;
-            let nano_part = nanos % 1_000_000_000;
-            if nano_part > 0 {
-                Ok(Value::String(format!(
-                    "{:02}:{:02}:{:02}.{:09}",
-                    hours, minutes, seconds, nano_part
-                )))
-            } else {
-                Ok(Value::String(format!(
-                    "{:02}:{:02}:{:02}",
-                    hours, minutes, seconds
-                )))
-            }
+            let tv = TemporalValue::Time {
+                nanos_since_midnight: arr.value(row),
+                offset_seconds: 0,
+            };
+            Ok(Value::String(tv.to_string()))
         }
         DataType::Duration => {
             // Duration is stored as LargeBinary via CypherValue codec
@@ -246,23 +256,52 @@ pub fn value_from_column(
             let bytes = arr.value(row);
             let uni_val = uni_common::cypher_value_codec::decode(bytes)
                 .map_err(|e| anyhow!("Failed to decode duration: {}", e))?;
-            // Convert to JSON representation
+            // Return canonical ISO-8601 text for compatibility.
             if let uni_common::Value::Temporal(uni_common::TemporalValue::Duration {
                 months,
                 days,
                 nanos,
             }) = &uni_val
             {
-                Ok(serde_json::json!({
-                    "months": months,
-                    "days": days,
-                    "nanoseconds": nanos
-                }))
+                let tv = TemporalValue::Duration {
+                    months: *months,
+                    days: *days,
+                    nanos: *nanos,
+                };
+                Ok(Value::String(tv.to_string()))
             } else {
                 Ok(serde_json::json!(uni_val.to_string()))
             }
         }
         DataType::DateTime | DataType::Timestamp => {
+            // Preferred schema: struct{nanos_since_epoch, offset_seconds, timezone_name}
+            if let Some(struct_arr) = col.as_any().downcast_ref::<StructArray>()
+                && let (Some(nanos_col), Some(offset_col), Some(tz_col)) = (
+                    struct_arr.column_by_name("nanos_since_epoch"),
+                    struct_arr.column_by_name("offset_seconds"),
+                    struct_arr.column_by_name("timezone_name"),
+                )
+                && let (Some(nanos_arr), Some(offset_arr), Some(tz_arr)) = (
+                    nanos_col
+                        .as_any()
+                        .downcast_ref::<TimestampNanosecondArray>(),
+                    offset_col.as_any().downcast_ref::<Int32Array>(),
+                    tz_col.as_any().downcast_ref::<StringArray>(),
+                )
+            {
+                if nanos_arr.is_null(row) || offset_arr.is_null(row) {
+                    return Ok(Value::Null);
+                }
+                let timezone_name = (!tz_arr.is_null(row)).then(|| tz_arr.value(row).to_string());
+                let tv = TemporalValue::DateTime {
+                    nanos_since_epoch: nanos_arr.value(row),
+                    offset_seconds: offset_arr.value(row),
+                    timezone_name,
+                };
+                return Ok(Value::String(tv.to_string()));
+            }
+
+            // Legacy schema: plain timestamp nanos, assume UTC offset=0
             let arr = col
                 .as_any()
                 .downcast_ref::<TimestampNanosecondArray>()
@@ -270,9 +309,12 @@ pub fn value_from_column(
             if arr.is_null(row) {
                 return Ok(Value::Null);
             }
-            let nanos = arr.value(row);
-            let dt = chrono::DateTime::from_timestamp_nanos(nanos);
-            Ok(Value::String(dt.format("%Y-%m-%dT%H:%M:%SZ").to_string()))
+            let tv = TemporalValue::DateTime {
+                nanos_since_epoch: arr.value(row),
+                offset_seconds: 0,
+                timezone_name: arr.timezone().map(|s| s.to_string()),
+            };
+            Ok(Value::String(tv.to_string()))
         }
         _ => Ok(Value::Null),
     }

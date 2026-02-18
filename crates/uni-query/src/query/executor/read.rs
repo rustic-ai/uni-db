@@ -2,7 +2,7 @@
 // Copyright 2024-2026 Dragonscale Team
 
 use crate::query::WINDOW_FUNCTIONS;
-use crate::query::datetime::parse_datetime_utc;
+use crate::query::datetime::{classify_temporal, eval_datetime_function, parse_datetime_utc};
 use crate::query::expr_eval::{
     eval_binary_op, eval_in_op, eval_scalar_function, eval_vector_similarity,
 };
@@ -851,6 +851,15 @@ impl Executor {
                     //     }
                     // }
                 }
+            } else if Self::contains_sort(&plan)
+                && !Self::contains_pattern_comprehension(&plan)
+                && !Self::needs_datafusion_for_step_indexing(&plan)
+            {
+                // Route non-window ORDER BY through fallback executor for Cypher
+                // ordering semantics (mixed-type precedence, list lexicographic,
+                // NaN/null handling) until DataFusion parity is complete.
+                self.execute_subplan(plan, prop_manager, params, ctx.as_ref())
+                    .await
             } else {
                 // Execute using DataFusion engine (no fallback)
                 let batches = self
@@ -1019,6 +1028,379 @@ impl Executor {
             | LogicalPlan::Project { input, .. } => Self::contains_window_functions(input),
             _ => false,
         }
+    }
+
+    /// Check if a logical plan contains ORDER BY (Sort) anywhere in the tree.
+    fn contains_sort(plan: &LogicalPlan) -> bool {
+        match plan {
+            LogicalPlan::Sort { .. } => true,
+
+            LogicalPlan::Union { left, right, .. } | LogicalPlan::CrossJoin { left, right } => {
+                Self::contains_sort(left) || Self::contains_sort(right)
+            }
+
+            LogicalPlan::Traverse { input, .. }
+            | LogicalPlan::TraverseMainByType { input, .. }
+            | LogicalPlan::Filter { input, .. }
+            | LogicalPlan::Create { input, .. }
+            | LogicalPlan::CreateBatch { input, .. }
+            | LogicalPlan::Merge { input, .. }
+            | LogicalPlan::Set { input, .. }
+            | LogicalPlan::Remove { input, .. }
+            | LogicalPlan::Delete { input, .. }
+            | LogicalPlan::Foreach { input, .. }
+            | LogicalPlan::Limit { input, .. }
+            | LogicalPlan::Aggregate { input, .. }
+            | LogicalPlan::Distinct { input }
+            | LogicalPlan::Window { input, .. }
+            | LogicalPlan::Project { input, .. }
+            | LogicalPlan::SubqueryCall { input, .. }
+            | LogicalPlan::ShortestPath { input, .. }
+            | LogicalPlan::AllShortestPaths { input, .. }
+            | LogicalPlan::QuantifiedPattern { input, .. }
+            | LogicalPlan::BindZeroLengthPath { input, .. }
+            | LogicalPlan::BindPath { input, .. }
+            | LogicalPlan::Unwind { input, .. } => Self::contains_sort(input),
+
+            LogicalPlan::Apply {
+                input, subquery, ..
+            } => Self::contains_sort(input) || Self::contains_sort(subquery),
+            LogicalPlan::RecursiveCTE {
+                initial, recursive, ..
+            } => Self::contains_sort(initial) || Self::contains_sort(recursive),
+            LogicalPlan::Explain { plan } => Self::contains_sort(plan),
+
+            _ => false,
+        }
+    }
+
+    fn expr_contains_pattern_comprehension(expr: &Expr) -> bool {
+        match expr {
+            Expr::PatternComprehension { .. } => true,
+            Expr::Property(base, _) | Expr::UnaryOp { expr: base, .. } => {
+                Self::expr_contains_pattern_comprehension(base)
+            }
+            Expr::BinaryOp { left, right, .. } => {
+                Self::expr_contains_pattern_comprehension(left)
+                    || Self::expr_contains_pattern_comprehension(right)
+            }
+            Expr::FunctionCall { args, .. } | Expr::List(args) => args
+                .iter()
+                .any(Self::expr_contains_pattern_comprehension),
+            Expr::Map(entries) => entries
+                .iter()
+                .any(|(_, v)| Self::expr_contains_pattern_comprehension(v)),
+            Expr::Case {
+                expr,
+                when_then,
+                else_expr,
+            } => {
+                expr.as_ref()
+                    .is_some_and(|e| Self::expr_contains_pattern_comprehension(e.as_ref()))
+                    || when_then.iter().any(|(w, t)| {
+                        Self::expr_contains_pattern_comprehension(w)
+                            || Self::expr_contains_pattern_comprehension(t)
+                    })
+                    || else_expr
+                        .as_ref()
+                        .is_some_and(|e| Self::expr_contains_pattern_comprehension(e.as_ref()))
+            }
+            _ => false,
+        }
+    }
+
+    /// Detect pattern comprehensions, which are DataFusion-only in the current fallback engine.
+    fn contains_pattern_comprehension(plan: &LogicalPlan) -> bool {
+        match plan {
+            LogicalPlan::Filter { input, predicate, .. } => {
+                Self::expr_contains_pattern_comprehension(predicate)
+                    || Self::contains_pattern_comprehension(input)
+            }
+            LogicalPlan::Project { input, projections } => {
+                projections
+                    .iter()
+                    .any(|(e, _)| Self::expr_contains_pattern_comprehension(e))
+                    || Self::contains_pattern_comprehension(input)
+            }
+            LogicalPlan::Sort { input, order_by } => {
+                order_by
+                    .iter()
+                    .any(|s| Self::expr_contains_pattern_comprehension(&s.expr))
+                    || Self::contains_pattern_comprehension(input)
+            }
+            LogicalPlan::Aggregate {
+                input,
+                group_by,
+                aggregates,
+            } => {
+                group_by
+                    .iter()
+                    .any(Self::expr_contains_pattern_comprehension)
+                    || aggregates
+                        .iter()
+                        .any(Self::expr_contains_pattern_comprehension)
+                    || Self::contains_pattern_comprehension(input)
+            }
+            LogicalPlan::Window {
+                input,
+                window_exprs,
+            } => {
+                window_exprs
+                    .iter()
+                    .any(Self::expr_contains_pattern_comprehension)
+                    || Self::contains_pattern_comprehension(input)
+            }
+            LogicalPlan::Union { left, right, .. } | LogicalPlan::CrossJoin { left, right } => {
+                Self::contains_pattern_comprehension(left)
+                    || Self::contains_pattern_comprehension(right)
+            }
+            LogicalPlan::Traverse { input, .. }
+            | LogicalPlan::TraverseMainByType { input, .. }
+            | LogicalPlan::Create { input, .. }
+            | LogicalPlan::CreateBatch { input, .. }
+            | LogicalPlan::Merge { input, .. }
+            | LogicalPlan::Set { input, .. }
+            | LogicalPlan::Remove { input, .. }
+            | LogicalPlan::Delete { input, .. }
+            | LogicalPlan::Foreach { input, .. }
+            | LogicalPlan::Limit { input, .. }
+            | LogicalPlan::Distinct { input }
+            | LogicalPlan::SubqueryCall { input, .. }
+            | LogicalPlan::ShortestPath { input, .. }
+            | LogicalPlan::AllShortestPaths { input, .. }
+            | LogicalPlan::QuantifiedPattern { input, .. }
+            | LogicalPlan::BindZeroLengthPath { input, .. }
+            | LogicalPlan::BindPath { input, .. }
+            | LogicalPlan::Unwind { input, .. } => Self::contains_pattern_comprehension(input),
+            LogicalPlan::Apply {
+                input, subquery, ..
+            } => {
+                Self::contains_pattern_comprehension(input)
+                    || Self::contains_pattern_comprehension(subquery)
+            }
+            LogicalPlan::RecursiveCTE {
+                initial, recursive, ..
+            } => {
+                Self::contains_pattern_comprehension(initial)
+                    || Self::contains_pattern_comprehension(recursive)
+            }
+            LogicalPlan::Explain { plan } => Self::contains_pattern_comprehension(plan),
+            _ => false,
+        }
+    }
+
+    /// Detect traversals with step variables; DataFusion currently handles these
+    /// more robustly for indexed list access semantics (e.g. r[0].prop).
+    fn contains_step_variable_traversal(plan: &LogicalPlan) -> bool {
+        match plan {
+            LogicalPlan::Traverse {
+                step_variable,
+                input,
+                ..
+            }
+            | LogicalPlan::TraverseMainByType {
+                step_variable,
+                input,
+                ..
+            } => step_variable.is_some() || Self::contains_step_variable_traversal(input),
+            LogicalPlan::Union { left, right, .. } | LogicalPlan::CrossJoin { left, right } => {
+                Self::contains_step_variable_traversal(left)
+                    || Self::contains_step_variable_traversal(right)
+            }
+            LogicalPlan::Filter { input, .. }
+            | LogicalPlan::Project { input, .. }
+            | LogicalPlan::Sort { input, .. }
+            | LogicalPlan::Limit { input, .. }
+            | LogicalPlan::Distinct { input }
+            | LogicalPlan::Aggregate { input, .. }
+            | LogicalPlan::Window { input, .. }
+            | LogicalPlan::SubqueryCall { input, .. }
+            | LogicalPlan::ShortestPath { input, .. }
+            | LogicalPlan::AllShortestPaths { input, .. }
+            | LogicalPlan::QuantifiedPattern { input, .. }
+            | LogicalPlan::BindZeroLengthPath { input, .. }
+            | LogicalPlan::BindPath { input, .. }
+            | LogicalPlan::Unwind { input, .. }
+            | LogicalPlan::Create { input, .. }
+            | LogicalPlan::CreateBatch { input, .. }
+            | LogicalPlan::Merge { input, .. }
+            | LogicalPlan::Set { input, .. }
+            | LogicalPlan::Remove { input, .. }
+            | LogicalPlan::Delete { input, .. }
+            | LogicalPlan::Foreach { input, .. } => Self::contains_step_variable_traversal(input),
+            LogicalPlan::Apply {
+                input, subquery, ..
+            } => {
+                Self::contains_step_variable_traversal(input)
+                    || Self::contains_step_variable_traversal(subquery)
+            }
+            LogicalPlan::RecursiveCTE {
+                initial, recursive, ..
+            } => {
+                Self::contains_step_variable_traversal(initial)
+                    || Self::contains_step_variable_traversal(recursive)
+            }
+            LogicalPlan::Explain { plan } => Self::contains_step_variable_traversal(plan),
+            _ => false,
+        }
+    }
+
+    fn expr_contains_array_index(expr: &Expr) -> bool {
+        match expr {
+            Expr::ArrayIndex { .. } | Expr::ArraySlice { .. } => true,
+            Expr::Property(base, _)
+            | Expr::UnaryOp { expr: base, .. }
+            | Expr::IsNull(base)
+            | Expr::IsNotNull(base)
+            | Expr::IsUnique(base) => Self::expr_contains_array_index(base),
+            Expr::BinaryOp { left, right, .. } => {
+                Self::expr_contains_array_index(left) || Self::expr_contains_array_index(right)
+            }
+            Expr::FunctionCall { args, .. } | Expr::List(args) => {
+                args.iter().any(Self::expr_contains_array_index)
+            }
+            Expr::Map(entries) => entries.iter().any(|(_, v)| Self::expr_contains_array_index(v)),
+            Expr::Case {
+                expr,
+                when_then,
+                else_expr,
+            } => {
+                expr.as_ref()
+                    .is_some_and(|e| Self::expr_contains_array_index(e.as_ref()))
+                    || when_then.iter().any(|(w, t)| {
+                        Self::expr_contains_array_index(w) || Self::expr_contains_array_index(t)
+                    })
+                    || else_expr
+                        .as_ref()
+                        .is_some_and(|e| Self::expr_contains_array_index(e.as_ref()))
+            }
+            Expr::In { expr, list } => {
+                Self::expr_contains_array_index(expr) || Self::expr_contains_array_index(list)
+            }
+            Expr::Quantifier {
+                list, predicate, ..
+            } => Self::expr_contains_array_index(list) || Self::expr_contains_array_index(predicate),
+            Expr::Reduce {
+                init, list, expr, ..
+            } => {
+                Self::expr_contains_array_index(init)
+                    || Self::expr_contains_array_index(list)
+                    || Self::expr_contains_array_index(expr)
+            }
+            Expr::ListComprehension {
+                list,
+                where_clause,
+                map_expr,
+                ..
+            } => {
+                Self::expr_contains_array_index(list)
+                    || where_clause
+                        .as_ref()
+                        .is_some_and(|e| Self::expr_contains_array_index(e.as_ref()))
+                    || Self::expr_contains_array_index(map_expr)
+            }
+            Expr::PatternComprehension {
+                where_clause,
+                map_expr,
+                ..
+            } => {
+                where_clause
+                    .as_ref()
+                    .is_some_and(|e| Self::expr_contains_array_index(e.as_ref()))
+                    || Self::expr_contains_array_index(map_expr)
+            }
+            Expr::MapProjection { base, items } => {
+                Self::expr_contains_array_index(base)
+                    || items.iter().any(|item| match item {
+                        MapProjectionItem::Property(_) | MapProjectionItem::Variable(_) => false,
+                        MapProjectionItem::LiteralEntry(_, expr) => {
+                            Self::expr_contains_array_index(expr)
+                        }
+                        MapProjectionItem::AllProperties => false,
+                    })
+            }
+            Expr::ValidAt {
+                entity, timestamp, ..
+            } => {
+                Self::expr_contains_array_index(entity) || Self::expr_contains_array_index(timestamp)
+            }
+            Expr::LabelCheck { expr, .. } => Self::expr_contains_array_index(expr),
+            _ => false,
+        }
+    }
+
+    fn plan_contains_array_index(plan: &LogicalPlan) -> bool {
+        match plan {
+            LogicalPlan::Filter { input, predicate, .. } => {
+                Self::expr_contains_array_index(predicate) || Self::plan_contains_array_index(input)
+            }
+            LogicalPlan::Project { input, projections } => {
+                projections
+                    .iter()
+                    .any(|(e, _)| Self::expr_contains_array_index(e))
+                    || Self::plan_contains_array_index(input)
+            }
+            LogicalPlan::Sort { input, order_by } => {
+                order_by
+                    .iter()
+                    .any(|s| Self::expr_contains_array_index(&s.expr))
+                    || Self::plan_contains_array_index(input)
+            }
+            LogicalPlan::Aggregate {
+                input,
+                group_by,
+                aggregates,
+            } => {
+                group_by.iter().any(Self::expr_contains_array_index)
+                    || aggregates.iter().any(Self::expr_contains_array_index)
+                    || Self::plan_contains_array_index(input)
+            }
+            LogicalPlan::Window {
+                input,
+                window_exprs,
+            } => {
+                window_exprs.iter().any(Self::expr_contains_array_index)
+                    || Self::plan_contains_array_index(input)
+            }
+            LogicalPlan::Union { left, right, .. } | LogicalPlan::CrossJoin { left, right } => {
+                Self::plan_contains_array_index(left) || Self::plan_contains_array_index(right)
+            }
+            LogicalPlan::Traverse { input, .. }
+            | LogicalPlan::TraverseMainByType { input, .. }
+            | LogicalPlan::Create { input, .. }
+            | LogicalPlan::CreateBatch { input, .. }
+            | LogicalPlan::Merge { input, .. }
+            | LogicalPlan::Set { input, .. }
+            | LogicalPlan::Remove { input, .. }
+            | LogicalPlan::Delete { input, .. }
+            | LogicalPlan::Foreach { input, .. }
+            | LogicalPlan::Limit { input, .. }
+            | LogicalPlan::Distinct { input }
+            | LogicalPlan::SubqueryCall { input, .. }
+            | LogicalPlan::ShortestPath { input, .. }
+            | LogicalPlan::AllShortestPaths { input, .. }
+            | LogicalPlan::QuantifiedPattern { input, .. }
+            | LogicalPlan::BindZeroLengthPath { input, .. }
+            | LogicalPlan::BindPath { input, .. }
+            | LogicalPlan::Unwind { input, .. } => Self::plan_contains_array_index(input),
+            LogicalPlan::Apply {
+                input, subquery, ..
+            } => {
+                Self::plan_contains_array_index(input) || Self::plan_contains_array_index(subquery)
+            }
+            LogicalPlan::RecursiveCTE {
+                initial, recursive, ..
+            } => {
+                Self::plan_contains_array_index(initial)
+                    || Self::plan_contains_array_index(recursive)
+            }
+            LogicalPlan::Explain { plan } => Self::plan_contains_array_index(plan),
+            _ => false,
+        }
+    }
+
+    fn needs_datafusion_for_step_indexing(plan: &LogicalPlan) -> bool {
+        Self::contains_step_variable_traversal(plan) && Self::plan_contains_array_index(plan)
     }
 
     /// Extract window expressions from a logical plan (recursively unwrap Sort/Limit/etc).
@@ -3150,7 +3532,7 @@ impl Executor {
                     let mut seen = std::collections::HashSet::new();
                     let mut result = Vec::new();
                     for row in rows {
-                        let key = format!("{:?}", row);
+                        let key = Self::canonical_row_key(&row);
                         if seen.insert(key) {
                             result.push(row);
                         }
@@ -3651,9 +4033,35 @@ impl Executor {
                     }
                     Ok(result)
                 }
-                LogicalPlan::BindPath { .. } => Err(anyhow!(
-                    "Fixed-length path binding is only supported in the DataFusion engine"
-                )),
+                LogicalPlan::BindPath {
+                    input,
+                    node_variables,
+                    edge_variables,
+                    path_variable,
+                } => {
+                    let rows = self
+                        .execute_subplan(*input, prop_manager, params, ctx)
+                        .await?;
+
+                    let mut result = Vec::with_capacity(rows.len());
+                    for mut row in rows {
+                        let nodes = node_variables
+                            .iter()
+                            .map(|var| Self::coerce_row_node(&row, var))
+                            .collect();
+                        let edges = edge_variables
+                            .iter()
+                            .map(|var| Self::coerce_row_edge(&row, var))
+                            .collect();
+
+                        row.insert(
+                            path_variable.clone(),
+                            Value::Path(crate::types::Path { nodes, edges }),
+                        );
+                        result.push(row);
+                    }
+                    Ok(result)
+                }
                 LogicalPlan::QuantifiedPattern { .. } => Err(anyhow!(
                     "Quantified patterns are not supported in the fallback executor"
                 )),
@@ -4785,6 +5193,346 @@ impl Executor {
         None
     }
 
+    fn id_from_value(value: &Value) -> Option<u64> {
+        value
+            .as_u64()
+            .or_else(|| value.as_i64().and_then(|v| (v >= 0).then_some(v as u64)))
+            .or_else(|| value.as_str().and_then(|s| s.parse::<u64>().ok()))
+    }
+
+    fn coerce_row_node(row: &HashMap<String, Value>, variable: &str) -> crate::types::Node {
+        if let Some(Value::Node(node)) = row.get(variable) {
+            return node.clone();
+        }
+
+        if let Some(Value::Map(map)) = row.get(variable) {
+            let vid = map
+                .get("_vid")
+                .or_else(|| map.get("vid"))
+                .or_else(|| map.get("_id"))
+                .and_then(Self::id_from_value)
+                .map(Vid::from)
+                .unwrap_or_else(|| Vid::from(0u64));
+
+            let mut labels = if let Some(Value::List(items)) = map.get("_labels") {
+                items
+                    .iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect::<Vec<_>>()
+            } else if let Some(label) = map.get("_label").and_then(Value::as_str) {
+                if label.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![label.to_string()]
+                }
+            } else if let Some(label) = map.get("label").and_then(Value::as_str) {
+                if label.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![label.to_string()]
+                }
+            } else {
+                Vec::new()
+            };
+            labels.sort();
+
+            let properties = if let Some(Value::Map(props)) = map.get("properties") {
+                props.clone()
+            } else {
+                map.iter()
+                    .filter_map(|(k, v)| (!k.starts_with('_')).then_some((k.clone(), v.clone())))
+                    .collect::<HashMap<_, _>>()
+            };
+
+            return crate::types::Node {
+                vid,
+                labels,
+                properties,
+            };
+        }
+
+        let vid = row
+            .get(&format!("{}._vid", variable))
+            .or_else(|| row.get(&format!("{}._id", variable)))
+            .and_then(Self::id_from_value)
+            .map(Vid::from)
+            .unwrap_or_else(|| Vid::from(0u64));
+
+        let labels = if let Some(Value::List(items)) = row.get(&format!("{}._labels", variable)) {
+            items
+                .iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect::<Vec<_>>()
+        } else if let Some(label) = row
+            .get(&format!("{}._label", variable))
+            .and_then(Value::as_str)
+        {
+            if label.is_empty() {
+                Vec::new()
+            } else {
+                vec![label.to_string()]
+            }
+        } else {
+            Vec::new()
+        };
+
+        let prefix = format!("{variable}.");
+        let properties = row
+            .iter()
+            .filter_map(|(k, v)| {
+                if !k.starts_with(&prefix) {
+                    return None;
+                }
+                let prop = &k[prefix.len()..];
+                if prop.starts_with('_') {
+                    return None;
+                }
+                Some((prop.to_string(), v.clone()))
+            })
+            .collect::<HashMap<_, _>>();
+
+        crate::types::Node {
+            vid,
+            labels,
+            properties,
+        }
+    }
+
+    fn coerce_row_edge(row: &HashMap<String, Value>, variable: &str) -> crate::types::Edge {
+        if let Some(Value::Edge(edge)) = row.get(variable) {
+            return edge.clone();
+        }
+
+        if let Some(Value::Map(map)) = row.get(variable) {
+            let eid = map
+                .get("_eid")
+                .or_else(|| map.get("eid"))
+                .or_else(|| map.get("_id"))
+                .and_then(Self::id_from_value)
+                .map(Eid::from)
+                .unwrap_or_else(|| Eid::from(0u64));
+            let src = map
+                .get("_src")
+                .or_else(|| map.get("src"))
+                .and_then(Self::id_from_value)
+                .map(Vid::from)
+                .unwrap_or_else(|| Vid::from(0u64));
+            let dst = map
+                .get("_dst")
+                .or_else(|| map.get("dst"))
+                .and_then(Self::id_from_value)
+                .map(Vid::from)
+                .unwrap_or_else(|| Vid::from(0u64));
+            let edge_type = map
+                .get("_type")
+                .or_else(|| map.get("_type_name"))
+                .or_else(|| map.get("edge_type"))
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+
+            let properties = if let Some(Value::Map(props)) = map.get("properties") {
+                props.clone()
+            } else {
+                map.iter()
+                    .filter_map(|(k, v)| (!k.starts_with('_')).then_some((k.clone(), v.clone())))
+                    .collect::<HashMap<_, _>>()
+            };
+
+            return crate::types::Edge {
+                eid,
+                edge_type,
+                src,
+                dst,
+                properties,
+            };
+        }
+
+        let prefix = format!("{variable}.");
+        let eid = row
+            .get(&format!("{}._eid", variable))
+            .or_else(|| row.get(&format!("{}._id", variable)))
+            .and_then(Self::id_from_value)
+            .map(Eid::from)
+            .unwrap_or_else(|| Eid::from(0u64));
+        let src = row
+            .get(&format!("{}._src", variable))
+            .and_then(Self::id_from_value)
+            .map(Vid::from)
+            .unwrap_or_else(|| Vid::from(0u64));
+        let dst = row
+            .get(&format!("{}._dst", variable))
+            .and_then(Self::id_from_value)
+            .map(Vid::from)
+            .unwrap_or_else(|| Vid::from(0u64));
+        let edge_type = row
+            .get(&format!("{}._type", variable))
+            .or_else(|| row.get(&format!("{}._type_name", variable)))
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+
+        let properties = row
+            .iter()
+            .filter_map(|(k, v)| {
+                if !k.starts_with(&prefix) {
+                    return None;
+                }
+                let prop = &k[prefix.len()..];
+                if prop.starts_with('_') {
+                    return None;
+                }
+                Some((prop.to_string(), v.clone()))
+            })
+            .collect::<HashMap<_, _>>();
+
+        crate::types::Edge {
+            eid,
+            edge_type,
+            src,
+            dst,
+            properties,
+        }
+    }
+
+    fn canonical_row_key(row: &HashMap<String, Value>) -> String {
+        let mut pairs: Vec<_> = row.iter().collect();
+        pairs.sort_by(|(lk, _), (rk, _)| lk.cmp(rk));
+
+        pairs
+            .into_iter()
+            .map(|(k, v)| format!("{k}={}", Self::canonical_value_key(v)))
+            .collect::<Vec<_>>()
+            .join("|")
+    }
+
+    fn canonical_value_key(v: &Value) -> String {
+        match v {
+            Value::Null => "null".to_string(),
+            Value::Bool(b) => format!("b:{b}"),
+            Value::Int(i) => format!("n:{i}"),
+            Value::Float(f) => {
+                if f.is_nan() {
+                    "nan".to_string()
+                } else if f.is_infinite() {
+                    if f.is_sign_positive() {
+                        "inf:+".to_string()
+                    } else {
+                        "inf:-".to_string()
+                    }
+                } else if f.fract() == 0.0 && *f >= i64::MIN as f64 && *f <= i64::MAX as f64 {
+                    format!("n:{}", *f as i64)
+                } else {
+                    format!("f:{f}")
+                }
+            }
+            Value::String(s) => {
+                if let Some(k) = Self::temporal_string_key(s) {
+                    format!("temporal:{k}")
+                } else {
+                    format!("s:{s}")
+                }
+            }
+            Value::Bytes(b) => format!("bytes:{:?}", b),
+            Value::List(items) => format!(
+                "list:[{}]",
+                items
+                    .iter()
+                    .map(Self::canonical_value_key)
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ),
+            Value::Map(map) => {
+                let mut pairs: Vec<_> = map.iter().collect();
+                pairs.sort_by(|(lk, _), (rk, _)| lk.cmp(rk));
+                format!(
+                    "map:{{{}}}",
+                    pairs
+                        .into_iter()
+                        .map(|(k, v)| format!("{k}:{}", Self::canonical_value_key(v)))
+                        .collect::<Vec<_>>()
+                        .join(",")
+                )
+            }
+            Value::Node(n) => {
+                let mut labels = n.labels.clone();
+                labels.sort();
+                format!(
+                    "node:{}:{}:{}",
+                    n.vid.as_u64(),
+                    labels.join(":"),
+                    Self::canonical_value_key(&Value::Map(n.properties.clone()))
+                )
+            }
+            Value::Edge(e) => format!(
+                "edge:{}:{}:{}:{}:{}",
+                e.eid.as_u64(),
+                e.edge_type,
+                e.src.as_u64(),
+                e.dst.as_u64(),
+                Self::canonical_value_key(&Value::Map(e.properties.clone()))
+            ),
+            Value::Path(p) => format!(
+                "path:nodes=[{}];edges=[{}]",
+                p.nodes
+                    .iter()
+                    .map(|n| Self::canonical_value_key(&Value::Node(n.clone())))
+                    .collect::<Vec<_>>()
+                    .join(","),
+                p.edges
+                    .iter()
+                    .map(|e| Self::canonical_value_key(&Value::Edge(e.clone())))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ),
+            Value::Vector(vs) => format!("vec:{:?}", vs),
+            Value::Temporal(t) => format!("temporal:{}", Self::canonical_temporal_key(t)),
+            _ => format!("{v:?}"),
+        }
+    }
+
+    fn canonical_temporal_key(t: &uni_common::TemporalValue) -> String {
+        match t {
+            uni_common::TemporalValue::Date { days_since_epoch } => format!("date:{days_since_epoch}"),
+            uni_common::TemporalValue::LocalTime {
+                nanos_since_midnight,
+            } => format!("localtime:{nanos_since_midnight}"),
+            uni_common::TemporalValue::Time {
+                nanos_since_midnight,
+                offset_seconds,
+            } => {
+                let utc_nanos = *nanos_since_midnight - (*offset_seconds as i64 * 1_000_000_000);
+                format!("time:{utc_nanos}")
+            }
+            uni_common::TemporalValue::LocalDateTime { nanos_since_epoch } => {
+                format!("localdatetime:{nanos_since_epoch}")
+            }
+            uni_common::TemporalValue::DateTime {
+                nanos_since_epoch, ..
+            } => format!("datetime:{nanos_since_epoch}"),
+            uni_common::TemporalValue::Duration {
+                months,
+                days,
+                nanos,
+            } => format!("duration:{months}:{days}:{nanos}"),
+        }
+    }
+
+    fn temporal_string_key(s: &str) -> Option<String> {
+        let fn_name = match classify_temporal(s)? {
+            uni_common::TemporalType::Date => "DATE",
+            uni_common::TemporalType::LocalTime => "LOCALTIME",
+            uni_common::TemporalType::Time => "TIME",
+            uni_common::TemporalType::LocalDateTime => "LOCALDATETIME",
+            uni_common::TemporalType::DateTime => "DATETIME",
+            uni_common::TemporalType::Duration => "DURATION",
+        };
+        match eval_datetime_function(fn_name, &[Value::String(s.to_string())]).ok()? {
+            Value::Temporal(tv) => Some(Self::canonical_temporal_key(&tv)),
+            _ => None,
+        }
+    }
+
     /// Performs BFS traversal from a single row, collecting matching results.
     ///
     /// # Errors
@@ -5905,6 +6653,17 @@ impl Executor {
 
         let mut groups: HashMap<String, (Vec<Value>, Vec<Accumulator>)> = HashMap::new();
 
+        // Cypher semantics: aggregation without grouping keys returns one row even
+        // on empty input (e.g. `RETURN count(*)`, `RETURN avg(x)`).
+        if rows.is_empty() {
+            if group_by.is_empty() {
+                let accs = Self::create_accumulators(aggregates);
+                let row = Self::build_aggregate_result(group_by, aggregates, &[], &accs);
+                return Ok(vec![row]);
+            }
+            return Ok(vec![]);
+        }
+
         for (idx, row) in rows.into_iter().enumerate() {
             // Periodic timeout check during aggregation
             if idx.is_multiple_of(Self::AGGREGATE_TIMEOUT_CHECK_INTERVAL)
@@ -5916,10 +6675,16 @@ impl Executor {
             let key_vals = self
                 .evaluate_group_keys(group_by, &row, prop_manager, params, ctx)
                 .await?;
-            // Note: Debug-based serialization for grouping keys is a known performance concern.
-            // Value doesn't implement Hash/Ord, requiring string-based grouping.
-            // For high-performance paths, use the vectorized executor with Arrow-native grouping.
-            let key_str = format!("{:?}", key_vals);
+            // Build a canonical key so grouping follows Cypher value semantics
+            // (e.g. temporal equality by instant, numeric normalization where applicable).
+            let key_str = format!(
+                "[{}]",
+                key_vals
+                    .iter()
+                    .map(Self::canonical_value_key)
+                    .collect::<Vec<_>>()
+                    .join(",")
+            );
 
             let entry = groups
                 .entry(key_str)

@@ -41,7 +41,17 @@ fn value(input: &str) -> IResult<&str, Value> {
         map(list, Value::List),
         map(map_parser, Value::Map),
         map(string, Value::String),
+        special_float,
         number,
+    ))(input)
+}
+
+fn special_float(input: &str) -> IResult<&str, Value> {
+    let (input, _) = multispace0(input)?;
+    alt((
+        map(tag("-Infinity"), |_| Value::Float(f64::NEG_INFINITY)),
+        map(tag("Infinity"), |_| Value::Float(f64::INFINITY)),
+        map(tag("NaN"), |_| Value::Float(f64::NAN)),
     ))(input)
 }
 
@@ -322,6 +332,22 @@ mod tests {
     fn test_parse_float() {
         assert_eq!(parse_value("3.15").unwrap(), Value::Float(3.15));
         assert_eq!(parse_value("-2.5").unwrap(), Value::Float(-2.5));
+    }
+
+    #[test]
+    fn test_parse_special_float_literals() {
+        match parse_value("NaN").unwrap() {
+            Value::Float(f) => assert!(f.is_nan()),
+            other => panic!("Expected NaN float, got {other:?}"),
+        }
+        assert_eq!(
+            parse_value("Infinity").unwrap(),
+            Value::Float(f64::INFINITY)
+        );
+        assert_eq!(
+            parse_value("-Infinity").unwrap(),
+            Value::Float(f64::NEG_INFINITY)
+        );
     }
 
     #[test]

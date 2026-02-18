@@ -332,6 +332,11 @@ fn collect_expr_variables_inner(expr: &Expr, vars: &mut Vec<String>) {
 /// Example: `RETURN r AS rel ORDER BY rel.id` becomes `ORDER BY r.id` so Sort can run
 /// before the final RETURN projection without losing alias semantics.
 fn rewrite_order_by_expr_with_aliases(expr: &Expr, aliases: &HashMap<String, Expr>) -> Expr {
+    let repr = expr.to_string_repr();
+    if let Some(rewritten) = aliases.get(&repr) {
+        return rewritten.clone();
+    }
+
     match expr {
         Expr::Variable(name) => aliases.get(name).cloned().unwrap_or_else(|| expr.clone()),
         Expr::Property(base, prop) => Expr::Property(
@@ -2400,42 +2405,6 @@ impl QueryPlanner {
         }
 
         if let Some(order_by) = &return_clause.order_by {
-            // Build an extended scope that includes RETURN aliases so ORDER BY
-            // can reference them (e.g. RETURN n.age AS age ORDER BY age).
-            let order_by_scope: Vec<VariableInfo> = {
-                let mut scope = vars_in_scope.to_vec();
-                for (expr, alias) in &projections {
-                    if let Some(a) = alias
-                        && !is_var_in_scope(&scope, a)
-                    {
-                        scope.push(VariableInfo::new(a.clone(), VariableType::Scalar));
-                    } else if let Expr::Variable(v) = expr
-                        && !is_var_in_scope(&scope, v)
-                    {
-                        scope.push(VariableInfo::new(v.clone(), VariableType::Scalar));
-                    }
-                }
-                scope
-            };
-            // Validate ORDER BY expressions against the extended scope
-            for item in order_by {
-                validate_expression_variables(&item.expr, &order_by_scope)?;
-                validate_expression(&item.expr, &order_by_scope)?;
-                let has_aggregate_in_item = contains_aggregate_recursive(&item.expr);
-                if has_aggregate_in_item && !has_agg {
-                    return Err(anyhow!(
-                        "SyntaxError: InvalidAggregation - Aggregation functions not allowed in ORDER BY after RETURN"
-                    ));
-                }
-                if has_agg && has_aggregate_in_item {
-                    validate_with_order_by_aggregate_item(
-                        &item.expr,
-                        &projected_aggregate_reprs,
-                        &projected_simple_reprs,
-                        &projected_aliases,
-                    )?;
-                }
-            }
             let alias_exprs: HashMap<String, Expr> = projections
                 .iter()
                 .filter_map(|(expr, alias)| {
@@ -2460,10 +2429,79 @@ impl QueryPlanner {
                     })
                 })
                 .collect();
+
+            // Build an extended scope that includes RETURN aliases so ORDER BY
+            // can reference them (e.g. RETURN n.age AS age ORDER BY age).
+            let order_by_scope: Vec<VariableInfo> = if return_clause.distinct {
+                // DISTINCT in RETURN narrows ORDER BY visibility to returned columns.
+                // Keep aliases and directly returned variables in scope.
+                let mut scope = Vec::new();
+                for (expr, alias) in &projections {
+                    if let Some(a) = alias
+                        && !is_var_in_scope(&scope, a)
+                    {
+                        scope.push(VariableInfo::new(a.clone(), VariableType::Scalar));
+                    }
+                    if let Expr::Variable(v) = expr
+                        && !is_var_in_scope(&scope, v)
+                    {
+                        scope.push(VariableInfo::new(v.clone(), VariableType::Scalar));
+                    }
+                }
+                scope
+            } else {
+                let mut scope = vars_in_scope.to_vec();
+                for (expr, alias) in &projections {
+                    if let Some(a) = alias
+                        && !is_var_in_scope(&scope, a)
+                    {
+                        scope.push(VariableInfo::new(a.clone(), VariableType::Scalar));
+                    } else if let Expr::Variable(v) = expr
+                        && !is_var_in_scope(&scope, v)
+                    {
+                        scope.push(VariableInfo::new(v.clone(), VariableType::Scalar));
+                    }
+                }
+                scope
+            };
+            // Validate ORDER BY expressions against the extended scope
+            for item in order_by {
+                // DISTINCT allows ORDER BY on the same projected expression
+                // even when underlying variables are not otherwise visible.
+                let matches_projected_expr = return_clause.distinct
+                    && projections
+                        .iter()
+                        .any(|(expr, _)| expr.to_string_repr() == item.expr.to_string_repr());
+                if !matches_projected_expr {
+                    validate_expression_variables(&item.expr, &order_by_scope)?;
+                    validate_expression(&item.expr, &order_by_scope)?;
+                }
+                let has_aggregate_in_item = contains_aggregate_recursive(&item.expr);
+                if has_aggregate_in_item && !has_agg {
+                    return Err(anyhow!(
+                        "SyntaxError: InvalidAggregation - Aggregation functions not allowed in ORDER BY after RETURN"
+                    ));
+                }
+                if has_agg && has_aggregate_in_item {
+                    validate_with_order_by_aggregate_item(
+                        &item.expr,
+                        &projected_aggregate_reprs,
+                        &projected_simple_reprs,
+                        &projected_aliases,
+                    )?;
+                }
+            }
             let rewritten_order_by: Vec<SortItem> = order_by
                 .iter()
                 .map(|item| SortItem {
-                    expr: rewrite_order_by_expr_with_aliases(&item.expr, &alias_exprs),
+                    expr: {
+                        let mut rewritten =
+                            rewrite_order_by_expr_with_aliases(&item.expr, &alias_exprs);
+                        if has_agg && !has_window_exprs {
+                            rewritten = replace_aggregates_with_columns(&rewritten);
+                        }
+                        rewritten
+                    },
                     ascending: item.ascending,
                 })
                 .collect();
@@ -4959,6 +4997,7 @@ impl QueryPlanner {
         let mut projected_aggregate_reprs: HashSet<String> = HashSet::new();
         let mut projected_simple_reprs: HashSet<String> = HashSet::new();
         let mut projected_aliases: HashSet<String> = HashSet::new();
+        let mut has_unaliased_non_variable_expr = false;
 
         for item in &with_clause.items {
             match item {
@@ -4988,13 +5027,6 @@ impl QueryPlanner {
                         if contains_pattern_predicate(expr) {
                             return Err(anyhow!(
                                 "SyntaxError: UnexpectedSyntax - Pattern predicates are not allowed in WITH"
-                            ));
-                        }
-
-                        // WITH requires all non-variable expressions to be aliased
-                        if alias.is_none() && !matches!(expr, Expr::Variable(_)) {
-                            return Err(anyhow!(
-                                "SyntaxError: NoExpressionAlias - All non-variable expressions in WITH must be aliased (use AS)"
                             ));
                         }
 
@@ -5050,6 +5082,8 @@ impl QueryPlanner {
                                 new_vars.push(VariableInfo::new(v.clone(), VariableType::Scalar));
                             }
                             projected_aliases.insert(v.clone());
+                        } else {
+                            has_unaliased_non_variable_expr = true;
                         }
                     }
                 }
@@ -5149,7 +5183,7 @@ impl QueryPlanner {
         } else if !projections.is_empty() {
             plan = LogicalPlan::Project {
                 input: Box::new(plan),
-                projections,
+                projections: projections.clone(),
             };
         }
 
@@ -5166,6 +5200,30 @@ impl QueryPlanner {
         // Keep pre-WITH vars in scope for parser compatibility, then apply
         // stricter checks for aggregate-containing ORDER BY items.
         if let Some(order_by) = &with_clause.order_by {
+            // Build a mapping from aliases and projected expression reprs to
+            // output columns of the preceding Project/Aggregate pipeline.
+            let with_order_aliases: HashMap<String, Expr> = projections
+                .iter()
+                .flat_map(|(expr, alias)| {
+                    let output_col = if let Some(a) = alias {
+                        a.clone()
+                    } else if expr.is_aggregate() && !is_compound_aggregate(expr) {
+                        aggregate_column_name(expr)
+                    } else {
+                        expr.to_string_repr()
+                    };
+
+                    let mut entries = Vec::new();
+                    // ORDER BY alias
+                    if let Some(a) = alias {
+                        entries.push((a.clone(), Expr::Variable(output_col.clone())));
+                    }
+                    // ORDER BY projected expression (e.g. me.age)
+                    entries.push((expr.to_string_repr(), Expr::Variable(output_col)));
+                    entries
+                })
+                .collect();
+
             let order_by_scope: Vec<VariableInfo> = {
                 let mut scope = new_vars.clone();
                 for v in vars_in_scope {
@@ -5193,10 +5251,39 @@ impl QueryPlanner {
                     )?;
                 }
             }
+            let rewritten_order_by: Vec<SortItem> = order_by
+                .iter()
+                .map(|item| {
+                    let mut expr =
+                        rewrite_order_by_expr_with_aliases(&item.expr, &with_order_aliases);
+                    if has_agg {
+                        // Rewrite any aggregate calls to the aggregate output
+                        // columns produced by Aggregate.
+                        expr = replace_aggregates_with_columns(&expr);
+                        // Then re-map projected property expressions to aliases
+                        // from the WITH projection.
+                        expr = rewrite_order_by_expr_with_aliases(&expr, &with_order_aliases);
+                    }
+                    SortItem {
+                        expr,
+                        ascending: item.ascending,
+                    }
+                })
+                .collect();
             plan = LogicalPlan::Sort {
                 input: Box::new(plan),
-                order_by: order_by.clone(),
+                order_by: rewritten_order_by,
             };
+        }
+
+        // Non-variable expressions in WITH must be aliased.
+        // This check is intentionally placed after ORDER BY validation so
+        // higher-priority semantic errors (e.g., ambiguous aggregation in
+        // ORDER BY) can surface first.
+        if has_unaliased_non_variable_expr {
+            return Err(anyhow!(
+                "SyntaxError: NoExpressionAlias - All non-variable expressions in WITH must be aliased"
+            ));
         }
 
         // Validate and apply SKIP/LIMIT for WITH clause

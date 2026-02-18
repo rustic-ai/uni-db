@@ -2062,8 +2062,7 @@
             "keyword": "Scenario ",
             "name": "[3] Delete relationship with bidirectional matching",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/delete/Delete2.feature:77:5\n      Matched: crates/uni-tck/src/steps/then.rs:9:1\n      Step panicked. Captured output: No result found\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -2113,7 +2112,7 @@
             "name": "[1] Detach deleting paths",
             "result": {
               "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/delete/Delete3.feature:47:5\n      Matched: crates/uni-tck/src/steps/then.rs:9:1\n      Step panicked. Captured output: No result found\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
+              "error_message": "Step failed:\n      Defined: tck/features/clauses/delete/Delete3.feature:48:5\n      Matched: crates/uni-tck/src/steps/and.rs:27:1\n      Step panicked. Captured output: assertion `left == right` failed: Expected -nodes=4, but got 0 (before=4, after=4)\n        left: 0\n       right: 4\n[Summary]\n1 feature\n1 scenario (1 failed)\n5 steps (4 passed, 1 failed)\n"
             }
           }
         ]
@@ -2127,8 +2126,7 @@
             "keyword": "Scenario ",
             "name": "[2] Delete on null path",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/delete/Delete3.feature:60:5\n      Matched: crates/uni-tck/src/steps/then.rs:9:1\n      Step panicked. Captured output: No result found\n[Summary]\n1 feature\n1 scenario (1 failed)\n3 steps (2 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -6643,7 +6641,7 @@
             "name": "[14] Named path with undirected fixed variable length pattern",
             "result": {
               "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/match/Match6.feature:273:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [(\"topRoute\", Some(Path(Path { nodes: [Node { vid: Vid(2), labels: [], properties: {} }, Node { vid: Vid(3), labels: [], properties: {} }, Node { vid: Vid(2), labels: [], properties: {} }, Node { vid: Vid(1), labels: [\"End\"], properties: {} }], edges: [Edge { eid: Eid(4), edge_type: \"CONNECTED_TO\", src: Vid(2), dst: Vid(3), properties: {} }, Edge { eid: Eid(3), edge_type: \"CONNECTED_TO\", src: Vid(3), dst: Vid(2), properties: {} }, Edge { eid: Eid(2), edge_type: \"CONNECTED_TO\", src: Vid(2), dst: Vid(1), properties: {} }] })))]. Expected: [{\"topRoute\": Path(Path { nodes: [Node { vid: Vid(0), labels: [\"Start\"], properties: {} }, Node { vid: Vid(0), labels: [], properties: {} }, Node { vid: Vid(0), labels: [], properties: {} }, Node { vid: Vid(0), labels: [], properties: {} }, Node { vid: Vid(0), labels: [\"End\"], properties: {} }], edges: [Edge { eid: Eid(0), edge_type: \"CONNECTED_TO\", src: Vid(0), dst: Vid(0), properties: {} }, Edge { eid: Eid(0), edge_type: \"CONNECTED_TO\", src: Vid(0), dst: Vid(0), properties: {} }, Edge { eid: Eid(0), edge_type: \"CONNECTED_TO\", src: Vid(0), dst: Vid(0), properties: {} }, Edge { eid: Eid(0), edge_type: \"CONNECTED_TO\", src: Vid(0), dst: Vid(0), properties: {} }] })}, {\"topRoute\": Path(Path { nodes: [Node { vid: Vid(0), labels: [\"Start\"], properties: {} }, Node { vid: Vid(0), labels: [], properties: {} }, Node { vid: Vid(0), labels: [], properties: {} }, Node { vid: Vid(0), labels: [], properties: {} }, Node { vid: Vid(0), labels: [\"End\"], properties: {} }], edges: [Edge { eid: Eid(0), edge_type: \"CONNECTED_TO\", src: Vid(0), dst: Vid(0), properties: {} }, Edge { eid: Eid(0), edge_type: \"CONNECTED_TO\", src: Vid(0), dst: Vid(0), properties: {} }, Edge { eid: Eid(0), edge_type: \"CONNECTED_TO\", src: V..."
+              "error_message": "Step failed:\n      Defined: tck/features/clauses/match/Match6.feature:273:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [(\"topRoute\", Some(Path(Path { nodes: [Node { vid: Vid(2), labels: [], properties: {} }, Node { vid: Vid(3), labels: [], properties: {} }, Node { vid: Vid(2), labels: [], properties: {} }, Node { vid: Vid(1), labels: [\"End\"], properties: {} }], edges: [Edge { eid: Eid(4), edge_type: \"CONNECTED_TO\", src: Vid(2), dst: Vid(3), properties: {} }, Edge { eid: Eid(3), edge_type: \"CONNECTED_TO\", src: Vid(3), dst: Vid(2), properties: {} }, Edge { eid: Eid(1), edge_type: \"CONNECTED_TO\", src: Vid(2), dst: Vid(1), properties: {} }] })))]. Expected: [{\"topRoute\": Path(Path { nodes: [Node { vid: Vid(0), labels: [\"Start\"], properties: {} }, Node { vid: Vid(0), labels: [], properties: {} }, Node { vid: Vid(0), labels: [], properties: {} }, Node { vid: Vid(0), labels: [], properties: {} }, Node { vid: Vid(0), labels: [\"End\"], properties: {} }], edges: [Edge { eid: Eid(0), edge_type: \"CONNECTED_TO\", src: Vid(0), dst: Vid(0), properties: {} }, Edge { eid: Eid(0), edge_type: \"CONNECTED_TO\", src: Vid(0), dst: Vid(0), properties: {} }, Edge { eid: Eid(0), edge_type: \"CONNECTED_TO\", src: Vid(0), dst: Vid(0), properties: {} }, Edge { eid: Eid(0), edge_type: \"CONNECTED_TO\", src: Vid(0), dst: Vid(0), properties: {} }] })}, {\"topRoute\": Path(Path { nodes: [Node { vid: Vid(0), labels: [\"Start\"], properties: {} }, Node { vid: Vid(0), labels: [], properties: {} }, Node { vid: Vid(0), labels: [], properties: {} }, Node { vid: Vid(0), labels: [], properties: {} }, Node { vid: Vid(0), labels: [\"End\"], properties: {} }], edges: [Edge { eid: Eid(0), edge_type: \"CONNECTED_TO\", src: Vid(0), dst: Vid(0), properties: {} }, Edge { eid: Eid(0), edge_type: \"CONNECTED_TO\", src: Vid(0), dst: Vid(0), properties: {} }, Edge { eid: Eid(0), edge_type: \"CONNECTED_TO\", src: V..."
             }
           }
         ]
@@ -10189,8 +10187,7 @@
             "keyword": "Scenario ",
             "name": "[9] ORDER BY should order lists in the expected order",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/return-orderby/ReturnOrderBy1.feature:161:5\n      Matched: crates/uni-tck/src/steps/then.rs:37:1\n      Step panicked. Captured output: Result mismatch (in order): Value mismatch at row 1 column 'lists': expected List([String(\"a\")]), got List([Int(1)])\n[Summary]\n1 feature\n1 scenario (1 failed)\n3 steps (2 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -10204,8 +10201,7 @@
             "keyword": "Scenario ",
             "name": "[10] ORDER BY DESC should order lists in the expected order",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/return-orderby/ReturnOrderBy1.feature:181:5\n      Matched: crates/uni-tck/src/steps/then.rs:37:1\n      Step panicked. Captured output: Result mismatch (in order): Value mismatch at row 0 column 'lists': expected List([Null, Int(2)]), got List([String(\"a\"), Int(1)])\n[Summary]\n1 feature\n1 scenario (1 failed)\n3 steps (2 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -10220,7 +10216,7 @@
             "name": "[11] ORDER BY should order distinct types in the expected order",
             "result": {
               "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/return-orderby/ReturnOrderBy1.feature:206:5\n      Matched: crates/uni-tck/src/steps/then.rs:37:1\n      Step panicked. Captured output: Failed to parse expected table: \"Parse error: Parsing Error: Error { input: \\\"NaN\\\", code: Digit }\"\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
+              "error_message": "Step failed:\n      Defined: tck/features/clauses/return-orderby/ReturnOrderBy1.feature:206:5\n      Matched: crates/uni-tck/src/steps/then.rs:37:1\n      Step panicked. Captured output: Result mismatch (in order): Value mismatch at row 4 column 'types': expected Path(Path { nodes: [Node { vid: Vid(0), labels: [\"N\"], properties: {} }, Node { vid: Vid(0), labels: [], properties: {} }], edges: [Edge { eid: Eid(0), edge_type: \"REL\", src: Vid(0), dst: Vid(0), properties: {} }] }), got Path(Path { nodes: [Node { vid: Vid(0), labels: [\"N\"], properties: {} }, Node { vid: Vid(1), labels: [], properties: {} }], edges: [Edge { eid: Eid(0), edge_type: \"\", src: Vid(0), dst: Vid(1), properties: {} }] })\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
             }
           }
         ]
@@ -10235,7 +10231,7 @@
             "name": "[12] ORDER BY DESC should order distinct types in the expected order",
             "result": {
               "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/return-orderby/ReturnOrderBy1.feature:233:5\n      Matched: crates/uni-tck/src/steps/then.rs:37:1\n      Step panicked. Captured output: Failed to parse expected table: \"Parse error: Parsing Error: Error { input: \\\"NaN\\\", code: Digit }\"\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
+              "error_message": "Step failed:\n      Defined: tck/features/clauses/return-orderby/ReturnOrderBy1.feature:233:5\n      Matched: crates/uni-tck/src/steps/then.rs:37:1\n      Step panicked. Captured output: Result mismatch (in order): Value mismatch at row 5 column 'types': expected Path(Path { nodes: [Node { vid: Vid(0), labels: [\"N\"], properties: {} }, Node { vid: Vid(0), labels: [], properties: {} }], edges: [Edge { eid: Eid(0), edge_type: \"REL\", src: Vid(0), dst: Vid(0), properties: {} }] }), got Path(Path { nodes: [Node { vid: Vid(0), labels: [\"N\"], properties: {} }, Node { vid: Vid(1), labels: [], properties: {} }], edges: [Edge { eid: Eid(0), edge_type: \"\", src: Vid(0), dst: Vid(1), properties: {} }] })\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
             }
           }
         ]
@@ -10283,8 +10279,7 @@
             "keyword": "Scenario ",
             "name": "[3] Sort on aggregated function",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/return-orderby/ReturnOrderBy2.feature:90:5\n      Matched: crates/uni-tck/src/steps/then.rs:37:1\n      Step panicked. Captured output: No result found\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -10298,8 +10293,7 @@
             "keyword": "Scenario ",
             "name": "[4] Support sort and distinct",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/return-orderby/ReturnOrderBy2.feature:112:5\n      Matched: crates/uni-tck/src/steps/then.rs:37:1\n      Step panicked. Captured output: Result mismatch (in order): Unexpected column 'a._all_props' in result\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -10313,8 +10307,7 @@
             "keyword": "Scenario ",
             "name": "[5] Support ordering by a property after being distinct-ified",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/return-orderby/ReturnOrderBy2.feature:131:5\n      Matched: crates/uni-tck/src/steps/then.rs:37:1\n      Step panicked. Captured output: Result mismatch (in order): Unexpected column 'b._all_props' in result\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -10328,8 +10321,7 @@
             "keyword": "Scenario ",
             "name": "[6] Count star should count everything in scope",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/return-orderby/ReturnOrderBy2.feature:148:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Query returned error instead of result: Query { message: \"SyntaxError: InvalidAggregation - This feature is not implemented: Physical plan does not support logical expression AggregateFunction(AggregateFunction { func: AggregateUDF { inner: Count { name: \\\"count\\\", signature: Signature { type_signature: OneOf([VariadicAny, Nullary]), volatility: Immutable } } }, params: AggregateFunctionParams { args: [Wildcard { qualifier: None, options: WildcardOptions { ilike: None, exclude: None, except: None, replace: None, rename: None } }], distinct: false, filter: None, order_by: [], null_treatment: None } })\", query: Some(\"\\nMATCH (a)\\nRETURN a, count(*)\\nORDER BY count(*)\\n\") }\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -10385,8 +10377,7 @@
             "keyword": "Scenario ",
             "name": "[10] Returned columns do not change from using ORDER BY",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/return-orderby/ReturnOrderBy2.feature:220:5\n      Matched: crates/uni-tck/src/steps/then.rs:37:1\n      Step panicked. Captured output: Result mismatch (in order): Unexpected column 'n._all_props' in result\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -10414,8 +10405,7 @@
             "keyword": "Scenario ",
             "name": "[12] Aggregation of named paths",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/return-orderby/ReturnOrderBy2.feature:259:5\n      Matched: crates/uni-tck/src/steps/then.rs:62:1\n      Step panicked. Captured output: No result found\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -10429,8 +10419,7 @@
             "keyword": "Scenario ",
             "name": "[13] Fail when sorting on variable removed by DISTINCT",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/return-orderby/ReturnOrderBy2.feature:278:5\n      Matched: crates/uni-tck/src/steps/then.rs:90:1\n      Step panicked. Captured output: No error found\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -10464,8 +10453,7 @@
             "keyword": "Scenario ",
             "name": "[1] Sort on aggregate function and normal property",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/return-orderby/ReturnOrderBy3.feature:48:5\n      Matched: crates/uni-tck/src/steps/then.rs:37:1\n      Step panicked. Captured output: No result found\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -10485,8 +10473,7 @@
             "keyword": "Scenario ",
             "name": "[1] ORDER BY of a column introduced in RETURN should return salient results in ascending order",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/return-orderby/ReturnOrderBy4.feature:44:5\n      Matched: crates/uni-tck/src/steps/then.rs:37:1\n      Step panicked. Captured output: Result mismatch (in order): Row count mismatch: expected 2, got 0\n[Summary]\n1 feature\n1 scenario (1 failed)\n3 steps (2 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -10540,8 +10527,7 @@
             "keyword": "Scenario ",
             "name": "[1] Handle constants and parameters inside an order by item which contains an aggregation expression",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/return-orderby/ReturnOrderBy6.feature:43:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Query returned error instead of result: Query { message: \"SyntaxError: InvalidAggregation - This feature is not implemented: Physical plan does not support logical expression AggregateFunction(AggregateFunction { func: AggregateUDF { inner: Avg { signature: Signature { type_signature: UserDefined, volatility: Immutable }, aliases: [\\\"mean\\\"] } }, params: AggregateFunctionParams { args: [ScalarFunction(ScalarFunction { func: ScalarUDF { inner: CypherToFloat64Udf }, args: [Column(Column { relation: None, name: \\\"person.age\\\" })] })], distinct: false, filter: None, order_by: [], null_treatment: None } })\", query: Some(\"\\nMATCH (person)\\nRETURN avg(person.age) AS avgAge\\nORDER BY $age + avg(person.age) - 1000\\n\") }\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -10555,8 +10541,7 @@
             "keyword": "Scenario ",
             "name": "[2] Handle returned aliases inside an order by item which contains an aggregation expression",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/return-orderby/ReturnOrderBy6.feature:56:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Query returned error instead of result: Query { message: \"SyntaxError: InvalidAggregation - This feature is not implemented: Physical plan does not support logical expression AggregateFunction(AggregateFunction { func: AggregateUDF { inner: Count { name: \\\"count\\\", signature: Signature { type_signature: OneOf([VariadicAny, Nullary]), volatility: Immutable } } }, params: AggregateFunctionParams { args: [Column(Column { relation: None, name: \\\"you.age\\\" })], distinct: false, filter: None, order_by: [], null_treatment: None } })\", query: Some(\"\\nMATCH (me: Person)--(you: Person)\\nRETURN me.age AS age, count(you.age) AS cnt\\nORDER BY age, age + count(you.age)\\n\") }\n[Summary]\n1 feature\n1 scenario (1 failed)\n3 steps (2 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -10570,8 +10555,7 @@
             "keyword": "Scenario ",
             "name": "[3] Handle returned property accesses inside an order by item which contains an aggregation expression",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/return-orderby/ReturnOrderBy6.feature:68:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Query returned error instead of result: Query { message: \"SyntaxError: InvalidAggregation - This feature is not implemented: Physical plan does not support logical expression AggregateFunction(AggregateFunction { func: AggregateUDF { inner: Count { name: \\\"count\\\", signature: Signature { type_signature: OneOf([VariadicAny, Nullary]), volatility: Immutable } } }, params: AggregateFunctionParams { args: [Column(Column { relation: None, name: \\\"you.age\\\" })], distinct: false, filter: None, order_by: [], null_treatment: None } })\", query: Some(\"\\nMATCH (me: Person)--(you: Person)\\nRETURN me.age AS age, count(you.age) AS cnt\\nORDER BY me.age + count(you.age)\\n\") }\n[Summary]\n1 feature\n1 scenario (1 failed)\n3 steps (2 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -13325,8 +13309,7 @@
             "keyword": "Scenario ",
             "name": "[9] Sort lists in ascending order",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:171:5\n      Matched: crates/uni-tck/src/steps/then.rs:37:1\n      Step panicked. Captured output: Result mismatch (in order): Value mismatch at row 1 column 'lists': expected List([String(\"a\")]), got List([Int(1)])\n[Summary]\n1 feature\n1 scenario (1 failed)\n3 steps (2 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -13340,8 +13323,7 @@
             "keyword": "Scenario ",
             "name": "[10] Sort lists in descending order",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:189:5\n      Matched: crates/uni-tck/src/steps/then.rs:37:1\n      Step panicked. Captured output: Result mismatch (in order): Value mismatch at row 0 column 'lists': expected List([Null, Int(2)]), got List([String(\"a\"), Int(1)])\n[Summary]\n1 feature\n1 scenario (1 failed)\n3 steps (2 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -13355,8 +13337,7 @@
             "keyword": "Scenario ",
             "name": "[11] Sort dates in ascending order",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:212:5\n      Matched: crates/uni-tck/src/steps/then.rs:37:1\n      Step panicked. Captured output: Result mismatch (in order): Value mismatch at row 0 column 'dates': expected String(\"1910-05-06\"), got List([])\n[Summary]\n1 feature\n1 scenario (1 failed)\n3 steps (2 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -13370,8 +13351,7 @@
             "keyword": "Scenario ",
             "name": "[12] Sort dates in descending order",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:233:5\n      Matched: crates/uni-tck/src/steps/then.rs:37:1\n      Step panicked. Captured output: Result mismatch (in order): Value mismatch at row 0 column 'dates': expected String(\"1985-05-06\"), got List([])\n[Summary]\n1 feature\n1 scenario (1 failed)\n3 steps (2 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -13385,8 +13365,7 @@
             "keyword": "Scenario ",
             "name": "[13] Sort local times in ascending order",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:253:5\n      Matched: crates/uni-tck/src/steps/then.rs:37:1\n      Step panicked. Captured output: Result mismatch (in order): Value mismatch at row 0 column 'localtimes': expected String(\"10:35\"), got List([])\n[Summary]\n1 feature\n1 scenario (1 failed)\n3 steps (2 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -13400,8 +13379,7 @@
             "keyword": "Scenario ",
             "name": "[14] Sort local times in descending order",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:274:5\n      Matched: crates/uni-tck/src/steps/then.rs:37:1\n      Step panicked. Captured output: Result mismatch (in order): Value mismatch at row 0 column 'localtimes': expected String(\"12:35:13\"), got List([])\n[Summary]\n1 feature\n1 scenario (1 failed)\n3 steps (2 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -13415,8 +13393,7 @@
             "keyword": "Scenario ",
             "name": "[15] Sort times in ascending order",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:295:5\n      Matched: crates/uni-tck/src/steps/then.rs:37:1\n      Step panicked. Captured output: Result mismatch (in order): Value mismatch at row 0 column 'times': expected String(\"12:35:15+05:00\"), got List([])\n[Summary]\n1 feature\n1 scenario (1 failed)\n3 steps (2 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -13430,8 +13407,7 @@
             "keyword": "Scenario ",
             "name": "[16] Sort times in descending order",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:316:5\n      Matched: crates/uni-tck/src/steps/then.rs:37:1\n      Step panicked. Captured output: Result mismatch (in order): Value mismatch at row 0 column 'times': expected String(\"10:35-08:00\"), got List([])\n[Summary]\n1 feature\n1 scenario (1 failed)\n3 steps (2 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -13445,8 +13421,7 @@
             "keyword": "Scenario ",
             "name": "[17] Sort local date times in ascending order",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:337:5\n      Matched: crates/uni-tck/src/steps/then.rs:37:1\n      Step panicked. Captured output: Result mismatch (in order): Value mismatch at row 0 column 'localdatetimes': expected String(\"0001-01-01T01:01:01.000000001\"), got List([])\n[Summary]\n1 feature\n1 scenario (1 failed)\n3 steps (2 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -13460,8 +13435,7 @@
             "keyword": "Scenario ",
             "name": "[18] Sort local date times in descending order",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:358:5\n      Matched: crates/uni-tck/src/steps/then.rs:37:1\n      Step panicked. Captured output: Result mismatch (in order): Value mismatch at row 0 column 'localdatetimes': expected String(\"9999-09-09T09:59:59.999999999\"), got List([])\n[Summary]\n1 feature\n1 scenario (1 failed)\n3 steps (2 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -13475,8 +13449,7 @@
             "keyword": "Scenario ",
             "name": "[19] Sort date times in ascending order",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:379:5\n      Matched: crates/uni-tck/src/steps/then.rs:37:1\n      Step panicked. Captured output: Result mismatch (in order): Value mismatch at row 0 column 'datetimes': expected String(\"0001-01-01T01:01:01.000000001-11:59\"), got List([])\n[Summary]\n1 feature\n1 scenario (1 failed)\n3 steps (2 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -13490,8 +13463,7 @@
             "keyword": "Scenario ",
             "name": "[20] Sort date times in descending order",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:400:5\n      Matched: crates/uni-tck/src/steps/then.rs:37:1\n      Step panicked. Captured output: Result mismatch (in order): Value mismatch at row 0 column 'datetimes': expected String(\"9999-09-09T09:59:59.999999999+11:59\"), got List([])\n[Summary]\n1 feature\n1 scenario (1 failed)\n3 steps (2 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -13506,7 +13478,7 @@
             "name": "[21] Sort distinct types in ascending order",
             "result": {
               "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:422:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [(\"types\", Some(Float(NaN)))]. Expected: [{\"types\": Map({\"a\": String(\"map\")})}, {\"types\": Node(Node { vid: Vid(0), labels: [\"N\"], properties: {} })}, {\"types\": Edge(Edge { eid: Eid(0), edge_type: \"REL\", src: Vid(0), dst: Vid(0), properties: {} })}, {\"types\": List([String(\"list\")])}, {\"types\": Path(Path { nodes: [Node { vid: Vid(0), labels: [\"N\"], properties: {} }, Node { vid: Vid(0), labels: [], properties: {} }], edges: [Edge { eid: Eid(0), edge_type: \"REL\", src: Vid(0), dst: Vid(0), properties: {} }] })}]\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
+              "error_message": "Step failed:\n      Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:422:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 4. Actual values: [(\"types\", Some(Path(Path { nodes: [Node { vid: Vid(0), labels: [\"N\"], properties: {} }, Node { vid: Vid(1), labels: [], properties: {} }], edges: [Edge { eid: Eid(0), edge_type: \"\", src: Vid(0), dst: Vid(1), properties: {} }] })))]. Expected: [{\"types\": Path(Path { nodes: [Node { vid: Vid(0), labels: [\"N\"], properties: {} }, Node { vid: Vid(0), labels: [], properties: {} }], edges: [Edge { eid: Eid(0), edge_type: \"REL\", src: Vid(0), dst: Vid(0), properties: {} }] })}]\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
             }
           }
         ]
@@ -13520,8 +13492,7 @@
             "keyword": "Scenario ",
             "name": "[22] Sort distinct types in descending order",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:446:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Failed to parse expected table: \"Parse error: Parsing Error: Error { input: \\\"NaN\\\", code: Digit }\"\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -13745,8 +13716,7 @@
             "keyword": "Scenario ",
             "name": "[29] Sort by a string variable projected from a node property in ascending order",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:662:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [(\"name\", Some(String(\"sit\"))), (\"a\", Some(Node(Node { vid: Vid(3), labels: [\"D\"], properties: {\"name\": String(\"sit\")} })))]. Expected: [{\"name\": String(\"amet\"), \"a\": Node(Node { vid: Vid(0), labels: [\"E\"], properties: {\"name\": String(\"amet\")} })}, {\"a\": Node(Node { vid: Vid(0), labels: [\"C\"], properties: {\"name\": String(\"dolor\")} }), \"name\": String(\"dolor\")}, {\"a\": Node(Node { vid: Vid(0), labels: [\"B\"], properties: {\"name\": String(\"ipsum\")} }), \"name\": String(\"ipsum\")}]\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -13760,8 +13730,7 @@
             "keyword": "Scenario ",
             "name": "[29] Sort by a string variable projected from a node property in ascending order",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:662:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [(\"a\", Some(Node(Node { vid: Vid(3), labels: [\"D\"], properties: {\"name\": String(\"sit\")} }))), (\"name\", Some(String(\"sit\")))]. Expected: [{\"a\": Node(Node { vid: Vid(0), labels: [\"E\"], properties: {\"name\": String(\"amet\")} }), \"name\": String(\"amet\")}, {\"a\": Node(Node { vid: Vid(0), labels: [\"C\"], properties: {\"name\": String(\"dolor\")} }), \"name\": String(\"dolor\")}, {\"name\": String(\"ipsum\"), \"a\": Node(Node { vid: Vid(0), labels: [\"B\"], properties: {\"name\": String(\"ipsum\")} })}]\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -13775,8 +13744,7 @@
             "keyword": "Scenario ",
             "name": "[29] Sort by a string variable projected from a node property in ascending order",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:662:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [(\"a\", Some(Node(Node { vid: Vid(3), labels: [\"D\"], properties: {\"name\": String(\"sit\")} }))), (\"name\", Some(String(\"sit\")))]. Expected: [{\"a\": Node(Node { vid: Vid(0), labels: [\"E\"], properties: {\"name\": String(\"amet\")} }), \"name\": String(\"amet\")}, {\"name\": String(\"dolor\"), \"a\": Node(Node { vid: Vid(0), labels: [\"C\"], properties: {\"name\": String(\"dolor\")} })}, {\"name\": String(\"ipsum\"), \"a\": Node(Node { vid: Vid(0), labels: [\"B\"], properties: {\"name\": String(\"ipsum\")} })}]\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -13790,8 +13758,7 @@
             "keyword": "Scenario ",
             "name": "[30] Sort by a string variable projected from a node property in descending order",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:694:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 2. Actual values: [(\"a\", Some(Node(Node { vid: Vid(2), labels: [\"C\"], properties: {\"name\": String(\"dolor\")} }))), (\"name\", Some(String(\"dolor\")))]. Expected: [{\"a\": Node(Node { vid: Vid(0), labels: [\"D\"], properties: {\"name\": String(\"sit\")} }), \"name\": String(\"sit\")}]\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -13805,8 +13772,7 @@
             "keyword": "Scenario ",
             "name": "[30] Sort by a string variable projected from a node property in descending order",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:694:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 2. Actual values: [(\"a\", Some(Node(Node { vid: Vid(2), labels: [\"C\"], properties: {\"name\": String(\"dolor\")} }))), (\"name\", Some(String(\"dolor\")))]. Expected: [{\"a\": Node(Node { vid: Vid(0), labels: [\"D\"], properties: {\"name\": String(\"sit\")} }), \"name\": String(\"sit\")}]\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -13960,8 +13926,7 @@
             "keyword": "Scenario ",
             "name": "[35] Sort by a local time variable projected from a node property in ascending order",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:851:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 1. Actual values: [(\"a\", Some(Node(Node { vid: Vid(4), labels: [\"E\"], properties: {\"time\": String(\"12:31:15\")} }))), (\"time\", Some(String(\"12:31:15\")))]. Expected: [{\"a\": Node(Node { vid: Vid(0), labels: [\"D\"], properties: {\"time\": String(\"12:30:14.645876123\")} }), \"time\": String(\"12:30:14.645876123\")}, {\"a\": Node(Node { vid: Vid(0), labels: [\"B\"], properties: {\"time\": String(\"12:31:14.645876123\")} }), \"time\": String(\"12:31:14.645876123\")}]\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -13975,8 +13940,7 @@
             "keyword": "Scenario ",
             "name": "[35] Sort by a local time variable projected from a node property in ascending order",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:851:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 1. Actual values: [(\"time\", Some(String(\"12:31:15\"))), (\"a\", Some(Node(Node { vid: Vid(4), labels: [\"E\"], properties: {\"time\": String(\"12:31:15\")} })))]. Expected: [{\"a\": Node(Node { vid: Vid(0), labels: [\"D\"], properties: {\"time\": String(\"12:30:14.645876123\")} }), \"time\": String(\"12:30:14.645876123\")}, {\"time\": String(\"12:31:14.645876123\"), \"a\": Node(Node { vid: Vid(0), labels: [\"B\"], properties: {\"time\": String(\"12:31:14.645876123\")} })}]\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -13990,8 +13954,7 @@
             "keyword": "Scenario ",
             "name": "[35] Sort by a local time variable projected from a node property in ascending order",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:851:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 1. Actual values: [(\"time\", Some(String(\"12:31:15\"))), (\"a\", Some(Node(Node { vid: Vid(4), labels: [\"E\"], properties: {\"time\": String(\"12:31:15\")} })))]. Expected: [{\"a\": Node(Node { vid: Vid(0), labels: [\"D\"], properties: {\"time\": String(\"12:30:14.645876123\")} }), \"time\": String(\"12:30:14.645876123\")}, {\"a\": Node(Node { vid: Vid(0), labels: [\"B\"], properties: {\"time\": String(\"12:31:14.645876123\")} }), \"time\": String(\"12:31:14.645876123\")}]\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -14005,8 +13968,7 @@
             "keyword": "Scenario ",
             "name": "[36] Sort by a local time variable projected from a node property in descending order",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:883:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 2. Actual values: [(\"a\", Some(Node(Node { vid: Vid(3), labels: [\"D\"], properties: {\"time\": String(\"12:30:14.645876123\")} }))), (\"time\", Some(String(\"12:30:14.645876123\")))]. Expected: [{\"a\": Node(Node { vid: Vid(0), labels: [\"E\"], properties: {\"time\": String(\"12:31:15\")} }), \"time\": String(\"12:31:15\")}]\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -14020,8 +13982,7 @@
             "keyword": "Scenario ",
             "name": "[36] Sort by a local time variable projected from a node property in descending order",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:883:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 2. Actual values: [(\"a\", Some(Node(Node { vid: Vid(3), labels: [\"D\"], properties: {\"time\": String(\"12:30:14.645876123\")} }))), (\"time\", Some(String(\"12:30:14.645876123\")))]. Expected: [{\"a\": Node(Node { vid: Vid(0), labels: [\"E\"], properties: {\"time\": String(\"12:31:15\")} }), \"time\": String(\"12:31:15\")}]\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -14035,8 +13996,7 @@
             "keyword": "Scenario ",
             "name": "[37] Sort by a time variable projected from a node property in ascending order",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:914:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [(\"a\", Some(Node(Node { vid: Vid(0), labels: [\"A\"], properties: {\"time\": String(\"10:35-08:00\")} }))), (\"time\", Some(String(\"10:35-08:00\")))]. Expected: [{\"a\": Node(Node { vid: Vid(0), labels: [\"D\"], properties: {\"time\": String(\"12:35:15+05:00\")} }), \"time\": String(\"12:35:15+05:00\")}, {\"a\": Node(Node { vid: Vid(0), labels: [\"E\"], properties: {\"time\": String(\"12:30:14.645876123+01:01\")} }), \"time\": String(\"12:30:14.645876123+01:01\")}, {\"a\": Node(Node { vid: Vid(0), labels: [\"B\"], properties: {\"time\": String(\"12:31:14.645876123+01:00\")} }), \"time\": String(\"12:31:14.645876123+01:00\")}]\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -14050,8 +14010,7 @@
             "keyword": "Scenario ",
             "name": "[37] Sort by a time variable projected from a node property in ascending order",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:914:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [(\"a\", Some(Node(Node { vid: Vid(0), labels: [\"A\"], properties: {\"time\": String(\"10:35-08:00\")} }))), (\"time\", Some(String(\"10:35-08:00\")))]. Expected: [{\"a\": Node(Node { vid: Vid(0), labels: [\"D\"], properties: {\"time\": String(\"12:35:15+05:00\")} }), \"time\": String(\"12:35:15+05:00\")}, {\"a\": Node(Node { vid: Vid(0), labels: [\"E\"], properties: {\"time\": String(\"12:30:14.645876123+01:01\")} }), \"time\": String(\"12:30:14.645876123+01:01\")}, {\"a\": Node(Node { vid: Vid(0), labels: [\"B\"], properties: {\"time\": String(\"12:31:14.645876123+01:00\")} }), \"time\": String(\"12:31:14.645876123+01:00\")}]\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -14065,8 +14024,7 @@
             "keyword": "Scenario ",
             "name": "[37] Sort by a time variable projected from a node property in ascending order",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:914:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [(\"a\", Some(Node(Node { vid: Vid(0), labels: [\"A\"], properties: {\"time\": String(\"10:35-08:00\")} }))), (\"time\", Some(String(\"10:35-08:00\")))]. Expected: [{\"a\": Node(Node { vid: Vid(0), labels: [\"D\"], properties: {\"time\": String(\"12:35:15+05:00\")} }), \"time\": String(\"12:35:15+05:00\")}, {\"a\": Node(Node { vid: Vid(0), labels: [\"E\"], properties: {\"time\": String(\"12:30:14.645876123+01:01\")} }), \"time\": String(\"12:30:14.645876123+01:01\")}, {\"a\": Node(Node { vid: Vid(0), labels: [\"B\"], properties: {\"time\": String(\"12:31:14.645876123+01:00\")} }), \"time\": String(\"12:31:14.645876123+01:00\")}]\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -14080,8 +14038,7 @@
             "keyword": "Scenario ",
             "name": "[38] Sort by a time variable projected from a node property in descending order",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:946:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 2. Actual values: [(\"a\", Some(Node(Node { vid: Vid(4), labels: [\"E\"], properties: {\"time\": String(\"12:30:14.645876123+01:01\")} }))), (\"time\", Some(String(\"12:30:14.645876123+01:01\")))]. Expected: [{\"a\": Node(Node { vid: Vid(0), labels: [\"A\"], properties: {\"time\": String(\"10:35-08:00\")} }), \"time\": String(\"10:35-08:00\")}]\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -14095,8 +14052,7 @@
             "keyword": "Scenario ",
             "name": "[38] Sort by a time variable projected from a node property in descending order",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:946:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 2. Actual values: [(\"time\", Some(String(\"12:30:14.645876123+01:01\"))), (\"a\", Some(Node(Node { vid: Vid(4), labels: [\"E\"], properties: {\"time\": String(\"12:30:14.645876123+01:01\")} })))]. Expected: [{\"time\": String(\"10:35-08:00\"), \"a\": Node(Node { vid: Vid(0), labels: [\"A\"], properties: {\"time\": String(\"10:35-08:00\")} })}]\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -14110,8 +14066,7 @@
             "keyword": "Scenario ",
             "name": "[39] Sort by a local date time variable projected from a node property in ascending order",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:977:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [(\"datetime\", Some(String(\"1970-01-01T00:00\"))), (\"a\", Some(Node(Node { vid: Vid(2), labels: [\"C\"], properties: {\"datetime\": String(\"1970-01-01T00:00\")} })))]. Expected: [{\"datetime\": String(\"0001-01-01T01:01:01.000000001\"), \"a\": Node(Node { vid: Vid(0), labels: [\"C\"], properties: {\"datetime\": String(\"0001-01-01T01:01:01.000000001\")} })}, {\"datetime\": String(\"1980-12-11T12:31:14\"), \"a\": Node(Node { vid: Vid(0), labels: [\"E\"], properties: {\"datetime\": String(\"1980-12-11T12:31:14\")} })}, {\"a\": Node(Node { vid: Vid(0), labels: [\"A\"], properties: {\"datetime\": String(\"1984-10-11T12:30:14.000000012\")} }), \"datetime\": String(\"1984-10-11T12:30:14.000000012\")}]\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -14125,8 +14080,7 @@
             "keyword": "Scenario ",
             "name": "[39] Sort by a local date time variable projected from a node property in ascending order",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:977:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [(\"a\", Some(Node(Node { vid: Vid(2), labels: [\"C\"], properties: {\"datetime\": String(\"1970-01-01T00:00\")} }))), (\"datetime\", Some(String(\"1970-01-01T00:00\")))]. Expected: [{\"a\": Node(Node { vid: Vid(0), labels: [\"C\"], properties: {\"datetime\": String(\"0001-01-01T01:01:01.000000001\")} }), \"datetime\": String(\"0001-01-01T01:01:01.000000001\")}, {\"a\": Node(Node { vid: Vid(0), labels: [\"E\"], properties: {\"datetime\": String(\"1980-12-11T12:31:14\")} }), \"datetime\": String(\"1980-12-11T12:31:14\")}, {\"datetime\": String(\"1984-10-11T12:30:14.000000012\"), \"a\": Node(Node { vid: Vid(0), labels: [\"A\"], properties: {\"datetime\": String(\"1984-10-11T12:30:14.000000012\")} })}]\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -14140,8 +14094,7 @@
             "keyword": "Scenario ",
             "name": "[39] Sort by a local date time variable projected from a node property in ascending order",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:977:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [(\"a\", Some(Node(Node { vid: Vid(2), labels: [\"C\"], properties: {\"datetime\": String(\"1970-01-01T00:00\")} }))), (\"datetime\", Some(String(\"1970-01-01T00:00\")))]. Expected: [{\"a\": Node(Node { vid: Vid(0), labels: [\"C\"], properties: {\"datetime\": String(\"0001-01-01T01:01:01.000000001\")} }), \"datetime\": String(\"0001-01-01T01:01:01.000000001\")}, {\"a\": Node(Node { vid: Vid(0), labels: [\"E\"], properties: {\"datetime\": String(\"1980-12-11T12:31:14\")} }), \"datetime\": String(\"1980-12-11T12:31:14\")}, {\"a\": Node(Node { vid: Vid(0), labels: [\"A\"], properties: {\"datetime\": String(\"1984-10-11T12:30:14.000000012\")} }), \"datetime\": String(\"1984-10-11T12:30:14.000000012\")}]\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -14155,8 +14108,7 @@
             "keyword": "Scenario ",
             "name": "[40] Sort by a local date time variable projected from a node property in descending order",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:1009:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 2. Actual values: [(\"a\", Some(Node(Node { vid: Vid(4), labels: [\"E\"], properties: {\"datetime\": String(\"1980-12-11T12:31:14\")} }))), (\"datetime\", Some(String(\"1980-12-11T12:31:14\")))]. Expected: [{\"a\": Node(Node { vid: Vid(0), labels: [\"D\"], properties: {\"datetime\": String(\"9999-09-09T09:59:59.999999999\")} }), \"datetime\": String(\"9999-09-09T09:59:59.999999999\")}]\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -14170,8 +14122,7 @@
             "keyword": "Scenario ",
             "name": "[40] Sort by a local date time variable projected from a node property in descending order",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:1009:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 2. Actual values: [(\"a\", Some(Node(Node { vid: Vid(4), labels: [\"E\"], properties: {\"datetime\": String(\"1980-12-11T12:31:14\")} }))), (\"datetime\", Some(String(\"1980-12-11T12:31:14\")))]. Expected: [{\"a\": Node(Node { vid: Vid(0), labels: [\"D\"], properties: {\"datetime\": String(\"9999-09-09T09:59:59.999999999\")} }), \"datetime\": String(\"9999-09-09T09:59:59.999999999\")}]\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -14185,8 +14136,7 @@
             "keyword": "Scenario ",
             "name": "[41] Sort by a date time variable projected from a node property in ascending order",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:1040:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [(\"a\", Some(Node(Node { vid: Vid(2), labels: [\"C\"], properties: {\"datetime\": String(\"1969-12-31T12:01-11:59\")} }))), (\"datetime\", Some(String(\"1969-12-31T12:01-11:59\")))]. Expected: [{\"a\": Node(Node { vid: Vid(0), labels: [\"C\"], properties: {\"datetime\": String(\"0001-01-01T01:01:01.000000001-11:59\")} }), \"datetime\": String(\"0001-01-01T01:01:01.000000001-11:59\")}, {\"a\": Node(Node { vid: Vid(0), labels: [\"E\"], properties: {\"datetime\": String(\"1980-12-11T12:31:14-11:59\")} }), \"datetime\": String(\"1980-12-11T12:31:14-11:59\")}, {\"datetime\": String(\"1984-10-11T12:31:14.645876123+00:17\"), \"a\": Node(Node { vid: Vid(0), labels: [\"B\"], properties: {\"datetime\": String(\"1984-10-11T12:31:14.645876123+00:17\")} })}]\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -14200,8 +14150,7 @@
             "keyword": "Scenario ",
             "name": "[41] Sort by a date time variable projected from a node property in ascending order",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:1040:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [(\"datetime\", Some(String(\"1969-12-31T12:01-11:59\"))), (\"a\", Some(Node(Node { vid: Vid(2), labels: [\"C\"], properties: {\"datetime\": String(\"1969-12-31T12:01-11:59\")} })))]. Expected: [{\"datetime\": String(\"0001-01-01T01:01:01.000000001-11:59\"), \"a\": Node(Node { vid: Vid(0), labels: [\"C\"], properties: {\"datetime\": String(\"0001-01-01T01:01:01.000000001-11:59\")} })}, {\"datetime\": String(\"1980-12-11T12:31:14-11:59\"), \"a\": Node(Node { vid: Vid(0), labels: [\"E\"], properties: {\"datetime\": String(\"1980-12-11T12:31:14-11:59\")} })}, {\"a\": Node(Node { vid: Vid(0), labels: [\"B\"], properties: {\"datetime\": String(\"1984-10-11T12:31:14.645876123+00:17\")} }), \"datetime\": String(\"1984-10-11T12:31:14.645876123+00:17\")}]\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -14215,8 +14164,7 @@
             "keyword": "Scenario ",
             "name": "[41] Sort by a date time variable projected from a node property in ascending order",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:1040:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [(\"datetime\", Some(String(\"1969-12-31T12:01-11:59\"))), (\"a\", Some(Node(Node { vid: Vid(2), labels: [\"C\"], properties: {\"datetime\": String(\"1969-12-31T12:01-11:59\")} })))]. Expected: [{\"datetime\": String(\"0001-01-01T01:01:01.000000001-11:59\"), \"a\": Node(Node { vid: Vid(0), labels: [\"C\"], properties: {\"datetime\": String(\"0001-01-01T01:01:01.000000001-11:59\")} })}, {\"a\": Node(Node { vid: Vid(0), labels: [\"E\"], properties: {\"datetime\": String(\"1980-12-11T12:31:14-11:59\")} }), \"datetime\": String(\"1980-12-11T12:31:14-11:59\")}, {\"a\": Node(Node { vid: Vid(0), labels: [\"B\"], properties: {\"datetime\": String(\"1984-10-11T12:31:14.645876123+00:17\")} }), \"datetime\": String(\"1984-10-11T12:31:14.645876123+00:17\")}]\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -14230,8 +14178,7 @@
             "keyword": "Scenario ",
             "name": "[42] Sort by a date time variable projected from a node property in descending order",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:1072:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 2. Actual values: [(\"datetime\", Some(String(\"1980-12-11T12:31:14-11:59\"))), (\"a\", Some(Node(Node { vid: Vid(4), labels: [\"E\"], properties: {\"datetime\": String(\"1980-12-11T12:31:14-11:59\")} })))]. Expected: [{\"datetime\": String(\"9999-09-09T09:59:59.999999999+11:59\"), \"a\": Node(Node { vid: Vid(0), labels: [\"D\"], properties: {\"datetime\": String(\"9999-09-09T09:59:59.999999999+11:59\")} })}]\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -14245,8 +14192,7 @@
             "keyword": "Scenario ",
             "name": "[42] Sort by a date time variable projected from a node property in descending order",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:1072:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 2. Actual values: [(\"datetime\", Some(String(\"1980-12-11T12:31:14-11:59\"))), (\"a\", Some(Node(Node { vid: Vid(4), labels: [\"E\"], properties: {\"datetime\": String(\"1980-12-11T12:31:14-11:59\")} })))]. Expected: [{\"datetime\": String(\"9999-09-09T09:59:59.999999999+11:59\"), \"a\": Node(Node { vid: Vid(0), labels: [\"D\"], properties: {\"datetime\": String(\"9999-09-09T09:59:59.999999999+11:59\")} })}]\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -14316,8 +14262,7 @@
             "keyword": "Scenario ",
             "name": "[45] Sort order should be consistent with comparisons where comparisons are defined #Example: booleans",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:1137:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Query returned error instead of result: Query { message: \"Execution error: ArgumentError: InvalidArgumentType - range() end must be an integer\", query: Some(\"\\nWITH [true, false] AS values\\nWITH values, size(values) AS numOfValues\\nUNWIND values AS value\\nWITH size([ x IN values WHERE x < value ]) AS x, value, numOfValues\\n  ORDER BY value\\nWITH numOfValues, collect(x) AS orderedX\\nRETURN orderedX = range(0, numOfValues-1) AS equal\\n\") }\n[Summary]\n1 feature\n1 scenario (1 failed)\n3 steps (2 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -14331,8 +14276,7 @@
             "keyword": "Scenario ",
             "name": "[45] Sort order should be consistent with comparisons where comparisons are defined #Example: integers",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:1137:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Query returned error instead of result: Query { message: \"Execution error: ArgumentError: InvalidArgumentType - range() end must be an integer\", query: Some(\"\\nWITH [351, -3974856, 93, -3, 123, 0, 3, -2, 20934587, 1, 20934585, 20934586, -10] AS values\\nWITH values, size(values) AS numOfValues\\nUNWIND values AS value\\nWITH size([ x IN values WHERE x < value ]) AS x, value, numOfValues\\n  ORDER BY value\\nWITH numOfValues, collect(x) AS orderedX\\nRETURN orderedX = range(0, numOfValues-1) AS equal\\n\") }\n[Summary]\n1 feature\n1 scenario (1 failed)\n3 steps (2 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -14346,8 +14290,7 @@
             "keyword": "Scenario ",
             "name": "[45] Sort order should be consistent with comparisons where comparisons are defined #Example: floats",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:1137:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Query returned error instead of result: Query { message: \"Execution error: ArgumentError: InvalidArgumentType - range() end must be an integer\", query: Some(\"\\nWITH [351.5, -3974856.01, -3.203957, 123.0002, 123.0001, 123.00013, 123.00011, 0.0100000, 0.0999999, 0.00000001, 3.0, 209345.87, -10.654] AS values\\nWITH values, size(values) AS numOfValues\\nUNWIND values AS value\\nWITH size([ x IN values WHERE x < value ]) AS x, value, numOfValues\\n  ORDER BY value\\nWITH numOfValues, collect(x) AS orderedX\\nRETURN orderedX = range(0, numOfValues-1) AS equal\\n\") }\n[Summary]\n1 feature\n1 scenario (1 failed)\n3 steps (2 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -14361,8 +14304,7 @@
             "keyword": "Scenario ",
             "name": "[45] Sort order should be consistent with comparisons where comparisons are defined #Example: string",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:1137:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Query returned error instead of result: Query { message: \"Execution error: ArgumentError: InvalidArgumentType - range() end must be an integer\", query: Some(\"\\nWITH ['Sort', 'order', ' ', 'should', 'be', '', 'consistent', 'with', 'comparisons', ', ', 'where', 'comparisons are', 'defined', '!'] AS values\\nWITH values, size(values) AS numOfValues\\nUNWIND values AS value\\nWITH size([ x IN values WHERE x < value ]) AS x, value, numOfValues\\n  ORDER BY value\\nWITH numOfValues, collect(x) AS orderedX\\nRETURN orderedX = range(0, numOfValues-1) AS equal\\n\") }\n[Summary]\n1 feature\n1 scenario (1 failed)\n3 steps (2 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -14376,8 +14318,7 @@
             "keyword": "Scenario ",
             "name": "[45] Sort order should be consistent with comparisons where comparisons are defined #Example: lists",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:1137:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Query returned error instead of result: Query { message: \"Execution error: ArgumentError: InvalidArgumentType - range() end must be an integer\", query: Some(\"\\nWITH [[2, 2], [2, -2], [1, 2], [], [1], [300, 0], [1, -20], [2, -2, 100]] AS values\\nWITH values, size(values) AS numOfValues\\nUNWIND values AS value\\nWITH size([ x IN values WHERE x < value ]) AS x, value, numOfValues\\n  ORDER BY value\\nWITH numOfValues, collect(x) AS orderedX\\nRETURN orderedX = range(0, numOfValues-1) AS equal\\n\") }\n[Summary]\n1 feature\n1 scenario (1 failed)\n3 steps (2 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -14391,8 +14332,7 @@
             "keyword": "Scenario ",
             "name": "[45] Sort order should be consistent with comparisons where comparisons are defined #Example: dates",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:1137:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Query returned error instead of result: Query { message: \"Execution error: Unsupported element type for typed_large_list_to_cv_array: Date32\", query: Some(\"\\nWITH [date({year: 1910, month: 5, day: 6}), date({year: 1980, month: 12, day: 24}), date({year: 1984, month: 10, day: 12}), date({year: 1985, month: 5, day: 6}), date({year: 1980, month: 10, day: 24}), date({year: 1984, month: 10, day: 11})] AS values\\nWITH values, size(values) AS numOfValues\\nUNWIND values AS value\\nWITH size([ x IN values WHERE x < value ]) AS x, value, numOfValues\\n  ORDER BY value\\nWITH numOfValues, collect(x) AS orderedX\\nRETURN orderedX = range(0, numOfValues-1) AS equal\\n\") }\n[Summary]\n1 feature\n1 scenario (1 failed)\n3 steps (2 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -14406,8 +14346,7 @@
             "keyword": "Scenario ",
             "name": "[45] Sort order should be consistent with comparisons where comparisons are defined #Example: localtimes",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:1137:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Query returned error instead of result: Query { message: \"Execution error: Unsupported element type for typed_large_list_to_cv_array: Time64(Nanosecond)\", query: Some(\"\\nWITH [localtime({hour: 10, minute: 35}), localtime({hour: 12, minute: 31, second: 14, nanosecond: 645876123}), localtime({hour: 12, minute: 31, second: 14, nanosecond: 645876124}), localtime({hour: 12, minute: 35, second: 13}), localtime({hour: 12, minute: 30, second: 14, nanosecond: 645876123}), localtime({hour: 12, minute: 31, second: 15})] AS values\\nWITH values, size(values) AS numOfValues\\nUNWIND values AS value\\nWITH size([ x IN values WHERE x < value ]) AS x, value, numOfValues\\n  ORDER BY value\\nWITH numOfValues, collect(x) AS orderedX\\nRETURN orderedX = range(0, numOfValues-1) AS equal\\n\") }\n[Summary]\n1 feature\n1 scenario (1 failed)\n3 steps (2 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -14421,8 +14360,7 @@
             "keyword": "Scenario ",
             "name": "[45] Sort order should be consistent with comparisons where comparisons are defined #Example: times",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:1137:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Query returned error instead of result: Query { message: \"Execution error: ArgumentError: InvalidArgumentType - range() end must be an integer\", query: Some(\"\\nWITH [time({hour: 10, minute: 35, timezone: '-08:00'}), time({hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'}), time({hour: 12, minute: 31, second: 14, nanosecond: 645876124, timezone: '+01:00'}), time({hour: 12, minute: 35, second: 15, timezone: '+05:00'}), time({hour: 12, minute: 30, second: 14, nanosecond: 645876123, timezone: '+01:01'}), time({hour: 12, minute: 35, second: 15, timezone: '+01:00'})] AS values\\nWITH values, size(values) AS numOfValues\\nUNWIND values AS value\\nWITH size([ x IN values WHERE x < value ]) AS x, value, numOfValues\\n  ORDER BY value\\nWITH numOfValues, collect(x) AS orderedX\\nRETURN orderedX = range(0, numOfValues-1) AS equal\\n\") }\n[Summary]\n1 feature\n1 scenario (1 failed)\n3 steps (2 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -14436,8 +14374,7 @@
             "keyword": "Scenario ",
             "name": "[45] Sort order should be consistent with comparisons where comparisons are defined #Example: localdatetimes",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:1137:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Query returned error instead of result: Query { message: \"Execution error: Unsupported element type for typed_large_list_to_cv_array: Timestamp(Nanosecond, None)\", query: Some(\"\\nWITH [localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 30, second: 14, nanosecond: 12}), localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123}), localdatetime({year: 1, month: 1, day: 1, hour: 1, minute: 1, second: 1, nanosecond: 1}), localdatetime({year: 9999, month: 9, day: 9, hour: 9, minute: 59, second: 59, nanosecond: 999999999}), localdatetime({year: 1980, month: 12, day: 11, hour: 12, minute: 31, second: 14})] AS values\\nWITH values, size(values) AS numOfValues\\nUNWIND values AS value\\nWITH size([ x IN values WHERE x < value ]) AS x, value, numOfValues\\n  ORDER BY value\\nWITH numOfValues, collect(x) AS orderedX\\nRETURN orderedX = range(0, numOfValues-1) AS equal\\n\") }\n[Summary]\n1 feature\n1 scenario (1 failed)\n3 steps (2 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -14451,8 +14388,7 @@
             "keyword": "Scenario ",
             "name": "[45] Sort order should be consistent with comparisons where comparisons are defined #Example: datetimes",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:1137:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Query returned error instead of result: Query { message: \"Execution error: ArgumentError: InvalidArgumentType - range() end must be an integer\", query: Some(\"\\nWITH [datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 30, second: 14, nanosecond: 12, timezone: '+00:15'}), datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+00:17'}), datetime({year: 1, month: 1, day: 1, hour: 1, minute: 1, second: 1, nanosecond: 1, timezone: '-11:59'}), datetime({year: 9999, month: 9, day: 9, hour: 9, minute: 59, second: 59, nanosecond: 999999999, timezone: '+11:59'}), datetime({year: 1980, month: 12, day: 11, hour: 12, minute: 31, second: 14, timezone: '-11:59'})] AS values\\nWITH values, size(values) AS numOfValues\\nUNWIND values AS value\\nWITH size([ x IN values WHERE x < value ]) AS x, value, numOfValues\\n  ORDER BY value\\nWITH numOfValues, collect(x) AS orderedX\\nRETURN orderedX = range(0, numOfValues-1) AS equal\\n\") }\n[Summary]\n1 feature\n1 scenario (1 failed)\n3 steps (2 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -14822,8 +14758,7 @@
             "keyword": "Scenario ",
             "name": "[7] Sort by a string expression in ascending order",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/with-orderBy/WithOrderBy2.feature:235:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Query returned error instead of result: Query { message: \"Error during planning: Input was LargeBinary which is not a supported datatype for concat function\", query: Some(\"\\nMATCH (a)\\nWITH a\\n  ORDER BY a.title + ' ' + a.name\\n  LIMIT 3\\nRETURN a\\n\") }\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -14837,8 +14772,7 @@
             "keyword": "Scenario ",
             "name": "[7] Sort by a string expression in ascending order",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/with-orderBy/WithOrderBy2.feature:235:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Query returned error instead of result: Query { message: \"Error during planning: Input was LargeBinary which is not a supported datatype for concat function\", query: Some(\"\\nMATCH (a)\\nWITH a\\n  ORDER BY a.title + ' ' + a.name ASC\\n  LIMIT 3\\nRETURN a\\n\") }\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -14852,8 +14786,7 @@
             "keyword": "Scenario ",
             "name": "[7] Sort by a string expression in ascending order",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/with-orderBy/WithOrderBy2.feature:235:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Query returned error instead of result: Query { message: \"Error during planning: Input was LargeBinary which is not a supported datatype for concat function\", query: Some(\"\\nMATCH (a)\\nWITH a\\n  ORDER BY a.title + ' ' + a.name ASCENDING\\n  LIMIT 3\\nRETURN a\\n\") }\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -14867,8 +14800,7 @@
             "keyword": "Scenario ",
             "name": "[8] Sort by a string expression in descending order",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/with-orderBy/WithOrderBy2.feature:266:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Query returned error instead of result: Query { message: \"Error during planning: Input was LargeBinary which is not a supported datatype for concat function\", query: Some(\"\\nMATCH (a)\\nWITH a\\n  ORDER BY a.title + ' ' + a.name DESC\\n  LIMIT 3\\nRETURN a\\n\") }\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -14882,8 +14814,7 @@
             "keyword": "Scenario ",
             "name": "[8] Sort by a string expression in descending order",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/with-orderBy/WithOrderBy2.feature:266:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Query returned error instead of result: Query { message: \"Error during planning: Input was LargeBinary which is not a supported datatype for concat function\", query: Some(\"\\nMATCH (a)\\nWITH a\\n  ORDER BY a.title + ' ' + a.name DESCENDING\\n  LIMIT 3\\nRETURN a\\n\") }\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -14967,8 +14898,7 @@
             "keyword": "Scenario ",
             "name": "[11] Sort by a date expression in ascending order",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/with-orderBy/WithOrderBy2.feature:358:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Query returned error instead of result: Query { message: \"Execution error: Invalid types for addition\", query: Some(\"\\nMATCH (a)\\nWITH a\\n  ORDER BY a.date + duration({months: 1, days: 2})\\n  LIMIT 2\\nRETURN a\\n\") }\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -14982,8 +14912,7 @@
             "keyword": "Scenario ",
             "name": "[11] Sort by a date expression in ascending order",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/with-orderBy/WithOrderBy2.feature:358:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Query returned error instead of result: Query { message: \"Execution error: Invalid types for addition\", query: Some(\"\\nMATCH (a)\\nWITH a\\n  ORDER BY a.date + duration({months: 1, days: 2}) ASC\\n  LIMIT 2\\nRETURN a\\n\") }\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -14997,8 +14926,7 @@
             "keyword": "Scenario ",
             "name": "[11] Sort by a date expression in ascending order",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/with-orderBy/WithOrderBy2.feature:358:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Query returned error instead of result: Query { message: \"Execution error: Invalid types for addition\", query: Some(\"\\nMATCH (a)\\nWITH a\\n  ORDER BY a.date + duration({months: 1, days: 2}) ASCENDING\\n  LIMIT 2\\nRETURN a\\n\") }\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -15012,8 +14940,7 @@
             "keyword": "Scenario ",
             "name": "[12] Sort by a date expression in descending order",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/with-orderBy/WithOrderBy2.feature:389:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Query returned error instead of result: Query { message: \"Execution error: Invalid types for addition\", query: Some(\"\\nMATCH (a)\\nWITH a\\n  ORDER BY a.date + duration({months: 1, days: 2}) DESC\\n  LIMIT 2\\nRETURN a\\n\") }\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -15027,8 +14954,7 @@
             "keyword": "Scenario ",
             "name": "[12] Sort by a date expression in descending order",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/with-orderBy/WithOrderBy2.feature:389:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Query returned error instead of result: Query { message: \"Execution error: Invalid types for addition\", query: Some(\"\\nMATCH (a)\\nWITH a\\n  ORDER BY a.date + duration({months: 1, days: 2}) DESCENDING\\n  LIMIT 2\\nRETURN a\\n\") }\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -15042,8 +14968,7 @@
             "keyword": "Scenario ",
             "name": "[13] Sort by a local time expression in ascending order",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/with-orderBy/WithOrderBy2.feature:418:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Query returned error instead of result: Query { message: \"Execution error: Invalid types for addition\", query: Some(\"\\nMATCH (a)\\nWITH a\\n  ORDER BY a.time + duration({minutes: 6})\\n  LIMIT 3\\nRETURN a\\n\") }\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -15057,8 +14982,7 @@
             "keyword": "Scenario ",
             "name": "[13] Sort by a local time expression in ascending order",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/with-orderBy/WithOrderBy2.feature:418:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Query returned error instead of result: Query { message: \"Execution error: Invalid types for addition\", query: Some(\"\\nMATCH (a)\\nWITH a\\n  ORDER BY a.time + duration({minutes: 6}) ASC\\n  LIMIT 3\\nRETURN a\\n\") }\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -15072,8 +14996,7 @@
             "keyword": "Scenario ",
             "name": "[13] Sort by a local time expression in ascending order",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/with-orderBy/WithOrderBy2.feature:418:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Query returned error instead of result: Query { message: \"Execution error: Invalid types for addition\", query: Some(\"\\nMATCH (a)\\nWITH a\\n  ORDER BY a.time + duration({minutes: 6}) ASCENDING\\n  LIMIT 3\\nRETURN a\\n\") }\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -15087,8 +15010,7 @@
             "keyword": "Scenario ",
             "name": "[14] Sort by a local time expression in descending order",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/with-orderBy/WithOrderBy2.feature:449:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Query returned error instead of result: Query { message: \"Execution error: Invalid types for addition\", query: Some(\"\\nMATCH (a)\\nWITH a\\n  ORDER BY a.time + duration({minutes: 6}) DESC\\n  LIMIT 3\\nRETURN a\\n\") }\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -15102,8 +15024,7 @@
             "keyword": "Scenario ",
             "name": "[14] Sort by a local time expression in descending order",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/with-orderBy/WithOrderBy2.feature:449:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Query returned error instead of result: Query { message: \"Execution error: Invalid types for addition\", query: Some(\"\\nMATCH (a)\\nWITH a\\n  ORDER BY a.time + duration({minutes: 6}) DESCENDING\\n  LIMIT 3\\nRETURN a\\n\") }\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -15117,8 +15038,7 @@
             "keyword": "Scenario ",
             "name": "[15] Sort by a time expression in ascending order",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/with-orderBy/WithOrderBy2.feature:479:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Query returned error instead of result: Query { message: \"Execution error: Invalid types for addition\", query: Some(\"\\nMATCH (a)\\nWITH a\\n  ORDER BY a.time + duration({minutes: 6})\\n  LIMIT 3\\nRETURN a\\n\") }\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -15132,8 +15052,7 @@
             "keyword": "Scenario ",
             "name": "[15] Sort by a time expression in ascending order",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/with-orderBy/WithOrderBy2.feature:479:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Query returned error instead of result: Query { message: \"Execution error: Invalid types for addition\", query: Some(\"\\nMATCH (a)\\nWITH a\\n  ORDER BY a.time + duration({minutes: 6}) ASC\\n  LIMIT 3\\nRETURN a\\n\") }\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -15147,8 +15066,7 @@
             "keyword": "Scenario ",
             "name": "[15] Sort by a time expression in ascending order",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/with-orderBy/WithOrderBy2.feature:479:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Query returned error instead of result: Query { message: \"Execution error: Invalid types for addition\", query: Some(\"\\nMATCH (a)\\nWITH a\\n  ORDER BY a.time + duration({minutes: 6}) ASCENDING\\n  LIMIT 3\\nRETURN a\\n\") }\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -15162,8 +15080,7 @@
             "keyword": "Scenario ",
             "name": "[16] Sort by a time expression in descending order",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/with-orderBy/WithOrderBy2.feature:510:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Query returned error instead of result: Query { message: \"Execution error: Invalid types for addition\", query: Some(\"\\nMATCH (a)\\nWITH a\\n  ORDER BY a.time + duration({minutes: 6}) DESC\\n  LIMIT 3\\nRETURN a\\n\") }\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -15177,8 +15094,7 @@
             "keyword": "Scenario ",
             "name": "[16] Sort by a time expression in descending order",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/with-orderBy/WithOrderBy2.feature:510:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Query returned error instead of result: Query { message: \"Execution error: Invalid types for addition\", query: Some(\"\\nMATCH (a)\\nWITH a\\n  ORDER BY a.time + duration({minutes: 6}) DESCENDING\\n  LIMIT 3\\nRETURN a\\n\") }\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -15192,8 +15108,7 @@
             "keyword": "Scenario ",
             "name": "[17] Sort by a local date time expression in ascending order",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/with-orderBy/WithOrderBy2.feature:540:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Query returned error instead of result: Query { message: \"Execution error: Invalid types for addition\", query: Some(\"\\nMATCH (a)\\nWITH a\\n  ORDER BY a.datetime + duration({days: 4, minutes: 6})\\n  LIMIT 3\\nRETURN a\\n\") }\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -15207,8 +15122,7 @@
             "keyword": "Scenario ",
             "name": "[17] Sort by a local date time expression in ascending order",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/with-orderBy/WithOrderBy2.feature:540:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Query returned error instead of result: Query { message: \"Execution error: Invalid types for addition\", query: Some(\"\\nMATCH (a)\\nWITH a\\n  ORDER BY a.datetime + duration({days: 4, minutes: 6}) ASC\\n  LIMIT 3\\nRETURN a\\n\") }\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -15222,8 +15136,7 @@
             "keyword": "Scenario ",
             "name": "[17] Sort by a local date time expression in ascending order",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/with-orderBy/WithOrderBy2.feature:540:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Query returned error instead of result: Query { message: \"Execution error: Invalid types for addition\", query: Some(\"\\nMATCH (a)\\nWITH a\\n  ORDER BY a.datetime + duration({days: 4, minutes: 6}) ASCENDING\\n  LIMIT 3\\nRETURN a\\n\") }\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -15237,8 +15150,7 @@
             "keyword": "Scenario ",
             "name": "[18] Sort by a local date time expression in descending order",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/with-orderBy/WithOrderBy2.feature:571:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Query returned error instead of result: Query { message: \"Execution error: Invalid types for addition\", query: Some(\"\\nMATCH (a)\\nWITH a\\n  ORDER BY a.datetime + duration({days: 4, minutes: 6}) DESC\\n  LIMIT 3\\nRETURN a\\n\") }\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -15252,8 +15164,7 @@
             "keyword": "Scenario ",
             "name": "[18] Sort by a local date time expression in descending order",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/with-orderBy/WithOrderBy2.feature:571:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Query returned error instead of result: Query { message: \"Execution error: Invalid types for addition\", query: Some(\"\\nMATCH (a)\\nWITH a\\n  ORDER BY a.datetime + duration({days: 4, minutes: 6}) DESCENDING\\n  LIMIT 3\\nRETURN a\\n\") }\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -15267,8 +15178,7 @@
             "keyword": "Scenario ",
             "name": "[19] Sort by a date time expression in ascending order",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/with-orderBy/WithOrderBy2.feature:601:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Query returned error instead of result: Query { message: \"Execution error: Invalid types for addition\", query: Some(\"\\nMATCH (a)\\nWITH a\\n  ORDER BY a.datetime + duration({days: 4, minutes: 6})\\n  LIMIT 3\\nRETURN a\\n\") }\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -15282,8 +15192,7 @@
             "keyword": "Scenario ",
             "name": "[19] Sort by a date time expression in ascending order",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/with-orderBy/WithOrderBy2.feature:601:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Query returned error instead of result: Query { message: \"Execution error: Invalid types for addition\", query: Some(\"\\nMATCH (a)\\nWITH a\\n  ORDER BY a.datetime + duration({days: 4, minutes: 6}) ASC\\n  LIMIT 3\\nRETURN a\\n\") }\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -15297,8 +15206,7 @@
             "keyword": "Scenario ",
             "name": "[19] Sort by a date time expression in ascending order",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/with-orderBy/WithOrderBy2.feature:601:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Query returned error instead of result: Query { message: \"Execution error: Invalid types for addition\", query: Some(\"\\nMATCH (a)\\nWITH a\\n  ORDER BY a.datetime + duration({days: 4, minutes: 6}) ASCENDING\\n  LIMIT 3\\nRETURN a\\n\") }\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -15312,8 +15220,7 @@
             "keyword": "Scenario ",
             "name": "[20] Sort by a date time expression in descending order",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/with-orderBy/WithOrderBy2.feature:632:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Query returned error instead of result: Query { message: \"Execution error: Invalid types for addition\", query: Some(\"\\nMATCH (a)\\nWITH a\\n  ORDER BY a.datetime + duration({days: 4, minutes: 6}) DESC\\n  LIMIT 3\\nRETURN a\\n\") }\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -15327,8 +15234,7 @@
             "keyword": "Scenario ",
             "name": "[20] Sort by a date time expression in descending order",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/with-orderBy/WithOrderBy2.feature:632:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Query returned error instead of result: Query { message: \"Execution error: Invalid types for addition\", query: Some(\"\\nMATCH (a)\\nWITH a\\n  ORDER BY a.datetime + duration({days: 4, minutes: 6}) DESCENDING\\n  LIMIT 3\\nRETURN a\\n\") }\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -15342,8 +15248,7 @@
             "keyword": "Scenario ",
             "name": "[21] Sort by an expression that is only partially orderable on a non-distinct binding table",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/with-orderBy/WithOrderBy2.feature:662:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Query returned error instead of result: Query { message: \"Error during planning: Input was LargeBinary which is not a supported datatype for concat function\", query: Some(\"\\nMATCH (a)\\nWITH a.name AS name\\n  ORDER BY a.name + 'C' ASC\\n  LIMIT 2\\nRETURN name\\n\") }\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -15357,8 +15262,7 @@
             "keyword": "Scenario ",
             "name": "[21] Sort by an expression that is only partially orderable on a non-distinct binding table",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/with-orderBy/WithOrderBy2.feature:662:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Query returned error instead of result: Query { message: \"Error during planning: Input was LargeBinary which is not a supported datatype for concat function\", query: Some(\"\\nMATCH (a)\\nWITH a.name AS name\\n  ORDER BY a.name + 'C' DESC\\n  LIMIT 2\\nRETURN name\\n\") }\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -15372,8 +15276,7 @@
             "keyword": "Scenario ",
             "name": "[22] Sort by an expression that is only partially orderable on a non-distinct binding table, but used as a grouping key",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/with-orderBy/WithOrderBy2.feature:691:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Query returned error instead of result: Query { message: \"Schema error: No field named \\\"a.name\\\". Did you mean 'name'?.\", query: Some(\"\\nMATCH (a)\\nWITH a.name AS name, count(*) AS cnt\\n  ORDER BY a.name ASC\\n  LIMIT 1\\nRETURN name, cnt\\n\") }\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -15387,8 +15290,7 @@
             "keyword": "Scenario ",
             "name": "[22] Sort by an expression that is only partially orderable on a non-distinct binding table, but used as a grouping key",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/with-orderBy/WithOrderBy2.feature:691:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Query returned error instead of result: Query { message: \"Schema error: No field named \\\"a.name\\\". Did you mean 'name'?.\", query: Some(\"\\nMATCH (a)\\nWITH a.name AS name, count(*) AS cnt\\n  ORDER BY a.name DESC\\n  LIMIT 1\\nRETURN name, cnt\\n\") }\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -15402,8 +15304,7 @@
             "keyword": "Scenario ",
             "name": "[23] Sort by an expression that is only partially orderable on a non-distinct binding table, but used in parts as a grouping key",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/with-orderBy/WithOrderBy2.feature:719:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Query returned error instead of result: Query { message: \"Schema error: No field named \\\"a.name\\\". Did you mean 'name'?.\", query: Some(\"\\nMATCH (a)\\nWITH a.name AS name, count(*) AS cnt\\n  ORDER BY a.name + 'C' ASC\\n  LIMIT 1\\nRETURN name, cnt\\n\") }\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -15417,8 +15318,7 @@
             "keyword": "Scenario ",
             "name": "[23] Sort by an expression that is only partially orderable on a non-distinct binding table, but used in parts as a grouping key",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/with-orderBy/WithOrderBy2.feature:719:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Query returned error instead of result: Query { message: \"Schema error: No field named \\\"a.name\\\". Did you mean 'name'?.\", query: Some(\"\\nMATCH (a)\\nWITH a.name AS name, count(*) AS cnt\\n  ORDER BY a.name + 'C' DESC\\n  LIMIT 1\\nRETURN name, cnt\\n\") }\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -17264,8 +17164,7 @@
             "keyword": "Scenario ",
             "name": "[11] Sort by an aggregate projection",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/with-orderBy/WithOrderBy4.feature:307:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Query returned error instead of result: Query { message: \"SyntaxError: InvalidAggregation - This feature is not implemented: Physical plan does not support logical expression AggregateFunction(AggregateFunction { func: AggregateUDF { inner: CypherSumUdaf { signature: Signature { type_signature: Any(1), volatility: Immutable } } }, params: AggregateFunctionParams { args: [BinaryExpr(BinaryExpr { left: Column(Column { relation: None, name: \\\"a.num\\\" }), op: Plus, right: Column(Column { relation: None, name: \\\"a.num2\\\" }) })], distinct: false, filter: None, order_by: [], null_treatment: None } })\", query: Some(\"\\nMATCH (a:A)\\nWITH a.num2 % 3 AS mod, sum(a.num + a.num2) AS sum\\n  ORDER BY sum(a.num + a.num2)\\n  LIMIT 2\\nRETURN mod, sum\\n\") }\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -17322,7 +17221,7 @@
             "name": "[15] Sort by an aliased aggregate projection does allow subsequent matching",
             "result": {
               "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/with-orderBy/WithOrderBy4.feature:395:5\n      Matched: crates/uni-tck/src/steps/then.rs:37:1\n      Step panicked. Captured output: No result found\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
+              "error_message": "Step failed:\n      Defined: tck/features/clauses/with-orderBy/WithOrderBy4.feature:395:5\n      Matched: crates/uni-tck/src/steps/then.rs:37:1\n      Step panicked. Captured output: Result mismatch (in order): Row count mismatch: expected 2, got 3\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
             }
           }
         ]
@@ -17336,8 +17235,7 @@
             "keyword": "Scenario ",
             "name": "[16] Handle constants and parameters inside an order by item which contains an aggregation expression",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/with-orderBy/WithOrderBy4.feature:412:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Query returned error instead of result: Query { message: \"SyntaxError: InvalidAggregation - This feature is not implemented: Physical plan does not support logical expression AggregateFunction(AggregateFunction { func: AggregateUDF { inner: Avg { signature: Signature { type_signature: UserDefined, volatility: Immutable }, aliases: [\\\"mean\\\"] } }, params: AggregateFunctionParams { args: [ScalarFunction(ScalarFunction { func: ScalarUDF { inner: CypherToFloat64Udf }, args: [Column(Column { relation: None, name: \\\"person.age\\\" })] })], distinct: false, filter: None, order_by: [], null_treatment: None } })\", query: Some(\"\\nMATCH (person)\\nWITH avg(person.age) AS avgAge\\nORDER BY $age + avg(person.age) - 1000\\nRETURN avgAge\\n\") }\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -17351,8 +17249,7 @@
             "keyword": "Scenario ",
             "name": "[17] Handle projected variables inside an order by item which contains an aggregation expression",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/with-orderBy/WithOrderBy4.feature:426:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Query returned error instead of result: Query { message: \"SyntaxError: InvalidAggregation - This feature is not implemented: Physical plan does not support logical expression AggregateFunction(AggregateFunction { func: AggregateUDF { inner: Count { name: \\\"count\\\", signature: Signature { type_signature: OneOf([VariadicAny, Nullary]), volatility: Immutable } } }, params: AggregateFunctionParams { args: [Column(Column { relation: None, name: \\\"you.age\\\" })], distinct: false, filter: None, order_by: [], null_treatment: None } })\", query: Some(\"\\nMATCH (me: Person)--(you: Person)\\nWITH me.age AS age, count(you.age) AS cnt\\nORDER BY age, age + count(you.age)\\nRETURN age\\n\") }\n[Summary]\n1 feature\n1 scenario (1 failed)\n3 steps (2 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -17366,8 +17263,7 @@
             "keyword": "Scenario ",
             "name": "[18]  Handle projected property accesses inside an order by item which contains an aggregation expression",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/with-orderBy/WithOrderBy4.feature:439:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Query returned error instead of result: Query { message: \"Schema error: No field named \\\"me.age\\\". Did you mean 'age'?.\", query: Some(\"\\nMATCH (me: Person)--(you: Person)\\nWITH me.age AS age, count(you.age) AS cnt\\nORDER BY me.age + count(you.age)\\nRETURN age\\n\") }\n[Summary]\n1 feature\n1 scenario (1 failed)\n3 steps (2 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -17395,8 +17291,7 @@
             "keyword": "Scenario ",
             "name": "[20] Fail if more complex expressions, even if projected, are used inside an order by item which contains an aggregation expression",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/with-orderBy/WithOrderBy4.feature:463:5\n      Matched: crates/uni-tck/src/steps/then.rs:90:1\n      Step panicked. Captured output: Error mismatch: Error detail mismatch: expected message to contain 'AmbiguousAggregationExpression', got 'Parse error: SyntaxError: NoExpressionAlias - All non-variable expressions in WITH must be aliased (use AS)'\n[Summary]\n1 feature\n1 scenario (1 failed)\n3 steps (2 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -17416,8 +17311,7 @@
             "keyword": "Scenario ",
             "name": "[1] Handle dependencies across WITH with SKIP",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/with-skip-limit/WithSkipLimit1.feature:80:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Result mismatch (any order): Unexpected column 'b._all_props' in result\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -17995,7 +17889,8 @@
             "keyword": "Scenario ",
             "name": "[1] Forwarding multiple node and relationship variables",
             "result": {
-              "status": "passed"
+              "status": "failed",
+              "error_message": "Step failed:\n      Defined: tck/features/clauses/with/With3.feature:49:5\n      Matched: crates/uni-tck/src/steps/then.rs:37:1\n      Step panicked. Captured output: Result mismatch (in order): Row count mismatch: expected 2, got 3\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
             }
           }
         ]
@@ -22832,7 +22727,7 @@
             "name": "[4] Statically access a property of a node resulting from an expression",
             "result": {
               "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/expressions/graph/Graph6.feature:90:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Result mismatch (any order): Expected column '(list[1]).missing' not found in result\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
+              "error_message": "Step failed:\n      Defined: tck/features/expressions/graph/Graph6.feature:90:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Result mismatch (any order): Expected column '(list[1]).existing' not found in result\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
             }
           }
         ]
@@ -22890,7 +22785,7 @@
             "name": "[8] Statically access a property of a relationship resulting from an expression",
             "result": {
               "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/expressions/graph/Graph6.feature:151:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Result mismatch (any order): Expected column '(list[1]).missing' not found in result\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
+              "error_message": "Step failed:\n      Defined: tck/features/expressions/graph/Graph6.feature:151:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Result mismatch (any order): Expected column '(list[1]).existing' not found in result\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
             }
           }
         ]
@@ -23189,7 +23084,7 @@
             "name": "[3] `properties()` on null",
             "result": {
               "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/expressions/graph/Graph9.feature:73:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [(\"properties(null)\", Some(Null)), (\"properties(n)\", Some(Null)), (\"properties(r)\", Some(Map({})))]. Expected: [{\"properties(null)\": Null, \"properties(n)\": Null, \"properties(r)\": Null}]\n[Summary]\n1 feature\n1 scenario (1 failed)\n3 steps (2 passed, 1 failed)\n"
+              "error_message": "Step failed:\n      Defined: tck/features/expressions/graph/Graph9.feature:73:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [(\"properties(r)\", Some(Map({}))), (\"properties(null)\", Some(Null)), (\"properties(n)\", Some(Null))]. Expected: [{\"properties(r)\": Null, \"properties(null)\": Null, \"properties(n)\": Null}]\n[Summary]\n1 feature\n1 scenario (1 failed)\n3 steps (2 passed, 1 failed)\n"
             }
           }
         ]
@@ -27354,7 +27249,7 @@
             "name": "[18] Return a complex list containing multiple mixed and nested values",
             "result": {
               "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/expressions/literals/Literals7.feature:295:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [(\"literal\", Some(List([Map({\"ppu\": Float(0.55), \"name\": String(\"Cake\"), \"topping\": List([Map({\"type\": String(\"None\"), \"id\": String(\"5001\")}), Map({\"type\": String(\"Glazed\"), \"id\": String(\"5002\")}), Map({\"id\": String(\"5005\"), \"type\": String(\"Sugar\")}), Map({\"id\": String(\"5007\"), \"type\": String(\"Powdered Sugar\")}), Map({\"id\": String(\"5006\"), \"type\": String(\"Chocolate Sprinkles\")}), Map({\"id\": String(\"5003\"), \"type\": String(\"Chocolate\")}), Map({\"type\": String(\"Maple\"), \"id\": String(\"5004\")})]), \"batters\": Map({\"batter\": List([Map({\"type\": String(\"Regular\"), \"id\": String(\"1001\")}), Map({\"type\": String(\"Chocolate\"), \"id\": String(\"1002\")}), Map({\"type\": String(\"Blueberry\"), \"id\": String(\"1003\")}), Map({\"id\": String(\"1004\"), \"type\": String(\"Devils Food\")})])}), \"type\": String(\"donut\"), \"id\": String(\"0001\")}), Map({\"ppu\": Float(0.55), \"batters\": Map({\"batter\": List([Map({\"id\": String(\"1001\"), \"type\": String(\"Regular\")})])}), \"name\": String(\"Raised\"), \"type\": String(\"donut\"), \"id\": String(\"0002\"), \"topping\": List([Map({\"type\": String(\"None\"), \"id\": String(\"5001\")}), Map({\"type\": String(\"Glazed\"), \"id\": String(\"5002\")}), Map({\"id\": String(\"5005\"), \"type\": String(\"Sugar\")}), Map({\"type\": String(\"Chocolate\"), \"id\": String(\"5003\")}), Map({\"id\": String(\"5004\"), \"type\": String(\"Maple\")})])}), Map({\"name\": String(\"Old Fashioned\"), \"batters\": Map({\"batter\": List([Map({\"id\": String(\"1001\"), \"type\": String(\"Regular\")}), Map({\"id\": String(\"1002\"), \"type\": String(\"Chocolate\")})])}), \"topping\": List([Map({\"id\": String(\"5001\"), \"type\": String(\"None\")}), Map({\"type\": String(\"Glazed\"), \"id\": String(\"5002\")}), Map({\"type\": String(\"Chocolate\"), \"id\": String(\"5003\")}), Map({\"type\": String(\"Maple\"), \"id\": String(\"5004\")})]), \"id\": String(\"0003\")..."
+              "error_message": "Step failed:\n      Defined: tck/features/expressions/literals/Literals7.feature:295:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [(\"literal\", Some(List([Map({\"ppu\": Float(0.55), \"topping\": List([Map({\"type\": String(\"None\"), \"id\": String(\"5001\")}), Map({\"type\": String(\"Glazed\"), \"id\": String(\"5002\")}), Map({\"type\": String(\"Sugar\"), \"id\": String(\"5005\")}), Map({\"id\": String(\"5007\"), \"type\": String(\"Powdered Sugar\")}), Map({\"id\": String(\"5006\"), \"type\": String(\"Chocolate Sprinkles\")}), Map({\"id\": String(\"5003\"), \"type\": String(\"Chocolate\")}), Map({\"type\": String(\"Maple\"), \"id\": String(\"5004\")})]), \"batters\": Map({\"batter\": List([Map({\"type\": String(\"Regular\"), \"id\": String(\"1001\")}), Map({\"type\": String(\"Chocolate\"), \"id\": String(\"1002\")}), Map({\"id\": String(\"1003\"), \"type\": String(\"Blueberry\")}), Map({\"type\": String(\"Devils Food\"), \"id\": String(\"1004\")})])}), \"name\": String(\"Cake\"), \"id\": String(\"0001\"), \"type\": String(\"donut\")}), Map({\"batters\": Map({\"batter\": List([Map({\"type\": String(\"Regular\"), \"id\": String(\"1001\")})])}), \"type\": String(\"donut\"), \"name\": String(\"Raised\"), \"ppu\": Float(0.55), \"id\": String(\"0002\"), \"topping\": List([Map({\"type\": String(\"None\"), \"id\": String(\"5001\")}), Map({\"id\": String(\"5002\"), \"type\": String(\"Glazed\")}), Map({\"id\": String(\"5005\"), \"type\": String(\"Sugar\")}), Map({\"type\": String(\"Chocolate\"), \"id\": String(\"5003\")}), Map({\"type\": String(\"Maple\"), \"id\": String(\"5004\")})])}), Map({\"topping\": List([Map({\"type\": String(\"None\"), \"id\": String(\"5001\")}), Map({\"id\": String(\"5002\"), \"type\": String(\"Glazed\")}), Map({\"id\": String(\"5003\"), \"type\": String(\"Chocolate\")}), Map({\"id\": String(\"5004\"), \"type\": String(\"Maple\")})]), \"batters\": Map({\"batter\": List([Map({\"type\": String(\"Regular\"), \"id\": String(\"1001\")}), Map({\"id\": String(\"1002\"), \"type\": String(\"Chocolate\")})])}), \"type\": String(\"donut\"), \"id\": String(\"0003\"), \"name\"..."
             }
           }
         ]
@@ -27655,7 +27550,7 @@
             "name": "[18] Return a complex map containing multiple mixed and nested values",
             "result": {
               "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/expressions/literals/Literals8.feature:294:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [(\"literal\", Some(Map({\"data\": List([Map({\"batters\": Map({\"batter\": List([Map({\"type\": String(\"Regular\"), \"id\": String(\"1001\")}), Map({\"type\": String(\"Chocolate\"), \"id\": String(\"1002\")}), Map({\"type\": String(\"Blueberry\"), \"id\": String(\"1003\")}), Map({\"id\": String(\"1004\"), \"type\": String(\"Devils Food\")})])}), \"ppu\": Float(0.55), \"topping\": List([Map({\"type\": String(\"None\"), \"id\": String(\"5001\")}), Map({\"type\": String(\"Glazed\"), \"id\": String(\"5002\")}), Map({\"id\": String(\"5005\"), \"type\": String(\"Sugar\")}), Map({\"id\": String(\"5007\"), \"type\": String(\"Powdered Sugar\")}), Map({\"id\": String(\"5006\"), \"type\": String(\"Chocolate Sprinkles\")}), Map({\"id\": String(\"5003\"), \"type\": String(\"Chocolate\")}), Map({\"type\": String(\"Maple\"), \"id\": String(\"5004\")})]), \"id\": String(\"0001\"), \"name\": String(\"Cake\"), \"type\": String(\"donut\")}), Map({\"topping\": List([Map({\"type\": String(\"None\"), \"id\": String(\"5001\")}), Map({\"id\": String(\"5002\"), \"type\": String(\"Glazed\")}), Map({\"id\": String(\"5005\"), \"type\": String(\"Sugar\")}), Map({\"type\": String(\"Chocolate\"), \"id\": String(\"5003\")}), Map({\"type\": String(\"Maple\"), \"id\": String(\"5004\")})]), \"id\": String(\"0002\"), \"batters\": Map({\"batter\": List([Map({\"id\": String(\"1001\"), \"type\": String(\"Regular\")})])}), \"name\": String(\"Raised\"), \"type\": String(\"donut\"), \"ppu\": Float(0.55)}), Map({\"id\": String(\"0003\"), \"ppu\": Float(0.55), \"name\": String(\"Old Fashioned\"), \"type\": String(\"donut\"), \"topping\": List([Map({\"id\": String(\"5001\"), \"type\": String(\"None\")}), Map({\"type\": String(\"Glazed\"), \"id\": String(\"5002\")}), Map({\"id\": String(\"5003\"), \"type\": String(\"Chocolate\")}), Map({\"type\": String(\"Maple\"), \"id\": String(\"5004\")})]), \"batters\": Map({\"batter\": List([Map({\"id\": String(\"1001\"), \"type\": String(\"Regular\")}), Ma..."
+              "error_message": "Step failed:\n      Defined: tck/features/expressions/literals/Literals8.feature:294:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [(\"literal\", Some(Map({\"data\": List([Map({\"id\": String(\"0001\"), \"topping\": List([Map({\"id\": String(\"5001\"), \"type\": String(\"None\")}), Map({\"id\": String(\"5002\"), \"type\": String(\"Glazed\")}), Map({\"type\": String(\"Sugar\"), \"id\": String(\"5005\")}), Map({\"type\": String(\"Powdered Sugar\"), \"id\": String(\"5007\")}), Map({\"type\": String(\"Chocolate Sprinkles\"), \"id\": String(\"5006\")}), Map({\"id\": String(\"5003\"), \"type\": String(\"Chocolate\")}), Map({\"type\": String(\"Maple\"), \"id\": String(\"5004\")})]), \"name\": String(\"Cake\"), \"type\": String(\"donut\"), \"ppu\": Float(0.55), \"batters\": Map({\"batter\": List([Map({\"id\": String(\"1001\"), \"type\": String(\"Regular\")}), Map({\"id\": String(\"1002\"), \"type\": String(\"Chocolate\")}), Map({\"type\": String(\"Blueberry\"), \"id\": String(\"1003\")}), Map({\"type\": String(\"Devils Food\"), \"id\": String(\"1004\")})])})}), Map({\"topping\": List([Map({\"id\": String(\"5001\"), \"type\": String(\"None\")}), Map({\"id\": String(\"5002\"), \"type\": String(\"Glazed\")}), Map({\"id\": String(\"5005\"), \"type\": String(\"Sugar\")}), Map({\"type\": String(\"Chocolate\"), \"id\": String(\"5003\")}), Map({\"type\": String(\"Maple\"), \"id\": String(\"5004\")})]), \"ppu\": Float(0.55), \"id\": String(\"0002\"), \"name\": String(\"Raised\"), \"batters\": Map({\"batter\": List([Map({\"id\": String(\"1001\"), \"type\": String(\"Regular\")})])}), \"type\": String(\"donut\")}), Map({\"id\": String(\"0003\"), \"type\": String(\"donut\"), \"batters\": Map({\"batter\": List([Map({\"type\": String(\"Regular\"), \"id\": String(\"1001\")}), Map({\"id\": String(\"1002\"), \"type\": String(\"Chocolate\")})])}), \"ppu\": Float(0.55), \"name\": String(\"Old Fashioned\"), \"topping\": List([Map({\"type\": String(\"None\"), \"id\": String(\"5001\")}), Map({\"type\": String(\"Glazed\"), \"id\": String(\"5002\")}), Map({\"type\": String(\"Chocolate\"), \"id\": String(\"5003\")..."
             }
           }
         ]
@@ -27830,7 +27725,7 @@
             "name": "[3] Statically access a field of a map resulting from an expression",
             "result": {
               "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/expressions/map/Map1.feature:65:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Result mismatch (any order): Expected column '(list[1]).missing' not found in result\n[Summary]\n1 feature\n1 scenario (1 failed)\n3 steps (2 passed, 1 failed)\n"
+              "error_message": "Step failed:\n      Defined: tck/features/expressions/map/Map1.feature:65:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Result mismatch (any order): Expected column '(list[1]).existing' not found in result\n[Summary]\n1 feature\n1 scenario (1 failed)\n3 steps (2 passed, 1 failed)\n"
             }
           }
         ]
@@ -49450,7 +49345,7 @@
             "name": "[6] Should provide accessors for date time",
             "result": {
               "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/expressions/temporal/Temporal5.feature:133:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [(\"d.dayOfQuarter\", Some(Int(42))), (\"d.ordinalDay\", Some(Int(316))), (\"d.month\", Some(Int(11))), (\"d.epochSeconds\", Some(Int(469024274))), (\"d.week\", Some(Int(45))), (\"d.offsetMinutes\", Some(Int(60))), (\"d.minute\", Some(Int(31))), (\"d.weekYear\", Some(Int(1984))), (\"d.year\", Some(Int(1984))), (\"d.offset\", Some(String(\"+01:00\"))), (\"d.weekDay\", Some(Int(7))), (\"d.microsecond\", Some(Int(645876))), (\"d.millisecond\", Some(Int(645))), (\"d.day\", Some(Int(11))), (\"d.timezone\", Some(String(\"Europe/Stockholm\"))), (\"d.epochMillis\", Some(Int(469024274645))), (\"d.hour\", Some(Int(12))), (\"d.quarter\", Some(Int(4))), (\"d.second\", Some(Int(14))), (\"d.nanosecond\", Some(Int(645876123))), (\"d.offsetSeconds\", Some(Int(3600)))]. Expected: [{\"d.dayOfQuarter\": Int(42), \"d.ordinalDay\": Int(316), \"d.month\": Int(11), \"d.epochSeconds\": Int(469020674), \"d.week\": Int(45), \"d.offsetMinutes\": Int(60), \"d.minute\": Int(31), \"d.weekYear\": Int(1984), \"d.year\": Int(1984), \"d.offset\": String(\"+01:00\"), \"d.weekDay\": Int(7), \"d.microsecond\": Int(645876), \"d.millisecond\": Int(645), \"d.day\": Int(11), \"d.timezone\": String(\"Europe/Stockholm\"), \"d.epochMillis\": Int(469020674645), \"d.hour\": Int(12), \"d.quarter\": Int(4), \"d.second\": Int(14), \"d.nanosecond\": Int(645876123), \"d.offsetSeconds\": Int(3600)}]\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
+              "error_message": "Step failed:\n      Defined: tck/features/expressions/temporal/Temporal5.feature:133:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [(\"d.day\", Some(Int(11))), (\"d.weekYear\", Some(Int(1984))), (\"d.nanosecond\", Some(Int(645876123))), (\"d.timezone\", Some(String(\"Europe/Stockholm\"))), (\"d.epochMillis\", Some(Int(469024274645))), (\"d.quarter\", Some(Int(4))), (\"d.millisecond\", Some(Int(645))), (\"d.weekDay\", Some(Int(7))), (\"d.dayOfQuarter\", Some(Int(42))), (\"d.week\", Some(Int(45))), (\"d.offset\", Some(String(\"+01:00\"))), (\"d.second\", Some(Int(14))), (\"d.microsecond\", Some(Int(645876))), (\"d.offsetSeconds\", Some(Int(3600))), (\"d.minute\", Some(Int(31))), (\"d.epochSeconds\", Some(Int(469024274))), (\"d.year\", Some(Int(1984))), (\"d.hour\", Some(Int(12))), (\"d.offsetMinutes\", Some(Int(60))), (\"d.ordinalDay\", Some(Int(316))), (\"d.month\", Some(Int(11)))]. Expected: [{\"d.day\": Int(11), \"d.weekYear\": Int(1984), \"d.nanosecond\": Int(645876123), \"d.timezone\": String(\"Europe/Stockholm\"), \"d.epochMillis\": Int(469020674645), \"d.quarter\": Int(4), \"d.millisecond\": Int(645), \"d.weekDay\": Int(7), \"d.dayOfQuarter\": Int(42), \"d.week\": Int(45), \"d.offset\": String(\"+01:00\"), \"d.second\": Int(14), \"d.microsecond\": Int(645876), \"d.offsetSeconds\": Int(3600), \"d.minute\": Int(31), \"d.epochSeconds\": Int(469020674), \"d.year\": Int(1984), \"d.hour\": Int(12), \"d.offsetMinutes\": Int(60), \"d.ordinalDay\": Int(316), \"d.month\": Int(11)}]\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
             }
           }
         ]

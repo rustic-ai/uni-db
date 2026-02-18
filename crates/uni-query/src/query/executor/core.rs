@@ -7,12 +7,15 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::RwLock;
 use uni_algo::algo::AlgorithmRegistry;
-use uni_common::Value;
-use uni_cypher::ast::Expr;
+use uni_common::{TemporalType, TemporalValue, Value};
+use uni_cypher::ast::{BinaryOp, Expr};
 use uni_store::QueryContext;
 use uni_store::runtime::l0_manager::L0Manager;
 use uni_store::runtime::writer::Writer;
 use uni_store::storage::manager::StorageManager;
+
+use crate::query::expr_eval::eval_binary_op;
+use crate::query::datetime::{classify_temporal, eval_datetime_function};
 
 use super::procedure::ProcedureRegistry;
 
@@ -302,23 +305,421 @@ impl Executor {
     }
 
     pub(crate) fn compare_values(a: &Value, b: &Value) -> std::cmp::Ordering {
+        let temporal_a = Self::extract_temporal_value(a);
+        let temporal_b = Self::extract_temporal_value(b);
+
+        if let (Some(ta), Some(tb)) = (&temporal_a, &temporal_b) {
+            return Self::compare_temporal(ta, tb);
+        }
+
+        // Temporal strings (e.g. "1984-10-11T...") and Value::Temporal should
+        // compare using Cypher temporal semantics when compatible.
+        if matches!(
+            (a, b),
+            (Value::String(_), Value::Temporal(_)) | (Value::Temporal(_), Value::String(_))
+        ) && let Some(ord) = Self::try_eval_ordering(a, b)
+        {
+            return ord;
+        }
+        if let (Value::String(_), Some(tb)) = (a, temporal_b)
+            && let Some(ord) = Self::try_eval_ordering(a, &Value::Temporal(tb))
+        {
+            return ord;
+        }
+        if let (Some(ta), Value::String(_)) = (temporal_a, b)
+            && let Some(ord) = Self::try_eval_ordering(&Value::Temporal(ta), b)
+        {
+            return ord;
+        }
+
+        let ra = Self::order_by_type_rank(a);
+        let rb = Self::order_by_type_rank(b);
+        if ra != rb {
+            return ra.cmp(&rb);
+        }
+
         match (a, b) {
-            (Value::Int(i1), Value::Int(i2)) => i1.cmp(i2),
-            (Value::Float(f1), Value::Float(f2)) => {
-                f1.partial_cmp(f2).unwrap_or(std::cmp::Ordering::Equal)
+            (Value::Map(l), Value::Map(r)) => Self::compare_maps(l, r),
+            (Value::Node(l), Value::Node(r)) => Self::compare_nodes(l, r),
+            (Value::Edge(l), Value::Edge(r)) => Self::compare_edges(l, r),
+            (Value::List(l), Value::List(r)) => Self::compare_lists(l, r),
+            (Value::Path(l), Value::Path(r)) => Self::compare_paths(l, r),
+            (Value::String(l), Value::String(r)) => {
+                let lv = Value::String(l.clone());
+                let rv = Value::String(r.clone());
+
+                if matches!(
+                    eval_binary_op(&lv, &BinaryOp::Lt, &rv),
+                    Ok(Value::Bool(true))
+                ) {
+                    std::cmp::Ordering::Less
+                } else if matches!(
+                    eval_binary_op(&lv, &BinaryOp::Gt, &rv),
+                    Ok(Value::Bool(true))
+                ) {
+                    std::cmp::Ordering::Greater
+                } else {
+                    l.cmp(r)
+                }
             }
-            (Value::Int(i), Value::Float(f)) => (*i as f64)
-                .partial_cmp(f)
-                .unwrap_or(std::cmp::Ordering::Equal),
-            (Value::Float(f), Value::Int(i)) => f
-                .partial_cmp(&(*i as f64))
-                .unwrap_or(std::cmp::Ordering::Equal),
-            (Value::String(s1), Value::String(s2)) => s1.cmp(s2),
-            (Value::Bool(b1), Value::Bool(b2)) => b1.cmp(b2),
-            (Value::Null, Value::Null) => std::cmp::Ordering::Equal,
-            (Value::Null, _) => std::cmp::Ordering::Less,
-            (_, Value::Null) => std::cmp::Ordering::Greater,
+            (Value::Bool(l), Value::Bool(r)) => l.cmp(r),
+            (Value::Temporal(l), Value::Temporal(r)) => Self::compare_temporal(l, r),
+            (Value::Int(l), Value::Int(r)) => l.cmp(r),
+            (Value::Float(l), Value::Float(r)) => {
+                if l.is_nan() && r.is_nan() {
+                    std::cmp::Ordering::Equal
+                } else if l.is_nan() {
+                    std::cmp::Ordering::Greater
+                } else if r.is_nan() {
+                    std::cmp::Ordering::Less
+                } else {
+                    l.partial_cmp(r).unwrap_or(std::cmp::Ordering::Equal)
+                }
+            }
+            (Value::Int(l), Value::Float(r)) => {
+                if r.is_nan() {
+                    std::cmp::Ordering::Less
+                } else {
+                    (*l as f64)
+                        .partial_cmp(r)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                }
+            }
+            (Value::Float(l), Value::Int(r)) => {
+                if l.is_nan() {
+                    std::cmp::Ordering::Greater
+                } else {
+                    l.partial_cmp(&(*r as f64))
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                }
+            }
+            (Value::Bytes(l), Value::Bytes(r)) => l.cmp(r),
+            (Value::Vector(l), Value::Vector(r)) => {
+                let min_len = l.len().min(r.len());
+                for i in 0..min_len {
+                    let ord = l[i].total_cmp(&r[i]);
+                    if ord != std::cmp::Ordering::Equal {
+                        return ord;
+                    }
+                }
+                l.len().cmp(&r.len())
+            }
             _ => std::cmp::Ordering::Equal,
+        }
+    }
+
+    fn try_eval_ordering(a: &Value, b: &Value) -> Option<std::cmp::Ordering> {
+        if matches!(eval_binary_op(a, &BinaryOp::Lt, b), Ok(Value::Bool(true))) {
+            Some(std::cmp::Ordering::Less)
+        } else if matches!(eval_binary_op(a, &BinaryOp::Gt, b), Ok(Value::Bool(true))) {
+            Some(std::cmp::Ordering::Greater)
+        } else if matches!(eval_binary_op(a, &BinaryOp::Eq, b), Ok(Value::Bool(true))) {
+            Some(std::cmp::Ordering::Equal)
+        } else {
+            None
+        }
+    }
+
+    /// Cypher ORDER BY total precedence:
+    /// MAP < NODE < RELATIONSHIP < LIST < PATH < STRING < BOOLEAN < TEMPORAL < NUMBER < NaN < NULL
+    fn order_by_type_rank(v: &Value) -> u8 {
+        match v {
+            Value::Map(map) => Self::map_order_rank(map),
+            Value::Node(_) => 1,
+            Value::Edge(_) => 2,
+            Value::List(_) => 3,
+            Value::Path(_) => 4,
+            Value::String(_) => 5,
+            Value::Bool(_) => 6,
+            Value::Temporal(_) => 7,
+            Value::Int(_) => 8,
+            Value::Float(f) if f.is_nan() => 9,
+            Value::Float(_) => 8,
+            Value::Null => 10,
+            Value::Bytes(_) | Value::Vector(_) => 11,
+            _ => 11,
+        }
+    }
+
+    fn map_order_rank(map: &HashMap<String, Value>) -> u8 {
+        if Self::map_as_temporal(map).is_some() {
+            7
+        } else if map.contains_key("nodes")
+            && (map.contains_key("relationships") || map.contains_key("edges"))
+        {
+            4
+        } else if map.contains_key("_eid")
+            || map.contains_key("_src")
+            || map.contains_key("_dst")
+            || map.contains_key("_type")
+            || map.contains_key("_type_name")
+        {
+            2
+        } else if map.contains_key("_vid")
+            || map.contains_key("_labels")
+            || map.contains_key("_label")
+        {
+            1
+        } else {
+            0
+        }
+    }
+
+    fn extract_temporal_value(value: &Value) -> Option<TemporalValue> {
+        match value {
+            Value::Temporal(t) => Some(t.clone()),
+            Value::Map(map) => Self::map_as_temporal(map),
+            Value::String(s) => Self::string_as_temporal(s),
+            _ => None,
+        }
+    }
+
+    fn string_as_temporal(s: &str) -> Option<TemporalValue> {
+        let fn_name = match classify_temporal(s)? {
+            TemporalType::Date => "DATE",
+            TemporalType::LocalTime => "LOCALTIME",
+            TemporalType::Time => "TIME",
+            TemporalType::LocalDateTime => "LOCALDATETIME",
+            TemporalType::DateTime => "DATETIME",
+            TemporalType::Duration => "DURATION",
+        };
+        match eval_datetime_function(fn_name, &[Value::String(s.to_string())]).ok()? {
+            Value::Temporal(tv) => Some(tv),
+            _ => None,
+        }
+    }
+
+    fn map_as_temporal(map: &HashMap<String, Value>) -> Option<TemporalValue> {
+        if map.len() != 1 {
+            return None;
+        }
+
+        let as_i32 = |v: &Value| v.as_i64().and_then(|n| i32::try_from(n).ok());
+        let as_i64 = |v: &Value| v.as_i64();
+
+        if let Some(Value::Map(inner)) = map.get("Date") {
+            let days = inner.get("days_since_epoch").and_then(as_i32)?;
+            return Some(TemporalValue::Date {
+                days_since_epoch: days,
+            });
+        }
+        if let Some(Value::Map(inner)) = map.get("LocalTime") {
+            let nanos = inner.get("nanos_since_midnight").and_then(as_i64)?;
+            return Some(TemporalValue::LocalTime {
+                nanos_since_midnight: nanos,
+            });
+        }
+        if let Some(Value::Map(inner)) = map.get("Time") {
+            let nanos = inner.get("nanos_since_midnight").and_then(as_i64)?;
+            let offset = inner.get("offset_seconds").and_then(as_i32)?;
+            return Some(TemporalValue::Time {
+                nanos_since_midnight: nanos,
+                offset_seconds: offset,
+            });
+        }
+        if let Some(Value::Map(inner)) = map.get("LocalDateTime") {
+            let nanos = inner.get("nanos_since_epoch").and_then(as_i64)?;
+            return Some(TemporalValue::LocalDateTime {
+                nanos_since_epoch: nanos,
+            });
+        }
+        if let Some(Value::Map(inner)) = map.get("DateTime") {
+            let nanos = inner.get("nanos_since_epoch").and_then(as_i64)?;
+            let offset = inner.get("offset_seconds").and_then(as_i32)?;
+            let timezone_name = match inner.get("timezone_name") {
+                Some(Value::String(s)) => Some(s.clone()),
+                _ => None,
+            };
+            return Some(TemporalValue::DateTime {
+                nanos_since_epoch: nanos,
+                offset_seconds: offset,
+                timezone_name,
+            });
+        }
+        if let Some(Value::Map(inner)) = map.get("Duration") {
+            let months = inner.get("months").and_then(as_i64)?;
+            let days = inner.get("days").and_then(as_i64)?;
+            let nanos = inner.get("nanos").and_then(as_i64)?;
+            return Some(TemporalValue::Duration {
+                months,
+                days,
+                nanos,
+            });
+        }
+        None
+    }
+
+    fn compare_lists(left: &[Value], right: &[Value]) -> std::cmp::Ordering {
+        for (l, r) in left.iter().zip(right.iter()) {
+            let ord = Self::compare_values(l, r);
+            if ord != std::cmp::Ordering::Equal {
+                return ord;
+            }
+        }
+        left.len().cmp(&right.len())
+    }
+
+    fn compare_maps(
+        left: &HashMap<String, Value>,
+        right: &HashMap<String, Value>,
+    ) -> std::cmp::Ordering {
+        let mut l_pairs: Vec<_> = left.iter().collect();
+        let mut r_pairs: Vec<_> = right.iter().collect();
+        l_pairs.sort_by(|(lk, _), (rk, _)| lk.cmp(rk));
+        r_pairs.sort_by(|(lk, _), (rk, _)| lk.cmp(rk));
+
+        for ((lk, lv), (rk, rv)) in l_pairs.iter().zip(r_pairs.iter()) {
+            let key_ord = lk.cmp(rk);
+            if key_ord != std::cmp::Ordering::Equal {
+                return key_ord;
+            }
+            let val_ord = Self::compare_values(lv, rv);
+            if val_ord != std::cmp::Ordering::Equal {
+                return val_ord;
+            }
+        }
+
+        l_pairs.len().cmp(&r_pairs.len())
+    }
+
+    fn compare_nodes(left: &uni_common::Node, right: &uni_common::Node) -> std::cmp::Ordering {
+        let mut l_labels = left.labels.clone();
+        let mut r_labels = right.labels.clone();
+        l_labels.sort();
+        r_labels.sort();
+
+        let labels_ord = l_labels.cmp(&r_labels);
+        if labels_ord != std::cmp::Ordering::Equal {
+            return labels_ord;
+        }
+
+        let vid_ord = left.vid.cmp(&right.vid);
+        if vid_ord != std::cmp::Ordering::Equal {
+            return vid_ord;
+        }
+
+        Self::compare_maps(&left.properties, &right.properties)
+    }
+
+    fn compare_edges(left: &uni_common::Edge, right: &uni_common::Edge) -> std::cmp::Ordering {
+        let edge_type_ord = left.edge_type.cmp(&right.edge_type);
+        if edge_type_ord != std::cmp::Ordering::Equal {
+            return edge_type_ord;
+        }
+
+        let src_ord = left.src.cmp(&right.src);
+        if src_ord != std::cmp::Ordering::Equal {
+            return src_ord;
+        }
+
+        let dst_ord = left.dst.cmp(&right.dst);
+        if dst_ord != std::cmp::Ordering::Equal {
+            return dst_ord;
+        }
+
+        let eid_ord = left.eid.cmp(&right.eid);
+        if eid_ord != std::cmp::Ordering::Equal {
+            return eid_ord;
+        }
+
+        Self::compare_maps(&left.properties, &right.properties)
+    }
+
+    fn compare_paths(left: &uni_common::Path, right: &uni_common::Path) -> std::cmp::Ordering {
+        for (ln, rn) in left.nodes.iter().zip(right.nodes.iter()) {
+            let ord = Self::compare_nodes(ln, rn);
+            if ord != std::cmp::Ordering::Equal {
+                return ord;
+            }
+        }
+        let node_len_ord = left.nodes.len().cmp(&right.nodes.len());
+        if node_len_ord != std::cmp::Ordering::Equal {
+            return node_len_ord;
+        }
+
+        for (le, re) in left.edges.iter().zip(right.edges.iter()) {
+            let ord = Self::compare_edges(le, re);
+            if ord != std::cmp::Ordering::Equal {
+                return ord;
+            }
+        }
+        left.edges.len().cmp(&right.edges.len())
+    }
+
+    fn compare_temporal(left: &TemporalValue, right: &TemporalValue) -> std::cmp::Ordering {
+        match (left, right) {
+            (
+                TemporalValue::Date {
+                    days_since_epoch: l,
+                },
+                TemporalValue::Date {
+                    days_since_epoch: r,
+                },
+            ) => l.cmp(r),
+            (
+                TemporalValue::LocalTime {
+                    nanos_since_midnight: l,
+                },
+                TemporalValue::LocalTime {
+                    nanos_since_midnight: r,
+                },
+            ) => l.cmp(r),
+            (
+                TemporalValue::Time {
+                    nanos_since_midnight: lm,
+                    offset_seconds: lo,
+                },
+                TemporalValue::Time {
+                    nanos_since_midnight: rm,
+                    offset_seconds: ro,
+                },
+            ) => {
+                let l_utc = *lm as i128 - (*lo as i128) * 1_000_000_000;
+                let r_utc = *rm as i128 - (*ro as i128) * 1_000_000_000;
+                l_utc.cmp(&r_utc)
+            }
+            (
+                TemporalValue::LocalDateTime {
+                    nanos_since_epoch: l,
+                },
+                TemporalValue::LocalDateTime {
+                    nanos_since_epoch: r,
+                },
+            ) => l.cmp(r),
+            (
+                TemporalValue::DateTime {
+                    nanos_since_epoch: l,
+                    ..
+                },
+                TemporalValue::DateTime {
+                    nanos_since_epoch: r,
+                    ..
+                },
+            ) => l.cmp(r),
+            (
+                TemporalValue::Duration {
+                    months: lm,
+                    days: ld,
+                    nanos: ln,
+                },
+                TemporalValue::Duration {
+                    months: rm,
+                    days: rd,
+                    nanos: rn,
+                },
+            ) => (*lm, *ld, *ln).cmp(&(*rm, *rd, *rn)),
+            _ => Self::temporal_variant_rank(left).cmp(&Self::temporal_variant_rank(right)),
+        }
+    }
+
+    fn temporal_variant_rank(v: &TemporalValue) -> u8 {
+        match v {
+            TemporalValue::Date { .. } => 0,
+            TemporalValue::LocalTime { .. } => 1,
+            TemporalValue::Time { .. } => 2,
+            TemporalValue::LocalDateTime { .. } => 3,
+            TemporalValue::DateTime { .. } => 4,
+            TemporalValue::Duration { .. } => 5,
         }
     }
 }
