@@ -459,6 +459,16 @@ impl GraphUnwindStream {
                     .map_err(|e| datafusion::error::DataFusionError::Execution(e.to_string()))
             }
 
+            // Map literal: {a: 1, b: 'x'}
+            Expr::Map(entries) => {
+                let mut map = HashMap::new();
+                for (key, val_expr) in entries {
+                    let val = self.evaluate_expr_impl(val_expr, batch, row_idx)?;
+                    map.insert(key.clone(), val);
+                }
+                Ok(Value::Map(map))
+            }
+
             // Unsupported expressions return null
             _ => Ok(Value::Null),
         }
@@ -896,6 +906,110 @@ mod tests {
             }
             _ => panic!("Expected list"),
         }
+    }
+
+    #[test]
+    fn test_evaluate_map_literal() {
+        use arrow_array::builder::UInt64Builder;
+        use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
+
+        let mut vid_builder = UInt64Builder::new();
+        vid_builder.append_value(1);
+
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![Field::new(
+                "n._vid",
+                DataType::UInt64,
+                false,
+            )])),
+            vec![Arc::new(vid_builder.finish())],
+        )
+        .unwrap();
+
+        let input_schema = Arc::new(Schema::new(vec![Field::new(
+            "n._vid",
+            DataType::UInt64,
+            false,
+        )]));
+
+        let empty_stream = RecordBatchStreamAdapter::new(input_schema, futures::stream::empty());
+
+        let stream = GraphUnwindStream {
+            input: Box::pin(empty_stream),
+            expr: Expr::Map(vec![
+                ("a".to_string(), Expr::Literal(CypherLiteral::Integer(1))),
+                (
+                    "b".to_string(),
+                    Expr::Literal(CypherLiteral::String("hello".to_string())),
+                ),
+            ]),
+            params: HashMap::new(),
+            schema: Arc::new(Schema::new(vec![
+                Field::new("n._vid", DataType::UInt64, false),
+                Field::new("x", DataType::LargeBinary, true),
+            ])),
+            metrics: BaselineMetrics::new(&ExecutionPlanMetricsSet::new(), 0),
+        };
+
+        let result = stream.evaluate_expr_for_row(&batch, 0).unwrap();
+        match result {
+            Value::Map(map) => {
+                assert_eq!(map.get("a"), Some(&Value::Int(1)));
+                assert_eq!(map.get("b"), Some(&Value::String("hello".to_string())));
+            }
+            _ => panic!("Expected Map, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_evaluate_map_property_access() {
+        use arrow_array::builder::UInt64Builder;
+        use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
+
+        let mut vid_builder = UInt64Builder::new();
+        vid_builder.append_value(1);
+
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![Field::new(
+                "n._vid",
+                DataType::UInt64,
+                false,
+            )])),
+            vec![Arc::new(vid_builder.finish())],
+        )
+        .unwrap();
+
+        let input_schema = Arc::new(Schema::new(vec![Field::new(
+            "n._vid",
+            DataType::UInt64,
+            false,
+        )]));
+
+        let empty_stream = RecordBatchStreamAdapter::new(input_schema, futures::stream::empty());
+
+        // Test: {a: 1, b: 'x'}.a should return 1
+        let map_expr = Expr::Map(vec![
+            ("a".to_string(), Expr::Literal(CypherLiteral::Integer(1))),
+            (
+                "b".to_string(),
+                Expr::Literal(CypherLiteral::String("x".to_string())),
+            ),
+        ]);
+        let prop_expr = Expr::Property(Box::new(map_expr), "a".to_string());
+
+        let stream = GraphUnwindStream {
+            input: Box::pin(empty_stream),
+            expr: prop_expr.clone(),
+            params: HashMap::new(),
+            schema: Arc::new(Schema::new(vec![
+                Field::new("n._vid", DataType::UInt64, false),
+                Field::new("x", DataType::LargeBinary, true),
+            ])),
+            metrics: BaselineMetrics::new(&ExecutionPlanMetricsSet::new(), 0),
+        };
+
+        let result = stream.evaluate_expr_impl(&prop_expr, &batch, 0).unwrap();
+        assert_eq!(result, Value::Int(1));
     }
 
     #[test]

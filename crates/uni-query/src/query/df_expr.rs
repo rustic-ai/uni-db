@@ -664,6 +664,14 @@ fn translate_property_access(
             ));
         }
 
+        if !is_graph_entity && crate::query::datetime::is_temporal_accessor(prop) {
+            let base_expr = DfExpr::Column(Column::from_name(var_name));
+            return Ok(dummy_udf_expr(
+                "_temporal_property",
+                vec![base_expr, lit(prop.to_string())],
+            ));
+        }
+
         // Standard property access: "{variable}.{property}" column reference.
         let col_name = format!("{}.{}", var_name, prop);
 
@@ -673,6 +681,16 @@ fn translate_property_access(
             && let Some(value) = ctx.parameters.get(&col_name)
         {
             return value_to_scalar(value).map(lit);
+        }
+
+        // Nested property access on non-graph variable (e.g., m.a.b where m is a map):
+        // recursively translate the base expression and chain index() calls.
+        if !is_graph_entity && matches!(base, Expr::Property(_, _)) {
+            let base_expr = cypher_expr_to_df(base, context)?;
+            return Ok(dummy_udf_expr(
+                "index",
+                vec![base_expr, lit(prop.to_string())],
+            ));
         }
 
         if is_graph_entity {
@@ -696,6 +714,15 @@ fn translate_property_access(
             let base_expr = cypher_expr_to_df(base, context)?;
             return Ok(dummy_udf_expr(
                 "_duration_property",
+                vec![base_expr, lit(prop.to_string())],
+            ));
+        }
+
+        // Try temporal accessor (e.g., datetime().year, time().hour).
+        if crate::query::datetime::is_temporal_accessor(prop) {
+            let base_expr = cypher_expr_to_df(base, context)?;
+            return Ok(dummy_udf_expr(
+                "_temporal_property",
                 vec![base_expr, lit(prop.to_string())],
             ));
         }
@@ -1440,10 +1467,7 @@ fn translate_string_function(name_upper: &str, df_args: Vec<DfExpr>) -> Option<R
     match name_upper {
         "TOSTRING" => {
             check1!("toString");
-            Some(Ok(cast_expr(
-                first_arg(&df_args),
-                datafusion::arrow::datatypes::DataType::Utf8,
-            )))
+            Some(Ok(dummy_udf_expr("tostring", df_args)))
         }
         "TOINTEGER" | "TOINT" => {
             check1!("toInteger");
@@ -2662,7 +2686,10 @@ pub fn apply_type_coercion(expr: &DfExpr, schema: &datafusion::common::DFSchema)
                     let all_list_or_lb = types.iter().all(|t| {
                         matches!(
                             t,
-                            DataType::LargeBinary | DataType::List(_) | DataType::LargeList(_)
+                            DataType::Null
+                                | DataType::LargeBinary
+                                | DataType::List(_)
+                                | DataType::LargeList(_)
                         )
                     });
                     if all_list_or_lb {
@@ -2724,9 +2751,7 @@ pub fn apply_type_coercion(expr: &DfExpr, schema: &datafusion::common::DFSchema)
                     // encoded map/struct field access via index()) are not boolean arrays,
                     // so wrap them with _cv_to_bool to decode and return a boolean.
                     let cw = match cw.get_type(schema).ok() {
-                        Some(DataType::LargeBinary) => {
-                            dummy_udf_expr("_cv_to_bool", vec![cw])
-                        }
+                        Some(DataType::LargeBinary) => dummy_udf_expr("_cv_to_bool", vec![cw]),
                         _ => cw,
                     };
                     let ct = apply_type_coercion(t, schema)?;
