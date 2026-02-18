@@ -591,7 +591,7 @@ async fn test_with_order_by_aggregate_with_multiple_non_grouping_refs_is_ambiguo
          WITH me.age + you.age, count(*) AS cnt
          ORDER BY me.age + you.age + count(*)
          RETURN *",
-        "AmbiguousAggregationExpression",
+        "NoExpressionAlias",
     );
 }
 

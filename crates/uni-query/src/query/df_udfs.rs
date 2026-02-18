@@ -2534,7 +2534,32 @@ fn get_type_rank_scalar(val: &ScalarValue) -> i32 {
 
         ScalarValue::Dictionary(_, val) => get_type_rank_scalar(val),
 
+        // LargeBinary: CypherValue-encoded properties — decode and rank semantically.
+        // Without this, all LB values get rank 0 (below Number/Bool/String), causing
+        // incorrect sort order in mixed-type ORDER BY.
+        ScalarValue::LargeBinary(Some(bytes)) => get_type_rank_from_cypher_value(bytes),
+
         _ => 0,
+    }
+}
+
+/// Decode a CypherValue-encoded byte slice and return its semantic type rank.
+/// Cypher ORDER BY rank: Map(8) > Node(7) > Rel(6) > Path(5) > List(4) > String(3) > Bool(2) > Number(1)
+fn get_type_rank_from_cypher_value(bytes: &[u8]) -> i32 {
+    use uni_common::Value;
+    match uni_common::cypher_value_codec::decode(bytes) {
+        Ok(Value::Null) => 9,
+        Ok(Value::Int(_) | Value::Float(_)) => 1,
+        Ok(Value::Bool(_)) => 2,
+        Ok(Value::String(_)) => 3,
+        Ok(Value::List(_)) => 4,
+        Ok(Value::Map(_)) => 8,
+        Ok(Value::Node(_)) => 7,
+        Ok(Value::Edge(_)) => 6,
+        Ok(Value::Path(_)) => 5,
+        Ok(Value::Bytes(_) | Value::Vector(_) | Value::Temporal(_)) => 0,
+        Ok(_) => 0,
+        Err(_) => 0,
     }
 }
 

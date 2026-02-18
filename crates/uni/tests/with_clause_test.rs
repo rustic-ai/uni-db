@@ -166,10 +166,7 @@ async fn test_with1_forward_possibly_null_node() -> Result<()> {
         .await?;
 
     assert_eq!(result.len(), 1);
-    assert_eq!(
-        result.rows()[0].value("a"),
-        Some(&Value::Null)
-    );
+    assert_eq!(result.rows()[0].value("a"), Some(&Value::Null));
     assert_eq!(result.rows()[0].get::<String>("b")?, "b");
 
     Ok(())
@@ -183,9 +180,11 @@ async fn test_with1_forward_possibly_null_node() -> Result<()> {
 #[tokio::test]
 async fn test_with2_property_join() -> Result<()> {
     let db = graph_nums().await?;
-    db.execute("CREATE (:Person {name: 'Alice', num: 42})").await?;
+    db.execute("CREATE (:Person {name: 'Alice', num: 42})")
+        .await?;
     db.execute("CREATE (:Person {name: 'Bob', id: 42})").await?;
-    db.execute("CREATE (:Person {name: 'Charlie', id: 99})").await?;
+    db.execute("CREATE (:Person {name: 'Charlie', id: 99})")
+        .await?;
 
     let result = db
         .query(
@@ -248,9 +247,7 @@ async fn test_with4_alias_relationship() -> Result<()> {
     let db = graph_a_to_b().await?;
 
     let result = db
-        .query(
-            "MATCH ()-[r1:T]->() WITH r1 AS r2 RETURN r2.name AS rel",
-        )
+        .query("MATCH ()-[r1:T]->() WITH r1 AS r2 RETURN r2.name AS rel")
         .await?;
 
     assert_eq!(result.len(), 1);
@@ -263,9 +260,12 @@ async fn test_with4_alias_relationship() -> Result<()> {
 #[tokio::test]
 async fn test_with4_alias_expr_to_new_name() -> Result<()> {
     let db = graph_nums().await?;
-    db.execute("CREATE (:Person {name: 'Alice', num: 1, id: 1})").await?;
-    db.execute("CREATE (:Person {name: 'Bob', num: 2, id: 2})").await?;
-    db.execute("CREATE (:Person {name: 'Charlie', num: 1, id: 3})").await?;
+    db.execute("CREATE (:Person {name: 'Alice', num: 1, id: 1})")
+        .await?;
+    db.execute("CREATE (:Person {name: 'Bob', num: 2, id: 2})")
+        .await?;
+    db.execute("CREATE (:Person {name: 'Charlie', num: 1, id: 3})")
+        .await?;
 
     let result = db
         .query(
@@ -302,20 +302,21 @@ async fn test_with4_alias_expr_to_existing_name() -> Result<()> {
     Ok(())
 }
 
-/// TCK With4[4]: Duplicate aliases.
-/// TCK spec requires a ColumnNameConflict error, but our engine currently
-/// accepts this (last value wins). Test documents actual behavior.
+/// TCK With4[4]: Duplicate aliases must raise ColumnNameConflict.
 #[tokio::test]
 async fn test_with4_duplicate_aliases_last_wins() -> Result<()> {
     let db = Uni::in_memory().build().await?;
 
-    let result = db.query("WITH 1 AS a, 2 AS a RETURN a").await?;
+    let result = db.query("WITH 1 AS a, 2 AS a RETURN a").await;
 
-    // Engine accepts duplicate aliases; last definition wins
-    assert_eq!(result.len(), 1);
-    let val = result.rows()[0].get::<i64>("a")?;
-    // Either 1 or 2 is acceptable — the key point is no crash
-    assert!(val == 1 || val == 2);
+    // TCK spec: duplicate aliases in WITH must raise ColumnNameConflict
+    assert!(result.is_err());
+    let err_msg = result.unwrap_err().to_string();
+    assert!(
+        err_msg.contains("ColumnNameConflict"),
+        "Expected ColumnNameConflict error, got: {}",
+        err_msg
+    );
 
     Ok(())
 }
@@ -346,9 +347,11 @@ async fn test_with4_unaliased_aggregate_accepted() -> Result<()> {
 #[tokio::test]
 async fn test_with4_reuse_variable_names() -> Result<()> {
     let db = graph_nums().await?;
-    db.execute("CREATE (:Person {name: 'Alice', num: 1})").await?;
+    db.execute("CREATE (:Person {name: 'Alice', num: 1})")
+        .await?;
     db.execute("CREATE (:Person {name: 'Bob', num: 2})").await?;
-    db.execute("CREATE (:Person {name: 'Charlie', num: 3})").await?;
+    db.execute("CREATE (:Person {name: 'Charlie', num: 3})")
+        .await?;
 
     let result = db
         .query(
@@ -374,7 +377,8 @@ async fn test_with4_reuse_variable_names() -> Result<()> {
 #[tokio::test]
 async fn test_with4_multiple_aliasing_backref() -> Result<()> {
     let db = graph_nums().await?;
-    db.execute("CREATE (:Person {name: 'Alice', id: 0})").await?;
+    db.execute("CREATE (:Person {name: 'Alice', id: 0})")
+        .await?;
 
     // Test single-level map aliasing with back-reference (which works).
     let result = db
@@ -434,8 +438,10 @@ async fn test_with5_distinct_expression() -> Result<()> {
 #[tokio::test]
 async fn test_with5_distinct_lists_in_maps() -> Result<()> {
     let db = graph_nums().await?;
-    db.execute("CREATE (:Person {name: 'Alice', num: 1})").await?;
-    db.execute("CREATE (:Person {name: 'Alice', num: 2})").await?;
+    db.execute("CREATE (:Person {name: 'Alice', num: 1})")
+        .await?;
+    db.execute("CREATE (:Person {name: 'Alice', num: 2})")
+        .await?;
 
     // Both have the same name, so {name: n.name} should deduplicate
     let result = db
@@ -456,8 +462,10 @@ async fn test_with5_distinct_lists_in_maps() -> Result<()> {
 #[tokio::test]
 async fn test_with6_group_single_key_single_agg() -> Result<()> {
     let db = graph_nums().await?;
-    db.execute("CREATE (:Person {name: 'Alice', num: 1})").await?;
-    db.execute("CREATE (:Person {name: 'Alice', num: 2})").await?;
+    db.execute("CREATE (:Person {name: 'Alice', num: 1})")
+        .await?;
+    db.execute("CREATE (:Person {name: 'Alice', num: 2})")
+        .await?;
     db.execute("CREATE (:Person {name: 'Bob', num: 3})").await?;
 
     let result = db
@@ -501,9 +509,11 @@ async fn test_with6_group_rel_key_agg() -> Result<()> {
 #[tokio::test]
 async fn test_with6_group_multiple_keys() -> Result<()> {
     let db = graph_nums().await?;
-    db.execute("CREATE (:Person {name: 'Alice', num: 1})").await?;
+    db.execute("CREATE (:Person {name: 'Alice', num: 1})")
+        .await?;
     db.execute("CREATE (:Person {name: 'Bob', num: 1})").await?;
-    db.execute("CREATE (:Person {name: 'Alice', num: 2})").await?;
+    db.execute("CREATE (:Person {name: 'Alice', num: 2})")
+        .await?;
 
     let result = db
         .query(
@@ -526,9 +536,12 @@ async fn test_with6_group_multiple_keys() -> Result<()> {
 #[tokio::test]
 async fn test_with6_agg_with_constants() -> Result<()> {
     let db = graph_nums().await?;
-    db.execute("CREATE (:Person {name: 'Alice', num: 10})").await?;
-    db.execute("CREATE (:Person {name: 'Bob', num: 20})").await?;
-    db.execute("CREATE (:Person {name: 'Charlie', num: 30})").await?;
+    db.execute("CREATE (:Person {name: 'Alice', num: 10})")
+        .await?;
+    db.execute("CREATE (:Person {name: 'Bob', num: 20})")
+        .await?;
+    db.execute("CREATE (:Person {name: 'Charlie', num: 30})")
+        .await?;
 
     let result = db
         .query(
@@ -554,8 +567,10 @@ async fn test_with6_agg_with_constants() -> Result<()> {
 #[tokio::test]
 async fn test_with6_agg_projected_vars_in_expr() -> Result<()> {
     let db = graph_nums().await?;
-    db.execute("CREATE (:Person {name: 'Alice', num: 10})").await?;
-    db.execute("CREATE (:Person {name: 'Bob', num: 20})").await?;
+    db.execute("CREATE (:Person {name: 'Alice', num: 10})")
+        .await?;
+    db.execute("CREATE (:Person {name: 'Bob', num: 20})")
+        .await?;
 
     let result = db
         .query(
@@ -578,8 +593,10 @@ async fn test_with6_agg_projected_vars_in_expr() -> Result<()> {
 #[tokio::test]
 async fn test_with6_fail_ambiguous_non_projected_var() -> Result<()> {
     let db = graph_nums().await?;
-    db.execute("CREATE (:Person {name: 'Alice', num: 10})").await?;
-    db.execute("CREATE (:Person {name: 'Bob', num: 20})").await?;
+    db.execute("CREATE (:Person {name: 'Alice', num: 10})")
+        .await?;
+    db.execute("CREATE (:Person {name: 'Bob', num: 20})")
+        .await?;
 
     // me.num is not projected as a grouping key, so using it outside aggregate is ambiguous
     let result = db
@@ -604,8 +621,10 @@ async fn test_with6_fail_ambiguous_non_projected_var() -> Result<()> {
 #[tokio::test]
 async fn test_with6_complex_expr_aggregate() -> Result<()> {
     let db = graph_nums().await?;
-    db.execute("CREATE (:Person {name: 'Alice', num: 10})").await?;
-    db.execute("CREATE (:Person {name: 'Bob', num: 20})").await?;
+    db.execute("CREATE (:Person {name: 'Alice', num: 10})")
+        .await?;
+    db.execute("CREATE (:Person {name: 'Bob', num: 20})")
+        .await?;
 
     // Use alias (which is what well-formed Cypher should do)
     let result = db
@@ -633,9 +652,11 @@ async fn test_with6_complex_expr_aggregate() -> Result<()> {
 #[tokio::test]
 async fn test_with7_chained_variable_rebinding() -> Result<()> {
     let db = graph_nums().await?;
-    db.execute("CREATE (:Person {name: 'Alice', num: 1})").await?;
+    db.execute("CREATE (:Person {name: 'Alice', num: 1})")
+        .await?;
     db.execute("CREATE (:Person {name: 'Bob', num: 2})").await?;
-    db.execute("CREATE (:Person {name: 'Charlie', num: 3})").await?;
+    db.execute("CREATE (:Person {name: 'Charlie', num: 3})")
+        .await?;
 
     let result = db
         .query(
@@ -661,10 +682,13 @@ async fn test_with7_chained_variable_rebinding() -> Result<()> {
 #[tokio::test]
 async fn test_with7_chained_predicates_aggregation() -> Result<()> {
     let db = graph_nums().await?;
-    db.execute("CREATE (:Person {name: 'Alice', num: 1})").await?;
+    db.execute("CREATE (:Person {name: 'Alice', num: 1})")
+        .await?;
     db.execute("CREATE (:Person {name: 'Bob', num: 2})").await?;
-    db.execute("CREATE (:Person {name: 'Charlie', num: 3})").await?;
-    db.execute("CREATE (:Person {name: 'Diana', num: 4})").await?;
+    db.execute("CREATE (:Person {name: 'Charlie', num: 3})")
+        .await?;
+    db.execute("CREATE (:Person {name: 'Diana', num: 4})")
+        .await?;
     db.execute("CREATE (:Person {name: 'Eve', num: 5})").await?;
 
     let result = db
@@ -928,9 +952,11 @@ async fn test_order_by4_aliased_agg() -> Result<()> {
 #[tokio::test]
 async fn test_order_by4_agg_allows_subsequent_match() -> Result<()> {
     let db = graph_nums().await?;
-    db.execute("CREATE (:Person {name: 'Alice', num: 1})").await?;
+    db.execute("CREATE (:Person {name: 'Alice', num: 1})")
+        .await?;
     db.execute("CREATE (:Person {name: 'Bob', num: 2})").await?;
-    db.execute("CREATE (:Person {name: 'Charlie', num: 3})").await?;
+    db.execute("CREATE (:Person {name: 'Charlie', num: 3})")
+        .await?;
 
     let result = db
         .query(
@@ -953,7 +979,8 @@ async fn test_order_by4_agg_allows_subsequent_match() -> Result<()> {
 #[tokio::test]
 async fn test_order_by4_fail_non_projected_agg_var() -> Result<()> {
     let db = graph_nums().await?;
-    db.execute("CREATE (:Person {name: 'Alice', num: 1})").await?;
+    db.execute("CREATE (:Person {name: 'Alice', num: 1})")
+        .await?;
 
     let result = db
         .query(
@@ -976,7 +1003,8 @@ async fn test_order_by4_fail_non_projected_agg_var() -> Result<()> {
 #[tokio::test]
 async fn test_order_by4_fail_non_projected_agg_expr() -> Result<()> {
     let db = graph_nums().await?;
-    db.execute("CREATE (:Person {name: 'Alice', num: 1})").await?;
+    db.execute("CREATE (:Person {name: 'Alice', num: 1})")
+        .await?;
 
     let result = db
         .query(
@@ -996,7 +1024,8 @@ async fn test_order_by4_fail_non_projected_agg_expr() -> Result<()> {
 #[tokio::test]
 async fn test_order_by4_fail_undefined_in_order_by() -> Result<()> {
     let db = graph_nums().await?;
-    db.execute("CREATE (:Person {name: 'Alice', num: 1})").await?;
+    db.execute("CREATE (:Person {name: 'Alice', num: 1})")
+        .await?;
 
     let result = db
         .query(
@@ -1042,9 +1071,12 @@ async fn test_order_by4_non_projected_existing_var() -> Result<()> {
 #[tokio::test]
 async fn test_where1_filter_single_variable() -> Result<()> {
     let db = graph_nums().await?;
-    db.execute("CREATE (:Person {name: 'A', name2: 'A2'})").await?;
-    db.execute("CREATE (:Person {name: 'B', name2: 'B2'})").await?;
-    db.execute("CREATE (:Person {name: 'C', name2: 'C2'})").await?;
+    db.execute("CREATE (:Person {name: 'A', name2: 'A2'})")
+        .await?;
+    db.execute("CREATE (:Person {name: 'B', name2: 'B2'})")
+        .await?;
+    db.execute("CREATE (:Person {name: 'C', name2: 'C2'})")
+        .await?;
 
     let result = db
         .query(
@@ -1064,9 +1096,12 @@ async fn test_where1_filter_single_variable() -> Result<()> {
 #[tokio::test]
 async fn test_where1_filter_with_distinct() -> Result<()> {
     let db = graph_nums().await?;
-    db.execute("CREATE (:Person {name: 'Alice', name2: 'A'})").await?;
-    db.execute("CREATE (:Person {name: 'Bob', name2: 'B'})").await?;
-    db.execute("CREATE (:Person {name: 'Charlie', name2: 'B'})").await?;
+    db.execute("CREATE (:Person {name: 'Alice', name2: 'A'})")
+        .await?;
+    db.execute("CREATE (:Person {name: 'Bob', name2: 'B'})")
+        .await?;
+    db.execute("CREATE (:Person {name: 'Charlie', name2: 'B'})")
+        .await?;
 
     let result = db
         .query(
@@ -1184,7 +1219,8 @@ async fn test_where2_conjunctive_multi_var() -> Result<()> {
 #[tokio::test]
 async fn test_where3_equi_join_identity() -> Result<()> {
     let db = graph_nums().await?;
-    db.execute("CREATE (:Person {name: 'Alice', id: 1})").await?;
+    db.execute("CREATE (:Person {name: 'Alice', id: 1})")
+        .await?;
     db.execute("CREATE (:Person {name: 'Bob', id: 2})").await?;
 
     // Cross product, filter where a = b (same node)
@@ -1208,9 +1244,11 @@ async fn test_where3_equi_join_identity() -> Result<()> {
 #[tokio::test]
 async fn test_where3_equi_join_properties_disconnected() -> Result<()> {
     let db = graph_nums().await?;
-    db.execute("CREATE (:Person {name: 'Alice', id: 1})").await?;
+    db.execute("CREATE (:Person {name: 'Alice', id: 1})")
+        .await?;
     db.execute("CREATE (:Person {name: 'Bob', id: 2})").await?;
-    db.execute("CREATE (:Person {name: 'Charlie', id: 1})").await?;
+    db.execute("CREATE (:Person {name: 'Charlie', id: 1})")
+        .await?;
 
     let result = db
         .query(
@@ -1231,9 +1269,12 @@ async fn test_where3_equi_join_properties_disconnected() -> Result<()> {
 #[tokio::test]
 async fn test_where3_equi_join_properties_adjacent() -> Result<()> {
     let db = graph_nums().await?;
-    db.execute("CREATE (:Person {name: 'Alice', animal: 'cat'})").await?;
-    db.execute("CREATE (:Person {name: 'Bob', animal: 'dog'})").await?;
-    db.execute("CREATE (:Person {name: 'Charlie', animal: 'cat'})").await?;
+    db.execute("CREATE (:Person {name: 'Alice', animal: 'cat'})")
+        .await?;
+    db.execute("CREATE (:Person {name: 'Bob', animal: 'dog'})")
+        .await?;
+    db.execute("CREATE (:Person {name: 'Charlie', animal: 'cat'})")
+        .await?;
 
     let result = db
         .query(
@@ -1258,9 +1299,11 @@ async fn test_where3_equi_join_properties_adjacent() -> Result<()> {
 #[tokio::test]
 async fn test_where4_non_equi_join_inequality() -> Result<()> {
     let db = graph_nums().await?;
-    db.execute("CREATE (:Person {name: 'Alice', id: 1})").await?;
+    db.execute("CREATE (:Person {name: 'Alice', id: 1})")
+        .await?;
     db.execute("CREATE (:Person {name: 'Bob', id: 2})").await?;
-    db.execute("CREATE (:Person {name: 'Charlie', id: 3})").await?;
+    db.execute("CREATE (:Person {name: 'Charlie', id: 3})")
+        .await?;
 
     let result = db
         .query(
@@ -1280,7 +1323,8 @@ async fn test_where4_non_equi_join_inequality() -> Result<()> {
 #[tokio::test]
 async fn test_where5_null_filter_out() -> Result<()> {
     let db = graph_nums().await?;
-    db.execute("CREATE (:Person {name: 'Alice', name2: 'text'})").await?;
+    db.execute("CREATE (:Person {name: 'Alice', name2: 'text'})")
+        .await?;
     db.execute("CREATE (:Person {name: 'Bob'})").await?; // name2 is null
 
     let result = db
@@ -1328,7 +1372,8 @@ async fn test_where5_null_and_false() -> Result<()> {
 #[tokio::test]
 async fn test_where5_null_and_true() -> Result<()> {
     let db = graph_nums().await?;
-    db.execute("CREATE (:Person {name: 'Alice', name2: 'text'})").await?;
+    db.execute("CREATE (:Person {name: 'Alice', name2: 'text'})")
+        .await?;
     db.execute("CREATE (:Person {name: 'Bob'})").await?; // name2 is null
 
     let result = db
@@ -1349,8 +1394,10 @@ async fn test_where5_null_and_true() -> Result<()> {
 #[tokio::test]
 async fn test_where5_null_or_rescues() -> Result<()> {
     let db = graph_nums().await?;
-    db.execute("CREATE (:Person {name: 'Alice', name2: 'text'})").await?;
-    db.execute("CREATE (:Person {name: 'Bob', name2: 'other'})").await?;
+    db.execute("CREATE (:Person {name: 'Alice', name2: 'text'})")
+        .await?;
+    db.execute("CREATE (:Person {name: 'Bob', name2: 'other'})")
+        .await?;
 
     let result = db
         .query(
@@ -1372,8 +1419,10 @@ async fn test_where5_null_or_rescues() -> Result<()> {
 #[tokio::test]
 async fn test_where6_filter_on_aggregate() -> Result<()> {
     let db = graph_nums().await?;
-    db.execute("CREATE (:Person {name: 'Alice', num: 1})").await?;
-    db.execute("CREATE (:Person {name: 'Alice', num: 2})").await?;
+    db.execute("CREATE (:Person {name: 'Alice', num: 1})")
+        .await?;
+    db.execute("CREATE (:Person {name: 'Alice', num: 2})")
+        .await?;
     db.execute("CREATE (:Person {name: 'Bob', num: 3})").await?;
 
     let result = db
@@ -1396,9 +1445,12 @@ async fn test_where6_filter_on_aggregate() -> Result<()> {
 #[tokio::test]
 async fn test_where7_sees_pre_with_variable() -> Result<()> {
     let db = graph_nums().await?;
-    db.execute("CREATE (:Person {name: 'Alice', name2: 'A'})").await?;
-    db.execute("CREATE (:Person {name: 'Bob', name2: 'B'})").await?;
-    db.execute("CREATE (:Person {name: 'Charlie', name2: 'C'})").await?;
+    db.execute("CREATE (:Person {name: 'Alice', name2: 'A'})")
+        .await?;
+    db.execute("CREATE (:Person {name: 'Bob', name2: 'B'})")
+        .await?;
+    db.execute("CREATE (:Person {name: 'Charlie', name2: 'C'})")
+        .await?;
 
     // WITH projects a (so a is still in scope for WHERE)
     let result = db
@@ -1420,9 +1472,12 @@ async fn test_where7_sees_pre_with_variable() -> Result<()> {
 #[tokio::test]
 async fn test_where7_sees_post_with_variable() -> Result<()> {
     let db = graph_nums().await?;
-    db.execute("CREATE (:Person {name: 'Alice', name2: 'A'})").await?;
-    db.execute("CREATE (:Person {name: 'Bob', name2: 'B'})").await?;
-    db.execute("CREATE (:Person {name: 'Charlie', name2: 'C'})").await?;
+    db.execute("CREATE (:Person {name: 'Alice', name2: 'A'})")
+        .await?;
+    db.execute("CREATE (:Person {name: 'Bob', name2: 'B'})")
+        .await?;
+    db.execute("CREATE (:Person {name: 'Charlie', name2: 'C'})")
+        .await?;
 
     let result = db
         .query(
@@ -1443,9 +1498,12 @@ async fn test_where7_sees_post_with_variable() -> Result<()> {
 #[tokio::test]
 async fn test_where7_sees_both_scopes() -> Result<()> {
     let db = graph_nums().await?;
-    db.execute("CREATE (:Person {name: 'Alice', name2: 'A'})").await?;
-    db.execute("CREATE (:Person {name: 'Bob', name2: 'B'})").await?;
-    db.execute("CREATE (:Person {name: 'Charlie', name2: 'C'})").await?;
+    db.execute("CREATE (:Person {name: 'Alice', name2: 'A'})")
+        .await?;
+    db.execute("CREATE (:Person {name: 'Bob', name2: 'B'})")
+        .await?;
+    db.execute("CREATE (:Person {name: 'Charlie', name2: 'C'})")
+        .await?;
 
     // Project a and alias; WHERE uses alias (post-WITH)
     let result = db
@@ -1627,7 +1685,8 @@ async fn test_skip_limit3_fewer_remaining() -> Result<()> {
 #[tokio::test]
 async fn test_with_star_pass_through() -> Result<()> {
     let db = graph_nums().await?;
-    db.execute("CREATE (:Person {name: 'Alice', num: 42})").await?;
+    db.execute("CREATE (:Person {name: 'Alice', num: 42})")
+        .await?;
 
     let result = db
         .query(
@@ -1702,7 +1761,8 @@ async fn test_with_unwind_pipeline() -> Result<()> {
 #[tokio::test]
 async fn test_with_scope_isolation() -> Result<()> {
     let db = graph_nums().await?;
-    db.execute("CREATE (:Person {name: 'Alice', num: 1})").await?;
+    db.execute("CREATE (:Person {name: 'Alice', num: 1})")
+        .await?;
 
     // Only project 'name', then try to reference 'a' → should fail
     let result = db
@@ -1725,7 +1785,8 @@ async fn test_with_scope_isolation() -> Result<()> {
 #[tokio::test]
 async fn test_with_then_create() -> Result<()> {
     let db = graph_nums().await?;
-    db.execute("CREATE (:Person {name: 'Alice', num: 1})").await?;
+    db.execute("CREATE (:Person {name: 'Alice', num: 1})")
+        .await?;
 
     db.execute(
         "MATCH (a:Person) \
@@ -1749,8 +1810,10 @@ async fn test_with_then_create() -> Result<()> {
 #[tokio::test]
 async fn test_chained_with_multi_level_aggregation() -> Result<()> {
     let db = graph_nums().await?;
-    db.execute("CREATE (:Person {name: 'Alice', num: 1})").await?;
-    db.execute("CREATE (:Person {name: 'Alice', num: 2})").await?;
+    db.execute("CREATE (:Person {name: 'Alice', num: 1})")
+        .await?;
+    db.execute("CREATE (:Person {name: 'Alice', num: 2})")
+        .await?;
     db.execute("CREATE (:Person {name: 'Bob', num: 3})").await?;
     db.execute("CREATE (:Person {name: 'Bob', num: 4})").await?;
 
@@ -1776,9 +1839,11 @@ async fn test_chained_with_multi_level_aggregation() -> Result<()> {
 #[tokio::test]
 async fn test_with_collect() -> Result<()> {
     let db = graph_nums().await?;
-    db.execute("CREATE (:Person {name: 'Alice', num: 1})").await?;
+    db.execute("CREATE (:Person {name: 'Alice', num: 1})")
+        .await?;
     db.execute("CREATE (:Person {name: 'Bob', num: 2})").await?;
-    db.execute("CREATE (:Person {name: 'Charlie', num: 3})").await?;
+    db.execute("CREATE (:Person {name: 'Charlie', num: 3})")
+        .await?;
 
     let result = db
         .query(

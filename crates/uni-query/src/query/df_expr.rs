@@ -2004,16 +2004,55 @@ fn translate_function_call(
 struct DummyUdf {
     name: String,
     signature: datafusion::logical_expr::Signature,
+    ret_type: datafusion::arrow::datatypes::DataType,
 }
 
 impl DummyUdf {
     fn new(name: String) -> Self {
+        let ret_type = dummy_udf_return_type(&name);
         Self {
             name,
             signature: datafusion::logical_expr::Signature::variadic_any(
                 datafusion::logical_expr::Volatility::Immutable,
             ),
+            ret_type,
         }
+    }
+}
+
+/// Infer the return type for a DummyUdf placeholder based on UDF name.
+///
+/// This is critical for `apply_type_coercion` which creates DummyUdf nodes
+/// and may process their parents before `resolve_udfs` runs. Without correct
+/// return types for arithmetic UDFs, the coercion logic mis-routes nested
+/// expressions (e.g., treating a CypherValue arithmetic result as a literal
+/// null, leading to invalid Cast insertions like Cast(LargeBinary→Int64)).
+///
+/// Only arithmetic/list/map UDFs return LargeBinary here. All other UDFs
+/// (comparisons, conversions, etc.) return Null — the default that preserves
+/// existing coercion behavior (including chained comparison support like
+/// `1 < n.num <= 3` where the parser doesn't decompose into AND).
+fn dummy_udf_return_type(name: &str) -> datafusion::arrow::datatypes::DataType {
+    use datafusion::arrow::datatypes::DataType;
+    match name {
+        // CypherValue arithmetic UDFs — these produce LargeBinary-encoded results
+        // and may appear as children of outer arithmetic/comparison expressions
+        // within a single apply_type_coercion pass.
+        "_cypher_add"
+        | "_cypher_sub"
+        | "_cypher_mul"
+        | "_cypher_div"
+        | "_cypher_mod"
+        | "_cypher_list_concat"
+        | "_cypher_list_append"
+        | "_make_cypher_list"
+        | "_map_project"
+        | "_cypher_list_to_cv"
+        | "_cypher_tail" => DataType::LargeBinary,
+        // Everything else: return Null to preserve existing coercion behavior.
+        // The second resolve_udfs pass will replace DummyUdf with the real UDF
+        // which has the correct return type.
+        _ => DataType::Null,
     }
 }
 
@@ -2058,8 +2097,9 @@ impl datafusion::logical_expr::ScalarUDFImpl for DummyUdf {
         &self,
         _arg_types: &[datafusion::arrow::datatypes::DataType],
     ) -> datafusion::error::Result<datafusion::arrow::datatypes::DataType> {
-        // Return null for placeholder - real UDF should override
-        Ok(datafusion::arrow::datatypes::DataType::Null)
+        // Return the UDF-name-based return type so that apply_type_coercion
+        // can correctly route nested expressions before resolve_udfs runs.
+        Ok(self.ret_type.clone())
     }
 
     fn invoke_with_args(
@@ -2355,12 +2395,10 @@ pub fn apply_type_coercion(expr: &DfExpr, schema: &datafusion::common::DFSchema)
 
                 // String concatenation now handled by unified Plus logic below
 
-                // Handle Null-typed operands: cast the null side to match the
-                // other operand's type so Arrow doesn't reject the type pair.
-                // Note: Null type often comes from DummyUdf placeholders for CypherValue
-                // UDFs (_cypher_add, _cypher_multiply, etc.) whose actual return type is
-                // LargeBinary. When the target type is LargeBinary, we treat the null-typed
-                // operand as LargeBinary and fall through to the LB handling below.
+                // Handle Null-typed operands (literal nulls): cast the null side to
+                // match the other operand's type so Arrow doesn't reject the type pair.
+                // When the target type is LargeBinary, fall through to the LB handling
+                // paths below (which use CypherValue UDFs that handle nulls natively).
                 let left_is_null = left_type.is_null();
                 let right_is_null = right_type.is_null();
                 if left_is_null && right_is_null {
@@ -2372,9 +2410,6 @@ pub fn apply_type_coercion(expr: &DfExpr, schema: &datafusion::common::DFSchema)
                     } else {
                         &left_type
                     };
-                    // If the target type is LargeBinary, the null-typed side is likely
-                    // a CypherValue UDF result — treat both as LB and fall through
-                    // to the LargeBinary handling paths below.
                     if !matches!(target, DataType::LargeBinary) {
                         let coerced_left = if left_is_null {
                             datafusion::logical_expr::cast(left, target.clone())
@@ -2392,18 +2427,20 @@ pub fn apply_type_coercion(expr: &DfExpr, schema: &datafusion::common::DFSchema)
 
                 // 0. LargeBinary (CypherValue) handling — before type-mismatch check since
                 //    both-LB is same-type but still needs special handling.
-                // Null-typed operands (from DummyUdf) are treated as LB when the other
-                // side is LB, so that CypherValue UDF results are properly routed.
-                let left_is_lb =
-                    matches!(left_type, DataType::LargeBinary) || left_is_null;
-                let right_is_lb =
-                    matches!(right_type, DataType::LargeBinary) || right_is_null;
+                // Null-typed operands from DummyUdf placeholders (for UDFs not yet resolved
+                // by resolve_udfs) are treated as LB when the other side is LB — the
+                // null-typed handler above falls through here when target is LB.
+                let left_is_lb = matches!(left_type, DataType::LargeBinary) || left_is_null;
+                let right_is_lb = matches!(right_type, DataType::LargeBinary) || right_is_null;
 
-                // List concatenation / append via Plus operator
+                // Plus operator with LargeBinary operands:
+                // Route through _cypher_add which handles BOTH list concatenation
+                // and numeric addition via eval_add(). Previously this routed to
+                // _cypher_list_concat which only handled lists and fell back to
+                // eval_binary_op(Add) for non-lists — _cypher_add is the direct path.
                 if binary.op == Operator::Plus {
-                    // Both CypherValue → list concat (both could be CypherValue lists)
                     if left_is_lb && right_is_lb {
-                        return Ok(dummy_udf_expr("_cypher_list_concat", vec![left, right]));
+                        return Ok(dummy_udf_expr("_cypher_add", vec![left, right]));
                     }
                     // Native List types → list concat or append
                     let left_is_native_list =
@@ -2857,10 +2894,20 @@ pub fn apply_type_coercion(expr: &DfExpr, schema: &datafusion::common::DFSchema)
             let coerced_inner = apply_type_coercion(inner, schema)?;
             Ok(coerced_inner.is_not_null())
         }
-        // Negation: recurse into inner expression
+        // Negation: recurse into inner expression.
+        // When the inner is LargeBinary (CypherValue-encoded), DataFusion can't
+        // negate it natively — rewrite as _cypher_mul(inner, -1).
         DfExpr::Negative(inner) => {
             let coerced_inner = apply_type_coercion(inner, schema)?;
-            Ok(DfExpr::Negative(Box::new(coerced_inner)))
+            let inner_type = coerced_inner.get_type(schema).ok();
+            if matches!(inner_type.as_ref(), Some(DataType::LargeBinary)) {
+                Ok(dummy_udf_expr(
+                    "_cypher_mul",
+                    vec![coerced_inner, lit(ScalarValue::Int64(Some(-1)))],
+                ))
+            } else {
+                Ok(DfExpr::Negative(Box::new(coerced_inner)))
+            }
         }
         // Cast: recurse into inner expression
         DfExpr::Cast(cast) => {
@@ -3445,7 +3492,7 @@ mod tests {
 
     #[test]
     fn test_coercion_both_lb_plus() {
-        // LB + LB → _cypher_list_concat
+        // LB + LB → _cypher_add (handles both list concat and numeric add via eval_add)
         let schema = make_schema(&[
             ("lb1", DataType::LargeBinary),
             ("lb2", DataType::LargeBinary),
@@ -3457,8 +3504,8 @@ mod tests {
         ));
         let result = apply_type_coercion(&expr, &schema).unwrap();
         assert!(
-            contains_udf(&result, "_cypher_list_concat"),
-            "expected _cypher_list_concat, got: {result}"
+            contains_udf(&result, "_cypher_add"),
+            "expected _cypher_add, got: {result}"
         );
     }
 

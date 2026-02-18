@@ -1,17 +1,19 @@
 # TCK Compliance Report
 
-**Generated:** 2026-02-17 22:07:09
-**Results:** `results_20260217_220708.json`
-**Compared to:** `results_20260217_215541.json`
+**Generated:** 2026-02-18 01:02:55
+**Results:** `results_20260218_010255.json`
+**Compared to:** `results_20260217_234013.json`
 
 ## Summary
 
 | Metric | Current | Previous | Delta |
 |--------|---------|----------|-------|
 | Scenarios | 3897 | 3897 |  |
-| Passed | 3492 | 3492 |  |
-| Failed | 404 | 404 |  |
-| Pass Rate | 89.6% | 89.6% | ➡️ +0.0pp |
+| Passed | 3536 | 3528 | +8 |
+| Failed | 360 | 368 | -8 |
+| Pass Rate | 90.7% | 90.5% | 📈 +0.2pp |
+
+**🟢 Fixed:** 8 scenarios now passing
 
 ## Feature Breakdown
 
@@ -142,7 +144,7 @@
 | ✅ Return1 | 2 | 2 | 0 | 100% |  |
 | ⚠️ Return2 | 18 | 13 | 5 | 72% |  |
 | ✅ Return3 | 3 | 3 | 0 | 100% |  |
-| ❌ Return4 | 11 | 5 | 6 | 45% |  |
+| ⚠️ Return4 | 11 | 7 | 4 | 64% | +9pp |
 | ✅ Return5 | 5 | 5 | 0 | 100% |  |
 | ✅ Return6 | 21 | 17 | 4 | 81% |  |
 | ⚠️ Return7 | 2 | 1 | 1 | 50% |  |
@@ -151,7 +153,7 @@
 | ⚠️ ReturnOrderBy2 | 14 | 7 | 7 | 50% |  |
 | ❌ ReturnOrderBy3 | 1 | 0 | 1 | 0% |  |
 | ⚠️ ReturnOrderBy4 | 2 | 1 | 1 | 50% |  |
-| ❌ ReturnOrderBy5 | 1 | 0 | 1 | 0% |  |
+| ✅ ReturnOrderBy5 | 1 | 1 | 0 | 100% | +100pp |
 | ❌ ReturnOrderBy6 | 5 | 2 | 3 | 40% |  |
 | ✅ ReturnSkipLimit1 | 11 | 10 | 1 | 91% |  |
 | ✅ ReturnSkipLimit2 | 17 | 17 | 0 | 100% |  |
@@ -190,18 +192,18 @@
 | ⚠️ Unwind1 | 14 | 11 | 3 | 79% |  |
 | ✅ With1 | 6 | 6 | 0 | 100% |  |
 | ✅ With2 | 2 | 2 | 0 | 100% |  |
-| ❌ With3 | 1 | 0 | 1 | 0% |  |
-| ⚠️ With4 | 7 | 4 | 3 | 57% |  |
+| ✅ With3 | 1 | 1 | 0 | 100% | +100pp |
+| ✅ With4 | 7 | 7 | 0 | 100% | +14pp |
 | ✅ With5 | 2 | 2 | 0 | 100% |  |
 | ✅ With6 | 9 | 9 | 0 | 100% |  |
 | ✅ With7 | 2 | 2 | 0 | 100% |  |
 | ❌ WithOrderBy1 | 96 | 47 | 49 | 49% |  |
-| ❌ WithOrderBy2 | 83 | 35 | 48 | 42% |  |
-| ⚠️ WithOrderBy3 | 93 | 69 | 24 | 74% |  |
-| ⚠️ WithOrderBy4 | 20 | 13 | 7 | 65% |  |
+| ⚠️ WithOrderBy2 | 83 | 47 | 36 | 57% | +2pp |
+| ✅ WithOrderBy3 | 93 | 93 | 0 | 100% |  |
+| ⚠️ WithOrderBy4 | 20 | 13 | 7 | 65% | +5pp |
 | ⚠️ WithSkipLimit1 | 2 | 1 | 1 | 50% |  |
 | ✅ WithSkipLimit2 | 4 | 4 | 0 | 100% |  |
-| ❌ WithSkipLimit3 | 3 | 1 | 2 | 33% |  |
+| ⚠️ WithSkipLimit3 | 3 | 2 | 1 | 67% | +33pp |
 | ✅ WithWhere1 | 4 | 4 | 0 | 100% |  |
 | ✅ WithWhere2 | 2 | 2 | 0 | 100% |  |
 | ✅ WithWhere3 | 3 | 3 | 0 | 100% |  |
@@ -209,6 +211,19 @@
 | ✅ WithWhere5 | 4 | 4 | 0 | 100% |  |
 | ✅ WithWhere6 | 1 | 1 | 0 | 100% |  |
 | ✅ WithWhere7 | 3 | 3 | 0 | 100% |  |
+
+## 🟢 Newly Passing
+
+Scenarios that were failing but are now passing:
+
+- **Return4** — [11] Reusing variable names in RETURN (line 189)
+- **ReturnOrderBy5** — [1] Renaming columns before ORDER BY should return results in ascending order (line 33)
+- **With3** — [1] Forwarding multiple node and relationship variables (line 33)
+- **With4** — [6] Reusing variable names in WITH (line 112)
+- **WithOrderBy2** — [24] Sort by an expression that is only partially orderable on a non-distinct binding table, but made distinct (line 754)
+- **WithOrderBy2** — [24] Sort by an expression that is only partially orderable on a non-distinct binding table, but made distinct (line 755)
+- **WithOrderBy4** — [8] Sort by non-projected existing variable (line 211)
+- **WithSkipLimit3** — [3] Limiting amount of rows when there are fewer left than the LIMIT argument (line 115)
 
 ## Failed Scenarios
 
@@ -907,7 +922,7 @@
   Step failed:
       Defined: tck/features/expressions/graph/Graph9.feature:73:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("properties(r)", Some(Map({}))), ("properties(null)
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("properties(n)", Some(Null)), ("properties(r)", Som
   ... (truncated)
   ```
 
@@ -998,7 +1013,7 @@
   Step failed:
       Defined: tck/features/expressions/literals/Literals7.feature:295:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("literal", Some(List([Map({"id": String("000
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("literal", Some(List([Map({"ppu": Float(0.55
   ... (truncated)
   ```
 
@@ -1009,7 +1024,7 @@
   Step failed:
       Defined: tck/features/expressions/literals/Literals8.feature:294:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("literal", Some(Map({"data": List([Map({"ppu
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("literal", Some(Map({"data": List([Map({"top
   ... (truncated)
   ```
 
@@ -2186,30 +2201,6 @@
       Step panicked. Captured output: Query returned error instead of result: Query { message: "SyntaxError: InvalidAggregation - DataFusion planning failed: This featur
   ... (truncated)
   ```
-- **[10] Fail when returning multiple columns with same name** (line 181)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/return/Return4.feature:187:5
-      Matched: crates/uni-tck/src/steps/then.rs:90:1
-      Step panicked. Captured output: No error found
-[Summary]
-1 feature
-1 scenario (1 failed)
-3 steps (2 passed, 1 failed)
-
-  ```
-- **[11] Reusing variable names in RETURN** (line 189)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/return/Return4.feature:205:5
-      Matched: crates/uni-tck/src/steps/then.rs:37:1
-      Step panicked. Captured output: No result found
-[Summary]
-1 feature
-1 scenario (1 failed)
-4 steps (3 passed, 1 failed)
-
-  ```
 
 ### Return6
 
@@ -2421,21 +2412,6 @@
   ... (truncated)
   ```
 
-### ReturnOrderBy5
-
-- **[1] Renaming columns before ORDER BY should return results in ascending order** (line 33)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/return-orderby/ReturnOrderBy5.feature:47:5
-      Matched: crates/uni-tck/src/steps/then.rs:37:1
-      Step panicked. Captured output: No result found
-[Summary]
-1 feature
-1 scenario (1 failed)
-4 steps (3 passed, 1 failed)
-
-  ```
-
 ### ReturnOrderBy6
 
 - **[1] Handle constants and parameters inside an order by item which contains an aggregation expression** (line 33)
@@ -2451,7 +2427,7 @@
   Step failed:
       Defined: tck/features/clauses/return-orderby/ReturnOrderBy6.feature:56:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Schema error: No field named age. Did you mean 'me.age'?.",
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "SyntaxError: InvalidAggregation - This feature is not imple
   ... (truncated)
   ```
 - **[3] Handle returned property accesses inside an order by item which contains an aggregation expression** (line 60)
@@ -3034,7 +3010,7 @@
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal5.feature:133:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("d.epochSeconds", Some(Int(469024274))), ("d
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("d.ordinalDay", Some(Int(316))), ("d.weekDay
   ... (truncated)
   ```
 
@@ -3172,60 +3148,6 @@
   ... (truncated)
   ```
 
-### With3
-
-- **[1] Forwarding multiple node and relationship variables** (line 33)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with/With3.feature:49:5
-      Matched: crates/uni-tck/src/steps/then.rs:37:1
-      Step panicked. Captured output: No result found
-[Summary]
-1 feature
-1 scenario (1 failed)
-4 steps (3 passed, 1 failed)
-
-  ```
-
-### With4
-
-- **[4] Fail when forwarding multiple aliases with the same name** (line 93)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with/With4.feature:100:5
-      Matched: crates/uni-tck/src/steps/then.rs:90:1
-      Step panicked. Captured output: No error found
-[Summary]
-1 feature
-1 scenario (1 failed)
-3 steps (2 passed, 1 failed)
-
-  ```
-- **[5] Fail when not aliasing expressions in WITH** (line 102)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with/With4.feature:110:5
-      Matched: crates/uni-tck/src/steps/then.rs:90:1
-      Step panicked. Captured output: No error found
-[Summary]
-1 feature
-1 scenario (1 failed)
-3 steps (2 passed, 1 failed)
-
-  ```
-- **[6] Reusing variable names in WITH** (line 112)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with/With4.feature:129:5
-      Matched: crates/uni-tck/src/steps/then.rs:37:1
-      Step panicked. Captured output: No result found
-[Summary]
-1 feature
-1 scenario (1 failed)
-4 steps (3 passed, 1 failed)
-
-  ```
-
 ### WithOrderBy1
 
 - **[9] Sort lists in ascending order** (line 161)
@@ -3355,7 +3277,7 @@
   Step failed:
       Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:662:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("name", Some(String("sit"))), ("a", Some(
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("a", Some(Node(Node { vid: Vid(3), labels
   ... (truncated)
   ```
 - **[29] Sort by a string variable projected from a node property in ascending order** (line 672)
@@ -3363,7 +3285,7 @@
   Step failed:
       Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:662:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("a", Some(Node(Node { vid: Vid(3), labels
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("name", Some(String("sit"))), ("a", Some(
   ... (truncated)
   ```
 - **[29] Sort by a string variable projected from a node property in ascending order** (line 673)
@@ -3371,7 +3293,7 @@
   Step failed:
       Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:662:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("a", Some(Node(Node { vid: Vid(3), labels
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("name", Some(String("sit"))), ("a", Some(
   ... (truncated)
   ```
 - **[30] Sort by a string variable projected from a node property in descending order** (line 703)
@@ -3387,7 +3309,7 @@
   Step failed:
       Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:694:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 2. Actual values: [("a", Some(Node(Node { vid: Vid(2), labels
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 2. Actual values: [("name", Some(String("dolor"))), ("a", Som
   ... (truncated)
   ```
 - **[35] Sort by a local time variable projected from a node property in ascending order** (line 860)
@@ -3395,7 +3317,7 @@
   Step failed:
       Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:851:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 1. Actual values: [("time", Some(String("12:31:15"))), ("a", 
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 1. Actual values: [("a", Some(Node(Node { vid: Vid(4), labels
   ... (truncated)
   ```
 - **[35] Sort by a local time variable projected from a node property in ascending order** (line 861)
@@ -3419,7 +3341,7 @@
   Step failed:
       Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:883:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 2. Actual values: [("a", Some(Node(Node { vid: Vid(3), labels
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 2. Actual values: [("time", Some(String("12:30:14.645876123")
   ... (truncated)
   ```
 - **[36] Sort by a local time variable projected from a node property in descending order** (line 893)
@@ -3427,7 +3349,7 @@
   Step failed:
       Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:883:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 2. Actual values: [("a", Some(Node(Node { vid: Vid(3), labels
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 2. Actual values: [("time", Some(String("12:30:14.645876123")
   ... (truncated)
   ```
 - **[37] Sort by a time variable projected from a node property in ascending order** (line 923)
@@ -3443,7 +3365,7 @@
   Step failed:
       Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:914:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("a", Some(Node(Node { vid: Vid(0), labels
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("time", Some(String("10:35-08:00"))), ("a
   ... (truncated)
   ```
 - **[37] Sort by a time variable projected from a node property in ascending order** (line 925)
@@ -3451,7 +3373,7 @@
   Step failed:
       Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:914:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("time", Some(String("10:35-08:00"))), ("a
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("a", Some(Node(Node { vid: Vid(0), labels
   ... (truncated)
   ```
 - **[38] Sort by a time variable projected from a node property in descending order** (line 955)
@@ -3459,7 +3381,7 @@
   Step failed:
       Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:946:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 2. Actual values: [("time", Some(String("12:30:14.645876123+0
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 2. Actual values: [("a", Some(Node(Node { vid: Vid(4), labels
   ... (truncated)
   ```
 - **[38] Sort by a time variable projected from a node property in descending order** (line 956)
@@ -3491,7 +3413,7 @@
   Step failed:
       Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:977:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("datetime", Some(String("1970-01-01T00:00
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("a", Some(Node(Node { vid: Vid(2), labels
   ... (truncated)
   ```
 - **[40] Sort by a local date time variable projected from a node property in descending order** (line 1018)
@@ -3515,7 +3437,7 @@
   Step failed:
       Defined: tck/features/clauses/with-orderBy/WithOrderBy1.feature:1040:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("a", Some(Node(Node { vid: Vid(2), label
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("datetime", Some(String("1969-12-31T12:0
   ... (truncated)
   ```
 - **[41] Sort by a date time variable projected from a node property in ascending order** (line 1050)
@@ -3633,86 +3555,6 @@
 
 ### WithOrderBy2
 
-- **[3] Sort by an integer expression in ascending order** (line 122)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy2.feature:113:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "This feature is not implemented: Unsupported CAST from LargeBi
-  ... (truncated)
-  ```
-- **[3] Sort by an integer expression in ascending order** (line 123)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy2.feature:113:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "This feature is not implemented: Unsupported CAST from LargeBi
-  ... (truncated)
-  ```
-- **[3] Sort by an integer expression in ascending order** (line 124)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy2.feature:113:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "This feature is not implemented: Unsupported CAST from LargeBi
-  ... (truncated)
-  ```
-- **[4] Sort by an integer expression in descending order** (line 153)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy2.feature:144:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "This feature is not implemented: Unsupported CAST from LargeBi
-  ... (truncated)
-  ```
-- **[4] Sort by an integer expression in descending order** (line 154)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy2.feature:144:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "This feature is not implemented: Unsupported CAST from LargeBi
-  ... (truncated)
-  ```
-- **[5] Sort by a float expression in ascending order** (line 183)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy2.feature:174:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "This feature is not implemented: Unsupported CAST from LargeBi
-  ... (truncated)
-  ```
-- **[5] Sort by a float expression in ascending order** (line 184)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy2.feature:174:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "This feature is not implemented: Unsupported CAST from LargeBi
-  ... (truncated)
-  ```
-- **[5] Sort by a float expression in ascending order** (line 185)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy2.feature:174:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "This feature is not implemented: Unsupported CAST from LargeBi
-  ... (truncated)
-  ```
-- **[6] Sort by a float expression in descending order** (line 214)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy2.feature:205:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "This feature is not implemented: Unsupported CAST from LargeBi
-  ... (truncated)
-  ```
-- **[6] Sort by a float expression in descending order** (line 215)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy2.feature:205:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "This feature is not implemented: Unsupported CAST from LargeBi
-  ... (truncated)
-  ```
 - **[7] Sort by a string expression in ascending order** (line 244)
   ```
   Step failed:
@@ -3958,7 +3800,7 @@
   Step failed:
       Defined: tck/features/clauses/with-orderBy/WithOrderBy2.feature:662:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Schema error: No field named \"a.name\". Did you mean 'name'?.
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Error during planning: Input was LargeBinary which is not a su
   ... (truncated)
   ```
 - **[21] Sort by an expression that is only partially orderable on a non-distinct binding table** (line 671)
@@ -3966,7 +3808,7 @@
   Step failed:
       Defined: tck/features/clauses/with-orderBy/WithOrderBy2.feature:662:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Schema error: No field named \"a.name\". Did you mean 'name'?.
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Error during planning: Input was LargeBinary which is not a su
   ... (truncated)
   ```
 - **[22] Sort by an expression that is only partially orderable on a non-distinct binding table, but used as a grouping key** (line 698)
@@ -4001,228 +3843,9 @@
       Step panicked. Captured output: Query returned error instead of result: Query { message: "Schema error: No field named \"a.name\". Did you mean 'name'?.
   ... (truncated)
   ```
-- **[24] Sort by an expression that is only partially orderable on a non-distinct binding table, but made distinct** (line 754)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy2.feature:747:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Schema error: No field named \"a.name\". Did you mean 'name'?.
-  ... (truncated)
-  ```
-- **[24] Sort by an expression that is only partially orderable on a non-distinct binding table, but made distinct** (line 755)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy2.feature:747:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Schema error: No field named \"a.name\". Did you mean 'name'?.
-  ... (truncated)
-  ```
-
-### WithOrderBy3
-
-- **[6] An constant expression does not influence the order determined by other expression before and after the constant expression** (line 237)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy3.feature:230:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "This feature is not implemented: Unsupported CAST from LargeBi
-  ... (truncated)
-  ```
-- **[6] An constant expression does not influence the order determined by other expression before and after the constant expression** (line 238)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy3.feature:230:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "This feature is not implemented: Unsupported CAST from LargeBi
-  ... (truncated)
-  ```
-- **[6] An constant expression does not influence the order determined by other expression before and after the constant expression** (line 239)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy3.feature:230:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "This feature is not implemented: Unsupported CAST from LargeBi
-  ... (truncated)
-  ```
-- **[6] An constant expression does not influence the order determined by other expression before and after the constant expression** (line 240)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy3.feature:230:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "This feature is not implemented: Unsupported CAST from LargeBi
-  ... (truncated)
-  ```
-- **[6] An constant expression does not influence the order determined by other expression before and after the constant expression** (line 241)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy3.feature:230:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "This feature is not implemented: Unsupported CAST from LargeBi
-  ... (truncated)
-  ```
-- **[6] An constant expression does not influence the order determined by other expression before and after the constant expression** (line 242)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy3.feature:230:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "This feature is not implemented: Unsupported CAST from LargeBi
-  ... (truncated)
-  ```
-- **[6] An constant expression does not influence the order determined by other expression before and after the constant expression** (line 243)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy3.feature:230:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "This feature is not implemented: Unsupported CAST from LargeBi
-  ... (truncated)
-  ```
-- **[6] An constant expression does not influence the order determined by other expression before and after the constant expression** (line 244)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy3.feature:230:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "This feature is not implemented: Unsupported CAST from LargeBi
-  ... (truncated)
-  ```
-- **[6] An constant expression does not influence the order determined by other expression before and after the constant expression** (line 245)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy3.feature:230:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "This feature is not implemented: Unsupported CAST from LargeBi
-  ... (truncated)
-  ```
-- **[6] An constant expression does not influence the order determined by other expression before and after the constant expression** (line 246)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy3.feature:230:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "This feature is not implemented: Unsupported CAST from LargeBi
-  ... (truncated)
-  ```
-- **[6] An constant expression does not influence the order determined by other expression before and after the constant expression** (line 247)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy3.feature:230:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "This feature is not implemented: Unsupported CAST from LargeBi
-  ... (truncated)
-  ```
-- **[6] An constant expression does not influence the order determined by other expression before and after the constant expression** (line 248)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy3.feature:230:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "This feature is not implemented: Unsupported CAST from LargeBi
-  ... (truncated)
-  ```
-- **[6] An constant expression does not influence the order determined by other expression before and after the constant expression** (line 249)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy3.feature:230:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "This feature is not implemented: Unsupported CAST from LargeBi
-  ... (truncated)
-  ```
-- **[6] An constant expression does not influence the order determined by other expression before and after the constant expression** (line 250)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy3.feature:230:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "This feature is not implemented: Unsupported CAST from LargeBi
-  ... (truncated)
-  ```
-- **[6] An constant expression does not influence the order determined by other expression before and after the constant expression** (line 251)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy3.feature:230:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "This feature is not implemented: Unsupported CAST from LargeBi
-  ... (truncated)
-  ```
-- **[6] An constant expression does not influence the order determined by other expression before and after the constant expression** (line 252)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy3.feature:230:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "This feature is not implemented: Unsupported CAST from LargeBi
-  ... (truncated)
-  ```
-- **[6] An constant expression does not influence the order determined by other expression before and after the constant expression** (line 253)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy3.feature:230:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "This feature is not implemented: Unsupported CAST from LargeBi
-  ... (truncated)
-  ```
-- **[6] An constant expression does not influence the order determined by other expression before and after the constant expression** (line 254)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy3.feature:230:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "This feature is not implemented: Unsupported CAST from LargeBi
-  ... (truncated)
-  ```
-- **[6] An constant expression does not influence the order determined by other expression before and after the constant expression** (line 255)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy3.feature:230:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "This feature is not implemented: Unsupported CAST from LargeBi
-  ... (truncated)
-  ```
-- **[6] An constant expression does not influence the order determined by other expression before and after the constant expression** (line 256)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy3.feature:230:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "This feature is not implemented: Unsupported CAST from LargeBi
-  ... (truncated)
-  ```
-- **[6] An constant expression does not influence the order determined by other expression before and after the constant expression** (line 257)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy3.feature:230:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "This feature is not implemented: Unsupported CAST from LargeBi
-  ... (truncated)
-  ```
-- **[6] An constant expression does not influence the order determined by other expression before and after the constant expression** (line 258)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy3.feature:230:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "This feature is not implemented: Unsupported CAST from LargeBi
-  ... (truncated)
-  ```
-- **[6] An constant expression does not influence the order determined by other expression before and after the constant expression** (line 259)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy3.feature:230:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "This feature is not implemented: Unsupported CAST from LargeBi
-  ... (truncated)
-  ```
-- **[6] An constant expression does not influence the order determined by other expression before and after the constant expression** (line 260)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy3.feature:230:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "This feature is not implemented: Unsupported CAST from LargeBi
-  ... (truncated)
-  ```
 
 ### WithOrderBy4
 
-- **[8] Sort by non-projected existing variable** (line 211)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-orderBy/WithOrderBy4.feature:230:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Schema error: No field named sum. Valid fields are a, \"a._vid
-  ... (truncated)
-  ```
 - **[11] Sort by an aggregate projection** (line 289)
   ```
   Step failed:
@@ -4275,6 +3898,14 @@
       Step panicked. Captured output: Query returned error instead of result: Query { message: "Schema error: No field named \"me.age\". Did you mean 'age'?."
   ... (truncated)
   ```
+- **[20] Fail if more complex expressions, even if projected, are used inside an order by item which contains an aggregation expression** (line 454)
+  ```
+  Step failed:
+      Defined: tck/features/clauses/with-orderBy/WithOrderBy4.feature:463:5
+      Matched: crates/uni-tck/src/steps/then.rs:90:1
+      Step panicked. Captured output: Error mismatch: Error detail mismatch: expected message to contain 'AmbiguousAggregationExpression', got 'Parse error: S
+  ... (truncated)
+  ```
 
 ### WithSkipLimit1
 
@@ -4303,18 +3934,6 @@
 1 feature
 1 scenario (1 failed)
 5 steps (4 passed, 1 failed)
-
-  ```
-- **[3] Limiting amount of rows when there are fewer left than the LIMIT argument** (line 115)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-skip-limit/WithSkipLimit3.feature:131:5
-      Matched: crates/uni-tck/src/steps/then.rs:37:1
-      Step panicked. Captured output: No result found
-[Summary]
-1 feature
-1 scenario (1 failed)
-4 steps (3 passed, 1 failed)
 
   ```
 
