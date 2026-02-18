@@ -696,6 +696,10 @@ pub fn eval_temporal_accessor(temporal_str: &str, component: &str) -> Result<Val
 pub fn eval_temporal_accessor_value(val: &Value, component: &str) -> Result<Value> {
     match val {
         Value::Null => Ok(Value::Null),
+        // Non-graph map property access can be translated through _temporal_property
+        // for accessor-like names such as `year`. For map values, preserve normal
+        // Cypher map semantics: treat it as key lookup.
+        Value::Map(map) => Ok(map.get(component).cloned().unwrap_or(Value::Null)),
         Value::Temporal(tv) => {
             // For offset-related accessors on temporal values, extract directly
             // from the TemporalValue fields to avoid lossy string round-trip.

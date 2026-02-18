@@ -4271,6 +4271,55 @@ impl QueryPlanner {
         }
     }
 
+    /// Split node map predicates into scan-pushable and residual filters.
+    ///
+    /// A predicate is scan-pushable when its value expression references only
+    /// the node variable itself (or no variables). Predicates referencing other
+    /// in-scope variables (correlated predicates) are returned as residual so
+    /// they can be applied after joining with the existing plan.
+    fn split_node_property_filters_for_scan(
+        &self,
+        variable: &str,
+        properties: &Option<Expr>,
+    ) -> (Option<Expr>, Option<Expr>) {
+        let entries = match properties {
+            Some(Expr::Map(entries)) => entries,
+            _ => return (None, None),
+        };
+
+        if entries.is_empty() {
+            return (None, None);
+        }
+
+        let mut pushdown_entries = Vec::new();
+        let mut residual_entries = Vec::new();
+
+        for (prop, val_expr) in entries {
+            let vars = collect_expr_variables(val_expr);
+            if vars.iter().all(|v| v == variable) {
+                pushdown_entries.push((prop.clone(), val_expr.clone()));
+            } else {
+                residual_entries.push((prop.clone(), val_expr.clone()));
+            }
+        }
+
+        let pushdown_map = if pushdown_entries.is_empty() {
+            None
+        } else {
+            Some(Expr::Map(pushdown_entries))
+        };
+        let residual_map = if residual_entries.is_empty() {
+            None
+        } else {
+            Some(Expr::Map(residual_entries))
+        };
+
+        (
+            self.properties_to_expr(variable, &pushdown_map),
+            self.properties_to_expr(variable, &residual_map),
+        )
+    }
+
     /// Plan an unbound node (creates a Scan, ScanAll, ScanMainByLabel, ExtIdLookup, or CrossJoin).
     fn plan_unbound_node(
         &self,
@@ -4289,6 +4338,26 @@ impl QueryPlanner {
             }
             Some(_) => return Err(anyhow!("Node properties must be a Map")),
             None => &[],
+        };
+
+        let has_existing_scope = !matches!(plan, LogicalPlan::Empty);
+
+        let apply_residual_filter = |input: LogicalPlan, residual: Option<Expr>| -> LogicalPlan {
+            if let Some(predicate) = residual {
+                LogicalPlan::Filter {
+                    input: Box::new(input),
+                    predicate,
+                    optional_variables: std::collections::HashSet::new(),
+                }
+            } else {
+                input
+            }
+        };
+
+        let (node_scan_filter, node_residual_filter) = if has_existing_scope {
+            self.split_node_property_filters_for_scan(variable, &node.properties)
+        } else {
+            (self.properties_to_expr(variable, &node.properties), None)
         };
 
         // Check for ext_id in properties when no label is specified
@@ -4316,7 +4385,11 @@ impl QueryPlanner {
                     Some(Expr::Map(remaining_props))
                 };
 
-                let prop_filter = self.properties_to_expr(variable, &remaining_expr);
+                let (prop_filter, residual_filter) = if has_existing_scope {
+                    self.split_node_property_filters_for_scan(variable, &remaining_expr)
+                } else {
+                    (self.properties_to_expr(variable, &remaining_expr), None)
+                };
 
                 let ext_id_lookup = LogicalPlan::ExtIdLookup {
                     variable: variable.to_string(),
@@ -4325,18 +4398,19 @@ impl QueryPlanner {
                     optional,
                 };
 
-                return Ok(Self::join_with_plan(plan, ext_id_lookup));
+                let joined = Self::join_with_plan(plan, ext_id_lookup);
+                return Ok(apply_residual_filter(joined, residual_filter));
             }
 
             // No ext_id: create ScanAll for unlabeled node pattern
-            let prop_filter = self.properties_to_expr(variable, &node.properties);
             let scan_all = LogicalPlan::ScanAll {
                 variable: variable.to_string(),
-                filter: prop_filter,
+                filter: node_scan_filter,
                 optional,
             };
 
-            return Ok(Self::join_with_plan(plan, scan_all));
+            let joined = Self::join_with_plan(plan, scan_all);
+            return Ok(apply_residual_filter(joined, node_residual_filter));
         }
 
         // Use first label for label_id (primary label for dataset selection)
@@ -4345,27 +4419,27 @@ impl QueryPlanner {
         // Check if label exists in schema
         if let Some(label_meta) = self.schema.get_label_case_insensitive(label_name) {
             // Known label: use standard Scan
-            let prop_filter = self.properties_to_expr(variable, &node.properties);
             let scan = LogicalPlan::Scan {
                 label_id: label_meta.id,
                 labels: node.labels.clone(),
                 variable: variable.to_string(),
-                filter: prop_filter,
+                filter: node_scan_filter,
                 optional,
             };
 
-            Ok(Self::join_with_plan(plan, scan))
+            let joined = Self::join_with_plan(plan, scan);
+            Ok(apply_residual_filter(joined, node_residual_filter))
         } else {
             // Unknown label: use ScanMainByLabels for schemaless support
-            let prop_filter = self.properties_to_expr(variable, &node.properties);
             let scan_main = LogicalPlan::ScanMainByLabels {
                 labels: node.labels.clone(),
                 variable: variable.to_string(),
-                filter: prop_filter,
+                filter: node_scan_filter,
                 optional,
             };
 
-            Ok(Self::join_with_plan(plan, scan_main))
+            let joined = Self::join_with_plan(plan, scan_main);
+            Ok(apply_residual_filter(joined, node_residual_filter))
         }
     }
 

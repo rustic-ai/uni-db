@@ -614,6 +614,9 @@ impl ScalarUDFImpl for IndexUdf {
                         // Check top-level first
                         if let Some(val) = map.get(key) {
                             val.clone()
+                        } else if let Some(Value::Map(all_props)) = map.get("_all_props") {
+                            // Schemaless entities store user properties under _all_props.
+                            all_props.get(key).cloned().unwrap_or(Value::Null)
                         } else if let Some(Value::Map(props)) = map.get("properties") {
                             // Serialized Node/Edge: properties are nested under "properties"
                             props.get(key).cloned().unwrap_or(Value::Null)
