@@ -309,8 +309,109 @@ pub fn arrow_to_value(col: &dyn Array, row: usize, data_type: Option<&DataType>)
         return Value::List(array_to_value_list(&list.value(row)));
     }
 
-    // Struct type
+    // Struct type — detect temporal structs by field names before generic handler
     if let Some(s) = col.as_any().downcast_ref::<StructArray>() {
+        let field_names: Vec<&str> = s.fields().iter().map(|f| f.name().as_str()).collect();
+
+        // DateTime struct: {nanos_since_epoch, offset_seconds, timezone_name}
+        if field_names.contains(&"nanos_since_epoch")
+            && field_names.contains(&"offset_seconds")
+            && field_names.contains(&"timezone_name")
+            && let (Some(nanos_col), Some(offset_col), Some(tz_col)) = (
+                s.column_by_name("nanos_since_epoch"),
+                s.column_by_name("offset_seconds"),
+                s.column_by_name("timezone_name"),
+            )
+        {
+            // Try TimestampNanosecond first (standard schema), then Int64 fallback
+            let nanos_opt = nanos_col
+                .as_any()
+                .downcast_ref::<TimestampNanosecondArray>()
+                .map(|a| {
+                    if a.is_null(row) {
+                        None
+                    } else {
+                        Some(a.value(row))
+                    }
+                })
+                .or_else(|| {
+                    nanos_col.as_any().downcast_ref::<Int64Array>().map(|a| {
+                        if a.is_null(row) {
+                            None
+                        } else {
+                            Some(a.value(row))
+                        }
+                    })
+                });
+            let offset_opt = offset_col.as_any().downcast_ref::<Int32Array>().map(|a| {
+                if a.is_null(row) {
+                    None
+                } else {
+                    Some(a.value(row))
+                }
+            });
+
+            if let (Some(Some(nanos)), Some(Some(offset))) = (nanos_opt, offset_opt) {
+                let tz_name = tz_col.as_any().downcast_ref::<StringArray>().and_then(|a| {
+                    if a.is_null(row) {
+                        None
+                    } else {
+                        Some(a.value(row).to_string())
+                    }
+                });
+                return Value::Temporal(uni_common::TemporalValue::DateTime {
+                    nanos_since_epoch: nanos,
+                    offset_seconds: offset,
+                    timezone_name: tz_name,
+                });
+            }
+        }
+
+        // Time struct: {nanos_since_midnight, offset_seconds}
+        if field_names.contains(&"nanos_since_midnight")
+            && field_names.contains(&"offset_seconds")
+            && let (Some(nanos_col), Some(offset_col)) = (
+                s.column_by_name("nanos_since_midnight"),
+                s.column_by_name("offset_seconds"),
+            )
+        {
+            // Try Time64Nanosecond first (standard schema), then Int64 fallback
+            let nanos_opt = nanos_col
+                .as_any()
+                .downcast_ref::<Time64NanosecondArray>()
+                .map(|a| {
+                    if a.is_null(row) {
+                        None
+                    } else {
+                        Some(a.value(row))
+                    }
+                })
+                .or_else(|| {
+                    nanos_col.as_any().downcast_ref::<Int64Array>().map(|a| {
+                        if a.is_null(row) {
+                            None
+                        } else {
+                            Some(a.value(row))
+                        }
+                    })
+                });
+            let offset_opt = offset_col.as_any().downcast_ref::<Int32Array>().map(|a| {
+                if a.is_null(row) {
+                    None
+                } else {
+                    Some(a.value(row))
+                }
+            });
+
+            if let (Some(Some(nanos)), Some(Some(offset))) = (nanos_opt, offset_opt) {
+                return Value::Temporal(uni_common::TemporalValue::Time {
+                    nanos_since_midnight: nanos,
+                    offset_seconds: offset,
+                });
+            }
+        }
+
+        // Generic struct → Map
         let mut map = HashMap::new();
         for (field, child) in s.fields().iter().zip(s.columns()) {
             map.insert(

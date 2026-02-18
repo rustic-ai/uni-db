@@ -2299,8 +2299,9 @@ pub fn apply_type_coercion(expr: &DfExpr, schema: &datafusion::common::DFSchema)
                     | Operator::Modulo
             );
 
-            // AND/OR with Null or Utf8 operands: cast to Boolean so Arrow kernel doesn't crash.
+            // AND/OR with Null, Utf8, or LargeBinary operands: coerce to Boolean.
             // UNWIND over json_encoded columns can produce Utf8 "true"/"false" values.
+            // LargeBinary (CypherValue) operands need _cv_to_bool UDF to decode.
             if matches!(binary.op, Operator::And | Operator::Or) {
                 let left_type = left.get_type(schema).ok();
                 let right_type = right.get_type(schema).ok();
@@ -2310,13 +2311,23 @@ pub fn apply_type_coercion(expr: &DfExpr, schema: &datafusion::common::DFSchema)
                 let right_needs_cast = right_type.as_ref().is_some_and(|t| {
                     t.is_null() || matches!(t, DataType::Utf8 | DataType::LargeUtf8)
                 });
-                if left_needs_cast || right_needs_cast {
-                    let coerced_left = if left_needs_cast {
+                let left_is_lb = left_type
+                    .as_ref()
+                    .is_some_and(|t| matches!(t, DataType::LargeBinary));
+                let right_is_lb = right_type
+                    .as_ref()
+                    .is_some_and(|t| matches!(t, DataType::LargeBinary));
+                if left_needs_cast || right_needs_cast || left_is_lb || right_is_lb {
+                    let coerced_left = if left_is_lb {
+                        dummy_udf_expr("_cv_to_bool", vec![left])
+                    } else if left_needs_cast {
                         datafusion::logical_expr::cast(left, DataType::Boolean)
                     } else {
                         left
                     };
-                    let coerced_right = if right_needs_cast {
+                    let coerced_right = if right_is_lb {
+                        dummy_udf_expr("_cv_to_bool", vec![right])
+                    } else if right_needs_cast {
                         datafusion::logical_expr::cast(right, DataType::Boolean)
                     } else {
                         right
@@ -2346,6 +2357,10 @@ pub fn apply_type_coercion(expr: &DfExpr, schema: &datafusion::common::DFSchema)
 
                 // Handle Null-typed operands: cast the null side to match the
                 // other operand's type so Arrow doesn't reject the type pair.
+                // Note: Null type often comes from DummyUdf placeholders for CypherValue
+                // UDFs (_cypher_add, _cypher_multiply, etc.) whose actual return type is
+                // LargeBinary. When the target type is LargeBinary, we treat the null-typed
+                // operand as LargeBinary and fall through to the LB handling below.
                 let left_is_null = left_type.is_null();
                 let right_is_null = right_type.is_null();
                 if left_is_null && right_is_null {
@@ -2357,23 +2372,32 @@ pub fn apply_type_coercion(expr: &DfExpr, schema: &datafusion::common::DFSchema)
                     } else {
                         &left_type
                     };
-                    let coerced_left = if left_is_null {
-                        datafusion::logical_expr::cast(left, target.clone())
-                    } else {
-                        left
-                    };
-                    let coerced_right = if right_is_null {
-                        datafusion::logical_expr::cast(right, target.clone())
-                    } else {
-                        right
-                    };
-                    return Ok(binary_expr(coerced_left, binary.op, coerced_right));
+                    // If the target type is LargeBinary, the null-typed side is likely
+                    // a CypherValue UDF result — treat both as LB and fall through
+                    // to the LargeBinary handling paths below.
+                    if !matches!(target, DataType::LargeBinary) {
+                        let coerced_left = if left_is_null {
+                            datafusion::logical_expr::cast(left, target.clone())
+                        } else {
+                            left
+                        };
+                        let coerced_right = if right_is_null {
+                            datafusion::logical_expr::cast(right, target.clone())
+                        } else {
+                            right
+                        };
+                        return Ok(binary_expr(coerced_left, binary.op, coerced_right));
+                    }
                 }
 
                 // 0. LargeBinary (CypherValue) handling — before type-mismatch check since
-                //    both-LB is same-type but still needs special handling
-                let left_is_lb = matches!(left_type, DataType::LargeBinary);
-                let right_is_lb = matches!(right_type, DataType::LargeBinary);
+                //    both-LB is same-type but still needs special handling.
+                // Null-typed operands (from DummyUdf) are treated as LB when the other
+                // side is LB, so that CypherValue UDF results are properly routed.
+                let left_is_lb =
+                    matches!(left_type, DataType::LargeBinary) || left_is_null;
+                let right_is_lb =
+                    matches!(right_type, DataType::LargeBinary) || right_is_null;
 
                 // List concatenation / append via Plus operator
                 if binary.op == Operator::Plus {
@@ -2857,6 +2881,47 @@ pub fn apply_type_coercion(expr: &DfExpr, schema: &datafusion::common::DFSchema)
         DfExpr::Alias(alias) => {
             let coerced_inner = apply_type_coercion(&alias.expr, schema)?;
             Ok(coerced_inner.alias(alias.name.clone()))
+        }
+        // Aggregate functions: recurse into arguments so inner expressions
+        // like `sum(a.num + a.num2)` get LargeBinary coercion applied.
+        DfExpr::AggregateFunction(agg) => {
+            let coerced_args: Vec<DfExpr> = agg
+                .params
+                .args
+                .iter()
+                .map(|a| apply_type_coercion(a, schema))
+                .collect::<Result<Vec<_>>>()?;
+            let coerced_order_by: Vec<datafusion::logical_expr::SortExpr> = agg
+                .params
+                .order_by
+                .iter()
+                .map(|s| {
+                    let coerced_expr = apply_type_coercion(&s.expr, schema)?;
+                    Ok(datafusion::logical_expr::SortExpr {
+                        expr: coerced_expr,
+                        asc: s.asc,
+                        nulls_first: s.nulls_first,
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?;
+            let coerced_filter = agg
+                .params
+                .filter
+                .as_ref()
+                .map(|f| apply_type_coercion(f, schema).map(Box::new))
+                .transpose()?;
+            Ok(DfExpr::AggregateFunction(
+                datafusion::logical_expr::expr::AggregateFunction {
+                    func: agg.func.clone(),
+                    params: datafusion::logical_expr::expr::AggregateFunctionParams {
+                        args: coerced_args,
+                        distinct: agg.params.distinct,
+                        filter: coerced_filter,
+                        order_by: coerced_order_by,
+                        null_treatment: agg.params.null_treatment,
+                    },
+                },
+            ))
         }
         // For other expression types, return as-is
         _ => Ok(expr.clone()),

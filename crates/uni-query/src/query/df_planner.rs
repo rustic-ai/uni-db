@@ -2717,6 +2717,9 @@ impl HybridPhysicalPlanner {
         // Build translation context with variable kinds from the input plan
         let ctx = self.translation_context_for_plan(input);
 
+        // Build DFSchema once for type coercion and physical expression conversion
+        let df_schema = datafusion::common::DFSchema::try_from(schema.as_ref().clone())?;
+
         // Translate sort expressions to DataFusion's SortExpr (a.k.a. Sort struct)
         // SortItem has `ascending: bool`, so use it directly
         // Default nulls_first to false for ASC, true for DESC
@@ -2737,14 +2740,16 @@ impl HybridPhysicalPlanner {
             }
 
             let df_expr = cypher_expr_to_df(&sort_expr, Some(&ctx))?;
+            let df_expr = Self::resolve_udfs(&df_expr, &session.state())?;
+            let df_expr = crate::query::df_expr::apply_type_coercion(&df_expr, &df_schema)?;
+            // Resolve UDFs again: apply_type_coercion may create new dummy UDF
+            // placeholders (e.g. _cv_to_bool, _cypher_add) that need resolution.
             let mut df_expr = Self::resolve_udfs(&df_expr, &session.state())?;
 
             // DateTime/Time struct sorting: replace with nanos_since_epoch/nanos_since_midnight
             // to ensure sorting by UTC instant, not struct byte ordering
             // Extract comparable values from temporal structs for correct sorting
-            if let Ok(expr_type) = df_expr.get_type(&datafusion::common::DFSchema::try_from(
-                schema.as_ref().clone(),
-            )?) {
+            if let Ok(expr_type) = df_expr.get_type(&df_schema) {
                 if uni_common::core::schema::is_datetime_struct(&expr_type) {
                     // Sort by UTC instant (nanos_since_epoch)
                     df_expr = crate::query::df_expr::extract_datetime_nanos(df_expr);
@@ -2765,12 +2770,12 @@ impl HybridPhysicalPlanner {
 
             // For ranks that share the same underlying DataFusion type (e.g. String vs Number vs Bool all coerced to String),
             // we need secondary keys to sort correctly within the rank.
-            // Rank 1 (Number): sort by toFloat(x)
-            let float_udf = crate::query::df_udfs::create_to_float_udf();
+            // Rank 1 (Number): sort by _try_to_float(x) — internal, returns NULL for unsupported types
+            let float_udf = crate::query::df_udfs::create_try_to_float_udf();
             let float_expr = float_udf.call(vec![df_expr.clone()]);
 
-            // Rank 2 (Bool): sort by toBoolean(x)
-            let bool_udf = crate::query::df_udfs::create_to_boolean_udf();
+            // Rank 2 (Bool): sort by _try_to_boolean(x) — internal, returns NULL for unsupported types
+            let bool_udf = crate::query::df_udfs::create_try_to_boolean_udf();
             let bool_expr = bool_udf.call(vec![df_expr.clone()]);
 
             df_sort_exprs.push(DfSortExpr::new(rank_expr, asc, nulls_first));
@@ -2778,9 +2783,6 @@ impl HybridPhysicalPlanner {
             df_sort_exprs.push(DfSortExpr::new(bool_expr, asc, nulls_first));
             df_sort_exprs.push(DfSortExpr::new(df_expr, asc, nulls_first));
         }
-
-        // Build DFSchema for conversion
-        let df_schema = datafusion::common::DFSchema::try_from(schema.as_ref().clone())?;
 
         let physical_sort_exprs = create_physical_sort_exprs(
             &df_sort_exprs,

@@ -484,7 +484,11 @@ pub(crate) fn coerce_case_results(
             .get_type(schema)
             .map_err(|e| anyhow!("Failed to get THEN type for cast: {}", e))?;
         if then_type != common_type {
-            *then_expr = Box::new(coerce_branch_to((**then_expr).clone(), &then_type, &common_type));
+            *then_expr = Box::new(coerce_branch_to(
+                (**then_expr).clone(),
+                &then_type,
+                &common_type,
+            ));
         }
     }
 
@@ -494,7 +498,11 @@ pub(crate) fn coerce_case_results(
             .get_type(schema)
             .map_err(|e| anyhow!("Failed to get ELSE type for cast: {}", e))?;
         if else_type != common_type {
-            *else_expr = Box::new(coerce_branch_to((**else_expr).clone(), &else_type, &common_type));
+            *else_expr = Box::new(coerce_branch_to(
+                (**else_expr).clone(),
+                &else_type,
+                &common_type,
+            ));
         }
     }
 

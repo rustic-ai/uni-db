@@ -158,6 +158,14 @@ impl TimezoneInfo {
         }
     }
 
+    /// Get the offset for a given UTC datetime (no ambiguity possible).
+    pub fn offset_for_utc(&self, utc_ndt: &NaiveDateTime) -> FixedOffset {
+        match self {
+            TimezoneInfo::FixedOffset(fo) => *fo,
+            TimezoneInfo::Named(tz) => tz.from_utc_datetime(utc_ndt).offset().fix(),
+        }
+    }
+
     /// Get the timezone name for output formatting.
     fn name(&self) -> Option<&str> {
         match self {
@@ -417,10 +425,17 @@ fn parse_datetime_style_duration(s: &str) -> Result<CypherDuration> {
     // Parse date part: YYYY-MM-DD
     let date_parts: Vec<&str> = date_part.split('-').collect();
     if date_parts.len() != 3 {
-        return Err(anyhow!("Invalid date-time style duration date: {}", date_part));
+        return Err(anyhow!(
+            "Invalid date-time style duration date: {}",
+            date_part
+        ));
     }
-    let years: i64 = date_parts[0].parse().map_err(|_| anyhow!("Invalid years"))?;
-    let month_val: i64 = date_parts[1].parse().map_err(|_| anyhow!("Invalid months"))?;
+    let years: i64 = date_parts[0]
+        .parse()
+        .map_err(|_| anyhow!("Invalid years"))?;
+    let month_val: i64 = date_parts[1]
+        .parse()
+        .map_err(|_| anyhow!("Invalid months"))?;
     let day_val: i64 = date_parts[2].parse().map_err(|_| anyhow!("Invalid days"))?;
 
     let months = years * 12 + month_val;
@@ -432,9 +447,15 @@ fn parse_datetime_style_duration(s: &str) -> Result<CypherDuration> {
         if time_parts.len() != 3 {
             return Err(anyhow!("Invalid date-time style duration time: {}", tp));
         }
-        let hours: f64 = time_parts[0].parse().map_err(|_| anyhow!("Invalid hours"))?;
-        let minutes: f64 = time_parts[1].parse().map_err(|_| anyhow!("Invalid minutes"))?;
-        let seconds: f64 = time_parts[2].parse().map_err(|_| anyhow!("Invalid seconds"))?;
+        let hours: f64 = time_parts[0]
+            .parse()
+            .map_err(|_| anyhow!("Invalid hours"))?;
+        let minutes: f64 = time_parts[1]
+            .parse()
+            .map_err(|_| anyhow!("Invalid minutes"))?;
+        let seconds: f64 = time_parts[2]
+            .parse()
+            .map_err(|_| anyhow!("Invalid seconds"))?;
         (hours * 3600.0 * NANOS_PER_SECOND as f64
             + minutes * 60.0 * NANOS_PER_SECOND as f64
             + seconds * NANOS_PER_SECOND as f64) as i64
@@ -492,7 +513,8 @@ fn parse_iso8601_duration_cypher(s: &str) -> Result<CypherDuration> {
                         // Cascade remaining fractional months via average Gregorian month (2,629,746 seconds)
                         let frac_secs = frac_frac_months * 2_629_746.0;
                         let extra_days = (frac_secs / SECONDS_PER_DAY as f64).trunc() as i64;
-                        let remaining_secs = frac_secs - (extra_days as f64 * SECONDS_PER_DAY as f64);
+                        let remaining_secs =
+                            frac_secs - (extra_days as f64 * SECONDS_PER_DAY as f64);
                         days += extra_days;
                         nanos += (remaining_secs * NANOS_PER_SECOND as f64) as i64;
                     }
@@ -505,7 +527,8 @@ fn parse_iso8601_duration_cypher(s: &str) -> Result<CypherDuration> {
                     if frac != 0.0 {
                         let frac_secs = frac * 2_629_746.0;
                         let extra_days = (frac_secs / SECONDS_PER_DAY as f64).trunc() as i64;
-                        let remaining_secs = frac_secs - (extra_days as f64 * SECONDS_PER_DAY as f64);
+                        let remaining_secs =
+                            frac_secs - (extra_days as f64 * SECONDS_PER_DAY as f64);
                         days += extra_days;
                         nanos += (remaining_secs * NANOS_PER_SECOND as f64) as i64;
                     }
@@ -680,12 +703,14 @@ pub fn eval_temporal_accessor_value(val: &Value, component: &str) -> Result<Valu
             match comp_lower.as_str() {
                 "timezone" => {
                     return match tv {
-                        TemporalValue::DateTime { timezone_name, offset_seconds, .. } => {
-                            Ok(match timezone_name {
-                                Some(name) => Value::String(name.clone()),
-                                None => Value::String(format_timezone_offset(*offset_seconds)),
-                            })
-                        }
+                        TemporalValue::DateTime {
+                            timezone_name,
+                            offset_seconds,
+                            ..
+                        } => Ok(match timezone_name {
+                            Some(name) => Value::String(name.clone()),
+                            None => Value::String(format_timezone_offset(*offset_seconds)),
+                        }),
                         TemporalValue::Time { offset_seconds, .. } => {
                             Ok(Value::String(format_timezone_offset(*offset_seconds)))
                         }
@@ -721,9 +746,9 @@ pub fn eval_temporal_accessor_value(val: &Value, component: &str) -> Result<Valu
                 }
                 "epochseconds" => {
                     return match tv {
-                        TemporalValue::DateTime { nanos_since_epoch, .. } => {
-                            Ok(Value::Int(nanos_since_epoch / 1_000_000_000))
-                        }
+                        TemporalValue::DateTime {
+                            nanos_since_epoch, ..
+                        } => Ok(Value::Int(nanos_since_epoch / 1_000_000_000)),
                         TemporalValue::LocalDateTime { nanos_since_epoch } => {
                             Ok(Value::Int(nanos_since_epoch / 1_000_000_000))
                         }
@@ -735,9 +760,9 @@ pub fn eval_temporal_accessor_value(val: &Value, component: &str) -> Result<Valu
                 }
                 "epochmillis" => {
                     return match tv {
-                        TemporalValue::DateTime { nanos_since_epoch, .. } => {
-                            Ok(Value::Int(nanos_since_epoch / 1_000_000))
-                        }
+                        TemporalValue::DateTime {
+                            nanos_since_epoch, ..
+                        } => Ok(Value::Int(nanos_since_epoch / 1_000_000)),
                         TemporalValue::LocalDateTime { nanos_since_epoch } => {
                             Ok(Value::Int(nanos_since_epoch / 1_000_000))
                         }
@@ -1166,7 +1191,7 @@ fn build_date_from_projection(
         let doq = map
             .get("dayOfQuarter")
             .and_then(|v| v.as_i64())
-            .unwrap_or(1) as u32;
+            .unwrap_or_else(|| day_of_quarter(source_date) as i64) as u32;
         return build_date_from_quarter(year, quarter, doq);
     }
 
@@ -1253,6 +1278,13 @@ fn build_date_from_week(year: i32, week: u32, day_of_week: u32) -> Result<NaiveD
     // Calculate target date
     let days_offset = ((week - 1) * 7 + (day_of_week - 1)) as i64;
     Ok(week1_monday + Duration::days(days_offset))
+}
+
+/// Compute the 1-based day-of-quarter for a given date.
+fn day_of_quarter(date: &NaiveDate) -> u32 {
+    let quarter_start_month = ((date.month() - 1) / 3) * 3 + 1;
+    let quarter_start = NaiveDate::from_ymd_opt(date.year(), quarter_start_month, 1).unwrap();
+    (date.signed_duration_since(quarter_start).num_days() + 1) as u32
 }
 
 /// Build date from quarter and day of quarter (returns NaiveDate).
@@ -1501,15 +1533,30 @@ fn eval_time_from_projection(
     let nanos = time_to_nanos(&time);
 
     if with_timezone {
-        let offset = if let Some(tz_str) = map.get("timezone").and_then(|v| v.as_str()) {
-            parse_timezone_offset(tz_str)?
+        if let Some(tz_str) = map.get("timezone").and_then(|v| v.as_str()) {
+            let new_offset = parse_timezone_offset(tz_str)?;
+            // If source has a timezone, perform timezone conversion:
+            // UTC = local_time - source_offset; new_local = UTC + new_offset
+            let converted_nanos = if let Some(src_offset) = source_offset {
+                let utc_nanos = nanos - (src_offset as i64) * 1_000_000_000;
+                let target_nanos = utc_nanos + (new_offset as i64) * 1_000_000_000;
+                // Wrap around within a day
+                target_nanos.rem_euclid(NANOS_PER_DAY)
+            } else {
+                // Source has no timezone (localtime/localdatetime): just assign
+                nanos
+            };
+            Ok(Value::Temporal(TemporalValue::Time {
+                nanos_since_midnight: converted_nanos,
+                offset_seconds: new_offset,
+            }))
         } else {
-            source_offset.unwrap_or(0)
-        };
-        Ok(Value::Temporal(TemporalValue::Time {
-            nanos_since_midnight: nanos,
-            offset_seconds: offset,
-        }))
+            let offset = source_offset.unwrap_or(0);
+            Ok(Value::Temporal(TemporalValue::Time {
+                nanos_since_midnight: nanos,
+                offset_seconds: offset,
+            }))
+        }
     } else {
         Ok(Value::Temporal(TemporalValue::LocalTime {
             nanos_since_midnight: nanos,
@@ -1557,11 +1604,16 @@ fn parse_time_string_with_tz(s: &str) -> Result<(NaiveTime, Option<TimezoneInfo>
     }
 
     // Try time with Z suffix
-    if let Some(base) = datetime_part.strip_suffix('Z').or_else(|| datetime_part.strip_suffix('z'))
+    if let Some(base) = datetime_part
+        .strip_suffix('Z')
+        .or_else(|| datetime_part.strip_suffix('z'))
         && let Ok(time) = try_parse_naive_time(base)
     {
         let utc_tz = TimezoneInfo::FixedOffset(FixedOffset::east_opt(0).unwrap());
-        let tz_info = tz_name.map(|n| parse_timezone(&n)).transpose()?.or(Some(utc_tz));
+        let tz_info = tz_name
+            .map(|n| parse_timezone(&n))
+            .transpose()?
+            .or(Some(utc_tz));
         return Ok((time, tz_info));
     }
 
@@ -1884,9 +1936,45 @@ fn eval_datetime_from_map(map: &HashMap<String, Value>, with_timezone: bool) -> 
         return eval_datetime_from_date_and_time(map, date_val, time_val, with_timezone);
     }
 
-    // date-only projection (time defaults from the source, which is typically midnight for Date)
+    // date-only projection: date from source, time from explicit map fields.
+    // Unlike `datetime` projection, we do NOT inherit timezone from the date source —
+    // it defaults to UTC unless an explicit `timezone` key is present.
     if let Some(date_val) = map.get("date") {
-        return eval_datetime_from_projection(map, date_val, with_timezone);
+        let source_date = temporal_or_string_to_date(date_val)?;
+        let date = build_date_from_projection(map, &source_date)?;
+        let hour = map.get("hour").and_then(|v| v.as_i64()).unwrap_or(0) as u32;
+        let minute = map.get("minute").and_then(|v| v.as_i64()).unwrap_or(0) as u32;
+        let second = map.get("second").and_then(|v| v.as_i64()).unwrap_or(0) as u32;
+        let nanos = build_nanoseconds(map);
+        let time = NaiveTime::from_hms_nano_opt(hour, minute, second, nanos)
+            .ok_or_else(|| anyhow!("Invalid time in datetime map"))?;
+        let ndt = NaiveDateTime::new(date, time);
+
+        if with_timezone {
+            let (offset_secs, tz_name) =
+                if let Some(tz_str) = map.get("timezone").and_then(|v| v.as_str()) {
+                    let tz_info = parse_timezone(tz_str)?;
+                    let offset = tz_info.offset_for_local(&ndt)?;
+                    (
+                        offset.local_minus_utc(),
+                        tz_info.name().map(|s| s.to_string()),
+                    )
+                } else {
+                    (0, None) // Default to UTC, not source tz
+                };
+
+            let utc_ndt = ndt - Duration::seconds(offset_secs as i64);
+            let utc_dt = DateTime::<Utc>::from_naive_utc_and_offset(utc_ndt, Utc);
+            return Ok(Value::Temporal(TemporalValue::DateTime {
+                nanos_since_epoch: utc_dt.timestamp_nanos_opt().unwrap_or(0),
+                offset_seconds: offset_secs,
+                timezone_name: tz_name,
+            }));
+        } else {
+            return Ok(Value::Temporal(TemporalValue::LocalDateTime {
+                nanos_since_epoch: naive_datetime_to_nanos(&ndt),
+            }));
+        }
     }
 
     // Build time part: if 'time' key is present, extract from temporal/string;
@@ -1937,28 +2025,56 @@ fn eval_datetime_from_map(map: &HashMap<String, Value>, with_timezone: bool) -> 
 
     if with_timezone {
         // Handle timezone: explicit > from time source > UTC default
-        let (offset_secs, tz_name) =
-            if let Some(tz_str) = map.get("timezone").and_then(|v| v.as_str()) {
-                let tz_info = parse_timezone(tz_str)?;
-                let offset = tz_info.offset_for_local(&ndt)?;
-                (
-                    offset.local_minus_utc(),
-                    tz_info.name().map(|s| s.to_string()),
-                )
-            } else if let Some(ref tz) = source_tz {
-                let offset = tz.offset_for_local(&ndt)?;
-                (offset.local_minus_utc(), tz.name().map(|s| s.to_string()))
+        // When source has a timezone and a different explicit timezone is given,
+        // perform timezone conversion (source_local → UTC → target_local).
+        if let Some(tz_str) = map.get("timezone").and_then(|v| v.as_str()) {
+            let tz_info = parse_timezone(tz_str)?;
+            if let Some(ref src_tz) = source_tz {
+                // Timezone CONVERSION: source local → UTC → target local
+                let src_offset = src_tz.offset_for_local(&ndt)?;
+                let utc_ndt = ndt - Duration::seconds(src_offset.local_minus_utc() as i64);
+                let target_offset = tz_info.offset_for_utc(&utc_ndt);
+                let offset_secs = target_offset.local_minus_utc();
+                let tz_name = tz_info.name().map(|s| s.to_string());
+                let utc_dt = DateTime::<Utc>::from_naive_utc_and_offset(utc_ndt, Utc);
+                Ok(Value::Temporal(TemporalValue::DateTime {
+                    nanos_since_epoch: utc_dt.timestamp_nanos_opt().unwrap_or(0),
+                    offset_seconds: offset_secs,
+                    timezone_name: tz_name,
+                }))
             } else {
-                (0, None)
-            };
-
-        let utc_ndt = ndt - Duration::seconds(offset_secs as i64);
-        let utc_dt = DateTime::<Utc>::from_naive_utc_and_offset(utc_ndt, Utc);
-        Ok(Value::Temporal(TemporalValue::DateTime {
-            nanos_since_epoch: utc_dt.timestamp_nanos_opt().unwrap_or(0),
-            offset_seconds: offset_secs,
-            timezone_name: tz_name,
-        }))
+                // Source has no timezone: just assign target timezone
+                let offset = tz_info.offset_for_local(&ndt)?;
+                let offset_secs = offset.local_minus_utc();
+                let tz_name = tz_info.name().map(|s| s.to_string());
+                let utc_ndt = ndt - Duration::seconds(offset_secs as i64);
+                let utc_dt = DateTime::<Utc>::from_naive_utc_and_offset(utc_ndt, Utc);
+                Ok(Value::Temporal(TemporalValue::DateTime {
+                    nanos_since_epoch: utc_dt.timestamp_nanos_opt().unwrap_or(0),
+                    offset_seconds: offset_secs,
+                    timezone_name: tz_name,
+                }))
+            }
+        } else if let Some(ref tz) = source_tz {
+            let offset = tz.offset_for_local(&ndt)?;
+            let offset_secs = offset.local_minus_utc();
+            let tz_name = tz.name().map(|s| s.to_string());
+            let utc_ndt = ndt - Duration::seconds(offset_secs as i64);
+            let utc_dt = DateTime::<Utc>::from_naive_utc_and_offset(utc_ndt, Utc);
+            Ok(Value::Temporal(TemporalValue::DateTime {
+                nanos_since_epoch: utc_dt.timestamp_nanos_opt().unwrap_or(0),
+                offset_seconds: offset_secs,
+                timezone_name: tz_name,
+            }))
+        } else {
+            // No timezone at all: default to UTC
+            let utc_dt = DateTime::<Utc>::from_naive_utc_and_offset(ndt, Utc);
+            Ok(Value::Temporal(TemporalValue::DateTime {
+                nanos_since_epoch: utc_dt.timestamp_nanos_opt().unwrap_or(0),
+                offset_seconds: 0,
+                timezone_name: None,
+            }))
+        }
     } else {
         // localdatetime - no timezone
         Ok(Value::Temporal(TemporalValue::LocalDateTime {
@@ -2048,28 +2164,54 @@ fn eval_datetime_from_date_and_time(
     let ndt = NaiveDateTime::new(date, time);
 
     if with_timezone {
-        let (offset_secs, tz_name) =
-            if let Some(tz_str) = map.get("timezone").and_then(|v| v.as_str()) {
-                let tz_info = parse_timezone(tz_str)?;
-                let offset = tz_info.offset_for_local(&ndt)?;
-                (
-                    offset.local_minus_utc(),
-                    tz_info.name().map(|s| s.to_string()),
-                )
-            } else if let Some(ref tz) = source_tz {
-                let offset = tz.offset_for_local(&ndt)?;
-                (offset.local_minus_utc(), tz.name().map(|s| s.to_string()))
+        if let Some(tz_str) = map.get("timezone").and_then(|v| v.as_str()) {
+            let tz_info = parse_timezone(tz_str)?;
+            if let Some(ref src_tz) = source_tz {
+                // Timezone CONVERSION: source local → UTC → target local
+                let src_offset = src_tz.offset_for_local(&ndt)?;
+                let utc_ndt = ndt - Duration::seconds(src_offset.local_minus_utc() as i64);
+                let target_offset = tz_info.offset_for_utc(&utc_ndt);
+                let offset_secs = target_offset.local_minus_utc();
+                let tz_name = tz_info.name().map(|s| s.to_string());
+                let utc_dt = DateTime::<Utc>::from_naive_utc_and_offset(utc_ndt, Utc);
+                Ok(Value::Temporal(TemporalValue::DateTime {
+                    nanos_since_epoch: utc_dt.timestamp_nanos_opt().unwrap_or(0),
+                    offset_seconds: offset_secs,
+                    timezone_name: tz_name,
+                }))
             } else {
-                (0, None)
-            };
-
-        let utc_ndt = ndt - Duration::seconds(offset_secs as i64);
-        let utc_dt = DateTime::<Utc>::from_naive_utc_and_offset(utc_ndt, Utc);
-        Ok(Value::Temporal(TemporalValue::DateTime {
-            nanos_since_epoch: utc_dt.timestamp_nanos_opt().unwrap_or(0),
-            offset_seconds: offset_secs,
-            timezone_name: tz_name,
-        }))
+                // Source has no timezone: just assign target timezone
+                let offset = tz_info.offset_for_local(&ndt)?;
+                let offset_secs = offset.local_minus_utc();
+                let tz_name = tz_info.name().map(|s| s.to_string());
+                let utc_ndt = ndt - Duration::seconds(offset_secs as i64);
+                let utc_dt = DateTime::<Utc>::from_naive_utc_and_offset(utc_ndt, Utc);
+                Ok(Value::Temporal(TemporalValue::DateTime {
+                    nanos_since_epoch: utc_dt.timestamp_nanos_opt().unwrap_or(0),
+                    offset_seconds: offset_secs,
+                    timezone_name: tz_name,
+                }))
+            }
+        } else if let Some(ref tz) = source_tz {
+            let offset = tz.offset_for_local(&ndt)?;
+            let offset_secs = offset.local_minus_utc();
+            let tz_name = tz.name().map(|s| s.to_string());
+            let utc_ndt = ndt - Duration::seconds(offset_secs as i64);
+            let utc_dt = DateTime::<Utc>::from_naive_utc_and_offset(utc_ndt, Utc);
+            Ok(Value::Temporal(TemporalValue::DateTime {
+                nanos_since_epoch: utc_dt.timestamp_nanos_opt().unwrap_or(0),
+                offset_seconds: offset_secs,
+                timezone_name: tz_name,
+            }))
+        } else {
+            // No timezone at all: default to UTC
+            let utc_dt = DateTime::<Utc>::from_naive_utc_and_offset(ndt, Utc);
+            Ok(Value::Temporal(TemporalValue::DateTime {
+                nanos_since_epoch: utc_dt.timestamp_nanos_opt().unwrap_or(0),
+                offset_seconds: 0,
+                timezone_name: None,
+            }))
+        }
     } else {
         Ok(Value::Temporal(TemporalValue::LocalDateTime {
             nanos_since_epoch: naive_datetime_to_nanos(&ndt),
@@ -2106,18 +2248,14 @@ fn eval_datetime_from_projection(
         .map(|v| v as u32)
         .unwrap_or(source_time.second());
 
-    // If explicit time components override the source, unspecified sub-second parts
-    // should be zero (not inherited from source), unless sub-seconds are also specified.
-    let has_explicit_time = map.contains_key("hour")
-        || map.contains_key("minute")
-        || map.contains_key("second");
+    // Sub-seconds are inherited from source unless explicitly overridden.
+    // When constructing via `datetime` key, overriding second/minute/hour
+    // still preserves sub-seconds from the source (per TCK Temporal3).
     let nanos = if map.contains_key("millisecond")
         || map.contains_key("microsecond")
         || map.contains_key("nanosecond")
     {
         build_nanoseconds(map)
-    } else if has_explicit_time {
-        0 // Explicit time override → zero sub-seconds unless specified
     } else {
         source_time.nanosecond()
     };
@@ -2128,29 +2266,54 @@ fn eval_datetime_from_projection(
     let ndt = NaiveDateTime::new(date, time);
 
     if with_timezone {
-        // Use timezone from map if provided, otherwise from source
-        let (offset_secs, tz_name) =
-            if let Some(tz_str) = map.get("timezone").and_then(|v| v.as_str()) {
-                let tz_info = parse_timezone(tz_str)?;
-                let offset = tz_info.offset_for_local(&ndt)?;
-                (
-                    offset.local_minus_utc(),
-                    tz_info.name().map(|s| s.to_string()),
-                )
-            } else if let Some(ref tz) = source_tz {
-                let offset = tz.offset_for_local(&ndt)?;
-                (offset.local_minus_utc(), tz.name().map(|s| s.to_string()))
+        if let Some(tz_str) = map.get("timezone").and_then(|v| v.as_str()) {
+            let tz_info = parse_timezone(tz_str)?;
+            if let Some(ref src_tz) = source_tz {
+                // Timezone CONVERSION: source local → UTC → target local
+                let src_offset = src_tz.offset_for_local(&ndt)?;
+                let utc_ndt = ndt - Duration::seconds(src_offset.local_minus_utc() as i64);
+                let target_offset = tz_info.offset_for_utc(&utc_ndt);
+                let offset_secs = target_offset.local_minus_utc();
+                let tz_name = tz_info.name().map(|s| s.to_string());
+                let utc_dt = DateTime::<Utc>::from_naive_utc_and_offset(utc_ndt, Utc);
+                Ok(Value::Temporal(TemporalValue::DateTime {
+                    nanos_since_epoch: utc_dt.timestamp_nanos_opt().unwrap_or(0),
+                    offset_seconds: offset_secs,
+                    timezone_name: tz_name,
+                }))
             } else {
-                (0, None)
-            };
-
-        let utc_ndt = ndt - Duration::seconds(offset_secs as i64);
-        let utc_dt = DateTime::<Utc>::from_naive_utc_and_offset(utc_ndt, Utc);
-        Ok(Value::Temporal(TemporalValue::DateTime {
-            nanos_since_epoch: utc_dt.timestamp_nanos_opt().unwrap_or(0),
-            offset_seconds: offset_secs,
-            timezone_name: tz_name,
-        }))
+                // Source has no timezone: just assign
+                let offset = tz_info.offset_for_local(&ndt)?;
+                let offset_secs = offset.local_minus_utc();
+                let tz_name = tz_info.name().map(|s| s.to_string());
+                let utc_ndt = ndt - Duration::seconds(offset_secs as i64);
+                let utc_dt = DateTime::<Utc>::from_naive_utc_and_offset(utc_ndt, Utc);
+                Ok(Value::Temporal(TemporalValue::DateTime {
+                    nanos_since_epoch: utc_dt.timestamp_nanos_opt().unwrap_or(0),
+                    offset_seconds: offset_secs,
+                    timezone_name: tz_name,
+                }))
+            }
+        } else if let Some(ref tz) = source_tz {
+            let offset = tz.offset_for_local(&ndt)?;
+            let offset_secs = offset.local_minus_utc();
+            let tz_name = tz.name().map(|s| s.to_string());
+            let utc_ndt = ndt - Duration::seconds(offset_secs as i64);
+            let utc_dt = DateTime::<Utc>::from_naive_utc_and_offset(utc_ndt, Utc);
+            Ok(Value::Temporal(TemporalValue::DateTime {
+                nanos_since_epoch: utc_dt.timestamp_nanos_opt().unwrap_or(0),
+                offset_seconds: offset_secs,
+                timezone_name: tz_name,
+            }))
+        } else {
+            // No timezone: default to UTC
+            let utc_dt = DateTime::<Utc>::from_naive_utc_and_offset(ndt, Utc);
+            Ok(Value::Temporal(TemporalValue::DateTime {
+                nanos_since_epoch: utc_dt.timestamp_nanos_opt().unwrap_or(0),
+                offset_seconds: 0,
+                timezone_name: None,
+            }))
+        }
     } else {
         Ok(Value::Temporal(TemporalValue::LocalDateTime {
             nanos_since_epoch: naive_datetime_to_nanos(&ndt),
@@ -2514,22 +2677,19 @@ pub fn parse_datetime_with_tz(s: &str) -> Result<(NaiveDate, NaiveTime, Option<T
     }
 
     // Try parsing datetime or time with Z suffix
-    if let Some(base) = datetime_part.strip_suffix('Z').or_else(|| datetime_part.strip_suffix('z')) {
+    if let Some(base) = datetime_part
+        .strip_suffix('Z')
+        .or_else(|| datetime_part.strip_suffix('z'))
+    {
         let utc_tz = Some(TimezoneInfo::FixedOffset(FixedOffset::east_opt(0).unwrap()));
         // Try as datetime first (e.g., "2015-W30-2T214032.142Z")
         if let Ok(ndt) = try_parse_naive_datetime(base) {
-            let tz_info = tz_name
-                .map(|n| parse_timezone(&n))
-                .transpose()?
-                .or(utc_tz);
+            let tz_info = tz_name.map(|n| parse_timezone(&n)).transpose()?.or(utc_tz);
             return Ok((ndt.date(), ndt.time(), tz_info));
         }
         // Try as time only
         if let Ok(time) = try_parse_naive_time(base) {
-            let tz_info = tz_name
-                .map(|n| parse_timezone(&n))
-                .transpose()?
-                .or(utc_tz);
+            let tz_info = tz_name.map(|n| parse_timezone(&n)).transpose()?.or(utc_tz);
             return Ok((today, time, tz_info));
         }
     }
@@ -3282,11 +3442,9 @@ fn truncate_time(
                 .unwrap_or_else(|| NaiveTime::from_hms_opt(0, 0, 0).unwrap());
             let offset = match tv {
                 TemporalValue::Time { offset_seconds, .. }
-                | TemporalValue::DateTime { offset_seconds, .. } => {
-                    Some(TimezoneInfo::FixedOffset(
-                        FixedOffset::east_opt(*offset_seconds).unwrap(),
-                    ))
-                }
+                | TemporalValue::DateTime { offset_seconds, .. } => Some(
+                    TimezoneInfo::FixedOffset(FixedOffset::east_opt(*offset_seconds).unwrap()),
+                ),
                 _ => None,
             };
             (Utc::now().date_naive(), t, offset)

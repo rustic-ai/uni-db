@@ -71,24 +71,22 @@ sync_compliance_reports() {
     local remove_count
     local i
 
-    compliance_mode=$(compliance_mode_dir "$mode")
+    compliance_mode=$(compliance_mode_dir "$mode") || exit 1
     compliance_dir="compliance_reports/$compliance_mode"
     mkdir -p "$compliance_dir"
 
-    cp -f "$results_json" "$compliance_dir/$(basename "$results_json")"
+    latest_json="$compliance_dir/$(basename "$results_json")"
+    cp -f "$results_json" "$latest_json"
 
-    mapfile -t json_files < <(find "$compliance_dir" -maxdepth 1 -type f -name 'results_*.json' | sort)
+    # Prune old timestamped results, keeping only the latest 2.
+    # Use a strict regex to match only YYYYMMDD_HHMMSS filenames (avoids
+    # non-timestamped files like results_baseline.json poisoning the sort).
+    mapfile -t json_files < <(find "$compliance_dir" -maxdepth 1 -type f -regextype posix-extended -regex '.*/results_[0-9]{8}_[0-9]{6}\.json' | sort)
     if [ "${#json_files[@]}" -gt 2 ]; then
         remove_count=$(( ${#json_files[@]} - 2 ))
         for ((i = 0; i < remove_count; i++)); do
             rm -f "${json_files[$i]}"
         done
-    fi
-
-    latest_json=$(find "$compliance_dir" -maxdepth 1 -type f -name 'results_*.json' | sort | tail -n 1)
-    if [ -z "$latest_json" ]; then
-        echo "❌ Could not find a results JSON in $compliance_dir" >&2
-        exit 1
     fi
 
     python3 scripts/analyze_tck_json.py "$latest_json"
@@ -123,11 +121,11 @@ run_for_mode() {
 
     local raw_results_dir="target/cucumber/nextest/$mode"
     local output_dir="target/cucumber/$mode"
-    local filter_expr=""
+    local -a filter_args=()
     local results_json
 
     if [ -n "$filter" ]; then
-        filter_expr="-E test($filter)"
+        filter_args=(-E "test($filter)")
         output_dir="$output_dir/filtered"
         echo "🚀 Running TCK tests in '$mode' mode (filter: $filter)..."
     else
@@ -139,10 +137,9 @@ run_for_mode() {
 
     echo ""
     # Run tests via nextest (--no-fail-fast to collect all results)
-    # shellcheck disable=SC2086
     UNI_TCK_SCHEMA_MODE="$mode" \
     UNI_TCK_NEXTEST_RESULTS_DIR="$raw_results_dir" \
-    cargo nextest run -p uni-tck --test tck --no-fail-fast $filter_expr || true
+    cargo nextest run -p uni-tck --test tck --no-fail-fast "${filter_args[@]}" || true
 
     echo ""
     echo "📊 Aggregating results..."
@@ -186,6 +183,6 @@ if [ "$RUN_BOTH" -eq 1 ]; then
     run_for_mode "schemaless" "$FILTER_ARG"
     run_for_mode "sidecar" "$FILTER_ARG"
 else
-    MODE=$(normalize_mode "${UNI_TCK_SCHEMA_MODE:-schemaless}")
+    MODE=$(normalize_mode "${UNI_TCK_SCHEMA_MODE:-schemaless}") || exit 1
     run_for_mode "$MODE" "$FILTER_ARG"
 fi

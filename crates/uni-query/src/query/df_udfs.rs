@@ -144,8 +144,10 @@ pub fn register_cypher_udfs(ctx: &SessionContext) -> DFResult<()> {
         ctx.register_udf(create_temporal_udf(name));
     }
 
-    // Duration property accessor UDF
+    // Duration and temporal property accessor UDFs
     ctx.register_udf(create_duration_property_udf());
+    ctx.register_udf(create_temporal_property_udf());
+    ctx.register_udf(create_tostring_udf());
     ctx.register_udf(create_type_rank_udf());
     ctx.register_udf(create_has_null_udf());
     ctx.register_udf(create_cypher_size_udf());
@@ -1381,11 +1383,18 @@ impl ScalarUDFImpl for DurationPropertyUdf {
                 ));
             }
 
+            let dur_string_owned;
             let dur_str = match &val_args[0] {
-                Value::String(s) => s,
+                Value::String(s) => s.as_str(),
+                Value::Temporal(uni_common::TemporalValue::Duration { .. }) => {
+                    dur_string_owned = val_args[0].to_string();
+                    &dur_string_owned
+                }
+                Value::Null => return Ok(Value::Null),
                 _ => {
                     return Err(datafusion::error::DataFusionError::Execution(
-                        "_duration_property(): duration must be a string".to_string(),
+                        "_duration_property(): duration must be a string or temporal duration"
+                            .to_string(),
                     ));
                 }
             };
@@ -1408,6 +1417,151 @@ impl ScalarUDFImpl for DurationPropertyUdf {
     }
 }
 
+/// Create a UDF for `toString()` that handles temporal types.
+///
+/// Converts any Value to its string representation. For temporals,
+/// uses the canonical Display format. For other types, uses natural formatting.
+fn create_tostring_udf() -> ScalarUDF {
+    ScalarUDF::new_from_impl(ToStringUdf::new())
+}
+
+#[derive(Debug)]
+struct ToStringUdf {
+    signature: Signature,
+}
+
+impl ToStringUdf {
+    fn new() -> Self {
+        Self {
+            signature: Signature::variadic_any(Volatility::Immutable),
+        }
+    }
+}
+
+impl_udf_eq_hash!(ToStringUdf);
+
+impl ScalarUDFImpl for ToStringUdf {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn name(&self) -> &str {
+        "tostring"
+    }
+
+    fn signature(&self) -> &Signature {
+        &self.signature
+    }
+
+    fn return_type(&self, _arg_types: &[DataType]) -> DFResult<DataType> {
+        Ok(DataType::Utf8)
+    }
+
+    fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DFResult<ColumnarValue> {
+        let output_type = self.return_type(&[])?;
+        invoke_cypher_udf(args, &output_type, |val_args| {
+            if val_args.is_empty() {
+                return Err(datafusion::error::DataFusionError::Execution(
+                    "toString(): requires 1 argument".to_string(),
+                ));
+            }
+            match &val_args[0] {
+                Value::Null => Ok(Value::Null),
+                Value::String(s) => Ok(Value::String(s.clone())),
+                Value::Int(i) => Ok(Value::String(i.to_string())),
+                Value::Float(f) => Ok(Value::String(f.to_string())),
+                Value::Bool(b) => Ok(Value::String(b.to_string())),
+                Value::Temporal(t) => Ok(Value::String(t.to_string())),
+                other => {
+                    let type_name = match other {
+                        Value::List(_) => "List",
+                        Value::Map(_) => "Map",
+                        Value::Node { .. } => "Node",
+                        Value::Edge { .. } => "Relationship",
+                        Value::Path { .. } => "Path",
+                        _ => "Unknown",
+                    };
+                    Err(datafusion::error::DataFusionError::Execution(format!(
+                        "Type mismatch: expected String, Integer, Float, Boolean, Temporal, or Point but was {}",
+                        type_name
+                    )))
+                }
+            }
+        })
+    }
+}
+
+/// Create a UDF for accessing temporal component properties.
+///
+/// Called as `_temporal_property(temporal_value, component_name)`.
+/// Returns a LargeBinary-encoded value (some accessors return strings, most return integers).
+fn create_temporal_property_udf() -> ScalarUDF {
+    ScalarUDF::new_from_impl(TemporalPropertyUdf::new())
+}
+
+#[derive(Debug)]
+struct TemporalPropertyUdf {
+    signature: Signature,
+}
+
+impl TemporalPropertyUdf {
+    fn new() -> Self {
+        Self {
+            signature: Signature::variadic_any(Volatility::Immutable),
+        }
+    }
+}
+
+impl_udf_eq_hash!(TemporalPropertyUdf);
+
+impl ScalarUDFImpl for TemporalPropertyUdf {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn name(&self) -> &str {
+        "_temporal_property"
+    }
+
+    fn signature(&self) -> &Signature {
+        &self.signature
+    }
+
+    fn return_type(&self, _arg_types: &[DataType]) -> DFResult<DataType> {
+        Ok(DataType::LargeBinary)
+    }
+
+    fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DFResult<ColumnarValue> {
+        let output_type = self.return_type(&[])?;
+        invoke_cypher_udf(args, &output_type, |val_args| {
+            if val_args.len() != 2 {
+                return Err(datafusion::error::DataFusionError::Execution(
+                    "_temporal_property(): requires 2 arguments (temporal_value, component)"
+                        .to_string(),
+                ));
+            }
+
+            let component = match &val_args[1] {
+                Value::String(s) => s.clone(),
+                _ => {
+                    return Err(datafusion::error::DataFusionError::Execution(
+                        "_temporal_property(): component must be a string".to_string(),
+                    ));
+                }
+            };
+
+            crate::query::datetime::eval_temporal_accessor_value(&val_args[0], &component).map_err(
+                |e| {
+                    datafusion::error::DataFusionError::Execution(format!(
+                        "_temporal_property(): {}",
+                        e
+                    ))
+                },
+            )
+        })
+    }
+}
+
 /// Downcast an `ArrayRef` to a concrete Arrow array type, returning a
 /// `DataFusionError::Execution` on failure.
 macro_rules! downcast_arr {
@@ -1419,6 +1573,26 @@ macro_rules! downcast_arr {
             ))
         })?
     };
+}
+
+/// Return the Cypher type name for a `Value`, used in error messages.
+fn cypher_type_name(val: &Value) -> &'static str {
+    match val {
+        Value::Null => "Null",
+        Value::Bool(_) => "Boolean",
+        Value::Int(_) => "Integer",
+        Value::Float(_) => "Float",
+        Value::String(_) => "String",
+        Value::Bytes(_) => "Bytes",
+        Value::List(_) => "List",
+        Value::Map(_) => "Map",
+        Value::Node(_) => "Node",
+        Value::Edge(_) => "Relationship",
+        Value::Path(_) => "Path",
+        Value::Vector(_) => "Vector",
+        Value::Temporal(_) => "Temporal",
+        _ => "Unknown",
+    }
 }
 
 /// Convert a string slice to `Value`, attempting JSON parse for object/array/quoted-string prefixes.
@@ -1945,25 +2119,24 @@ impl ScalarUDFImpl for ToIntegerUdf {
             }
 
             let val = &val_args[0];
-            let result = match val {
-                Value::Int(i) => Value::Int(*i),
-                Value::Float(f) => Value::Int(*f as i64),
+            match val {
+                Value::Int(i) => Ok(Value::Int(*i)),
+                Value::Float(f) => Ok(Value::Int(*f as i64)),
                 Value::String(s) => {
                     if let Ok(i) = s.parse::<i64>() {
-                        Value::Int(i)
+                        Ok(Value::Int(i))
                     } else if let Ok(f) = s.parse::<f64>() {
-                        Value::Int(f as i64)
+                        Ok(Value::Int(f as i64))
                     } else {
-                        Value::Null
+                        Ok(Value::Null)
                     }
                 }
-                Value::Null => Value::Null,
-                _ => {
-                    // Cypher: return null if cannot convert
-                    Value::Null
-                }
-            };
-            Ok(result)
+                Value::Null => Ok(Value::Null),
+                other => Err(datafusion::error::DataFusionError::Execution(format!(
+                    "InvalidArgumentValue: tointeger(): cannot convert {} to integer",
+                    cypher_type_name(other)
+                ))),
+            }
         })
     }
 }
@@ -2018,23 +2191,22 @@ impl ScalarUDFImpl for ToFloatUdf {
             }
 
             let val = &val_args[0];
-            let result = match val {
-                Value::Int(i) => Value::Float(*i as f64),
-                Value::Float(f) => Value::Float(*f),
+            match val {
+                Value::Int(i) => Ok(Value::Float(*i as f64)),
+                Value::Float(f) => Ok(Value::Float(*f)),
                 Value::String(s) => {
                     if let Ok(f) = s.parse::<f64>() {
-                        Value::Float(f)
+                        Ok(Value::Float(f))
                     } else {
-                        Value::Null
+                        Ok(Value::Null)
                     }
                 }
-                Value::Null => Value::Null,
-                _ => {
-                    // Cypher: return null if cannot convert
-                    Value::Null
-                }
-            };
-            Ok(result)
+                Value::Null => Ok(Value::Null),
+                other => Err(datafusion::error::DataFusionError::Execution(format!(
+                    "InvalidArgumentValue: tofloat(): cannot convert {} to float",
+                    cypher_type_name(other)
+                ))),
+            }
         })
     }
 }
@@ -2089,7 +2261,142 @@ impl ScalarUDFImpl for ToBooleanUdf {
             }
 
             let val = &val_args[0];
-            let result = match val {
+            match val {
+                Value::Bool(b) => Ok(Value::Bool(*b)),
+                Value::String(s) => {
+                    let s_lower = s.to_lowercase();
+                    if s_lower == "true" {
+                        Ok(Value::Bool(true))
+                    } else if s_lower == "false" {
+                        Ok(Value::Bool(false))
+                    } else {
+                        Ok(Value::Null)
+                    }
+                }
+                Value::Null => Ok(Value::Null),
+                Value::Int(i) => Ok(Value::Bool(*i != 0)),
+                other => Err(datafusion::error::DataFusionError::Execution(format!(
+                    "InvalidArgumentValue: toboolean(): cannot convert {} to boolean",
+                    cypher_type_name(other)
+                ))),
+            }
+        })
+    }
+}
+
+// ============================================================================
+// _try_to_float(x) -> Float64   (internal: returns NULL for unsupported types)
+// Used by ORDER BY type-ranked sorting, NOT user-facing.
+// ============================================================================
+
+pub fn create_try_to_float_udf() -> ScalarUDF {
+    ScalarUDF::new_from_impl(TryToFloatUdf::new())
+}
+
+#[derive(Debug)]
+struct TryToFloatUdf {
+    signature: Signature,
+}
+
+impl TryToFloatUdf {
+    fn new() -> Self {
+        Self {
+            signature: Signature::any(1, Volatility::Immutable),
+        }
+    }
+}
+
+impl_udf_eq_hash!(TryToFloatUdf);
+
+impl ScalarUDFImpl for TryToFloatUdf {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn name(&self) -> &str {
+        "_try_to_float"
+    }
+
+    fn signature(&self) -> &Signature {
+        &self.signature
+    }
+
+    fn return_type(&self, _arg_types: &[DataType]) -> DFResult<DataType> {
+        Ok(DataType::Float64)
+    }
+
+    fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DFResult<ColumnarValue> {
+        let output_type = self.return_type(&[])?;
+        invoke_cypher_udf(args, &output_type, |val_args| {
+            if val_args.is_empty() {
+                return Ok(Value::Null);
+            }
+            let val = &val_args[0];
+            Ok(match val {
+                Value::Int(i) => Value::Float(*i as f64),
+                Value::Float(f) => Value::Float(*f),
+                Value::String(s) => {
+                    if let Ok(f) = s.parse::<f64>() {
+                        Value::Float(f)
+                    } else {
+                        Value::Null
+                    }
+                }
+                _ => Value::Null,
+            })
+        })
+    }
+}
+
+// ============================================================================
+// _try_to_boolean(x) -> Boolean   (internal: returns NULL for unsupported types)
+// Used by ORDER BY type-ranked sorting, NOT user-facing.
+// ============================================================================
+
+pub fn create_try_to_boolean_udf() -> ScalarUDF {
+    ScalarUDF::new_from_impl(TryToBooleanUdf::new())
+}
+
+#[derive(Debug)]
+struct TryToBooleanUdf {
+    signature: Signature,
+}
+
+impl TryToBooleanUdf {
+    fn new() -> Self {
+        Self {
+            signature: Signature::any(1, Volatility::Immutable),
+        }
+    }
+}
+
+impl_udf_eq_hash!(TryToBooleanUdf);
+
+impl ScalarUDFImpl for TryToBooleanUdf {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn name(&self) -> &str {
+        "_try_to_boolean"
+    }
+
+    fn signature(&self) -> &Signature {
+        &self.signature
+    }
+
+    fn return_type(&self, _arg_types: &[DataType]) -> DFResult<DataType> {
+        Ok(DataType::Boolean)
+    }
+
+    fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DFResult<ColumnarValue> {
+        let output_type = self.return_type(&[])?;
+        invoke_cypher_udf(args, &output_type, |val_args| {
+            if val_args.is_empty() {
+                return Ok(Value::Null);
+            }
+            let val = &val_args[0];
+            Ok(match val {
                 Value::Bool(b) => Value::Bool(*b),
                 Value::String(s) => {
                     let s_lower = s.to_lowercase();
@@ -2101,18 +2408,9 @@ impl ScalarUDFImpl for ToBooleanUdf {
                         Value::Null
                     }
                 }
-                Value::Null => Value::Null,
                 Value::Int(i) => Value::Bool(*i != 0),
-                Value::Float(_) => Value::Null,
-                Value::List(_) | Value::Map(_) => {
-                    return Err(datafusion::error::DataFusionError::Execution(format!(
-                        "InvalidArgumentValue: toboolean(): cannot convert {:?} to boolean",
-                        val
-                    )));
-                }
                 _ => Value::Null,
-            };
-            Ok(result)
+            })
         })
     }
 }

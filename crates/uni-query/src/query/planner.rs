@@ -650,7 +650,7 @@ fn replace_aggregates_with_columns(expr: &Expr) -> Expr {
             variable: variable.clone(),
             list: Box::new(replace_aggregates_with_columns(list)),
             where_clause: where_clause.clone(), // don't touch — references loop var
-            map_expr: map_expr.clone(),          // don't touch — references loop var
+            map_expr: map_expr.clone(),         // don't touch — references loop var
         },
         Expr::Quantifier {
             quantifier,
@@ -683,10 +683,7 @@ fn replace_aggregates_with_columns(expr: &Expr) -> Expr {
             window_spec,
         } => Expr::FunctionCall {
             name: name.clone(),
-            args: args
-                .iter()
-                .map(replace_aggregates_with_columns)
-                .collect(),
+            args: args.iter().map(replace_aggregates_with_columns).collect(),
             distinct: *distinct,
             window_spec: window_spec.clone(),
         },
@@ -702,9 +699,10 @@ fn replace_aggregates_with_columns(expr: &Expr) -> Expr {
         Expr::IsNull(e) => Expr::IsNull(Box::new(replace_aggregates_with_columns(e))),
         Expr::IsNotNull(e) => Expr::IsNotNull(Box::new(replace_aggregates_with_columns(e))),
         Expr::IsUnique(e) => Expr::IsUnique(Box::new(replace_aggregates_with_columns(e))),
-        Expr::Property(base, prop) => {
-            Expr::Property(Box::new(replace_aggregates_with_columns(base)), prop.clone())
-        }
+        Expr::Property(base, prop) => Expr::Property(
+            Box::new(replace_aggregates_with_columns(base)),
+            prop.clone(),
+        ),
         Expr::List(items) => {
             Expr::List(items.iter().map(replace_aggregates_with_columns).collect())
         }
@@ -2216,9 +2214,7 @@ impl QueryPlanner {
                 for r in &refs {
                     let is_covered = match r {
                         NonAggregateRef::Var(v) => group_by_reprs.contains(v),
-                        NonAggregateRef::Property { repr, .. } => {
-                            group_by_reprs.contains(repr)
-                        }
+                        NonAggregateRef::Property { repr, .. } => group_by_reprs.contains(repr),
                     };
                     if !is_covered {
                         return Err(anyhow!(
@@ -2392,17 +2388,14 @@ impl QueryPlanner {
                     .into_iter()
                     .map(|(expr, alias)| {
                         // Check if this expression is an aggregate function
-                        if expr.is_aggregate()
-                            && !is_compound_aggregate(&expr)
-                            && !has_window_exprs
+                        if expr.is_aggregate() && !is_compound_aggregate(&expr) && !has_window_exprs
                         {
                             // Bare aggregate — replace with column reference
                             let col_name = Self::get_aggregate_column_name(&expr);
                             (Expr::Variable(col_name), alias)
                         } else if !has_window_exprs
                             && (is_compound_aggregate(&expr)
-                                || (!expr.is_aggregate()
-                                    && contains_aggregate_recursive(&expr)))
+                                || (!expr.is_aggregate() && contains_aggregate_recursive(&expr)))
                         {
                             // Compound aggregate — replace inner aggregates with
                             // column references, keep outer expression for Project
@@ -4895,9 +4888,7 @@ impl QueryPlanner {
                 for r in &refs {
                     let is_covered = match r {
                         NonAggregateRef::Var(v) => group_by_reprs.contains(v),
-                        NonAggregateRef::Property { repr, .. } => {
-                            group_by_reprs.contains(repr)
-                        }
+                        NonAggregateRef::Property { repr, .. } => group_by_reprs.contains(repr),
                     };
                     if !is_covered {
                         return Err(anyhow!(
