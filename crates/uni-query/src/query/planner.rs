@@ -327,6 +327,77 @@ fn collect_expr_variables_inner(expr: &Expr, vars: &mut Vec<String>) {
     }
 }
 
+/// Rewrite ORDER BY expressions to resolve projection aliases back to their source expressions.
+///
+/// Example: `RETURN r AS rel ORDER BY rel.id` becomes `ORDER BY r.id` so Sort can run
+/// before the final RETURN projection without losing alias semantics.
+fn rewrite_order_by_expr_with_aliases(expr: &Expr, aliases: &HashMap<String, Expr>) -> Expr {
+    match expr {
+        Expr::Variable(name) => aliases.get(name).cloned().unwrap_or_else(|| expr.clone()),
+        Expr::Property(base, prop) => Expr::Property(
+            Box::new(rewrite_order_by_expr_with_aliases(base, aliases)),
+            prop.clone(),
+        ),
+        Expr::BinaryOp { left, op, right } => Expr::BinaryOp {
+            left: Box::new(rewrite_order_by_expr_with_aliases(left, aliases)),
+            op: op.clone(),
+            right: Box::new(rewrite_order_by_expr_with_aliases(right, aliases)),
+        },
+        Expr::UnaryOp { op, expr: inner } => Expr::UnaryOp {
+            op: op.clone(),
+            expr: Box::new(rewrite_order_by_expr_with_aliases(inner, aliases)),
+        },
+        Expr::FunctionCall {
+            name,
+            args,
+            distinct,
+            window_spec,
+        } => Expr::FunctionCall {
+            name: name.clone(),
+            args: args
+                .iter()
+                .map(|a| rewrite_order_by_expr_with_aliases(a, aliases))
+                .collect(),
+            distinct: *distinct,
+            window_spec: window_spec.clone(),
+        },
+        Expr::List(items) => Expr::List(
+            items
+                .iter()
+                .map(|item| rewrite_order_by_expr_with_aliases(item, aliases))
+                .collect(),
+        ),
+        Expr::Map(entries) => Expr::Map(
+            entries
+                .iter()
+                .map(|(k, v)| (k.clone(), rewrite_order_by_expr_with_aliases(v, aliases)))
+                .collect(),
+        ),
+        Expr::Case {
+            expr: case_expr,
+            when_then,
+            else_expr,
+        } => Expr::Case {
+            expr: case_expr
+                .as_ref()
+                .map(|e| Box::new(rewrite_order_by_expr_with_aliases(e, aliases))),
+            when_then: when_then
+                .iter()
+                .map(|(w, t)| {
+                    (
+                        rewrite_order_by_expr_with_aliases(w, aliases),
+                        rewrite_order_by_expr_with_aliases(t, aliases),
+                    )
+                })
+                .collect(),
+            else_expr: else_expr
+                .as_ref()
+                .map(|e| Box::new(rewrite_order_by_expr_with_aliases(e, aliases))),
+        },
+        _ => expr.clone(),
+    }
+}
+
 /// Validate function call argument types.
 /// Returns error if type constraints are violated.
 fn validate_function_call(name: &str, args: &[Expr], vars_in_scope: &[VariableInfo]) -> Result<()> {
@@ -2194,8 +2265,20 @@ impl QueryPlanner {
                         }
 
                         if let Some(a) = alias {
+                            if projected_aliases.contains(a) {
+                                return Err(anyhow!(
+                                    "SyntaxError: ColumnNameConflict - Duplicate column name '{}' in RETURN",
+                                    a
+                                ));
+                            }
                             projected_aliases.insert(a.clone());
                         } else if let Expr::Variable(v) = expr {
+                            if projected_aliases.contains(v) {
+                                return Err(anyhow!(
+                                    "SyntaxError: ColumnNameConflict - Duplicate column name '{}' in RETURN",
+                                    v
+                                ));
+                            }
                             projected_aliases.insert(v.clone());
                         }
                     }
@@ -2353,9 +2436,40 @@ impl QueryPlanner {
                     )?;
                 }
             }
+            let alias_exprs: HashMap<String, Expr> = projections
+                .iter()
+                .filter_map(|(expr, alias)| {
+                    alias.as_ref().map(|a| {
+                        // ORDER BY is planned before the final RETURN projection.
+                        // In aggregate contexts, aliases must resolve to the
+                        // post-aggregate output columns, not raw aggregate calls.
+                        let rewritten = if has_agg && !has_window_exprs {
+                            if expr.is_aggregate() && !is_compound_aggregate(expr) {
+                                Expr::Variable(aggregate_column_name(expr))
+                            } else if is_compound_aggregate(expr)
+                                || (!expr.is_aggregate() && contains_aggregate_recursive(expr))
+                            {
+                                replace_aggregates_with_columns(expr)
+                            } else {
+                                Expr::Variable(expr.to_string_repr())
+                            }
+                        } else {
+                            expr.clone()
+                        };
+                        (a.clone(), rewritten)
+                    })
+                })
+                .collect();
+            let rewritten_order_by: Vec<SortItem> = order_by
+                .iter()
+                .map(|item| SortItem {
+                    expr: rewrite_order_by_expr_with_aliases(&item.expr, &alias_exprs),
+                    ascending: item.ascending,
+                })
+                .collect();
             plan = LogicalPlan::Sort {
                 input: Box::new(plan),
-                order_by: order_by.clone(),
+                order_by: rewritten_order_by,
             };
         }
 
@@ -4803,6 +4917,13 @@ impl QueryPlanner {
                             ));
                         }
 
+                        // WITH requires all non-variable expressions to be aliased
+                        if alias.is_none() && !matches!(expr, Expr::Variable(_)) {
+                            return Err(anyhow!(
+                                "SyntaxError: NoExpressionAlias - All non-variable expressions in WITH must be aliased (use AS)"
+                            ));
+                        }
+
                         projections.push((expr.clone(), alias.clone()));
                         if expr.is_aggregate() && !is_compound_aggregate(expr) {
                             // Bare aggregate — push directly
@@ -4832,10 +4953,22 @@ impl QueryPlanner {
                         // Preserve non-scalar type information when WITH aliases
                         // entity/path-capable expressions.
                         if let Some(a) = alias {
+                            if projected_aliases.contains(a) {
+                                return Err(anyhow!(
+                                    "SyntaxError: ColumnNameConflict - Duplicate column name '{}' in WITH",
+                                    a
+                                ));
+                            }
                             let inferred = infer_with_output_type(expr, vars_in_scope);
                             new_vars.push(VariableInfo::new(a.clone(), inferred));
                             projected_aliases.insert(a.clone());
                         } else if let Expr::Variable(v) = expr {
+                            if projected_aliases.contains(v) {
+                                return Err(anyhow!(
+                                    "SyntaxError: ColumnNameConflict - Duplicate column name '{}' in WITH",
+                                    v
+                                ));
+                            }
                             // Preserve the original type if the variable is just passed through
                             if let Some(existing) = find_var_in_scope(vars_in_scope, v) {
                                 new_vars.push(existing.clone());
@@ -4849,32 +4982,42 @@ impl QueryPlanner {
             }
         }
 
-        // Collect extra variables referenced by the WHERE clause that are
-        // not already part of the WITH projection.  These must be carried
-        // through the initial Project so the Filter can reference them, then
-        // stripped by a second Project afterwards.
-        let where_extras: Vec<String> = if let Some(predicate) = &with_clause.where_clause {
-            let referenced = collect_expr_variables(predicate);
-            let projected_names: std::collections::HashSet<&str> =
-                new_vars.iter().map(|v| v.name.as_str()).collect();
-            referenced
-                .into_iter()
-                .filter(|name| {
-                    !projected_names.contains(name.as_str())
-                        && find_var_in_scope(vars_in_scope, name).is_some()
-                })
-                .collect()
-        } else {
-            Vec::new()
-        };
+        // Collect extra variables that need to survive the projection stage
+        // for later WHERE / ORDER BY evaluation, then strip them afterwards.
+        let projected_names: std::collections::HashSet<&str> =
+            new_vars.iter().map(|v| v.name.as_str()).collect();
+        let mut passthrough_extras: Vec<String> = Vec::new();
+        let mut seen_passthrough: HashSet<String> = HashSet::new();
 
-        // If the WHERE clause references pre-projection variables, temporarily
-        // include them in the projection so the filter can see them.
-        let needs_cleanup = !where_extras.is_empty();
-        if !where_extras.is_empty() {
-            for extra in &where_extras {
-                projections.push((Expr::Variable(extra.clone()), Some(extra.clone())));
+        if let Some(predicate) = &with_clause.where_clause {
+            for name in collect_expr_variables(predicate) {
+                if !projected_names.contains(name.as_str())
+                    && find_var_in_scope(vars_in_scope, &name).is_some()
+                    && seen_passthrough.insert(name.clone())
+                {
+                    passthrough_extras.push(name);
+                }
             }
+        }
+
+        // Non-aggregating WITH allows ORDER BY to reference incoming variables.
+        // Carry those variables through the projection so Sort can resolve them.
+        if !has_agg && let Some(order_by) = &with_clause.order_by {
+            for item in order_by {
+                for name in collect_expr_variables(&item.expr) {
+                    if !projected_names.contains(name.as_str())
+                        && find_var_in_scope(vars_in_scope, &name).is_some()
+                        && seen_passthrough.insert(name.clone())
+                    {
+                        passthrough_extras.push(name);
+                    }
+                }
+            }
+        }
+
+        let needs_cleanup = !passthrough_extras.is_empty();
+        for extra in &passthrough_extras {
+            projections.push((Expr::Variable(extra.clone()), Some(extra.clone())));
         }
 
         // Validate compound aggregate expressions: non-aggregate refs must be
@@ -4945,18 +5088,6 @@ impl QueryPlanner {
             };
         }
 
-        // Strip the extra variables that were only needed by the WHERE clause.
-        if needs_cleanup {
-            let cleanup_projections: Vec<(Expr, Option<String>)> = new_vars
-                .iter()
-                .map(|v| (Expr::Variable(v.name.clone()), Some(v.name.clone())))
-                .collect();
-            plan = LogicalPlan::Project {
-                input: Box::new(plan),
-                projections: cleanup_projections,
-            };
-        }
-
         // Validate and apply ORDER BY for WITH clause.
         // Keep pre-WITH vars in scope for parser compatibility, then apply
         // stricter checks for aggregate-containing ORDER BY items.
@@ -5013,6 +5144,18 @@ impl QueryPlanner {
                 input: Box::new(plan),
                 skip,
                 fetch,
+            };
+        }
+
+        // Strip passthrough columns that were only needed by WHERE / ORDER BY.
+        if needs_cleanup {
+            let cleanup_projections: Vec<(Expr, Option<String>)> = new_vars
+                .iter()
+                .map(|v| (Expr::Variable(v.name.clone()), Some(v.name.clone())))
+                .collect();
+            plan = LogicalPlan::Project {
+                input: Box::new(plan),
+                projections: cleanup_projections,
             };
         }
 
