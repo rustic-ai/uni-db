@@ -384,6 +384,68 @@ impl FileSandboxConfig {
     }
 }
 
+/// Which mutation clause is being routed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MutationClause {
+    Create,
+    Set,
+    Remove,
+    Delete,
+    Merge,
+}
+
+/// Per-clause gating for the DataFusion mutation path.
+///
+/// When a clause is disabled, queries containing that mutation type are routed
+/// to the legacy fallback executor instead of the DataFusion MutationExec operators.
+/// All clauses are disabled by default (safe-by-default: fallback path), matching
+/// the M0 design doc contract.
+#[derive(Clone, Debug, Default)]
+pub struct MutationPathConfig {
+    /// Route CREATE mutations through DataFusion (default: false).
+    pub create_enabled: bool,
+    /// Route SET mutations through DataFusion (default: false).
+    pub set_enabled: bool,
+    /// Route REMOVE mutations through DataFusion (default: false).
+    pub remove_enabled: bool,
+    /// Route DELETE mutations through DataFusion (default: false).
+    pub delete_enabled: bool,
+    /// Route MERGE mutations through DataFusion (default: false).
+    pub merge_enabled: bool,
+}
+
+impl MutationPathConfig {
+    /// Returns a config with all mutation clauses disabled (forces fallback for all).
+    #[must_use]
+    pub fn all_disabled() -> Self {
+        Self::default()
+    }
+
+    /// Returns a config with all mutation clauses enabled (DF path for all).
+    #[must_use]
+    pub fn all_enabled() -> Self {
+        Self {
+            create_enabled: true,
+            set_enabled: true,
+            remove_enabled: true,
+            delete_enabled: true,
+            merge_enabled: true,
+        }
+    }
+
+    /// Check whether a specific mutation clause is enabled for the DF path.
+    #[must_use]
+    pub fn is_clause_enabled(&self, clause: MutationClause) -> bool {
+        match clause {
+            MutationClause::Create => self.create_enabled,
+            MutationClause::Set => self.set_enabled,
+            MutationClause::Remove => self.remove_enabled,
+            MutationClause::Delete => self.delete_enabled,
+            MutationClause::Merge => self.merge_enabled,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct UniConfig {
     /// Maximum adjacency cache size in bytes (default: 1GB)
@@ -434,6 +496,9 @@ pub struct UniConfig {
 
     /// Background index rebuild configuration
     pub index_rebuild: IndexRebuildConfig,
+
+    /// Per-clause gating for the DataFusion mutation path.
+    pub mutation_path: MutationPathConfig,
 }
 
 impl Default for UniConfig {
@@ -458,6 +523,7 @@ impl Default for UniConfig {
             max_query_memory: 1024 * 1024 * 1024, // 1GB
             object_store: ObjectStoreConfig::default(),
             index_rebuild: IndexRebuildConfig::default(),
+            mutation_path: MutationPathConfig::default(),
         }
     }
 }
@@ -679,6 +745,71 @@ mod security_tests {
             let server = FileSandboxConfig::default_for_mode(DeploymentMode::Server);
             assert!(server.enabled);
             assert!(!server.allowed_paths.is_empty());
+        }
+    }
+
+    mod mutation_path {
+        use super::*;
+
+        #[test]
+        fn test_mutation_path_config_default_all_disabled() {
+            let config = MutationPathConfig::default();
+            assert!(!config.create_enabled);
+            assert!(!config.set_enabled);
+            assert!(!config.remove_enabled);
+            assert!(!config.delete_enabled);
+            assert!(!config.merge_enabled);
+            assert!(!config.is_clause_enabled(MutationClause::Create));
+            assert!(!config.is_clause_enabled(MutationClause::Set));
+            assert!(!config.is_clause_enabled(MutationClause::Remove));
+            assert!(!config.is_clause_enabled(MutationClause::Delete));
+            assert!(!config.is_clause_enabled(MutationClause::Merge));
+        }
+
+        #[test]
+        fn test_mutation_path_config_all_disabled() {
+            let config = MutationPathConfig::all_disabled();
+            assert!(!config.create_enabled);
+            assert!(!config.set_enabled);
+            assert!(!config.remove_enabled);
+            assert!(!config.delete_enabled);
+            assert!(!config.merge_enabled);
+            assert!(!config.is_clause_enabled(MutationClause::Create));
+            assert!(!config.is_clause_enabled(MutationClause::Set));
+            assert!(!config.is_clause_enabled(MutationClause::Remove));
+            assert!(!config.is_clause_enabled(MutationClause::Delete));
+            assert!(!config.is_clause_enabled(MutationClause::Merge));
+        }
+
+        #[test]
+        fn test_mutation_path_config_all_enabled() {
+            let config = MutationPathConfig::all_enabled();
+            assert!(config.create_enabled);
+            assert!(config.set_enabled);
+            assert!(config.remove_enabled);
+            assert!(config.delete_enabled);
+            assert!(config.merge_enabled);
+            assert!(config.is_clause_enabled(MutationClause::Create));
+            assert!(config.is_clause_enabled(MutationClause::Set));
+            assert!(config.is_clause_enabled(MutationClause::Remove));
+            assert!(config.is_clause_enabled(MutationClause::Delete));
+            assert!(config.is_clause_enabled(MutationClause::Merge));
+        }
+
+        #[test]
+        fn test_mutation_path_config_is_clause_enabled() {
+            let config = MutationPathConfig {
+                create_enabled: true,
+                set_enabled: false,
+                remove_enabled: true,
+                delete_enabled: false,
+                merge_enabled: true,
+            };
+            assert!(config.is_clause_enabled(MutationClause::Create));
+            assert!(!config.is_clause_enabled(MutationClause::Set));
+            assert!(config.is_clause_enabled(MutationClause::Remove));
+            assert!(!config.is_clause_enabled(MutationClause::Delete));
+            assert!(config.is_clause_enabled(MutationClause::Merge));
         }
     }
 }

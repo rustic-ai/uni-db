@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use uni_common::DataType;
 use uni_common::Value;
-use uni_common::core::id::Vid;
+use uni_common::core::id::{Eid, Vid};
 use uni_common::core::schema::{Constraint, ConstraintTarget, ConstraintType, SchemaManager};
 use uni_cypher::ast::{
     AlterAction, AlterEdgeType, AlterLabel, BinaryOp, ConstraintType as AstConstraintType,
@@ -20,22 +20,291 @@ use uni_store::QueryContext;
 use uni_store::runtime::property_manager::PropertyManager;
 use uni_store::runtime::writer::Writer;
 
+/// Identity fields extracted from a map-encoded edge.
+struct EdgeIdentity {
+    eid: Eid,
+    src: Vid,
+    dst: Vid,
+    edge_type_id: u32,
+}
+
 impl Executor {
-    /// Extract labels from a node value (Map with _labels field)
+    /// Extracts labels from a node value.
+    ///
+    /// Handles both `Value::Map` (with a `_labels` list field) and
+    /// `Value::Node` (with a `labels` vec field).
+    ///
+    /// Returns `None` when the value is not a node or has no labels.
     pub(crate) fn extract_labels_from_node(node_val: &Value) -> Option<Vec<String>> {
-        if let Value::Map(map) = node_val {
-            // Check for _labels (plural array)
-            if let Some(Value::List(labels_arr)) = map.get("_labels") {
-                let labels: Vec<String> = labels_arr
-                    .iter()
-                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                    .collect();
-                if !labels.is_empty() {
-                    return Some(labels);
+        match node_val {
+            Value::Map(map) => {
+                // Map-encoded node: look for _labels array
+                if let Some(Value::List(labels_arr)) = map.get("_labels") {
+                    let labels: Vec<String> = labels_arr
+                        .iter()
+                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                        .collect();
+                    if !labels.is_empty() {
+                        return Some(labels);
+                    }
+                }
+                None
+            }
+            Value::Node(node) => (!node.labels.is_empty()).then(|| node.labels.clone()),
+            _ => None,
+        }
+    }
+
+    /// Extracts user-visible properties from a value that represents a node or edge.
+    ///
+    /// Strips internal bookkeeping keys (those prefixed with `_` or named
+    /// `ext_id`) from map-encoded entities and returns only the user-facing
+    /// property key-value pairs.
+    ///
+    /// Returns `None` when `val` is not a map, node, or edge.
+    pub(crate) fn extract_user_properties_from_value(
+        val: &Value,
+    ) -> Option<HashMap<String, Value>> {
+        match val {
+            Value::Map(map) => {
+                // Distinguish entity-encoded maps from plain map literals.
+                // A node map has both `_vid` and `_labels`.
+                // An edge map has `_eid`, `_src`, and `_dst`.
+                let is_node_map = map.contains_key("_vid") && map.contains_key("_labels");
+                let is_edge_map = map.contains_key("_eid")
+                    && map.contains_key("_src")
+                    && map.contains_key("_dst");
+
+                if is_node_map || is_edge_map {
+                    // Filter out internal bookkeeping keys
+                    Some(
+                        map.iter()
+                            .filter(|(k, _)| !k.starts_with('_') && k.as_str() != "ext_id")
+                            .map(|(k, v)| (k.clone(), v.clone()))
+                            .collect(),
+                    )
+                } else {
+                    // Plain map literal — return as-is
+                    Some(map.clone())
                 }
             }
+            Value::Node(node) => Some(node.properties.clone()),
+            Value::Edge(edge) => Some(edge.properties.clone()),
+            _ => None,
         }
-        None
+    }
+
+    /// Applies a property map to a vertex or edge entity bound to `variable` in `row`.
+    ///
+    /// When `replace` is `true` the entity's property set is replaced: keys absent
+    /// from `new_props` are tombstoned (written as `Value::Null`) so the storage
+    /// layer removes them.  When `replace` is `false` the map is merged: keys in
+    /// `new_props` are upserted, while keys absent from `new_props` are unchanged.
+    /// A `Value::Null` entry in `new_props` acts as an explicit tombstone in both
+    /// modes.
+    ///
+    /// Labels are never altered — the spec states that `SET n = map` replaces
+    /// properties only.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the entity cannot be found in the storage layer, or
+    /// if the writer fails to persist the updated properties.
+    #[allow(clippy::too_many_arguments)]
+    async fn apply_properties_to_entity(
+        &self,
+        variable: &str,
+        new_props: HashMap<String, Value>,
+        replace: bool,
+        row: &mut HashMap<String, Value>,
+        writer: &mut Writer,
+        prop_manager: &PropertyManager,
+        params: &HashMap<String, Value>,
+        ctx: Option<&QueryContext>,
+    ) -> Result<()> {
+        // Clone the target so we can hold &row references elsewhere.
+        let target = row.get(variable).cloned();
+
+        match target {
+            Some(Value::Node(ref node)) => {
+                let vid = node.vid;
+                let labels = node.labels.clone();
+                let current = prop_manager
+                    .get_all_vertex_props_with_ctx(vid, ctx)
+                    .await?
+                    .unwrap_or_default();
+                let write_props = Self::merge_props(current, new_props, replace);
+                let mut enriched = write_props.clone();
+                for label_name in &labels {
+                    self.enrich_properties_with_generated_columns(
+                        label_name,
+                        &mut enriched,
+                        prop_manager,
+                        params,
+                        ctx,
+                    )
+                    .await?;
+                }
+                let _ = writer
+                    .insert_vertex_with_labels(vid, enriched.clone(), labels)
+                    .await?;
+                // Update the in-memory row binding
+                if let Some(Value::Node(n)) = row.get_mut(variable) {
+                    n.properties = enriched.into_iter().filter(|(_, v)| !v.is_null()).collect();
+                }
+            }
+            Some(ref node_val) if Self::vid_from_value(node_val).is_ok() => {
+                let vid = Self::vid_from_value(node_val)?;
+                let labels = Self::extract_labels_from_node(node_val).unwrap_or_default();
+                let current = prop_manager
+                    .get_all_vertex_props_with_ctx(vid, ctx)
+                    .await?
+                    .unwrap_or_default();
+                let write_props = Self::merge_props(current, new_props, replace);
+                let mut enriched = write_props.clone();
+                for label_name in &labels {
+                    self.enrich_properties_with_generated_columns(
+                        label_name,
+                        &mut enriched,
+                        prop_manager,
+                        params,
+                        ctx,
+                    )
+                    .await?;
+                }
+                let _ = writer
+                    .insert_vertex_with_labels(vid, enriched.clone(), labels)
+                    .await?;
+                // Update the in-memory map-encoded node binding
+                if let Some(Value::Map(node_map)) = row.get_mut(variable) {
+                    // Remove old user property keys, keep internal fields
+                    node_map.retain(|k, _| k.starts_with('_') || k == "ext_id");
+                    // Insert effective (non-null) properties
+                    for (k, v) in enriched {
+                        if !v.is_null() {
+                            node_map.insert(k, v);
+                        }
+                    }
+                }
+            }
+            Some(Value::Edge(ref edge)) => {
+                let eid = edge.eid;
+                let src = edge.src;
+                let dst = edge.dst;
+                let etype = self.resolve_edge_type_id(&Value::String(edge.edge_type.clone()))?;
+                let current = prop_manager
+                    .get_all_edge_props_with_ctx(eid, ctx)
+                    .await?
+                    .unwrap_or_default();
+                let write_props = Self::merge_props(current, new_props, replace);
+                writer
+                    .insert_edge(src, dst, etype, eid, write_props.clone())
+                    .await?;
+                // Update the in-memory row binding
+                if let Some(Value::Edge(e)) = row.get_mut(variable) {
+                    e.properties = write_props
+                        .into_iter()
+                        .filter(|(_, v)| !v.is_null())
+                        .collect();
+                }
+            }
+            Some(ref edge_val)
+                if matches!(edge_val, Value::Map(m)
+                    if m.contains_key("_eid") && m.contains_key("_src") && m.contains_key("_dst")) =>
+            {
+                if let Value::Map(map) = edge_val {
+                    let ei = self.extract_edge_identity(map)?;
+                    let current = prop_manager
+                        .get_all_edge_props_with_ctx(ei.eid, ctx)
+                        .await?
+                        .unwrap_or_default();
+                    let write_props = Self::merge_props(current, new_props, replace);
+                    writer
+                        .insert_edge(ei.src, ei.dst, ei.edge_type_id, ei.eid, write_props.clone())
+                        .await?;
+                    // Update the in-memory map-encoded edge binding
+                    if let Some(Value::Map(edge_map)) = row.get_mut(variable) {
+                        edge_map.retain(|k, _| k.starts_with('_'));
+                        for (k, v) in write_props {
+                            if !v.is_null() {
+                                edge_map.insert(k, v);
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {
+                // No matching entity — nothing to do (caller already guarded against Null)
+            }
+        }
+        Ok(())
+    }
+
+    /// Computes the property map to write given current storage state and the
+    /// incoming change map.
+    ///
+    /// When `replace` is `true`, keys present in `current` but absent from
+    /// `incoming` are tombstoned with `Value::Null`.  Null values inside
+    /// `incoming` are always preserved as explicit tombstones.
+    ///
+    /// When `replace` is `false`, `current` is the base and `incoming` is
+    /// merged on top: each key in `incoming` overwrites or tombstones the
+    /// corresponding entry in `current`.
+    fn merge_props(
+        current: HashMap<String, Value>,
+        incoming: HashMap<String, Value>,
+        replace: bool,
+    ) -> HashMap<String, Value> {
+        if replace {
+            // Start from the non-null incoming entries only.
+            let mut result: HashMap<String, Value> = incoming
+                .iter()
+                .filter(|(_, v)| !v.is_null())
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            // Tombstone every current key that is absent from incoming OR explicitly
+            // set to null in incoming (both mean "delete this property").
+            for k in current.keys() {
+                if incoming.get(k).is_none_or(|v| v.is_null()) {
+                    result.insert(k.clone(), Value::Null);
+                }
+            }
+            result
+        } else {
+            // Merge: start from current and apply incoming on top
+            let mut result = current;
+            result.extend(incoming);
+            result
+        }
+    }
+
+    /// Extract edge identity fields (`_eid`, `_src`, `_dst`, `_type`) from a map.
+    fn extract_edge_identity(&self, map: &HashMap<String, Value>) -> Result<EdgeIdentity> {
+        let eid = Eid::from(
+            map.get("_eid")
+                .and_then(|v| v.as_u64())
+                .ok_or_else(|| anyhow!("Invalid _eid"))?,
+        );
+        let src = Vid::from(
+            map.get("_src")
+                .and_then(|v| v.as_u64())
+                .ok_or_else(|| anyhow!("Invalid _src"))?,
+        );
+        let dst = Vid::from(
+            map.get("_dst")
+                .and_then(|v| v.as_u64())
+                .ok_or_else(|| anyhow!("Invalid _dst"))?,
+        );
+        let edge_type_id = self.resolve_edge_type_id(
+            map.get("_type")
+                .ok_or_else(|| anyhow!("Missing _type on edge map"))?,
+        )?;
+        Ok(EdgeIdentity {
+            eid,
+            src,
+            dst,
+            edge_type_id,
+        })
     }
 
     /// Resolve edge type ID from a Value, supporting both Int and String representations.
@@ -90,7 +359,7 @@ impl Executor {
         let schema = self.storage.schema_manager().schema();
 
         // Try as edge type first
-        if let Some(_edge_type_meta) = schema.get_edge_type_case_insensitive(identifier) {
+        if schema.get_edge_type_case_insensitive(identifier).is_some() {
             return self
                 .export_edge_type_in_format(identifier, path, format)
                 .await;
@@ -270,10 +539,9 @@ impl Executor {
     /// Export edges of a specific type to Parquet
     async fn export_edge_type(&self, edge_type: &str, path: &str) -> Result<usize> {
         let schema = self.storage.schema_manager().schema();
-        let _edge_type_meta = schema
-            .edge_types
-            .get(edge_type)
-            .ok_or_else(|| anyhow!("Edge type '{}' not found", edge_type))?;
+        if !schema.edge_types.contains_key(edge_type) {
+            return Err(anyhow!("Edge type '{}' not found", edge_type));
+        }
 
         let lancedb_store = self.storage.lancedb_store();
         let table = lancedb_store.open_main_edge_table().await?;
@@ -521,15 +789,9 @@ impl Executor {
 
     fn read_parquet_file(&self, path: &str) -> Result<Vec<arrow_array::RecordBatch>> {
         let file = std::fs::File::open(path)?;
-        let builder = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(file)?;
-        let reader = builder.build()?;
-
-        let mut batches = Vec::new();
-        for batch_result in reader {
-            batches.push(batch_result?);
-        }
-
-        Ok(batches)
+        let reader = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(file)?
+            .build()?;
+        reader.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
     fn read_csv_file(
@@ -746,11 +1008,7 @@ impl Executor {
 
                 // If expression has an explicit variable, use it as an object
                 if let Some(var) = expr.extract_variable() {
-                    let props_map: HashMap<String, Value> = properties
-                        .iter()
-                        .map(|(k, v)| (k.clone(), v.clone()))
-                        .collect();
-                    scope.insert(var, Value::Map(props_map));
+                    scope.insert(var, Value::Map(properties.clone()));
                 } else {
                     // No explicit variable - add properties directly to scope for bare references
                     // e.g., "lower(email)" can reference "email" directly
@@ -1260,29 +1518,24 @@ impl Executor {
                                 node.properties.insert(prop_name.clone(), val);
                             }
                         } else if let Value::Map(map) = node_val
-                            && let (Some(eid_v), Some(src_v), Some(dst_v), Some(type_v)) = (
-                                map.get("_eid"),
-                                map.get("_src"),
-                                map.get("_dst"),
-                                map.get("_type"),
-                            )
+                            && map.contains_key("_eid")
+                            && map.contains_key("_src")
+                            && map.contains_key("_dst")
+                            && map.contains_key("_type")
                         {
-                            let eid = uni_common::core::id::Eid::from(
-                                eid_v.as_u64().ok_or(anyhow!("Invalid _eid"))?,
-                            );
-                            let src = Vid::from(src_v.as_u64().ok_or(anyhow!("Invalid _src"))?);
-                            let dst = Vid::from(dst_v.as_u64().ok_or(anyhow!("Invalid _dst"))?);
-                            let etype = self.resolve_edge_type_id(type_v)?;
+                            let ei = self.extract_edge_identity(map)?;
 
                             let mut props = prop_manager
-                                .get_all_edge_props_with_ctx(eid, ctx)
+                                .get_all_edge_props_with_ctx(ei.eid, ctx)
                                 .await?
                                 .unwrap_or_default();
                             let val = self
                                 .evaluate_expr(value, row, prop_manager, params, ctx)
                                 .await?;
                             props.insert(prop_name.clone(), val.clone());
-                            writer.insert_edge(src, dst, etype, eid, props).await?;
+                            writer
+                                .insert_edge(ei.src, ei.dst, ei.edge_type_id, ei.eid, props)
+                                .await?;
 
                             // Update the row object so subsequent RETURN sees the new value
                             if let Some(Value::Map(edge_map)) = row.get_mut(var_name) {
@@ -1355,17 +1608,38 @@ impl Executor {
                         }
                     }
                 }
-                SetItem::Variable { .. } => {
-                    return Err(anyhow!(
-                        "SET variable = expression is not yet supported in AST migration. \
-                         Use SET variable.property = value instead."
-                    ));
-                }
-                SetItem::VariablePlus { .. } => {
-                    return Err(anyhow!(
-                        "SET variable += expression is not yet supported in AST migration. \
-                         Use SET variable.property = value instead."
-                    ));
+                SetItem::Variable { variable, value }
+                | SetItem::VariablePlus { variable, value } => {
+                    let replace = matches!(item, SetItem::Variable { .. });
+                    let op_str = if replace { "=" } else { "+=" };
+
+                    // SET n = expr / SET n += expr — null target from OPTIONAL MATCH is a silent no-op
+                    if matches!(row.get(variable.as_str()), None | Some(Value::Null)) {
+                        continue;
+                    }
+                    let rhs = self
+                        .evaluate_expr(value, row, prop_manager, params, ctx)
+                        .await?;
+                    let new_props =
+                        Self::extract_user_properties_from_value(&rhs).ok_or_else(|| {
+                            anyhow!(
+                                "SET {} {} expr: right-hand side must evaluate to a map, \
+                                 node, or relationship",
+                                variable,
+                                op_str
+                            )
+                        })?;
+                    self.apply_properties_to_entity(
+                        variable,
+                        new_props,
+                        replace,
+                        row,
+                        writer,
+                        prop_manager,
+                        params,
+                        ctx,
+                    )
+                    .await?;
                 }
             }
         }
@@ -1463,24 +1737,16 @@ impl Executor {
         prop_manager: &PropertyManager,
         ctx: Option<&QueryContext>,
     ) -> Result<()> {
-        if let (Some(eid_v), Some(src_v), Some(dst_v), Some(type_v)) = (
-            map.get("_eid"),
-            map.get("_src"),
-            map.get("_dst"),
-            map.get("_type"),
-        ) {
-            let eid =
-                uni_common::core::id::Eid::from(eid_v.as_u64().ok_or(anyhow!("Invalid _eid"))?);
-            let src = Vid::from(src_v.as_u64().ok_or(anyhow!("Invalid _src"))?);
-            let dst = Vid::from(dst_v.as_u64().ok_or(anyhow!("Invalid _dst"))?);
-            let etype = self.resolve_edge_type_id(type_v)?;
-
+        if map.contains_key("_eid") {
+            let ei = self.extract_edge_identity(map)?;
             let mut props = prop_manager
-                .get_all_edge_props_with_ctx(eid, ctx)
+                .get_all_edge_props_with_ctx(ei.eid, ctx)
                 .await?
                 .unwrap_or_default();
             props.insert(prop_name.to_string(), Value::Null);
-            writer.insert_edge(src, dst, etype, eid, props).await?;
+            writer
+                .insert_edge(ei.src, ei.dst, ei.edge_type_id, ei.eid, props)
+                .await?;
         }
         Ok(())
     }
@@ -1614,20 +1880,51 @@ impl Executor {
         map: &HashMap<String, Value>,
         writer: &mut Writer,
     ) -> Result<()> {
-        if let (Some(eid_v), Some(src_v), Some(dst_v), Some(type_v)) = (
-            map.get("_eid"),
-            map.get("_src"),
-            map.get("_dst"),
-            map.get("_type"),
-        ) {
-            let eid =
-                uni_common::core::id::Eid::from(eid_v.as_u64().ok_or(anyhow!("Invalid _eid"))?);
-            let src = Vid::from(src_v.as_u64().ok_or(anyhow!("Invalid _src"))?);
-            let dst = Vid::from(dst_v.as_u64().ok_or(anyhow!("Invalid _dst"))?);
-            let etype = self.resolve_edge_type_id(type_v)?;
-            writer.delete_edge(eid, src, dst, etype).await?;
+        if map.contains_key("_eid") {
+            let ei = self.extract_edge_identity(map)?;
+            writer
+                .delete_edge(ei.eid, ei.src, ei.dst, ei.edge_type_id)
+                .await?;
         }
         Ok(())
+    }
+
+    /// Build a scan plan node, choosing `ScanAll` when `label_id == 0` (schemaless)
+    /// and `Scan` otherwise.
+    fn make_scan_plan(
+        label_id: u16,
+        labels: Vec<String>,
+        variable: String,
+        filter: Option<Expr>,
+    ) -> LogicalPlan {
+        if label_id == 0 {
+            LogicalPlan::ScanAll {
+                variable,
+                filter,
+                optional: false,
+            }
+        } else {
+            LogicalPlan::Scan {
+                label_id,
+                labels,
+                variable,
+                filter,
+                optional: false,
+            }
+        }
+    }
+
+    /// Attach a new scan node to the running plan, using `CrossJoin` when the plan
+    /// already contains prior operators.
+    fn attach_scan(plan: LogicalPlan, scan: LogicalPlan) -> LogicalPlan {
+        if matches!(plan, LogicalPlan::Empty) {
+            scan
+        } else {
+            LogicalPlan::CrossJoin {
+                left: Box::new(plan),
+                right: Box::new(scan),
+            }
+        }
     }
 
     pub(crate) async fn execute_merge_match(
@@ -1717,50 +2014,34 @@ impl Executor {
                                 Some(vid_filter)
                             };
 
-                            let scan = LogicalPlan::Scan {
+                            let scan = Self::make_scan_plan(
                                 label_id,
-                                labels: extracted_labels,
-                                variable: variable.clone(),
-                                filter: combined_filter,
-                                optional: false,
-                            };
-
-                            if matches!(plan, LogicalPlan::Empty) {
-                                plan = scan;
-                            } else {
-                                plan = LogicalPlan::CrossJoin {
-                                    left: Box::new(plan),
-                                    right: Box::new(scan),
-                                };
-                            }
+                                extracted_labels,
+                                variable.clone(),
+                                combined_filter,
+                            );
+                            plan = Self::attach_scan(plan, scan);
                         } else {
                             if n.labels.is_empty() {
                                 return Err(anyhow!("MERGE node must have a label"));
                             }
                             let label_name = &n.labels[0];
                             let schema = self.storage.schema_manager().schema();
-                            let label_meta = schema
-                                .labels
-                                .get(label_name)
-                                .ok_or_else(|| anyhow!("Label {} not found", label_name))?;
+                            // Fall back to label_id 0 (any/schemaless) when the label is not
+                            // in the schema — this allows MERGE to work in schemaless mode.
+                            let label_id = schema
+                                .get_label_case_insensitive(label_name)
+                                .map(|m| m.id)
+                                .unwrap_or(0);
 
                             let prop_filter = planner.properties_to_expr(&variable, &n.properties);
-                            let scan = LogicalPlan::Scan {
-                                label_id: label_meta.id,
-                                labels: n.labels.clone(),
-                                variable: variable.clone(),
-                                filter: prop_filter,
-                                optional: false, // MERGE MATCH is strict
-                            };
-
-                            if matches!(plan, LogicalPlan::Empty) {
-                                plan = scan;
-                            } else {
-                                plan = LogicalPlan::CrossJoin {
-                                    left: Box::new(plan),
-                                    right: Box::new(scan),
-                                };
-                            }
+                            let scan = Self::make_scan_plan(
+                                label_id,
+                                n.labels.clone(),
+                                variable.clone(),
+                                prop_filter,
+                            );
+                            plan = Self::attach_scan(plan, scan);
 
                             if !variable.is_empty() {
                                 vars_in_scope.push(variable.clone());
@@ -1784,20 +2065,24 @@ impl Executor {
                                         ));
                                     } else {
                                         let type_name = &r.types[0];
-                                        let edge_meta = schema
-                                            .get_edge_type_case_insensitive(type_name)
-                                            .ok_or_else(|| {
-                                                anyhow!("Edge type {} not found", type_name)
-                                            })?;
-                                        edge_type_ids.push(edge_meta.id);
+                                        // Use get_or_assign so schemaless edge types work without
+                                        // a prior schema declaration (same approach as CREATE).
+                                        let type_id = self
+                                            .storage
+                                            .schema_manager()
+                                            .get_or_assign_edge_type_id(type_name);
+                                        edge_type_ids.push(type_id);
                                     }
 
-                                    let target_label_meta = if let Some(lbl) =
+                                    // Resolve target label ID. For schemaless labels (not in the
+                                    // schema), fall back to 0 which means "any label" in traversal.
+                                    let target_label_id: u16 = if let Some(lbl) =
                                         n_target.labels.first()
                                     {
                                         schema
                                             .get_label_case_insensitive(lbl)
-                                            .ok_or_else(|| anyhow!("Label {} not found", lbl))?
+                                            .map(|m| m.id)
+                                            .unwrap_or(0)
                                     } else if let Some(var) = &n_target.variable {
                                         if let Some(val) = row.get(var) {
                                             // In the new storage model, get labels from node value
@@ -1807,20 +2092,15 @@ impl Executor {
                                                 if let Some(first_label) = labels.first() {
                                                     schema
                                                         .get_label_case_insensitive(first_label)
-                                                        .ok_or_else(|| {
-                                                        anyhow!("Label {} not found", first_label)
-                                                    })?
+                                                        .map(|m| m.id)
+                                                        .unwrap_or(0)
                                                 } else {
-                                                    return Err(anyhow!(
-                                                        "Variable {} has no labels",
-                                                        var
-                                                    ));
+                                                    // Bound node with no labels — schemaless, any
+                                                    0
                                                 }
                                             } else if Self::vid_from_value(val).is_ok() {
-                                                return Err(anyhow!(
-                                                    "Variable {} is a node without labels info",
-                                                    var
-                                                ));
+                                                // VID without label info — schemaless, any
+                                                0
                                             } else {
                                                 return Err(anyhow!(
                                                     "Variable {} is not a node",
@@ -1854,7 +2134,7 @@ impl Executor {
                                         direction: r.direction.clone(),
                                         source_variable,
                                         target_variable: target_variable.clone(),
-                                        target_label_id: target_label_meta.id,
+                                        target_label_id,
                                         step_variable: r.variable.clone(),
                                         min_hops: r.range.as_ref().and_then(|r| r.min).unwrap_or(1)
                                             as usize,
@@ -1914,72 +2194,37 @@ impl Executor {
                 }
             }
 
-            // Execute the plan
-            // We need to inject the current row into the execution if the plan starts with Empty?
-            // Actually, if we use CrossJoin with existing row, we can simulate the context.
-            // But Scan operators ignore input row usually?
-            // Our LogicalPlan execution model passes the result of previous step as input to next.
-            // Scan ignores input usually.
-            // But if we bind variables from `row`, we need to ensure they are available.
-
-            // The simple Scan operator returns all nodes.
-            // If we want to filter by existing `row` values, we need to inject `row` into the stream?
-            // Or we treat `row` as initial state.
-
-            // Since `execute` takes a plan, and `Scan` generates new rows...
-            // If `plan` is `CrossJoin(Empty, Scan)`, and `Empty` produces 1 row (empty map), then result is Scan rows.
-            // But we want to filter `Scan` rows based on `row` values if variable matches.
-
-            // Actually, `evaluate_expr` uses `row`.
-            // If we have `LogicalPlan::Filter`, it uses the row passed to it.
-            // But `Scan` produces NEW rows.
-            // We need to carry over the `row` context.
-
-            // Solution: Use `LogicalPlan::Project` or similar to inject initial context?
-            // Or simply execute the plan, which returns all matches in DB, and then filter/join with `row`.
-
-            // BUT: execute_subplan handles the flow.
-            // If we pass `row` as initial context? No, `execute` starts from scratch.
-
-            // Strategy:
-            // 1. Execute the plan to find ALL matches in the DB that satisfy the pattern.
-            // 2. Filter the results to keep only those that match the BOUND variables in `row`.
+            // Execute the plan to find all matches, then filter against bound variables in `row`.
         }
 
         let db_matches = self
             .execute_subplan(plan, prop_manager, params, ctx)
             .await?;
 
-        let mut final_matches = Vec::new();
-        for db_match in db_matches {
-            // Check consistency with input row
-            let mut consistent = true;
-            for (key, val) in row {
-                if let Some(db_val) = db_match.get(key)
-                    && db_val != val
-                {
-                    // Mismatch? Check if they represent the same VID
-                    let vid1 = Self::vid_from_value(val);
-                    let vid2 = Self::vid_from_value(db_val);
-                    if let (Ok(v1), Ok(v2)) = (vid1, vid2) {
-                        if v1 != v2 {
-                            consistent = false;
-                            break;
-                        }
-                    } else {
-                        consistent = false;
-                        break;
+        // Keep only DB results that are consistent with the input row bindings.
+        let final_matches = db_matches
+            .into_iter()
+            .filter(|db_match| {
+                row.iter().all(|(key, val)| {
+                    let Some(db_val) = db_match.get(key) else {
+                        return true;
+                    };
+                    if db_val == val {
+                        return true;
                     }
-                }
-            }
-
-            if consistent {
-                // Merge db_match into row
+                    // Values differ -- treat as consistent if they represent the same VID
+                    matches!(
+                        (Self::vid_from_value(val), Self::vid_from_value(db_val)),
+                        (Ok(v1), Ok(v2)) if v1 == v2
+                    )
+                })
+            })
+            .map(|db_match| {
                 let mut merged = row.clone();
                 merged.extend(db_match);
-                final_matches.push(merged);
-            }
-        }
+                merged
+            })
+            .collect();
 
         Ok(final_matches)
     }

@@ -271,8 +271,8 @@ async fn test_valid_at_edge_temporal() -> Result<()> {
     assert_eq!(results.rows[0].get::<String>("company")?, "Globex Inc");
     assert_eq!(results.rows[0].get::<String>("role")?, "Senior Engineer");
 
-    // Test: Query exactly at transition point (2022-06-30 should still match Acme, 2022-07-01 should match Globex)
-    // At 2022-06-30T00:00:00Z: [2020-01-01, 2022-06-30) does NOT include 2022-06-30
+    // Test: Query at the boundary of a half-open interval.
+    // At 2022-06-30T00:00:00Z: [2020-01-01, 2022-06-30) does NOT include the end instant.
     let results = db
         .query(
             "
@@ -562,6 +562,105 @@ async fn test_valid_at_custom_prop_suggestion() -> Result<()> {
         !start_date_suggestions.is_empty(),
         "Should suggest index for custom start property 'start_date'"
     );
+
+    Ok(())
+}
+
+/// Test schemaless edge temporal property access after flush.
+///
+/// Known issue: schemaless edge properties (edges registered without `.property()` calls)
+/// may not be accessible via named property access (e.g. `e.valid_from`) after flush,
+/// because the schemaless property storage path differs from schema-defined edges.
+/// See docs/DATAFUSION_MUTATION_IMPLEMENTATION_PLAN.md for details.
+#[ignore]
+#[tokio::test]
+async fn test_valid_at_schemaless_edge_temporal() -> Result<()> {
+    let db = Uni::in_memory().build().await?;
+
+    // Create node schemas
+    db.schema()
+        .label("Worker")
+        .property("name", DataType::String)
+        .apply()
+        .await?;
+
+    db.schema()
+        .label("Employer")
+        .property("name", DataType::String)
+        .apply()
+        .await?;
+
+    // Register edge type with NO .property() calls — schemaless edge
+    db.schema()
+        .edge_type("WORKS_FOR", &["Worker"], &["Employer"])
+        .apply()
+        .await?;
+
+    // Create nodes
+    db.execute("CREATE (w:Worker {name: 'Bob'})").await?;
+    db.execute("CREATE (e:Employer {name: 'TechCo'})").await?;
+
+    // Create edge with temporal properties (schemaless — not declared in schema)
+    db.execute(
+        "
+        MATCH (w:Worker {name: 'Bob'}), (e:Employer {name: 'TechCo'})
+        CREATE (w)-[:WORKS_FOR {
+            valid_from: datetime('2021-01-01T00:00:00Z'),
+            valid_to: null,
+            role: 'Developer'
+        }]->(e)
+    ",
+    )
+    .await?;
+
+    // Pre-flush: named property access should work (data in L0)
+    let results = db
+        .query(
+            "
+        MATCH (w:Worker {name: 'Bob'})-[r:WORKS_FOR]->(e:Employer)
+        RETURN r.role AS role, r.valid_from AS vf
+    ",
+        )
+        .await?;
+    assert_eq!(results.len(), 1, "Should find the edge pre-flush");
+    assert_eq!(results.rows[0].get::<String>("role")?, "Developer");
+
+    // Flush to persist edges to storage
+    db.flush().await?;
+
+    // Post-flush: named property access on schemaless edge — this is the regression
+    let results = db
+        .query(
+            "
+        MATCH (w:Worker {name: 'Bob'})-[r:WORKS_FOR]->(e:Employer)
+        RETURN r.role AS role, r.valid_from AS vf
+    ",
+        )
+        .await?;
+    assert_eq!(results.len(), 1, "Should find the edge post-flush");
+    assert_eq!(
+        results.rows[0].get::<String>("role")?,
+        "Developer",
+        "Schemaless edge property should be accessible after flush"
+    );
+
+    // Post-flush: VALID_AT on schemaless edge
+    let results = db
+        .query(
+            "
+        MATCH (w:Worker {name: 'Bob'})-[r:WORKS_FOR]->(e:Employer)
+        WHERE r VALID_AT(datetime('2023-06-15T00:00:00Z'), 'valid_from', 'valid_to')
+        RETURN e.name AS employer, r.role AS role
+    ",
+        )
+        .await?;
+    assert_eq!(
+        results.len(),
+        1,
+        "VALID_AT should work on schemaless edge post-flush"
+    );
+    assert_eq!(results.rows[0].get::<String>("employer")?, "TechCo");
+    assert_eq!(results.rows[0].get::<String>("role")?, "Developer");
 
     Ok(())
 }

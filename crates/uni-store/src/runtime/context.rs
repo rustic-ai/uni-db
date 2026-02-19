@@ -5,6 +5,7 @@ use crate::runtime::l0::L0Buffer;
 use parking_lot::RwLock;
 use std::sync::Arc;
 use std::time::Instant;
+use uni_common::config::MutationPathConfig;
 
 #[derive(Clone)]
 pub struct QueryContext {
@@ -14,6 +15,8 @@ pub struct QueryContext {
     /// These remain visible to reads until flush completes successfully.
     pub pending_flush_l0s: Vec<Arc<RwLock<L0Buffer>>>,
     pub deadline: Option<Instant>,
+    /// Per-clause gating for the DataFusion mutation path.
+    pub mutation_path: MutationPathConfig,
 }
 
 impl QueryContext {
@@ -23,6 +26,7 @@ impl QueryContext {
             transaction_l0: None,
             pending_flush_l0s: Vec::new(),
             deadline: None,
+            mutation_path: MutationPathConfig::default(),
         }
     }
 
@@ -35,6 +39,7 @@ impl QueryContext {
             transaction_l0,
             pending_flush_l0s: Vec::new(),
             deadline: None,
+            mutation_path: MutationPathConfig::default(),
         }
     }
 
@@ -48,11 +53,16 @@ impl QueryContext {
             transaction_l0,
             pending_flush_l0s,
             deadline: None,
+            mutation_path: MutationPathConfig::default(),
         }
     }
 
     pub fn set_deadline(&mut self, deadline: Instant) {
         self.deadline = Some(deadline);
+    }
+
+    pub fn set_mutation_path(&mut self, config: MutationPathConfig) {
+        self.mutation_path = config;
     }
 
     pub fn check_timeout(&self) -> anyhow::Result<()> {

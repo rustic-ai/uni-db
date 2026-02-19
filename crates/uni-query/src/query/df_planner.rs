@@ -42,8 +42,12 @@ use crate::query::df_graph::traverse::{
 use crate::query::df_graph::{
     GraphApplyExec, GraphExecutionContext, GraphExtIdLookupExec, GraphProcedureCallExec,
     GraphScanExec, GraphShortestPathExec, GraphTraverseExec, GraphTraverseMainExec,
-    GraphUnwindExec, GraphVectorKnnExec, L0Context, OptionalFilterExec,
+    GraphUnwindExec, GraphVectorKnnExec, L0Context, MutationContext, OptionalFilterExec,
 };
+use crate::query::df_graph::mutation_create::new_create_exec;
+use crate::query::df_graph::mutation_delete::new_delete_exec;
+use crate::query::df_graph::mutation_remove::new_remove_exec;
+use crate::query::df_graph::mutation_set::new_set_exec;
 use crate::query::planner::{
     LogicalPlan, aggregate_column_name, classify_window_expressions, collect_properties_from_plan,
 };
@@ -118,6 +122,10 @@ pub struct HybridPhysicalPlanner {
 
     /// Query parameters for expression translation.
     params: HashMap<String, uni_common::Value>,
+
+    /// Mutation context for write operations (CREATE, SET, REMOVE, DELETE).
+    /// Present only when the query contains write clauses.
+    mutation_ctx: Option<Arc<MutationContext>>,
 }
 
 impl std::fmt::Debug for HybridPhysicalPlanner {
@@ -162,6 +170,7 @@ impl HybridPhysicalPlanner {
             schema,
             last_flush_version: AtomicU64::new(0),
             params,
+            mutation_ctx: None,
         }
     }
 
@@ -240,7 +249,25 @@ impl HybridPhysicalPlanner {
             schema,
             last_flush_version: AtomicU64::new(0),
             params,
+            mutation_ctx: None,
         }
+    }
+
+    /// Set the mutation context for write operations.
+    pub fn with_mutation_context(mut self, ctx: Arc<MutationContext>) -> Self {
+        self.mutation_ctx = Some(ctx);
+        self
+    }
+
+    /// Get the mutation context, returning an error if not set.
+    fn require_mutation_ctx(&self) -> Result<Arc<MutationContext>> {
+        self.mutation_ctx.clone().ok_or_else(|| {
+            tracing::error!(
+                "Mutation context not set — this indicates a routing bug where a write \
+                 operation was sent to the DataFusion engine without a MutationContext"
+            );
+            anyhow!("Mutation context not set — write operations require a MutationContext")
+        })
     }
 
     /// Build a `TranslationContext` with variable kinds collected from a LogicalPlan.
@@ -687,15 +714,79 @@ impl HybridPhysicalPlanner {
                 all_properties,
             ),
 
-            // === Unsupported (for now) ===
-            LogicalPlan::Create { .. }
-            | LogicalPlan::CreateBatch { .. }
-            | LogicalPlan::Merge { .. }
-            | LogicalPlan::Set { .. }
-            | LogicalPlan::Remove { .. }
-            | LogicalPlan::Delete { .. } => Err(anyhow!(
-                "Write operations not yet supported in DataFusion engine"
-            )),
+            // === Mutation operators ===
+            LogicalPlan::Create { input, pattern } => {
+                tracing::debug!("Planning MutationCreateExec");
+                let child = self.plan_internal(input, all_properties)?;
+                let mutation_ctx = self.require_mutation_ctx()?;
+                Ok(Arc::new(new_create_exec(
+                    child,
+                    pattern.clone(),
+                    mutation_ctx,
+                )))
+            }
+            LogicalPlan::CreateBatch { input, patterns } => {
+                tracing::debug!(
+                    patterns = patterns.len(),
+                    "Planning MutationCreateExec (batch)"
+                );
+                let child = self.plan_internal(input, all_properties)?;
+                let mutation_ctx = self.require_mutation_ctx()?;
+                // CreateBatch uses the same MutationCreateExec, wrapping patterns individually.
+                // We chain multiple create ops: one per pattern.
+                let mut current = child;
+                for pattern in patterns {
+                    current = Arc::new(new_create_exec(
+                        current,
+                        pattern.clone(),
+                        mutation_ctx.clone(),
+                    ));
+                }
+                Ok(current)
+            }
+            LogicalPlan::Set { input, items } => {
+                tracing::debug!(items = items.len(), "Planning MutationSetExec");
+                let child = self.plan_internal(input, all_properties)?;
+                let mutation_ctx = self.require_mutation_ctx()?;
+                Ok(Arc::new(new_set_exec(
+                    child,
+                    items.clone(),
+                    mutation_ctx,
+                )))
+            }
+            LogicalPlan::Remove { input, items } => {
+                tracing::debug!(items = items.len(), "Planning MutationRemoveExec");
+                let child = self.plan_internal(input, all_properties)?;
+                let mutation_ctx = self.require_mutation_ctx()?;
+                Ok(Arc::new(new_remove_exec(
+                    child,
+                    items.clone(),
+                    mutation_ctx,
+                )))
+            }
+            LogicalPlan::Delete {
+                input,
+                items,
+                detach,
+            } => {
+                tracing::debug!(
+                    items = items.len(),
+                    detach = detach,
+                    "Planning MutationDeleteExec"
+                );
+                let child = self.plan_internal(input, all_properties)?;
+                let mutation_ctx = self.require_mutation_ctx()?;
+                Ok(Arc::new(new_delete_exec(
+                    child,
+                    items.clone(),
+                    *detach,
+                    mutation_ctx,
+                )))
+            }
+            // MERGE stays on fallback path (too complex for initial rollout)
+            LogicalPlan::Merge { .. } => {
+                Err(anyhow!("MERGE not yet supported in DataFusion engine"))
+            }
 
             LogicalPlan::Window {
                 input,
@@ -1182,6 +1273,69 @@ impl HybridPhysicalPlanner {
     ///
     /// Used for labels that aren't in the schema - queries the main table
     /// with `array_contains(labels, 'X')` filter and extracts properties from `props_json`.
+    /// Add a structural projection for a variable if wildcard access ("*") is needed.
+    ///
+    /// Derives the property list from the plan's output schema (columns with the
+    /// variable prefix) and wraps them into a Struct column via `add_structural_projection`.
+    fn add_wildcard_structural_projection(
+        &self,
+        plan: Arc<dyn ExecutionPlan>,
+        variable: &str,
+        all_properties: &HashMap<String, HashSet<String>>,
+    ) -> Result<Arc<dyn ExecutionPlan>> {
+        if !all_properties
+            .get(variable)
+            .is_some_and(|p| p.contains("*"))
+        {
+            return Ok(plan);
+        }
+        let prefix = format!("{}.", variable);
+        let struct_props: Vec<String> = plan
+            .schema()
+            .fields()
+            .iter()
+            .filter_map(|f| {
+                f.name()
+                    .strip_prefix(&prefix)
+                    .filter(|prop| !prop.starts_with('_') || *prop == "_all_props")
+                    .map(|prop| prop.to_string())
+            })
+            .collect();
+        self.add_structural_projection(plan, variable, &struct_props)
+    }
+
+    /// Detect whether a target variable is already bound in the input plan's schema.
+    ///
+    /// Returns `Some("{target_variable}._vid")` when the column is present.
+    fn detect_bound_target(
+        input_schema: &SchemaRef,
+        target_variable: &str,
+    ) -> Option<String> {
+        let col = format!("{}._vid", target_variable);
+        input_schema.column_with_name(&col).is_some().then_some(col)
+    }
+
+    /// Resolve the property list and wildcard flag for a schemaless vertex scan.
+    ///
+    /// Filters out the `"*"` marker, ensures `_all_props` is present, and returns
+    /// `(properties, need_full)` where `need_full` indicates structural access.
+    fn resolve_schemaless_properties(
+        variable: &str,
+        all_properties: &HashMap<String, HashSet<String>>,
+    ) -> (Vec<String>, bool) {
+        let mut properties: Vec<String> = all_properties
+            .get(variable)
+            .map(|s| s.iter().filter(|p| *p != "*").cloned().collect())
+            .unwrap_or_default();
+        let need_full = all_properties
+            .get(variable)
+            .is_some_and(|p| p.contains("*"));
+        if !properties.iter().any(|p| p == "_all_props") {
+            properties.push("_all_props".to_string());
+        }
+        (properties, need_full)
+    }
+
     fn plan_schemaless_scan(
         &self,
         label_name: &str,
@@ -1190,20 +1344,8 @@ impl HybridPhysicalPlanner {
         optional: bool,
         all_properties: &HashMap<String, HashSet<String>>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
-        let mut properties: Vec<String> = all_properties
-            .get(variable)
-            .map(|s| s.iter().filter(|p| *p != "*").cloned().collect())
-            .unwrap_or_default();
-
-        let need_full = all_properties
-            .get(variable)
-            .is_some_and(|p| p.contains("*"));
-
-        // Always include _all_props for schemaless scans so that downstream
-        // plan_filter can rewrite property accesses to json_get_* calls.
-        if !properties.iter().any(|p| p == "_all_props") {
-            properties.push("_all_props".to_string());
-        }
+        let (properties, need_full) =
+            Self::resolve_schemaless_properties(variable, all_properties);
 
         let mut scan_plan: Arc<dyn ExecutionPlan> =
             Arc::new(GraphScanExec::new_schemaless_vertex_scan(
@@ -1240,20 +1382,8 @@ impl HybridPhysicalPlanner {
         optional: bool,
         all_properties: &HashMap<String, HashSet<String>>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
-        let mut properties: Vec<String> = all_properties
-            .get(variable)
-            .map(|s| s.iter().filter(|p| *p != "*").cloned().collect())
-            .unwrap_or_default();
-
-        let need_full = all_properties
-            .get(variable)
-            .is_some_and(|p| p.contains("*"));
-
-        // Always include _all_props for schemaless scans so that downstream
-        // plan_filter can rewrite property accesses to json_get_* calls.
-        if !properties.iter().any(|p| p == "_all_props") {
-            properties.push("_all_props".to_string());
-        }
+        let (properties, need_full) =
+            Self::resolve_schemaless_properties(variable, all_properties);
 
         let mut scan_plan: Arc<dyn ExecutionPlan> =
             Arc::new(GraphScanExec::new_multi_label_vertex_scan(
@@ -1290,20 +1420,8 @@ impl HybridPhysicalPlanner {
         optional: bool,
         all_properties: &HashMap<String, HashSet<String>>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
-        let mut properties: Vec<String> = all_properties
-            .get(variable)
-            .map(|s| s.iter().filter(|p| *p != "*").cloned().collect())
-            .unwrap_or_default();
-
-        let need_full = all_properties
-            .get(variable)
-            .is_some_and(|p| p.contains("*"));
-
-        // Always include _all_props for schemaless scans so that downstream
-        // plan_filter can rewrite property accesses to json_get_* calls.
-        if !properties.iter().any(|p| p == "_all_props") {
-            properties.push("_all_props".to_string());
-        }
+        let (properties, need_full) =
+            Self::resolve_schemaless_properties(variable, all_properties);
 
         let mut scan_plan: Arc<dyn ExecutionPlan> =
             Arc::new(GraphScanExec::new_schemaless_all_scan(
@@ -1416,6 +1534,13 @@ impl HybridPhysicalPlanner {
                 if needs_overflow && !edge_properties.contains(&"overflow_json".to_string()) {
                     edge_properties.push("overflow_json".to_string());
                 }
+
+                // Add _all_props for L0 edge property visibility: schemaless edges
+                // store properties by name in L0, not as overflow_json blobs, so we
+                // need _all_props to surface them through the DataFusion path.
+                if has_wildcard && !edge_properties.contains(&"_all_props".to_string()) {
+                    edge_properties.push("_all_props".to_string());
+                }
             }
 
             // Extract target vertex properties, expanding "*" wildcards
@@ -1489,16 +1614,7 @@ impl HybridPhysicalPlanner {
             // cannot handle the query, or via explicit filter predicates.
 
             // Check if target variable is already bound (for cycle patterns like n-->k<--n)
-            let target_vid_col = format!("{}._vid", target_variable);
-            let bound_target_column = if input_plan
-                .schema()
-                .column_with_name(&target_vid_col)
-                .is_some()
-            {
-                Some(target_vid_col)
-            } else {
-                None
-            };
+            let bound_target_column = Self::detect_bound_target(&input_plan.schema(), target_variable);
 
             // Collect edge ID columns from previous hops for relationship uniqueness.
             // Look for both explicit edge variables (ending in "._eid") and
@@ -1613,16 +1729,7 @@ impl HybridPhysicalPlanner {
                 };
 
                 // Check if target variable is already bound (for patterns where target is in scope)
-                let target_vid_col = format!("{}._vid", target_variable);
-                let bound_target_column = if input_plan
-                    .schema()
-                    .column_with_name(&target_vid_col)
-                    .is_some()
-                {
-                    Some(target_vid_col)
-                } else {
-                    None
-                };
+                let bound_target_column = Self::detect_bound_target(&input_plan.schema(), target_variable);
                 if bound_target_column.is_some() {
                     // For correlated patterns with bound target, traversal only needs reachability.
                     // Reuse existing bound target columns from input and avoid re-hydrating props.
@@ -1652,28 +1759,11 @@ impl HybridPhysicalPlanner {
         let mut traverse_plan = traverse_plan;
 
         // Structural projection for target variable
-        if all_properties
-            .get(target_variable)
-            .is_some_and(|p| p.contains("*"))
-        {
-            // Derive target properties from the traverse plan's output schema.
-            // The traverse exec materializes columns like `b.name` from resolved
-            // properties, but all_properties may only contain {"*"}.
-            let prefix = format!("{}.", target_variable);
-            let struct_props: Vec<String> = traverse_plan
-                .schema()
-                .fields()
-                .iter()
-                .filter_map(|f| {
-                    f.name()
-                        .strip_prefix(&prefix)
-                        .filter(|prop| !prop.starts_with('_') || *prop == "_all_props")
-                        .map(|prop| prop.to_string())
-                })
-                .collect();
-            traverse_plan =
-                self.add_structural_projection(traverse_plan, target_variable, &struct_props)?;
-        }
+        traverse_plan = self.add_wildcard_structural_projection(
+            traverse_plan,
+            target_variable,
+            all_properties,
+        )?;
 
         // Structural projection for edge variable
         // Only for single-hop traversals; VLP step variables are already List<Edge>
@@ -1783,16 +1873,7 @@ impl HybridPhysicalPlanner {
         let (input_plan, source_col) = Self::resolve_source_vid_col(input_plan, source_variable)?;
 
         // Check if target variable is already bound (for patterns where target is in scope)
-        let target_vid_col = format!("{}._vid", target_variable);
-        let bound_target_column = if input_plan
-            .schema()
-            .column_with_name(&target_vid_col)
-            .is_some()
-        {
-            Some(target_vid_col)
-        } else {
-            None
-        };
+        let bound_target_column = Self::detect_bound_target(&input_plan.schema(), target_variable);
 
         // Extract edge properties for schemaless edges (all treated as Utf8/JSON)
         let mut edge_properties: Vec<String> = if let Some(edge_var) = step_variable {
@@ -1854,26 +1935,11 @@ impl HybridPhysicalPlanner {
         let mut result_plan = traverse_plan;
 
         // Structural projection for target variable (RETURN t, labels(t), etc.)
-        if all_properties
-            .get(target_variable)
-            .is_some_and(|p| p.contains("*"))
-        {
-            // Derive target properties from the plan's output schema.
-            let prefix = format!("{}.", target_variable);
-            let struct_props: Vec<String> = result_plan
-                .schema()
-                .fields()
-                .iter()
-                .filter_map(|f| {
-                    f.name()
-                        .strip_prefix(&prefix)
-                        .filter(|prop| !prop.starts_with('_') || *prop == "_all_props")
-                        .map(|prop| prop.to_string())
-                })
-                .collect();
-            result_plan =
-                self.add_structural_projection(result_plan, target_variable, &struct_props)?;
-        }
+        result_plan = self.add_wildcard_structural_projection(
+            result_plan,
+            target_variable,
+            all_properties,
+        )?;
 
         // Structural projection for edge variable (type(r), RETURN r, etc.)
         if let Some(edge_var) = step_variable
@@ -1931,16 +1997,7 @@ impl HybridPhysicalPlanner {
         let (input_plan, source_col) = Self::resolve_source_vid_col(input_plan, source_variable)?;
 
         // Check if target variable is already bound (for patterns where target is in scope)
-        let target_vid_col = format!("{}._vid", target_variable);
-        let bound_target_column = if input_plan
-            .schema()
-            .column_with_name(&target_vid_col)
-            .is_some()
-        {
-            Some(target_vid_col)
-        } else {
-            None
-        };
+        let bound_target_column = Self::detect_bound_target(&input_plan.schema(), target_variable);
 
         // Extract target vertex properties
         let mut target_properties: Vec<String> = all_properties
@@ -2361,6 +2418,44 @@ impl HybridPhysicalPlanner {
         Ok(Arc::new(ProjectionExec::try_new(proj_exprs, agg_exec)?))
     }
 
+    /// Wrap a temporal aggregate argument with `get_field(arg, "nanos_since_epoch")` or
+    /// `get_field(arg, "nanos_since_midnight")` when the argument is a DateTime/Time struct.
+    ///
+    /// Returns the argument unchanged for non-temporal types.
+    fn wrap_temporal_sort_key(
+        arg: datafusion::logical_expr::Expr,
+        schema: &SchemaRef,
+    ) -> Result<datafusion::logical_expr::Expr> {
+        use datafusion::logical_expr::ScalarUDF;
+        if let Ok(arg_type) = arg.get_type(&datafusion::common::DFSchema::try_from(
+            schema.as_ref().clone(),
+        )?) {
+            if uni_common::core::schema::is_datetime_struct(&arg_type) {
+                return Ok(datafusion::logical_expr::Expr::ScalarFunction(
+                    datafusion::logical_expr::expr::ScalarFunction::new_udf(
+                        Arc::new(ScalarUDF::from(
+                            datafusion::functions::core::getfield::GetFieldFunc::new(),
+                        )),
+                        vec![arg, datafusion::logical_expr::lit("nanos_since_epoch")],
+                    ),
+                ));
+            } else if uni_common::core::schema::is_time_struct(&arg_type) {
+                return Ok(datafusion::logical_expr::Expr::ScalarFunction(
+                    datafusion::logical_expr::expr::ScalarFunction::new_udf(
+                        Arc::new(ScalarUDF::from(
+                            datafusion::functions::core::getfield::GetFieldFunc::new(),
+                        )),
+                        vec![
+                            arg,
+                            datafusion::logical_expr::lit("nanos_since_midnight"),
+                        ],
+                    ),
+                ));
+            }
+        }
+        Ok(arg)
+    }
+
     /// Translate Cypher aggregate expressions to DataFusion.
     fn translate_aggregates(
         &self,
@@ -2462,37 +2557,7 @@ impl HybridPhysicalPlanner {
                 }
                 "min" => {
                     // Use Cypher-aware min for LargeBinary columns (mixed types)
-                    let mut arg = get_arg()?;
-
-                    // DateTime/Time struct: apply min to nanos field
-                    if let Ok(arg_type) = arg.get_type(&datafusion::common::DFSchema::try_from(
-                        schema.as_ref().clone(),
-                    )?) {
-                        if uni_common::core::schema::is_datetime_struct(&arg_type) {
-                            use datafusion::logical_expr::ScalarUDF;
-                            arg = datafusion::logical_expr::Expr::ScalarFunction(
-                                datafusion::logical_expr::expr::ScalarFunction::new_udf(
-                                    Arc::new(ScalarUDF::from(
-                                        datafusion::functions::core::getfield::GetFieldFunc::new(),
-                                    )),
-                                    vec![arg, datafusion::logical_expr::lit("nanos_since_epoch")],
-                                ),
-                            );
-                        } else if uni_common::core::schema::is_time_struct(&arg_type) {
-                            use datafusion::logical_expr::ScalarUDF;
-                            arg = datafusion::logical_expr::Expr::ScalarFunction(
-                                datafusion::logical_expr::expr::ScalarFunction::new_udf(
-                                    Arc::new(ScalarUDF::from(
-                                        datafusion::functions::core::getfield::GetFieldFunc::new(),
-                                    )),
-                                    vec![
-                                        arg,
-                                        datafusion::logical_expr::lit("nanos_since_midnight"),
-                                    ],
-                                ),
-                            );
-                        }
-                    }
+                    let arg = Self::wrap_temporal_sort_key(get_arg()?, schema)?;
 
                     if self.is_large_binary_col(&arg, schema) {
                         let udaf = Arc::new(crate::query::df_udfs::create_cypher_min_udaf());
@@ -2503,37 +2568,7 @@ impl HybridPhysicalPlanner {
                 }
                 "max" => {
                     // Use Cypher-aware max for LargeBinary columns (mixed types)
-                    let mut arg = get_arg()?;
-
-                    // DateTime/Time struct: apply max to nanos field
-                    if let Ok(arg_type) = arg.get_type(&datafusion::common::DFSchema::try_from(
-                        schema.as_ref().clone(),
-                    )?) {
-                        if uni_common::core::schema::is_datetime_struct(&arg_type) {
-                            use datafusion::logical_expr::ScalarUDF;
-                            arg = datafusion::logical_expr::Expr::ScalarFunction(
-                                datafusion::logical_expr::expr::ScalarFunction::new_udf(
-                                    Arc::new(ScalarUDF::from(
-                                        datafusion::functions::core::getfield::GetFieldFunc::new(),
-                                    )),
-                                    vec![arg, datafusion::logical_expr::lit("nanos_since_epoch")],
-                                ),
-                            );
-                        } else if uni_common::core::schema::is_time_struct(&arg_type) {
-                            use datafusion::logical_expr::ScalarUDF;
-                            arg = datafusion::logical_expr::Expr::ScalarFunction(
-                                datafusion::logical_expr::expr::ScalarFunction::new_udf(
-                                    Arc::new(ScalarUDF::from(
-                                        datafusion::functions::core::getfield::GetFieldFunc::new(),
-                                    )),
-                                    vec![
-                                        arg,
-                                        datafusion::logical_expr::lit("nanos_since_midnight"),
-                                    ],
-                                ),
-                            );
-                        }
-                    }
+                    let arg = Self::wrap_temporal_sort_key(get_arg()?, schema)?;
 
                     if self.is_large_binary_col(&arg, schema) {
                         let udaf = Arc::new(crate::query::df_udfs::create_cypher_max_udaf());

@@ -683,8 +683,9 @@ impl PropertyManager {
                 // In new storage model, get edge type from L0Buffer
                 let type_name = l0.get_edge_type(eid);
 
+                let include_all = properties.contains(&"_all_props");
                 for (k, v) in l0_props {
-                    if properties.contains(&k.as_str()) {
+                    if include_all || properties.contains(&k.as_str()) {
                         // Check if property is CRDT
                         let is_crdt = type_name
                             .and_then(|tn| schema.properties.get(tn))

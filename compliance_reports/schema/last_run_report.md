@@ -1,21 +1,17 @@
 # TCK Compliance Report
 
-**Generated:** 2026-02-18 11:25:59
-**Results:** `results_20260218_112559.json`
-**Compared to:** `results_20260218_031321.json`
+**Generated:** 2026-02-18 16:35:54
+**Results:** `results_20260218_163554.json`
+**Compared to:** `results_20260218_152042.json`
 
 ## Summary
 
 | Metric | Current | Previous | Delta |
 |--------|---------|----------|-------|
 | Scenarios | 3897 | 3897 |  |
-| Passed | 3718 | 3613 | +105 |
-| Failed | 178 | 283 | -105 |
-| Pass Rate | 95.4% | 92.7% | 📈 +2.7pp |
-
-**🟢 Fixed:** 106 scenarios now passing
-
-**🔴 Regressions:** 1 scenarios now failing
+| Passed | 3763 | 3763 |  |
+| Failed | 133 | 133 |  |
+| Pass Rate | 96.6% | 96.6% | ➡️ +0.0pp |
 
 ## Feature Breakdown
 
@@ -52,8 +48,8 @@
 | ✅ Create5 | 5 | 5 | 0 | 100% |  |
 | ✅ Create6 | 14 | 12 | 2 | 86% |  |
 | ✅ Delete1 | 8 | 7 | 1 | 88% |  |
-| ✅ Delete2 | 5 | 4 | 1 | 80% | +20pp |
-| ⚠️ Delete3 | 2 | 1 | 1 | 50% | +50pp |
+| ✅ Delete2 | 5 | 4 | 1 | 80% |  |
+| ⚠️ Delete3 | 2 | 1 | 1 | 50% |  |
 | ✅ Delete4 | 3 | 3 | 0 | 100% |  |
 | ❌ Delete5 | 9 | 3 | 6 | 33% |  |
 | ✅ Delete6 | 14 | 12 | 2 | 86% |  |
@@ -69,7 +65,7 @@
 | ✅ Graph9 | 7 | 6 | 1 | 86% |  |
 | ✅ List1 | 23 | 23 | 0 | 100% |  |
 | ✅ List11 | 67 | 66 | 1 | 99% |  |
-| ⚠️ List12 | 7 | 4 | 3 | 57% |  |
+| ✅ List12 | 7 | 6 | 1 | 86% |  |
 | ✅ List2 | 15 | 15 | 0 | 100% |  |
 | ✅ List3 | 7 | 7 | 0 | 100% |  |
 | ✅ List4 | 2 | 2 | 0 | 100% |  |
@@ -107,15 +103,15 @@
 | ✅ Mathematical2 | 1 | 1 | 0 | 100% |  |
 | ✅ Mathematical3 | 1 | 1 | 0 | 100% |  |
 | ⚠️ Mathematical8 | 2 | 1 | 1 | 50% |  |
-| ❌ Merge1 | 17 | 7 | 10 | 41% |  |
+| ⚠️ Merge1 | 17 | 9 | 8 | 53% |  |
 | ✅ Merge2 | 6 | 5 | 1 | 83% |  |
 | ✅ Merge3 | 5 | 4 | 1 | 80% |  |
-| ⚠️ Merge4 | 2 | 1 | 1 | 50% |  |
-| ⚠️ Merge5 | 29 | 15 | 14 | 52% |  |
-| ❌ Merge6 | 6 | 1 | 5 | 17% |  |
-| ❌ Merge7 | 5 | 1 | 4 | 20% |  |
+| ✅ Merge4 | 2 | 2 | 0 | 100% |  |
+| ⚠️ Merge5 | 29 | 20 | 9 | 69% |  |
+| ✅ Merge6 | 6 | 6 | 0 | 100% |  |
+| ✅ Merge7 | 5 | 5 | 0 | 100% |  |
 | ✅ Merge8 | 1 | 1 | 0 | 100% |  |
-| ❌ Merge9 | 4 | 1 | 3 | 25% |  |
+| ⚠️ Merge9 | 4 | 2 | 2 | 50% |  |
 | ✅ Null1 | 17 | 17 | 0 | 100% |  |
 | ✅ Null2 | 17 | 17 | 0 | 100% |  |
 | ✅ Null3 | 10 | 10 | 0 | 100% |  |
@@ -151,21 +147,21 @@
 | ✅ Return6 | 21 | 18 | 3 | 86% |  |
 | ⚠️ Return7 | 2 | 1 | 1 | 50% |  |
 | ✅ Return8 | 1 | 1 | 0 | 100% |  |
-| ✅ ReturnOrderBy1 | 12 | 10 | 2 | 83% | +17pp |
-| ✅ ReturnOrderBy2 | 14 | 14 | 0 | 100% | +50pp |
-| ✅ ReturnOrderBy3 | 1 | 1 | 0 | 100% | +100pp |
-| ✅ ReturnOrderBy4 | 2 | 2 | 0 | 100% | +50pp |
+| ✅ ReturnOrderBy1 | 12 | 10 | 2 | 83% |  |
+| ✅ ReturnOrderBy2 | 14 | 14 | 0 | 100% |  |
+| ✅ ReturnOrderBy3 | 1 | 1 | 0 | 100% |  |
+| ✅ ReturnOrderBy4 | 2 | 2 | 0 | 100% |  |
 | ✅ ReturnOrderBy5 | 1 | 1 | 0 | 100% |  |
-| ✅ ReturnOrderBy6 | 5 | 5 | 0 | 100% | +60pp |
+| ✅ ReturnOrderBy6 | 5 | 5 | 0 | 100% |  |
 | ✅ ReturnSkipLimit1 | 11 | 10 | 1 | 91% |  |
 | ✅ ReturnSkipLimit2 | 17 | 17 | 0 | 100% |  |
 | ⚠️ ReturnSkipLimit3 | 3 | 2 | 1 | 67% |  |
-| ⚠️ Set1 | 11 | 7 | 4 | 64% |  |
+| ✅ Set1 | 11 | 10 | 1 | 91% |  |
 | ✅ Set2 | 3 | 3 | 0 | 100% |  |
 | ✅ Set3 | 8 | 8 | 0 | 100% |  |
-| ❌ Set4 | 5 | 0 | 5 | 0% |  |
-| ❌ Set5 | 5 | 0 | 5 | 0% |  |
-| ❌ Set6 | 21 | 6 | 15 | 29% |  |
+| ✅ Set4 | 5 | 5 | 0 | 100% |  |
+| ✅ Set5 | 5 | 5 | 0 | 100% |  |
+| ✅ Set6 | 21 | 18 | 3 | 86% |  |
 | ❌ String1 | 1 | 0 | 1 | 0% |  |
 | ✅ String10 | 9 | 9 | 0 | 100% |  |
 | ✅ String11 | 2 | 2 | 0 | 100% |  |
@@ -194,16 +190,16 @@
 | ✅ Unwind1 | 14 | 14 | 0 | 100% |  |
 | ✅ With1 | 6 | 6 | 0 | 100% |  |
 | ✅ With2 | 2 | 2 | 0 | 100% |  |
-| ❌ With3 | 1 | 0 | 1 | 0% | -100pp |
+| ❌ With3 | 1 | 0 | 1 | 0% |  |
 | ✅ With4 | 7 | 7 | 0 | 100% |  |
 | ✅ With5 | 2 | 2 | 0 | 100% |  |
 | ✅ With6 | 9 | 9 | 0 | 100% |  |
 | ✅ With7 | 2 | 2 | 0 | 100% |  |
-| ✅ WithOrderBy1 | 96 | 95 | 1 | 99% | +50pp |
-| ✅ WithOrderBy2 | 83 | 83 | 0 | 100% | +43pp |
+| ✅ WithOrderBy1 | 96 | 95 | 1 | 99% |  |
+| ✅ WithOrderBy2 | 83 | 83 | 0 | 100% |  |
 | ✅ WithOrderBy3 | 93 | 93 | 0 | 100% |  |
-| ✅ WithOrderBy4 | 20 | 19 | 1 | 95% | +25pp |
-| ✅ WithSkipLimit1 | 2 | 2 | 0 | 100% | +50pp |
+| ✅ WithOrderBy4 | 20 | 19 | 1 | 95% |  |
+| ✅ WithSkipLimit1 | 2 | 2 | 0 | 100% |  |
 | ✅ WithSkipLimit2 | 4 | 4 | 0 | 100% |  |
 | ⚠️ WithSkipLimit3 | 3 | 2 | 1 | 67% |  |
 | ✅ WithWhere1 | 4 | 4 | 0 | 100% |  |
@@ -213,123 +209,6 @@
 | ✅ WithWhere5 | 4 | 4 | 0 | 100% |  |
 | ✅ WithWhere6 | 1 | 1 | 0 | 100% |  |
 | ✅ WithWhere7 | 3 | 3 | 0 | 100% |  |
-
-## 🔴 Regressions
-
-Scenarios that were passing but are now failing:
-
-- **With3** — [1] Forwarding multiple node and relationship variables (line 33)
-
-## 🟢 Newly Passing
-
-Scenarios that were failing but are now passing:
-
-- **Delete2** — [3] Delete relationship with bidirectional matching (line 65)
-- **Delete3** — [2] Delete on null path (line 53)
-- **ReturnOrderBy1** — [10] ORDER BY DESC should order lists in the expected order (line 173)
-- **ReturnOrderBy1** — [9] ORDER BY should order lists in the expected order (line 153)
-- **ReturnOrderBy2** — [10] Returned columns do not change from using ORDER BY (line 208)
-- **ReturnOrderBy2** — [12] Aggregation of named paths (line 243)
-- **ReturnOrderBy2** — [13] Fail when sorting on variable removed by DISTINCT (line 266)
-- **ReturnOrderBy2** — [3] Sort on aggregated function (line 75)
-- **ReturnOrderBy2** — [4] Support sort and distinct (line 98)
-- **ReturnOrderBy2** — [5] Support ordering by a property after being distinct-ified (line 119)
-- **ReturnOrderBy2** — [6] Count star should count everything in scope (line 136)
-- **ReturnOrderBy3** — [1] Sort on aggregate function and normal property (line 33)
-- **ReturnOrderBy4** — [1] ORDER BY of a column introduced in RETURN should return salient results in ascending order (line 33)
-- **ReturnOrderBy6** — [1] Handle constants and parameters inside an order by item which contains an aggregation expression (line 33)
-- **ReturnOrderBy6** — [2] Handle returned aliases inside an order by item which contains an aggregation expression (line 48)
-- **ReturnOrderBy6** — [3] Handle returned property accesses inside an order by item which contains an aggregation expression (line 60)
-- **WithOrderBy1** — [10] Sort lists in descending order (line 179)
-- **WithOrderBy1** — [11] Sort dates in ascending order (line 197)
-- **WithOrderBy1** — [12] Sort dates in descending order (line 218)
-- **WithOrderBy1** — [13] Sort local times in ascending order (line 239)
-- **WithOrderBy1** — [14] Sort local times in descending order (line 260)
-- **WithOrderBy1** — [15] Sort times in ascending order (line 281)
-- **WithOrderBy1** — [16] Sort times in descending order (line 302)
-- **WithOrderBy1** — [17] Sort local date times in ascending order (line 323)
-- **WithOrderBy1** — [18] Sort local date times in descending order (line 344)
-- **WithOrderBy1** — [19] Sort date times in ascending order (line 365)
-- **WithOrderBy1** — [20] Sort date times in descending order (line 386)
-- **WithOrderBy1** — [22] Sort distinct types in descending order (line 431)
-- **WithOrderBy1** — [29] Sort by a string variable projected from a node property in ascending order (line 671)
-- **WithOrderBy1** — [29] Sort by a string variable projected from a node property in ascending order (line 672)
-- **WithOrderBy1** — [29] Sort by a string variable projected from a node property in ascending order (line 673)
-- **WithOrderBy1** — [30] Sort by a string variable projected from a node property in descending order (line 703)
-- **WithOrderBy1** — [30] Sort by a string variable projected from a node property in descending order (line 704)
-- **WithOrderBy1** — [35] Sort by a local time variable projected from a node property in ascending order (line 860)
-- **WithOrderBy1** — [35] Sort by a local time variable projected from a node property in ascending order (line 861)
-- **WithOrderBy1** — [35] Sort by a local time variable projected from a node property in ascending order (line 862)
-- **WithOrderBy1** — [36] Sort by a local time variable projected from a node property in descending order (line 892)
-- **WithOrderBy1** — [36] Sort by a local time variable projected from a node property in descending order (line 893)
-- **WithOrderBy1** — [37] Sort by a time variable projected from a node property in ascending order (line 923)
-- **WithOrderBy1** — [37] Sort by a time variable projected from a node property in ascending order (line 924)
-- **WithOrderBy1** — [37] Sort by a time variable projected from a node property in ascending order (line 925)
-- **WithOrderBy1** — [38] Sort by a time variable projected from a node property in descending order (line 955)
-- **WithOrderBy1** — [38] Sort by a time variable projected from a node property in descending order (line 956)
-- **WithOrderBy1** — [39] Sort by a local date time variable projected from a node property in ascending order (line 986)
-- **WithOrderBy1** — [39] Sort by a local date time variable projected from a node property in ascending order (line 987)
-- **WithOrderBy1** — [39] Sort by a local date time variable projected from a node property in ascending order (line 988)
-- **WithOrderBy1** — [40] Sort by a local date time variable projected from a node property in descending order (line 1018)
-- **WithOrderBy1** — [40] Sort by a local date time variable projected from a node property in descending order (line 1019)
-- **WithOrderBy1** — [41] Sort by a date time variable projected from a node property in ascending order (line 1049)
-- **WithOrderBy1** — [41] Sort by a date time variable projected from a node property in ascending order (line 1050)
-- **WithOrderBy1** — [41] Sort by a date time variable projected from a node property in ascending order (line 1051)
-- **WithOrderBy1** — [42] Sort by a date time variable projected from a node property in descending order (line 1081)
-- **WithOrderBy1** — [42] Sort by a date time variable projected from a node property in descending order (line 1082)
-- **WithOrderBy1** — [45] Sort order should be consistent with comparisons where comparisons are defined #Example: booleans (line 1144)
-- **WithOrderBy1** — [45] Sort order should be consistent with comparisons where comparisons are defined #Example: dates (line 1149)
-- **WithOrderBy1** — [45] Sort order should be consistent with comparisons where comparisons are defined #Example: datetimes (line 1153)
-- **WithOrderBy1** — [45] Sort order should be consistent with comparisons where comparisons are defined #Example: floats (line 1146)
-- **WithOrderBy1** — [45] Sort order should be consistent with comparisons where comparisons are defined #Example: integers (line 1145)
-- **WithOrderBy1** — [45] Sort order should be consistent with comparisons where comparisons are defined #Example: lists (line 1148)
-- **WithOrderBy1** — [45] Sort order should be consistent with comparisons where comparisons are defined #Example: localdatetimes (line 1152)
-- **WithOrderBy1** — [45] Sort order should be consistent with comparisons where comparisons are defined #Example: localtimes (line 1150)
-- **WithOrderBy1** — [45] Sort order should be consistent with comparisons where comparisons are defined #Example: string (line 1147)
-- **WithOrderBy1** — [45] Sort order should be consistent with comparisons where comparisons are defined #Example: times (line 1151)
-- **WithOrderBy1** — [9] Sort lists in ascending order (line 161)
-- **WithOrderBy2** — [11] Sort by a date expression in ascending order (line 366)
-- **WithOrderBy2** — [11] Sort by a date expression in ascending order (line 367)
-- **WithOrderBy2** — [11] Sort by a date expression in ascending order (line 368)
-- **WithOrderBy2** — [12] Sort by a date expression in descending order (line 397)
-- **WithOrderBy2** — [12] Sort by a date expression in descending order (line 398)
-- **WithOrderBy2** — [13] Sort by a local time expression in ascending order (line 427)
-- **WithOrderBy2** — [13] Sort by a local time expression in ascending order (line 428)
-- **WithOrderBy2** — [13] Sort by a local time expression in ascending order (line 429)
-- **WithOrderBy2** — [14] Sort by a local time expression in descending order (line 458)
-- **WithOrderBy2** — [14] Sort by a local time expression in descending order (line 459)
-- **WithOrderBy2** — [15] Sort by a time expression in ascending order (line 488)
-- **WithOrderBy2** — [15] Sort by a time expression in ascending order (line 489)
-- **WithOrderBy2** — [15] Sort by a time expression in ascending order (line 490)
-- **WithOrderBy2** — [16] Sort by a time expression in descending order (line 519)
-- **WithOrderBy2** — [16] Sort by a time expression in descending order (line 520)
-- **WithOrderBy2** — [17] Sort by a local date time expression in ascending order (line 549)
-- **WithOrderBy2** — [17] Sort by a local date time expression in ascending order (line 550)
-- **WithOrderBy2** — [17] Sort by a local date time expression in ascending order (line 551)
-- **WithOrderBy2** — [18] Sort by a local date time expression in descending order (line 580)
-- **WithOrderBy2** — [18] Sort by a local date time expression in descending order (line 581)
-- **WithOrderBy2** — [19] Sort by a date time expression in ascending order (line 610)
-- **WithOrderBy2** — [19] Sort by a date time expression in ascending order (line 611)
-- **WithOrderBy2** — [19] Sort by a date time expression in ascending order (line 612)
-- **WithOrderBy2** — [20] Sort by a date time expression in descending order (line 641)
-- **WithOrderBy2** — [20] Sort by a date time expression in descending order (line 642)
-- **WithOrderBy2** — [21] Sort by an expression that is only partially orderable on a non-distinct binding table (line 670)
-- **WithOrderBy2** — [21] Sort by an expression that is only partially orderable on a non-distinct binding table (line 671)
-- **WithOrderBy2** — [22] Sort by an expression that is only partially orderable on a non-distinct binding table, but used as a grouping key (line 698)
-- **WithOrderBy2** — [22] Sort by an expression that is only partially orderable on a non-distinct binding table, but used as a grouping key (line 699)
-- **WithOrderBy2** — [23] Sort by an expression that is only partially orderable on a non-distinct binding table, but used in parts as a grouping key (line 726)
-- **WithOrderBy2** — [23] Sort by an expression that is only partially orderable on a non-distinct binding table, but used in parts as a grouping key (line 727)
-- **WithOrderBy2** — [7] Sort by a string expression in ascending order (line 244)
-- **WithOrderBy2** — [7] Sort by a string expression in ascending order (line 245)
-- **WithOrderBy2** — [7] Sort by a string expression in ascending order (line 246)
-- **WithOrderBy2** — [8] Sort by a string expression in descending order (line 275)
-- **WithOrderBy2** — [8] Sort by a string expression in descending order (line 276)
-- **WithOrderBy4** — [11] Sort by an aggregate projection (line 289)
-- **WithOrderBy4** — [16] Handle constants and parameters inside an order by item which contains an aggregation expression (line 401)
-- **WithOrderBy4** — [17] Handle projected variables inside an order by item which contains an aggregation expression (line 417)
-- **WithOrderBy4** — [18]  Handle projected property accesses inside an order by item which contains an aggregation expression (line 430)
-- **WithOrderBy4** — [20] Fail if more complex expressions, even if projected, are used inside an order by item which contains an aggregation expression (line 454)
-- **WithSkipLimit1** — [1] Handle dependencies across WITH with SKIP (line 62)
 
 ## Failed Scenarios
 
@@ -718,11 +597,11 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/graph/Graph6.feature:151:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): Expected column '(list[1]).existing' not found in result
+      Step panicked. Captured output: Result mismatch (any order): Expected column '(list[1]).missing' not found in result
 [Summary]
 1 feature
 1 scenario (1 failed)
-4
+4 
   ... (truncated)
   ```
 
@@ -733,7 +612,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/graph/Graph9.feature:73:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("properties(r)", Some(Map({}))), ("properties(null)
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("properties(n)", Some(Null)), ("properties(r)", Som
   ... (truncated)
   ```
 
@@ -750,30 +629,6 @@ Scenarios that were failing but are now passing:
 
 ### List12
 
-- **[1] Collect and extract using a list comprehension** (line 33)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/list/List12.feature:51:5
-      Matched: crates/uni-tck/src/steps/and.rs:27:1
-      Step panicked. Captured output: assertion `left == right` failed: Expected +properties=1, but got 0 (before=1, after=1)
-        left: 0
-       right: 1
-[Summary]
-1 
-  ... (truncated)
-  ```
-- **[2] Collect and filter using a list comprehension** (line 55)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/list/List12.feature:73:5
-      Matched: crates/uni-tck/src/steps/and.rs:27:1
-      Step panicked. Captured output: assertion `left == right` failed: Expected +properties=1, but got 0 (before=1, after=1)
-        left: 0
-       right: 1
-[Summary]
-1 
-  ... (truncated)
-  ```
 - **[6] Using a list comprehension in a WHERE** (line 127)
   ```
   Step failed:
@@ -824,7 +679,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/literals/Literals7.feature:295:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("literal", Some(List([Map({"ppu": Float(0.55
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("literal", Some(List([Map({"topping": List([
   ... (truncated)
   ```
 
@@ -835,7 +690,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/literals/Literals8.feature:294:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("literal", Some(Map({"data": List([Map({"id"
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("literal", Some(Map({"data": List([Map({"ppu
   ... (truncated)
   ```
 
@@ -846,11 +701,11 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/map/Map1.feature:65:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): Expected column '(list[1]).existing' not found in result
+      Step panicked. Captured output: Result mismatch (any order): Expected column '(list[1]).notMissing' not found in result
 [Summary]
 1 feature
 1 scenario (1 failed)
-3 step
+3 st
   ... (truncated)
   ```
 
@@ -1008,32 +863,6 @@ Scenarios that were failing but are now passing:
       Step panicked. Captured output: Query returned error instead of result: Query { message: "MERGE node must have a label", query: Some("\nMERGE (a {num: 43})\nRETURN a.
   ... (truncated)
   ```
-- **[7] Merge should work when finding multiple elements** (line 128)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/merge/Merge1.feature:136:5
-      Matched: crates/uni-tck/src/steps/then.rs:9:1
-      Step panicked. Captured output: assertion `left == right` failed: Expected empty result, but got 2 rows
-        left: 2
-       right: 0
-[Summary]
-1 feature
-1 scenario
-  ... (truncated)
-  ```
-- **[8] Merge should handle argument properly** (line 141)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/merge/Merge1.feature:153:5
-      Matched: crates/uni-tck/src/steps/then.rs:9:1
-      Step panicked. Captured output: assertion `left == right` failed: Expected empty result, but got 1 rows
-        left: 1
-       right: 0
-[Summary]
-1 feature
-1 scenario
-  ... (truncated)
-  ```
 - **[9] Merge should support updates while merging** (line 159)
   ```
   Step failed:
@@ -1049,14 +878,13 @@ Scenarios that were failing but are now passing:
 - **[11] Merge should be able to merge using property of bound node** (line 211)
   ```
   Step failed:
-      Defined: tck/features/clauses/merge/Merge1.feature:227:5
-      Matched: crates/uni-tck/src/steps/then.rs:9:1
-      Step panicked. Captured output: assertion `left == right` failed: Expected empty result, but got 6 rows
+      Defined: tck/features/clauses/merge/Merge1.feature:228:5
+      Matched: crates/uni-tck/src/steps/and.rs:27:1
+      Step panicked. Captured output: assertion `left == right` failed: Expected +nodes=3, but got 6 (before=6, after=12)
         left: 6
-       right: 0
+       right: 3
 [Summary]
-1 feature
-1 scenario
+1 featur
   ... (truncated)
   ```
 - **[12] Merge should be able to merge using property of freshly created node** (line 233)
@@ -1134,45 +962,8 @@ Scenarios that were failing but are now passing:
 
   ```
 
-### Merge4
-
-- **[1] Merge should be able to set labels on match and on create** (line 33)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/merge/Merge4.feature:46:5
-      Matched: crates/uni-tck/src/steps/then.rs:9:1
-      Step panicked. Captured output: assertion `left == right` failed: Expected empty result, but got 2 rows
-        left: 2
-       right: 0
-[Summary]
-1 feature
-1 scenario 
-  ... (truncated)
-  ```
-
 ### Merge5
 
-- **[4] Using bound variables from other updating clause** (line 88)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/merge/Merge5.feature:96:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Variable b is a node without labels info", query: Some("\nCREATE (a), (b)\nM
-  ... (truncated)
-  ```
-- **[9] Creating relationship using merged nodes** (line 180)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/merge/Merge5.feature:192:5
-      Matched: crates/uni-tck/src/steps/then.rs:9:1
-      Step panicked. Captured output: assertion `left == right` failed: Expected empty result, but got 1 rows
-        left: 1
-       right: 0
-[Summary]
-1 feature
-1 scenario
-  ... (truncated)
-  ```
 - **[10] Merge should bind a path** (line 196)
   ```
   Step failed:
@@ -1186,23 +977,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/clauses/merge/Merge5.feature:221:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Variable b is a node without labels info", query: Some("\nCREATE (a {id: 2}
-  ... (truncated)
-  ```
-- **[12] Match outgoing relationship when direction unspecified** (line 229)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/merge/Merge5.feature:242:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Variable b is a node without labels info", query: Some("\nMATCH (a {id: 2})
-  ... (truncated)
-  ```
-- **[13] Match both incoming and outgoing relationships when direction unspecified** (line 247)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/merge/Merge5.feature:261:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Variable b is a node without labels info", query: Some("\nMATCH (a {id: 2})
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("s", Some(Null)), ("e", Some(Null))]. Expected: [{"s":
   ... (truncated)
   ```
 - **[14] Using list properties via variable** (line 267)
@@ -1217,28 +992,12 @@ Scenarios that were failing but are now passing:
 1
   ... (truncated)
   ```
-- **[16] Aliasing of existing nodes 1** (line 305)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/merge/Merge5.feature:319:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Variable b is a node without labels info", query: Some("\nMATCH (n)\nMATCH 
-  ... (truncated)
-  ```
-- **[17] Aliasing of existing nodes 2** (line 325)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/merge/Merge5.feature:338:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Variable b is a node without labels info", query: Some("\nMATCH (n)\nWITH n
-  ... (truncated)
-  ```
 - **[18] Double aliasing of existing nodes 1** (line 344)
   ```
   Step failed:
       Defined: tck/features/clauses/merge/Merge5.feature:362:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Variable b is a node without labels info", query: Some("\nMATCH (n)\nMATCH 
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "MERGE node must have a label", query: Some("\nMATCH (n)\nMATCH (m)\nWITH n 
   ... (truncated)
   ```
 - **[19] Double aliasing of existing nodes 2** (line 368)
@@ -1252,14 +1011,13 @@ Scenarios that were failing but are now passing:
 - **[20] Do not match on deleted entities** (line 391)
   ```
   Step failed:
-      Defined: tck/features/clauses/merge/Merge5.feature:412:5
-      Matched: crates/uni-tck/src/steps/then.rs:9:1
-      Step panicked. Captured output: assertion `left == right` failed: Expected empty result, but got 2 rows
-        left: 2
-       right: 0
+      Defined: tck/features/clauses/merge/Merge5.feature:413:5
+      Matched: crates/uni-tck/src/steps/and.rs:27:1
+      Step panicked. Captured output: assertion `left == right` failed: Expected +nodes=2, but got -2 (before=5, after=3)
+        left: -2
+       right: 2
 [Summary]
-1 feature
-1 scenario
+1 featu
   ... (truncated)
   ```
 - **[21] Do not match on deleted relationships** (line 421)
@@ -1286,123 +1044,16 @@ Scenarios that were failing but are now passing:
 3 steps (2 passed, 1 failed)
 
   ```
-
-### Merge6
-
-- **[1] Using ON CREATE on a node** (line 33)
+- **[29] Fail on merging relationship with null property** (line 512)
   ```
   Step failed:
-      Defined: tck/features/clauses/merge/Merge6.feature:45:5
-      Matched: crates/uni-tck/src/steps/then.rs:9:1
-      Step panicked. Captured output: assertion `left == right` failed: Expected empty result, but got 1 rows
-        left: 1
-       right: 0
-[Summary]
-1 feature
-1 scenario 
-  ... (truncated)
-  ```
-- **[3] Updating one property with ON CREATE** (line 70)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/merge/Merge6.feature:82:5
-      Matched: crates/uni-tck/src/steps/then.rs:9:1
-      Step panicked. Captured output: assertion `left == right` failed: Expected empty result, but got 1 rows
-        left: 1
-       right: 0
-[Summary]
-1 feature
-1 scenario 
-  ... (truncated)
-  ```
-- **[4] Null-setting one property with ON CREATE** (line 95)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/merge/Merge6.feature:107:5
-      Matched: crates/uni-tck/src/steps/then.rs:9:1
-      Step panicked. Captured output: assertion `left == right` failed: Expected empty result, but got 1 rows
-        left: 1
-       right: 0
-[Summary]
-1 feature
-1 scenario
-  ... (truncated)
-  ```
-- **[6] Copying properties from node with ON CREATE** (line 119)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/merge/Merge6.feature:131:5
-      Matched: crates/uni-tck/src/steps/then.rs:9:1
-      Step panicked. Captured output: No result found
+      Defined: tck/features/clauses/merge/Merge5.feature:519:5
+      Matched: crates/uni-tck/src/steps/then.rs:90:1
+      Step panicked. Captured output: No error found
 [Summary]
 1 feature
 1 scenario (1 failed)
-4 steps (3 passed, 1 failed)
-
-  ```
-- **[7] Copying properties from literal map with ON CREATE** (line 144)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/merge/Merge6.feature:156:5
-      Matched: crates/uni-tck/src/steps/then.rs:9:1
-      Step panicked. Captured output: No result found
-[Summary]
-1 feature
-1 scenario (1 failed)
-4 steps (3 passed, 1 failed)
-
-  ```
-
-### Merge7
-
-- **[1] Using ON MATCH on created node** (line 33)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/merge/Merge7.feature:45:5
-      Matched: crates/uni-tck/src/steps/then.rs:9:1
-      Step panicked. Captured output: assertion `left == right` failed: Expected empty result, but got 1 rows
-        left: 1
-       right: 0
-[Summary]
-1 feature
-1 scenario 
-  ... (truncated)
-  ```
-- **[2] Using ON MATCH on created relationship** (line 49)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/merge/Merge7.feature:61:5
-      Matched: crates/uni-tck/src/steps/then.rs:9:1
-      Step panicked. Captured output: assertion `left == right` failed: Expected empty result, but got 1 rows
-        left: 1
-       right: 0
-[Summary]
-1 feature
-1 scenario 
-  ... (truncated)
-  ```
-- **[4] Copying properties from node with ON MATCH** (line 85)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/merge/Merge7.feature:102:5
-      Matched: crates/uni-tck/src/steps/then.rs:9:1
-      Step panicked. Captured output: No result found
-[Summary]
-1 feature
-1 scenario (1 failed)
-5 steps (4 passed, 1 failed)
-
-  ```
-- **[5] Copying properties from literal map with ON MATCH** (line 115)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/merge/Merge7.feature:132:5
-      Matched: crates/uni-tck/src/steps/then.rs:9:1
-      Step panicked. Captured output: No result found
-[Summary]
-1 feature
-1 scenario (1 failed)
-5 steps (4 passed, 1 failed)
+3 steps (2 passed, 1 failed)
 
   ```
 
@@ -1414,19 +1065,6 @@ Scenarios that were failing but are now passing:
       Defined: tck/features/clauses/merge/Merge9.feature:41:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
       Step panicked. Captured output: Query returned error instead of result: Query { message: "MERGE node must have a label", query: Some("\nUNWIND [1, 2, 3, 4] AS int\nME
-  ... (truncated)
-  ```
-- **[2] UNWIND with multiple MERGE** (line 48)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/merge/Merge9.feature:57:5
-      Matched: crates/uni-tck/src/steps/then.rs:9:1
-      Step panicked. Captured output: assertion `left == right` failed: Expected empty result, but got 4 rows
-        left: 4
-       right: 0
-[Summary]
-1 feature
-1 scenario 
   ... (truncated)
   ```
 - **[4] MERGE after WITH with predicate and WITH with aggregation** (line 81)
@@ -1802,42 +1440,6 @@ Scenarios that were failing but are now passing:
 
 ### Set1
 
-- **[1] Set a property** (line 33)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/set/Set1.feature:49:5
-      Matched: crates/uni-tck/src/steps/and.rs:27:1
-      Step panicked. Captured output: assertion `left == right` failed: Expected +properties=1, but got 0 (before=1, after=1)
-        left: 0
-       right: 1
-[Summary]
-1 feature
-  ... (truncated)
-  ```
-- **[2] Set a property to an expression** (line 53)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/set/Set1.feature:69:5
-      Matched: crates/uni-tck/src/steps/and.rs:27:1
-      Step panicked. Captured output: assertion `left == right` failed: Expected +properties=1, but got 0 (before=1, after=1)
-        left: 0
-       right: 1
-[Summary]
-1 feature
-  ... (truncated)
-  ```
-- **[4] Set a property by selecting the relationship using a simple expression** (line 91)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/set/Set1.feature:106:5
-      Matched: crates/uni-tck/src/steps/and.rs:27:1
-      Step panicked. Captured output: assertion `left == right` failed: Expected +properties=1, but got 0 (before=0, after=0)
-        left: 0
-       right: 1
-[Summary]
-1 featur
-  ... (truncated)
-  ```
 - **[10] Failing when setting a list of maps as a property** (line 180)
   ```
   Step failed:
@@ -1851,172 +1453,14 @@ Scenarios that were failing but are now passing:
 
   ```
 
-### Set4
-
-- **[1] Set multiple properties with a property map** (line 33)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/set/Set4.feature:45:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "SET variable = expression is not yet supported in AST migration. Use SET variabl
-  ... (truncated)
-  ```
-- **[2] Non-existent values in a property map are removed with SET** (line 51)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/set/Set4.feature:63:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "SET variable = expression is not yet supported in AST migration. Use SET variabl
-  ... (truncated)
-  ```
-- **[3] Null values in a property map are removed with SET** (line 70)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/set/Set4.feature:82:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "SET variable = expression is not yet supported in AST migration. Use SET variabl
-  ... (truncated)
-  ```
-- **[4] All properties are removed if node is set to empty property map** (line 89)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/set/Set4.feature:101:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "SET variable = expression is not yet supported in AST migration. Use SET variab
-  ... (truncated)
-  ```
-- **[5] Ignore null when setting properties using an overriding map** (line 107)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/set/Set4.feature:115:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "SET variable = expression is not yet supported in AST migration. Use SET variab
-  ... (truncated)
-  ```
-
-### Set5
-
-- **[1] Ignore null when setting properties using an appending map** (line 33)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/set/Set5.feature:41:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "SET variable += expression is not yet supported in AST migration. Use SET variab
-  ... (truncated)
-  ```
-- **[2] Overwrite values when using +=** (line 46)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/set/Set5.feature:58:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "SET variable += expression is not yet supported in AST migration. Use SET variab
-  ... (truncated)
-  ```
-- **[3] Retain old values when using +=** (line 65)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/set/Set5.feature:77:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "SET variable += expression is not yet supported in AST migration. Use SET variab
-  ... (truncated)
-  ```
-- **[4] Explicit null values in a map remove old values** (line 83)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/set/Set5.feature:95:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "SET variable += expression is not yet supported in AST migration. Use SET variab
-  ... (truncated)
-  ```
-- **[5] Set an empty map when using += has no effect** (line 101)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/set/Set5.feature:113:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "SET variable += expression is not yet supported in AST migration. Use SET varia
-  ... (truncated)
-  ```
-
 ### Set6
 
-- **[1] Limiting to zero results after setting a property on nodes affects the result set but not the side effects** (line 33)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/set/Set6.feature:48:5
-      Matched: crates/uni-tck/src/steps/and.rs:27:1
-      Step panicked. Captured output: assertion `left == right` failed: Expected +properties=1, but got 0 (before=1, after=1)
-        left: 0
-       right: 1
-[Summary]
-1 feature
-  ... (truncated)
-  ```
-- **[2] Skipping all results after setting a property on nodes affects the result set but not the side effects** (line 52)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/set/Set6.feature:67:5
-      Matched: crates/uni-tck/src/steps/and.rs:27:1
-      Step panicked. Captured output: assertion `left == right` failed: Expected +properties=1, but got 0 (before=1, after=1)
-        left: 0
-       right: 1
-[Summary]
-1 feature
-  ... (truncated)
-  ```
-- **[3] Skipping and limiting to a few results after setting a property on nodes affects the result set but not the side effects** (line 71)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/set/Set6.feature:92:5
-      Matched: crates/uni-tck/src/steps/and.rs:27:1
-      Step panicked. Captured output: assertion `left == right` failed: Expected +properties=5, but got 0 (before=5, after=5)
-        left: 0
-       right: 5
-[Summary]
-1 feature
-  ... (truncated)
-  ```
-- **[4] Skipping zero results and limiting to all results after setting a property on nodes does not affect the result set nor the side effects** (line 96)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/set/Set6.feature:120:5
-      Matched: crates/uni-tck/src/steps/and.rs:27:1
-      Step panicked. Captured output: assertion `left == right` failed: Expected +properties=5, but got 0 (before=5, after=5)
-        left: 0
-       right: 5
-[Summary]
-1 featur
-  ... (truncated)
-  ```
 - **[5] Filtering after setting a property on nodes affects the result set but not the side effects** (line 124)
   ```
   Step failed:
       Defined: tck/features/clauses/set/Set6.feature:142:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
       Step panicked. Captured output: Query returned error instead of result: Query { message: "Write operations not yet supported in DataFusion engine", query: Some("\nMATCH 
-  ... (truncated)
-  ```
-- **[6] Aggregating in `RETURN` after setting a property on nodes affects the result set but not the side effects** (line 151)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/set/Set6.feature:170:5
-      Matched: crates/uni-tck/src/steps/and.rs:27:1
-      Step panicked. Captured output: assertion `left == right` failed: Expected +properties=5, but got 0 (before=5, after=5)
-        left: 0
-       right: 5
-[Summary]
-1 featur
-  ... (truncated)
-  ```
-- **[7] Aggregating in `WITH` after setting a property on nodes affects the result set but not the side effects** (line 174)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/set/Set6.feature:194:5
-      Matched: crates/uni-tck/src/steps/and.rs:27:1
-      Step panicked. Captured output: assertion `left == right` failed: Expected +properties=5, but got 0 (before=5, after=5)
-        left: 0
-       right: 5
-[Summary]
-1 featur
   ... (truncated)
   ```
 - **[12] Filtering after adding a label on nodes affects the result set but not the side effects** (line 285)
@@ -2027,84 +1471,12 @@ Scenarios that were failing but are now passing:
       Step panicked. Captured output: Query returned error instead of result: Query { message: "Write operations not yet supported in DataFusion engine", query: Some("\nMATCH 
   ... (truncated)
   ```
-- **[15] Limiting to zero results after setting a property on relationships affects the result set but not the side effects** (line 355)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/set/Set6.feature:370:5
-      Matched: crates/uni-tck/src/steps/and.rs:27:1
-      Step panicked. Captured output: assertion `left == right` failed: Expected +properties=1, but got 0 (before=1, after=1)
-        left: 0
-       right: 1
-[Summary]
-1 featur
-  ... (truncated)
-  ```
-- **[16] Skipping all results after setting a property on relationships affects the result set but not the side effects** (line 374)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/set/Set6.feature:389:5
-      Matched: crates/uni-tck/src/steps/and.rs:27:1
-      Step panicked. Captured output: assertion `left == right` failed: Expected +properties=1, but got 0 (before=1, after=1)
-        left: 0
-       right: 1
-[Summary]
-1 featur
-  ... (truncated)
-  ```
-- **[17] Skipping and limiting to a few results after setting a property on relationships affects the result set but not the side effects** (line 393)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/set/Set6.feature:414:5
-      Matched: crates/uni-tck/src/steps/and.rs:27:1
-      Step panicked. Captured output: assertion `left == right` failed: Expected +properties=5, but got 0 (before=5, after=5)
-        left: 0
-       right: 5
-[Summary]
-1 featur
-  ... (truncated)
-  ```
-- **[18] Skipping zero result and limiting to all results after setting a property on relationships does not affect the result set nor the side effects** (line 418)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/set/Set6.feature:442:5
-      Matched: crates/uni-tck/src/steps/and.rs:27:1
-      Step panicked. Captured output: assertion `left == right` failed: Expected +properties=5, but got 0 (before=5, after=5)
-        left: 0
-       right: 5
-[Summary]
-1 featur
-  ... (truncated)
-  ```
 - **[19] Filtering after setting a property on relationships affects the result set but not the side effects** (line 446)
   ```
   Step failed:
       Defined: tck/features/clauses/set/Set6.feature:464:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
       Step panicked. Captured output: Query returned error instead of result: Query { message: "Write operations not yet supported in DataFusion engine", query: Some("\nMATCH 
-  ... (truncated)
-  ```
-- **[20] Aggregating in `RETURN` after setting a property on relationships affects the result set but not the side effects** (line 473)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/set/Set6.feature:492:5
-      Matched: crates/uni-tck/src/steps/and.rs:27:1
-      Step panicked. Captured output: assertion `left == right` failed: Expected +properties=5, but got 0 (before=5, after=5)
-        left: 0
-       right: 5
-[Summary]
-1 featur
-  ... (truncated)
-  ```
-- **[21] Aggregating in `WITH` after setting a property on relationships affects the result set but not the side effects** (line 496)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/set/Set6.feature:516:5
-      Matched: crates/uni-tck/src/steps/and.rs:27:1
-      Step panicked. Captured output: assertion `left == right` failed: Expected +properties=5, but got 0 (before=5, after=5)
-        left: 0
-       right: 5
-[Summary]
-1 featur
   ... (truncated)
   ```
 
@@ -2211,7 +1583,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal5.feature:133:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("d.day", Some(Int(11))), ("d.weekYear", Some
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("d.weekDay", Some(Int(7))), ("d.month", Some
   ... (truncated)
   ```
 

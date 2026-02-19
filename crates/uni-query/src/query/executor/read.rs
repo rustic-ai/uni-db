@@ -67,6 +67,32 @@ use parquet;
 
 use super::core::*;
 
+/// Number of system fields on an edge map: `_eid`, `_src`, `_dst`, `_type`, `_type_name`.
+const EDGE_SYSTEM_FIELD_COUNT: usize = 5;
+/// Number of system fields on a vertex map: `_vid`, `_label`, `_uid`.
+const VERTEX_SYSTEM_FIELD_COUNT: usize = 3;
+
+/// Collect VIDs from all L0 buffers visible to a query context.
+///
+/// Applies `extractor` to each L0 buffer (main, transaction, pending flush) and
+/// collects the results. Returns an empty vec when no query context is present.
+fn collect_l0_vids(
+    ctx: Option<&QueryContext>,
+    extractor: impl Fn(&uni_store::runtime::l0::L0Buffer) -> Vec<Vid>,
+) -> Vec<Vid> {
+    let mut vids = Vec::new();
+    if let Some(ctx) = ctx {
+        vids.extend(extractor(&ctx.l0.read()));
+        if let Some(tx_l0_arc) = &ctx.transaction_l0 {
+            vids.extend(extractor(&tx_l0_arc.read()));
+        }
+        for pending_l0_arc in &ctx.pending_flush_l0s {
+            vids.extend(extractor(&pending_l0_arc.read()));
+        }
+    }
+    vids
+}
+
 /// Hydrate an entity map (vertex or edge) with properties if not already loaded.
 ///
 /// This is the fallback for pushdown hydration - if the entity only has system fields
@@ -82,8 +108,7 @@ async fn hydrate_entity_if_needed(
 ) {
     // Check for edge entity
     if let Some(eid_u64) = map.get("_eid").and_then(|v| v.as_u64()) {
-        // Edge system fields: _eid, _src, _dst, _type, _type_name (5 fields)
-        if map.len() <= 5 {
+        if map.len() <= EDGE_SYSTEM_FIELD_COUNT {
             tracing::debug!(
                 "Pushdown fallback: hydrating edge {} at execution time",
                 eid_u64
@@ -100,7 +125,7 @@ async fn hydrate_entity_if_needed(
             tracing::trace!(
                 "Pushdown success: edge {} already has {} properties",
                 eid_u64,
-                map.len() - 5
+                map.len() - EDGE_SYSTEM_FIELD_COUNT
             );
         }
         return;
@@ -108,7 +133,7 @@ async fn hydrate_entity_if_needed(
 
     // Check for vertex entity
     if let Some(vid_u64) = map.get("_vid").and_then(|v| v.as_u64()) {
-        if map.len() <= 3 {
+        if map.len() <= VERTEX_SYSTEM_FIELD_COUNT {
             tracing::debug!(
                 "Pushdown fallback: hydrating vertex {} at execution time",
                 vid_u64
@@ -125,7 +150,7 @@ async fn hydrate_entity_if_needed(
             tracing::trace!(
                 "Pushdown success: vertex {} already has {} properties",
                 vid_u64,
-                map.len() - 3
+                map.len() - VERTEX_SYSTEM_FIELD_COUNT
             );
         }
     }
@@ -265,23 +290,10 @@ impl Executor {
             .scan_storage_candidates(label_id, variable, filter)
             .await?;
 
-        if let Some(ctx) = ctx {
-            // Convert label_id to label_name for L0 lookup
-            let schema = self.storage.schema_manager().schema();
-            if let Some(label_name) = schema.label_name_by_id(label_id) {
-                // Main L0
-                candidates.extend(ctx.l0.read().vids_for_label(label_name));
-
-                // Transaction L0
-                if let Some(tx_l0_arc) = &ctx.transaction_l0 {
-                    candidates.extend(tx_l0_arc.read().vids_for_label(label_name));
-                }
-
-                // Pending flush L0s (data being flushed that's still visible)
-                for pending_l0_arc in &ctx.pending_flush_l0s {
-                    candidates.extend(pending_l0_arc.read().vids_for_label(label_name));
-                }
-            }
+        // Convert label_id to label_name for L0 lookup
+        let schema = self.storage.schema_manager().schema();
+        if let Some(label_name) = schema.label_name_by_id(label_id) {
+            candidates.extend(collect_l0_vids(ctx, |l0| l0.vids_for_label(label_name)));
         }
 
         self.verify_and_filter_candidates(candidates, variable, filter, ctx, prop_manager, params)
@@ -306,20 +318,7 @@ impl Executor {
         let mut candidates = MainVertexDataset::find_all_vids(lancedb).await?;
 
         // Add VIDs from L0 buffers
-        if let Some(ctx) = ctx {
-            // Main L0 - get all VIDs regardless of label
-            candidates.extend(ctx.l0.read().all_vertex_vids());
-
-            // Transaction L0
-            if let Some(tx_l0_arc) = &ctx.transaction_l0 {
-                candidates.extend(tx_l0_arc.read().all_vertex_vids());
-            }
-
-            // Pending flush L0s
-            for pending_l0_arc in &ctx.pending_flush_l0s {
-                candidates.extend(pending_l0_arc.read().all_vertex_vids());
-            }
-        }
+        candidates.extend(collect_l0_vids(ctx, |l0| l0.all_vertex_vids()));
 
         self.verify_and_filter_candidates(candidates, variable, filter, ctx, prop_manager, params)
             .await
@@ -345,20 +344,7 @@ impl Executor {
             MainVertexDataset::find_vids_by_label_name(lancedb, label_name).await?;
 
         // Add VIDs from L0 buffers that have this label
-        if let Some(ctx) = ctx {
-            // Main L0
-            candidates.extend(ctx.l0.read().vids_for_label(label_name));
-
-            // Transaction L0
-            if let Some(tx_l0_arc) = &ctx.transaction_l0 {
-                candidates.extend(tx_l0_arc.read().vids_for_label(label_name));
-            }
-
-            // Pending flush L0s
-            for pending_l0_arc in &ctx.pending_flush_l0s {
-                candidates.extend(pending_l0_arc.read().vids_for_label(label_name));
-            }
-        }
+        candidates.extend(collect_l0_vids(ctx, |l0| l0.vids_for_label(label_name)));
 
         self.verify_and_filter_candidates(candidates, variable, filter, ctx, prop_manager, params)
             .await
@@ -437,21 +423,11 @@ impl Executor {
         }
 
         // Overlay L0 buffer intersection
-        if let Some(ctx) = ctx {
+        {
             let label_refs: Vec<&str> = labels.iter().map(|s| s.as_str()).collect();
-
-            // Main L0
-            candidates.extend(ctx.l0.read().vids_with_all_labels(&label_refs));
-
-            // Transaction L0
-            if let Some(tx_l0_arc) = &ctx.transaction_l0 {
-                candidates.extend(tx_l0_arc.read().vids_with_all_labels(&label_refs));
-            }
-
-            // Pending flush L0s
-            for pending_l0_arc in &ctx.pending_flush_l0s {
-                candidates.extend(pending_l0_arc.read().vids_with_all_labels(&label_refs));
-            }
+            candidates.extend(collect_l0_vids(ctx, |l0| {
+                l0.vids_with_all_labels(&label_refs)
+            }));
         }
 
         self.verify_and_filter_candidates(candidates, variable, filter, ctx, prop_manager, params)
@@ -516,14 +492,42 @@ impl Executor {
         let session_ctx = Arc::new(SyncRwLock::new(ctx));
 
         // Create hybrid planner
-        let planner = HybridPhysicalPlanner::with_l0_context(
+        let mut planner = HybridPhysicalPlanner::with_l0_context(
             session_ctx.clone(),
             self.storage.clone(),
             l0_context,
-            prop_manager_arc,
+            prop_manager_arc.clone(),
             Arc::new(self.storage.schema_manager().schema().clone()),
             params.clone(),
         );
+
+        // Build MutationContext when the plan contains write operations
+        if Self::contains_write_operations(&plan) {
+            let writer = self
+                .writer
+                .as_ref()
+                .ok_or_else(|| anyhow!("Write operations require a Writer"))?
+                .clone();
+            let query_ctx = self.get_context().await;
+
+            debug_assert!(
+                query_ctx.is_some(),
+                "BUG: query_ctx is None for write operation"
+            );
+
+            let mutation_ctx = Arc::new(crate::query::df_graph::MutationContext {
+                executor: self.clone(),
+                writer,
+                prop_manager: prop_manager_arc,
+                params: params.clone(),
+                query_ctx,
+            });
+            planner = planner.with_mutation_context(mutation_ctx);
+            tracing::debug!(
+                plan_type = Self::get_plan_type(&plan),
+                "Mutation routed to DataFusion engine"
+            );
+        }
 
         // Plan the query
         let execution_plan = planner.plan(&plan)?;
@@ -651,16 +655,15 @@ impl Executor {
     /// This only normalizes path structures (objects with "nodes" and "relationships" arrays).
     /// Other values are returned unchanged to avoid interfering with query execution.
     fn normalize_path_if_needed(value: Value) -> Value {
-        // Only normalize if this looks like a path (has nodes and relationships/edges)
-        if let Value::Map(map) = value {
-            if map.contains_key("nodes")
-                && (map.contains_key("relationships") || map.contains_key("edges"))
+        match value {
+            Value::Map(map)
+                if map.contains_key("nodes")
+                    && (map.contains_key("relationships") || map.contains_key("edges")) =>
             {
-                return Self::normalize_path_map(map);
+                Self::normalize_path_map(map)
             }
-            return Value::Map(map);
+            other => other,
         }
-        value
     }
 
     /// Normalize a path map object.
@@ -703,78 +706,55 @@ impl Executor {
         Value::Map(map)
     }
 
-    /// Normalize a node within a path to user-facing format.
-    fn normalize_path_node_map(mut map: HashMap<String, Value>) -> Value {
-        // Convert _vid to _id as string
-        if let Some(vid) = map.remove("_vid") {
-            let id_str = match vid {
-                Value::Int(n) => n.to_string(),
-                Value::Float(n) => n.to_string(),
-                Value::String(s) => s,
-                _ => vid.to_string(),
-            };
-            map.insert("_id".to_string(), Value::String(id_str));
+    /// Convert a Value to its string representation for path normalization.
+    fn value_to_id_string(val: Value) -> String {
+        match val {
+            Value::Int(n) => n.to_string(),
+            Value::Float(n) => n.to_string(),
+            Value::String(s) => s,
+            other => other.to_string(),
         }
+    }
 
-        // Normalize properties if present
-        if let Some(props) = map.get("properties") {
-            if props.is_null() {
+    /// Move a map entry from `src_key` to `dst_key`, converting the value to a string.
+    /// When `src_key == dst_key`, this simply stringifies the value in place.
+    fn stringify_map_field(map: &mut HashMap<String, Value>, src_key: &str, dst_key: &str) {
+        if let Some(val) = map.remove(src_key) {
+            map.insert(
+                dst_key.to_string(),
+                Value::String(Self::value_to_id_string(val)),
+            );
+        }
+    }
+
+    /// Ensure the "properties" field is a non-null map.
+    fn ensure_properties_map(map: &mut HashMap<String, Value>) {
+        match map.get("properties") {
+            Some(props) if !props.is_null() => {}
+            _ => {
                 map.insert("properties".to_string(), Value::Map(HashMap::new()));
             }
-        } else {
-            map.insert("properties".to_string(), Value::Map(HashMap::new()));
         }
+    }
 
+    /// Normalize a node within a path to user-facing format.
+    fn normalize_path_node_map(mut map: HashMap<String, Value>) -> Value {
+        Self::stringify_map_field(&mut map, "_vid", "_id");
+        Self::ensure_properties_map(&mut map);
         Value::Map(map)
     }
 
     /// Normalize an edge within a path to user-facing format.
     fn normalize_path_edge_map(mut map: HashMap<String, Value>) -> Value {
-        // Convert _eid to _id as string
-        if let Some(eid) = map.remove("_eid") {
-            let id_str = match eid {
-                Value::Int(n) => n.to_string(),
-                Value::Float(n) => n.to_string(),
-                Value::String(s) => s,
-                _ => eid.to_string(),
-            };
-            map.insert("_id".to_string(), Value::String(id_str));
-        }
+        Self::stringify_map_field(&mut map, "_eid", "_id");
+        Self::stringify_map_field(&mut map, "_src", "_src");
+        Self::stringify_map_field(&mut map, "_dst", "_dst");
 
-        // Convert _src and _dst to strings
-        if let Some(src) = map.remove("_src") {
-            let src_str = match src {
-                Value::Int(n) => n.to_string(),
-                Value::Float(n) => n.to_string(),
-                Value::String(s) => s,
-                _ => src.to_string(),
-            };
-            map.insert("_src".to_string(), Value::String(src_str));
-        }
-        if let Some(dst) = map.remove("_dst") {
-            let dst_str = match dst {
-                Value::Int(n) => n.to_string(),
-                Value::Float(n) => n.to_string(),
-                Value::String(s) => s,
-                _ => dst.to_string(),
-            };
-            map.insert("_dst".to_string(), Value::String(dst_str));
-        }
-
-        // Rename _type_name to _type if present
         if let Some(type_name) = map.remove("_type_name") {
             map.insert("_type".to_string(), type_name);
         }
 
-        // Normalize properties if present
-        if let Some(props) = map.get("properties") {
-            if props.is_null() {
-                map.insert("properties".to_string(), Value::Map(HashMap::new()));
-            }
-        } else {
-            map.insert("properties".to_string(), Value::Map(HashMap::new()));
-        }
-
+        Self::ensure_properties_map(&mut map);
         Value::Map(map)
     }
 
@@ -789,18 +769,34 @@ impl Executor {
         prop_manager: &'a PropertyManager,
         params: &'a HashMap<String, Value>,
     ) -> BoxFuture<'a, Result<Vec<HashMap<String, Value>>>> {
-        let _config = self.config.clone();
         Box::pin(async move {
             let query_type = Self::get_plan_type(&plan);
             let ctx = self.get_context().await;
             let start = Instant::now();
 
-            // Route DDL/Admin operations directly to fallback executor (skip DataFusion)
-            let res = if Self::is_ddl_or_admin(&plan) {
-                self.execute_subplan(plan, prop_manager, params, ctx.as_ref())
-                    .await
-            } else if Self::contains_write_operations(&plan) {
-                // Write/mutation operations are not supported by DataFusion
+            // Route DDL/Admin, MERGE, FOREACH, and complex mutation queries to the
+            // fallback executor. Simple "terminal" mutations (single mutation clause at
+            // the outermost level, no RETURN/WITH) flow through DataFusion via MutationExec
+            // operators. Complex mutations (multi-clause, or with downstream RETURN/WITH)
+            // still use the fallback path for correct variable flow and output semantics.
+            let mutation_config = ctx
+                .as_ref()
+                .map(|c| &c.mutation_path)
+                .unwrap_or(&self.config.mutation_path);
+            let res = if Self::is_ddl_or_admin(&plan)
+                || Self::contains_merge_or_foreach(&plan)
+                || Self::needs_mutation_fallback(&plan)
+                || Self::mutation_clause_disabled_by_config(&plan, mutation_config)
+            {
+                if Self::contains_write_operations(&plan) {
+                    tracing::debug!(
+                        plan_type = query_type,
+                        needs_fallback = Self::needs_mutation_fallback(&plan),
+                        clause_disabled =
+                            Self::mutation_clause_disabled_by_config(&plan, mutation_config),
+                        "Mutation routed to fallback executor"
+                    );
+                }
                 self.execute_subplan(plan, prop_manager, params, ctx.as_ref())
                     .await
             } else if Self::contains_window_functions(&plan) {
@@ -828,28 +824,11 @@ impl Executor {
                             .await
                     }
                 } else {
-                    // No window functions found - use DataFusion (no fallback)
+                    // No window functions found - use DataFusion
                     let batches = self
                         .execute_datafusion(plan.clone(), prop_manager, params)
                         .await?;
                     self.record_batches_to_rows(batches)
-                    // DISABLED: legacy executor fallback
-                    // match self
-                    //     .execute_datafusion(plan.clone(), prop_manager, params)
-                    //     .await
-                    // {
-                    //     Ok(batches) => self.record_batches_to_rows(batches),
-                    //     Err(e) => {
-                    //         log::debug!("DataFusion execution failed (falling back): {}", e);
-                    //         if e.to_string().contains("Query timed out")
-                    //             || e.to_string().contains("Query exceeded memory limit")
-                    //         {
-                    //             return Err(e);
-                    //         }
-                    //         self.execute_subplan(plan, prop_manager, params, ctx.as_ref())
-                    //             .await
-                    //     }
-                    // }
                 }
             } else if Self::contains_sort(&plan)
                 && !Self::contains_pattern_comprehension(&plan)
@@ -861,28 +840,11 @@ impl Executor {
                 self.execute_subplan(plan, prop_manager, params, ctx.as_ref())
                     .await
             } else {
-                // Execute using DataFusion engine (no fallback)
+                // Execute using DataFusion engine
                 let batches = self
                     .execute_datafusion(plan.clone(), prop_manager, params)
                     .await?;
                 self.record_batches_to_rows(batches)
-                // DISABLED: legacy executor fallback
-                // match self
-                //     .execute_datafusion(plan.clone(), prop_manager, params)
-                //     .await
-                // {
-                //     Ok(batches) => self.record_batches_to_rows(batches),
-                //     Err(e) => {
-                //         log::debug!("DataFusion execution failed (falling back): {}", e);
-                //         if e.to_string().contains("Query timed out")
-                //             || e.to_string().contains("Query exceeded memory limit")
-                //         {
-                //             return Err(e);
-                //         }
-                //         self.execute_subplan(plan, prop_manager, params, ctx.as_ref())
-                //             .await
-                //     }
-                // }
             };
 
             let duration = start.elapsed();
@@ -933,6 +895,65 @@ impl Executor {
         }
     }
 
+    /// Return all direct child plan references from a `LogicalPlan`.
+    ///
+    /// This centralizes the variant→children mapping so that recursive walkers
+    /// (e.g., `contains_sort`, `contains_write_operations`) can delegate the
+    /// "recurse into children" logic instead of duplicating the match arms.
+    ///
+    /// Note: `Foreach` returns only its `input`; the `body: Vec<LogicalPlan>`
+    /// is not included because it requires special iteration. Callers that
+    /// need to inspect the body should handle `Foreach` before falling through.
+    fn plan_children(plan: &LogicalPlan) -> Vec<&LogicalPlan> {
+        match plan {
+            // Single-input wrappers
+            LogicalPlan::Project { input, .. }
+            | LogicalPlan::Sort { input, .. }
+            | LogicalPlan::Limit { input, .. }
+            | LogicalPlan::Distinct { input }
+            | LogicalPlan::Aggregate { input, .. }
+            | LogicalPlan::Window { input, .. }
+            | LogicalPlan::Unwind { input, .. }
+            | LogicalPlan::Filter { input, .. }
+            | LogicalPlan::Create { input, .. }
+            | LogicalPlan::CreateBatch { input, .. }
+            | LogicalPlan::Set { input, .. }
+            | LogicalPlan::Remove { input, .. }
+            | LogicalPlan::Delete { input, .. }
+            | LogicalPlan::Merge { input, .. }
+            | LogicalPlan::Foreach { input, .. }
+            | LogicalPlan::Traverse { input, .. }
+            | LogicalPlan::TraverseMainByType { input, .. }
+            | LogicalPlan::BindZeroLengthPath { input, .. }
+            | LogicalPlan::BindPath { input, .. }
+            | LogicalPlan::ShortestPath { input, .. }
+            | LogicalPlan::AllShortestPaths { input, .. }
+            | LogicalPlan::Explain { plan: input, .. } => vec![input.as_ref()],
+
+            // Two-input wrappers
+            LogicalPlan::Apply {
+                input, subquery, ..
+            }
+            | LogicalPlan::SubqueryCall { input, subquery } => {
+                vec![input.as_ref(), subquery.as_ref()]
+            }
+            LogicalPlan::Union { left, right, .. } | LogicalPlan::CrossJoin { left, right } => {
+                vec![left.as_ref(), right.as_ref()]
+            }
+            LogicalPlan::RecursiveCTE {
+                initial, recursive, ..
+            } => vec![initial.as_ref(), recursive.as_ref()],
+            LogicalPlan::QuantifiedPattern {
+                input,
+                pattern_plan,
+                ..
+            } => vec![input.as_ref(), pattern_plan.as_ref()],
+
+            // Leaf nodes (scans, DDL, admin, etc.)
+            _ => vec![],
+        }
+    }
+
     /// Check if a plan is a DDL or admin operation that should skip DataFusion.
     ///
     /// These operations don't produce data streams and aren't supported by the
@@ -977,25 +998,144 @@ impl Executor {
             | LogicalPlan::LoadCsv { .. }
             | LogicalPlan::ProcedureCall { .. } => true,
 
-            // Recurse through read-only wrapper nodes that may contain DDL/admin
+            // Recurse through single-input wrapper nodes
             LogicalPlan::Project { input, .. }
             | LogicalPlan::Sort { input, .. }
             | LogicalPlan::Limit { input, .. }
             | LogicalPlan::Distinct { input }
             | LogicalPlan::Aggregate { input, .. }
             | LogicalPlan::Window { input, .. }
-            | LogicalPlan::Unwind { input, .. } => Self::is_ddl_or_admin(input),
+            | LogicalPlan::Unwind { input, .. }
+            | LogicalPlan::Filter { input, .. }
+            | LogicalPlan::BindZeroLengthPath { input, .. }
+            | LogicalPlan::BindPath { input, .. }
+            | LogicalPlan::ShortestPath { input, .. }
+            | LogicalPlan::AllShortestPaths { input, .. } => Self::is_ddl_or_admin(input),
+
+            // Recurse through two-input wrapper nodes
+            LogicalPlan::Apply {
+                input, subquery, ..
+            }
+            | LogicalPlan::SubqueryCall { input, subquery } => {
+                Self::is_ddl_or_admin(input) || Self::is_ddl_or_admin(subquery)
+            }
+            LogicalPlan::Union { left, right, .. } | LogicalPlan::CrossJoin { left, right } => {
+                Self::is_ddl_or_admin(left) || Self::is_ddl_or_admin(right)
+            }
+            LogicalPlan::RecursiveCTE {
+                initial, recursive, ..
+            } => Self::is_ddl_or_admin(initial) || Self::is_ddl_or_admin(recursive),
+            LogicalPlan::QuantifiedPattern {
+                input,
+                pattern_plan,
+                ..
+            } => Self::is_ddl_or_admin(input) || Self::is_ddl_or_admin(pattern_plan),
 
             _ => false,
+        }
+    }
+
+    /// Check if a plan contains MERGE or FOREACH operations.
+    ///
+    /// Only these two write operations stay on the fallback path. All other
+    /// mutations (CREATE, SET, REMOVE, DELETE) now flow through DataFusion
+    /// via MutationExec operators.
+    fn contains_merge_or_foreach(plan: &LogicalPlan) -> bool {
+        match plan {
+            LogicalPlan::Merge { .. } | LogicalPlan::Foreach { .. } => true,
+            _ => Self::plan_children(plan)
+                .iter()
+                .any(|child| Self::contains_merge_or_foreach(child)),
+        }
+    }
+
+    /// Check if a mutation query needs the fallback executor path.
+    ///
+    /// Returns true when mutations are "complex" — i.e., the DF mutation operators
+    /// can't produce correct output because:
+    /// 1. The mutation is wrapped by RETURN/WITH (needs updated values or created variables
+    ///    in the output batch, which requires complex row→batch Struct reconstruction)
+    /// 2. The mutation has nested mutations (multi-clause CREATE needs variable flow
+    ///    between clauses, which requires created variables in intermediate output)
+    /// 3. The plan contains LOAD CSV (not yet supported in DF engine)
+    ///
+    /// Simple "terminal" mutations (outermost plan is a single mutation clause,
+    /// input is a read plan) are safe for DF: the mutation is a storage-level side
+    /// effect and the output batches (passed through from the read operators) aren't
+    /// consumed for their mutation-affected values.
+    fn needs_mutation_fallback(plan: &LogicalPlan) -> bool {
+        if !Self::contains_write_operations(plan) {
+            return false;
+        }
+
+        // Check for LOAD CSV anywhere in the plan
+        if Self::contains_load_csv(plan) {
+            return true;
+        }
+
+        // If the outermost plan is NOT a mutation (e.g., it's RETURN, WITH, Sort wrapping
+        // a mutation), the downstream consumer needs correct output from the mutation.
+        // The DF path passes through original input batches unchanged, so RETURN/WITH
+        // would see stale values. Route to fallback.
+        if !Self::is_mutation_plan(plan) {
+            return true;
+        }
+
+        // If the mutation's input contains other mutations (multi-clause CREATE, SET+SET, etc.),
+        // variable flow between clauses requires proper output schemas. Route to fallback.
+        Self::has_nested_mutations(plan)
+    }
+
+    /// Check if the outermost plan node is a mutation clause.
+    fn is_mutation_plan(plan: &LogicalPlan) -> bool {
+        matches!(
+            plan,
+            LogicalPlan::Create { .. }
+                | LogicalPlan::CreateBatch { .. }
+                | LogicalPlan::Set { .. }
+                | LogicalPlan::Remove { .. }
+                | LogicalPlan::Delete { .. }
+        )
+    }
+
+    /// Check if a mutation plan has nested mutations in its input.
+    ///
+    /// This detects multi-clause mutation patterns like:
+    /// `CREATE (a) CREATE (a)-[:R]->(:B)` → Create { input: Create { ... } }
+    fn has_nested_mutations(plan: &LogicalPlan) -> bool {
+        match plan {
+            LogicalPlan::Create { input, .. }
+            | LogicalPlan::CreateBatch { input, .. }
+            | LogicalPlan::Set { input, .. }
+            | LogicalPlan::Remove { input, .. }
+            | LogicalPlan::Delete { input, .. } => Self::contains_write_operations(input),
+            _ => false,
+        }
+    }
+
+    /// Check if a plan contains LOAD CSV anywhere in the tree.
+    fn contains_load_csv(plan: &LogicalPlan) -> bool {
+        match plan {
+            LogicalPlan::LoadCsv { .. } => true,
+            // Foreach has a body of plans — check body members too
+            LogicalPlan::Foreach { body, .. } => {
+                Self::plan_children(plan)
+                    .iter()
+                    .any(|child| Self::contains_load_csv(child))
+                    || body.iter().any(Self::contains_load_csv)
+            }
+            _ => Self::plan_children(plan)
+                .iter()
+                .any(|child| Self::contains_load_csv(child)),
         }
     }
 
     /// Check if a plan contains write/mutation operations anywhere in the tree.
     ///
     /// Write operations (`CREATE`, `MERGE`, `DELETE`, `SET`, `REMOVE`, `FOREACH`)
-    /// are not supported by the DataFusion engine. This recurses through
-    /// read-only wrapper nodes to detect writes nested inside projections
-    /// (e.g. `CREATE (n:Person) RETURN n` produces `Project { Create { ... } }`).
+    /// are used to determine when a MutationContext needs to be built for DataFusion.
+    /// This recurses through read-only wrapper nodes to detect writes nested inside
+    /// projections (e.g. `CREATE (n:Person) RETURN n` produces `Project { Create { ... } }`).
     fn contains_write_operations(plan: &LogicalPlan) -> bool {
         match plan {
             LogicalPlan::Create { .. }
@@ -1005,16 +1145,29 @@ impl Executor {
             | LogicalPlan::Set { .. }
             | LogicalPlan::Remove { .. }
             | LogicalPlan::Foreach { .. } => true,
+            _ => Self::plan_children(plan)
+                .iter()
+                .any(|child| Self::contains_write_operations(child)),
+        }
+    }
 
-            // Recurse through read-only wrapper nodes
-            LogicalPlan::Project { input, .. }
-            | LogicalPlan::Sort { input, .. }
-            | LogicalPlan::Limit { input, .. }
-            | LogicalPlan::Distinct { input }
-            | LogicalPlan::Aggregate { input, .. }
-            | LogicalPlan::Window { input, .. }
-            | LogicalPlan::Unwind { input, .. } => Self::contains_write_operations(input),
-
+    /// Check if the outermost mutation clause is disabled via `MutationPathConfig`.
+    ///
+    /// Returns `true` when the plan's mutation clause has been gated off in the config,
+    /// forcing the query to the fallback executor. Non-mutation plans always return `false`.
+    fn mutation_clause_disabled_by_config(
+        plan: &LogicalPlan,
+        config: &uni_common::config::MutationPathConfig,
+    ) -> bool {
+        use uni_common::config::MutationClause;
+        match plan {
+            LogicalPlan::Create { .. } | LogicalPlan::CreateBatch { .. } => {
+                !config.is_clause_enabled(MutationClause::Create)
+            }
+            LogicalPlan::Set { .. } => !config.is_clause_enabled(MutationClause::Set),
+            LogicalPlan::Remove { .. } => !config.is_clause_enabled(MutationClause::Remove),
+            LogicalPlan::Delete { .. } => !config.is_clause_enabled(MutationClause::Delete),
+            LogicalPlan::Merge { .. } => !config.is_clause_enabled(MutationClause::Merge),
             _ => false,
         }
     }
@@ -1034,43 +1187,9 @@ impl Executor {
     fn contains_sort(plan: &LogicalPlan) -> bool {
         match plan {
             LogicalPlan::Sort { .. } => true,
-
-            LogicalPlan::Union { left, right, .. } | LogicalPlan::CrossJoin { left, right } => {
-                Self::contains_sort(left) || Self::contains_sort(right)
-            }
-
-            LogicalPlan::Traverse { input, .. }
-            | LogicalPlan::TraverseMainByType { input, .. }
-            | LogicalPlan::Filter { input, .. }
-            | LogicalPlan::Create { input, .. }
-            | LogicalPlan::CreateBatch { input, .. }
-            | LogicalPlan::Merge { input, .. }
-            | LogicalPlan::Set { input, .. }
-            | LogicalPlan::Remove { input, .. }
-            | LogicalPlan::Delete { input, .. }
-            | LogicalPlan::Foreach { input, .. }
-            | LogicalPlan::Limit { input, .. }
-            | LogicalPlan::Aggregate { input, .. }
-            | LogicalPlan::Distinct { input }
-            | LogicalPlan::Window { input, .. }
-            | LogicalPlan::Project { input, .. }
-            | LogicalPlan::SubqueryCall { input, .. }
-            | LogicalPlan::ShortestPath { input, .. }
-            | LogicalPlan::AllShortestPaths { input, .. }
-            | LogicalPlan::QuantifiedPattern { input, .. }
-            | LogicalPlan::BindZeroLengthPath { input, .. }
-            | LogicalPlan::BindPath { input, .. }
-            | LogicalPlan::Unwind { input, .. } => Self::contains_sort(input),
-
-            LogicalPlan::Apply {
-                input, subquery, ..
-            } => Self::contains_sort(input) || Self::contains_sort(subquery),
-            LogicalPlan::RecursiveCTE {
-                initial, recursive, ..
-            } => Self::contains_sort(initial) || Self::contains_sort(recursive),
-            LogicalPlan::Explain { plan } => Self::contains_sort(plan),
-
-            _ => false,
+            _ => Self::plan_children(plan)
+                .iter()
+                .any(|child| Self::contains_sort(child)),
         }
     }
 
@@ -1084,9 +1203,9 @@ impl Executor {
                 Self::expr_contains_pattern_comprehension(left)
                     || Self::expr_contains_pattern_comprehension(right)
             }
-            Expr::FunctionCall { args, .. } | Expr::List(args) => args
-                .iter()
-                .any(Self::expr_contains_pattern_comprehension),
+            Expr::FunctionCall { args, .. } | Expr::List(args) => {
+                args.iter().any(Self::expr_contains_pattern_comprehension)
+            }
             Expr::Map(entries) => entries
                 .iter()
                 .any(|(_, v)| Self::expr_contains_pattern_comprehension(v)),
@@ -1111,27 +1230,21 @@ impl Executor {
 
     /// Detect pattern comprehensions, which are DataFusion-only in the current fallback engine.
     fn contains_pattern_comprehension(plan: &LogicalPlan) -> bool {
-        match plan {
-            LogicalPlan::Filter { input, predicate, .. } => {
+        // Check expressions in nodes that carry them
+        let has_expr = match plan {
+            LogicalPlan::Filter { predicate, .. } => {
                 Self::expr_contains_pattern_comprehension(predicate)
-                    || Self::contains_pattern_comprehension(input)
             }
-            LogicalPlan::Project { input, projections } => {
-                projections
-                    .iter()
-                    .any(|(e, _)| Self::expr_contains_pattern_comprehension(e))
-                    || Self::contains_pattern_comprehension(input)
-            }
-            LogicalPlan::Sort { input, order_by } => {
-                order_by
-                    .iter()
-                    .any(|s| Self::expr_contains_pattern_comprehension(&s.expr))
-                    || Self::contains_pattern_comprehension(input)
-            }
+            LogicalPlan::Project { projections, .. } => projections
+                .iter()
+                .any(|(e, _)| Self::expr_contains_pattern_comprehension(e)),
+            LogicalPlan::Sort { order_by, .. } => order_by
+                .iter()
+                .any(|s| Self::expr_contains_pattern_comprehension(&s.expr)),
             LogicalPlan::Aggregate {
-                input,
                 group_by,
                 aggregates,
+                ..
             } => {
                 group_by
                     .iter()
@@ -1139,54 +1252,19 @@ impl Executor {
                     || aggregates
                         .iter()
                         .any(Self::expr_contains_pattern_comprehension)
-                    || Self::contains_pattern_comprehension(input)
             }
-            LogicalPlan::Window {
-                input,
-                window_exprs,
-            } => {
-                window_exprs
-                    .iter()
-                    .any(Self::expr_contains_pattern_comprehension)
-                    || Self::contains_pattern_comprehension(input)
-            }
-            LogicalPlan::Union { left, right, .. } | LogicalPlan::CrossJoin { left, right } => {
-                Self::contains_pattern_comprehension(left)
-                    || Self::contains_pattern_comprehension(right)
-            }
-            LogicalPlan::Traverse { input, .. }
-            | LogicalPlan::TraverseMainByType { input, .. }
-            | LogicalPlan::Create { input, .. }
-            | LogicalPlan::CreateBatch { input, .. }
-            | LogicalPlan::Merge { input, .. }
-            | LogicalPlan::Set { input, .. }
-            | LogicalPlan::Remove { input, .. }
-            | LogicalPlan::Delete { input, .. }
-            | LogicalPlan::Foreach { input, .. }
-            | LogicalPlan::Limit { input, .. }
-            | LogicalPlan::Distinct { input }
-            | LogicalPlan::SubqueryCall { input, .. }
-            | LogicalPlan::ShortestPath { input, .. }
-            | LogicalPlan::AllShortestPaths { input, .. }
-            | LogicalPlan::QuantifiedPattern { input, .. }
-            | LogicalPlan::BindZeroLengthPath { input, .. }
-            | LogicalPlan::BindPath { input, .. }
-            | LogicalPlan::Unwind { input, .. } => Self::contains_pattern_comprehension(input),
-            LogicalPlan::Apply {
-                input, subquery, ..
-            } => {
-                Self::contains_pattern_comprehension(input)
-                    || Self::contains_pattern_comprehension(subquery)
-            }
-            LogicalPlan::RecursiveCTE {
-                initial, recursive, ..
-            } => {
-                Self::contains_pattern_comprehension(initial)
-                    || Self::contains_pattern_comprehension(recursive)
-            }
-            LogicalPlan::Explain { plan } => Self::contains_pattern_comprehension(plan),
+            LogicalPlan::Window { window_exprs, .. } => window_exprs
+                .iter()
+                .any(Self::expr_contains_pattern_comprehension),
             _ => false,
+        };
+        if has_expr {
+            return true;
         }
+        // Recurse into child plans
+        Self::plan_children(plan)
+            .iter()
+            .any(|child| Self::contains_pattern_comprehension(child))
     }
 
     /// Detect traversals with step variables; DataFusion currently handles these
@@ -1203,45 +1281,9 @@ impl Executor {
                 input,
                 ..
             } => step_variable.is_some() || Self::contains_step_variable_traversal(input),
-            LogicalPlan::Union { left, right, .. } | LogicalPlan::CrossJoin { left, right } => {
-                Self::contains_step_variable_traversal(left)
-                    || Self::contains_step_variable_traversal(right)
-            }
-            LogicalPlan::Filter { input, .. }
-            | LogicalPlan::Project { input, .. }
-            | LogicalPlan::Sort { input, .. }
-            | LogicalPlan::Limit { input, .. }
-            | LogicalPlan::Distinct { input }
-            | LogicalPlan::Aggregate { input, .. }
-            | LogicalPlan::Window { input, .. }
-            | LogicalPlan::SubqueryCall { input, .. }
-            | LogicalPlan::ShortestPath { input, .. }
-            | LogicalPlan::AllShortestPaths { input, .. }
-            | LogicalPlan::QuantifiedPattern { input, .. }
-            | LogicalPlan::BindZeroLengthPath { input, .. }
-            | LogicalPlan::BindPath { input, .. }
-            | LogicalPlan::Unwind { input, .. }
-            | LogicalPlan::Create { input, .. }
-            | LogicalPlan::CreateBatch { input, .. }
-            | LogicalPlan::Merge { input, .. }
-            | LogicalPlan::Set { input, .. }
-            | LogicalPlan::Remove { input, .. }
-            | LogicalPlan::Delete { input, .. }
-            | LogicalPlan::Foreach { input, .. } => Self::contains_step_variable_traversal(input),
-            LogicalPlan::Apply {
-                input, subquery, ..
-            } => {
-                Self::contains_step_variable_traversal(input)
-                    || Self::contains_step_variable_traversal(subquery)
-            }
-            LogicalPlan::RecursiveCTE {
-                initial, recursive, ..
-            } => {
-                Self::contains_step_variable_traversal(initial)
-                    || Self::contains_step_variable_traversal(recursive)
-            }
-            LogicalPlan::Explain { plan } => Self::contains_step_variable_traversal(plan),
-            _ => false,
+            _ => Self::plan_children(plan)
+                .iter()
+                .any(|child| Self::contains_step_variable_traversal(child)),
         }
     }
 
@@ -1259,7 +1301,9 @@ impl Executor {
             Expr::FunctionCall { args, .. } | Expr::List(args) => {
                 args.iter().any(Self::expr_contains_array_index)
             }
-            Expr::Map(entries) => entries.iter().any(|(_, v)| Self::expr_contains_array_index(v)),
+            Expr::Map(entries) => entries
+                .iter()
+                .any(|(_, v)| Self::expr_contains_array_index(v)),
             Expr::Case {
                 expr,
                 when_then,
@@ -1279,7 +1323,9 @@ impl Executor {
             }
             Expr::Quantifier {
                 list, predicate, ..
-            } => Self::expr_contains_array_index(list) || Self::expr_contains_array_index(predicate),
+            } => {
+                Self::expr_contains_array_index(list) || Self::expr_contains_array_index(predicate)
+            }
             Expr::Reduce {
                 init, list, expr, ..
             } => {
@@ -1322,7 +1368,8 @@ impl Executor {
             Expr::ValidAt {
                 entity, timestamp, ..
             } => {
-                Self::expr_contains_array_index(entity) || Self::expr_contains_array_index(timestamp)
+                Self::expr_contains_array_index(entity)
+                    || Self::expr_contains_array_index(timestamp)
             }
             Expr::LabelCheck { expr, .. } => Self::expr_contains_array_index(expr),
             _ => false,
@@ -1331,7 +1378,9 @@ impl Executor {
 
     fn plan_contains_array_index(plan: &LogicalPlan) -> bool {
         match plan {
-            LogicalPlan::Filter { input, predicate, .. } => {
+            LogicalPlan::Filter {
+                input, predicate, ..
+            } => {
                 Self::expr_contains_array_index(predicate) || Self::plan_contains_array_index(input)
             }
             LogicalPlan::Project { input, projections } => {
@@ -5493,7 +5542,9 @@ impl Executor {
 
     fn canonical_temporal_key(t: &uni_common::TemporalValue) -> String {
         match t {
-            uni_common::TemporalValue::Date { days_since_epoch } => format!("date:{days_since_epoch}"),
+            uni_common::TemporalValue::Date { days_since_epoch } => {
+                format!("date:{days_since_epoch}")
+            }
             uni_common::TemporalValue::LocalTime {
                 nanos_since_midnight,
             } => format!("localtime:{nanos_since_midnight}"),

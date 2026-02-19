@@ -42,6 +42,11 @@ pub mod common;
 pub mod comprehension;
 pub mod expr_compiler;
 pub mod ext_id_lookup;
+pub mod mutation_common;
+pub mod mutation_create;
+pub mod mutation_delete;
+pub mod mutation_remove;
+pub mod mutation_set;
 pub mod optional_filter;
 pub mod pattern_comprehension;
 pub mod procedure_call;
@@ -67,6 +72,11 @@ use uni_store::storage::manager::StorageManager;
 
 pub use apply::GraphApplyExec;
 pub use ext_id_lookup::GraphExtIdLookupExec;
+pub use mutation_common::{MutationContext, MutationExec};
+pub use mutation_create::MutationCreateExec;
+pub use mutation_delete::MutationDeleteExec;
+pub use mutation_remove::MutationRemoveExec;
+pub use mutation_set::MutationSetExec;
 pub use optional_filter::OptionalFilterExec;
 pub use procedure_call::GraphProcedureCallExec;
 pub use scan::GraphScanExec;
@@ -287,12 +297,15 @@ impl GraphExecutionContext {
             .clone()
             .unwrap_or_else(|| Arc::new(RwLock::new(L0Buffer::new(0, None))));
 
-        QueryContext {
+        let mut ctx = QueryContext::new_with_pending(
             l0,
-            transaction_l0: self.l0_context.transaction_l0.clone(),
-            pending_flush_l0s: self.l0_context.pending_flush_l0s.clone(),
-            deadline: self.deadline,
+            self.l0_context.transaction_l0.clone(),
+            self.l0_context.pending_flush_l0s.clone(),
+        );
+        if let Some(deadline) = self.deadline {
+            ctx.set_deadline(deadline);
         }
+        ctx
     }
 
     /// Ensure adjacency CSRs are warmed for the given edge types and direction.

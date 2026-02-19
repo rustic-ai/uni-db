@@ -98,19 +98,35 @@ async fn side_effects_should_be(world: &mut UniWorld, step: &cucumber::gherkin::
                 );
             }
             "+properties" => {
-                let actual = effects.properties_after as i64 - effects.properties_before as i64;
+                // Gross additions: properties whose value was set (new or changed).
+                let actual = effects.properties_added as i64;
                 assert_eq!(
-                    actual, expected,
-                    "Expected +properties={}, but got {} (before={}, after={})",
-                    expected, actual, effects.properties_before, effects.properties_after
+                    actual,
+                    expected,
+                    "Expected +properties={}, but got {} (before={}, after={}, \
+                     added={}, removed={})",
+                    expected,
+                    actual,
+                    effects.properties_before,
+                    effects.properties_after,
+                    effects.properties_added,
+                    effects.properties_removed,
                 );
             }
             "-properties" => {
-                let actual = effects.properties_before as i64 - effects.properties_after as i64;
+                // Gross removals: properties whose value was deleted or overwritten.
+                let actual = effects.properties_removed as i64;
                 assert_eq!(
-                    actual, expected,
-                    "Expected -properties={}, but got {} (before={}, after={})",
-                    expected, actual, effects.properties_before, effects.properties_after
+                    actual,
+                    expected,
+                    "Expected -properties={}, but got {} (before={}, after={}, \
+                     added={}, removed={})",
+                    expected,
+                    actual,
+                    effects.properties_before,
+                    effects.properties_after,
+                    effects.properties_added,
+                    effects.properties_removed,
                 );
             }
             _ => {

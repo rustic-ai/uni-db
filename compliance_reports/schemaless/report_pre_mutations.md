@@ -1,17 +1,19 @@
 # TCK Compliance Report
 
-**Generated:** 2026-02-18 21:25:23
-**Results:** `results_20260218_212523.json`
-**Compared to:** `results_20260218_201342.json`
+**Generated:** 2026-02-18 11:20:11
+**Results:** `results_20260218_112011.json`
+**Compared to:** `results_20260218_100905.json`
 
 ## Summary
 
 | Metric | Current | Previous | Delta |
 |--------|---------|----------|-------|
 | Scenarios | 3897 | 3897 |  |
-| Passed | 3750 | 3750 |  |
-| Failed | 146 | 146 |  |
-| Pass Rate | 96.2% | 96.2% | ➡️ +0.0pp |
+| Passed | 3647 | 3636 | +11 |
+| Failed | 249 | 260 | -11 |
+| Pass Rate | 93.6% | 93.3% | 📈 +0.3pp |
+
+**🟢 Fixed:** 11 scenarios now passing
 
 ## Feature Breakdown
 
@@ -42,17 +44,17 @@
 | ✅ Conditional2 | 12 | 12 | 0 | 100% |  |
 | ✅ CountingSubgraphMatches1 | 11 | 11 | 0 | 100% |  |
 | ✅ Create1 | 20 | 19 | 1 | 95% |  |
-| ✅ Create2 | 24 | 24 | 0 | 100% |  |
-| ✅ Create3 | 13 | 11 | 2 | 85% |  |
-| ✅ Create4 | 2 | 2 | 0 | 100% |  |
+| ⚠️ Create2 | 24 | 19 | 5 | 79% |  |
+| ⚠️ Create3 | 13 | 10 | 3 | 77% |  |
+| ⚠️ Create4 | 2 | 1 | 1 | 50% |  |
 | ✅ Create5 | 5 | 4 | 1 | 80% |  |
-| ✅ Create6 | 14 | 14 | 0 | 100% |  |
+| ❌ Create6 | 14 | 6 | 8 | 43% |  |
 | ⚠️ Delete1 | 8 | 6 | 2 | 75% |  |
-| ✅ Delete2 | 5 | 4 | 1 | 80% |  |
+| ⚠️ Delete2 | 5 | 3 | 2 | 60% |  |
 | ⚠️ Delete3 | 2 | 1 | 1 | 50% |  |
 | ✅ Delete4 | 3 | 3 | 0 | 100% |  |
 | ❌ Delete5 | 9 | 2 | 7 | 22% |  |
-| ✅ Delete6 | 14 | 14 | 0 | 100% |  |
+| ❌ Delete6 | 14 | 6 | 8 | 43% |  |
 | ⚠️ ExistentialSubquery1 | 4 | 3 | 1 | 75% |  |
 | ⚠️ ExistentialSubquery2 | 3 | 2 | 1 | 67% |  |
 | ❌ ExistentialSubquery3 | 3 | 1 | 2 | 33% |  |
@@ -65,7 +67,7 @@
 | ✅ Graph9 | 7 | 6 | 1 | 86% |  |
 | ✅ List1 | 23 | 23 | 0 | 100% |  |
 | ✅ List11 | 67 | 66 | 1 | 99% |  |
-| ✅ List12 | 7 | 6 | 1 | 86% |  |
+| ⚠️ List12 | 7 | 4 | 3 | 57% |  |
 | ✅ List2 | 15 | 15 | 0 | 100% |  |
 | ✅ List3 | 7 | 7 | 0 | 100% |  |
 | ✅ List4 | 2 | 2 | 0 | 100% |  |
@@ -92,7 +94,7 @@
 | ✅ Match7 | 31 | 31 | 0 | 100% |  |
 | ⚠️ Match8 | 3 | 2 | 1 | 67% |  |
 | ✅ Match9 | 9 | 8 | 1 | 89% |  |
-| ✅ MatchWhere1 | 15 | 15 | 0 | 100% |  |
+| ✅ MatchWhere1 | 15 | 14 | 1 | 93% |  |
 | ⚠️ MatchWhere2 | 2 | 1 | 1 | 50% |  |
 | ✅ MatchWhere3 | 3 | 3 | 0 | 100% |  |
 | ⚠️ MatchWhere4 | 2 | 1 | 1 | 50% |  |
@@ -103,15 +105,15 @@
 | ✅ Mathematical2 | 1 | 1 | 0 | 100% |  |
 | ✅ Mathematical3 | 1 | 1 | 0 | 100% |  |
 | ⚠️ Mathematical8 | 2 | 1 | 1 | 50% |  |
-| ❌ Merge1 | 17 | 8 | 9 | 47% |  |
-| ⚠️ Merge2 | 6 | 3 | 3 | 50% |  |
-| ❌ Merge3 | 5 | 2 | 3 | 40% |  |
+| ❌ Merge1 | 17 | 2 | 15 | 12% |  |
+| ❌ Merge2 | 6 | 1 | 5 | 17% |  |
+| ❌ Merge3 | 5 | 1 | 4 | 20% |  |
 | ❌ Merge4 | 2 | 0 | 2 | 0% |  |
-| ⚠️ Merge5 | 29 | 19 | 10 | 66% |  |
-| ✅ Merge6 | 6 | 6 | 0 | 100% |  |
-| ✅ Merge7 | 5 | 5 | 0 | 100% |  |
-| ✅ Merge8 | 1 | 1 | 0 | 100% |  |
-| ⚠️ Merge9 | 4 | 2 | 2 | 50% |  |
+| ❌ Merge5 | 29 | 6 | 23 | 21% |  |
+| ❌ Merge6 | 6 | 0 | 6 | 0% |  |
+| ❌ Merge7 | 5 | 0 | 5 | 0% |  |
+| ❌ Merge8 | 1 | 0 | 1 | 0% |  |
+| ❌ Merge9 | 4 | 0 | 4 | 0% |  |
 | ✅ Null1 | 17 | 17 | 0 | 100% |  |
 | ✅ Null2 | 17 | 17 | 0 | 100% |  |
 | ✅ Null3 | 10 | 10 | 0 | 100% |  |
@@ -119,7 +121,7 @@
 | ⚠️ Path2 | 3 | 2 | 1 | 67% |  |
 | ❌ Path3 | 3 | 1 | 2 | 33% |  |
 | ✅ Pattern1 | 39 | 39 | 0 | 100% |  |
-| ✅ Pattern2 | 11 | 11 | 0 | 100% |  |
+| ✅ Pattern2 | 11 | 11 | 0 | 100% | +9pp |
 | ✅ Precedence1 | 72 | 72 | 0 | 100% |  |
 | ✅ Precedence2 | 26 | 26 | 0 | 100% |  |
 | ✅ Precedence3 | 11 | 11 | 0 | 100% |  |
@@ -136,9 +138,9 @@
 | ✅ Quantifier7 | 36 | 36 | 0 | 100% |  |
 | ✅ Quantifier8 | 31 | 31 | 0 | 100% |  |
 | ✅ Quantifier9 | 17 | 17 | 0 | 100% |  |
-| ⚠️ Remove1 | 7 | 4 | 3 | 57% |  |
+| ❌ Remove1 | 7 | 3 | 4 | 43% |  |
 | ✅ Remove2 | 5 | 5 | 0 | 100% |  |
-| ✅ Remove3 | 21 | 21 | 0 | 100% |  |
+| ⚠️ Remove3 | 21 | 12 | 9 | 57% |  |
 | ✅ Return1 | 2 | 2 | 0 | 100% |  |
 | ⚠️ Return2 | 18 | 13 | 5 | 72% |  |
 | ✅ Return3 | 3 | 3 | 0 | 100% |  |
@@ -156,12 +158,12 @@
 | ✅ ReturnSkipLimit1 | 11 | 10 | 1 | 91% |  |
 | ✅ ReturnSkipLimit2 | 17 | 17 | 0 | 100% |  |
 | ⚠️ ReturnSkipLimit3 | 3 | 2 | 1 | 67% |  |
-| ✅ Set1 | 11 | 10 | 1 | 91% |  |
-| ✅ Set2 | 3 | 3 | 0 | 100% |  |
+| ⚠️ Set1 | 11 | 7 | 4 | 64% |  |
+| ⚠️ Set2 | 3 | 2 | 1 | 67% |  |
 | ❌ Set3 | 8 | 1 | 7 | 12% |  |
-| ✅ Set4 | 5 | 5 | 0 | 100% |  |
-| ✅ Set5 | 5 | 5 | 0 | 100% |  |
-| ⚠️ Set6 | 21 | 14 | 7 | 67% |  |
+| ❌ Set4 | 5 | 0 | 5 | 0% |  |
+| ❌ Set5 | 5 | 0 | 5 | 0% |  |
+| ❌ Set6 | 21 | 0 | 21 | 0% |  |
 | ❌ String1 | 1 | 0 | 1 | 0% |  |
 | ✅ String10 | 9 | 9 | 0 | 100% |  |
 | ✅ String11 | 2 | 2 | 0 | 100% |  |
@@ -177,7 +179,7 @@
 | ✅ Temporal5 | 7 | 6 | 1 | 86% |  |
 | ✅ Temporal6 | 17 | 16 | 1 | 94% |  |
 | ✅ Temporal7 | 18 | 16 | 2 | 89% |  |
-| ✅ Temporal8 | 27 | 27 | 0 | 100% |  |
+| ✅ Temporal8 | 27 | 27 | 0 | 100% | +33pp |
 | ✅ Temporal9 | 322 | 322 | 0 | 100% |  |
 | ✅ TriadicSelection1 | 19 | 19 | 0 | 100% |  |
 | ✅ TypeConversion1 | 10 | 10 | 0 | 100% |  |
@@ -187,11 +189,11 @@
 | ✅ Union1 | 5 | 4 | 1 | 80% |  |
 | ✅ Union2 | 5 | 4 | 1 | 80% |  |
 | ✅ Union3 | 2 | 2 | 0 | 100% |  |
-| ✅ Unwind1 | 14 | 14 | 0 | 100% |  |
+| ✅ Unwind1 | 14 | 12 | 2 | 86% |  |
 | ✅ With1 | 6 | 6 | 0 | 100% |  |
 | ✅ With2 | 2 | 2 | 0 | 100% |  |
 | ✅ With3 | 1 | 1 | 0 | 100% |  |
-| ✅ With4 | 7 | 7 | 0 | 100% |  |
+| ✅ With4 | 7 | 7 | 0 | 100% | +14pp |
 | ✅ With5 | 2 | 2 | 0 | 100% |  |
 | ✅ With6 | 9 | 9 | 0 | 100% |  |
 | ✅ With7 | 2 | 2 | 0 | 100% |  |
@@ -209,6 +211,22 @@
 | ✅ WithWhere5 | 4 | 4 | 0 | 100% |  |
 | ✅ WithWhere6 | 1 | 1 | 0 | 100% |  |
 | ✅ WithWhere7 | 3 | 3 | 0 | 100% |  |
+
+## 🟢 Newly Passing
+
+Scenarios that were failing but are now passing:
+
+- **Pattern2** — [11] Use a pattern comprehension and ORDER BY (line 226)
+- **Temporal8** — [6] Should add or subtract durations (line 167)
+- **Temporal8** — [6] Should add or subtract durations (line 168)
+- **Temporal8** — [6] Should add or subtract durations (line 169)
+- **Temporal8** — [6] Should add or subtract durations (line 170)
+- **Temporal8** — [6] Should add or subtract durations (line 171)
+- **Temporal8** — [6] Should add or subtract durations (line 172)
+- **Temporal8** — [6] Should add or subtract durations (line 173)
+- **Temporal8** — [6] Should add or subtract durations (line 174)
+- **Temporal8** — [6] Should add or subtract durations (line 175)
+- **With4** — [5] Fail when not aliasing expressions in WITH (line 102)
 
 ## Failed Scenarios
 
@@ -311,6 +329,69 @@
 
   ```
 
+### Create2
+
+- **[13] Create a single relationship with a property** (line 229)
+  ```
+  Step failed:
+      Defined: tck/features/clauses/create/Create2.feature:236:5
+      Matched: crates/uni-tck/src/steps/and.rs:27:1
+      Step panicked. Captured output: assertion `left == right` failed: Expected +properties=1, but got 0 (before=0, after=0)
+        left: 0
+       right: 1
+[Summary]
+1 
+  ... (truncated)
+  ```
+- **[14] Create a single relationship with a property and return it** (line 241)
+  ```
+  Step failed:
+      Defined: tck/features/clauses/create/Create2.feature:251:5
+      Matched: crates/uni-tck/src/steps/and.rs:27:1
+      Step panicked. Captured output: assertion `left == right` failed: Expected +properties=1, but got 0 (before=0, after=0)
+        left: 0
+       right: 1
+[Summary]
+1 
+  ... (truncated)
+  ```
+- **[15] Create a single relationship with two properties** (line 256)
+  ```
+  Step failed:
+      Defined: tck/features/clauses/create/Create2.feature:263:5
+      Matched: crates/uni-tck/src/steps/and.rs:27:1
+      Step panicked. Captured output: assertion `left == right` failed: Expected +properties=2, but got 0 (before=0, after=0)
+        left: 0
+       right: 2
+[Summary]
+1 
+  ... (truncated)
+  ```
+- **[16] Create a single relationship with two properties and return them** (line 268)
+  ```
+  Step failed:
+      Defined: tck/features/clauses/create/Create2.feature:278:5
+      Matched: crates/uni-tck/src/steps/and.rs:27:1
+      Step panicked. Captured output: assertion `left == right` failed: Expected +properties=2, but got 0 (before=0, after=0)
+        left: 0
+       right: 2
+[Summary]
+1 
+  ... (truncated)
+  ```
+- **[17] Create a single relationship with null properties should not return those properties** (line 283)
+  ```
+  Step failed:
+      Defined: tck/features/clauses/create/Create2.feature:293:5
+      Matched: crates/uni-tck/src/steps/and.rs:27:1
+      Step panicked. Captured output: assertion `left == right` failed: Expected +properties=1, but got 0 (before=0, after=0)
+        left: 0
+       right: 1
+[Summary]
+1 
+  ... (truncated)
+  ```
+
 ### Create3
 
 - **[11] WITH-MERGE-CREATE: A bound node should be recognized after projection with WITH + MERGE node** (line 212)
@@ -337,6 +418,32 @@
 3 steps (2 passed, 1 failed)
 
   ```
+- **[13] Merge followed by multiple creates** (line 244)
+  ```
+  Step failed:
+      Defined: tck/features/clauses/create/Create3.feature:252:5
+      Matched: crates/uni-tck/src/steps/then.rs:9:1
+      Step panicked. Captured output: No result found
+[Summary]
+1 feature
+1 scenario (1 failed)
+3 steps (2 passed, 1 failed)
+
+  ```
+
+### Create4
+
+- **[1] Generate the movie graph** (line 33)
+  ```
+  Step failed:
+      Defined: tck/features/clauses/create/Create4.feature:573:5
+      Matched: crates/uni-tck/src/steps/and.rs:27:1
+      Step panicked. Captured output: assertion `left == right` failed: Expected +properties=564, but got 374 (before=0, after=374)
+        left: 374
+       right: 564
+[S
+  ... (truncated)
+  ```
 
 ### Create5
 
@@ -350,6 +457,97 @@
 1 feature
 1 scenario (1 failed)
 6 steps (5 passed, 1 fa
+  ... (truncated)
+  ```
+
+### Create6
+
+- **[5] Filtering after creating nodes affects the result set but not the side effects** (line 102)
+  ```
+  Step failed:
+      Defined: tck/features/clauses/create/Create6.feature:112:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Write operations not yet supported in DataFusion engine", query: Some("\n
+  ... (truncated)
+  ```
+- **[8] Limiting to zero results after creating relationships affects the result set but not the side effects** (line 154)
+  ```
+  Step failed:
+      Defined: tck/features/clauses/create/Create6.feature:164:5
+      Matched: crates/uni-tck/src/steps/and.rs:27:1
+      Step panicked. Captured output: assertion `left == right` failed: Expected +properties=1, but got 0 (before=0, after=0)
+        left: 0
+       right: 1
+[Summary]
+1 
+  ... (truncated)
+  ```
+- **[9] Skipping all results after creating relationships affects the result set but not the side effects** (line 169)
+  ```
+  Step failed:
+      Defined: tck/features/clauses/create/Create6.feature:179:5
+      Matched: crates/uni-tck/src/steps/and.rs:27:1
+      Step panicked. Captured output: assertion `left == right` failed: Expected +properties=1, but got 0 (before=0, after=0)
+        left: 0
+       right: 1
+[Summary]
+1 
+  ... (truncated)
+  ```
+- **[10] Skipping and limiting to a few results after creating relationships does not affect the result set nor the side effects** (line 184)
+  ```
+  Step failed:
+      Defined: tck/features/clauses/create/Create6.feature:197:5
+      Matched: crates/uni-tck/src/steps/and.rs:27:1
+      Step panicked. Captured output: assertion `left == right` failed: Expected +properties=5, but got 0 (before=0, after=0)
+        left: 0
+       right: 5
+[Summary]
+1 
+  ... (truncated)
+  ```
+- **[11] Skipping zero result and limiting to all results after creating relationships does not affect the result set nor the side effects** (line 202)
+  ```
+  Step failed:
+      Defined: tck/features/clauses/create/Create6.feature:218:5
+      Matched: crates/uni-tck/src/steps/and.rs:27:1
+      Step panicked. Captured output: assertion `left == right` failed: Expected +properties=5, but got 0 (before=0, after=0)
+        left: 0
+       right: 5
+[Summary]
+1 
+  ... (truncated)
+  ```
+- **[12] Filtering after creating relationships affects the result set but not the side effects** (line 223)
+  ```
+  Step failed:
+      Defined: tck/features/clauses/create/Create6.feature:233:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Write operations not yet supported in DataFusion engine", query: Some("\n
+  ... (truncated)
+  ```
+- **[13] Aggregating in `RETURN` after creating relationships affects the result set but not the side effects** (line 242)
+  ```
+  Step failed:
+      Defined: tck/features/clauses/create/Create6.feature:253:5
+      Matched: crates/uni-tck/src/steps/and.rs:27:1
+      Step panicked. Captured output: assertion `left == right` failed: Expected +properties=5, but got 0 (before=0, after=0)
+        left: 0
+       right: 5
+[Summary]
+1 
+  ... (truncated)
+  ```
+- **[14] Aggregating in `WITH` after creating relationships affects the result set but not the side effects** (line 258)
+  ```
+  Step failed:
+      Defined: tck/features/clauses/create/Create6.feature:270:5
+      Matched: crates/uni-tck/src/steps/and.rs:27:1
+      Step panicked. Captured output: assertion `left == right` failed: Expected +properties=5, but got 0 (before=0, after=0)
+        left: 0
+       right: 5
+[Summary]
+1 
   ... (truncated)
   ```
 
@@ -382,6 +580,18 @@
 
 ### Delete2
 
+- **[3] Delete relationship with bidirectional matching** (line 65)
+  ```
+  Step failed:
+      Defined: tck/features/clauses/delete/Delete2.feature:78:5
+      Matched: crates/uni-tck/src/steps/and.rs:27:1
+      Step panicked. Captured output: assertion `left == right` failed: Expected -properties=1, but got 0 (before=0, after=0)
+        left: 0
+       right: 1
+[Summary]
+1 f
+  ... (truncated)
+  ```
 - **[5] Failing when deleting a relationship type** (line 96)
   ```
   Step failed:
@@ -497,6 +707,97 @@
 
   ```
 
+### Delete6
+
+- **[5] Filtering after deleting nodes affects the result set but not the side effects** (line 128)
+  ```
+  Step failed:
+      Defined: tck/features/clauses/delete/Delete6.feature:147:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Write operations not yet supported in DataFusion engine", query: Some("\n
+  ... (truncated)
+  ```
+- **[8] Limiting to zero results after deleting relationships affects the result set but not the side effects** (line 207)
+  ```
+  Step failed:
+      Defined: tck/features/clauses/delete/Delete6.feature:222:5
+      Matched: crates/uni-tck/src/steps/and.rs:27:1
+      Step panicked. Captured output: assertion `left == right` failed: Expected -properties=1, but got 0 (before=0, after=0)
+        left: 0
+       right: 1
+[Summary]
+1 
+  ... (truncated)
+  ```
+- **[9] Skipping all results after deleting relationships affects the result set but not the side effects** (line 226)
+  ```
+  Step failed:
+      Defined: tck/features/clauses/delete/Delete6.feature:241:5
+      Matched: crates/uni-tck/src/steps/and.rs:27:1
+      Step panicked. Captured output: assertion `left == right` failed: Expected -properties=1, but got 0 (before=0, after=0)
+        left: 0
+       right: 1
+[Summary]
+1 
+  ... (truncated)
+  ```
+- **[10] Skipping and limiting to a few results after deleting relationships affects the result set but not the side effects** (line 245)
+  ```
+  Step failed:
+      Defined: tck/features/clauses/delete/Delete6.feature:266:5
+      Matched: crates/uni-tck/src/steps/and.rs:27:1
+      Step panicked. Captured output: assertion `left == right` failed: Expected -properties=5, but got 0 (before=0, after=0)
+        left: 0
+       right: 5
+[Summary]
+1 
+  ... (truncated)
+  ```
+- **[11] Skipping zero result and limiting to all results after deleting relationships does not affect the result set nor the side effects** (line 270)
+  ```
+  Step failed:
+      Defined: tck/features/clauses/delete/Delete6.feature:294:5
+      Matched: crates/uni-tck/src/steps/and.rs:27:1
+      Step panicked. Captured output: assertion `left == right` failed: Expected -properties=5, but got 0 (before=0, after=0)
+        left: 0
+       right: 5
+[Summary]
+1 
+  ... (truncated)
+  ```
+- **[12] Filtering after deleting relationships affects the result set but not the side effects** (line 298)
+  ```
+  Step failed:
+      Defined: tck/features/clauses/delete/Delete6.feature:317:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Write operations not yet supported in DataFusion engine", query: Some("\n
+  ... (truncated)
+  ```
+- **[13] Aggregating in `RETURN` after deleting relationships affects the result set but not the side effects** (line 325)
+  ```
+  Step failed:
+      Defined: tck/features/clauses/delete/Delete6.feature:345:5
+      Matched: crates/uni-tck/src/steps/and.rs:27:1
+      Step panicked. Captured output: assertion `left == right` failed: Expected -properties=5, but got 0 (before=0, after=0)
+        left: 0
+       right: 5
+[Summary]
+1 
+  ... (truncated)
+  ```
+- **[14] Aggregating in `WITH` after deleting relationships affects the result set but not the side effects** (line 349)
+  ```
+  Step failed:
+      Defined: tck/features/clauses/delete/Delete6.feature:370:5
+      Matched: crates/uni-tck/src/steps/and.rs:27:1
+      Step panicked. Captured output: assertion `left == right` failed: Expected -properties=5, but got 0 (before=0, after=0)
+        left: 0
+       right: 5
+[Summary]
+1 
+  ... (truncated)
+  ```
+
 ### ExistentialSubquery1
 
 - **[2] Simple subquery with WHERE clause** (line 53)
@@ -574,11 +875,11 @@
   Step failed:
       Defined: tck/features/expressions/graph/Graph6.feature:90:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): Expected column '(list[1]).missing' not found in result
+      Step panicked. Captured output: Result mismatch (any order): Expected column '(list[1]).missingToo' not found in result
 [Summary]
 1 feature
 1 scenario (1 failed)
-4 s
+
   ... (truncated)
   ```
 - **[6] Statically access a property of a optional non-null relationship** (line 111)
@@ -598,10 +899,11 @@
   Step failed:
       Defined: tck/features/expressions/graph/Graph6.feature:151:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): Expected column '(list[1]).missingToo' not found in result
+      Step panicked. Captured output: Result mismatch (any order): Expected column '(list[1]).existing' not found in result
 [Summary]
 1 feature
 1 scenario (1 failed)
+4
   ... (truncated)
   ```
 
@@ -612,7 +914,7 @@
   Step failed:
       Defined: tck/features/expressions/graph/Graph9.feature:73:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("properties(n)", Some(Null)), ("properties(null)", 
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("properties(null)", Some(Null)), ("properties(r)", 
   ... (truncated)
   ```
 
@@ -629,6 +931,30 @@
 
 ### List12
 
+- **[1] Collect and extract using a list comprehension** (line 33)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/list/List12.feature:51:5
+      Matched: crates/uni-tck/src/steps/and.rs:27:1
+      Step panicked. Captured output: assertion `left == right` failed: Expected +properties=1, but got 0 (before=1, after=1)
+        left: 0
+       right: 1
+[Summary]
+1 
+  ... (truncated)
+  ```
+- **[2] Collect and filter using a list comprehension** (line 55)
+  ```
+  Step failed:
+      Defined: tck/features/expressions/list/List12.feature:73:5
+      Matched: crates/uni-tck/src/steps/and.rs:27:1
+      Step panicked. Captured output: assertion `left == right` failed: Expected +properties=1, but got 0 (before=1, after=1)
+        left: 0
+       right: 1
+[Summary]
+1 
+  ... (truncated)
+  ```
 - **[6] Using a list comprehension in a WHERE** (line 127)
   ```
   Step failed:
@@ -679,7 +1005,7 @@
   Step failed:
       Defined: tck/features/expressions/literals/Literals7.feature:295:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("literal", Some(List([Map({"id": String("000
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("literal", Some(List([Map({"name": String("C
   ... (truncated)
   ```
 
@@ -701,11 +1027,11 @@
   Step failed:
       Defined: tck/features/expressions/map/Map1.feature:65:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): Expected column '(list[1]).notMissing' not found in result
+      Step panicked. Captured output: Result mismatch (any order): Expected column '(list[1]).missing' not found in result
 [Summary]
 1 feature
 1 scenario (1 failed)
-3 st
+3 steps
   ... (truncated)
   ```
 
@@ -817,7 +1143,7 @@
   Step failed:
       Defined: tck/features/clauses/match/Match8.feature:70:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "MERGE node must have a label", query: Some("\nMATCH (a)\nMERGE (b)\nWITH *\n
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Write operations not yet supported in DataFusion engine", query: Some("\nMAT
   ... (truncated)
   ```
 
@@ -833,6 +1159,17 @@
 1 feature
 1 scenario (1 failed)
 4 steps (3 passed, 1 fai
+  ... (truncated)
+  ```
+
+### MatchWhere1
+
+- **[6] Filter node with a parameter in a property predicate on multi variables with one binding** (line 120)
+  ```
+  Step failed:
+      Defined: tck/features/clauses/match-where/MatchWhere1.feature:134:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("r", Some(Edge(Edge { eid: Eid(0), edge_typ
   ... (truncated)
   ```
 
@@ -886,6 +1223,22 @@
       Step panicked. Captured output: Query returned error instead of result: Query { message: "MERGE node must have a label", query: Some("\nMERGE (a)\nRETURN count(*) AS 
   ... (truncated)
   ```
+- **[2] Merge node with label** (line 46)
+  ```
+  Step failed:
+      Defined: tck/features/clauses/merge/Merge1.feature:53:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Label TheLabel not found", query: Some("\nMERGE (a:TheLabel)\nRETURN labels(
+  ... (truncated)
+  ```
+- **[3] Merge node with label when it exists** (line 60)
+  ```
+  Step failed:
+      Defined: tck/features/clauses/merge/Merge1.feature:71:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Label TheLabel not found", query: Some("\nMERGE (a:TheLabel)\nRETURN a.id\n"
+  ... (truncated)
+  ```
 - **[4] Merge node should create when it doesn't match, properties** (line 76)
   ```
   Step failed:
@@ -894,16 +1247,52 @@
       Step panicked. Captured output: Query returned error instead of result: Query { message: "MERGE node must have a label", query: Some("\nMERGE (a {num: 43})\nRETURN a.
   ... (truncated)
   ```
+- **[5] Merge node should create when it doesn't match, properties and label** (line 94)
+  ```
+  Step failed:
+      Defined: tck/features/clauses/merge/Merge1.feature:105:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Label TheLabel not found", query: Some("\nMERGE (a:TheLabel {num: 43})\nRET
+  ... (truncated)
+  ```
+- **[6] Merge node with prop and label** (line 112)
+  ```
+  Step failed:
+      Defined: tck/features/clauses/merge/Merge1.feature:123:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Label TheLabel not found", query: Some("\nMERGE (a:TheLabel {num: 42})\nRET
+  ... (truncated)
+  ```
+- **[7] Merge should work when finding multiple elements** (line 128)
+  ```
+  Step failed:
+      Defined: tck/features/clauses/merge/Merge1.feature:136:5
+      Matched: crates/uni-tck/src/steps/then.rs:9:1
+      Step panicked. Captured output: No result found
+[Summary]
+1 feature
+1 scenario (1 failed)
+3 steps (2 passed, 1 failed)
+
+  ```
+- **[8] Merge should handle argument properly** (line 141)
+  ```
+  Step failed:
+      Defined: tck/features/clauses/merge/Merge1.feature:153:5
+      Matched: crates/uni-tck/src/steps/then.rs:9:1
+      Step panicked. Captured output: No result found
+[Summary]
+1 feature
+1 scenario (1 failed)
+4 steps (3 passed, 1 failed)
+
+  ```
 - **[9] Merge should support updates while merging** (line 159)
   ```
   Step failed:
-      Defined: tck/features/clauses/merge/Merge1.feature:187:5
-      Matched: crates/uni-tck/src/steps/and.rs:27:1
-      Step panicked. Captured output: assertion `left == right` failed: Expected +nodes=15, but got 27 (before=9, after=36)
-        left: 27
-       right: 15
-[Summary]
-1 fe
+      Defined: tck/features/clauses/merge/Merge1.feature:176:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Label N not found", query: Some("\nMATCH (foo)\nWITH foo.x AS x, foo.y AS y
   ... (truncated)
   ```
 - **[10] Merge must properly handle multiple labels** (line 192)
@@ -911,20 +1300,24 @@
   Step failed:
       Defined: tck/features/clauses/merge/Merge1.feature:203:5
       Matched: crates/uni-tck/src/steps/then.rs:48:1
-      Step panicked. Captured output: Result mismatch (ignoring list order): Row 0 column labels mismatch: expected List([String("L"), String("B")]), got List([String("L")
-  ... (truncated)
+      Step panicked. Captured output: No result found
+[Summary]
+1 feature
+1 scenario (1 failed)
+4 steps (3 passed, 1 failed)
+
   ```
 - **[11] Merge should be able to merge using property of bound node** (line 211)
   ```
   Step failed:
-      Defined: tck/features/clauses/merge/Merge1.feature:228:5
-      Matched: crates/uni-tck/src/steps/and.rs:27:1
-      Step panicked. Captured output: assertion `left == right` failed: Expected +nodes=3, but got 6 (before=6, after=12)
-        left: 6
-       right: 3
+      Defined: tck/features/clauses/merge/Merge1.feature:227:5
+      Matched: crates/uni-tck/src/steps/then.rs:9:1
+      Step panicked. Captured output: No result found
 [Summary]
-1 featur
-  ... (truncated)
+1 feature
+1 scenario (1 failed)
+4 steps (3 passed, 1 failed)
+
   ```
 - **[12] Merge should be able to merge using property of freshly created node** (line 233)
   ```
@@ -949,13 +1342,9 @@
 - **[14] Merges should not be able to match on deleted nodes** (line 259)
   ```
   Step failed:
-      Defined: tck/features/clauses/merge/Merge1.feature:277:5
-      Matched: crates/uni-tck/src/steps/and.rs:27:1
-      Step panicked. Captured output: assertion `left == right` failed: Expected +nodes=1, but got -1 (before=2, after=1)
-        left: -1
-       right: 1
-[Summary]
-1 featu
+      Defined: tck/features/clauses/merge/Merge1.feature:273:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Label A not found", query: Some("\nMATCH (a:A)\nDELETE a\nMERGE (a2:A)\nRET
   ... (truncated)
   ```
 - **[15] Fail when merge a node that is already bound** (line 282)
@@ -997,16 +1386,28 @@
 3 steps (2 passed, 1 failed)
 
   ```
+- **[3] Merge node with label add property on create** (line 60)
+  ```
+  Step failed:
+      Defined: tck/features/clauses/merge/Merge2.feature:68:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Label TheLabel not found", query: Some("\nMERGE (a:TheLabel)\n  ON CREATE SE
+  ... (truncated)
+  ```
+- **[4] Merge node with label add property on update when it exists** (line 76)
+  ```
+  Step failed:
+      Defined: tck/features/clauses/merge/Merge2.feature:88:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Label TheLabel not found", query: Some("\nMERGE (a:TheLabel)\n  ON CREATE SE
+  ... (truncated)
+  ```
 - **[5] Merge should be able to use properties of bound node in ON CREATE** (line 93)
   ```
   Step failed:
       Defined: tck/features/clauses/merge/Merge2.feature:107:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): Row count mismatch: expected 2, got 4
-[Summary]
-1 feature
-1 scenario (1 failed)
-4 steps (3 passed, 1 fai
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Label City not found", query: Some("\nMATCH (person:Person)\nMERGE (city:Ci
   ... (truncated)
   ```
 
@@ -1036,16 +1437,20 @@
 4 steps (3 passed, 1 failed)
 
   ```
+- **[3] Merge node and set property on match** (line 66)
+  ```
+  Step failed:
+      Defined: tck/features/clauses/merge/Merge3.feature:78:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Label TheLabel not found", query: Some("\nMERGE (a:TheLabel)\n  ON MATCH SET
+  ... (truncated)
+  ```
 - **[4] Merge should be able to use properties of bound node in ON MATCH** (line 84)
   ```
   Step failed:
       Defined: tck/features/clauses/merge/Merge3.feature:98:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): Row count mismatch: expected 2, got 4
-[Summary]
-1 feature
-1 scenario (1 failed)
-4 steps (3 passed, 1 fail
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Label City not found", query: Some("\nMATCH (person:Person)\nMERGE (city:Cit
   ... (truncated)
   ```
 
@@ -1068,27 +1473,87 @@
   Step failed:
       Defined: tck/features/clauses/merge/Merge4.feature:66:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): Row count mismatch: expected 2, got 4
-[Summary]
-1 feature
-1 scenario (1 failed)
-4 steps (3 passed, 1 fail
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Label City not found", query: Some("\nMATCH (person:Person)\nMERGE (city:Cit
   ... (truncated)
   ```
 
 ### Merge5
 
+- **[1] Creating a relationship** (line 33)
+  ```
+  Step failed:
+      Defined: tck/features/clauses/merge/Merge5.feature:45:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Edge type TYPE not found", query: Some("\nMATCH (a:A), (b:B)\nMERGE (a)-[r:T
+  ... (truncated)
+  ```
+- **[2] Matching a relationship** (line 51)
+  ```
+  Step failed:
+      Defined: tck/features/clauses/merge/Merge5.feature:64:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Edge type TYPE not found", query: Some("\nMATCH (a:A), (b:B)\nMERGE (a)-[r:T
+  ... (truncated)
+  ```
+- **[3] Matching two relationships** (line 69)
+  ```
+  Step failed:
+      Defined: tck/features/clauses/merge/Merge5.feature:83:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Edge type TYPE not found", query: Some("\nMATCH (a:A), (b:B)\nMERGE (a)-[r:T
+  ... (truncated)
+  ```
+- **[4] Using bound variables from other updating clause** (line 88)
+  ```
+  Step failed:
+      Defined: tck/features/clauses/merge/Merge5.feature:96:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Edge type X not found", query: Some("\nCREATE (a), (b)\nMERGE (a)-[:X]->(b)\
+  ... (truncated)
+  ```
+- **[5] Filtering relationships** (line 103)
+  ```
+  Step failed:
+      Defined: tck/features/clauses/merge/Merge5.feature:117:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Edge type TYPE not found", query: Some("\nMATCH (a:A), (b:B)\nMERGE (a)-[r:
+  ... (truncated)
+  ```
+- **[6] Creating relationship when all matches filtered out** (line 122)
+  ```
+  Step failed:
+      Defined: tck/features/clauses/merge/Merge5.feature:135:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Edge type TYPE not found", query: Some("\nMATCH (a:A), (b:B)\nMERGE (a)-[r:
+  ... (truncated)
+  ```
+- **[7] Matching incoming relationship** (line 142)
+  ```
+  Step failed:
+      Defined: tck/features/clauses/merge/Merge5.feature:156:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Edge type TYPE not found", query: Some("\nMATCH (a:A), (b:B)\nMERGE (a)<-[r
+  ... (truncated)
+  ```
+- **[8] Creating relationship with property** (line 161)
+  ```
+  Step failed:
+      Defined: tck/features/clauses/merge/Merge5.feature:173:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Edge type TYPE not found", query: Some("\nMATCH (a:A), (b:B)\nMERGE (a)-[r:
+  ... (truncated)
+  ```
 - **[9] Creating relationship using merged nodes** (line 180)
   ```
   Step failed:
-      Defined: tck/features/clauses/merge/Merge5.feature:193:5
-      Matched: crates/uni-tck/src/steps/and.rs:27:1
-      Step panicked. Captured output: assertion `left == right` failed: Expected +relationships=1, but got 4 (before=0, after=4)
-        left: 4
-       right: 1
+      Defined: tck/features/clauses/merge/Merge5.feature:192:5
+      Matched: crates/uni-tck/src/steps/then.rs:9:1
+      Step panicked. Captured output: No result found
 [Summary]
-1
-  ... (truncated)
+1 feature
+1 scenario (1 failed)
+4 steps (3 passed, 1 failed)
+
   ```
 - **[10] Merge should bind a path** (line 196)
   ```
@@ -1103,19 +1568,55 @@
   Step failed:
       Defined: tck/features/clauses/merge/Merge5.feature:221:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("s", Some(Null)), ("e", Some(Null))]. Expected: [{"s":
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Edge type KNOWS not found", query: Some("\nCREATE (a {id: 2}), (b {id: 1})\
+  ... (truncated)
+  ```
+- **[12] Match outgoing relationship when direction unspecified** (line 229)
+  ```
+  Step failed:
+      Defined: tck/features/clauses/merge/Merge5.feature:242:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Edge type KNOWS not found", query: Some("\nMATCH (a {id: 2}), (b {id: 1})\n
+  ... (truncated)
+  ```
+- **[13] Match both incoming and outgoing relationships when direction unspecified** (line 247)
+  ```
+  Step failed:
+      Defined: tck/features/clauses/merge/Merge5.feature:261:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Edge type KNOWS not found", query: Some("\nMATCH (a {id: 2})--(b {id: 1})\n
   ... (truncated)
   ```
 - **[14] Using list properties via variable** (line 267)
   ```
   Step failed:
-      Defined: tck/features/clauses/merge/Merge5.feature:281:5
-      Matched: crates/uni-tck/src/steps/and.rs:27:1
-      Step panicked. Captured output: assertion `left == right` failed: Expected +relationships=1, but got 2 (before=0, after=2)
-        left: 2
-       right: 1
-[Summary]
-1
+      Defined: tck/features/clauses/merge/Merge5.feature:278:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Edge type FB not found", query: Some("\nCREATE (a:Foo), (b:Bar)\nWITH a, b\
+  ... (truncated)
+  ```
+- **[15] Matching using list property** (line 287)
+  ```
+  Step failed:
+      Defined: tck/features/clauses/merge/Merge5.feature:300:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Edge type T not found", query: Some("\nMATCH (a:A), (b:B)\nMERGE (a)-[r:T {
+  ... (truncated)
+  ```
+- **[16] Aliasing of existing nodes 1** (line 305)
+  ```
+  Step failed:
+      Defined: tck/features/clauses/merge/Merge5.feature:319:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Edge type T not found", query: Some("\nMATCH (n)\nMATCH (m)\nWITH n AS a, m
+  ... (truncated)
+  ```
+- **[17] Aliasing of existing nodes 2** (line 325)
+  ```
+  Step failed:
+      Defined: tck/features/clauses/merge/Merge5.feature:338:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Edge type T not found", query: Some("\nMATCH (n)\nWITH n AS a, n AS b\nMERG
   ... (truncated)
   ```
 - **[18] Double aliasing of existing nodes 1** (line 344)
@@ -1123,7 +1624,7 @@
   Step failed:
       Defined: tck/features/clauses/merge/Merge5.feature:362:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "MERGE node must have a label", query: Some("\nMATCH (n)\nMATCH (m)\nWITH n 
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Edge type T not found", query: Some("\nMATCH (n)\nMATCH (m)\nWITH n AS a, m
   ... (truncated)
   ```
 - **[19] Double aliasing of existing nodes 2** (line 368)
@@ -1137,24 +1638,21 @@
 - **[20] Do not match on deleted entities** (line 391)
   ```
   Step failed:
-      Defined: tck/features/clauses/merge/Merge5.feature:413:5
-      Matched: crates/uni-tck/src/steps/and.rs:27:1
-      Step panicked. Captured output: assertion `left == right` failed: Expected +nodes=2, but got -3 (before=5, after=2)
-        left: -3
-       right: 2
+      Defined: tck/features/clauses/merge/Merge5.feature:412:5
+      Matched: crates/uni-tck/src/steps/then.rs:9:1
+      Step panicked. Captured output: No result found
 [Summary]
-1 featu
-  ... (truncated)
+1 feature
+1 scenario (1 failed)
+4 steps (3 passed, 1 failed)
+
   ```
 - **[21] Do not match on deleted relationships** (line 421)
   ```
   Step failed:
-      Defined: tck/features/clauses/merge/Merge5.feature:440:5
-      Matched: crates/uni-tck/src/steps/and.rs:27:1
-      Step panicked. Captured output: assertion `left == right` failed: Expected +relationships=1, but got -1 (before=2, after=1)
-        left: -1
-       right: 1
-[Summary]
+      Defined: tck/features/clauses/merge/Merge5.feature:436:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Edge type T not found", query: Some("\nMATCH (a)-[t:T]->(b)\nDELETE t\nMERG
   ... (truncated)
   ```
 - **[22] Fail when imposing new predicates on a variable that is already bound** (line 446)
@@ -1162,24 +1660,158 @@
   Step failed:
       Defined: tck/features/clauses/merge/Merge5.feature:453:5
       Matched: crates/uni-tck/src/steps/then.rs:90:1
-      Step panicked. Captured output: No error found
-[Summary]
-1 feature
-1 scenario (1 failed)
-3 steps (2 passed, 1 failed)
-
+      Step panicked. Captured output: Error mismatch: Error detail mismatch: expected message to contain 'VariableAlreadyBound', got 'Query error: Edge type KNOWS not foun
+  ... (truncated)
   ```
 - **[29] Fail on merging relationship with null property** (line 512)
   ```
   Step failed:
       Defined: tck/features/clauses/merge/Merge5.feature:519:5
       Matched: crates/uni-tck/src/steps/then.rs:90:1
-      Step panicked. Captured output: No error found
+      Step panicked. Captured output: Error mismatch: Error detail mismatch: expected message to contain 'MergeReadOwnWrites', got 'Query error: Edge type X not found'
+[Su
+  ... (truncated)
+  ```
+
+### Merge6
+
+- **[1] Using ON CREATE on a node** (line 33)
+  ```
+  Step failed:
+      Defined: tck/features/clauses/merge/Merge6.feature:45:5
+      Matched: crates/uni-tck/src/steps/then.rs:9:1
+      Step panicked. Captured output: No result found
 [Summary]
 1 feature
 1 scenario (1 failed)
-3 steps (2 passed, 1 failed)
+4 steps (3 passed, 1 failed)
 
+  ```
+- **[2] Using ON CREATE on a relationship** (line 50)
+  ```
+  Step failed:
+      Defined: tck/features/clauses/merge/Merge6.feature:63:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Edge type TYPE not found", query: Some("\nMATCH (a:A), (b:B)\nMERGE (a)-[r:T
+  ... (truncated)
+  ```
+- **[3] Updating one property with ON CREATE** (line 70)
+  ```
+  Step failed:
+      Defined: tck/features/clauses/merge/Merge6.feature:82:5
+      Matched: crates/uni-tck/src/steps/then.rs:9:1
+      Step panicked. Captured output: No result found
+[Summary]
+1 feature
+1 scenario (1 failed)
+4 steps (3 passed, 1 failed)
+
+  ```
+- **[4] Null-setting one property with ON CREATE** (line 95)
+  ```
+  Step failed:
+      Defined: tck/features/clauses/merge/Merge6.feature:107:5
+      Matched: crates/uni-tck/src/steps/then.rs:9:1
+      Step panicked. Captured output: No result found
+[Summary]
+1 feature
+1 scenario (1 failed)
+4 steps (3 passed, 1 failed)
+
+  ```
+- **[6] Copying properties from node with ON CREATE** (line 119)
+  ```
+  Step failed:
+      Defined: tck/features/clauses/merge/Merge6.feature:131:5
+      Matched: crates/uni-tck/src/steps/then.rs:9:1
+      Step panicked. Captured output: No result found
+[Summary]
+1 feature
+1 scenario (1 failed)
+4 steps (3 passed, 1 failed)
+
+  ```
+- **[7] Copying properties from literal map with ON CREATE** (line 144)
+  ```
+  Step failed:
+      Defined: tck/features/clauses/merge/Merge6.feature:156:5
+      Matched: crates/uni-tck/src/steps/then.rs:9:1
+      Step panicked. Captured output: No result found
+[Summary]
+1 feature
+1 scenario (1 failed)
+4 steps (3 passed, 1 failed)
+
+  ```
+
+### Merge7
+
+- **[1] Using ON MATCH on created node** (line 33)
+  ```
+  Step failed:
+      Defined: tck/features/clauses/merge/Merge7.feature:45:5
+      Matched: crates/uni-tck/src/steps/then.rs:9:1
+      Step panicked. Captured output: No result found
+[Summary]
+1 feature
+1 scenario (1 failed)
+4 steps (3 passed, 1 failed)
+
+  ```
+- **[2] Using ON MATCH on created relationship** (line 49)
+  ```
+  Step failed:
+      Defined: tck/features/clauses/merge/Merge7.feature:61:5
+      Matched: crates/uni-tck/src/steps/then.rs:9:1
+      Step panicked. Captured output: No result found
+[Summary]
+1 feature
+1 scenario (1 failed)
+4 steps (3 passed, 1 failed)
+
+  ```
+- **[3] Using ON MATCH on a relationship** (line 65)
+  ```
+  Step failed:
+      Defined: tck/features/clauses/merge/Merge7.feature:79:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Edge type TYPE not found", query: Some("\nMATCH (a:A), (b:B)\nMERGE (a)-[r:T
+  ... (truncated)
+  ```
+- **[4] Copying properties from node with ON MATCH** (line 85)
+  ```
+  Step failed:
+      Defined: tck/features/clauses/merge/Merge7.feature:102:5
+      Matched: crates/uni-tck/src/steps/then.rs:9:1
+      Step panicked. Captured output: No result found
+[Summary]
+1 feature
+1 scenario (1 failed)
+5 steps (4 passed, 1 failed)
+
+  ```
+- **[5] Copying properties from literal map with ON MATCH** (line 115)
+  ```
+  Step failed:
+      Defined: tck/features/clauses/merge/Merge7.feature:132:5
+      Matched: crates/uni-tck/src/steps/then.rs:9:1
+      Step panicked. Captured output: No result found
+[Summary]
+1 feature
+1 scenario (1 failed)
+5 steps (4 passed, 1 failed)
+
+  ```
+
+### Merge8
+
+- **[1] Using ON CREATE and ON MATCH** (line 33)
+  ```
+  Step failed:
+      Defined: tck/features/clauses/merge/Merge8.feature:49:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Edge type TYPE not found", query: Some("\nMATCH (a:A), (b:B)\nMERGE (a)-[r:T
+  ... (truncated)
   ```
 
 ### Merge9
@@ -1192,18 +1824,32 @@
       Step panicked. Captured output: Query returned error instead of result: Query { message: "MERGE node must have a label", query: Some("\nUNWIND [1, 2, 3, 4] AS int\nME
   ... (truncated)
   ```
-- **[4] MERGE after WITH with predicate and WITH with aggregation** (line 81)
+- **[2] UNWIND with multiple MERGE** (line 48)
   ```
   Step failed:
-      Defined: tck/features/clauses/merge/Merge9.feature:98:5
-      Matched: crates/uni-tck/src/steps/and.rs:4:1
-      Step panicked. Captured output: assertion `left == right` failed: Node count changed: 1 -> 2
-        left: 1
-       right: 2
+      Defined: tck/features/clauses/merge/Merge9.feature:57:5
+      Matched: crates/uni-tck/src/steps/then.rs:9:1
+      Step panicked. Captured output: No result found
 [Summary]
 1 feature
 1 scenario (1 failed)
-5
+3 steps (2 passed, 1 failed)
+
+  ```
+- **[3] Mixing MERGE with CREATE** (line 64)
+  ```
+  Step failed:
+      Defined: tck/features/clauses/merge/Merge9.feature:73:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Edge type KNOWS not found", query: Some("\nCREATE (a:A), (b:B)\nMERGE (a)-[:
+  ... (truncated)
+  ```
+- **[4] MERGE after WITH with predicate and WITH with aggregation** (line 81)
+  ```
+  Step failed:
+      Defined: tck/features/clauses/merge/Merge9.feature:95:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Label A not found", query: Some("\nUNWIND [42] AS props\nWITH props WHERE pr
   ... (truncated)
   ```
 
@@ -1310,6 +1956,18 @@
       Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("props", Some(Int(3)))]. Expected: [{"props": Int(1)}
   ... (truncated)
   ```
+- **[3] Remove a single relationship property** (line 69)
+  ```
+  Step failed:
+      Defined: tck/features/clauses/remove/Remove1.feature:84:5
+      Matched: crates/uni-tck/src/steps/and.rs:27:1
+      Step panicked. Captured output: assertion `left == right` failed: Expected -properties=1, but got 0 (before=0, after=0)
+        left: 0
+       right: 1
+[Summary]
+1 f
+  ... (truncated)
+  ```
 - **[4] Remove multiple relationship properties** (line 87)
   ```
   Step failed:
@@ -1324,6 +1982,105 @@
       Defined: tck/features/clauses/remove/Remove1.feature:148:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
       Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("totalNumberOfProps", Some(Int(3)))]. Expected: [{"t
+  ... (truncated)
+  ```
+
+### Remove3
+
+- **[5] Filtering after removing a property from nodes affects the result set but not the side effects** (line 120)
+  ```
+  Step failed:
+      Defined: tck/features/clauses/remove/Remove3.feature:138:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Write operations not yet supported in DataFusion engine", query: Some("\n
+  ... (truncated)
+  ```
+- **[12] Filtering after removing a label from nodes affects the result set but not the side effects** (line 277)
+  ```
+  Step failed:
+      Defined: tck/features/clauses/remove/Remove3.feature:295:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Write operations not yet supported in DataFusion engine", query: Some("\n
+  ... (truncated)
+  ```
+- **[15] Limiting to zero results after removing a property from relationships affects the result set but not the side effects** (line 347)
+  ```
+  Step failed:
+      Defined: tck/features/clauses/remove/Remove3.feature:362:5
+      Matched: crates/uni-tck/src/steps/and.rs:27:1
+      Step panicked. Captured output: assertion `left == right` failed: Expected -properties=1, but got 0 (before=0, after=0)
+        left: 0
+       right: 1
+[Summary]
+1 
+  ... (truncated)
+  ```
+- **[16] Skipping all results after removing a property from relationships affects the result set but not the side effects** (line 365)
+  ```
+  Step failed:
+      Defined: tck/features/clauses/remove/Remove3.feature:380:5
+      Matched: crates/uni-tck/src/steps/and.rs:27:1
+      Step panicked. Captured output: assertion `left == right` failed: Expected -properties=1, but got 0 (before=0, after=0)
+        left: 0
+       right: 1
+[Summary]
+1 
+  ... (truncated)
+  ```
+- **[17] Skipping and limiting to a few results after removing a property from relationships affects the result set but not the side effects** (line 383)
+  ```
+  Step failed:
+      Defined: tck/features/clauses/remove/Remove3.feature:404:5
+      Matched: crates/uni-tck/src/steps/and.rs:27:1
+      Step panicked. Captured output: assertion `left == right` failed: Expected -properties=5, but got 0 (before=0, after=0)
+        left: 0
+       right: 5
+[Summary]
+1 
+  ... (truncated)
+  ```
+- **[18] Skipping zero result and limiting to all results after removing a property from relationships does not affect the result set nor the side effects** (line 407)
+  ```
+  Step failed:
+      Defined: tck/features/clauses/remove/Remove3.feature:431:5
+      Matched: crates/uni-tck/src/steps/and.rs:27:1
+      Step panicked. Captured output: assertion `left == right` failed: Expected -properties=5, but got 0 (before=0, after=0)
+        left: 0
+       right: 5
+[Summary]
+1 
+  ... (truncated)
+  ```
+- **[19] Filtering after removing a property from relationships affects the result set but not the side effects** (line 434)
+  ```
+  Step failed:
+      Defined: tck/features/clauses/remove/Remove3.feature:452:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Write operations not yet supported in DataFusion engine", query: Some("\n
+  ... (truncated)
+  ```
+- **[20] Aggregating in `RETURN` after removing a property from relationships affects the result set but not the side effects** (line 459)
+  ```
+  Step failed:
+      Defined: tck/features/clauses/remove/Remove3.feature:478:5
+      Matched: crates/uni-tck/src/steps/and.rs:27:1
+      Step panicked. Captured output: assertion `left == right` failed: Expected -properties=5, but got 0 (before=0, after=0)
+        left: 0
+       right: 5
+[Summary]
+1 
+  ... (truncated)
+  ```
+- **[21] Aggregating in `WITH` after removing a property from relationships affects the result set but not the side effects** (line 481)
+  ```
+  Step failed:
+      Defined: tck/features/clauses/remove/Remove3.feature:501:5
+      Matched: crates/uni-tck/src/steps/and.rs:27:1
+      Step panicked. Captured output: assertion `left == right` failed: Expected -properties=5, but got 0 (before=0, after=0)
+        left: 0
+       right: 5
+[Summary]
+1 
   ... (truncated)
   ```
 
@@ -1527,6 +2284,42 @@
 
 ### Set1
 
+- **[1] Set a property** (line 33)
+  ```
+  Step failed:
+      Defined: tck/features/clauses/set/Set1.feature:49:5
+      Matched: crates/uni-tck/src/steps/and.rs:27:1
+      Step panicked. Captured output: assertion `left == right` failed: Expected +properties=1, but got 0 (before=1, after=1)
+        left: 0
+       right: 1
+[Summary]
+1 feature
+  ... (truncated)
+  ```
+- **[2] Set a property to an expression** (line 53)
+  ```
+  Step failed:
+      Defined: tck/features/clauses/set/Set1.feature:69:5
+      Matched: crates/uni-tck/src/steps/and.rs:27:1
+      Step panicked. Captured output: assertion `left == right` failed: Expected +properties=1, but got 0 (before=1, after=1)
+        left: 0
+       right: 1
+[Summary]
+1 feature
+  ... (truncated)
+  ```
+- **[4] Set a property by selecting the relationship using a simple expression** (line 91)
+  ```
+  Step failed:
+      Defined: tck/features/clauses/set/Set1.feature:106:5
+      Matched: crates/uni-tck/src/steps/and.rs:27:1
+      Step panicked. Captured output: assertion `left == right` failed: Expected +properties=1, but got 0 (before=0, after=0)
+        left: 0
+       right: 1
+[Summary]
+1 featur
+  ... (truncated)
+  ```
 - **[10] Failing when setting a list of maps as a property** (line 180)
   ```
   Step failed:
@@ -1538,6 +2331,21 @@
 1 scenario (1 failed)
 3 steps (2 passed, 1 failed)
 
+  ```
+
+### Set2
+
+- **[3] Setting a relationship property to null removes the existing property** (line 70)
+  ```
+  Step failed:
+      Defined: tck/features/clauses/set/Set2.feature:85:5
+      Matched: crates/uni-tck/src/steps/and.rs:27:1
+      Step panicked. Captured output: assertion `left == right` failed: Expected -properties=1, but got 0 (before=0, after=0)
+        left: 0
+       right: 1
+[Summary]
+1 feature
+  ... (truncated)
   ```
 
 ### Set3
@@ -1607,8 +2415,174 @@
 
   ```
 
+### Set4
+
+- **[1] Set multiple properties with a property map** (line 33)
+  ```
+  Step failed:
+      Defined: tck/features/clauses/set/Set4.feature:45:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "SET variable = expression is not yet supported in AST migration. Use SET variabl
+  ... (truncated)
+  ```
+- **[2] Non-existent values in a property map are removed with SET** (line 51)
+  ```
+  Step failed:
+      Defined: tck/features/clauses/set/Set4.feature:63:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "SET variable = expression is not yet supported in AST migration. Use SET variabl
+  ... (truncated)
+  ```
+- **[3] Null values in a property map are removed with SET** (line 70)
+  ```
+  Step failed:
+      Defined: tck/features/clauses/set/Set4.feature:82:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "SET variable = expression is not yet supported in AST migration. Use SET variabl
+  ... (truncated)
+  ```
+- **[4] All properties are removed if node is set to empty property map** (line 89)
+  ```
+  Step failed:
+      Defined: tck/features/clauses/set/Set4.feature:101:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "SET variable = expression is not yet supported in AST migration. Use SET variab
+  ... (truncated)
+  ```
+- **[5] Ignore null when setting properties using an overriding map** (line 107)
+  ```
+  Step failed:
+      Defined: tck/features/clauses/set/Set4.feature:115:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "SET variable = expression is not yet supported in AST migration. Use SET variab
+  ... (truncated)
+  ```
+
+### Set5
+
+- **[1] Ignore null when setting properties using an appending map** (line 33)
+  ```
+  Step failed:
+      Defined: tck/features/clauses/set/Set5.feature:41:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "SET variable += expression is not yet supported in AST migration. Use SET variab
+  ... (truncated)
+  ```
+- **[2] Overwrite values when using +=** (line 46)
+  ```
+  Step failed:
+      Defined: tck/features/clauses/set/Set5.feature:58:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "SET variable += expression is not yet supported in AST migration. Use SET variab
+  ... (truncated)
+  ```
+- **[3] Retain old values when using +=** (line 65)
+  ```
+  Step failed:
+      Defined: tck/features/clauses/set/Set5.feature:77:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "SET variable += expression is not yet supported in AST migration. Use SET variab
+  ... (truncated)
+  ```
+- **[4] Explicit null values in a map remove old values** (line 83)
+  ```
+  Step failed:
+      Defined: tck/features/clauses/set/Set5.feature:95:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "SET variable += expression is not yet supported in AST migration. Use SET variab
+  ... (truncated)
+  ```
+- **[5] Set an empty map when using += has no effect** (line 101)
+  ```
+  Step failed:
+      Defined: tck/features/clauses/set/Set5.feature:113:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "SET variable += expression is not yet supported in AST migration. Use SET varia
+  ... (truncated)
+  ```
+
 ### Set6
 
+- **[1] Limiting to zero results after setting a property on nodes affects the result set but not the side effects** (line 33)
+  ```
+  Step failed:
+      Defined: tck/features/clauses/set/Set6.feature:48:5
+      Matched: crates/uni-tck/src/steps/and.rs:27:1
+      Step panicked. Captured output: assertion `left == right` failed: Expected +properties=1, but got 0 (before=1, after=1)
+        left: 0
+       right: 1
+[Summary]
+1 feature
+  ... (truncated)
+  ```
+- **[2] Skipping all results after setting a property on nodes affects the result set but not the side effects** (line 52)
+  ```
+  Step failed:
+      Defined: tck/features/clauses/set/Set6.feature:67:5
+      Matched: crates/uni-tck/src/steps/and.rs:27:1
+      Step panicked. Captured output: assertion `left == right` failed: Expected +properties=1, but got 0 (before=1, after=1)
+        left: 0
+       right: 1
+[Summary]
+1 feature
+  ... (truncated)
+  ```
+- **[3] Skipping and limiting to a few results after setting a property on nodes affects the result set but not the side effects** (line 71)
+  ```
+  Step failed:
+      Defined: tck/features/clauses/set/Set6.feature:92:5
+      Matched: crates/uni-tck/src/steps/and.rs:27:1
+      Step panicked. Captured output: assertion `left == right` failed: Expected +properties=5, but got 0 (before=5, after=5)
+        left: 0
+       right: 5
+[Summary]
+1 feature
+  ... (truncated)
+  ```
+- **[4] Skipping zero results and limiting to all results after setting a property on nodes does not affect the result set nor the side effects** (line 96)
+  ```
+  Step failed:
+      Defined: tck/features/clauses/set/Set6.feature:120:5
+      Matched: crates/uni-tck/src/steps/and.rs:27:1
+      Step panicked. Captured output: assertion `left == right` failed: Expected +properties=5, but got 0 (before=5, after=5)
+        left: 0
+       right: 5
+[Summary]
+1 featur
+  ... (truncated)
+  ```
+- **[5] Filtering after setting a property on nodes affects the result set but not the side effects** (line 124)
+  ```
+  Step failed:
+      Defined: tck/features/clauses/set/Set6.feature:142:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Write operations not yet supported in DataFusion engine", query: Some("\nMATCH 
+  ... (truncated)
+  ```
+- **[6] Aggregating in `RETURN` after setting a property on nodes affects the result set but not the side effects** (line 151)
+  ```
+  Step failed:
+      Defined: tck/features/clauses/set/Set6.feature:170:5
+      Matched: crates/uni-tck/src/steps/and.rs:27:1
+      Step panicked. Captured output: assertion `left == right` failed: Expected +properties=5, but got 0 (before=5, after=5)
+        left: 0
+       right: 5
+[Summary]
+1 featur
+  ... (truncated)
+  ```
+- **[7] Aggregating in `WITH` after setting a property on nodes affects the result set but not the side effects** (line 174)
+  ```
+  Step failed:
+      Defined: tck/features/clauses/set/Set6.feature:194:5
+      Matched: crates/uni-tck/src/steps/and.rs:27:1
+      Step panicked. Captured output: assertion `left == right` failed: Expected +properties=5, but got 0 (before=5, after=5)
+        left: 0
+       right: 5
+[Summary]
+1 featur
+  ... (truncated)
+  ```
 - **[8] Limiting to zero results after adding a label on nodes affects the result set but not the side effects** (line 198)
   ```
   Step failed:
@@ -1646,7 +2620,7 @@
   Step failed:
       Defined: tck/features/clauses/set/Set6.feature:303:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Label Foo not found in schema", query: Some("\nMATCH (n:N)\nSET n:Foo\nWITH n\n
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Write operations not yet supported in DataFusion engine", query: Some("\nMATCH 
   ... (truncated)
   ```
 - **[13] Aggregating in `RETURN` after adding a label on nodes affects the result set but not the side effects** (line 310)
@@ -1663,6 +2637,86 @@
       Defined: tck/features/clauses/set/Set6.feature:349:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
       Step panicked. Captured output: Query returned error instead of result: Query { message: "Label Foo not found in schema", query: Some("\nMATCH (n:N)\nSET n:Foo\nWITH sum
+  ... (truncated)
+  ```
+- **[15] Limiting to zero results after setting a property on relationships affects the result set but not the side effects** (line 355)
+  ```
+  Step failed:
+      Defined: tck/features/clauses/set/Set6.feature:370:5
+      Matched: crates/uni-tck/src/steps/and.rs:27:1
+      Step panicked. Captured output: assertion `left == right` failed: Expected +properties=1, but got 0 (before=0, after=0)
+        left: 0
+       right: 1
+[Summary]
+1 featur
+  ... (truncated)
+  ```
+- **[16] Skipping all results after setting a property on relationships affects the result set but not the side effects** (line 374)
+  ```
+  Step failed:
+      Defined: tck/features/clauses/set/Set6.feature:389:5
+      Matched: crates/uni-tck/src/steps/and.rs:27:1
+      Step panicked. Captured output: assertion `left == right` failed: Expected +properties=1, but got 0 (before=0, after=0)
+        left: 0
+       right: 1
+[Summary]
+1 featur
+  ... (truncated)
+  ```
+- **[17] Skipping and limiting to a few results after setting a property on relationships affects the result set but not the side effects** (line 393)
+  ```
+  Step failed:
+      Defined: tck/features/clauses/set/Set6.feature:414:5
+      Matched: crates/uni-tck/src/steps/and.rs:27:1
+      Step panicked. Captured output: assertion `left == right` failed: Expected +properties=5, but got 0 (before=0, after=0)
+        left: 0
+       right: 5
+[Summary]
+1 featur
+  ... (truncated)
+  ```
+- **[18] Skipping zero result and limiting to all results after setting a property on relationships does not affect the result set nor the side effects** (line 418)
+  ```
+  Step failed:
+      Defined: tck/features/clauses/set/Set6.feature:442:5
+      Matched: crates/uni-tck/src/steps/and.rs:27:1
+      Step panicked. Captured output: assertion `left == right` failed: Expected +properties=5, but got 0 (before=0, after=0)
+        left: 0
+       right: 5
+[Summary]
+1 featur
+  ... (truncated)
+  ```
+- **[19] Filtering after setting a property on relationships affects the result set but not the side effects** (line 446)
+  ```
+  Step failed:
+      Defined: tck/features/clauses/set/Set6.feature:464:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Write operations not yet supported in DataFusion engine", query: Some("\nMATCH 
+  ... (truncated)
+  ```
+- **[20] Aggregating in `RETURN` after setting a property on relationships affects the result set but not the side effects** (line 473)
+  ```
+  Step failed:
+      Defined: tck/features/clauses/set/Set6.feature:492:5
+      Matched: crates/uni-tck/src/steps/and.rs:27:1
+      Step panicked. Captured output: assertion `left == right` failed: Expected +properties=5, but got 0 (before=0, after=0)
+        left: 0
+       right: 5
+[Summary]
+1 featur
+  ... (truncated)
+  ```
+- **[21] Aggregating in `WITH` after setting a property on relationships affects the result set but not the side effects** (line 496)
+  ```
+  Step failed:
+      Defined: tck/features/clauses/set/Set6.feature:516:5
+      Matched: crates/uni-tck/src/steps/and.rs:27:1
+      Step panicked. Captured output: assertion `left == right` failed: Expected +properties=5, but got 0 (before=0, after=0)
+        left: 0
+       right: 5
+[Summary]
+1 featur
   ... (truncated)
   ```
 
@@ -1769,7 +2823,7 @@
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal5.feature:133:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("d.epochSeconds", Some(Int(469024274))), ("d
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("d.microsecond", Some(Int(645876))), ("d.day
   ... (truncated)
   ```
 
@@ -1873,6 +2927,29 @@
 1 feature
 1 scenario (1 failed)
 4 steps (3 passed, 1
+  ... (truncated)
+  ```
+
+### Unwind1
+
+- **[6] Creating nodes from an unwound parameter list** (line 113)
+  ```
+  Step failed:
+      Defined: tck/features/clauses/unwind/Unwind1.feature:130:5
+      Matched: crates/uni-tck/src/steps/then.rs:37:1
+      Step panicked. Captured output: No result found
+[Summary]
+1 feature
+1 scenario (1 failed)
+5 steps (4 passed, 1 failed)
+
+  ```
+- **[14] Unwind with merge** (line 263)
+  ```
+  Step failed:
+      Defined: tck/features/clauses/unwind/Unwind1.feature:274:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Label Person not found", query: Some("\nUNWIND $props AS prop\nMERGE (p:P
   ... (truncated)
   ```
 

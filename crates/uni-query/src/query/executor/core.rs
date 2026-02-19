@@ -14,8 +14,8 @@ use uni_store::runtime::l0_manager::L0Manager;
 use uni_store::runtime::writer::Writer;
 use uni_store::storage::manager::StorageManager;
 
-use crate::query::expr_eval::eval_binary_op;
 use crate::query::datetime::{classify_temporal, eval_datetime_function};
+use crate::query::expr_eval::eval_binary_op;
 
 use super::procedure::ProcedureRegistry;
 
@@ -115,13 +115,8 @@ impl Accumulator {
                 if !val.is_null() {
                     *current = Some(match current.take() {
                         None => val.clone(),
-                        Some(cur) => {
-                            if cypher_cross_type_cmp(val, &cur) == std::cmp::Ordering::Less {
-                                val.clone()
-                            } else {
-                                cur
-                            }
-                        }
+                        Some(cur) if cypher_cross_type_cmp(val, &cur).is_lt() => val.clone(),
+                        Some(cur) => cur,
                     });
                 }
             }
@@ -129,13 +124,8 @@ impl Accumulator {
                 if !val.is_null() {
                     *current = Some(match current.take() {
                         None => val.clone(),
-                        Some(cur) => {
-                            if cypher_cross_type_cmp(val, &cur) == std::cmp::Ordering::Greater {
-                                val.clone()
-                            } else {
-                                cur
-                            }
-                        }
+                        Some(cur) if cypher_cross_type_cmp(val, &cur).is_gt() => val.clone(),
+                        Some(cur) => cur,
                     });
                 }
             }
@@ -184,18 +174,17 @@ impl Accumulator {
                     return Value::Null;
                 }
                 let mut sorted = values.clone();
-                sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                sorted.sort_by(|a, b| a.total_cmp(b));
                 let n = sorted.len();
                 let idx = (percentile * (n as f64 - 1.0)).round() as usize;
-                let idx = idx.min(n - 1);
-                numeric_to_value(sorted[idx])
+                numeric_to_value(sorted[idx.min(n - 1)])
             }
             Accumulator::PercentileCont { values, percentile } => {
                 if values.is_empty() {
                     return Value::Null;
                 }
                 let mut sorted = values.clone();
-                sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                sorted.sort_by(|a, b| a.total_cmp(b));
                 let n = sorted.len();
                 if n == 1 {
                     return Value::Float(sorted[0]);
@@ -294,17 +283,21 @@ impl Executor {
                 writer.l0_manager.get_pending_flush(),
             );
             ctx.set_deadline(Instant::now() + self.config.query_timeout);
+            ctx.set_mutation_path(self.config.mutation_path.clone());
             Some(ctx)
         } else {
             self.l0_manager.as_ref().map(|m| {
                 let mut ctx = QueryContext::new(m.get_current());
                 ctx.set_deadline(Instant::now() + self.config.query_timeout);
+                ctx.set_mutation_path(self.config.mutation_path.clone());
                 ctx
             })
         }
     }
 
     pub(crate) fn compare_values(a: &Value, b: &Value) -> std::cmp::Ordering {
+        use std::cmp::Ordering;
+
         let temporal_a = Self::extract_temporal_value(a);
         let temporal_b = Self::extract_temporal_value(b);
 
@@ -345,76 +338,59 @@ impl Executor {
             (Value::List(l), Value::List(r)) => Self::compare_lists(l, r),
             (Value::Path(l), Value::Path(r)) => Self::compare_paths(l, r),
             (Value::String(l), Value::String(r)) => {
-                let lv = Value::String(l.clone());
-                let rv = Value::String(r.clone());
-
-                if matches!(
-                    eval_binary_op(&lv, &BinaryOp::Lt, &rv),
-                    Ok(Value::Bool(true))
-                ) {
-                    std::cmp::Ordering::Less
-                } else if matches!(
-                    eval_binary_op(&lv, &BinaryOp::Gt, &rv),
-                    Ok(Value::Bool(true))
-                ) {
-                    std::cmp::Ordering::Greater
-                } else {
-                    l.cmp(r)
-                }
+                // Use eval_binary_op on the original references to avoid cloning.
+                Self::try_eval_ordering(a, b).unwrap_or_else(|| l.cmp(r))
             }
             (Value::Bool(l), Value::Bool(r)) => l.cmp(r),
             (Value::Temporal(l), Value::Temporal(r)) => Self::compare_temporal(l, r),
             (Value::Int(l), Value::Int(r)) => l.cmp(r),
             (Value::Float(l), Value::Float(r)) => {
                 if l.is_nan() && r.is_nan() {
-                    std::cmp::Ordering::Equal
+                    Ordering::Equal
                 } else if l.is_nan() {
-                    std::cmp::Ordering::Greater
+                    Ordering::Greater
                 } else if r.is_nan() {
-                    std::cmp::Ordering::Less
+                    Ordering::Less
                 } else {
-                    l.partial_cmp(r).unwrap_or(std::cmp::Ordering::Equal)
+                    l.partial_cmp(r).unwrap_or(Ordering::Equal)
                 }
             }
             (Value::Int(l), Value::Float(r)) => {
                 if r.is_nan() {
-                    std::cmp::Ordering::Less
+                    Ordering::Less
                 } else {
-                    (*l as f64)
-                        .partial_cmp(r)
-                        .unwrap_or(std::cmp::Ordering::Equal)
+                    (*l as f64).partial_cmp(r).unwrap_or(Ordering::Equal)
                 }
             }
             (Value::Float(l), Value::Int(r)) => {
                 if l.is_nan() {
-                    std::cmp::Ordering::Greater
+                    Ordering::Greater
                 } else {
-                    l.partial_cmp(&(*r as f64))
-                        .unwrap_or(std::cmp::Ordering::Equal)
+                    l.partial_cmp(&(*r as f64)).unwrap_or(Ordering::Equal)
                 }
             }
             (Value::Bytes(l), Value::Bytes(r)) => l.cmp(r),
             (Value::Vector(l), Value::Vector(r)) => {
-                let min_len = l.len().min(r.len());
-                for i in 0..min_len {
-                    let ord = l[i].total_cmp(&r[i]);
-                    if ord != std::cmp::Ordering::Equal {
+                for (lv, rv) in l.iter().zip(r.iter()) {
+                    let ord = lv.total_cmp(rv);
+                    if ord != Ordering::Equal {
                         return ord;
                     }
                 }
                 l.len().cmp(&r.len())
             }
-            _ => std::cmp::Ordering::Equal,
+            _ => Ordering::Equal,
         }
     }
 
     fn try_eval_ordering(a: &Value, b: &Value) -> Option<std::cmp::Ordering> {
+        use std::cmp::Ordering;
         if matches!(eval_binary_op(a, &BinaryOp::Lt, b), Ok(Value::Bool(true))) {
-            Some(std::cmp::Ordering::Less)
+            Some(Ordering::Less)
         } else if matches!(eval_binary_op(a, &BinaryOp::Gt, b), Ok(Value::Bool(true))) {
-            Some(std::cmp::Ordering::Greater)
+            Some(Ordering::Greater)
         } else if matches!(eval_binary_op(a, &BinaryOp::Eq, b), Ok(Value::Bool(true))) {
-            Some(std::cmp::Ordering::Equal)
+            Some(Ordering::Equal)
         } else {
             None
         }
@@ -550,13 +526,11 @@ impl Executor {
     }
 
     fn compare_lists(left: &[Value], right: &[Value]) -> std::cmp::Ordering {
-        for (l, r) in left.iter().zip(right.iter()) {
-            let ord = Self::compare_values(l, r);
-            if ord != std::cmp::Ordering::Equal {
-                return ord;
-            }
-        }
-        left.len().cmp(&right.len())
+        left.iter()
+            .zip(right.iter())
+            .map(|(l, r)| Self::compare_values(l, r))
+            .find(|o| o.is_ne())
+            .unwrap_or_else(|| left.len().cmp(&right.len()))
     }
 
     fn compare_maps(
@@ -565,21 +539,15 @@ impl Executor {
     ) -> std::cmp::Ordering {
         let mut l_pairs: Vec<_> = left.iter().collect();
         let mut r_pairs: Vec<_> = right.iter().collect();
-        l_pairs.sort_by(|(lk, _), (rk, _)| lk.cmp(rk));
-        r_pairs.sort_by(|(lk, _), (rk, _)| lk.cmp(rk));
+        l_pairs.sort_by_key(|(k, _)| *k);
+        r_pairs.sort_by_key(|(k, _)| *k);
 
-        for ((lk, lv), (rk, rv)) in l_pairs.iter().zip(r_pairs.iter()) {
-            let key_ord = lk.cmp(rk);
-            if key_ord != std::cmp::Ordering::Equal {
-                return key_ord;
-            }
-            let val_ord = Self::compare_values(lv, rv);
-            if val_ord != std::cmp::Ordering::Equal {
-                return val_ord;
-            }
-        }
-
-        l_pairs.len().cmp(&r_pairs.len())
+        l_pairs
+            .iter()
+            .zip(r_pairs.iter())
+            .map(|((lk, lv), (rk, rv))| lk.cmp(rk).then_with(|| Self::compare_values(lv, rv)))
+            .find(|o| o.is_ne())
+            .unwrap_or_else(|| l_pairs.len().cmp(&r_pairs.len()))
     }
 
     fn compare_nodes(left: &uni_common::Node, right: &uni_common::Node) -> std::cmp::Ordering {
@@ -588,62 +556,36 @@ impl Executor {
         l_labels.sort();
         r_labels.sort();
 
-        let labels_ord = l_labels.cmp(&r_labels);
-        if labels_ord != std::cmp::Ordering::Equal {
-            return labels_ord;
-        }
-
-        let vid_ord = left.vid.cmp(&right.vid);
-        if vid_ord != std::cmp::Ordering::Equal {
-            return vid_ord;
-        }
-
-        Self::compare_maps(&left.properties, &right.properties)
+        l_labels
+            .cmp(&r_labels)
+            .then_with(|| left.vid.cmp(&right.vid))
+            .then_with(|| Self::compare_maps(&left.properties, &right.properties))
     }
 
     fn compare_edges(left: &uni_common::Edge, right: &uni_common::Edge) -> std::cmp::Ordering {
-        let edge_type_ord = left.edge_type.cmp(&right.edge_type);
-        if edge_type_ord != std::cmp::Ordering::Equal {
-            return edge_type_ord;
-        }
-
-        let src_ord = left.src.cmp(&right.src);
-        if src_ord != std::cmp::Ordering::Equal {
-            return src_ord;
-        }
-
-        let dst_ord = left.dst.cmp(&right.dst);
-        if dst_ord != std::cmp::Ordering::Equal {
-            return dst_ord;
-        }
-
-        let eid_ord = left.eid.cmp(&right.eid);
-        if eid_ord != std::cmp::Ordering::Equal {
-            return eid_ord;
-        }
-
-        Self::compare_maps(&left.properties, &right.properties)
+        left.edge_type
+            .cmp(&right.edge_type)
+            .then_with(|| left.src.cmp(&right.src))
+            .then_with(|| left.dst.cmp(&right.dst))
+            .then_with(|| left.eid.cmp(&right.eid))
+            .then_with(|| Self::compare_maps(&left.properties, &right.properties))
     }
 
     fn compare_paths(left: &uni_common::Path, right: &uni_common::Path) -> std::cmp::Ordering {
-        for (ln, rn) in left.nodes.iter().zip(right.nodes.iter()) {
-            let ord = Self::compare_nodes(ln, rn);
-            if ord != std::cmp::Ordering::Equal {
-                return ord;
-            }
-        }
-        let node_len_ord = left.nodes.len().cmp(&right.nodes.len());
-        if node_len_ord != std::cmp::Ordering::Equal {
-            return node_len_ord;
-        }
-
-        for (le, re) in left.edges.iter().zip(right.edges.iter()) {
-            let ord = Self::compare_edges(le, re);
-            if ord != std::cmp::Ordering::Equal {
-                return ord;
-            }
-        }
-        left.edges.len().cmp(&right.edges.len())
+        left.nodes
+            .iter()
+            .zip(right.nodes.iter())
+            .map(|(l, r)| Self::compare_nodes(l, r))
+            .find(|o| o.is_ne())
+            .unwrap_or_else(|| left.nodes.len().cmp(&right.nodes.len()))
+            .then_with(|| {
+                left.edges
+                    .iter()
+                    .zip(right.edges.iter())
+                    .map(|(l, r)| Self::compare_edges(l, r))
+                    .find(|o| o.is_ne())
+                    .unwrap_or_else(|| left.edges.len().cmp(&right.edges.len()))
+            })
     }
 
     fn compare_temporal(left: &TemporalValue, right: &TemporalValue) -> std::cmp::Ordering {

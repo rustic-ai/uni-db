@@ -345,11 +345,11 @@ fn rewrite_order_by_expr_with_aliases(expr: &Expr, aliases: &HashMap<String, Exp
         ),
         Expr::BinaryOp { left, op, right } => Expr::BinaryOp {
             left: Box::new(rewrite_order_by_expr_with_aliases(left, aliases)),
-            op: op.clone(),
+            op: *op,
             right: Box::new(rewrite_order_by_expr_with_aliases(right, aliases)),
         },
         Expr::UnaryOp { op, expr: inner } => Expr::UnaryOp {
-            op: op.clone(),
+            op: *op,
             expr: Box::new(rewrite_order_by_expr_with_aliases(inner, aliases)),
         },
         Expr::FunctionCall {
@@ -3002,7 +3002,8 @@ impl QueryPlanner {
             | LogicalPlan::CreateBatch { .. }
             | LogicalPlan::Delete { .. }
             | LogicalPlan::Set { .. }
-            | LogicalPlan::Remove { .. } => LogicalPlan::Limit {
+            | LogicalPlan::Remove { .. }
+            | LogicalPlan::Merge { .. } => LogicalPlan::Limit {
                 input: Box::new(plan),
                 skip: None,
                 fetch: Some(0),

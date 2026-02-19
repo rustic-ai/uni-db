@@ -70,16 +70,39 @@ impl std::fmt::Debug for UniWorld {
     }
 }
 
+/// Graph state snapshot used to compute side-effect counts across a mutation.
+///
+/// Property change events (`+properties` / `-properties`) require per-property
+/// comparison: a property that is overwritten with a different value counts as
+/// both a removal of the old value and an addition of the new value.  The
+/// aggregate `properties_before` / `properties_after` fields capture the total
+/// number of non-null property assignments at each point in time for use by
+/// the gross-event counters in `and.rs`.
 #[derive(Debug, Default, Clone)]
 pub struct SideEffects {
     pub nodes_before: usize,
     pub nodes_after: usize,
     pub edges_before: usize,
     pub edges_after: usize,
+    /// Total non-null properties at snapshot time (before mutation).
     pub properties_before: usize,
+    /// Total non-null properties at snapshot time (after mutation).
     pub properties_after: usize,
+    /// Gross property additions: (entity_id, prop_key) pairs with a non-null
+    /// value that either did not exist before or had a different value.
+    pub properties_added: usize,
+    /// Gross property removals: (entity_id, prop_key) pairs that had a
+    /// non-null value before but are null/absent after, OR had a different
+    /// non-null value before (value was overwritten).
+    pub properties_removed: usize,
     pub labels_before: HashSet<String>,
     pub labels_after: HashSet<String>,
+    /// Per-entity, per-property value snapshot (before).  Key format:
+    /// `"<vid>:<prop>"` for vertices and `"<eid>:<prop>"` for edges.
+    /// Only non-null values are stored.
+    prop_snapshot_before: HashMap<String, Value>,
+    /// Per-entity, per-property value snapshot (after).
+    prop_snapshot_after: HashMap<String, Value>,
 }
 
 impl Default for UniWorld {
@@ -152,14 +175,10 @@ impl UniWorld {
         self.side_effects.edges_before = self
             .count_by_query("MATCH ()-[r]->() RETURN count(r) as count")
             .await;
-        // Property counting - required for some TCK tests
-        let node_props = self
-            .count_by_query("MATCH (n) UNWIND keys(n) AS k RETURN count(k) AS count")
-            .await;
-        let rel_props = self
-            .count_by_query("MATCH ()-[r]->() UNWIND keys(r) AS k RETURN count(k) AS count")
-            .await;
-        self.side_effects.properties_before = node_props + rel_props;
+        // Build a per-entity, per-key property snapshot for gross change counting.
+        let snapshot = self.collect_property_snapshot().await;
+        self.side_effects.properties_before = snapshot.len();
+        self.side_effects.prop_snapshot_before = snapshot;
         self.side_effects.labels_before = self.get_labels().await?;
         Ok(())
     }
@@ -175,35 +194,121 @@ impl UniWorld {
         self.side_effects.edges_after = self
             .count_by_query("MATCH ()-[r]->() RETURN count(r) as count")
             .await;
-        // Property counting - required for some TCK tests
-        let node_props = self
-            .count_by_query("MATCH (n) UNWIND keys(n) AS k RETURN count(k) AS count")
-            .await;
-        let rel_props = self
-            .count_by_query("MATCH ()-[r]->() UNWIND keys(r) AS k RETURN count(k) AS count")
-            .await;
-        self.side_effects.properties_after = node_props + rel_props;
+        // Build after snapshot and compute gross change counts.
+        let snapshot = self.collect_property_snapshot().await;
+        self.side_effects.properties_after = snapshot.len();
+        self.side_effects.prop_snapshot_after = snapshot;
+
+        // Gross additions: (entity, key) that is in AFTER but wasn't in BEFORE
+        // with the same value.
+        let before = &self.side_effects.prop_snapshot_before;
+        let after = &self.side_effects.prop_snapshot_after;
+        let mut added = 0usize;
+        let mut removed = 0usize;
+        for (k, v_after) in after {
+            match before.get(k) {
+                None => added += 1,
+                Some(v_before) if v_before != v_after => {
+                    added += 1;
+                    removed += 1;
+                }
+                _ => {}
+            }
+        }
+        for k in before.keys() {
+            if !after.contains_key(k) {
+                removed += 1;
+            }
+        }
+        self.side_effects.properties_added = added;
+        self.side_effects.properties_removed = removed;
         self.side_effects.labels_after = self.get_labels().await?;
         Ok(())
     }
 
+    /// Collect all (entity_id::prop_key → value) pairs across all nodes and
+    /// relationships.  Only non-null values are included.
+    ///
+    /// Key format: `"n:<vid>:<prop>"` for vertices, `"r:<eid>:<prop>"` for edges.
+    async fn collect_property_snapshot(&self) -> HashMap<String, Value> {
+        let mut snapshot = HashMap::new();
+
+        // Node properties
+        if let Ok(result) = self.db().query("MATCH (n) RETURN n").await {
+            for row in &result.rows {
+                if let Some(node_val) = row.values.first() {
+                    self.add_entity_to_snapshot(&mut snapshot, "n", node_val);
+                }
+            }
+        }
+
+        // Relationship properties
+        if let Ok(result) = self.db().query("MATCH ()-[r]->() RETURN r").await {
+            for row in &result.rows {
+                if let Some(rel_val) = row.values.first() {
+                    self.add_entity_to_snapshot(&mut snapshot, "r", rel_val);
+                }
+            }
+        }
+
+        snapshot
+    }
+
+    /// Adds (entity_id::prop_key -> value) entries from a single entity value
+    /// to the snapshot map.  Handles both `Value::Map` and `Value::Node` /
+    /// `Value::Edge` representations.
+    fn add_entity_to_snapshot(
+        &self,
+        snapshot: &mut HashMap<String, Value>,
+        prefix: &str,
+        entity: &Value,
+    ) {
+        let insert_props =
+            |snapshot: &mut HashMap<String, Value>, id: u64, props: &HashMap<String, Value>| {
+                for (k, v) in props {
+                    if !k.starts_with('_') && k != "ext_id" && !v.is_null() {
+                        snapshot.insert(format!("{}:{}:{}", prefix, id, k), v.clone());
+                    }
+                }
+            };
+
+        match entity {
+            Value::Map(map) => {
+                let id = map
+                    .get("_vid")
+                    .or_else(|| map.get("_eid"))
+                    .and_then(|v| v.as_u64());
+                if let Some(id) = id {
+                    insert_props(snapshot, id, map);
+                }
+            }
+            Value::Node(node) => {
+                insert_props(snapshot, u64::from(node.vid), &node.properties);
+            }
+            Value::Edge(edge) => {
+                insert_props(snapshot, u64::from(edge.eid), &edge.properties);
+            }
+            _ => {}
+        }
+    }
+
     /// Run a count query and extract the integer result, returning 0 on failure.
     async fn count_by_query(&self, query: &str) -> usize {
-        let Ok(result) = self.db().query(query).await else {
-            if let Err(e) = self.db().query(query).await {
+        match self.db().query(query).await {
+            Ok(result) => result
+                .rows
+                .first()
+                .and_then(|row| row.values.first())
+                .and_then(|v| match v {
+                    Value::Int(count) => Some(*count as usize),
+                    _ => None,
+                })
+                .unwrap_or(0),
+            Err(e) => {
                 eprintln!("[TCK] count_by_query failed for query '{}': {}", query, e);
+                0
             }
-            return 0;
-        };
-        result
-            .rows
-            .first()
-            .and_then(|row| row.values.first())
-            .and_then(|v| match v {
-                Value::Int(count) => Some(*count as usize),
-                _ => None,
-            })
-            .unwrap_or(0)
+        }
     }
 
     async fn get_labels(&self) -> anyhow::Result<HashSet<String>> {

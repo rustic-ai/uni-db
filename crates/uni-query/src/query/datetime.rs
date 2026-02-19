@@ -234,25 +234,34 @@ fn parse_timezone(tz_str: &str) -> Result<TimezoneInfo> {
 /// This is the canonical datetime parsing function for temporal operations
 /// like `validAt`. Using a single implementation ensures consistent behavior.
 pub fn parse_datetime_utc(s: &str) -> Result<DateTime<Utc>> {
-    DateTime::parse_from_rfc3339(s)
+    // Temporal string renderings in the engine can include a bracketed timezone
+    // suffix (e.g. "2020-01-01T00:00Z[UTC]"). Strip it for parsing while keeping
+    // the explicit offset/UTC marker in the base datetime.
+    let s = s.trim();
+    let parse_input = match s.rfind('[') {
+        Some(pos) if s.ends_with(']') => &s[..pos],
+        _ => s,
+    };
+
+    DateTime::parse_from_rfc3339(parse_input)
         .map(|dt: DateTime<FixedOffset>| dt.with_timezone(&Utc))
         .or_else(|_| {
             // Handle formats without seconds (e.g., "2023-01-01T00:00Z")
-            if let Some(base) = s.strip_suffix('Z') {
+            if let Some(base) = parse_input.strip_suffix('Z') {
                 NaiveDateTime::parse_from_str(base, "%Y-%m-%dT%H:%M")
                     .map(|ndt| DateTime::<Utc>::from_naive_utc_and_offset(ndt, Utc))
             } else {
                 // Handle formats without seconds with offset (e.g., "2023-01-01T00:00+05:00")
-                DateTime::parse_from_str(s, "%Y-%m-%dT%H:%M%:z")
+                DateTime::parse_from_str(parse_input, "%Y-%m-%dT%H:%M%:z")
                     .map(|dt: DateTime<FixedOffset>| dt.with_timezone(&Utc))
             }
         })
         .or_else(|_| {
-            DateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S %z")
+            DateTime::parse_from_str(parse_input, "%Y-%m-%d %H:%M:%S %z")
                 .map(|dt: DateTime<FixedOffset>| dt.with_timezone(&Utc))
         })
         .or_else(|_| {
-            NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S")
+            NaiveDateTime::parse_from_str(parse_input, "%Y-%m-%d %H:%M:%S")
                 .map(|ndt| DateTime::<Utc>::from_naive_utc_and_offset(ndt, Utc))
         })
         .map_err(|_| anyhow!("Invalid datetime format: {}", s))
@@ -3787,8 +3796,8 @@ fn eval_duration_between(args: &[Value]) -> Result<Value> {
     // Both have date and time: calendar months + remaining time as nanos (no days).
     // Only use UTC normalization when BOTH operands have timezone info.
     if start_has_date && end_has_date && start_has_time && end_has_time {
-        let both_tz_aware = start.utc_offset_secs.is_some() && end.utc_offset_secs.is_some();
-        let (s_date, s_time, e_date, e_time) = if both_tz_aware {
+        let tz_aware = both_tz_aware(&start, &end);
+        let (s_date, s_time, e_date, e_time) = if tz_aware {
             (
                 start.utc_datetime.date(),
                 start.utc_datetime.time(),
@@ -3819,8 +3828,8 @@ fn eval_duration_between(args: &[Value]) -> Result<Value> {
 
     // One has date+time, other is date-only: months + days + remaining time.
     if start_has_date && end_has_date {
-        let both_tz_aware = start.utc_offset_secs.is_some() && end.utc_offset_secs.is_some();
-        let (s_date, s_time, e_date, e_time) = if both_tz_aware {
+        let tz_aware = both_tz_aware(&start, &end);
+        let (s_date, s_time, e_date, e_time) = if tz_aware {
             (
                 start.utc_datetime.date(),
                 start.utc_datetime.time(),
@@ -3851,13 +3860,13 @@ fn eval_duration_between(args: &[Value]) -> Result<Value> {
 
     // Cross-type: one has date, other is time-only, or both time-only.
     // Use UTC normalization only when BOTH operands have timezone info.
-    let both_tz_aware = start.utc_offset_secs.is_some() && end.utc_offset_secs.is_some();
-    let start_time = if both_tz_aware {
+    let tz_aware = both_tz_aware(&start, &end);
+    let start_time = if tz_aware {
         start.utc_datetime.time()
     } else {
         start.local_time
     };
-    let end_time = if both_tz_aware {
+    let end_time = if tz_aware {
         end.utc_datetime.time()
     } else {
         end.local_time
@@ -3903,8 +3912,8 @@ fn eval_duration_in_months(args: &[Value]) -> Result<Value> {
 
     if has_date_component(start.ttype) && has_date_component(end.ttype) {
         // Only use UTC normalization when both operands have timezone info
-        let both_tz = start.utc_offset_secs.is_some() && end.utc_offset_secs.is_some();
-        let (s_date, s_time, e_date, e_time) = if both_tz {
+        let tz_aware = both_tz_aware(&start, &end);
+        let (s_date, s_time, e_date, e_time) = if tz_aware {
             (
                 start.utc_datetime.date(),
                 start.utc_datetime.time(),
@@ -3955,8 +3964,8 @@ fn eval_duration_in_days(args: &[Value]) -> Result<Value> {
 
     if has_date_component(start.ttype) && has_date_component(end.ttype) {
         // Only use UTC normalization when both operands have timezone info.
-        let both_tz = start.utc_offset_secs.is_some() && end.utc_offset_secs.is_some();
-        let (s_dt, e_dt) = if both_tz {
+        let tz_aware = both_tz_aware(&start, &end);
+        let (s_dt, e_dt) = if tz_aware {
             (start.utc_datetime, end.utc_datetime)
         } else {
             (
@@ -4032,7 +4041,7 @@ fn eval_duration_in_seconds(args: &[Value]) -> Result<Value> {
     //   are interpreted in the shared named timezone then converted to UTC.
     // - If both operands have timezone info (fixed offsets), normalize to UTC.
     // - Otherwise (mixed local + fixed-offset, or both local), use face values.
-    let both_have_tz = start.utc_offset_secs.is_some() && end.utc_offset_secs.is_some();
+    let have_tz = both_tz_aware(&start, &end);
 
     let resolve =
         |pt: &ParsedTemporal, date_override: Option<NaiveDate>| -> Result<NaiveDateTime> {
@@ -4048,7 +4057,7 @@ fn eval_duration_in_seconds(args: &[Value]) -> Result<Value> {
                     // Local operand or date-overridden: interpret in the shared tz.
                     normalize_local_to_utc(local_ndt, tz)
                 }
-            } else if both_have_tz {
+            } else if have_tz {
                 // Both have fixed offsets: use UTC normalization.
                 if date_override.is_some() {
                     let offset = pt.utc_offset_secs.unwrap_or(0);
@@ -4085,12 +4094,12 @@ fn eval_duration_in_seconds(args: &[Value]) -> Result<Value> {
         }
 
         // No named timezone: simple time difference.
-        let s_time = if both_have_tz {
+        let s_time = if have_tz {
             start.utc_datetime.time()
         } else {
             start.local_time
         };
-        let e_time = if both_have_tz {
+        let e_time = if have_tz {
             end.utc_datetime.time()
         } else {
             end.local_time
@@ -4127,6 +4136,11 @@ struct ParsedTemporal {
     utc_offset_secs: Option<i32>,
     /// The named IANA timezone, if present (for DST-aware cross-type computation).
     named_tz: Option<Tz>,
+}
+
+/// Check whether both temporal operands carry timezone information.
+fn both_tz_aware(a: &ParsedTemporal, b: &ParsedTemporal) -> bool {
+    a.utc_offset_secs.is_some() && b.utc_offset_secs.is_some()
 }
 
 /// Parse a temporal value into local components, UTC-normalized datetime, and type.
@@ -4328,6 +4342,15 @@ mod tests {
     /// Helper to build a Value::Map from key-value pairs.
     fn map_val(pairs: Vec<(&str, Value)>) -> Value {
         Value::Map(pairs.into_iter().map(|(k, v)| (k.to_string(), v)).collect())
+    }
+
+    #[test]
+    fn test_parse_datetime_utc_accepts_bracketed_timezone_suffix() {
+        let dt = parse_datetime_utc("2020-01-01T00:00Z[UTC]").unwrap();
+        assert_eq!(dt.to_rfc3339(), "2020-01-01T00:00:00+00:00");
+
+        let dt = parse_datetime_utc("2020-01-01T01:00:00+01:00[Europe/Paris]").unwrap();
+        assert_eq!(dt.to_rfc3339(), "2020-01-01T00:00:00+00:00");
     }
 
     #[test]
