@@ -28,7 +28,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use uni_common::Value;
 use uni_common::core::id::Vid;
-use uni_cypher::ast::{Expr, Pattern, RemoveItem, SetItem};
+use uni_cypher::ast::{Expr, Pattern, RemoveItem, SetClause, SetItem};
 use uni_store::runtime::property_manager::PropertyManager;
 use uni_store::runtime::writer::Writer;
 use uni_store::storage::arrow_convert;
@@ -87,6 +87,13 @@ pub enum MutationKind {
 
     /// DELETE clause: delete nodes/edges.
     Delete { items: Vec<Expr>, detach: bool },
+
+    /// MERGE clause: match-or-create with optional ON MATCH/ON CREATE actions.
+    Merge {
+        pattern: Pattern,
+        on_match: Option<SetClause>,
+        on_create: Option<SetClause>,
+    },
 }
 
 /// Convert RecordBatches to row-based HashMaps for mutation processing.
@@ -326,9 +333,42 @@ async fn execute_mutation_inner(
         ))
     })?;
 
-    // 3. Acquire writer lock and apply mutations
-    let mut writer = mutation_ctx.writer.write().await;
+    // 3. Apply mutations.
+    // MERGE manages its own writer lock internally (acquires/releases per-row because
+    // execute_merge_match needs to run a read subplan between lock acquisitions).
+    // All other mutations acquire the writer lock once for the entire clause.
+    if let MutationKind::Merge {
+        ref pattern,
+        ref on_match,
+        ref on_create,
+    } = mutation_kind
+    {
+        let exec = &mutation_ctx.executor;
+        let pm = &mutation_ctx.prop_manager;
+        let params = &mutation_ctx.params;
+        let ctx = mutation_ctx.query_ctx.as_ref();
 
+        let result_rows = exec
+            .execute_merge(rows, pattern, on_match.as_ref(), on_create.as_ref(), pm, params, ctx)
+            .await
+            .map_err(|e| {
+                datafusion::error::DataFusionError::Execution(format!("MERGE failed: {e}"))
+            })?;
+
+        tracing::debug!(
+            mutation = mutation_label,
+            input_rows = input_row_count,
+            output_rows = result_rows.len(),
+            "MERGE mutation complete"
+        );
+
+        // MERGE returns its own result rows — pass through original input batches
+        // (side effects are already applied).
+        let results: Vec<DFResult<RecordBatch>> = input_batches.into_iter().map(Ok).collect();
+        return Ok(futures::stream::iter(results));
+    }
+
+    let mut writer = mutation_ctx.writer.write().await;
     apply_mutations(&mutation_ctx, &mutation_kind, &mut rows, &mut writer).await?;
     drop(writer);
 
@@ -503,6 +543,11 @@ async fn apply_mutations(
                 }
             }
         }
+        MutationKind::Merge { .. } => {
+            // MERGE is handled before the writer lock in execute_mutation_inner.
+            // This branch is unreachable but required for exhaustive matching.
+            unreachable!("MERGE mutations are handled before apply_mutations is called");
+        }
     }
 
     Ok(())
@@ -516,6 +561,7 @@ fn mutation_kind_label(kind: &MutationKind) -> &'static str {
         MutationKind::Set { .. } => "SET",
         MutationKind::Remove { .. } => "REMOVE",
         MutationKind::Delete { .. } => "DELETE",
+        MutationKind::Merge { .. } => "MERGE",
     }
 }
 

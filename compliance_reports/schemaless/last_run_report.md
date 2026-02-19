@@ -1,8 +1,8 @@
 # TCK Compliance Report
 
-**Generated:** 2026-02-19 09:45:13
-**Results:** `results_20260219_094513.json`
-**Compared to:** `results_20260219_085920.json`
+**Generated:** 2026-02-19 10:39:17
+**Results:** `results_20260219_103917.json`
+**Compared to:** `results_20260219_094513.json`
 
 ## Summary
 
@@ -397,11 +397,10 @@
   Step failed:
       Defined: tck/features/expressions/graph/Graph6.feature:151:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): Expected column '(list[1]).missing' not found in result
+      Step panicked. Captured output: Result mismatch (any order): Expected column '(list[1]).missingToo' not found in result
 [Summary]
 1 feature
 1 scenario (1 failed)
-4 
   ... (truncated)
   ```
 
@@ -479,7 +478,7 @@
   Step failed:
       Defined: tck/features/expressions/literals/Literals7.feature:295:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("literal", Some(List([Map({"batters": Map({"
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("literal", Some(List([Map({"topping": List([
   ... (truncated)
   ```
 
@@ -1054,7 +1053,7 @@
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal5.feature:133:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("d.weekDay", Some(Int(7))), ("d.quarter", So
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("d.offsetMinutes", Some(Int(60))), ("d.offse
   ... (truncated)
   ```
 

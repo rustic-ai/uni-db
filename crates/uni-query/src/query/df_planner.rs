@@ -37,6 +37,7 @@ use crate::query::df_graph::bind_fixed_path::BindFixedPathExec;
 use crate::query::df_graph::bind_zero_length_path::BindZeroLengthPathExec;
 use crate::query::df_graph::mutation_create::new_create_exec;
 use crate::query::df_graph::mutation_delete::new_delete_exec;
+use crate::query::df_graph::mutation_merge::new_merge_exec;
 use crate::query::df_graph::mutation_remove::new_remove_exec;
 use crate::query::df_graph::mutation_set::new_set_exec;
 use crate::query::df_graph::recursive_cte::RecursiveCTEExec;
@@ -781,9 +782,22 @@ impl HybridPhysicalPlanner {
                     mutation_ctx,
                 )))
             }
-            // MERGE stays on fallback path (too complex for initial rollout)
-            LogicalPlan::Merge { .. } => {
-                Err(anyhow!("MERGE not yet supported in DataFusion engine"))
+            LogicalPlan::Merge {
+                input,
+                pattern,
+                on_match,
+                on_create,
+            } => {
+                tracing::debug!("Planning MutationMergeExec");
+                let child = self.plan_internal(input, all_properties)?;
+                let mutation_ctx = self.require_mutation_ctx()?;
+                Ok(Arc::new(new_merge_exec(
+                    child,
+                    pattern.clone(),
+                    on_match.clone(),
+                    on_create.clone(),
+                    mutation_ctx,
+                )))
             }
 
             LogicalPlan::Window {

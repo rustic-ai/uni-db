@@ -1,7 +1,7 @@
 # DataFusion Mutation Implementation Plan
 
 **Date:** 2026-02-18
-**Last updated:** 2026-02-19 (M4 MERGE complete: 76/76 MERGE scenarios, +20 TCK scenarios, overall 3814/3897 97.9%)
+**Last updated:** 2026-02-19 (M4.1 MERGE DF routing: terminal MERGE now flows through DataFusion MutationExec path; 76/76 TCK, 3814/3897 overall 97.9%)
 **Depends on:** `docs/DATAFUSION_MUTATION_APPROACHES.md`
 **Primary strategy:** Implement Approach A first, keep Approach B as staged follow-up.
 
@@ -13,8 +13,8 @@
 | **M1** | **COMPLETE** | All SET semantic forms implemented; Gate A satisfied |
 | **M2** | **COMPLETE** | `MutationExec` framework built; `MutationContext` wired; eager barrier; all 4 operators dispatched via planner |
 | **M3** | **COMPLETE** | All 4 operators wired in DF planner; simple terminal mutations route to DF path; complex mutations (RETURN/WITH, nested) fall back. M3 parity fixes round 1: label SET schemaless, multi-property REMOVE batching, DELETE/CREATE error validation (+23 TCK scenarios). Round 2: schemaless edge visibility in batch detach-delete, two-pass non-detach DELETE, BindPath null-safety, property type validation, edge uniqueness in GraphTraverseMainExec (+12 TCK scenarios) |
-| **M4** | **COMPLETE** | All 76/76 MERGE scenarios passing. Merge1-9 at 100%. 8-phase implementation: VariableAlreadyBound validation, multi-label filter, property expression resolution, read-own-writes, deleted entity filtering, path variable binding, undirected MERGE + startNode/endNode, sequential chains |
-| **M5** | Not started | |
+| **M4** | **COMPLETE** | All 76/76 MERGE scenarios passing. Merge1-9 at 100%. 8-phase implementation + DF routing: terminal MERGE now flows through DataFusion `MutationMergeExec` operator (same framework as CREATE/SET/REMOVE/DELETE). Complex MERGE (with RETURN/WITH, nested mutations) falls back. |
+| **M5** | Not started | Hardening, performance, default rollout |
 
 ### Overall TCK (schemaless mode, 2026-02-19)
 
@@ -22,7 +22,7 @@
 |--------|-------|
 | Total scenarios | 3897 |
 | Passed | 3814 |
-| Failed | 83 |
+| Failed | 82 |
 | Pass rate | **97.9%** |
 
 ### Mutation TCK Breakdown
@@ -94,9 +94,10 @@ Done means all of the following:
 3. Persistence/interop scenarios pass for `Create6`, `Delete6`, `Set6`, `Remove3`.
 4. Side-effect accounting remains exact (`+/-nodes`, `+/-relationships`, `+/-properties`, `+/-labels`).
 5. `Delete5` (expression-based and nested delete targets, path deletion) passes.
-6. MERGE has an explicit status:
-   - either parity-complete and enabled on new path, or
-   - still pinned to fallback with clear feature flag and tests.
+6. MERGE is parity-complete and enabled on new path:
+   - 76/76 TCK scenarios passing. ✅
+   - Terminal MERGE routes through `MutationMergeExec` on DF path. ✅
+   - Complex MERGE (RETURN/WITH, nested) falls back via `needs_mutation_fallback()`. ✅
 7. No regression in non-mutation query suites.
 
 ## 3. Milestone Plan (Recommended)
@@ -283,7 +284,7 @@ Goal: introduce a Writer-backed mutation sink abstraction and wire it into the e
 **Routing Logic:**
 - `execute_datafusion()` in `read.rs` builds `MutationContext` when `contains_write_operations()`
   detects write clauses in the plan.
-- Multi-level dispatch: DDL/Admin → MERGE/FOREACH fallback → mutation config gate →
+- Multi-level dispatch: DDL/Admin → FOREACH fallback → mutation config gate →
   complex mutation fallback → window functions → DataFusion path.
 
 ### M2 Tasks
@@ -353,11 +354,11 @@ Goal: move stable mutation clauses to DF + Writer sink incrementally, with full 
 
 **Status: COMPLETE** (2026-02-19)
 
-- All 4 mutation operators (CREATE, SET, REMOVE, DELETE) fully wired in `HybridPhysicalPlanner`.
+- All 5 mutation operators (CREATE, SET, REMOVE, DELETE, MERGE) fully wired in `HybridPhysicalPlanner`.
 - Simple terminal mutations (no RETURN/WITH shaping, no nested mutations) route to DF path.
 - Complex mutations with RETURN/WITH, SKIP/LIMIT, or nested mutations fall back via
   `needs_mutation_fallback()` in `read.rs`.
-- MERGE explicitly falls back (not wired to DF path).
+- MERGE routed through `MutationMergeExec` for terminal queries (M4.1 update).
 
 ### M3 Parity Fixes Round 1 (2026-02-18, +23 TCK scenarios)
 
@@ -390,9 +391,10 @@ Targeted remaining Delete, Set, and Create failures. Achieved +12 with zero regr
 
 | Helper | Purpose |
 |--------|---------|
-| `is_mutation_plan()` | Detects CREATE/SET/REMOVE/DELETE at outermost level |
+| `is_mutation_plan()` | Detects CREATE/SET/REMOVE/DELETE/MERGE at outermost level |
 | `needs_mutation_fallback()` | Returns true for mutations with RETURN/WITH or nested mutations |
-| `has_nested_mutations()` | Detects multi-clause mutations |
+| `has_nested_mutations()` | Detects multi-clause mutations (includes MERGE) |
+| `contains_foreach()` | Detects FOREACH (only remaining always-fallback mutation) |
 | `contains_write_operations()` | Detects any write op in plan tree (triggers MutationContext build) |
 | `mutation_clause_disabled_by_config()` | Checks per-clause MutationPathConfig gate |
 
@@ -532,9 +534,36 @@ ON CREATE/ON MATCH subclause work begins, because those subclauses use the same 
 - Fixed empty-string key (`""`) polluting `final_matches` filter between sequential MERGE clauses: unnamed MERGE nodes use `""` as placeholder variable, now skipped in consistency filter alongside `__`-prefixed keys.
 - TCK: Merge5[9], Merge5[18], Merge5[19], Merge1[9]
 
+### Phase 9: DataFusion MutationExec routing (M4.1, 2026-02-19)
+
+Wired MERGE into the DataFusion `MutationExec` framework so terminal MERGE queries (no RETURN/WITH
+shaping, no nested mutations) flow through the DF path. Complex MERGE continues to use fallback via
+`needs_mutation_fallback()`.
+
+**Key design decision: Writer lock handling.** Unlike CREATE/SET/REMOVE/DELETE which use simple
+per-row helpers called under a pre-acquired writer lock, `execute_merge()` manages its own writer
+lock internally (acquires/releases per-row because `execute_merge_match()` needs to run a read
+subplan between lock acquisitions). Therefore, `execute_mutation_inner()` handles MERGE *before*
+the writer lock acquisition, delegating entirely to `execute_merge()`.
+
+Files modified:
+- `crates/uni-query/src/query/df_graph/mutation_common.rs` — Added `MutationKind::Merge` variant
+  with `pattern`, `on_match`, `on_create` fields. MERGE branch in `execute_mutation_inner()` skips
+  the shared writer lock and delegates to `executor.execute_merge()` directly.
+- `crates/uni-query/src/query/df_graph/mutation_merge.rs` **(NEW)** — Thin wrapper with
+  `MutationMergeExec` type alias and `new_merge_exec()` constructor.
+- `crates/uni-query/src/query/df_graph/mod.rs` — Added module export.
+- `crates/uni-query/src/query/df_planner.rs` — Replaced MERGE error stub with `MutationMergeExec`
+  planning via `new_merge_exec()`.
+- `crates/uni-query/src/query/executor/read.rs` — Renamed `contains_merge_or_foreach()` to
+  `contains_foreach()` (removed MERGE from always-fallback gate). Added `LogicalPlan::Merge` to
+  `is_mutation_plan()` and `has_nested_mutations()`.
+
+Verification: 76/76 MERGE TCK, 92/92 merge unit tests, 3814/3897 full TCK (zero regressions).
+
 ### Legacy Options (superseded)
 
-~~**Option 1** (recommended near-term): Keep MERGE on fallback path~~ — **Superseded: full parity achieved.**
+~~**Option 1** (recommended near-term): Keep MERGE on fallback path~~ — **Superseded: full parity achieved and DF routing wired.**
 
 **ON CREATE SET** (Merge6) ✅ COMPLETE — 6/6
 **ON MATCH SET** (Merge7/8) ✅ COMPLETE — 5/5 + 1/1
@@ -549,8 +578,11 @@ This applies under both Option 1 (fallback must handle it correctly) and Option 
 Primary files:
 
 - `crates/uni-query/src/query/executor/write.rs` (MERGE execution: match-or-create, property resolution, path binding, final_matches filter)
-- `crates/uni-query/src/query/executor/read.rs` (BFS self-loop fix, startNode/endNode fallback, deleted entity filtering)
+- `crates/uni-query/src/query/executor/read.rs` (routing: `contains_foreach()`, `is_mutation_plan()`, `has_nested_mutations()`)
 - `crates/uni-query/src/query/planner.rs` (VariableAlreadyBound validation in validate_merge_clause)
+- `crates/uni-query/src/query/df_graph/mutation_merge.rs` (MutationMergeExec constructor)
+- `crates/uni-query/src/query/df_graph/mutation_common.rs` (MutationKind::Merge, MERGE branch in execute_mutation_inner)
+- `crates/uni-query/src/query/df_planner.rs` (MERGE planning via new_merge_exec)
 
 TCK gates:
 
@@ -560,6 +592,7 @@ Exit criteria:
 
 1. MERGE behavior is parity-complete: **76/76 scenarios passing.** ✅
 2. Map parameter behavior is tested and matches spec. ✅
+3. Terminal MERGE queries route through DataFusion MutationExec path. ✅
 
 ---
 
@@ -592,8 +625,10 @@ Exit criteria:
 
 1. `src/query/executor/read.rs` ✅
    - `MutationPathConfig` routing check via `mutation_clause_disabled_by_config()`.
-   - Multi-level routing: DDL → MERGE/FOREACH fallback → config gate → complexity fallback → DF path.
+   - Multi-level routing: DDL → FOREACH fallback → config gate → complexity fallback → DF path.
    - `MutationContext` built in `execute_datafusion()` when write operations detected.
+   - `contains_foreach()` gates only FOREACH to fallback (MERGE removed in M4.1).
+   - `is_mutation_plan()` and `has_nested_mutations()` include MERGE.
 2. `src/query/executor/write.rs` ✅
    - All SET semantic forms implemented: map-replace, map-append, entity-copy, null-property.
    - Null-entity silent-skip guard at mutation helper entry.
@@ -603,18 +638,20 @@ Exit criteria:
 3. `src/query/executor/core.rs`
    - Passes `MutationPathConfig` to query context via `set_mutation_path()`.
 4. `src/query/df_planner.rs` ✅
-   - All 4 mutation operators wired: `new_create_exec`, `new_set_exec`, `new_remove_exec`, `new_delete_exec`.
+   - All 5 mutation operators wired: `new_create_exec`, `new_set_exec`, `new_remove_exec`, `new_delete_exec`, `new_merge_exec`.
    - `with_mutation_context()` / `require_mutation_ctx()` for context management.
    - `CreateBatch` handled by chaining individual `new_create_exec` calls.
 5. `src/query/df_graph/mod.rs` ✅
-   - Exports: `MutationContext`, `MutationExec`, and all typed wrappers.
+   - Exports: `MutationContext`, `MutationExec`, and all typed wrappers including `MutationMergeExec`.
 6. `src/query/df_graph/mutation_common.rs` ✅ (NEW)
    - `MutationExec` struct implementing `ExecutionPlan` with `MutationKind` dispatch.
    - `MutationContext` struct with executor, writer, prop_manager, params, query_ctx.
-   - `MutationKind` enum: Create, Set, Remove, Delete variants.
+   - `MutationKind` enum: Create, Set, Remove, Delete, Merge variants.
    - `execute_mutation_stream()` with eager barrier pattern.
    - `apply_mutations()` dispatching to write helpers by kind.
-7. `src/query/df_graph/mutation_{create,set,remove,delete}.rs` ✅ (NEW)
+   - MERGE handled specially: delegates to `executor.execute_merge()` before writer lock
+     acquisition (MERGE manages its own lock internally).
+7. `src/query/df_graph/mutation_{create,set,remove,delete,merge}.rs` ✅ (NEW)
    - Thin wrappers: type alias + typed constructor function per clause.
 8. `src/query/df_graph/traverse.rs` ✅
    - `GraphTraverseMainExec`: added `used_edge_columns` for relationship uniqueness enforcement.
@@ -743,6 +780,9 @@ correctness and must be written as separate integration tests:
 
 4. **MERGE complexity stalling rollout** ✅ MITIGATED
    - Status: MERGE fully implemented with 76/76 TCK scenarios passing. 8-phase implementation completed.
+     Terminal MERGE now routes through DataFusion `MutationMergeExec` (M4.1). MERGE manages its own
+     writer lock internally, so `execute_mutation_inner()` delegates to `execute_merge()` without
+     pre-acquiring the lock.
 
 5. **ON CREATE/ON MATCH SET map forms broken without M1 foundation** ✅ MITIGATED
    - Mitigation: Gate E enforces that M1 (all SET forms) and M3 SET promotion are complete before
@@ -765,8 +805,8 @@ correctness and must be written as separate integration tests:
 ## 7. Rollout Strategy
 
 1. Ship feature-flagged by clause via `MutationPathConfig` (default all-fallback).
-2. Enable in this order: `CREATE` → `DELETE` → `REMOVE` → `SET`.
-3. MERGE: Gate E satisfied, 76/76 TCK scenarios passing. Ready for promotion when DF path migration is complete.
+2. Enable in this order: `CREATE` → `DELETE` → `REMOVE` → `SET` → `MERGE`.
+3. MERGE: Gate E satisfied, 76/76 TCK scenarios passing. DF routing wired (M4.1). Terminal MERGE flows through `MutationMergeExec`; complex MERGE falls back.
 4. Promote per clause after TCK gate + perf sanity + Gate D (no read regressions).
 
 ---
@@ -855,7 +895,8 @@ CREATE (self-loop patterns) remain valid.
 
 ### MERGE core match-or-create (Merge1-5, Merge9) ✅ RESOLVED
 
-All MERGE scenarios now passing: **76/76 (100%)**. Implemented in 8 phases:
+All MERGE scenarios now passing: **76/76 (100%)**. Implemented in 8 phases + DF routing (M4.1).
+Terminal MERGE queries now flow through `MutationMergeExec` on the DataFusion path. Phases:
 
 1. **VariableAlreadyBound validation** (`planner.rs`): MERGE node variables already in scope
    raise `SyntaxError` when standalone or introducing new labels/properties. Merge1[15], Merge5[22].
@@ -888,7 +929,7 @@ All MERGE scenarios now passing: **76/76 (100%)**. Implemented in 8 phases:
 
 ## 9. Approach B Program (After Approach A Stabilizes)
 
-Only start when Approach A is stable for non-MERGE mutation clauses.
+Only start when Approach A is stable for all mutation clauses (CREATE, SET, REMOVE, DELETE, MERGE).
 
 Phases:
 

@@ -798,17 +798,18 @@ impl Executor {
             let ctx = self.get_context().await;
             let start = Instant::now();
 
-            // Route DDL/Admin, MERGE, FOREACH, and complex mutation queries to the
+            // Route DDL/Admin, FOREACH, and complex mutation queries to the
             // fallback executor. Simple "terminal" mutations (single mutation clause at
             // the outermost level, no RETURN/WITH) flow through DataFusion via MutationExec
-            // operators. Complex mutations (multi-clause, or with downstream RETURN/WITH)
+            // operators — this includes CREATE, SET, REMOVE, DELETE, and MERGE.
+            // Complex mutations (multi-clause, or with downstream RETURN/WITH)
             // still use the fallback path for correct variable flow and output semantics.
             let mutation_config = ctx
                 .as_ref()
                 .map(|c| &c.mutation_path)
                 .unwrap_or(&self.config.mutation_path);
             let res = if Self::is_ddl_or_admin(&plan)
-                || Self::contains_merge_or_foreach(&plan)
+                || Self::contains_foreach(&plan)
                 || Self::needs_mutation_fallback(&plan)
                 || Self::mutation_clause_disabled_by_config(&plan, mutation_config)
             {
@@ -1059,17 +1060,17 @@ impl Executor {
         }
     }
 
-    /// Check if a plan contains MERGE or FOREACH operations.
+    /// Check if a plan contains FOREACH operations.
     ///
-    /// Only these two write operations stay on the fallback path. All other
-    /// mutations (CREATE, SET, REMOVE, DELETE) now flow through DataFusion
+    /// Only FOREACH stays on the fallback path. All other mutations
+    /// (CREATE, SET, REMOVE, DELETE, MERGE) now flow through DataFusion
     /// via MutationExec operators.
-    fn contains_merge_or_foreach(plan: &LogicalPlan) -> bool {
+    fn contains_foreach(plan: &LogicalPlan) -> bool {
         match plan {
-            LogicalPlan::Merge { .. } | LogicalPlan::Foreach { .. } => true,
+            LogicalPlan::Foreach { .. } => true,
             _ => Self::plan_children(plan)
                 .iter()
-                .any(|child| Self::contains_merge_or_foreach(child)),
+                .any(|child| Self::contains_foreach(child)),
         }
     }
 
@@ -1119,6 +1120,7 @@ impl Executor {
                 | LogicalPlan::Set { .. }
                 | LogicalPlan::Remove { .. }
                 | LogicalPlan::Delete { .. }
+                | LogicalPlan::Merge { .. }
         )
     }
 
@@ -1132,7 +1134,8 @@ impl Executor {
             | LogicalPlan::CreateBatch { input, .. }
             | LogicalPlan::Set { input, .. }
             | LogicalPlan::Remove { input, .. }
-            | LogicalPlan::Delete { input, .. } => Self::contains_write_operations(input),
+            | LogicalPlan::Delete { input, .. }
+            | LogicalPlan::Merge { input, .. } => Self::contains_write_operations(input),
             _ => false,
         }
     }
