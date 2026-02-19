@@ -1176,6 +1176,10 @@ impl Executor {
             .as_ref()
             .ok_or_else(|| anyhow!("Write operation requires a Writer"))?;
 
+        // Prepare pattern for path variable binding: assign temp edge variable
+        // names to unnamed relationships in paths that have path variables.
+        let (path_pattern, temp_vars) = Self::prepare_pattern_for_path_binding(pattern);
+
         let mut results = Vec::new();
         for mut row in rows {
             // Optimization: Check for single node pattern with unique constraint
@@ -1247,6 +1251,7 @@ impl Executor {
                     )
                     .await?;
                 }
+                Self::bind_path_variables(&path_pattern, &mut match_row, &temp_vars);
                 results.push(match_row);
             } else {
                 // Fallback to standard execution
@@ -1267,11 +1272,12 @@ impl Executor {
                             )
                             .await?;
                         }
+                        Self::bind_path_variables(&path_pattern, &mut m, &temp_vars);
                         results.push(m);
                     }
                 } else {
                     self.execute_create_pattern(
-                        pattern,
+                        &path_pattern,
                         &mut row,
                         &mut writer,
                         prop_manager,
@@ -1290,6 +1296,7 @@ impl Executor {
                         )
                         .await?;
                     }
+                    Self::bind_path_variables(&path_pattern, &mut row, &temp_vars);
                     results.push(row);
                 }
             }
@@ -1699,13 +1706,10 @@ impl Executor {
                     if let Expr::Property(var_expr, prop_name) = expr
                         && let Expr::Variable(var_name) = &**var_expr
                     {
-                        if let Some(entry) =
-                            prop_removals.iter_mut().find(|(v, _)| v == var_name)
-                        {
+                        if let Some(entry) = prop_removals.iter_mut().find(|(v, _)| v == var_name) {
                             entry.1.push(prop_name.clone());
                         } else {
-                            prop_removals
-                                .push((var_name.clone(), vec![prop_name.clone()]));
+                            prop_removals.push((var_name.clone(), vec![prop_name.clone()]));
                         }
                     }
                 }
@@ -1729,18 +1733,15 @@ impl Executor {
                     .unwrap_or_default();
 
                 // Only write back if at least one property actually exists
-                let any_exist = prop_names.iter().any(|p| {
-                    props.get(p).is_some_and(|v| !v.is_null())
-                });
+                let any_exist = prop_names
+                    .iter()
+                    .any(|p| props.get(p).is_some_and(|v| !v.is_null()));
                 if any_exist {
                     for prop_name in prop_names {
                         props.insert(prop_name.clone(), Value::Null);
                     }
-                    let labels =
-                        Self::extract_labels_from_node(node_val).unwrap_or_default();
-                    let _ = writer
-                        .insert_vertex_with_labels(vid, props, labels)
-                        .await?;
+                    let labels = Self::extract_labels_from_node(node_val).unwrap_or_default();
+                    let _ = writer.insert_vertex_with_labels(vid, props, labels).await?;
                 }
 
                 // Update the row map regardless (downstream sees Null)
@@ -1758,21 +1759,15 @@ impl Executor {
                         .await?
                         .unwrap_or_default();
 
-                    let any_exist = prop_names.iter().any(|p| {
-                        props.get(p).is_some_and(|v| !v.is_null())
-                    });
+                    let any_exist = prop_names
+                        .iter()
+                        .any(|p| props.get(p).is_some_and(|v| !v.is_null()));
                     if any_exist {
                         for prop_name in prop_names {
                             props.insert(prop_name.to_string(), Value::Null);
                         }
                         writer
-                            .insert_edge(
-                                ei.src,
-                                ei.dst,
-                                ei.edge_type_id,
-                                ei.eid,
-                                props,
-                            )
+                            .insert_edge(ei.src, ei.dst, ei.edge_type_id, ei.eid, props)
                             .await?;
                     }
                 }
@@ -1787,17 +1782,16 @@ impl Executor {
                 let eid = edge.eid;
                 let src = edge.src;
                 let dst = edge.dst;
-                let etype =
-                    self.resolve_edge_type_id(&Value::String(edge.edge_type.clone()))?;
+                let etype = self.resolve_edge_type_id(&Value::String(edge.edge_type.clone()))?;
 
                 let mut props = prop_manager
                     .get_all_edge_props_with_ctx(eid, ctx)
                     .await?
                     .unwrap_or_default();
 
-                let any_exist = prop_names.iter().any(|p| {
-                    props.get(p).is_some_and(|v| !v.is_null())
-                });
+                let any_exist = prop_names
+                    .iter()
+                    .any(|p| props.get(p).is_some_and(|v| !v.is_null()));
                 if any_exist {
                     for prop_name in prop_names {
                         props.insert(prop_name.to_string(), Value::Null);
@@ -1901,13 +1895,8 @@ impl Executor {
                         .await?;
                 }
                 for node in &path.nodes {
-                    self.execute_delete_vertex(
-                        node.vid,
-                        detach,
-                        Some(node.labels.clone()),
-                        writer,
-                    )
-                    .await?;
+                    self.execute_delete_vertex(node.vid, detach, Some(node.labels.clone()), writer)
+                        .await?;
                 }
             }
             _ => {
@@ -1998,24 +1987,35 @@ impl Executor {
         Ok(())
     }
 
-    /// Build a scan plan node, choosing `ScanAll` when `label_id == 0` (schemaless)
-    /// and `Scan` otherwise.
+    /// Build a scan plan node.
+    ///
+    /// - `label_id > 0`: schema label → `Scan` (fast, label-specific storage)
+    /// - `label_id == 0` with labels: schemaless → `ScanMainByLabels` (main table + L0, filtered by label name)
+    /// - `label_id == 0` without labels: unlabeled → `ScanAll`
     fn make_scan_plan(
         label_id: u16,
         labels: Vec<String>,
         variable: String,
         filter: Option<Expr>,
     ) -> LogicalPlan {
-        if label_id == 0 {
-            LogicalPlan::ScanAll {
+        if label_id > 0 {
+            LogicalPlan::Scan {
+                label_id,
+                labels,
+                variable,
+                filter,
+                optional: false,
+            }
+        } else if !labels.is_empty() {
+            // Schemaless label: use ScanMainByLabels to filter by label name
+            LogicalPlan::ScanMainByLabels {
+                labels,
                 variable,
                 filter,
                 optional: false,
             }
         } else {
-            LogicalPlan::Scan {
-                label_id,
-                labels,
+            LogicalPlan::ScanAll {
                 variable,
                 filter,
                 optional: false,
@@ -2033,6 +2033,53 @@ impl Executor {
                 left: Box::new(plan),
                 right: Box::new(scan),
             }
+        }
+    }
+
+    /// Resolve MERGE property map expressions against the current row context.
+    ///
+    /// MERGE patterns like `MERGE (city:City {name: person.bornIn})` contain
+    /// property expressions that reference bound variables. These need to be
+    /// evaluated to concrete literal values before being converted to filter
+    /// expressions by `properties_to_expr()`.
+    async fn resolve_merge_properties(
+        &self,
+        properties: &Option<Expr>,
+        row: &HashMap<String, Value>,
+        prop_manager: &PropertyManager,
+        params: &HashMap<String, Value>,
+        ctx: Option<&QueryContext>,
+    ) -> Result<Option<Expr>> {
+        let entries = match properties {
+            Some(Expr::Map(entries)) => entries,
+            other => return Ok(other.clone()),
+        };
+        let mut resolved = Vec::new();
+        for (key, val_expr) in entries {
+            if matches!(val_expr, Expr::Literal(_)) {
+                resolved.push((key.clone(), val_expr.clone()));
+            } else {
+                let value = self
+                    .evaluate_expr(val_expr, row, prop_manager, params, ctx)
+                    .await?;
+                resolved.push((key.clone(), Self::value_to_literal_expr(&value)));
+            }
+        }
+        Ok(Some(Expr::Map(resolved)))
+    }
+
+    /// Convert a runtime Value back to an AST literal expression.
+    fn value_to_literal_expr(value: &Value) -> Expr {
+        match value {
+            Value::Int(i) => Expr::Literal(CypherLiteral::Integer(*i)),
+            Value::Float(f) => Expr::Literal(CypherLiteral::Float(*f)),
+            Value::String(s) => Expr::Literal(CypherLiteral::String(s.clone())),
+            Value::Bool(b) => Expr::Literal(CypherLiteral::Bool(*b)),
+            Value::Null => Expr::Literal(CypherLiteral::Null),
+            Value::List(items) => {
+                Expr::List(items.iter().map(Self::value_to_literal_expr).collect())
+            }
+            _ => Expr::Literal(CypherLiteral::Null),
         }
     }
 
@@ -2092,7 +2139,17 @@ impl Executor {
                                     .unwrap_or(0)
                             };
 
-                            let prop_filter = planner.properties_to_expr(&variable, &n.properties);
+                            let resolved_props = self
+                                .resolve_merge_properties(
+                                    &n.properties,
+                                    row,
+                                    prop_manager,
+                                    params,
+                                    ctx,
+                                )
+                                .await?;
+                            let prop_filter =
+                                planner.properties_to_expr(&variable, &resolved_props);
 
                             // Create a filter expression for VID: variable._vid = vid
                             // But our expression engine handles `Expr::Variable` as column.
@@ -2145,7 +2202,17 @@ impl Executor {
                                     .unwrap_or(0)
                             };
 
-                            let prop_filter = planner.properties_to_expr(&variable, &n.properties);
+                            let resolved_props = self
+                                .resolve_merge_properties(
+                                    &n.properties,
+                                    row,
+                                    prop_manager,
+                                    params,
+                                    ctx,
+                                )
+                                .await?;
+                            let prop_filter =
+                                planner.properties_to_expr(&variable, &resolved_props);
                             let scan = Self::make_scan_plan(
                                 label_id,
                                 n.labels.clone(),
@@ -2153,6 +2220,25 @@ impl Executor {
                                 prop_filter,
                             );
                             plan = Self::attach_scan(plan, scan);
+
+                            // Add label filters when:
+                            // 1. Multiple labels with a known schema label: filter for
+                            //    additional labels (Scan only scans by the first label).
+                            // 2. Schemaless labels (label_id = 0): ScanAll finds ALL
+                            //    nodes, so we must filter to only those with the
+                            //    specified label(s).
+                            if !n.labels.is_empty()
+                                && !variable.is_empty()
+                                && (label_id == 0 || n.labels.len() > 1)
+                                && let Some(label_filter) =
+                                    planner.node_filter_expr(&variable, &n.labels, &None)
+                            {
+                                plan = LogicalPlan::Filter {
+                                    input: Box::new(plan),
+                                    predicate: label_filter,
+                                    optional_variables: std::collections::HashSet::new(),
+                                };
+                            }
 
                             if !variable.is_empty() {
                                 vars_in_scope.push(variable.clone());
@@ -2263,21 +2349,42 @@ impl Executor {
                                     // Apply property filters for relationship
                                     if r.properties.is_some()
                                         && let Some(r_var) = &r.variable
-                                        && let Some(prop_filter) =
-                                            planner.properties_to_expr(r_var, &r.properties)
                                     {
-                                        plan = LogicalPlan::Filter {
-                                            input: Box::new(plan),
-                                            predicate: prop_filter,
-                                            optional_variables: std::collections::HashSet::new(),
-                                        };
+                                        let resolved_rel_props = self
+                                            .resolve_merge_properties(
+                                                &r.properties,
+                                                row,
+                                                prop_manager,
+                                                params,
+                                                ctx,
+                                            )
+                                            .await?;
+                                        if let Some(prop_filter) =
+                                            planner.properties_to_expr(r_var, &resolved_rel_props)
+                                        {
+                                            plan = LogicalPlan::Filter {
+                                                input: Box::new(plan),
+                                                predicate: prop_filter,
+                                                optional_variables: std::collections::HashSet::new(
+                                                ),
+                                            };
+                                        }
                                     }
 
                                     // Apply property filters for target node if it was new
                                     if !target_variable.is_empty() {
+                                        let resolved_target_props = self
+                                            .resolve_merge_properties(
+                                                &n_target.properties,
+                                                row,
+                                                prop_manager,
+                                                params,
+                                                ctx,
+                                            )
+                                            .await?;
                                         if let Some(prop_filter) = planner.properties_to_expr(
                                             &target_variable,
-                                            &n_target.properties,
+                                            &resolved_target_props,
                                         ) {
                                             plan = LogicalPlan::Filter {
                                                 input: Box::new(plan),
@@ -2313,10 +2420,18 @@ impl Executor {
             .await?;
 
         // Keep only DB results that are consistent with the input row bindings.
+        // Skip internal keys (starting with "__") as they are implementation
+        // artifacts (e.g. __used_edges) and not user-visible variable bindings.
+        // Also skip the empty-string key (""), which is the placeholder variable
+        // for unnamed MERGE nodes — it may carry over from a prior MERGE clause
+        // and must not constrain the current pattern's match.
         let final_matches = db_matches
             .into_iter()
             .filter(|db_match| {
                 row.iter().all(|(key, val)| {
+                    if key.is_empty() || key.starts_with("__") {
+                        return true;
+                    }
                     let Some(db_val) = db_match.get(key) else {
                         return true;
                     };
@@ -2338,5 +2453,170 @@ impl Executor {
             .collect();
 
         Ok(final_matches)
+    }
+
+    /// Prepare a MERGE pattern for path variable binding.
+    ///
+    /// If any path in the pattern has a path variable (e.g., `MERGE p = (a)-[:R]->(b)`),
+    /// unnamed relationships need internal variable names so that `execute_create_pattern`
+    /// stores the edge data in the row for later path construction.
+    ///
+    /// Returns the (possibly modified) pattern and a list of temp variable names to clean up.
+    fn prepare_pattern_for_path_binding(pattern: &Pattern) -> (Pattern, Vec<String>) {
+        let has_path_vars = pattern
+            .paths
+            .iter()
+            .any(|p| p.variable.as_ref().is_some_and(|v| !v.is_empty()));
+
+        if !has_path_vars {
+            return (pattern.clone(), Vec::new());
+        }
+
+        let mut modified = pattern.clone();
+        let mut temp_vars = Vec::new();
+
+        for path in &mut modified.paths {
+            if path.variable.as_ref().is_none_or(|v| v.is_empty()) {
+                continue;
+            }
+            for (idx, element) in path.elements.iter_mut().enumerate() {
+                if let PatternElement::Relationship(r) = element
+                    && r.variable.as_ref().is_none_or(String::is_empty)
+                {
+                    let temp_var = format!("__path_r_{}", idx);
+                    r.variable = Some(temp_var.clone());
+                    temp_vars.push(temp_var);
+                }
+            }
+        }
+
+        (modified, temp_vars)
+    }
+
+    /// Bind path variables in the result row based on the MERGE pattern.
+    ///
+    /// Walks each path in the pattern, collects node/edge values from the row
+    /// by variable name, and constructs a `Value::Path`.
+    fn bind_path_variables(
+        pattern: &Pattern,
+        row: &mut HashMap<String, Value>,
+        temp_vars: &[String],
+    ) {
+        for path in &pattern.paths {
+            let Some(path_var) = path.variable.as_ref() else {
+                continue;
+            };
+            if path_var.is_empty() {
+                continue;
+            }
+
+            let mut nodes = Vec::new();
+            let mut edges = Vec::new();
+
+            for element in &path.elements {
+                match element {
+                    PatternElement::Node(n) => {
+                        if let Some(var) = &n.variable
+                            && let Some(val) = row.get(var)
+                            && let Some(node) = Self::value_to_node_for_path(val)
+                        {
+                            nodes.push(node);
+                        }
+                    }
+                    PatternElement::Relationship(r) => {
+                        if let Some(var) = &r.variable
+                            && let Some(val) = row.get(var)
+                            && let Some(edge) = Self::value_to_edge_for_path(val, &r.types)
+                        {
+                            edges.push(edge);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            if !nodes.is_empty() {
+                use uni_common::value::Path;
+                row.insert(path_var.clone(), Value::Path(Path { nodes, edges }));
+            }
+        }
+
+        // Clean up internal temp variables
+        for var in temp_vars {
+            row.remove(var);
+        }
+    }
+
+    /// Convert a Value (Map or Node) to a Node for path construction.
+    fn value_to_node_for_path(val: &Value) -> Option<uni_common::value::Node> {
+        match val {
+            Value::Node(n) => Some(n.clone()),
+            Value::Map(map) => {
+                let vid = map.get("_vid").and_then(|v| v.as_u64()).map(Vid::new)?;
+                let labels = if let Some(Value::List(l)) = map.get("_labels") {
+                    l.iter()
+                        .filter_map(|v| {
+                            if let Value::String(s) = v {
+                                Some(s.clone())
+                            } else {
+                                None
+                            }
+                        })
+                        .collect()
+                } else {
+                    vec![]
+                };
+                let properties: HashMap<String, Value> = map
+                    .iter()
+                    .filter(|(k, _)| !k.starts_with('_'))
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect();
+                Some(uni_common::value::Node {
+                    vid,
+                    labels,
+                    properties,
+                })
+            }
+            _ => None,
+        }
+    }
+
+    /// Convert a Value (Map or Edge) to an Edge for path construction.
+    fn value_to_edge_for_path(
+        val: &Value,
+        type_names: &[String],
+    ) -> Option<uni_common::value::Edge> {
+        match val {
+            Value::Edge(e) => Some(e.clone()),
+            Value::Map(map) => {
+                let eid = map.get("_eid").and_then(|v| v.as_u64()).map(Eid::new)?;
+                let edge_type = map
+                    .get("_type_name")
+                    .and_then(|v| {
+                        if let Value::String(s) = v {
+                            Some(s.clone())
+                        } else {
+                            None
+                        }
+                    })
+                    .or_else(|| type_names.first().cloned())
+                    .unwrap_or_default();
+                let src = map.get("_src").and_then(|v| v.as_u64()).map(Vid::new)?;
+                let dst = map.get("_dst").and_then(|v| v.as_u64()).map(Vid::new)?;
+                let properties: HashMap<String, Value> = map
+                    .iter()
+                    .filter(|(k, _)| !k.starts_with('_'))
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect();
+                Some(uni_common::value::Edge {
+                    eid,
+                    edge_type,
+                    src,
+                    dst,
+                    properties,
+                })
+            }
+            _ => None,
+        }
     }
 }

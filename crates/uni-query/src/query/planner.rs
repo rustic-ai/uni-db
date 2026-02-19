@@ -323,18 +323,11 @@ fn collect_expr_variables_inner(expr: &Expr, vars: &mut Vec<String>) {
             }
         }
         Expr::LabelCheck { expr, .. } => collect_expr_variables_inner(expr, vars),
-        Expr::ArrayIndex {
-            array,
-            index,
-        } => {
+        Expr::ArrayIndex { array, index } => {
             collect_expr_variables_inner(array, vars);
             collect_expr_variables_inner(index, vars);
         }
-        Expr::ArraySlice {
-            array,
-            start,
-            end,
-        } => {
+        Expr::ArraySlice { array, start, end } => {
             collect_expr_variables_inner(array, vars);
             if let Some(s) = start {
                 collect_expr_variables_inner(s, vars);
@@ -1447,6 +1440,23 @@ fn validate_merge_clause(merge_clause: &MergeClause, vars_in_scope: &[VariableIn
                         ));
                     }
                     reject_null_merge_properties(&n.properties)?;
+                    // VariableAlreadyBound: reject if a bound variable is used
+                    // as a standalone MERGE node or introduces new labels/properties.
+                    // Bare endpoint references like (a) in MERGE (a)-[:R]->(b) are valid.
+                    if let Some(variable) = &n.variable
+                        && !variable.is_empty()
+                        && is_var_in_scope(vars_in_scope, variable)
+                    {
+                        let is_standalone = path.elements.len() == 1;
+                        let has_new_labels = !n.labels.is_empty();
+                        let has_new_properties = n.properties.is_some();
+                        if is_standalone || has_new_labels || has_new_properties {
+                            return Err(anyhow!(
+                                "SyntaxError: VariableAlreadyBound - Variable '{}' already defined",
+                                variable
+                            ));
+                        }
+                    }
                 }
                 PatternElement::Relationship(r) => {
                     if let Some(variable) = &r.variable

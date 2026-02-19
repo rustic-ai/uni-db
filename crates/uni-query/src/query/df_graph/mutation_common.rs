@@ -26,8 +26,8 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use uni_common::core::id::Vid;
 use uni_common::Value;
+use uni_common::core::id::Vid;
 use uni_cypher::ast::{Expr, Pattern, RemoveItem, SetItem};
 use uni_store::runtime::property_manager::PropertyManager;
 use uni_store::runtime::writer::Writer;
@@ -427,8 +427,7 @@ async fn apply_mutations(
                             }
                             _ => {
                                 if let Ok(vid) = Executor::vid_from_value(&val) {
-                                    vertex_labels
-                                        .push(Executor::extract_labels_from_node(&val));
+                                    vertex_labels.push(Executor::extract_labels_from_node(&val));
                                     vertex_vids.push(vid);
                                 } else if matches!(&val, Value::Map(_) | Value::Edge(_)) {
                                     edge_vals.push(val);
@@ -471,16 +470,14 @@ async fn apply_mutations(
                                 }
                                 for node in &path.nodes {
                                     if seen_vids.insert(node.vid.as_u64()) {
-                                        all_node_vals
-                                            .push((node.vid, Some(node.labels.clone())));
+                                        all_node_vals.push((node.vid, Some(node.labels.clone())));
                                     }
                                 }
                             }
                             _ => {
                                 if let Ok(vid) = Executor::vid_from_value(&val) {
                                     if seen_vids.insert(vid.as_u64()) {
-                                        let labels =
-                                            Executor::extract_labels_from_node(&val);
+                                        let labels = Executor::extract_labels_from_node(&val);
                                         all_node_vals.push((vid, labels));
                                     }
                                 } else {
@@ -726,7 +723,7 @@ mod tests {
             vec![
                 Arc::new(StringArray::from(vec![Some("hello")])),
                 Arc::new(Int64Array::from(vec![Some(42)])),
-                Arc::new(arrow_array::Float64Array::from(vec![Some(3.14)])),
+                Arc::new(arrow_array::Float64Array::from(vec![Some(3.125)])),
                 Arc::new(arrow_array::BooleanArray::from(vec![Some(true)])),
             ],
         )
@@ -750,7 +747,7 @@ mod tests {
         assert_eq!(roundtrip_rows[0].get("b"), Some(&Value::Bool(true)));
         // Float comparison
         if let Some(Value::Float(f)) = roundtrip_rows[0].get("f") {
-            assert!((*f - 3.14).abs() < 1e-10);
+            assert!((*f - 3.125).abs() < 1e-10);
         } else {
             panic!("Expected float value");
         }

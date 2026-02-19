@@ -84,6 +84,14 @@ pub struct SideEffects {
     pub nodes_after: usize,
     pub edges_before: usize,
     pub edges_after: usize,
+    /// Gross node creations: node IDs present after but not before.
+    pub nodes_created: usize,
+    /// Gross node deletions: node IDs present before but not after.
+    pub nodes_deleted: usize,
+    /// Gross edge creations: edge IDs present after but not before.
+    pub edges_created: usize,
+    /// Gross edge deletions: edge IDs present before but not after.
+    pub edges_deleted: usize,
     /// Total non-null properties at snapshot time (before mutation).
     pub properties_before: usize,
     /// Total non-null properties at snapshot time (after mutation).
@@ -103,6 +111,10 @@ pub struct SideEffects {
     prop_snapshot_before: HashMap<String, Value>,
     /// Per-entity, per-property value snapshot (after).
     prop_snapshot_after: HashMap<String, Value>,
+    /// Node ID set (before) for gross change tracking.
+    node_ids_before: HashSet<u64>,
+    /// Edge ID set (before) for gross change tracking.
+    edge_ids_before: HashSet<u64>,
 }
 
 impl Default for UniWorld {
@@ -169,12 +181,11 @@ impl UniWorld {
     /// Uses sequential queries to avoid any potential lock contention.
     /// Property counting is included for TCK compliance.
     pub async fn capture_state_before(&mut self) -> anyhow::Result<()> {
-        self.side_effects.nodes_before = self
-            .count_by_query("MATCH (n) RETURN count(n) as count")
-            .await;
-        self.side_effects.edges_before = self
-            .count_by_query("MATCH ()-[r]->() RETURN count(r) as count")
-            .await;
+        // Collect node/edge ID sets for gross creation/deletion tracking.
+        self.side_effects.node_ids_before = self.collect_node_ids().await;
+        self.side_effects.edge_ids_before = self.collect_edge_ids().await;
+        self.side_effects.nodes_before = self.side_effects.node_ids_before.len();
+        self.side_effects.edges_before = self.side_effects.edge_ids_before.len();
         // Build a per-entity, per-key property snapshot for gross change counting.
         let snapshot = self.collect_property_snapshot().await;
         self.side_effects.properties_before = snapshot.len();
@@ -188,12 +199,27 @@ impl UniWorld {
     /// Uses sequential queries to avoid any potential lock contention.
     /// Property counting is included for TCK compliance.
     pub async fn capture_state_after(&mut self) -> anyhow::Result<()> {
-        self.side_effects.nodes_after = self
-            .count_by_query("MATCH (n) RETURN count(n) as count")
-            .await;
-        self.side_effects.edges_after = self
-            .count_by_query("MATCH ()-[r]->() RETURN count(r) as count")
-            .await;
+        // Collect node/edge ID sets and compute gross changes.
+        let node_ids_after = self.collect_node_ids().await;
+        let edge_ids_after = self.collect_edge_ids().await;
+        self.side_effects.nodes_after = node_ids_after.len();
+        self.side_effects.edges_after = edge_ids_after.len();
+        self.side_effects.nodes_created = node_ids_after
+            .difference(&self.side_effects.node_ids_before)
+            .count();
+        self.side_effects.nodes_deleted = self
+            .side_effects
+            .node_ids_before
+            .difference(&node_ids_after)
+            .count();
+        self.side_effects.edges_created = edge_ids_after
+            .difference(&self.side_effects.edge_ids_before)
+            .count();
+        self.side_effects.edges_deleted = self
+            .side_effects
+            .edge_ids_before
+            .difference(&edge_ids_after)
+            .count();
         // Build after snapshot and compute gross change counts.
         let snapshot = self.collect_property_snapshot().await;
         self.side_effects.properties_after = snapshot.len();
@@ -292,23 +318,30 @@ impl UniWorld {
         }
     }
 
-    /// Run a count query and extract the integer result, returning 0 on failure.
-    async fn count_by_query(&self, query: &str) -> usize {
-        match self.db().query(query).await {
-            Ok(result) => result
-                .rows
-                .first()
-                .and_then(|row| row.values.first())
-                .and_then(|v| match v {
-                    Value::Int(count) => Some(*count as usize),
-                    _ => None,
-                })
-                .unwrap_or(0),
-            Err(e) => {
-                eprintln!("[TCK] count_by_query failed for query '{}': {}", query, e);
-                0
+    /// Collect all node IDs (VIDs) currently in the graph.
+    async fn collect_node_ids(&self) -> HashSet<u64> {
+        let mut ids = HashSet::new();
+        if let Ok(result) = self.db().query("MATCH (n) RETURN id(n) AS id").await {
+            for row in &result.rows {
+                if let Some(Value::Int(id)) = row.values.first() {
+                    ids.insert(*id as u64);
+                }
             }
         }
+        ids
+    }
+
+    /// Collect all edge IDs (EIDs) currently in the graph.
+    async fn collect_edge_ids(&self) -> HashSet<u64> {
+        let mut ids = HashSet::new();
+        if let Ok(result) = self.db().query("MATCH ()-[r]->() RETURN id(r) AS id").await {
+            for row in &result.rows {
+                if let Some(Value::Int(id)) = row.values.first() {
+                    ids.insert(*id as u64);
+                }
+            }
+        }
+        ids
     }
 
     async fn get_labels(&self) -> anyhow::Result<HashSet<String>> {

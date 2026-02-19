@@ -1,19 +1,17 @@
 # TCK Compliance Report
 
-**Generated:** 2026-02-19 01:55:04
-**Results:** `results_20260219_015504.json`
-**Compared to:** `results_20260219_014759.json`
+**Generated:** 2026-02-19 09:45:13
+**Results:** `results_20260219_094513.json`
+**Compared to:** `results_20260219_085920.json`
 
 ## Summary
 
 | Metric | Current | Previous | Delta |
 |--------|---------|----------|-------|
 | Scenarios | 3897 | 3897 |  |
-| Passed | 3794 | 3792 | +2 |
-| Failed | 102 | 104 | -2 |
-| Pass Rate | 97.4% | 97.3% | 📈 +0.1pp |
-
-**🟢 Fixed:** 2 scenarios now passing
+| Passed | 3814 | 3814 |  |
+| Failed | 82 | 82 |  |
+| Pass Rate | 97.9% | 97.9% | ➡️ +0.0pp |
 
 ## Feature Breakdown
 
@@ -105,15 +103,15 @@
 | ✅ Mathematical2 | 1 | 1 | 0 | 100% |  |
 | ✅ Mathematical3 | 1 | 1 | 0 | 100% |  |
 | ⚠️ Mathematical8 | 2 | 1 | 1 | 50% |  |
-| ⚠️ Merge1 | 17 | 11 | 6 | 65% | +6pp |
-| ✅ Merge2 | 6 | 5 | 1 | 83% |  |
-| ✅ Merge3 | 5 | 4 | 1 | 80% |  |
-| ❌ Merge4 | 2 | 0 | 2 | 0% |  |
-| ⚠️ Merge5 | 29 | 20 | 9 | 69% | +3pp |
+| ✅ Merge1 | 17 | 17 | 0 | 100% |  |
+| ✅ Merge2 | 6 | 6 | 0 | 100% |  |
+| ✅ Merge3 | 5 | 5 | 0 | 100% |  |
+| ✅ Merge4 | 2 | 2 | 0 | 100% |  |
+| ✅ Merge5 | 29 | 29 | 0 | 100% |  |
 | ✅ Merge6 | 6 | 6 | 0 | 100% |  |
 | ✅ Merge7 | 5 | 5 | 0 | 100% |  |
 | ✅ Merge8 | 1 | 1 | 0 | 100% |  |
-| ⚠️ Merge9 | 4 | 3 | 1 | 75% |  |
+| ✅ Merge9 | 4 | 4 | 0 | 100% |  |
 | ✅ Null1 | 17 | 17 | 0 | 100% |  |
 | ✅ Null2 | 17 | 17 | 0 | 100% |  |
 | ✅ Null3 | 10 | 10 | 0 | 100% |  |
@@ -211,13 +209,6 @@
 | ✅ WithWhere5 | 4 | 4 | 0 | 100% |  |
 | ✅ WithWhere6 | 1 | 1 | 0 | 100% |  |
 | ✅ WithWhere7 | 3 | 3 | 0 | 100% |  |
-
-## 🟢 Newly Passing
-
-Scenarios that were failing but are now passing:
-
-- **Merge1** — [17] Fail on merging node with null property (line 300)
-- **Merge5** — [29] Fail on merging relationship with null property (line 512)
 
 ## Failed Scenarios
 
@@ -382,11 +373,11 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/graph/Graph6.feature:90:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): Expected column '(list[1]).missingToo' not found in result
+      Step panicked. Captured output: Result mismatch (any order): Expected column '(list[1]).existing' not found in result
 [Summary]
 1 feature
 1 scenario (1 failed)
-
+4 
   ... (truncated)
   ```
 - **[6] Statically access a property of a optional non-null relationship** (line 111)
@@ -406,10 +397,11 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/graph/Graph6.feature:151:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): Expected column '(list[1]).missingToo' not found in result
+      Step panicked. Captured output: Result mismatch (any order): Expected column '(list[1]).missing' not found in result
 [Summary]
 1 feature
 1 scenario (1 failed)
+4 
   ... (truncated)
   ```
 
@@ -420,7 +412,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/graph/Graph9.feature:73:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("properties(n)", Some(Null)), ("properties(null)", 
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("properties(n)", Some(Null)), ("properties(r)", Som
   ... (truncated)
   ```
 
@@ -487,7 +479,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/literals/Literals7.feature:295:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("literal", Some(List([Map({"type": String("d
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("literal", Some(List([Map({"batters": Map({"
   ... (truncated)
   ```
 
@@ -509,11 +501,11 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/map/Map1.feature:65:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): Expected column '(list[1]).notMissing' not found in result
+      Step panicked. Captured output: Result mismatch (any order): Expected column '(list[1]).missing' not found in result
 [Summary]
 1 feature
 1 scenario (1 failed)
-3 st
+3 steps
   ... (truncated)
   ```
 
@@ -681,251 +673,6 @@ Scenarios that were failing but are now passing:
 [Summary]
 1 feature
 1 scenar
-  ... (truncated)
-  ```
-
-### Merge1
-
-- **[9] Merge should support updates while merging** (line 159)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/merge/Merge1.feature:187:5
-      Matched: crates/uni-tck/src/steps/and.rs:27:1
-      Step panicked. Captured output: assertion `left == right` failed: Expected +nodes=15, but got 27 (before=9, after=36)
-        left: 27
-       right: 15
-[Summary]
-1 fe
-  ... (truncated)
-  ```
-- **[10] Merge must properly handle multiple labels** (line 192)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/merge/Merge1.feature:203:5
-      Matched: crates/uni-tck/src/steps/then.rs:48:1
-      Step panicked. Captured output: Result mismatch (ignoring list order): Row 0 column labels mismatch: expected List([String("L"), String("B")]), got List([String("L")
-  ... (truncated)
-  ```
-- **[11] Merge should be able to merge using property of bound node** (line 211)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/merge/Merge1.feature:228:5
-      Matched: crates/uni-tck/src/steps/and.rs:27:1
-      Step panicked. Captured output: assertion `left == right` failed: Expected +nodes=3, but got 6 (before=6, after=12)
-        left: 6
-       right: 3
-[Summary]
-1 featur
-  ... (truncated)
-  ```
-- **[13] Merge should bind a path** (line 245)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/merge/Merge1.feature:252:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("p", Some(Null))]. Expected: [{"p": Path(Path { nodes:
-  ... (truncated)
-  ```
-- **[14] Merges should not be able to match on deleted nodes** (line 259)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/merge/Merge1.feature:277:5
-      Matched: crates/uni-tck/src/steps/and.rs:27:1
-      Step panicked. Captured output: assertion `left == right` failed: Expected +nodes=1, but got -1 (before=2, after=1)
-        left: -1
-       right: 1
-[Summary]
-1 featu
-  ... (truncated)
-  ```
-- **[15] Fail when merge a node that is already bound** (line 282)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/merge/Merge1.feature:289:5
-      Matched: crates/uni-tck/src/steps/then.rs:90:1
-      Step panicked. Captured output: No error found
-[Summary]
-1 feature
-1 scenario (1 failed)
-3 steps (2 passed, 1 failed)
-
-  ```
-
-### Merge2
-
-- **[5] Merge should be able to use properties of bound node in ON CREATE** (line 93)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/merge/Merge2.feature:107:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): Row count mismatch: expected 2, got 4
-[Summary]
-1 feature
-1 scenario (1 failed)
-4 steps (3 passed, 1 fai
-  ... (truncated)
-  ```
-
-### Merge3
-
-- **[4] Merge should be able to use properties of bound node in ON MATCH** (line 84)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/merge/Merge3.feature:98:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): Row count mismatch: expected 2, got 4
-[Summary]
-1 feature
-1 scenario (1 failed)
-4 steps (3 passed, 1 fail
-  ... (truncated)
-  ```
-
-### Merge4
-
-- **[1] Merge should be able to set labels on match and on create** (line 33)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/merge/Merge4.feature:47:5
-      Matched: crates/uni-tck/src/steps/and.rs:27:1
-      Step panicked. Captured output: assertion `left == right` failed: Expected +nodes=1, but got 0 (before=2, after=2)
-        left: 0
-       right: 1
-[Summary]
-1 feature
-
-  ... (truncated)
-  ```
-- **[2] Merge should be able to use properties of bound node in ON MATCH and ON CREATE** (line 51)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/merge/Merge4.feature:66:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): Row count mismatch: expected 2, got 4
-[Summary]
-1 feature
-1 scenario (1 failed)
-4 steps (3 passed, 1 fail
-  ... (truncated)
-  ```
-
-### Merge5
-
-- **[9] Creating relationship using merged nodes** (line 180)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/merge/Merge5.feature:193:5
-      Matched: crates/uni-tck/src/steps/and.rs:27:1
-      Step panicked. Captured output: assertion `left == right` failed: Expected +relationships=1, but got 4 (before=0, after=4)
-        left: 4
-       right: 1
-[Summary]
-1
-  ... (truncated)
-  ```
-- **[10] Merge should bind a path** (line 196)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/merge/Merge5.feature:205:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("p", Some(Null))]. Expected: [{"p": Path(Path { nodes:
-  ... (truncated)
-  ```
-- **[11] Use outgoing direction when unspecified** (line 213)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/merge/Merge5.feature:221:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("s", Some(Null)), ("e", Some(Null))]. Expected: [{"s":
-  ... (truncated)
-  ```
-- **[14] Using list properties via variable** (line 267)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/merge/Merge5.feature:281:5
-      Matched: crates/uni-tck/src/steps/and.rs:27:1
-      Step panicked. Captured output: assertion `left == right` failed: Expected +relationships=1, but got 2 (before=0, after=2)
-        left: 2
-       right: 1
-[Summary]
-1
-  ... (truncated)
-  ```
-- **[18] Double aliasing of existing nodes 1** (line 344)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/merge/Merge5.feature:365:5
-      Matched: crates/uni-tck/src/steps/and.rs:27:1
-      Step panicked. Captured output: assertion `left == right` failed: Expected +relationships=1, but got 2 (before=0, after=2)
-        left: 2
-       right: 1
-[Summary]
-1
-  ... (truncated)
-  ```
-- **[19] Double aliasing of existing nodes 2** (line 368)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/merge/Merge5.feature:388:5
-      Matched: crates/uni-tck/src/steps/and.rs:27:1
-      Step panicked. Captured output: assertion `left == right` failed: Expected +relationships=1, but got 2 (before=0, after=2)
-        left: 2
-       right: 1
-[Summary]
-1
-  ... (truncated)
-  ```
-- **[20] Do not match on deleted entities** (line 391)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/merge/Merge5.feature:413:5
-      Matched: crates/uni-tck/src/steps/and.rs:27:1
-      Step panicked. Captured output: assertion `left == right` failed: Expected +nodes=2, but got -3 (before=5, after=2)
-        left: -3
-       right: 2
-[Summary]
-1 featu
-  ... (truncated)
-  ```
-- **[21] Do not match on deleted relationships** (line 421)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/merge/Merge5.feature:440:5
-      Matched: crates/uni-tck/src/steps/and.rs:27:1
-      Step panicked. Captured output: assertion `left == right` failed: Expected +relationships=1, but got 0 (before=2, after=2)
-        left: 0
-       right: 1
-[Summary]
-1
-  ... (truncated)
-  ```
-- **[22] Fail when imposing new predicates on a variable that is already bound** (line 446)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/merge/Merge5.feature:453:5
-      Matched: crates/uni-tck/src/steps/then.rs:90:1
-      Step panicked. Captured output: No error found
-[Summary]
-1 feature
-1 scenario (1 failed)
-3 steps (2 passed, 1 failed)
-
-  ```
-
-### Merge9
-
-- **[4] MERGE after WITH with predicate and WITH with aggregation** (line 81)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/merge/Merge9.feature:98:5
-      Matched: crates/uni-tck/src/steps/and.rs:4:1
-      Step panicked. Captured output: assertion `left == right` failed: Node count changed: 1 -> 2
-        left: 1
-       right: 2
-[Summary]
-1 feature
-1 scenario (1 failed)
-5
   ... (truncated)
   ```
 
@@ -1307,7 +1054,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal5.feature:133:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("d.weekYear", Some(Int(1984))), ("d.hour", S
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("d.weekDay", Some(Int(7))), ("d.quarter", So
   ... (truncated)
   ```
 

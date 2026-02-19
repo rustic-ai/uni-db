@@ -795,7 +795,9 @@ impl Writer {
         // Fall back to main L0
         let l0 = self.l0_manager.get_current();
         let l0_guard = l0.read();
-        l0_guard.get_edge_endpoint_full(eid).map(|(_, _, etype)| etype)
+        l0_guard
+            .get_edge_endpoint_full(eid)
+            .map(|(_, _, etype)| etype)
     }
 
     /// Set the type name for an edge (used for schemaless edge types).

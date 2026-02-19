@@ -42,35 +42,49 @@ async fn side_effects_should_be(world: &mut UniWorld, step: &cucumber::gherkin::
 
         match header {
             "+nodes" => {
-                let actual = effects.nodes_after as i64 - effects.nodes_before as i64;
+                let actual = effects.nodes_created as i64;
                 assert_eq!(
-                    actual, expected,
-                    "Expected +nodes={}, but got {} (before={}, after={})",
-                    expected, actual, effects.nodes_before, effects.nodes_after
+                    actual,
+                    expected,
+                    "Expected +nodes={}, but got {} (before={}, after={}, created={}, deleted={})",
+                    expected,
+                    actual,
+                    effects.nodes_before,
+                    effects.nodes_after,
+                    effects.nodes_created,
+                    effects.nodes_deleted
                 );
             }
             "-nodes" => {
-                let actual = effects.nodes_before as i64 - effects.nodes_after as i64;
+                let actual = effects.nodes_deleted as i64;
                 assert_eq!(
-                    actual, expected,
-                    "Expected -nodes={}, but got {} (before={}, after={})",
-                    expected, actual, effects.nodes_before, effects.nodes_after
+                    actual,
+                    expected,
+                    "Expected -nodes={}, but got {} (before={}, after={}, created={}, deleted={})",
+                    expected,
+                    actual,
+                    effects.nodes_before,
+                    effects.nodes_after,
+                    effects.nodes_created,
+                    effects.nodes_deleted
                 );
             }
             "+relationships" | "+edges" => {
-                let actual = effects.edges_after as i64 - effects.edges_before as i64;
+                let actual = effects.edges_created as i64;
                 assert_eq!(
                     actual, expected,
-                    "Expected +relationships={}, but got {} (before={}, after={})",
-                    expected, actual, effects.edges_before, effects.edges_after
+                    "Expected +relationships={}, but got {} (before={}, after={}, created={}, deleted={})",
+                    expected, actual, effects.edges_before, effects.edges_after,
+                    effects.edges_created, effects.edges_deleted
                 );
             }
             "-relationships" | "-edges" => {
-                let actual = effects.edges_before as i64 - effects.edges_after as i64;
+                let actual = effects.edges_deleted as i64;
                 assert_eq!(
                     actual, expected,
-                    "Expected -relationships={}, but got {} (before={}, after={})",
-                    expected, actual, effects.edges_before, effects.edges_after
+                    "Expected -relationships={}, but got {} (before={}, after={}, created={}, deleted={})",
+                    expected, actual, effects.edges_before, effects.edges_after,
+                    effects.edges_created, effects.edges_deleted
                 );
             }
             "+labels" => {

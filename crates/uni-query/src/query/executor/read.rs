@@ -459,6 +459,26 @@ impl Executor {
         Err(anyhow!("Invalid Vid format: {:?}", val))
     }
 
+    /// Find a node value in the row by VID.
+    ///
+    /// Scans all values in the row, looking for a node (Map or Node) whose VID
+    /// matches the target. Returns the full node value if found, or a minimal
+    /// Map with just `_vid` as fallback.
+    fn find_node_by_vid(row: &HashMap<String, Value>, target_vid: Vid) -> Value {
+        for val in row.values() {
+            if let Ok(vid) = Self::vid_from_value(val)
+                && vid == target_vid
+            {
+                return val.clone();
+            }
+        }
+        // Fallback: return minimal node map
+        Value::Map(HashMap::from([(
+            "_vid".to_string(),
+            Value::Int(target_vid.as_u64() as i64),
+        )]))
+    }
+
     /// Executes a query using the DataFusion-based engine.
     ///
     /// Uses `HybridPhysicalPlanner` which produces DataFusion `ExecutionPlan`
@@ -2293,16 +2313,24 @@ impl Executor {
                         let val = this
                             .evaluate_expr(&args[0], row, prop_manager, params, ctx)
                             .await?;
+                        if let Value::Edge(edge) = &val {
+                            return Ok(Self::find_node_by_vid(row, edge.src));
+                        }
                         if let Value::Map(map) = &val {
                             if let Some(start_node) = map.get("_startNode") {
                                 return Ok(start_node.clone());
                             }
-                            // Try _src_vid for raw edge data
                             if let Some(src_vid) = map.get("_src_vid") {
                                 return Ok(Value::Map(HashMap::from([(
                                     "_vid".to_string(),
                                     src_vid.clone(),
                                 )])));
+                            }
+                            // Resolve _src VID by looking up node in row
+                            if let Some(src_id) = map.get("_src")
+                                && let Some(u) = src_id.as_u64()
+                            {
+                                return Ok(Self::find_node_by_vid(row, Vid::new(u)));
                             }
                         }
                         return Ok(Value::Null);
@@ -2316,16 +2344,24 @@ impl Executor {
                         let val = this
                             .evaluate_expr(&args[0], row, prop_manager, params, ctx)
                             .await?;
+                        if let Value::Edge(edge) = &val {
+                            return Ok(Self::find_node_by_vid(row, edge.dst));
+                        }
                         if let Value::Map(map) = &val {
                             if let Some(end_node) = map.get("_endNode") {
                                 return Ok(end_node.clone());
                             }
-                            // Try _dst_vid for raw edge data
                             if let Some(dst_vid) = map.get("_dst_vid") {
                                 return Ok(Value::Map(HashMap::from([(
                                     "_vid".to_string(),
                                     dst_vid.clone(),
                                 )])));
+                            }
+                            // Resolve _dst VID by looking up node in row
+                            if let Some(dst_id) = map.get("_dst")
+                                && let Some(u) = dst_id.as_u64()
+                            {
+                                return Ok(Self::find_node_by_vid(row, Vid::new(u)));
                             }
                         }
                         return Ok(Value::Null);
@@ -3434,22 +3470,12 @@ impl Executor {
 
                     // Standard filter for non-OPTIONAL MATCH
                     let mut filtered = Vec::new();
-                    for (idx, row) in input_matches.iter().enumerate() {
+                    for row in input_matches.iter() {
                         let res = self
                             .evaluate_expr(&predicate, row, prop_manager, params, ctx)
                             .await?;
 
                         let passes = res.as_bool().unwrap_or(false);
-
-                        // Debug first few rows
-                        if idx < 3 {
-                            tracing::debug!(
-                                "Filter row {}: predicate result={:?} passes={}",
-                                idx,
-                                res,
-                                passes
-                            );
-                        }
 
                         if passes {
                             filtered.push(row.clone());
@@ -3796,8 +3822,7 @@ impl Executor {
                                             // Decompose path into nodes and edges
                                             for node in &path.nodes {
                                                 vertex_vids.push(node.vid);
-                                                vertex_labels
-                                                    .push(Some(node.labels.clone()));
+                                                vertex_labels.push(Some(node.labels.clone()));
                                             }
                                             for edge in &path.edges {
                                                 edge_vals.push(Value::Edge(edge.clone()));
@@ -3805,14 +3830,11 @@ impl Executor {
                                         }
                                         _ => {
                                             if let Ok(vid) = Self::vid_from_value(&val) {
-                                                let labels =
-                                                    Self::extract_labels_from_node(&val);
+                                                let labels = Self::extract_labels_from_node(&val);
                                                 vertex_vids.push(vid);
                                                 vertex_labels.push(labels);
-                                            } else if matches!(
-                                                &val,
-                                                Value::Map(_) | Value::Edge(_)
-                                            ) {
+                                            } else if matches!(&val, Value::Map(_) | Value::Edge(_))
+                                            {
                                                 edge_vals.push(val);
                                             }
                                         }
@@ -3855,8 +3877,7 @@ impl Executor {
                                         Value::Path(path) => {
                                             for edge in &path.edges {
                                                 if seen_eids.insert(edge.eid.as_u64()) {
-                                                    all_edge_vals
-                                                        .push(Value::Edge(edge.clone()));
+                                                    all_edge_vals.push(Value::Edge(edge.clone()));
                                                 }
                                             }
                                             for node in &path.nodes {
@@ -5892,12 +5913,13 @@ impl Executor {
             } else {
                 std::collections::HashSet::new()
             };
-
         let mut found_neighbor = false;
         let mut visited = HashMap::new();
         let mut queue = std::collections::VecDeque::new();
         queue.push_back((source_vid, 0, Vec::new()));
-        visited.insert(source_vid, 0);
+        // Note: do NOT add source_vid to visited here. This allows self-loops
+        // (edges from source back to source) to be discovered as valid targets.
+        // The source will be added to visited when it's first reached via an edge.
 
         let mut iteration_count = 0usize;
 
@@ -5914,9 +5936,8 @@ impl Executor {
                 continue;
             }
 
-            for (next, edge_entry) in
-                self.collect_incident_edges(graph, curr, edge_type_ids, direction)
-            {
+            let incident = self.collect_incident_edges(graph, curr, edge_type_ids, direction);
+            for (next, edge_entry) in incident {
                 // Skip edges already used in previous hops (relationship uniqueness)
                 if used_edges_from_previous_hops.contains(&edge_entry.eid.as_u64()) {
                     continue;
@@ -5929,11 +5950,12 @@ impl Executor {
                 let mut new_path = path.clone();
                 new_path.push(edge_entry.eid);
 
-                if Self::should_visit_vertex(&visited, next, depth, step_variable) {
+                let should_visit = Self::should_visit_vertex(&visited, next, depth, step_variable);
+                if should_visit {
                     visited.insert(next, depth + 1);
                     queue.push_back((next, depth + 1, new_path.clone()));
 
-                    if Self::is_valid_target(
+                    let valid = Self::is_valid_target(
                         next,
                         depth + 1,
                         min_hops,
@@ -5941,7 +5963,8 @@ impl Executor {
                         bound_target_vid,
                         target_label_name,
                         ctx,
-                    ) {
+                    );
+                    if valid {
                         found_neighbor = true;
                         // Look up edge type name from schema
                         let edge_type_name =

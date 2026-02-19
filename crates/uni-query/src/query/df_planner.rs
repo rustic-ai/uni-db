@@ -35,6 +35,10 @@
 use crate::query::df_expr::{TranslationContext, VariableKind, cypher_expr_to_df};
 use crate::query::df_graph::bind_fixed_path::BindFixedPathExec;
 use crate::query::df_graph::bind_zero_length_path::BindZeroLengthPathExec;
+use crate::query::df_graph::mutation_create::new_create_exec;
+use crate::query::df_graph::mutation_delete::new_delete_exec;
+use crate::query::df_graph::mutation_remove::new_remove_exec;
+use crate::query::df_graph::mutation_set::new_set_exec;
 use crate::query::df_graph::recursive_cte::RecursiveCTEExec;
 use crate::query::df_graph::traverse::{
     GraphVariableLengthTraverseExec, GraphVariableLengthTraverseMainExec,
@@ -44,10 +48,6 @@ use crate::query::df_graph::{
     GraphScanExec, GraphShortestPathExec, GraphTraverseExec, GraphTraverseMainExec,
     GraphUnwindExec, GraphVectorKnnExec, L0Context, MutationContext, OptionalFilterExec,
 };
-use crate::query::df_graph::mutation_create::new_create_exec;
-use crate::query::df_graph::mutation_delete::new_delete_exec;
-use crate::query::df_graph::mutation_remove::new_remove_exec;
-use crate::query::df_graph::mutation_set::new_set_exec;
 use crate::query::planner::{
     LogicalPlan, aggregate_column_name, classify_window_expressions, collect_properties_from_plan,
 };
@@ -750,11 +750,7 @@ impl HybridPhysicalPlanner {
                 tracing::debug!(items = items.len(), "Planning MutationSetExec");
                 let child = self.plan_internal(input, all_properties)?;
                 let mutation_ctx = self.require_mutation_ctx()?;
-                Ok(Arc::new(new_set_exec(
-                    child,
-                    items.clone(),
-                    mutation_ctx,
-                )))
+                Ok(Arc::new(new_set_exec(child, items.clone(), mutation_ctx)))
             }
             LogicalPlan::Remove { input, items } => {
                 tracing::debug!(items = items.len(), "Planning MutationRemoveExec");
@@ -1309,10 +1305,7 @@ impl HybridPhysicalPlanner {
     /// Detect whether a target variable is already bound in the input plan's schema.
     ///
     /// Returns `Some("{target_variable}._vid")` when the column is present.
-    fn detect_bound_target(
-        input_schema: &SchemaRef,
-        target_variable: &str,
-    ) -> Option<String> {
+    fn detect_bound_target(input_schema: &SchemaRef, target_variable: &str) -> Option<String> {
         let col = format!("{}._vid", target_variable);
         input_schema.column_with_name(&col).is_some().then_some(col)
     }
@@ -1346,8 +1339,7 @@ impl HybridPhysicalPlanner {
         optional: bool,
         all_properties: &HashMap<String, HashSet<String>>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
-        let (properties, need_full) =
-            Self::resolve_schemaless_properties(variable, all_properties);
+        let (properties, need_full) = Self::resolve_schemaless_properties(variable, all_properties);
 
         let mut scan_plan: Arc<dyn ExecutionPlan> =
             Arc::new(GraphScanExec::new_schemaless_vertex_scan(
@@ -1384,8 +1376,7 @@ impl HybridPhysicalPlanner {
         optional: bool,
         all_properties: &HashMap<String, HashSet<String>>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
-        let (properties, need_full) =
-            Self::resolve_schemaless_properties(variable, all_properties);
+        let (properties, need_full) = Self::resolve_schemaless_properties(variable, all_properties);
 
         let mut scan_plan: Arc<dyn ExecutionPlan> =
             Arc::new(GraphScanExec::new_multi_label_vertex_scan(
@@ -1422,8 +1413,7 @@ impl HybridPhysicalPlanner {
         optional: bool,
         all_properties: &HashMap<String, HashSet<String>>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
-        let (properties, need_full) =
-            Self::resolve_schemaless_properties(variable, all_properties);
+        let (properties, need_full) = Self::resolve_schemaless_properties(variable, all_properties);
 
         let mut scan_plan: Arc<dyn ExecutionPlan> =
             Arc::new(GraphScanExec::new_schemaless_all_scan(
@@ -1616,7 +1606,8 @@ impl HybridPhysicalPlanner {
             // cannot handle the query, or via explicit filter predicates.
 
             // Check if target variable is already bound (for cycle patterns like n-->k<--n)
-            let bound_target_column = Self::detect_bound_target(&input_plan.schema(), target_variable);
+            let bound_target_column =
+                Self::detect_bound_target(&input_plan.schema(), target_variable);
 
             // Collect edge ID columns from previous hops for relationship uniqueness.
             // Look for both explicit edge variables (ending in "._eid") and
@@ -1731,7 +1722,8 @@ impl HybridPhysicalPlanner {
                 };
 
                 // Check if target variable is already bound (for patterns where target is in scope)
-                let bound_target_column = Self::detect_bound_target(&input_plan.schema(), target_variable);
+                let bound_target_column =
+                    Self::detect_bound_target(&input_plan.schema(), target_variable);
                 if bound_target_column.is_some() {
                     // For correlated patterns with bound target, traversal only needs reachability.
                     // Reuse existing bound target columns from input and avoid re-hydrating props.
@@ -1968,11 +1960,8 @@ impl HybridPhysicalPlanner {
         let mut result_plan = traverse_plan;
 
         // Structural projection for target variable (RETURN t, labels(t), etc.)
-        result_plan = self.add_wildcard_structural_projection(
-            result_plan,
-            target_variable,
-            all_properties,
-        )?;
+        result_plan =
+            self.add_wildcard_structural_projection(result_plan, target_variable, all_properties)?;
 
         // Structural projection for edge variable (type(r), RETURN r, etc.)
         if let Some(edge_var) = step_variable
@@ -2478,10 +2467,7 @@ impl HybridPhysicalPlanner {
                         Arc::new(ScalarUDF::from(
                             datafusion::functions::core::getfield::GetFieldFunc::new(),
                         )),
-                        vec![
-                            arg,
-                            datafusion::logical_expr::lit("nanos_since_midnight"),
-                        ],
+                        vec![arg, datafusion::logical_expr::lit("nanos_since_midnight")],
                     ),
                 ));
             }
