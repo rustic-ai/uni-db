@@ -323,7 +323,27 @@ fn collect_expr_variables_inner(expr: &Expr, vars: &mut Vec<String>) {
             }
         }
         Expr::LabelCheck { expr, .. } => collect_expr_variables_inner(expr, vars),
-        _ => {} // Literals and other non-variable expressions
+        Expr::ArrayIndex {
+            array,
+            index,
+        } => {
+            collect_expr_variables_inner(array, vars);
+            collect_expr_variables_inner(index, vars);
+        }
+        Expr::ArraySlice {
+            array,
+            start,
+            end,
+        } => {
+            collect_expr_variables_inner(array, vars);
+            if let Some(s) = start {
+                collect_expr_variables_inner(s, vars);
+            }
+            if let Some(e) = end {
+                collect_expr_variables_inner(e, vars);
+            }
+        }
+        _ => {} // Literals, parameters, and other non-variable expressions
     }
 }
 
@@ -697,6 +717,11 @@ fn extract_inner_aggregates_rec(expr: &Expr, out: &mut Vec<Expr>) {
                 extract_inner_aggregates_rec(e, out);
             }
         }
+        Expr::Map(entries) => {
+            for (_, v) in entries {
+                extract_inner_aggregates_rec(v, out);
+            }
+        }
         _ => {}
     }
 }
@@ -823,6 +848,12 @@ fn replace_aggregates_with_columns(expr: &Expr) -> Expr {
                 .as_ref()
                 .map(|e| Box::new(replace_aggregates_with_columns(e))),
         },
+        Expr::Map(entries) => Expr::Map(
+            entries
+                .iter()
+                .map(|(k, v)| (k.clone(), replace_aggregates_with_columns(v)))
+                .collect(),
+        ),
         // Leaf expressions — return as-is
         other => other.clone(),
     }
@@ -875,6 +906,7 @@ fn contains_aggregate_recursive(expr: &Expr) -> bool {
                 || start.as_deref().is_some_and(contains_aggregate_recursive)
                 || end.as_deref().is_some_and(contains_aggregate_recursive)
         }
+        Expr::Map(entries) => entries.iter().any(|(_, v)| contains_aggregate_recursive(v)),
         _ => false,
     }
 }
@@ -1388,6 +1420,22 @@ fn validate_merge_set_item(item: &SetItem, vars_in_scope: &[VariableInfo]) -> Re
     Ok(())
 }
 
+/// Reject MERGE patterns containing null property values (e.g. `MERGE ({k: null})`).
+/// The OpenCypher spec requires all property values in MERGE to be non-null.
+fn reject_null_merge_properties(properties: &Option<Expr>) -> Result<()> {
+    if let Some(Expr::Map(entries)) = properties {
+        for (key, value) in entries {
+            if matches!(value, Expr::Literal(CypherLiteral::Null)) {
+                return Err(anyhow!(
+                    "SemanticError: MergeReadOwnWrites - MERGE cannot use null property value for '{}'",
+                    key
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn validate_merge_clause(merge_clause: &MergeClause, vars_in_scope: &[VariableInfo]) -> Result<()> {
     for path in &merge_clause.pattern.paths {
         for element in &path.elements {
@@ -1398,6 +1446,7 @@ fn validate_merge_clause(merge_clause: &MergeClause, vars_in_scope: &[VariableIn
                             "SyntaxError: InvalidParameterUse - Parameters cannot be used as node predicates"
                         ));
                     }
+                    reject_null_merge_properties(&n.properties)?;
                 }
                 PatternElement::Relationship(r) => {
                     if let Some(variable) = &r.variable
@@ -1424,6 +1473,7 @@ fn validate_merge_clause(merge_clause: &MergeClause, vars_in_scope: &[VariableIn
                             "SyntaxError: InvalidParameterUse - Parameters cannot be used as relationship predicates"
                         ));
                     }
+                    reject_null_merge_properties(&r.properties)?;
                 }
                 PatternElement::Parenthesized { .. } => {}
             }
@@ -1655,6 +1705,10 @@ pub enum LogicalPlan {
         /// All variables from this OPTIONAL MATCH pattern.
         /// When any hop in the pattern fails, ALL these variables should be set to NULL.
         optional_pattern_vars: std::collections::HashSet<String>,
+        /// Variables belonging to the current MATCH clause scope.
+        /// Used for relationship uniqueness scoping: only edge columns whose
+        /// associated variable is in this set participate in uniqueness filtering.
+        scope_match_variables: std::collections::HashSet<String>,
     },
     Filter {
         input: Box<LogicalPlan>,
@@ -2644,6 +2698,11 @@ impl QueryPlanner {
         }
 
         let mut vars_in_scope: Vec<VariableInfo> = initial_vars;
+        // Track variables introduced by CREATE clauses so we can distinguish
+        // MATCH-introduced variables (which cannot be re-created as bare nodes)
+        // from CREATE-introduced variables (which can be referenced as bare nodes).
+        let mut create_introduced_vars: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
 
         let clause_count = query.clauses.len();
         for (clause_idx, clause) in query.clauses.into_iter().enumerate() {
@@ -2792,6 +2851,7 @@ impl QueryPlanner {
                     // - Variables used in properties must be defined
                     let mut create_vars: Vec<&str> = Vec::new();
                     for path in &create_clause.pattern.paths {
+                        let is_standalone_node = path.elements.len() == 1;
                         for element in &path.elements {
                             match element {
                                 PatternElement::Node(n) => {
@@ -2815,9 +2875,23 @@ impl QueryPlanner {
                                                 &create_vars,
                                             )?;
                                             create_vars.push(v);
+                                        } else if is_standalone_node
+                                            && is_var_in_scope(&vars_in_scope, v)
+                                            && !create_introduced_vars.contains(v)
+                                        {
+                                            // Standalone bare node referencing a variable from a
+                                            // non-CREATE clause (e.g. MATCH (a) CREATE (a)) — invalid.
+                                            // Bare nodes used as relationship endpoints
+                                            // (e.g. CREATE (a)-[:R]->(b)) are valid references.
+                                            return Err(anyhow!(
+                                                "SyntaxError: VariableAlreadyBound - '{}'",
+                                                v
+                                            ));
+                                        } else if !create_vars.contains(&v) {
+                                            // New bare variable — register it
+                                            create_vars.push(v);
                                         }
-                                        // Bare node (v) - if already in scope, it's a reference (OK)
-                                        // If not in scope, it will be added to scope later
+                                        // else: bare reference to same-CREATE or previous-CREATE variable — OK
                                     }
                                 }
                                 PatternElement::Relationship(r) => {
@@ -2886,6 +2960,7 @@ impl QueryPlanner {
                                     if let Some(var) = &n.variable
                                         && !var.is_empty()
                                     {
+                                        create_introduced_vars.insert(var.clone());
                                         add_var_to_scope(
                                             &mut vars_in_scope,
                                             var,
@@ -2897,6 +2972,7 @@ impl QueryPlanner {
                                     if let Some(var) = &r.variable
                                         && !var.is_empty()
                                     {
+                                        create_introduced_vars.insert(var.clone());
                                         add_var_to_scope(
                                             &mut vars_in_scope,
                                             var,
@@ -2941,28 +3017,45 @@ impl QueryPlanner {
                     };
                 }
                 Clause::Delete(delete_clause) => {
-                    // Validate DELETE targets - must be defined and must be entities (Node/Edge/Path)
+                    // Validate DELETE targets
                     for item in &delete_clause.items {
+                        // DELETE n:Label is invalid syntax (label expressions not allowed)
+                        if matches!(item, Expr::LabelCheck { .. }) {
+                            return Err(anyhow!(
+                                "SyntaxError: InvalidDelete - DELETE requires a simple variable reference, not a label expression"
+                            ));
+                        }
                         let vars_used = collect_expr_variables(item);
+                        // Reject expressions with no variable references (e.g. DELETE 1+1)
+                        if vars_used.is_empty() {
+                            return Err(anyhow!(
+                                "SyntaxError: InvalidArgumentType - DELETE requires node or relationship, not a literal expression"
+                            ));
+                        }
                         for var in &vars_used {
                             // Check if variable is defined
-                            if let Some(info) = find_var_in_scope(&vars_in_scope, var) {
-                                // Check if variable is an entity type (Node, Edge, Path), not Scalar
-                                if matches!(
-                                    info.var_type,
-                                    VariableType::Scalar | VariableType::ScalarLiteral
-                                ) {
-                                    return Err(anyhow!(
-                                        "SyntaxError: InvalidArgumentType - DELETE requires node or relationship, '{}' is a scalar value",
-                                        var
-                                    ));
-                                }
-                            } else {
+                            if find_var_in_scope(&vars_in_scope, var).is_none() {
                                 return Err(anyhow!(
                                     "SyntaxError: UndefinedVariable - Variable '{}' not defined",
                                     var
                                 ));
                             }
+                        }
+                        // Strict type check only for simple variable references —
+                        // complex expressions (property access, array index, etc.)
+                        // may resolve to a node/edge at runtime even if the base
+                        // variable is typed as Scalar (e.g. nodes(p)[0]).
+                        if let Expr::Variable(name) = item
+                            && let Some(info) = find_var_in_scope(&vars_in_scope, name)
+                            && matches!(
+                                info.var_type,
+                                VariableType::Scalar | VariableType::ScalarLiteral
+                            )
+                        {
+                            return Err(anyhow!(
+                                "SyntaxError: InvalidArgumentType - DELETE requires node or relationship, '{}' is a scalar value",
+                                name
+                            ));
                         }
                     }
                     plan = LogicalPlan::Delete {
@@ -4026,6 +4119,23 @@ impl QueryPlanner {
             // - path_var is the named path variable (p in `p = (a)-[r*]->(b)`)
             let step_var = params.rel.variable.clone();
             let path_var = params.path_variable.clone();
+
+            // Compute scope_match_variables for relationship uniqueness scoping.
+            let mut scope_match_variables: std::collections::HashSet<String> = vars_in_scope
+                [vars_before_pattern..]
+                .iter()
+                .map(|v| v.name.clone())
+                .collect();
+            if let Some(ref sv) = step_var {
+                // Only add the step variable to scope if it's NOT rebound from a previous clause.
+                // Rebound edges (bound_edge_var is set) should not participate in uniqueness
+                // filtering because the second MATCH intentionally reuses the same edge.
+                if bound_edge_var.is_none() {
+                    scope_match_variables.insert(sv.clone());
+                }
+            }
+            scope_match_variables.insert(target_variable.clone());
+
             let mut plan = LogicalPlan::TraverseMainByType {
                 type_names: unknown_types,
                 input: Box::new(plan),
@@ -4044,6 +4154,7 @@ impl QueryPlanner {
                 path_variable: path_var.clone(),
                 is_variable_length,
                 optional_pattern_vars: params.optional_pattern_vars.clone(),
+                scope_match_variables,
             };
 
             // Only apply bound target filter for Imported variables (from outer scope/subquery).

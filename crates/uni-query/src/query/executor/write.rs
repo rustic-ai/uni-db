@@ -1468,6 +1468,38 @@ impl Executor {
         Ok(())
     }
 
+    /// Validates that a value is a valid property type per OpenCypher.
+    /// Rejects maps, nodes, edges, paths, and lists containing those types or nested lists.
+    fn validate_property_value(prop_name: &str, val: &Value) -> Result<()> {
+        match val {
+            Value::Map(_) | Value::Node(_) | Value::Edge(_) | Value::Path(_) => {
+                anyhow::bail!(
+                    "TypeError: InvalidPropertyType - Property '{}' has an invalid type",
+                    prop_name
+                );
+            }
+            Value::List(items) => {
+                for item in items {
+                    match item {
+                        Value::Map(_)
+                        | Value::Node(_)
+                        | Value::Edge(_)
+                        | Value::Path(_)
+                        | Value::List(_) => {
+                            anyhow::bail!(
+                                "TypeError: InvalidPropertyType - Property '{}' has an invalid type",
+                                prop_name
+                            );
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
     pub(crate) async fn execute_set_items_locked(
         &self,
         items: &[SetItem],
@@ -1492,6 +1524,7 @@ impl Executor {
                             let val = self
                                 .evaluate_expr(value, row, prop_manager, params, ctx)
                                 .await?;
+                            Self::validate_property_value(prop_name, &val)?;
                             props.insert(prop_name.clone(), val.clone());
 
                             // Enrich with generated columns
@@ -1532,6 +1565,7 @@ impl Executor {
                             let val = self
                                 .evaluate_expr(value, row, prop_manager, params, ctx)
                                 .await?;
+                            Self::validate_property_value(prop_name, &val)?;
                             props.insert(prop_name.clone(), val.clone());
                             writer
                                 .insert_edge(ei.src, ei.dst, ei.edge_type_id, ei.eid, props)
@@ -1558,6 +1592,7 @@ impl Executor {
                             let val = self
                                 .evaluate_expr(value, row, prop_manager, params, ctx)
                                 .await?;
+                            Self::validate_property_value(prop_name, &val)?;
                             props.insert(prop_name.clone(), val.clone());
                             writer.insert_edge(src, dst, etype, eid, props).await?;
 
@@ -1584,15 +1619,8 @@ impl Executor {
                             .collect();
 
                         if !labels_to_add.is_empty() {
-                            // Validate that all new labels exist in schema
-                            let schema = self.storage.schema_manager().schema();
-                            for label in &labels_to_add {
-                                if schema.get_label_case_insensitive(label).is_none() {
-                                    return Err(anyhow!("Label {} not found in schema", label));
-                                }
-                            }
-
-                            // Add labels via L0Buffer
+                            // Add labels via L0Buffer (schemaless: accept any label name,
+                            // matching CREATE behavior)
                             if let Some(ctx) = ctx {
                                 ctx.l0.write().add_vertex_labels(vid, labels_to_add.clone());
                             }
@@ -1647,6 +1675,12 @@ impl Executor {
     }
 
     /// Execute REMOVE clause items (property removal or label removal).
+    ///
+    /// Property removals are batched per variable to avoid stale reads: when
+    /// multiple properties of the same entity are removed in one REMOVE clause,
+    /// we read from storage once, null all specified properties, and write back
+    /// once. This prevents the second removal from reading stale data that
+    /// doesn't reflect the first removal's L0 write.
     pub(crate) async fn execute_remove_items_locked(
         &self,
         items: &[RemoveItem],
@@ -1655,99 +1689,130 @@ impl Executor {
         prop_manager: &PropertyManager,
         ctx: Option<&QueryContext>,
     ) -> Result<()> {
+        // Collect property names to remove, grouped by variable.
+        // Use Vec<(String, Vec<String>)> to preserve insertion order.
+        let mut prop_removals: Vec<(String, Vec<String>)> = Vec::new();
+
         for item in items {
             match item {
                 RemoveItem::Property(expr) => {
-                    self.execute_remove_property(expr, row, writer, prop_manager, ctx)
-                        .await?;
+                    if let Expr::Property(var_expr, prop_name) = expr
+                        && let Expr::Variable(var_name) = &**var_expr
+                    {
+                        if let Some(entry) =
+                            prop_removals.iter_mut().find(|(v, _)| v == var_name)
+                        {
+                            entry.1.push(prop_name.clone());
+                        } else {
+                            prop_removals
+                                .push((var_name.clone(), vec![prop_name.clone()]));
+                        }
+                    }
                 }
                 RemoveItem::Labels { variable, labels } => {
                     self.execute_remove_labels(variable, labels, row, ctx)?;
                 }
             }
         }
-        Ok(())
-    }
 
-    /// Execute property removal for a vertex or edge.
-    pub(crate) async fn execute_remove_property(
-        &self,
-        expr: &Expr,
-        row: &mut HashMap<String, Value>,
-        writer: &mut Writer,
-        prop_manager: &PropertyManager,
-        ctx: Option<&QueryContext>,
-    ) -> Result<()> {
-        if let Expr::Property(var_expr, prop_name) = expr
-            && let Expr::Variable(var_name) = &**var_expr
-            && let Some(node_val) = row.get(var_name)
-        {
+        // Execute batched property removals per variable.
+        for (var_name, prop_names) in &prop_removals {
+            let Some(node_val) = row.get(var_name) else {
+                continue;
+            };
+
             if let Ok(vid) = Self::vid_from_value(node_val) {
-                // Remove property from vertex
+                // Vertex property removal
                 let mut props = prop_manager
                     .get_all_vertex_props_with_ctx(vid, ctx)
                     .await?
                     .unwrap_or_default();
-                props.insert(prop_name.clone(), Value::Null);
-                let labels = Self::extract_labels_from_node(node_val).unwrap_or_default();
-                let _ = writer.insert_vertex_with_labels(vid, props, labels).await?;
 
-                // Update the row to reflect the property removal
+                // Only write back if at least one property actually exists
+                let any_exist = prop_names.iter().any(|p| {
+                    props.get(p).is_some_and(|v| !v.is_null())
+                });
+                if any_exist {
+                    for prop_name in prop_names {
+                        props.insert(prop_name.clone(), Value::Null);
+                    }
+                    let labels =
+                        Self::extract_labels_from_node(node_val).unwrap_or_default();
+                    let _ = writer
+                        .insert_vertex_with_labels(vid, props, labels)
+                        .await?;
+                }
+
+                // Update the row map regardless (downstream sees Null)
                 if let Some(Value::Map(node_map)) = row.get_mut(var_name) {
-                    node_map.insert(prop_name.clone(), Value::Null);
+                    for prop_name in prop_names {
+                        node_map.insert(prop_name.clone(), Value::Null);
+                    }
                 }
             } else if let Value::Map(map) = node_val {
-                // Remove property from edge
-                self.execute_remove_edge_property(map, prop_name, writer, prop_manager, ctx)
-                    .await?;
+                // Edge property removal (map-encoded)
+                if map.contains_key("_eid") {
+                    let ei = self.extract_edge_identity(map)?;
+                    let mut props = prop_manager
+                        .get_all_edge_props_with_ctx(ei.eid, ctx)
+                        .await?
+                        .unwrap_or_default();
 
-                // Update the row to reflect the property removal
+                    let any_exist = prop_names.iter().any(|p| {
+                        props.get(p).is_some_and(|v| !v.is_null())
+                    });
+                    if any_exist {
+                        for prop_name in prop_names {
+                            props.insert(prop_name.to_string(), Value::Null);
+                        }
+                        writer
+                            .insert_edge(
+                                ei.src,
+                                ei.dst,
+                                ei.edge_type_id,
+                                ei.eid,
+                                props,
+                            )
+                            .await?;
+                    }
+                }
+
                 if let Some(Value::Map(edge_map)) = row.get_mut(var_name) {
-                    edge_map.insert(prop_name.clone(), Value::Null);
+                    for prop_name in prop_names {
+                        edge_map.insert(prop_name.clone(), Value::Null);
+                    }
                 }
             } else if let Value::Edge(edge) = node_val {
-                // Remove property from Value::Edge directly
+                // Edge property removal (Value::Edge)
                 let eid = edge.eid;
                 let src = edge.src;
                 let dst = edge.dst;
-                let etype = self.resolve_edge_type_id(&Value::String(edge.edge_type.clone()))?;
+                let etype =
+                    self.resolve_edge_type_id(&Value::String(edge.edge_type.clone()))?;
 
                 let mut props = prop_manager
                     .get_all_edge_props_with_ctx(eid, ctx)
                     .await?
                     .unwrap_or_default();
-                props.insert(prop_name.to_string(), Value::Null);
-                writer.insert_edge(src, dst, etype, eid, props).await?;
 
-                // Update the row to reflect the property removal
+                let any_exist = prop_names.iter().any(|p| {
+                    props.get(p).is_some_and(|v| !v.is_null())
+                });
+                if any_exist {
+                    for prop_name in prop_names {
+                        props.insert(prop_name.to_string(), Value::Null);
+                    }
+                    writer.insert_edge(src, dst, etype, eid, props).await?;
+                }
+
                 if let Some(Value::Edge(edge)) = row.get_mut(var_name) {
-                    edge.properties.insert(prop_name.to_string(), Value::Null);
+                    for prop_name in prop_names {
+                        edge.properties.insert(prop_name.to_string(), Value::Null);
+                    }
                 }
             }
         }
-        Ok(())
-    }
 
-    /// Execute property removal from an edge.
-    pub(crate) async fn execute_remove_edge_property(
-        &self,
-        map: &HashMap<String, Value>,
-        prop_name: &str,
-        writer: &mut Writer,
-        prop_manager: &PropertyManager,
-        ctx: Option<&QueryContext>,
-    ) -> Result<()> {
-        if map.contains_key("_eid") {
-            let ei = self.extract_edge_identity(map)?;
-            let mut props = prop_manager
-                .get_all_edge_props_with_ctx(ei.eid, ctx)
-                .await?
-                .unwrap_or_default();
-            props.insert(prop_name.to_string(), Value::Null);
-            writer
-                .insert_edge(ei.src, ei.dst, ei.edge_type_id, ei.eid, props)
-                .await?;
-        }
         Ok(())
     }
 
@@ -1795,26 +1860,70 @@ impl Executor {
         Ok(())
     }
 
-    /// Execute DELETE clause for a single item (vertex or edge).
+    /// Resolve edge type ID for a Value::Edge, handling empty edge_type strings
+    /// by looking up the type from the L0 buffer's edge endpoints.
+    fn resolve_edge_type_id_for_edge(
+        &self,
+        edge: &crate::types::Edge,
+        writer: &Writer,
+    ) -> Result<u32> {
+        if !edge.edge_type.is_empty() {
+            return self.resolve_edge_type_id(&Value::String(edge.edge_type.clone()));
+        }
+        // Edge type name is empty (e.g., from anonymous MATCH patterns).
+        // Look up the edge type ID from the L0 buffer's edge endpoints.
+        if let Some(etype) = writer.get_edge_type_id_from_l0(edge.eid) {
+            return Ok(etype);
+        }
+        Err(anyhow!(
+            "Cannot determine edge type for edge {:?} — edge type name is empty and not found in L0",
+            edge.eid
+        ))
+    }
+
+    /// Execute DELETE clause for a single item (vertex, edge, path, or null).
     pub(crate) async fn execute_delete_item_locked(
         &self,
         val: &Value,
         detach: bool,
         writer: &mut Writer,
     ) -> Result<()> {
-        if let Ok(vid) = Self::vid_from_value(val) {
-            let labels = Self::extract_labels_from_node(val);
-            self.execute_delete_vertex(vid, detach, labels, writer)
-                .await?;
-        } else if let Value::Map(map) = val {
-            self.execute_delete_edge_from_map(map, writer).await?;
-        } else if let Value::Edge(edge) = val {
-            // Delete Value::Edge directly
-            let eid = edge.eid;
-            let src = edge.src;
-            let dst = edge.dst;
-            let etype = self.resolve_edge_type_id(&Value::String(edge.edge_type.clone()))?;
-            writer.delete_edge(eid, src, dst, etype).await?;
+        match val {
+            Value::Null => {
+                // DELETE null is a no-op per OpenCypher spec
+            }
+            Value::Path(path) => {
+                // Delete path edges first, then nodes
+                for edge in &path.edges {
+                    let etype = self.resolve_edge_type_id_for_edge(edge, writer)?;
+                    writer
+                        .delete_edge(edge.eid, edge.src, edge.dst, etype)
+                        .await?;
+                }
+                for node in &path.nodes {
+                    self.execute_delete_vertex(
+                        node.vid,
+                        detach,
+                        Some(node.labels.clone()),
+                        writer,
+                    )
+                    .await?;
+                }
+            }
+            _ => {
+                if let Ok(vid) = Self::vid_from_value(val) {
+                    let labels = Self::extract_labels_from_node(val);
+                    self.execute_delete_vertex(vid, detach, labels, writer)
+                        .await?;
+                } else if let Value::Map(map) = val {
+                    self.execute_delete_edge_from_map(map, writer).await?;
+                } else if let Value::Edge(edge) = val {
+                    let etype = self.resolve_edge_type_id_for_edge(edge, writer)?;
+                    writer
+                        .delete_edge(edge.eid, edge.src, edge.dst, etype)
+                        .await?;
+                }
+            }
         }
         Ok(())
     }
@@ -1839,7 +1948,7 @@ impl Executor {
     /// Check that a vertex has no edges (required for non-DETACH DELETE).
     pub(crate) async fn check_vertex_has_no_edges(&self, vid: Vid, writer: &Writer) -> Result<()> {
         let schema = self.storage.schema_manager().schema();
-        let edge_type_ids: Vec<u32> = schema.edge_types.values().map(|m| m.id).collect();
+        let edge_type_ids: Vec<u32> = schema.all_edge_type_ids();
 
         let out_graph = self
             .storage
@@ -1867,7 +1976,7 @@ impl Executor {
 
         if has_out || has_in {
             return Err(anyhow!(
-                "Cannot delete node {}, because it still has relationships. To delete the node and its relationships, use DETACH DELETE.",
+                "ConstraintVerificationFailed: DeleteConnectedNode - Cannot delete node {}, because it still has relationships. To delete the node and its relationships, use DETACH DELETE.",
                 vid
             ));
         }
@@ -2022,17 +2131,19 @@ impl Executor {
                             );
                             plan = Self::attach_scan(plan, scan);
                         } else {
-                            if n.labels.is_empty() {
-                                return Err(anyhow!("MERGE node must have a label"));
-                            }
-                            let label_name = &n.labels[0];
-                            let schema = self.storage.schema_manager().schema();
-                            // Fall back to label_id 0 (any/schemaless) when the label is not
-                            // in the schema — this allows MERGE to work in schemaless mode.
-                            let label_id = schema
-                                .get_label_case_insensitive(label_name)
-                                .map(|m| m.id)
-                                .unwrap_or(0);
+                            let label_id = if n.labels.is_empty() {
+                                // Unlabeled MERGE node: scan all nodes (label_id 0 → ScanAll)
+                                0
+                            } else {
+                                let label_name = &n.labels[0];
+                                let schema = self.storage.schema_manager().schema();
+                                // Fall back to label_id 0 (any/schemaless) when the label is not
+                                // in the schema — this allows MERGE to work in schemaless mode.
+                                schema
+                                    .get_label_case_insensitive(label_name)
+                                    .map(|m| m.id)
+                                    .unwrap_or(0)
+                            };
 
                             let prop_filter = planner.properties_to_expr(&variable, &n.properties);
                             let scan = Self::make_scan_plan(

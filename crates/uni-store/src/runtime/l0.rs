@@ -476,6 +476,11 @@ impl L0Buffer {
             .map(|(src, dst, _)| (*src, *dst))
     }
 
+    /// Returns full edge endpoint data (src_vid, dst_vid, edge_type_id) for an EID.
+    pub fn get_edge_endpoint_full(&self, eid: Eid) -> Option<(Vid, Vid, u32)> {
+        self.edge_endpoints.get(&eid).copied()
+    }
+
     #[instrument(skip(self, other), level = "trace")]
     pub fn merge(&mut self, other: &L0Buffer) -> Result<()> {
         trace!(

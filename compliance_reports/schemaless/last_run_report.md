@@ -1,17 +1,19 @@
 # TCK Compliance Report
 
-**Generated:** 2026-02-18 21:25:23
-**Results:** `results_20260218_212523.json`
-**Compared to:** `results_20260218_201342.json`
+**Generated:** 2026-02-19 01:55:04
+**Results:** `results_20260219_015504.json`
+**Compared to:** `results_20260219_014759.json`
 
 ## Summary
 
 | Metric | Current | Previous | Delta |
 |--------|---------|----------|-------|
 | Scenarios | 3897 | 3897 |  |
-| Passed | 3750 | 3750 |  |
-| Failed | 146 | 146 |  |
-| Pass Rate | 96.2% | 96.2% | ➡️ +0.0pp |
+| Passed | 3794 | 3792 | +2 |
+| Failed | 102 | 104 | -2 |
+| Pass Rate | 97.4% | 97.3% | 📈 +0.1pp |
+
+**🟢 Fixed:** 2 scenarios now passing
 
 ## Feature Breakdown
 
@@ -41,17 +43,17 @@
 | ✅ Conditional1 | 1 | 1 | 0 | 100% |  |
 | ✅ Conditional2 | 12 | 12 | 0 | 100% |  |
 | ✅ CountingSubgraphMatches1 | 11 | 11 | 0 | 100% |  |
-| ✅ Create1 | 20 | 19 | 1 | 95% |  |
+| ✅ Create1 | 20 | 20 | 0 | 100% |  |
 | ✅ Create2 | 24 | 24 | 0 | 100% |  |
-| ✅ Create3 | 13 | 11 | 2 | 85% |  |
+| ✅ Create3 | 13 | 13 | 0 | 100% |  |
 | ✅ Create4 | 2 | 2 | 0 | 100% |  |
-| ✅ Create5 | 5 | 4 | 1 | 80% |  |
+| ✅ Create5 | 5 | 5 | 0 | 100% |  |
 | ✅ Create6 | 14 | 14 | 0 | 100% |  |
-| ⚠️ Delete1 | 8 | 6 | 2 | 75% |  |
-| ✅ Delete2 | 5 | 4 | 1 | 80% |  |
-| ⚠️ Delete3 | 2 | 1 | 1 | 50% |  |
+| ✅ Delete1 | 8 | 8 | 0 | 100% |  |
+| ✅ Delete2 | 5 | 5 | 0 | 100% |  |
+| ✅ Delete3 | 2 | 2 | 0 | 100% |  |
 | ✅ Delete4 | 3 | 3 | 0 | 100% |  |
-| ❌ Delete5 | 9 | 2 | 7 | 22% |  |
+| ✅ Delete5 | 9 | 9 | 0 | 100% |  |
 | ✅ Delete6 | 14 | 14 | 0 | 100% |  |
 | ⚠️ ExistentialSubquery1 | 4 | 3 | 1 | 75% |  |
 | ⚠️ ExistentialSubquery2 | 3 | 2 | 1 | 67% |  |
@@ -103,15 +105,15 @@
 | ✅ Mathematical2 | 1 | 1 | 0 | 100% |  |
 | ✅ Mathematical3 | 1 | 1 | 0 | 100% |  |
 | ⚠️ Mathematical8 | 2 | 1 | 1 | 50% |  |
-| ❌ Merge1 | 17 | 8 | 9 | 47% |  |
-| ⚠️ Merge2 | 6 | 3 | 3 | 50% |  |
-| ❌ Merge3 | 5 | 2 | 3 | 40% |  |
+| ⚠️ Merge1 | 17 | 11 | 6 | 65% | +6pp |
+| ✅ Merge2 | 6 | 5 | 1 | 83% |  |
+| ✅ Merge3 | 5 | 4 | 1 | 80% |  |
 | ❌ Merge4 | 2 | 0 | 2 | 0% |  |
-| ⚠️ Merge5 | 29 | 19 | 10 | 66% |  |
+| ⚠️ Merge5 | 29 | 20 | 9 | 69% | +3pp |
 | ✅ Merge6 | 6 | 6 | 0 | 100% |  |
 | ✅ Merge7 | 5 | 5 | 0 | 100% |  |
 | ✅ Merge8 | 1 | 1 | 0 | 100% |  |
-| ⚠️ Merge9 | 4 | 2 | 2 | 50% |  |
+| ⚠️ Merge9 | 4 | 3 | 1 | 75% |  |
 | ✅ Null1 | 17 | 17 | 0 | 100% |  |
 | ✅ Null2 | 17 | 17 | 0 | 100% |  |
 | ✅ Null3 | 10 | 10 | 0 | 100% |  |
@@ -136,15 +138,15 @@
 | ✅ Quantifier7 | 36 | 36 | 0 | 100% |  |
 | ✅ Quantifier8 | 31 | 31 | 0 | 100% |  |
 | ✅ Quantifier9 | 17 | 17 | 0 | 100% |  |
-| ⚠️ Remove1 | 7 | 4 | 3 | 57% |  |
+| ✅ Remove1 | 7 | 7 | 0 | 100% |  |
 | ✅ Remove2 | 5 | 5 | 0 | 100% |  |
 | ✅ Remove3 | 21 | 21 | 0 | 100% |  |
 | ✅ Return1 | 2 | 2 | 0 | 100% |  |
 | ⚠️ Return2 | 18 | 13 | 5 | 72% |  |
 | ✅ Return3 | 3 | 3 | 0 | 100% |  |
-| ⚠️ Return4 | 11 | 7 | 4 | 64% |  |
+| ⚠️ Return4 | 11 | 8 | 3 | 73% |  |
 | ✅ Return5 | 5 | 5 | 0 | 100% |  |
-| ✅ Return6 | 21 | 17 | 4 | 81% |  |
+| ✅ Return6 | 21 | 18 | 3 | 86% |  |
 | ⚠️ Return7 | 2 | 1 | 1 | 50% |  |
 | ✅ Return8 | 1 | 1 | 0 | 100% |  |
 | ✅ ReturnOrderBy1 | 12 | 12 | 0 | 100% |  |
@@ -156,12 +158,12 @@
 | ✅ ReturnSkipLimit1 | 11 | 10 | 1 | 91% |  |
 | ✅ ReturnSkipLimit2 | 17 | 17 | 0 | 100% |  |
 | ⚠️ ReturnSkipLimit3 | 3 | 2 | 1 | 67% |  |
-| ✅ Set1 | 11 | 10 | 1 | 91% |  |
+| ✅ Set1 | 11 | 11 | 0 | 100% |  |
 | ✅ Set2 | 3 | 3 | 0 | 100% |  |
-| ❌ Set3 | 8 | 1 | 7 | 12% |  |
+| ✅ Set3 | 8 | 8 | 0 | 100% |  |
 | ✅ Set4 | 5 | 5 | 0 | 100% |  |
 | ✅ Set5 | 5 | 5 | 0 | 100% |  |
-| ⚠️ Set6 | 21 | 14 | 7 | 67% |  |
+| ✅ Set6 | 21 | 21 | 0 | 100% |  |
 | ❌ String1 | 1 | 0 | 1 | 0% |  |
 | ✅ String10 | 9 | 9 | 0 | 100% |  |
 | ✅ String11 | 2 | 2 | 0 | 100% |  |
@@ -209,6 +211,13 @@
 | ✅ WithWhere5 | 4 | 4 | 0 | 100% |  |
 | ✅ WithWhere6 | 1 | 1 | 0 | 100% |  |
 | ✅ WithWhere7 | 3 | 3 | 0 | 100% |  |
+
+## 🟢 Newly Passing
+
+Scenarios that were failing but are now passing:
+
+- **Merge1** — [17] Fail on merging node with null property (line 300)
+- **Merge5** — [29] Fail on merging relationship with null property (line 512)
 
 ## Failed Scenarios
 
@@ -296,207 +305,6 @@
   ... (truncated)
   ```
 
-### Create1
-
-- **[13] Fail when creating a node that is already bound** (line 176)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/create/Create1.feature:183:5
-      Matched: crates/uni-tck/src/steps/then.rs:90:1
-      Step panicked. Captured output: No error found
-[Summary]
-1 feature
-1 scenario (1 failed)
-3 steps (2 passed, 1 failed)
-
-  ```
-
-### Create3
-
-- **[11] WITH-MERGE-CREATE: A bound node should be recognized after projection with WITH + MERGE node** (line 212)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/create/Create3.feature:222:5
-      Matched: crates/uni-tck/src/steps/then.rs:9:1
-      Step panicked. Captured output: No result found
-[Summary]
-1 feature
-1 scenario (1 failed)
-3 steps (2 passed, 1 failed)
-
-  ```
-- **[12] WITH-MERGE-CREATE: A bound node should be recognized after projection with WITH + MERGE pattern** (line 227)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/create/Create3.feature:239:5
-      Matched: crates/uni-tck/src/steps/then.rs:9:1
-      Step panicked. Captured output: No result found
-[Summary]
-1 feature
-1 scenario (1 failed)
-3 steps (2 passed, 1 failed)
-
-  ```
-
-### Create5
-
-- **[3] Create a pattern with multiple hops in varying directions** (line 73)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/create/Create5.feature:89:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): Row count mismatch: expected 1, got 2
-[Summary]
-1 feature
-1 scenario (1 failed)
-6 steps (5 passed, 1 fa
-  ... (truncated)
-  ```
-
-### Delete1
-
-- **[7] Failing when deleting connected nodes** (line 116)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/delete/Delete1.feature:130:5
-      Matched: crates/uni-tck/src/steps/then.rs:90:1
-      Step panicked. Captured output: No error found
-[Summary]
-1 feature
-1 scenario (1 failed)
-4 steps (3 passed, 1 failed)
-
-  ```
-- **[8] Failing when deleting a label** (line 132)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/delete/Delete1.feature:139:5
-      Matched: crates/uni-tck/src/steps/then.rs:90:1
-      Step panicked. Captured output: No error found
-[Summary]
-1 feature
-1 scenario (1 failed)
-3 steps (2 passed, 1 failed)
-
-  ```
-
-### Delete2
-
-- **[5] Failing when deleting a relationship type** (line 96)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/delete/Delete2.feature:107:5
-      Matched: crates/uni-tck/src/steps/then.rs:90:1
-      Step panicked. Captured output: No error found
-[Summary]
-1 feature
-1 scenario (1 failed)
-4 steps (3 passed, 1 failed)
-
-  ```
-
-### Delete3
-
-- **[1] Detach deleting paths** (line 33)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/delete/Delete3.feature:48:5
-      Matched: crates/uni-tck/src/steps/and.rs:27:1
-      Step panicked. Captured output: assertion `left == right` failed: Expected -nodes=4, but got 0 (before=4, after=4)
-        left: 0
-       right: 4
-[Summary]
-1 featur
-  ... (truncated)
-  ```
-
-### Delete5
-
-- **[1] Delete node from a list** (line 33)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/delete/Delete5.feature:52:5
-      Matched: crates/uni-tck/src/steps/and.rs:27:1
-      Step panicked. Captured output: assertion `left == right` failed: Expected -relationships=1, but got 0 (before=4, after=4)
-        left: 0
-       right: 1
-[Summary]
-
-  ... (truncated)
-  ```
-- **[3] Delete nodes from a map** (line 78)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/delete/Delete5.feature:90:5
-      Matched: crates/uni-tck/src/steps/then.rs:9:1
-      Step panicked. Captured output: No result found
-[Summary]
-1 feature
-1 scenario (1 failed)
-4 steps (3 passed, 1 failed)
-
-  ```
-- **[4] Delete relationships from a map** (line 95)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/delete/Delete5.feature:109:5
-      Matched: crates/uni-tck/src/steps/then.rs:9:1
-      Step panicked. Captured output: No result found
-[Summary]
-1 feature
-1 scenario (1 failed)
-4 steps (3 passed, 1 failed)
-
-  ```
-- **[5] Detach delete nodes from nested map/list** (line 113)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/delete/Delete5.feature:127:5
-      Matched: crates/uni-tck/src/steps/then.rs:9:1
-      Step panicked. Captured output: No result found
-[Summary]
-1 feature
-1 scenario (1 failed)
-4 steps (3 passed, 1 failed)
-
-  ```
-- **[6] Delete relationships from nested map/list** (line 132)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/delete/Delete5.feature:146:5
-      Matched: crates/uni-tck/src/steps/then.rs:9:1
-      Step panicked. Captured output: No result found
-[Summary]
-1 feature
-1 scenario (1 failed)
-4 steps (3 passed, 1 failed)
-
-  ```
-- **[7] Delete paths from nested map/list** (line 150)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/delete/Delete5.feature:164:5
-      Matched: crates/uni-tck/src/steps/then.rs:9:1
-      Step panicked. Captured output: No result found
-[Summary]
-1 feature
-1 scenario (1 failed)
-4 steps (3 passed, 1 failed)
-
-  ```
-- **[9] Failing when deleting an integer expression** (line 179)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/delete/Delete5.feature:186:5
-      Matched: crates/uni-tck/src/steps/then.rs:90:1
-      Step panicked. Captured output: No error found
-[Summary]
-1 feature
-1 scenario (1 failed)
-3 steps (2 passed, 1 failed)
-
-  ```
-
 ### ExistentialSubquery1
 
 - **[2] Simple subquery with WHERE clause** (line 53)
@@ -555,7 +363,7 @@
   Step failed:
       Defined: tck/features/expressions/graph/Graph4.feature:77:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("type(null)", Some(Null)), ("type(r)", Some(String(
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("type(r)", Some(String("NOT_THERE"))), ("type(null)
   ... (truncated)
   ```
 - **[4] `type()` on mixed null and non-null relationships** (line 82)
@@ -574,11 +382,11 @@
   Step failed:
       Defined: tck/features/expressions/graph/Graph6.feature:90:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): Expected column '(list[1]).missing' not found in result
+      Step panicked. Captured output: Result mismatch (any order): Expected column '(list[1]).missingToo' not found in result
 [Summary]
 1 feature
 1 scenario (1 failed)
-4 s
+
   ... (truncated)
   ```
 - **[6] Statically access a property of a optional non-null relationship** (line 111)
@@ -679,7 +487,7 @@
   Step failed:
       Defined: tck/features/expressions/literals/Literals7.feature:295:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("literal", Some(List([Map({"id": String("000
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("literal", Some(List([Map({"type": String("d
   ... (truncated)
   ```
 
@@ -690,7 +498,7 @@
   Step failed:
       Defined: tck/features/expressions/literals/Literals8.feature:294:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("literal", Some(Map({"data": List([Map({"ppu
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("literal", Some(Map({"data": List([Map({"nam
   ... (truncated)
   ```
 
@@ -817,7 +625,7 @@
   Step failed:
       Defined: tck/features/clauses/match/Match8.feature:70:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "MERGE node must have a label", query: Some("\nMATCH (a)\nMERGE (b)\nWITH *\n
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("count(*)", Some(Int(4)))]. Expected: [{"count(*)": Int
   ... (truncated)
   ```
 
@@ -878,22 +686,6 @@
 
 ### Merge1
 
-- **[1] Merge node when no nodes exist** (line 33)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/merge/Merge1.feature:40:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "MERGE node must have a label", query: Some("\nMERGE (a)\nRETURN count(*) AS 
-  ... (truncated)
-  ```
-- **[4] Merge node should create when it doesn't match, properties** (line 76)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/merge/Merge1.feature:87:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "MERGE node must have a label", query: Some("\nMERGE (a {num: 43})\nRETURN a.
-  ... (truncated)
-  ```
 - **[9] Merge should support updates while merging** (line 159)
   ```
   Step failed:
@@ -926,24 +718,12 @@
 1 featur
   ... (truncated)
   ```
-- **[12] Merge should be able to merge using property of freshly created node** (line 233)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/merge/Merge1.feature:240:5
-      Matched: crates/uni-tck/src/steps/then.rs:9:1
-      Step panicked. Captured output: No result found
-[Summary]
-1 feature
-1 scenario (1 failed)
-3 steps (2 passed, 1 failed)
-
-  ```
 - **[13] Merge should bind a path** (line 245)
   ```
   Step failed:
       Defined: tck/features/clauses/merge/Merge1.feature:252:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "MERGE node must have a label", query: Some("\nMERGE p = (a {num: 1})\nRETUR
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("p", Some(Null))]. Expected: [{"p": Path(Path { nodes:
   ... (truncated)
   ```
 - **[14] Merges should not be able to match on deleted nodes** (line 259)
@@ -973,30 +753,6 @@
 
 ### Merge2
 
-- **[1] Merge node with label add label on create** (line 33)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/merge/Merge2.feature:41:5
-      Matched: crates/uni-tck/src/steps/then.rs:48:1
-      Step panicked. Captured output: No result found
-[Summary]
-1 feature
-1 scenario (1 failed)
-3 steps (2 passed, 1 failed)
-
-  ```
-- **[2] ON CREATE on created nodes** (line 48)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/merge/Merge2.feature:55:5
-      Matched: crates/uni-tck/src/steps/then.rs:9:1
-      Step panicked. Captured output: No result found
-[Summary]
-1 feature
-1 scenario (1 failed)
-3 steps (2 passed, 1 failed)
-
-  ```
 - **[5] Merge should be able to use properties of bound node in ON CREATE** (line 93)
   ```
   Step failed:
@@ -1012,30 +768,6 @@
 
 ### Merge3
 
-- **[1] Merge should be able to set labels on match** (line 33)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/merge/Merge3.feature:44:5
-      Matched: crates/uni-tck/src/steps/then.rs:9:1
-      Step panicked. Captured output: No result found
-[Summary]
-1 feature
-1 scenario (1 failed)
-4 steps (3 passed, 1 failed)
-
-  ```
-- **[2] Merge node with label add label on match when it exists** (line 48)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/merge/Merge3.feature:60:5
-      Matched: crates/uni-tck/src/steps/then.rs:48:1
-      Step panicked. Captured output: No result found
-[Summary]
-1 feature
-1 scenario (1 failed)
-4 steps (3 passed, 1 failed)
-
-  ```
 - **[4] Merge should be able to use properties of bound node in ON MATCH** (line 84)
   ```
   Step failed:
@@ -1054,14 +786,15 @@
 - **[1] Merge should be able to set labels on match and on create** (line 33)
   ```
   Step failed:
-      Defined: tck/features/clauses/merge/Merge4.feature:46:5
-      Matched: crates/uni-tck/src/steps/then.rs:9:1
-      Step panicked. Captured output: No result found
+      Defined: tck/features/clauses/merge/Merge4.feature:47:5
+      Matched: crates/uni-tck/src/steps/and.rs:27:1
+      Step panicked. Captured output: assertion `left == right` failed: Expected +nodes=1, but got 0 (before=2, after=2)
+        left: 0
+       right: 1
 [Summary]
 1 feature
-1 scenario (1 failed)
-4 steps (3 passed, 1 failed)
 
+  ... (truncated)
   ```
 - **[2] Merge should be able to use properties of bound node in ON MATCH and ON CREATE** (line 51)
   ```
@@ -1095,7 +828,7 @@
   Step failed:
       Defined: tck/features/clauses/merge/Merge5.feature:205:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "MERGE node must have a label", query: Some("\nMERGE (a {num: 1})\nMERGE (b 
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("p", Some(Null))]. Expected: [{"p": Path(Path { nodes:
   ... (truncated)
   ```
 - **[11] Use outgoing direction when unspecified** (line 213)
@@ -1121,17 +854,25 @@
 - **[18] Double aliasing of existing nodes 1** (line 344)
   ```
   Step failed:
-      Defined: tck/features/clauses/merge/Merge5.feature:362:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "MERGE node must have a label", query: Some("\nMATCH (n)\nMATCH (m)\nWITH n 
+      Defined: tck/features/clauses/merge/Merge5.feature:365:5
+      Matched: crates/uni-tck/src/steps/and.rs:27:1
+      Step panicked. Captured output: assertion `left == right` failed: Expected +relationships=1, but got 2 (before=0, after=2)
+        left: 2
+       right: 1
+[Summary]
+1
   ... (truncated)
   ```
 - **[19] Double aliasing of existing nodes 2** (line 368)
   ```
   Step failed:
-      Defined: tck/features/clauses/merge/Merge5.feature:385:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "MERGE node must have a label", query: Some("\nMATCH (n)\nWITH n AS a\nMERGE
+      Defined: tck/features/clauses/merge/Merge5.feature:388:5
+      Matched: crates/uni-tck/src/steps/and.rs:27:1
+      Step panicked. Captured output: assertion `left == right` failed: Expected +relationships=1, but got 2 (before=0, after=2)
+        left: 2
+       right: 1
+[Summary]
+1
   ... (truncated)
   ```
 - **[20] Do not match on deleted entities** (line 391)
@@ -1151,10 +892,11 @@
   Step failed:
       Defined: tck/features/clauses/merge/Merge5.feature:440:5
       Matched: crates/uni-tck/src/steps/and.rs:27:1
-      Step panicked. Captured output: assertion `left == right` failed: Expected +relationships=1, but got -1 (before=2, after=1)
-        left: -1
+      Step panicked. Captured output: assertion `left == right` failed: Expected +relationships=1, but got 0 (before=2, after=2)
+        left: 0
        right: 1
 [Summary]
+1
   ... (truncated)
   ```
 - **[22] Fail when imposing new predicates on a variable that is already bound** (line 446)
@@ -1169,29 +911,9 @@
 3 steps (2 passed, 1 failed)
 
   ```
-- **[29] Fail on merging relationship with null property** (line 512)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/merge/Merge5.feature:519:5
-      Matched: crates/uni-tck/src/steps/then.rs:90:1
-      Step panicked. Captured output: No error found
-[Summary]
-1 feature
-1 scenario (1 failed)
-3 steps (2 passed, 1 failed)
-
-  ```
 
 ### Merge9
 
-- **[1] UNWIND with one MERGE** (line 33)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/merge/Merge9.feature:41:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "MERGE node must have a label", query: Some("\nUNWIND [1, 2, 3, 4] AS int\nME
-  ... (truncated)
-  ```
 - **[4] MERGE after WITH with predicate and WITH with aggregation** (line 81)
   ```
   Step failed:
@@ -1300,33 +1022,6 @@
   ... (truncated)
   ```
 
-### Remove1
-
-- **[2] Remove multiple node properties** (line 51)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/remove/Remove1.feature:63:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("props", Some(Int(3)))]. Expected: [{"props": Int(1)}
-  ... (truncated)
-  ```
-- **[4] Remove multiple relationship properties** (line 87)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/remove/Remove1.feature:99:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("props", Some(Int(3)))]. Expected: [{"props": Int(1)}
-  ... (truncated)
-  ```
-- **[7] Remove a missing node property** (line 136)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/remove/Remove1.feature:148:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("totalNumberOfProps", Some(Int(3)))]. Expected: [{"t
-  ... (truncated)
-  ```
-
 ### Return2
 
 - **[8] Returning label predicate expression** (line 140)
@@ -1428,25 +1123,9 @@
 4 
   ... (truncated)
   ```
-- **[9] Handle subexpression in aggregation also occurring as standalone expression with nested aggregation in a literal map** (line 163)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/return/Return4.feature:176:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "SyntaxError: InvalidAggregation - DataFusion planning failed: This featur
-  ... (truncated)
-  ```
 
 ### Return6
 
-- **[6] Handle aggregates inside non-aggregate expressions** (line 116)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/return/Return6.feature:123:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "SyntaxError: InvalidAggregation - DataFusion planning failed: This featur
-  ... (truncated)
-  ```
 - **[13] Returning the minimum length of paths** (line 230)
   ```
   Step failed:
@@ -1523,147 +1202,6 @@
 1 scenario (1 failed)
 5 steps (4 passed, 1 failed)
 
-  ```
-
-### Set1
-
-- **[10] Failing when setting a list of maps as a property** (line 180)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/set/Set1.feature:187:5
-      Matched: crates/uni-tck/src/steps/then.rs:90:1
-      Step panicked. Captured output: No error found
-[Summary]
-1 feature
-1 scenario (1 failed)
-3 steps (2 passed, 1 failed)
-
-  ```
-
-### Set3
-
-- **[1] Add a single label to a node with no label** (line 33)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/set/Set3.feature:45:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Label Foo not found in schema", query: Some("\nMATCH (n)\nSET n:Foo\nRETURN n\n"
-  ... (truncated)
-  ```
-- **[2] Adding multiple labels to a node with no label** (line 51)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/set/Set3.feature:63:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Label Foo not found in schema", query: Some("\nMATCH (n)\nSET n:Foo:Bar\nRETURN 
-  ... (truncated)
-  ```
-- **[3] Add a single label to a node with an existing label** (line 69)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/set/Set3.feature:81:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Label Foo not found in schema", query: Some("\nMATCH (n:A)\nSET n:Foo\nRETURN n\
-  ... (truncated)
-  ```
-- **[4] Adding multiple labels to a node with an existing label** (line 87)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/set/Set3.feature:99:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Label Foo not found in schema", query: Some("\nMATCH (n)\nSET n:Foo:Bar\nRETURN 
-  ... (truncated)
-  ```
-- **[5] Ignore whitespace before colon 1** (line 105)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/set/Set3.feature:117:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Label Foo not found in schema", query: Some("\nMATCH (n)\nSET n :Foo\nRETURN la
-  ... (truncated)
-  ```
-- **[6] Ignore whitespace before colon 2** (line 123)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/set/Set3.feature:135:5
-      Matched: crates/uni-tck/src/steps/then.rs:48:1
-      Step panicked. Captured output: No result found
-[Summary]
-1 feature
-1 scenario (1 failed)
-4 steps (3 passed, 1 failed)
-
-  ```
-- **[7] Ignore whitespace before colon 3** (line 141)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/set/Set3.feature:153:5
-      Matched: crates/uni-tck/src/steps/then.rs:48:1
-      Step panicked. Captured output: No result found
-[Summary]
-1 feature
-1 scenario (1 failed)
-4 steps (3 passed, 1 failed)
-
-  ```
-
-### Set6
-
-- **[8] Limiting to zero results after adding a label on nodes affects the result set but not the side effects** (line 198)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/set/Set6.feature:211:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Label Foo not found in schema", query: Some("\nMATCH (n:N)\nSET n:Foo\nRETURN n
-  ... (truncated)
-  ```
-- **[9] Skipping all results after adding a label on nodes affects the result set but not the side effects** (line 216)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/set/Set6.feature:229:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Label Foo not found in schema", query: Some("\nMATCH (n:N)\nSET n:Foo\nRETURN n
-  ... (truncated)
-  ```
-- **[10] Skipping and limiting to a few results after adding a label on nodes affects the result set but not the side effects** (line 234)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/set/Set6.feature:251:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Label Foo not found in schema", query: Some("\nMATCH (n:N)\nSET n:Foo\nRETURN n
-  ... (truncated)
-  ```
-- **[11] Skipping zero result and limiting to all results after adding a label on nodes does not affect the result set nor the side effects** (line 258)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/set/Set6.feature:275:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Label Foo not found in schema", query: Some("\nMATCH (n:N)\nSET n:Foo\nRETURN n
-  ... (truncated)
-  ```
-- **[12] Filtering after adding a label on nodes affects the result set but not the side effects** (line 285)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/set/Set6.feature:303:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Label Foo not found in schema", query: Some("\nMATCH (n:N)\nSET n:Foo\nWITH n\n
-  ... (truncated)
-  ```
-- **[13] Aggregating in `RETURN` after adding a label on nodes affects the result set but not the side effects** (line 310)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/set/Set6.feature:326:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Label Foo not found in schema", query: Some("\nMATCH (n:N)\nSET n:Foo\nRETURN s
-  ... (truncated)
-  ```
-- **[14] Aggregating in `WITH` after adding a label on nodes affects the result set but not the side effects** (line 332)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/set/Set6.feature:349:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Label Foo not found in schema", query: Some("\nMATCH (n:N)\nSET n:Foo\nWITH sum
-  ... (truncated)
   ```
 
 ### String1
@@ -1769,7 +1307,7 @@
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal5.feature:133:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("d.epochSeconds", Some(Int(469024274))), ("d
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("d.weekYear", Some(Int(1984))), ("d.hour", S
   ... (truncated)
   ```
 

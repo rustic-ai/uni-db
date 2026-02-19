@@ -782,6 +782,22 @@ impl Writer {
         l0_guard.get_edge_type(eid).map(|s| s.to_string())
     }
 
+    /// Look up the edge type ID (u32) for an EID from the L0 buffer's edge endpoints.
+    /// Falls back to the transaction L0 if available.
+    pub fn get_edge_type_id_from_l0(&self, eid: Eid) -> Option<u32> {
+        // Check transaction L0 first
+        if let Some(tx_l0) = &self.transaction_l0 {
+            let guard = tx_l0.read();
+            if let Some((_, _, etype)) = guard.get_edge_endpoint_full(eid) {
+                return Some(etype);
+            }
+        }
+        // Fall back to main L0
+        let l0 = self.l0_manager.get_current();
+        let l0_guard = l0.read();
+        l0_guard.get_edge_endpoint_full(eid).map(|(_, _, etype)| etype)
+    }
+
     /// Set the type name for an edge (used for schemaless edge types).
     /// This is called during CREATE for edge types not found in the schema.
     pub fn set_edge_type(&self, eid: Eid, type_name: String) {

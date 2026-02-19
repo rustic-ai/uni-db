@@ -1073,7 +1073,16 @@ fn eval_size(arg: &Value) -> Result<Value> {
 fn eval_keys(arg: &Value) -> Result<Value> {
     match arg {
         Value::Map(map) => {
-            let mut keys: Vec<&String> = map.keys().filter(|k| !k.starts_with('_')).collect();
+            // Entities (nodes/edges) are detected by internal fields (_vid, _eid).
+            // For entities, null-valued properties don't exist (REMOVE sets them to Null).
+            // For plain maps, null-valued keys are valid and must be included.
+            let is_entity =
+                map.contains_key("_vid") || map.contains_key("_eid") || map.contains_key("_labels");
+            let mut keys: Vec<&String> = map
+                .iter()
+                .filter(|(k, v)| !k.starts_with('_') && (!is_entity || !v.is_null()))
+                .map(|(k, _)| k)
+                .collect();
             keys.sort();
             Ok(Value::List(
                 keys.into_iter().map(|k| Value::String(k.clone())).collect(),

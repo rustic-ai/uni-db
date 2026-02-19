@@ -1412,6 +1412,10 @@ pub struct GraphTraverseMainExec {
     /// When set, only traversals reaching this exact VID are included.
     bound_target_column: Option<String>,
 
+    /// Columns containing edge IDs from previous hops (for relationship uniqueness).
+    /// Edges matching any of these IDs are excluded from traversal results.
+    used_edge_columns: Vec<String>,
+
     /// Output schema.
     schema: SchemaRef,
 
@@ -1448,6 +1452,7 @@ impl GraphTraverseMainExec {
         graph_ctx: Arc<GraphExecutionContext>,
         optional: bool,
         bound_target_column: Option<String>,
+        used_edge_columns: Vec<String>,
     ) -> Self {
         let source_column = source_column.into();
         let target_variable = target_variable.into();
@@ -1476,6 +1481,7 @@ impl GraphTraverseMainExec {
             graph_ctx,
             optional,
             bound_target_column,
+            used_edge_columns,
             schema,
             properties,
             metrics: ExecutionPlanMetricsSet::new(),
@@ -1622,6 +1628,7 @@ impl ExecutionPlan for GraphTraverseMainExec {
             graph_ctx: self.graph_ctx.clone(),
             optional: self.optional,
             bound_target_column: self.bound_target_column.clone(),
+            used_edge_columns: self.used_edge_columns.clone(),
             schema: self.schema.clone(),
             properties: self.properties.clone(),
             metrics: self.metrics.clone(),
@@ -1648,6 +1655,7 @@ impl ExecutionPlan for GraphTraverseMainExec {
             self.graph_ctx.clone(),
             self.optional,
             self.bound_target_column.clone(),
+            self.used_edge_columns.clone(),
             self.schema.clone(),
             metrics,
         )))
@@ -1709,6 +1717,9 @@ struct GraphTraverseMainStream {
     /// Column name of an already-bound target VID (for filtering).
     bound_target_column: Option<String>,
 
+    /// Columns containing edge IDs from previous hops (for relationship uniqueness).
+    used_edge_columns: Vec<String>,
+
     /// Output schema.
     schema: SchemaRef,
 
@@ -1734,6 +1745,7 @@ impl GraphTraverseMainStream {
         graph_ctx: Arc<GraphExecutionContext>,
         optional: bool,
         bound_target_column: Option<String>,
+        used_edge_columns: Vec<String>,
         schema: SchemaRef,
         metrics: BaselineMetrics,
     ) -> Self {
@@ -1754,6 +1766,7 @@ impl GraphTraverseMainStream {
             graph_ctx,
             optional,
             bound_target_column,
+            used_edge_columns,
             schema,
             state: GraphTraverseMainState::LoadingEdges {
                 future: Box::pin(fut),
@@ -1789,6 +1802,17 @@ impl GraphTraverseMainStream {
             .transpose()?;
         let expected_targets: Option<&UInt64Array> = bound_target_cow.as_deref();
 
+        // Collect edge ID arrays from previous hops for relationship uniqueness filtering.
+        let used_edge_arrays: Vec<&UInt64Array> = self
+            .used_edge_columns
+            .iter()
+            .filter_map(|col| {
+                input
+                    .column_by_name(col)
+                    .and_then(|c| c.as_any().downcast_ref::<UInt64Array>())
+            })
+            .collect();
+
         // Build expansions: (input_row_idx, target_vid, eid, edge_type, edge_props)
         type Expansion = (usize, Vid, Eid, String, uni_common::Properties);
         let mut expansions: Vec<Expansion> = Vec::new();
@@ -1797,8 +1821,25 @@ impl GraphTraverseMainStream {
             if let Some(src_u64) = src_u64 {
                 let src_vid = Vid::from(src_u64);
 
+                // Collect used edge IDs for this row from all previous hops
+                let used_eids: HashSet<u64> = used_edge_arrays
+                    .iter()
+                    .filter_map(|arr| {
+                        if arr.is_null(row_idx) {
+                            None
+                        } else {
+                            Some(arr.value(row_idx))
+                        }
+                    })
+                    .collect();
+
                 if let Some(neighbors) = adjacency.get(&src_vid) {
                     for (target_vid, eid, edge_type, props) in neighbors {
+                        // Skip edges already used in previous hops (relationship uniqueness)
+                        if used_eids.contains(&eid.as_u64()) {
+                            continue;
+                        }
+
                         // Filter by bound target VID if set (for patterns where target is in scope).
                         // Only include traversals where the target matches the expected VID.
                         if let Some(targets) = expected_targets {

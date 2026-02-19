@@ -22,10 +22,11 @@ use datafusion::physical_plan::{
 };
 use futures::TryStreamExt;
 use std::any::Any;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use uni_common::core::id::Vid;
 use uni_common::Value;
 use uni_cypher::ast::{Expr, Pattern, RemoveItem, SetItem};
 use uni_store::runtime::property_manager::PropertyManager;
@@ -410,11 +411,29 @@ async fn apply_mutations(
                             .evaluate_expr(expr, row, pm, params, ctx)
                             .await
                             .map_err(|e| df_err("DELETE eval failed", e))?;
-                        if let Ok(vid) = Executor::vid_from_value(&val) {
-                            vertex_labels.push(Executor::extract_labels_from_node(&val));
-                            vertex_vids.push(vid);
-                        } else if matches!(&val, Value::Map(_) | Value::Edge(_)) {
-                            edge_vals.push(val);
+                        match &val {
+                            Value::Null => {
+                                // DELETE null is a no-op
+                            }
+                            Value::Path(path) => {
+                                // Decompose path into nodes and edges
+                                for node in &path.nodes {
+                                    vertex_vids.push(node.vid);
+                                    vertex_labels.push(Some(node.labels.clone()));
+                                }
+                                for edge in &path.edges {
+                                    edge_vals.push(Value::Edge(edge.clone()));
+                                }
+                            }
+                            _ => {
+                                if let Ok(vid) = Executor::vid_from_value(&val) {
+                                    vertex_labels
+                                        .push(Executor::extract_labels_from_node(&val));
+                                    vertex_vids.push(vid);
+                                } else if matches!(&val, Value::Map(_) | Value::Edge(_)) {
+                                    edge_vals.push(val);
+                                }
+                            }
                         }
                     }
                 }
@@ -429,16 +448,61 @@ async fn apply_mutations(
                         .map_err(|e| df_err("DELETE edge failed", e))?;
                 }
             } else {
+                // Non-detach delete: two-pass to handle shared nodes across paths.
+                // Pass 1: Evaluate all items, collect edges and nodes separately.
+                let mut all_edge_vals: Vec<Value> = Vec::new();
+                let mut all_node_vals: Vec<(Vid, Option<Vec<String>>)> = Vec::new();
+                let mut seen_vids: HashSet<u64> = HashSet::new();
+                let mut seen_eids: HashSet<u64> = HashSet::new();
+
                 for row in rows.iter() {
                     for expr in items {
                         let val = exec
                             .evaluate_expr(expr, row, pm, params, ctx)
                             .await
                             .map_err(|e| df_err("DELETE eval failed", e))?;
-                        exec.execute_delete_item_locked(&val, false, writer)
-                            .await
-                            .map_err(|e| df_err("DELETE failed", e))?;
+                        match &val {
+                            Value::Null => {}
+                            Value::Path(path) => {
+                                for edge in &path.edges {
+                                    if seen_eids.insert(edge.eid.as_u64()) {
+                                        all_edge_vals.push(Value::Edge(edge.clone()));
+                                    }
+                                }
+                                for node in &path.nodes {
+                                    if seen_vids.insert(node.vid.as_u64()) {
+                                        all_node_vals
+                                            .push((node.vid, Some(node.labels.clone())));
+                                    }
+                                }
+                            }
+                            _ => {
+                                if let Ok(vid) = Executor::vid_from_value(&val) {
+                                    if seen_vids.insert(vid.as_u64()) {
+                                        let labels =
+                                            Executor::extract_labels_from_node(&val);
+                                        all_node_vals.push((vid, labels));
+                                    }
+                                } else {
+                                    all_edge_vals.push(val);
+                                }
+                            }
+                        }
                     }
+                }
+
+                // Pass 2a: Delete all edges first.
+                for val in &all_edge_vals {
+                    exec.execute_delete_item_locked(val, false, writer)
+                        .await
+                        .map_err(|e| df_err("DELETE edge failed", e))?;
+                }
+
+                // Pass 2b: Delete all nodes (edges are already gone).
+                for (vid, labels) in &all_node_vals {
+                    exec.execute_delete_vertex(*vid, false, labels.clone(), writer)
+                        .await
+                        .map_err(|e| df_err("DELETE node failed", e))?;
                 }
             }
         }

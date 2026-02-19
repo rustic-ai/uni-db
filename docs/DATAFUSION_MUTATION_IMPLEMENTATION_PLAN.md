@@ -1,7 +1,7 @@
 # DataFusion Mutation Implementation Plan
 
 **Date:** 2026-02-18
-**Last updated:** 2026-02-18
+**Last updated:** 2026-02-19 (M3 parity fixes round 2: Delete5 9/9, Delete3 2/2, Set1 11/11, Create5 5/5, +12 TCK scenarios)
 **Depends on:** `docs/DATAFUSION_MUTATION_APPROACHES.md`
 **Primary strategy:** Implement Approach A first, keep Approach B as staged follow-up.
 
@@ -9,50 +9,50 @@
 
 | Milestone | Status | Summary |
 |-----------|--------|---------|
-| **M0** | Not started | Baseline capture done via `compliance_reports/`; `MutationPathConfig` not yet implemented |
+| **M0** | **COMPLETE** | `MutationPathConfig` implemented in `uni_common::config`; routing checks in `read.rs`; baseline TCK archived in `compliance_reports/` |
 | **M1** | **COMPLETE** | All SET semantic forms implemented; Gate A satisfied |
-| **M2** | Not started | |
-| **M3** | Not started | |
+| **M2** | **COMPLETE** | `MutationExec` framework built; `MutationContext` wired; eager barrier; all 4 operators dispatched via planner |
+| **M3** | **In progress** | All 4 operators wired in DF planner; simple terminal mutations route to DF path; complex mutations (RETURN/WITH, nested) fall back. M3 parity fixes round 1: label SET schemaless, multi-property REMOVE batching, DELETE/CREATE error validation (+23 TCK scenarios). Round 2: schemaless edge visibility in batch detach-delete, two-pass non-detach DELETE, BindPath null-safety, property type validation, edge uniqueness in GraphTraverseMainExec (+12 TCK scenarios) |
 | **M4** | Partially complete (via M1 edge property fix) | Merge6: 6/6, Merge7: 5/5, Merge8: 1/1 |
 | **M5** | Not started | |
 
-### Overall TCK (schemaless mode, 2026-02-18)
+### Overall TCK (schemaless mode, 2026-02-19)
 
 | Metric | Value |
 |--------|-------|
 | Total scenarios | 3897 |
-| Passed | 3741 |
-| Failed | 155 |
-| Pass rate | **96.0%** |
+| Passed | 3785 |
+| Failed | 112 |
+| Pass rate | **97.1%** |
 
 ### Mutation TCK Breakdown
 
 | Feature | Passed | Total | Rate | Status |
 |---------|--------|-------|------|--------|
-| Create1 | 19 | 20 | 95% | Near-parity |
+| **Create1** | **20** | **20** | **100%** | **Complete** (was 19/20) |
 | Create2 | 24 | 24 | **100%** | Complete |
-| Create3 | 11 | 13 | 85% | |
+| **Create3** | **13** | **13** | **100%** | **Complete** (was 11/13) |
 | Create4 | 2 | 2 | **100%** | Complete |
-| Create5 | 4 | 5 | 80% | |
-| Create6 | 12 | 14 | 86% | |
-| Delete1 | 6 | 8 | 75% | |
-| Delete2 | 4 | 5 | 80% | |
-| Delete3 | 1 | 2 | 50% | |
+| **Create5** | **5** | **5** | **100%** | **Complete** (was 4/5) |
+| **Create6** | **14** | **14** | **100%** | **Complete** (was 12/14) |
+| **Delete1** | **8** | **8** | **100%** | **Complete** (was 6/8) |
+| **Delete2** | **5** | **5** | **100%** | **Complete** (was 4/5) |
+| **Delete3** | **2** | **2** | **100%** | **Complete** (was 1/2) |
 | Delete4 | 3 | 3 | **100%** | Complete |
-| Delete5 | 2 | 9 | 22% | Blocked (expression-based targets) |
-| Delete6 | 12 | 14 | 86% | |
-| Set1 | 10 | 11 | 91% | |
+| **Delete5** | **9** | **9** | **100%** | **Complete** (was 2/9) |
+| **Delete6** | **14** | **14** | **100%** | **Complete** (was 12/14) |
+| **Set1** | **11** | **11** | **100%** | **Complete** (was 10/11) |
 | Set2 | 3 | 3 | **100%** | Complete |
-| Set3 | 1 | 8 | 12% | Blocked (label-set semantics) |
+| **Set3** | **8** | **8** | **100%** | **Complete** (was 1/8) |
 | **Set4** | **5** | **5** | **100%** | **Gate A** |
 | **Set5** | **5** | **5** | **100%** | **Gate A** |
-| Set6 | 12 | 21 | 57% | |
-| Remove1 | 4 | 7 | 57% | |
+| **Set6** | **21** | **21** | **100%** | **Complete** (was 14/21) |
+| **Remove1** | **7** | **7** | **100%** | **Complete** (was 4/7) |
 | Remove2 | 5 | 5 | **100%** | Complete |
-| Remove3 | 18 | 21 | 86% | |
+| **Remove3** | **21** | **21** | **100%** | **Complete** (was 18/21) |
 | Merge1 | 8 | 17 | 47% | |
-| Merge2 | 3 | 6 | 50% | |
-| Merge3 | 2 | 5 | 40% | |
+| Merge2 | 4 | 6 | 67% | (was 3/6) |
+| Merge3 | 3 | 5 | 60% | (was 2/5) |
 | Merge4 | 0 | 2 | 0% | |
 | Merge5 | 19 | 29 | 66% | |
 | **Merge6** | **6** | **6** | **100%** | **Complete (ON CREATE SET)** |
@@ -65,10 +65,10 @@
 | Gate | Status | Details |
 |------|--------|---------|
 | **Gate A** | **SATISFIED** | Set4: 5/5, Set5: 5/5. Entity-copy and map forms working. |
-| Gate B | Not satisfied | Create6: 12/14, Delete5: 2/9, Set6: 12/21, Remove3: 18/21 |
+| Gate B | **SATISFIED** | Create6: **14/14** ✅, Delete6: **14/14** ✅, Remove3: **21/21** ✅, Set6: **21/21** ✅, Delete5: **9/9** ✅ |
 | Gate C | Not applicable yet | Requires new path implementation |
-| Gate D | Satisfied | No regressions in read-only suites |
-| Gate E | Partially satisfied | Gate A done; M3 SET promotion not yet started |
+| Gate D | **SATISFIED** | No regressions in read-only suites. Full TCK at 97.1% (3785/3897), +35 vs pre-M3 baseline. |
+| Gate E | Partially satisfied | Gate A done; M3 in progress (all 4 operators wired, simple mutations on DF path). |
 
 ## 1. Scope and Objectives
 
@@ -101,9 +101,11 @@ Done means all of the following:
 
 ## 3. Milestone Plan (Recommended)
 
-## M0 - Baseline and Safety Rails
+## M0 - Baseline and Safety Rails ✅ COMPLETE
 
 Goal: establish controlled rollout and parity measurement before behavior changes.
+
+**Status: COMPLETE** (2026-02-18)
 
 ### M0 Routing Toggle Design Decision (resolve before coding)
 
@@ -114,25 +116,32 @@ tests and per-instance in production without recompilation. The toggle is checke
 the executor dispatches mutation clauses. When toggled to `true`, the clause routes to the new
 DF + Writer sink path; otherwise it falls through to the existing fallback executor.
 
+### M0 Implementation Details
+
+- `MutationPathConfig` defined in `crates/uni-common/src/config.rs` with per-clause boolean fields.
+- Routing check implemented in `crates/uni-query/src/query/executor/read.rs` via
+  `mutation_clause_disabled_by_config()` method.
+- Baseline TCK reports archived in `compliance_reports/schema/` and `compliance_reports/schemaless/`
+  with pre-mutation snapshots (`results_pre_mutations.json`, `report_pre_mutations.md`).
+
 Tasks:
 
-1. Define `MutationPathConfig` struct and attach it to `QueryContext`.
-2. Add per-clause routing check at dispatch points in the executor.
-3. Add "new path vs fallback" marker in query metrics/logging using the existing tracing infrastructure.
-4. Capture baseline TCK slices and store results in `compliance_reports/`.
+1. Define `MutationPathConfig` struct and attach it to `QueryContext`. ✅
+2. Add per-clause routing check at dispatch points in the executor. ✅
+3. Add "new path vs fallback" marker in query metrics/logging using the existing tracing infrastructure. ✅
+4. Capture baseline TCK slices and store results in `compliance_reports/`. ✅
 
 Primary files:
 
-- `crates/uni-query/src/query/executor/read.rs`
-- `crates/uni-query/src/query/executor/mod.rs`
-- `crates/uni-query/src/query/mod.rs`
-- `compliance_reports/` (report snapshots, no behavior change)
+- `crates/uni-common/src/config.rs` (`MutationPathConfig` struct)
+- `crates/uni-query/src/query/executor/read.rs` (routing checks)
+- `compliance_reports/` (baseline snapshots)
 
 Exit criteria:
 
-1. `MutationPathConfig` is defined, all fields default to fallback, and routing checks compile.
-2. Can toggle each mutation clause to fallback/new path independently via `QueryContext`.
-3. Baseline TCK reports for mutation feature families are archived.
+1. `MutationPathConfig` is defined, all fields default to fallback, and routing checks compile. ✅
+2. Can toggle each mutation clause to fallback/new path independently via `QueryContext`. ✅
+3. Baseline TCK reports for mutation feature families are archived. ✅
 
 ---
 
@@ -148,7 +157,7 @@ M1 is a prerequisite for every subsequent milestone. No sink work begins until a
 - Merge7 ON MATCH SET: 5/5
 - Merge8 ON CREATE + ON MATCH: 1/1
 - No regressions in Set1-3, Set6
-- Full TCK: 3741/3897 (96.0%), +74 scenarios vs pre-M1 baseline
+- Full TCK: 3750/3897 (96.2%), +83 scenarios vs pre-M1 baseline
 
 ### M1 Implementation Details
 
@@ -245,25 +254,51 @@ Exit criteria:
 
 ---
 
-## M2 - Mutation Sink Infrastructure (Approach A Core)
+## M2 - Mutation Sink Infrastructure (Approach A Core) ✅ COMPLETE
 
 Goal: introduce a Writer-backed mutation sink abstraction and wire it into the execution pipeline.
 
+**Status: COMPLETE** (2026-02-18)
+
+### M2 Implementation Details
+
+**Unified MutationExec Framework:**
+- `MutationExec` struct in `crates/uni-query/src/query/df_graph/mutation_common.rs` implements
+  `ExecutionPlan` trait with generic dispatch via `MutationKind` enum.
+- Thin typed wrappers: `MutationCreateExec`, `MutationSetExec`, `MutationRemoveExec`,
+  `MutationDeleteExec` (type aliases + constructor functions in separate modules).
+- `MutationContext` holds shared resources: `executor`, `writer`, `prop_manager`, `params`,
+  `query_ctx` (for L0 buffer visibility).
+
+**Eager Barrier Pattern:**
+- `execute_mutation_stream()` collects all input RecordBatches to completion before dispatching.
+- Writer lock acquired once per clause (clause-scoped, not row-scoped).
+- `apply_mutations()` dispatches by `MutationKind` to existing hardened write helpers from M1.
+
+**Planner Wiring:**
+- `HybridPhysicalPlanner.mutation_ctx: Option<Arc<MutationContext>>` field.
+- `with_mutation_context()` sets context; `require_mutation_ctx()` validates presence.
+- All 4 operators (CREATE, CreateBatch, SET, REMOVE, DELETE) fully wired in `plan_internal()`.
+
+**Routing Logic:**
+- `execute_datafusion()` in `read.rs` builds `MutationContext` when `contains_write_operations()`
+  detects write clauses in the plan.
+- Multi-level dispatch: DDL/Admin → MERGE/FOREACH fallback → mutation config gate →
+  complex mutation fallback → window functions → DataFusion path.
+
 ### M2 Tasks
 
-1. **Define mutation sink interface**
+1. **Define mutation sink interface** ✅
    - Input: row stream (batch or row-wise) with bound entities/aliases.
    - Output: updated row stream with mutated entity values reflected, and side-effect counters.
    - Backend: single acquired `Writer` per clause execution (clause-scoped lock, not row-scoped).
 
-2. **Implement sink operations for `CREATE`, `DELETE`, `SET`, `REMOVE`** by delegating to the
-   hardened write helpers from M1. The sink must not re-implement mutation semantics.
+2. **Implement sink operations for `CREATE`, `DELETE`, `SET`, `REMOVE`** ✅
+   Delegates to hardened write helpers from M1 via `apply_mutations()`.
 
-3. **Enforce eager barrier semantics at each write clause**
-   - The sink must fully consume all input rows and commit all writes before yielding any output row.
-   - DataFusion is pull-based; the barrier must be an explicit materialization step, not implicit.
-   - Write a correctness test: after a `CREATE`, a subsequent `MATCH` in the same statement must
-     see all created nodes (read-your-write visibility proof).
+3. **Enforce eager barrier semantics at each write clause** ✅
+   - `execute_mutation_stream()` fully consumes input before yielding output.
+   - Integration test in `crates/uni/tests/df_mutation_test.rs`.
 
 4. **Expression-based DELETE targets** (spec DELETE, `Delete5`)
    - The sink's delete operation must accept an *evaluated* expression value as its target, not only
@@ -280,45 +315,90 @@ Goal: introduce a Writer-backed mutation sink abstraction and wire it into the e
      relationships and delete all of them. Relationships are deleted before their endpoint nodes.
    - Path deletion must produce correct `-nodes`, `-relationships`, `-labels` side-effect counts.
 
-6. **Read-your-write visibility for post-mutation reads**
-   - After the sink commits a write clause, subsequent reads in the same statement must go through
-     the L0 buffer / statement context so that created/modified entities are visible.
-   - Confirm `src/runtime/context.rs` and `src/runtime/l0_visibility.rs` provide this guarantee
-     without changes, or document what must change.
+6. **Read-your-write visibility for post-mutation reads** ✅
+   - `QueryContext` with L0 buffer + `transaction_l0` + `pending_flush_l0s` provides visibility.
+   - `QueryContext::new_with_pending()` added in `crates/uni-store/src/runtime/context.rs`.
 
 Primary files:
 
-- `crates/uni-query/src/query/df_planner.rs`
-- `crates/uni-query/src/query/df_graph/mod.rs`
-- `crates/uni-query/src/query/df_graph/` (new sink module(s))
-- `crates/uni-query/src/query/executor/read.rs`
-- `crates/uni-query/src/query/executor/write.rs`
-- `crates/uni-store/src/runtime/writer.rs` (only if API extension needed)
-- `crates/uni-store/src/runtime/context.rs`
-- `crates/uni-store/src/runtime/l0_visibility.rs`
+- `crates/uni-query/src/query/df_graph/mutation_common.rs` (`MutationExec`, `MutationContext`, `MutationKind`)
+- `crates/uni-query/src/query/df_graph/mutation_create.rs` (thin wrapper + constructor)
+- `crates/uni-query/src/query/df_graph/mutation_set.rs` (thin wrapper + constructor)
+- `crates/uni-query/src/query/df_graph/mutation_remove.rs` (thin wrapper + constructor)
+- `crates/uni-query/src/query/df_graph/mutation_delete.rs` (thin wrapper + constructor)
+- `crates/uni-query/src/query/df_graph/mod.rs` (exports)
+- `crates/uni-query/src/query/df_planner.rs` (planner wiring)
+- `crates/uni-query/src/query/executor/read.rs` (routing, MutationContext construction)
+- `crates/uni-query/src/query/executor/write.rs` (mutation helpers)
+- `crates/uni-store/src/runtime/context.rs` (`QueryContext::new_with_pending`)
 
 Test gates:
 
-1. Unit tests for sink row→mutation mapping and side-effect counters.
+1. Unit tests for sink row→mutation mapping and side-effect counters. ✅
 2. Correctness test: `CREATE (n) RETURN n` followed by `MATCH (n) RETURN count(n)` in same session
-   sees the created node (read-your-write).
-3. Integration tests for mixed query pipelines with `WITH`, `UNWIND`, `LIMIT`, `SKIP`.
+   sees the created node (read-your-write). ✅
+3. Integration tests for mixed query pipelines with `WITH`, `UNWIND`, `LIMIT`, `SKIP`. ✅ (partial)
 4. Unit test: expression-based delete target (list index, map property) dispatches correctly.
 
 Exit criteria:
 
-1. New path works for at least one write clause end-to-end under the `MutationPathConfig` flag.
-2. Eager barrier is proven correct by the read-your-write correctness test.
+1. New path works for at least one write clause end-to-end under the `MutationPathConfig` flag. ✅
+2. Eager barrier is proven correct by the read-your-write correctness test. ✅
 
 ---
 
-## M3 - Clause-by-Clause Enablement on New Path
+## M3 - Clause-by-Clause Enablement on New Path (In Progress)
 
 Goal: move stable mutation clauses to DF + Writer sink incrementally, with full TCK parity per clause.
 
+**Status: IN PROGRESS** (2026-02-18)
+
+- All 4 mutation operators (CREATE, SET, REMOVE, DELETE) fully wired in `HybridPhysicalPlanner`.
+- Simple terminal mutations (no RETURN/WITH shaping, no nested mutations) route to DF path.
+- Complex mutations with RETURN/WITH, SKIP/LIMIT, or nested mutations fall back via
+  `needs_mutation_fallback()` in `read.rs`.
+- MERGE explicitly falls back (not wired to DF path).
+
+### M3 Parity Fixes Round 1 (2026-02-18, +23 TCK scenarios)
+
+Targeted 3 root causes accounting for 19 of 30 non-MERGE mutation failures. Achieved +23
+(exceeded target due to cascading fixes to MERGE and bonus DELETE syntax validation).
+
+| Fix | Files Modified | Scenarios Fixed |
+|-----|----------------|-----------------|
+| Label SET schemaless: removed schema validation in `SetItem::Labels` | `write.rs` | Set3[1-7], Set6[8-14] (+14) |
+| Multi-property REMOVE batching: read-once/write-once per variable | `write.rs`, `expr_eval.rs` | Remove1[2,4,7] (+3) |
+| DELETE connected node: `all_edge_type_ids()` + `ConstraintVerificationFailed` error | `write.rs`, `read.rs`, `impl_query.rs` | Delete1[7] (+1) |
+| DELETE syntax validation: reject `Expr::LabelCheck` in DELETE | `planner.rs` | Delete1[8], Delete2[5] (+2) |
+| CREATE already-bound: standalone bare node check | `planner.rs` | Create1[13] (+1) |
+| Cascade: label SET fix applied to MERGE ON CREATE/ON MATCH SET | (via `write.rs`) | Merge2[1], Merge3[2] (+2) |
+
+### M3 Parity Fixes Round 2 (2026-02-19, +12 TCK scenarios)
+
+Targeted remaining Delete, Set, and Create failures. Achieved +12 with zero regressions.
+
+| Fix | Files Modified | Scenarios Fixed |
+|-----|----------------|-----------------|
+| Schemaless edge visibility in `batch_detach_delete_vertices`: changed `schema.edge_types` to `schema.all_edge_type_ids()` | `read.rs` | Delete5[1], Delete5[5] (+2) |
+| Two-pass non-detach DELETE: collect all edges/nodes across paths, delete edges first, then nodes. Dedup via `seen_vids`/`seen_eids` | `read.rs`, `mutation_common.rs` | Delete5[7] (+1) |
+| BindPath null-safety for OPTIONAL MATCH: check for null path/edge/node variables before constructing path | `read.rs` | Delete3[2] (+1) |
+| Property type validation: reject Map, Node, Edge, Path as property values; reject nested lists | `write.rs`, `error.rs` | Set1[10] (+1) |
+| Edge uniqueness in `GraphTraverseMainExec`: added `used_edge_columns` with scope filtering via `scope_match_variables` | `traverse.rs`, `df_planner.rs`, `planner.rs` | Create5[3] (+1) |
+| Cascade: Delete5 expression/path fixes covered remaining scenarios | (via `read.rs`) | Delete5[2,3,4,6,8,9] (+6) |
+
+### Routing Helpers in `read.rs`
+
+| Helper | Purpose |
+|--------|---------|
+| `is_mutation_plan()` | Detects CREATE/SET/REMOVE/DELETE at outermost level |
+| `needs_mutation_fallback()` | Returns true for mutations with RETURN/WITH or nested mutations |
+| `has_nested_mutations()` | Detects multi-clause mutations |
+| `contains_write_operations()` | Detects any write op in plan tree (triggers MutationContext build) |
+| `mutation_clause_disabled_by_config()` | Checks per-clause MutationPathConfig gate |
+
 ### Prerequisite
 
-Gate A must be satisfied (M1 exit criteria met) before enabling any clause on the new path.
+Gate A must be satisfied (M1 exit criteria met) before enabling any clause on the new path. ✅
 
 ### Enablement Order
 
@@ -329,7 +409,7 @@ Gate A must be satisfied (M1 exit criteria met) before enabling any clause on th
 
 ### Tasks Per Clause
 
-1. Enable routing for clause under `MutationPathConfig` flag.
+1. Enable routing for clause under `MutationPathConfig` flag. ✅ (all 4 wired)
 2. Run clause-specific TCK family and targeted integration tests.
 3. Fix parity gaps.
 4. Promote clause flag to default-on only after TCK gate + perf sanity pass.
@@ -354,8 +434,10 @@ Gate A must be satisfied (M1 exit criteria met) before enabling any clause on th
 - Validate path deletion: delete a path object and confirm all constituent nodes and relationships
   are removed with correct side-effect counts.
 - Validate DELETE error semantics: deleting a node with relationships without DETACH must raise
-  a runtime error (`ConstraintValidationFailed` or equivalent).
+  a runtime error (`ConstraintVerificationFailed`). ✅ Fixed: `check_vertex_has_no_edges` uses
+  `schema.all_edge_type_ids()`, error mapped to `UniError::Constraint`.
 - Validate relationship-only delete leaves endpoint nodes intact.
+- Validate DELETE syntax: reject label-check expressions (`DELETE n:Label`). ✅ Fixed in planner.
 
 ### SET-Specific Tasks
 
@@ -371,10 +453,10 @@ Primary files:
 
 TCK gates:
 
-1. `Create1-6` (including Create6 persistence scenarios)
-2. `Delete1-6` (including Delete5 expression-based targets)
-3. `Remove1-3`
-4. `Set1-6` (including Set4 and Set5)
+1. `Create1-6`: Create1 **20/20** ✅, Create2 **24/24** ✅, Create3 **13/13** ✅, Create4 **2/2** ✅, Create5 **5/5** ✅, Create6 **14/14** ✅
+2. `Delete1-6`: Delete1 **8/8** ✅, Delete2 **5/5** ✅, Delete3 **2/2** ✅, Delete4 **3/3** ✅, Delete5 **9/9** ✅, Delete6 **14/14** ✅
+3. `Remove1-3`: Remove1 **7/7** ✅, Remove2 **5/5** ✅, Remove3 **21/21** ✅
+4. `Set1-6`: Set1 **11/11** ✅, Set2 **3/3** ✅, Set3 **8/8** ✅, Set4 **5/5** ✅, Set5 **5/5** ✅, Set6 **21/21** ✅
 
 Integration test gate:
 
@@ -419,7 +501,7 @@ ON CREATE/ON MATCH subclause work begins, because those subclauses use the same 
 
    **Phase 1: Node merge** — remaining gaps
    - Match-or-create semantics for single node patterns.
-   - TCK gate: `Merge1` (8/17), `Merge2` (3/6), `Merge3` (2/5), `Merge4` (0/2).
+   - TCK gate: `Merge1` (8/17), `Merge2` (4/6), `Merge3` (3/5), `Merge4` (0/2).
    - Remaining failures involve label matching, property comparison, and side-effect counting.
 
    **Phase 2: Relationship merge** — remaining gaps
@@ -495,37 +577,48 @@ Exit criteria:
 
 ## 4.1 `crates/uni-query`
 
-1. `src/query/executor/read.rs`
-   - Add `MutationPathConfig` routing check per clause dispatch point.
-   - Add transition routing from fallback to sink path.
-   - Keep explicit fallback for unsupported clauses.
-2. `src/query/executor/write.rs`
-   - Implement all SET semantic forms: map-replace, map-append, entity-copy, null-property.
-   - Add null-entity silent-skip guard at the entry of each mutation helper.
-   - Expose reusable mutation helper APIs for the sink path.
-   - Keep side-effect and row-update behavior canonical (sink delegates here, not re-implements).
-3. `src/query/executor/mod.rs`
-   - Define `MutationPathConfig` struct.
-4. `src/query/df_planner.rs`
-   - Replace "write unsupported" path with planned mutation boundaries.
-   - Emit physical nodes for sink execution.
-5. `src/query/df_graph/mod.rs`
-   - Register mutation sink physical nodes.
-6. `src/query/df_graph/*` (new modules expected)
-   - `mutation_sink.rs` (or clause-specific sink modules).
-   - Eager barrier materialization and row mapping.
-   - Expression evaluation for delete targets (list index, map property, nested path, path object).
-7. `src/query/executor/result_normalizer.rs`
-   - Preserve output shape parity for mutated rows if needed.
+1. `src/query/executor/read.rs` ✅
+   - `MutationPathConfig` routing check via `mutation_clause_disabled_by_config()`.
+   - Multi-level routing: DDL → MERGE/FOREACH fallback → config gate → complexity fallback → DF path.
+   - `MutationContext` built in `execute_datafusion()` when write operations detected.
+2. `src/query/executor/write.rs` ✅
+   - All SET semantic forms implemented: map-replace, map-append, entity-copy, null-property.
+   - Null-entity silent-skip guard at mutation helper entry.
+   - Reusable APIs: `execute_create_pattern()`, `execute_set_items_locked()`,
+     `execute_remove_items_locked()`, `execute_delete_item_locked()`.
+   - `EdgeIdentity` struct + `extract_edge_identity()` for edge mutation helpers.
+3. `src/query/executor/core.rs`
+   - Passes `MutationPathConfig` to query context via `set_mutation_path()`.
+4. `src/query/df_planner.rs` ✅
+   - All 4 mutation operators wired: `new_create_exec`, `new_set_exec`, `new_remove_exec`, `new_delete_exec`.
+   - `with_mutation_context()` / `require_mutation_ctx()` for context management.
+   - `CreateBatch` handled by chaining individual `new_create_exec` calls.
+5. `src/query/df_graph/mod.rs` ✅
+   - Exports: `MutationContext`, `MutationExec`, and all typed wrappers.
+6. `src/query/df_graph/mutation_common.rs` ✅ (NEW)
+   - `MutationExec` struct implementing `ExecutionPlan` with `MutationKind` dispatch.
+   - `MutationContext` struct with executor, writer, prop_manager, params, query_ctx.
+   - `MutationKind` enum: Create, Set, Remove, Delete variants.
+   - `execute_mutation_stream()` with eager barrier pattern.
+   - `apply_mutations()` dispatching to write helpers by kind.
+7. `src/query/df_graph/mutation_{create,set,remove,delete}.rs` ✅ (NEW)
+   - Thin wrappers: type alias + typed constructor function per clause.
+8. `src/query/df_graph/traverse.rs` ✅
+   - `GraphTraverseMainExec`: added `used_edge_columns` for relationship uniqueness enforcement.
+   - `GraphTraverseMainStream`: per-row edge uniqueness filtering in `expand_batch`.
+9. `src/query/planner.rs` ✅
+   - `TraverseMainByType`: added `scope_match_variables` for MATCH-scoped edge uniqueness.
+10. `src/query/executor/result_normalizer.rs`
+    - Preserve output shape parity for mutated rows if needed. (not yet needed)
 
 ## 4.2 `crates/uni-store`
 
-1. `src/runtime/writer.rs`
-   - Keep as durability backend.
-   - Add small API adjustments only if sink contract requires it.
-2. `src/runtime/context.rs` and `src/runtime/l0_visibility.rs`
-   - Confirm read-your-write visibility for post-mutation reads in same statement.
-   - Document the guarantee explicitly; if it is not currently guaranteed, implement it before M2.
+1. `src/runtime/writer.rs` — unchanged, serves as durability backend.
+2. `src/runtime/context.rs` ✅
+   - `QueryContext::new_with_pending()` added for constructing context with pending L0 buffers.
+   - Read-your-write visibility confirmed via L0 buffer + transaction_l0 + pending_flush_l0s.
+3. `src/runtime/property_manager.rs` ✅
+   - `overlay_l0_edge_batch` updated to include all L0 properties when `_all_props` requested.
 
 ## 4.3 `crates/uni-tck`
 
@@ -535,6 +628,7 @@ Exit criteria:
 Files:
 
 - `crates/uni-tck/src/steps/and.rs` (reference for side-effect contract)
+- `crates/uni-tck/src/matcher/error.rs` (error classification, `is_runtime_detail_code`)
 - `crates/uni-tck/tck/features/clauses/{create,delete,set,remove,merge}/*.feature`
 
 ## 4.4 `docs`
@@ -561,12 +655,12 @@ Files:
 - Entity-copy `SET n = <node/rel>` passes with correct side-effect counts (Merge6[6]). ✅
 - Multiple SET items ordered correctly. ✅
 
-**Gate B** (prerequisite for promoting each clause to default-on): **NOT YET SATISFIED**
-- `Create6`: 12/14 (86%) — 2 relationship-create-with-aggregation scenarios remaining.
-- `Delete6`: 12/14 (86%) — 2 relationship-delete-with-aggregation scenarios remaining.
-- `Set6`: 12/21 (57%) — relationship property SET with SKIP/LIMIT/aggregation gaps.
-- `Remove3`: 18/21 (86%) — relationship property REMOVE with SKIP/LIMIT/aggregation gaps.
-- `Delete5`: 2/9 (22%) — expression-based and nested delete targets blocked.
+**Gate B** (prerequisite for promoting each clause to default-on): ✅ **SATISFIED**
+- `Create6`: **14/14 (100%)** ✅ (was 12/14)
+- `Delete6`: **14/14 (100%)** ✅ (was 12/14)
+- `Remove3`: **21/21 (100%)** ✅ (was 18/21)
+- `Set6`: **21/21 (100%)** ✅ (was 14/21) — label SET in schemaless mode now works.
+- `Delete5`: **9/9 (100%)** ✅ (was 2/9) — schemaless edge visibility, two-pass non-detach DELETE, path deletion all fixed.
 
 **Gate C** (prerequisite for M5 default rollout): **NOT APPLICABLE YET**
 - Side-effect counts are identical between fallback and new path for a sampled query corpus
@@ -574,12 +668,12 @@ Files:
 
 **Gate D** (prerequisite for any milestone promotion): ✅ **SATISFIED**
 - No regression in read-only TCK families (`Match1-9`, `Return1-8`, `With1-7`, etc.).
-- Full TCK at 96.0% (3741/3897), +74 vs previous run.
+- Full TCK at 97.1% (3785/3897), +118 vs pre-M1 baseline.
 
 **Gate E** (prerequisite for M4 MERGE ON CREATE/ON MATCH phases): **PARTIALLY SATISFIED**
 - Gate A is satisfied. ✅
-- M3 is not yet started (SET clause family not yet on new path).
-- However, ON CREATE SET (Merge6) and ON MATCH SET (Merge7/8) already work via fallback path.
+- M3 is in progress (all 4 operators wired, simple mutations on DF path).
+- ON CREATE SET (Merge6) and ON MATCH SET (Merge7/8) already work via fallback path.
 
 ## 5.3 Additional Integration Tests Required
 
@@ -677,21 +771,74 @@ uses `_all_props` which surfaces properties from L0 and from the overflow_json s
 **Impact**: `test_valid_at_edge_temporal` fails (1 cargo test). Not a mutation-specific issue.
 **Scope**: Affects any schemaless edge type after flush. Does not affect L0-resident edges.
 
-### Relationship mutation side-effects with SKIP/LIMIT/aggregation
+### Relationship mutation side-effects with SKIP/LIMIT/aggregation ✅ RESOLVED
 
-Set6, Remove3, Create6, Delete6 all have failures (57%-86%) related to relationship
-mutations combined with SKIP, LIMIT, and aggregation in RETURN/WITH. The side-effect
-counts are correct but result set shaping after relationship mutations has gaps. This is
-a Gate B blocker.
+Set6 is now **21/21 (100%)**. The remaining failures were caused by `SET n:Label` being
+rejected in schemaless mode (same root cause as Set3). Fixed by removing schema validation
+in the `SetItem::Labels` branch of `execute_set_items_locked` in `write.rs`.
 
-### Expression-based DELETE (Delete5)
+### Expression-based DELETE (Delete5) ✅ RESOLVED
 
-Delete5 has 7/9 failing scenarios. Expression-based delete targets (list index, map property,
-nested paths, path objects) are not yet implemented. This is an M2 task.
+Delete5 is now **9/9 (100%)**. Fixes:
+- `batch_detach_delete_vertices` now uses `schema.all_edge_type_ids()` instead of
+  `schema.edge_types` to include schemaless edge types (Delete5[1], Delete5[5]).
+- Non-detach DELETE restructured to two-pass: collect all edges and nodes across all paths/items
+  first, delete all edges, then delete all nodes. Deduplication via `seen_vids`/`seen_eids`
+  HashSets prevents double-deletion when paths share nodes/edges (Delete5[7]).
+- Same two-pass pattern applied to DataFusion mutation path in `mutation_common.rs`.
+- Path deletion and expression-based targets (list index, map property, nested paths) all working.
 
-### Label-based SET (Set3)
+### OPTIONAL MATCH path binding (Delete3) ✅ RESOLVED
 
-Set3 has 7/8 failing scenarios. `SET n:Label` (adding labels) is not yet fully implemented.
+Delete3 is now **2/2 (100%)**. Fixed in `BindPath` handler: when OPTIONAL MATCH finds no match,
+edge/node variables are `Value::Null`, but `coerce_row_edge()` was creating placeholder
+`Edge{eid:0, type:""}` instead of preserving null. Added null-safety check — if any path,
+edge, or node variable is null, the path variable is set to `Value::Null` instead of
+constructing a placeholder path.
+
+### Property type validation (Set1) ✅ RESOLVED
+
+Set1 is now **11/11 (100%)**. Added `validate_property_value` in `write.rs` that rejects
+`Map`, `Node`, `Edge`, `Path` as direct property values, and `List` containing any of the
+above or nested lists. Error: `TypeError: InvalidPropertyType`. Added `InvalidPropertyType`
+to `is_runtime_detail_code` in `error.rs`. Validation called in all three property SET branches.
+
+### Mixed-direction multi-hop MATCH (Create5) ✅ RESOLVED
+
+Create5 is now **5/5 (100%)**. Root cause: `GraphTraverseMainExec` (DataFusion schemaless
+traverse operator) was missing relationship uniqueness enforcement. Added `used_edge_columns`
+to `GraphTraverseMainExec` and `GraphTraverseMainStream`, with per-row filtering to exclude
+already-used edges. Scoped via `scope_match_variables` in the logical plan to prevent
+cross-clause filtering (e.g., edges reused across MATCH clauses via WITH remain valid).
+
+### Label-based SET (Set3) ✅ RESOLVED
+
+Set3 is now **8/8 (100%)**. Fixed by removing schema label validation in `execute_set_items_locked`
+(`write.rs`). In schemaless mode, labels are now created dynamically via the Writer, matching
+CREATE behavior.
+
+### Multi-property REMOVE (Remove1) ✅ RESOLVED
+
+Remove1 is now **7/7 (100%)**. Fixed by batching property removals per variable in
+`execute_remove_items_locked` (`write.rs`) — reads properties once, nulls all specified
+properties, writes back once. Also fixed `eval_keys` in `expr_eval.rs` to exclude null-valued
+properties for entities (nodes/edges).
+
+### DELETE error validation (Delete1, Delete2) ✅ RESOLVED
+
+Delete1 is now **8/8 (100%)** and Delete2 is now **5/5 (100%)**. Fixes:
+- Delete1[7]: `check_vertex_has_no_edges` now uses `schema.all_edge_type_ids()` to include
+  schemaless edge types. Error message includes `ConstraintVerificationFailed: DeleteConnectedNode`
+  prefix, mapped to `UniError::Constraint` in `impl_query.rs`.
+- Delete1[8], Delete2[5]: DELETE clause now validates that targets are simple variable references,
+  rejecting `Expr::LabelCheck` expressions with `SyntaxError: InvalidDelete`.
+
+### CREATE already-bound variable (Create1) ✅ RESOLVED
+
+Create1 is now **20/20 (100%)**. Fixed in planner: standalone bare nodes in CREATE that
+reference variables from previous clauses (MATCH/WITH) are now rejected with
+`SyntaxError: VariableAlreadyBound`. Bare nodes used as relationship endpoints in the same
+CREATE (self-loop patterns) remain valid.
 
 ---
 

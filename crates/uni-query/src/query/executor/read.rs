@@ -435,6 +435,10 @@ impl Executor {
     }
 
     pub(crate) fn vid_from_value(val: &Value) -> Result<Vid> {
+        // Handle Value::Node directly (has vid field)
+        if let Value::Node(node) = val {
+            return Ok(node.vid);
+        }
         // Handle Object (node) containing _vid field
         if let Value::Map(map) = val
             && let Some(vid_val) = map.get("_vid")
@@ -3236,6 +3240,7 @@ impl Executor {
                     path_variable,
                     is_variable_length,
                     optional_pattern_vars,
+                    scope_match_variables: _,
                 } => {
                     let input_matches = self
                         .execute_subplan(*input, prop_manager, params, ctx)
@@ -3783,12 +3788,34 @@ impl Executor {
                                     let val = self
                                         .evaluate_expr(expr, row, prop_manager, params, ctx)
                                         .await?;
-                                    if let Ok(vid) = Self::vid_from_value(&val) {
-                                        let labels = Self::extract_labels_from_node(&val);
-                                        vertex_vids.push(vid);
-                                        vertex_labels.push(labels);
-                                    } else if let Value::Map(_) = &val {
-                                        edge_vals.push(val);
+                                    match &val {
+                                        Value::Null => {
+                                            // DELETE null is a no-op
+                                        }
+                                        Value::Path(path) => {
+                                            // Decompose path into nodes and edges
+                                            for node in &path.nodes {
+                                                vertex_vids.push(node.vid);
+                                                vertex_labels
+                                                    .push(Some(node.labels.clone()));
+                                            }
+                                            for edge in &path.edges {
+                                                edge_vals.push(Value::Edge(edge.clone()));
+                                            }
+                                        }
+                                        _ => {
+                                            if let Ok(vid) = Self::vid_from_value(&val) {
+                                                let labels =
+                                                    Self::extract_labels_from_node(&val);
+                                                vertex_vids.push(vid);
+                                                vertex_labels.push(labels);
+                                            } else if matches!(
+                                                &val,
+                                                Value::Map(_) | Value::Edge(_)
+                                            ) {
+                                                edge_vals.push(val);
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -3805,20 +3832,72 @@ impl Executor {
 
                             // Delete edges individually (typically few).
                             for val in &edge_vals {
-                                if let Value::Map(map) = val {
-                                    self.execute_delete_edge_from_map(map, &mut writer).await?;
-                                }
+                                self.execute_delete_item_locked(val, false, &mut writer)
+                                    .await?;
                             }
                         } else {
-                            // Non-detach delete: per-item (checks for dangling edges).
+                            // Non-detach delete: two-pass to handle shared nodes across paths.
+                            // Pass 1: Evaluate all items, collect edges and nodes separately.
+                            let mut all_edge_vals: Vec<Value> = Vec::new();
+                            let mut all_node_vals: Vec<(Vid, Option<Vec<String>>)> = Vec::new();
+                            let mut seen_vids: std::collections::HashSet<u64> =
+                                std::collections::HashSet::new();
+                            let mut seen_eids: std::collections::HashSet<u64> =
+                                std::collections::HashSet::new();
+
                             for row in &rows {
                                 for expr in &items {
                                     let val = self
                                         .evaluate_expr(expr, row, prop_manager, params, ctx)
                                         .await?;
-                                    self.execute_delete_item_locked(&val, false, &mut writer)
-                                        .await?;
+                                    match &val {
+                                        Value::Null => {}
+                                        Value::Path(path) => {
+                                            for edge in &path.edges {
+                                                if seen_eids.insert(edge.eid.as_u64()) {
+                                                    all_edge_vals
+                                                        .push(Value::Edge(edge.clone()));
+                                                }
+                                            }
+                                            for node in &path.nodes {
+                                                if seen_vids.insert(node.vid.as_u64()) {
+                                                    all_node_vals.push((
+                                                        node.vid,
+                                                        Some(node.labels.clone()),
+                                                    ));
+                                                }
+                                            }
+                                        }
+                                        _ => {
+                                            if let Ok(vid) = Self::vid_from_value(&val) {
+                                                if seen_vids.insert(vid.as_u64()) {
+                                                    let labels =
+                                                        Self::extract_labels_from_node(&val);
+                                                    all_node_vals.push((vid, labels));
+                                                }
+                                            } else {
+                                                all_edge_vals.push(val);
+                                            }
+                                        }
+                                    }
                                 }
+                            }
+
+                            // Pass 2a: Delete all edges first.
+                            for val in &all_edge_vals {
+                                self.execute_delete_item_locked(val, false, &mut writer)
+                                    .await?;
+                            }
+
+                            // Pass 2b: Delete all nodes (edges are already gone).
+                            for (vid, labels) in &all_node_vals {
+                                self.execute_delete_vertex(
+                                    *vid,
+                                    false,
+                                    labels.clone(),
+                                    &mut writer,
+                                )
+                                .await?;
                             }
                         }
                     } else {
@@ -4094,19 +4173,35 @@ impl Executor {
 
                     let mut result = Vec::with_capacity(rows.len());
                     for mut row in rows {
-                        let nodes = node_variables
-                            .iter()
-                            .map(|var| Self::coerce_row_node(&row, var))
-                            .collect();
-                        let edges = edge_variables
-                            .iter()
-                            .map(|var| Self::coerce_row_edge(&row, var))
-                            .collect();
+                        // If the path is already null (OPTIONAL MATCH with no match),
+                        // or any edge/node variable is null, preserve null.
+                        let is_null = row
+                            .get(&path_variable)
+                            .is_some_and(|v| matches!(v, Value::Null))
+                            || edge_variables
+                                .iter()
+                                .any(|var| row.get(var).is_some_and(|v| matches!(v, Value::Null)))
+                            || node_variables
+                                .iter()
+                                .any(|var| row.get(var).is_some_and(|v| matches!(v, Value::Null)));
 
-                        row.insert(
-                            path_variable.clone(),
-                            Value::Path(crate::types::Path { nodes, edges }),
-                        );
+                        if is_null {
+                            row.insert(path_variable.clone(), Value::Null);
+                        } else {
+                            let nodes = node_variables
+                                .iter()
+                                .map(|var| Self::coerce_row_node(&row, var))
+                                .collect();
+                            let edges = edge_variables
+                                .iter()
+                                .map(|var| Self::coerce_row_edge(&row, var))
+                                .collect();
+
+                            row.insert(
+                                path_variable.clone(),
+                                Value::Path(crate::types::Path { nodes, edges }),
+                            );
+                        }
                         result.push(row);
                     }
                     Ok(result)
@@ -4487,8 +4582,21 @@ impl Executor {
 
             let mut found = false;
 
+            // Read used edges from previous hops for relationship uniqueness
+            let used_edges: std::collections::HashSet<u64> =
+                if let Some(Value::List(arr)) = input_row.get("__used_edges") {
+                    arr.iter().filter_map(|v| v.as_u64()).collect()
+                } else {
+                    std::collections::HashSet::new()
+                };
+
             // Find edges matching source and direction
             for (eid, src_vid, dst_vid, edge_type, edge_props) in &edges_by_type {
+                // Enforce relationship uniqueness across hops
+                if used_edges.contains(&eid.as_u64()) {
+                    continue;
+                }
+
                 let (matches, target_vid) = match direction {
                     Direction::Outgoing => (*src_vid == source_vid, *dst_vid),
                     Direction::Incoming => (*dst_vid == source_vid, *src_vid),
@@ -4588,6 +4696,16 @@ impl Executor {
                     });
                     new_row.insert(pv.clone(), path_obj);
                 }
+
+                // Track used edges for relationship uniqueness in subsequent hops
+                let mut new_used: Vec<Value> =
+                    if let Some(Value::List(arr)) = new_row.get("__used_edges") {
+                        arr.clone()
+                    } else {
+                        Vec::new()
+                    };
+                new_used.push(Value::Int(eid.as_u64() as i64));
+                new_row.insert("__used_edges".to_string(), Value::List(new_used));
 
                 new_matches.push(new_row);
             }
@@ -8905,7 +9023,7 @@ impl Executor {
 
     pub(crate) async fn detach_delete_vertex(&self, vid: Vid, writer: &mut Writer) -> Result<()> {
         let schema = self.storage.schema_manager().schema();
-        let edge_type_ids: Vec<u32> = schema.edge_types.values().map(|m| m.id).collect();
+        let edge_type_ids: Vec<u32> = schema.all_edge_type_ids();
 
         // 1. Find and delete all outgoing edges
         let out_graph = self
@@ -8954,7 +9072,7 @@ impl Executor {
         writer: &mut Writer,
     ) -> Result<()> {
         let schema = self.storage.schema_manager().schema();
-        let edge_type_ids: Vec<u32> = schema.edge_types.values().map(|m| m.id).collect();
+        let edge_type_ids: Vec<u32> = schema.all_edge_type_ids();
 
         // Load outgoing subgraph for all VIDs in one call.
         let out_graph = self

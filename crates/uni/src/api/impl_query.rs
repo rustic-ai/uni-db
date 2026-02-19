@@ -100,6 +100,7 @@ fn into_query_error(e: impl std::fmt::Display, cypher: &str) -> UniError {
 
 /// Convert an executor/runtime error into the appropriate `UniError` type.
 /// TypeError messages from UDF execution become `UniError::Type` (Runtime phase).
+/// ConstraintVerificationFailed messages become `UniError::Constraint` (Runtime phase).
 /// All other executor errors remain `UniError::Query`.
 fn into_execution_error(e: impl std::fmt::Display, cypher: &str) -> UniError {
     let msg = normalize_error_message(&e.to_string(), cypher);
@@ -108,6 +109,8 @@ fn into_execution_error(e: impl std::fmt::Display, cypher: &str) -> UniError {
             expected: msg,
             actual: String::new(),
         }
+    } else if msg.starts_with("ConstraintVerificationFailed:") {
+        UniError::Constraint { message: msg }
     } else {
         UniError::Query {
             message: msg,
@@ -304,6 +307,8 @@ impl Uni {
                         expected: msg,
                         actual: String::new(),
                     }
+                } else if msg.starts_with("ConstraintVerificationFailed:") {
+                    UniError::Constraint { message: msg }
                 } else {
                     UniError::Query {
                         message: msg,

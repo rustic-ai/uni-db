@@ -537,6 +537,7 @@ impl HybridPhysicalPlanner {
                 target_filter: _, // Applied as FilterExec later
                 path_variable,
                 is_variable_length,
+                scope_match_variables,
                 ..
             } => {
                 if *is_variable_length {
@@ -563,6 +564,7 @@ impl HybridPhysicalPlanner {
                         step_variable.as_deref(),
                         *optional,
                         all_properties,
+                        scope_match_variables,
                     )
                 }
             }
@@ -1866,6 +1868,7 @@ impl HybridPhysicalPlanner {
         step_variable: Option<&str>,
         optional: bool,
         all_properties: &HashMap<String, HashSet<String>>,
+        scope_match_variables: &std::collections::HashSet<String>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
         let input_plan = self.plan_internal(input, all_properties)?;
 
@@ -1917,6 +1920,35 @@ impl HybridPhysicalPlanner {
             target_properties.clear();
         }
 
+        // Compute used_edge_columns for relationship uniqueness (same logic as Traverse).
+        // Only include edge columns whose associated variable is in the current MATCH scope.
+        // This prevents relationship uniqueness from being enforced across MATCH clauses.
+        let used_edge_columns: Vec<String> = input_plan
+            .schema()
+            .fields()
+            .iter()
+            .filter_map(|f| {
+                let name = f.name();
+                if name.ends_with("._eid") {
+                    let var_name = name.trim_end_matches("._eid");
+                    if scope_match_variables.contains(var_name) {
+                        Some(name.clone())
+                    } else {
+                        None
+                    }
+                } else if name.starts_with("__eid_to_") {
+                    let var_name = name.trim_start_matches("__eid_to_");
+                    if scope_match_variables.contains(var_name) {
+                        Some(name.clone())
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            })
+            .collect();
+
         // Create the schemaless traversal execution plan
         let traverse_plan: Arc<dyn ExecutionPlan> = Arc::new(GraphTraverseMainExec::new(
             input_plan,
@@ -1930,6 +1962,7 @@ impl HybridPhysicalPlanner {
             self.graph_ctx.clone(),
             optional,
             bound_target_column,
+            used_edge_columns,
         ));
 
         let mut result_plan = traverse_plan;

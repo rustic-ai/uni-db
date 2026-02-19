@@ -137,6 +137,7 @@ fn is_runtime_detail_code(detail: &str) -> bool {
             | "InvalidArgumentValue"
             | "InvalidArgumentType"
             | "NegativeIntegerArgument"
+            | "InvalidPropertyType"
     )
 }
 
