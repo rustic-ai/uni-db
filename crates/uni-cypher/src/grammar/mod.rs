@@ -47,10 +47,7 @@ fn extract_token_span_at(input: &str, pos: usize) -> Option<(usize, usize)> {
         return None;
     }
 
-    let mut p = pos.min(bytes.len().saturating_sub(1));
-    if p == bytes.len() && p > 0 {
-        p -= 1;
-    }
+    let mut p = pos.min(bytes.len() - 1);
 
     let is_token_char =
         |b: u8| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.' | b'#' | b'$');
@@ -124,18 +121,8 @@ fn is_invalid_relationship_pattern(input: &str, pos: usize) -> bool {
     let Some(segment) = relationship_bracket_segment(input, pos) else {
         return false;
     };
-
-    // Example: [:LIKES..] (missing `*`)
-    if segment.contains("..") && !segment.contains('*') {
-        return true;
-    }
-
-    // Example: [:LIKES*-2] (negative range bound)
-    if segment.contains("*-") {
-        return true;
-    }
-
-    false
+    // [:LIKES..] (missing `*`) or [:LIKES*-2] (negative range bound)
+    (segment.contains("..") && !segment.contains('*')) || segment.contains("*-")
 }
 
 fn is_invalid_number_literal(input: &str, pos: usize) -> bool {
@@ -157,20 +144,15 @@ fn is_invalid_number_literal(input: &str, pos: usize) -> bool {
 
     if t.starts_with("0x") || t.starts_with("0X") {
         let digits = &t[2..];
-        if digits.is_empty() {
-            return true;
-        }
-        return digits.chars().any(|c| !(c.is_ascii_hexdigit() || c == '_'));
+        return digits.is_empty() || digits.chars().any(|c| !(c.is_ascii_hexdigit() || c == '_'));
     }
 
     if t.starts_with("0o") || t.starts_with("0O") {
         let digits = &t[2..];
-        if digits.is_empty() {
-            return true;
-        }
-        return digits
-            .chars()
-            .any(|c| !(matches!(c, '0'..='7') || c == '_'));
+        return digits.is_empty()
+            || digits
+                .chars()
+                .any(|c| !(matches!(c, '0'..='7') || c == '_'));
     }
 
     // Decimal-like token with alphabetic suffix/midfix, e.g. 9223372h54775808
@@ -201,8 +183,7 @@ fn map_pest_error(input: &str, e: pest::error::Error<Rule>) -> ParseError {
         ));
     }
 
-    let msg = format!("{}", e);
-    ParseError::new(format!("UnexpectedSyntax: {}", msg))
+    ParseError::new(format!("UnexpectedSyntax: {e}"))
 }
 
 #[cfg(test)]

@@ -728,18 +728,16 @@ pub enum ListAfterIdentifier {
         projection: Box<Expr>,
     },
 
-    /// [id.prop, ...] or [id + 1, ...] - List literal with complex first element
+    /// List literal: \[id, ...\], \[id.prop, ...\], or \[id + 1, ...\]
+    /// Empty suffixes means the identifier stands alone as the first element.
     ExpressionTail {
         suffix: Vec<ExprSuffix>,
         more: Vec<Expr>,
     },
-
-    /// \[id, ...\] or \[id\] - List literal with simple identifier element
-    SimpleTail { more: Vec<Expr> },
 }
 
 impl ListAfterIdentifier {
-    /// Resolve this intermediate representation into a final Expr, given the identifier
+    /// Resolve this intermediate representation into a final Expr, given the identifier.
     pub fn resolve(self, id: String) -> Expr {
         match self {
             ListAfterIdentifier::Comprehension {
@@ -758,11 +756,6 @@ impl ListAfterIdentifier {
                 items.extend(more);
                 Expr::List(items)
             }
-            ListAfterIdentifier::SimpleTail { more } => {
-                let mut items = vec![Expr::Variable(id)];
-                items.extend(more);
-                Expr::List(items)
-            }
         }
     }
 }
@@ -771,7 +764,6 @@ impl ListAfterIdentifier {
 /// Used to parse things like: id.prop, id\[0\], id(), id+1, etc.
 #[derive(Debug, Clone)]
 pub enum ExprSuffix {
-    // Postfix operators
     Property(String),
     Index(Expr),
     Slice {
@@ -781,35 +773,7 @@ pub enum ExprSuffix {
     FunctionCall(Vec<Expr>),
     IsNull,
     IsNotNull,
-
-    // Binary operators - capture right-hand side
-    Add(Expr),
-    Sub(Expr),
-    Mul(Expr),
-    Div(Expr),
-    Mod(Expr),
-    Pow(Expr),
-
-    // Comparison operators
-    Eq(Expr),
-    NotEq(Expr),
-    Lt(Expr),
-    LtEq(Expr),
-    Gt(Expr),
-    GtEq(Expr),
-
-    // Logical operators
-    And(Expr),
-    Or(Expr),
-    Xor(Expr),
-
-    // String operators
-    Contains(Expr),
-    StartsWith(Expr),
-    EndsWith(Expr),
-    Regex(Expr),
-
-    // List membership
+    Binary(BinaryOp, Expr),
     In(Expr),
 }
 
@@ -920,7 +884,6 @@ fn make_binary_op(left: Expr, op: BinaryOp, right: Expr) -> Expr {
 fn apply_suffixes(mut expr: Expr, suffixes: Vec<ExprSuffix>) -> Expr {
     for suffix in suffixes {
         expr = match suffix {
-            // Postfix operators
             ExprSuffix::Property(name) => Expr::Property(Box::new(expr), name),
 
             ExprSuffix::Index(idx) => Expr::ArrayIndex {
@@ -947,35 +910,8 @@ fn apply_suffixes(mut expr: Expr, suffixes: Vec<ExprSuffix>) -> Expr {
 
             ExprSuffix::IsNull => Expr::IsNull(Box::new(expr)),
             ExprSuffix::IsNotNull => Expr::IsNotNull(Box::new(expr)),
+            ExprSuffix::Binary(op, rhs) => make_binary_op(expr, op, rhs),
 
-            // Binary operators - arithmetic
-            ExprSuffix::Add(r) => make_binary_op(expr, BinaryOp::Add, r),
-            ExprSuffix::Sub(r) => make_binary_op(expr, BinaryOp::Sub, r),
-            ExprSuffix::Mul(r) => make_binary_op(expr, BinaryOp::Mul, r),
-            ExprSuffix::Div(r) => make_binary_op(expr, BinaryOp::Div, r),
-            ExprSuffix::Mod(r) => make_binary_op(expr, BinaryOp::Mod, r),
-            ExprSuffix::Pow(r) => make_binary_op(expr, BinaryOp::Pow, r),
-
-            // Binary operators - comparison
-            ExprSuffix::Eq(r) => make_binary_op(expr, BinaryOp::Eq, r),
-            ExprSuffix::NotEq(r) => make_binary_op(expr, BinaryOp::NotEq, r),
-            ExprSuffix::Lt(r) => make_binary_op(expr, BinaryOp::Lt, r),
-            ExprSuffix::LtEq(r) => make_binary_op(expr, BinaryOp::LtEq, r),
-            ExprSuffix::Gt(r) => make_binary_op(expr, BinaryOp::Gt, r),
-            ExprSuffix::GtEq(r) => make_binary_op(expr, BinaryOp::GtEq, r),
-
-            // Binary operators - logical
-            ExprSuffix::And(r) => make_binary_op(expr, BinaryOp::And, r),
-            ExprSuffix::Or(r) => make_binary_op(expr, BinaryOp::Or, r),
-            ExprSuffix::Xor(r) => make_binary_op(expr, BinaryOp::Xor, r),
-
-            // Binary operators - string
-            ExprSuffix::Contains(r) => make_binary_op(expr, BinaryOp::Contains, r),
-            ExprSuffix::StartsWith(r) => make_binary_op(expr, BinaryOp::StartsWith, r),
-            ExprSuffix::EndsWith(r) => make_binary_op(expr, BinaryOp::EndsWith, r),
-            ExprSuffix::Regex(r) => make_binary_op(expr, BinaryOp::Regex, r),
-
-            // List membership
             ExprSuffix::In(right) => Expr::In {
                 expr: Box::new(expr),
                 list: Box::new(right),
@@ -1211,10 +1147,6 @@ impl Expr {
                 items: items
                     .iter()
                     .map(|item| match item {
-                        MapProjectionItem::Property(prop) => {
-                            MapProjectionItem::Property(prop.clone())
-                        }
-                        MapProjectionItem::AllProperties => MapProjectionItem::AllProperties,
                         MapProjectionItem::LiteralEntry(key, expr) => {
                             MapProjectionItem::LiteralEntry(
                                 key.clone(),
@@ -1224,7 +1156,7 @@ impl Expr {
                         MapProjectionItem::Variable(v) if v == old_var => {
                             MapProjectionItem::Variable(new_var.to_string())
                         }
-                        MapProjectionItem::Variable(v) => MapProjectionItem::Variable(v.clone()),
+                        other => other.clone(),
                     })
                     .collect(),
             },
@@ -1242,23 +1174,20 @@ impl Expr {
             Expr::FunctionCall {
                 name, window_spec, ..
             } => {
-                // Window functions are not aggregates - they're window functions
-                if window_spec.is_some() {
-                    return false;
-                }
-                matches!(
-                    name.to_lowercase().as_str(),
-                    "count"
-                        | "sum"
-                        | "avg"
-                        | "min"
-                        | "max"
-                        | "collect"
-                        | "stdev"
-                        | "stdevp"
-                        | "percentiledisc"
-                        | "percentilecont"
-                )
+                window_spec.is_none()
+                    && matches!(
+                        name.to_lowercase().as_str(),
+                        "count"
+                            | "sum"
+                            | "avg"
+                            | "min"
+                            | "max"
+                            | "collect"
+                            | "stdev"
+                            | "stdevp"
+                            | "percentiledisc"
+                            | "percentilecont"
+                    )
             }
             Expr::CountSubquery(_) | Expr::CollectSubquery(_) => true,
             Expr::Property(base, _) => base.is_aggregate(),

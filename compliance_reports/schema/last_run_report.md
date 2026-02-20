@@ -1,8 +1,8 @@
 # TCK Compliance Report
 
-**Generated:** 2026-02-19 22:30:28
-**Results:** `results_20260219_223028.json`
-**Compared to:** `results_20260219_210124.json`
+**Generated:** 2026-02-19 23:11:57
+**Results:** `results_20260219_231157.json`
+**Compared to:** `results_20260219_223028.json`
 
 ## Summary
 
@@ -412,7 +412,7 @@
   Step failed:
       Defined: tck/features/expressions/graph/Graph9.feature:73:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("properties(null)", Some(Null)), ("properties(r)", 
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("properties(n)", Some(Null)), ("properties(null)", 
   ... (truncated)
   ```
 
@@ -479,7 +479,7 @@
   Step failed:
       Defined: tck/features/expressions/literals/Literals7.feature:295:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("literal", Some(List([Map({"type": String("d
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("literal", Some(List([Map({"ppu": Float(0.55
   ... (truncated)
   ```
 
@@ -516,7 +516,7 @@
   Step failed:
       Defined: tck/features/clauses/match/Match4.feature:111:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): Row count mismatch: expected 1, got 16
+      Step panicked. Captured output: Result mismatch (any order): Row count mismatch: expected 1, got 15
 [Summary]
 1 feature
 1 scenario (1 failed)
@@ -614,7 +614,7 @@
   Step failed:
       Defined: tck/features/clauses/match/Match7.feature:361:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("p", Some(Null)), ("x", Some(Node(Node { vid: Vid(1), 
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("x", Some(Node(Node { vid: Vid(1), labels: [], propert
   ... (truncated)
   ```
 
@@ -1007,7 +1007,7 @@
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal5.feature:133:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("d.nanosecond", Some(Int(645876123))), ("d.d
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("d.nanosecond", Some(Int(645876123))), ("d.o
   ... (truncated)
   ```
 

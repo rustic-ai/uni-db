@@ -4,47 +4,36 @@ use crate::ast::*;
 use pest::iterators::{Pair, Pairs};
 use uni_common::Value;
 
-// ═══════════════════════════════════════════════════════════════════════════
-// HELPER FUNCTIONS
-// ═══════════════════════════════════════════════════════════════════════════
-
-/// Strip backticks from identifier_or_keyword tokens
-/// Converts `Order` -> Order, `my-var` -> my-var, plain -> plain
-fn normalize_identifier(s: &str) -> String {
-    if s.starts_with('`') && s.ends_with('`') && s.len() > 1 {
-        s[1..s.len() - 1].to_string()
-    } else {
-        s.to_string()
-    }
+/// Check if the next token in a peekable iterator matches the given rule.
+fn peek_is(inner: &mut std::iter::Peekable<Pairs<Rule>>, rule: Rule) -> bool {
+    inner.peek().is_some_and(|p| p.as_rule() == rule)
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-// QUERY BUILDING
-// ═══════════════════════════════════════════════════════════════════════════
+/// Strip backticks from identifier_or_keyword tokens.
+fn normalize_identifier(s: &str) -> String {
+    s.strip_prefix('`')
+        .and_then(|s| s.strip_suffix('`'))
+        .unwrap_or(s)
+        .to_string()
+}
 
 pub fn build_query(pairs: Pairs<Rule>) -> Result<Query, ParseError> {
     let pair = pairs.into_iter().next().unwrap();
+    debug_assert_eq!(pair.as_rule(), Rule::query);
 
-    match pair.as_rule() {
-        Rule::query => {
-            let mut inner = pair.into_inner();
-            let query_pair = inner.next().unwrap();
-            let query = build_union_query(query_pair)?;
+    let mut inner = pair.into_inner();
+    let query = build_union_query(inner.next().unwrap())?;
 
-            // Check for trailing time_travel_clause
-            if let Some(tt_pair) = inner.next()
-                && tt_pair.as_rule() == Rule::time_travel_clause
-            {
-                let spec = build_time_travel_spec(tt_pair)?;
-                return Ok(Query::TimeTravel {
-                    query: Box::new(query),
-                    spec,
-                });
-            }
-            Ok(query)
-        }
-        _ => unreachable!("Expected query rule, got {:?}", pair.as_rule()),
+    if let Some(tt_pair) = inner.next()
+        && tt_pair.as_rule() == Rule::time_travel_clause
+    {
+        let spec = build_time_travel_spec(tt_pair)?;
+        return Ok(Query::TimeTravel {
+            query: Box::new(query),
+            spec,
+        });
     }
+    Ok(query)
 }
 
 fn build_time_travel_spec(pair: Pair<Rule>) -> Result<TimeTravelSpec, ParseError> {
@@ -144,17 +133,10 @@ fn build_clause(pair: Pair<Rule>) -> Result<Clause, ParseError> {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-// CLAUSE IMPLEMENTATIONS
-// ═══════════════════════════════════════════════════════════════════════════
-
 fn build_match_clause(pair: Pair<Rule>) -> Result<Clause, ParseError> {
     let mut inner = pair.into_inner().peekable();
 
-    let optional = inner
-        .peek()
-        .map(|p| p.as_rule() == Rule::OPTIONAL)
-        .unwrap_or(false);
+    let optional = peek_is(&mut inner, Rule::OPTIONAL);
     if optional {
         inner.next();
     }
@@ -230,7 +212,7 @@ fn parse_projection_modifiers(pairs: Pairs<Rule>) -> Result<ProjectionModifiers,
 
 /// Check and consume DISTINCT keyword from the front of the iterator.
 fn consume_distinct(inner: &mut Pairs<Rule>) -> bool {
-    if inner.peek().map(|p| p.as_rule()) == Some(Rule::DISTINCT) {
+    if inner.peek().is_some_and(|p| p.as_rule() == Rule::DISTINCT) {
         inner.next();
         true
     } else {
@@ -307,16 +289,10 @@ fn build_unwind_clause(pair: Pair<Rule>) -> Result<Clause, ParseError> {
 fn build_delete_clause(pair: Pair<Rule>) -> Result<Clause, ParseError> {
     let mut inner = pair.into_inner().peekable();
 
-    let detach = if inner
-        .peek()
-        .map(|p| p.as_rule() == Rule::DETACH)
-        .unwrap_or(false)
-    {
+    let detach = peek_is(&mut inner, Rule::DETACH);
+    if detach {
         inner.next();
-        true
-    } else {
-        false
-    };
+    }
 
     inner.next(); // DELETE
     let items = build_expression_list(inner.next().unwrap())?;
@@ -565,12 +541,10 @@ fn build_load_csv_clause(pair: Pair<Rule>) -> Result<Clause, ParseError> {
     inner.next(); // LOAD
     inner.next(); // CSV
 
-    let mut with_headers = false;
-    let next = inner.peek().unwrap();
-    if next.as_rule() == Rule::WITH {
-        inner.next();
+    let with_headers = inner.peek().is_some_and(|p| p.as_rule() == Rule::WITH);
+    if with_headers {
+        inner.next(); // WITH
         inner.next(); // HEADERS
-        with_headers = true;
     }
 
     inner.next(); // FROM
@@ -608,15 +582,9 @@ fn build_load_csv_clause(pair: Pair<Rule>) -> Result<Clause, ParseError> {
     }))
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-// EXPRESSIONS
-// ═══════════════════════════════════════════════════════════════════════════
-
 pub fn build_expression(pair: Pair<Rule>) -> Result<Expr, ParseError> {
     match pair.as_rule() {
-        Rule::expression => build_expression(pair.into_inner().next().unwrap()),
-        Rule::comprehension_source => {
-            // comprehension_source wraps comparison_expression
+        Rule::expression | Rule::comprehension_source => {
             build_expression(pair.into_inner().next().unwrap())
         }
         Rule::or_expression => build_binary_left_assoc(pair, BinaryOp::Or),
@@ -694,11 +662,7 @@ fn build_multiplicative_expression(pair: Pair<Rule>) -> Result<Expr, ParseError>
 fn build_not_expression(pair: Pair<Rule>) -> Result<Expr, ParseError> {
     let mut inner = pair.into_inner().peekable();
     let mut not_count = 0;
-    while inner
-        .peek()
-        .map(|p| p.as_rule() == Rule::NOT)
-        .unwrap_or(false)
-    {
+    while peek_is(&mut inner, Rule::NOT) {
         inner.next();
         not_count += 1;
     }
@@ -917,8 +881,7 @@ fn build_unary_expression(pair: Pair<Rule>) -> Result<Expr, ParseError> {
     // Consume leading plus/minus tokens
     while inner
         .peek()
-        .map(|p| matches!(p.as_rule(), Rule::minus | Rule::plus))
-        .unwrap_or(false)
+        .is_some_and(|p| matches!(p.as_rule(), Rule::minus | Rule::plus))
     {
         let p = inner.next().unwrap();
         if p.as_rule() == Rule::minus {
@@ -1134,19 +1097,10 @@ fn build_primary_expression(pair: Pair<Rule>) -> Result<Expr, ParseError> {
         Rule::quantifier_expression => build_quantifier_expression(first),
         Rule::reduce_expression => build_reduce_expression(first),
         Rule::pattern_expression => {
-            // Pattern as boolean: (n)-->(m) is equivalent to EXISTS { MATCH (n)-->(m) }
-            let mut elements = vec![];
-            for child in first.into_inner() {
-                match child.as_rule() {
-                    Rule::node_pattern => {
-                        elements.push(PatternElement::Node(build_node_pattern(child)?))
-                    }
-                    Rule::relationship_pattern => elements.push(PatternElement::Relationship(
-                        build_relationship_pattern(child)?,
-                    )),
-                    _ => unreachable!("Unexpected child in pattern_expression"),
-                }
-            }
+            let elements = first
+                .into_inner()
+                .map(build_pattern_child)
+                .collect::<Result<Vec<_>, _>>()?;
             let path = PathPattern {
                 variable: None,
                 elements,
@@ -1364,32 +1318,22 @@ fn build_literal(pair: Pair<Rule>) -> Result<Expr, ParseError> {
 
 fn build_list_expression(pair: Pair<Rule>) -> Result<Expr, ParseError> {
     let mut inner = pair.into_inner();
-    let first = inner.next();
-    if first.is_none() {
+    let Some(first) = inner.next() else {
         return Ok(Expr::List(vec![]));
-    }
-    let first = first.unwrap();
+    };
 
     match first.as_rule() {
         Rule::pattern_comprehension_body => {
             let mut p_inner = first.into_inner().peekable();
-            let mut variable = None;
-            if p_inner
-                .peek()
-                .map(|p| p.as_rule() == Rule::identifier)
-                .unwrap_or(false)
-            {
-                variable = Some(p_inner.next().unwrap().as_str().to_string());
-            }
-            let pattern_pair = p_inner.next().unwrap();
-            let path = build_path_pattern(pattern_pair)?;
+            let variable = if peek_is(&mut p_inner, Rule::identifier) {
+                Some(p_inner.next().unwrap().as_str().to_string())
+            } else {
+                None
+            };
+            let path = build_path_pattern(p_inner.next().unwrap())?;
             let pattern = Pattern { paths: vec![path] };
 
-            let where_clause = if p_inner
-                .peek()
-                .map(|p| p.as_rule() == Rule::WHERE)
-                .unwrap_or(false)
-            {
+            let where_clause = if peek_is(&mut p_inner, Rule::WHERE) {
                 p_inner.next();
                 Some(build_expression(p_inner.next().unwrap())?)
             } else {
@@ -1455,11 +1399,15 @@ fn build_list_expression(pair: Pair<Rule>) -> Result<Expr, ParseError> {
 fn build_case_expression(pair: Pair<Rule>) -> Result<Expr, ParseError> {
     let mut inner = pair.into_inner();
     inner.next(); // CASE
-    let mut expr = None;
-    let next = inner.peek().unwrap();
-    if next.as_rule() == Rule::expression {
-        expr = Some(Box::new(build_expression(inner.next().unwrap())?));
-    }
+
+    let expr = if inner
+        .peek()
+        .is_some_and(|p| p.as_rule() == Rule::expression)
+    {
+        Some(Box::new(build_expression(inner.next().unwrap())?))
+    } else {
+        None
+    };
 
     let mut when_then = vec![];
     let mut else_expr = None;
@@ -1477,7 +1425,6 @@ fn build_case_expression(pair: Pair<Rule>) -> Result<Expr, ParseError> {
             Rule::else_clause => {
                 else_expr = Some(Box::new(build_expression(p.into_inner().nth(1).unwrap())?));
             }
-            Rule::END => {}
             _ => {}
         }
     }
@@ -1555,16 +1502,23 @@ fn build_map_literal(pair: Pair<Rule>) -> Result<Expr, ParseError> {
     Ok(Expr::Map(entries))
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-// PATTERNS
-// ═══════════════════════════════════════════════════════════════════════════
-
 fn build_pattern(pair: Pair<Rule>) -> Result<Pattern, ParseError> {
     let paths = pair
         .into_inner()
         .map(build_path_pattern)
         .collect::<Result<Vec<_>, _>>()?;
     Ok(Pattern { paths })
+}
+
+/// Build a `PatternElement` from a node_pattern or relationship_pattern pair.
+fn build_pattern_child(child: Pair<Rule>) -> Result<PatternElement, ParseError> {
+    match child.as_rule() {
+        Rule::node_pattern => Ok(PatternElement::Node(build_node_pattern(child)?)),
+        Rule::relationship_pattern => Ok(PatternElement::Relationship(build_relationship_pattern(
+            child,
+        )?)),
+        _ => unreachable!("Unexpected pattern child: {:?}", child.as_rule()),
+    }
 }
 
 /// Process a single pattern_element and append its contents to the elements vector.
@@ -1584,18 +1538,13 @@ fn process_pattern_element(
             elements.push(build_parenthesized_pattern(first_child)?);
         }
         Rule::node_pattern => {
-            elements.push(PatternElement::Node(build_node_pattern(first_child)?));
+            elements.push(build_pattern_child(first_child)?);
             for child in elem_inner {
-                match child.as_rule() {
-                    Rule::relationship_pattern => {
-                        elements.push(PatternElement::Relationship(build_relationship_pattern(
-                            child,
-                        )?));
-                    }
-                    Rule::node_pattern => {
-                        elements.push(PatternElement::Node(build_node_pattern(child)?));
-                    }
-                    _ => {}
+                if matches!(
+                    child.as_rule(),
+                    Rule::node_pattern | Rule::relationship_pattern
+                ) {
+                    elements.push(build_pattern_child(child)?);
                 }
             }
         }
@@ -1609,16 +1558,12 @@ fn process_pattern_element(
 
 fn build_path_pattern(pair: Pair<Rule>) -> Result<PathPattern, ParseError> {
     let mut inner = pair.into_inner().peekable();
-    let mut variable = None;
 
-    // Check for optional variable assignment
-    if inner
-        .peek()
-        .map(|p| p.as_rule() == Rule::identifier)
-        .unwrap_or(false)
-    {
-        variable = Some(inner.next().unwrap().as_str().to_string());
-    }
+    let variable = if peek_is(&mut inner, Rule::identifier) {
+        Some(inner.next().unwrap().as_str().to_string())
+    } else {
+        None
+    };
 
     let mut shortest_path_mode = None;
     let mut elements = vec![];
@@ -1655,32 +1600,24 @@ fn build_path_pattern(pair: Pair<Rule>) -> Result<PathPattern, ParseError> {
 fn build_parenthesized_pattern(pair: Pair<Rule>) -> Result<PatternElement, ParseError> {
     let mut inner = pair.into_inner().peekable();
 
-    // Optional variable assignment
-    let mut variable = None;
-    if inner.peek().map(|p| p.as_rule()) == Some(Rule::identifier) {
-        variable = Some(inner.next().unwrap().as_str().to_string());
-        // Skip the '=' which is implicit in the grammar structure
-    }
+    let variable = if peek_is(&mut inner, Rule::identifier) {
+        Some(inner.next().unwrap().as_str().to_string())
+    } else {
+        None
+    };
 
-    // Pattern part (required)
     let pattern_part = inner.next().unwrap();
-    let mut elements = vec![];
-    for child in pattern_part.into_inner() {
-        match child.as_rule() {
-            Rule::node_pattern => elements.push(PatternElement::Node(build_node_pattern(child)?)),
-            Rule::relationship_pattern => elements.push(PatternElement::Relationship(
-                build_relationship_pattern(child)?,
-            )),
-            _ => unreachable!("Unexpected child in pattern_part"),
-        }
-    }
+    let elements = pattern_part
+        .into_inner()
+        .map(build_pattern_child)
+        .collect::<Result<Vec<_>, _>>()?;
 
-    // Optional WHERE clause
-    let mut where_clause = None;
-    if inner.peek().map(|p| p.as_rule()) == Some(Rule::WHERE) {
-        inner.next(); // consume WHERE
-        where_clause = Some(build_expression(inner.next().unwrap())?);
-    }
+    let where_clause = if peek_is(&mut inner, Rule::WHERE) {
+        inner.next();
+        Some(build_expression(inner.next().unwrap())?)
+    } else {
+        None
+    };
 
     // Optional path quantifier
     let range = inner.next().map(build_path_quantifier).transpose()?;
@@ -1753,20 +1690,12 @@ fn build_path_quantifier(pair: Pair<Rule>) -> Result<Range, ParseError> {
             }
         }
         _ => {
-            // {,m} - first element is the max integer
-            if !inner.is_empty() {
-                let max: u32 = inner[0].as_str().parse().unwrap();
-                Ok(Range {
-                    min: Some(0),
-                    max: Some(max),
-                })
-            } else {
-                // {,}
-                Ok(Range {
-                    min: Some(0),
-                    max: None,
-                })
-            }
+            // {,m}
+            let max: u32 = inner[0].as_str().parse().unwrap();
+            Ok(Range {
+                min: Some(0),
+                max: Some(max),
+            })
         }
     }
 }
@@ -1785,8 +1714,7 @@ fn parse_predicate(pair: Pair<Rule>) -> Result<(Option<Expr>, Option<Expr>), Par
             let properties = Some(build_properties(first)?);
             let where_clause = if pred_inner
                 .next()
-                .map(|p| p.as_rule() == Rule::WHERE)
-                .unwrap_or(false)
+                .is_some_and(|p| p.as_rule() == Rule::WHERE)
             {
                 Some(build_expression(pred_inner.next().unwrap())?)
             } else {
@@ -1892,10 +1820,6 @@ fn build_relationship_pattern(pair: Pair<Rule>) -> Result<RelationshipPattern, P
         where_clause,
     })
 }
-
-// ═══════════════════════════════════════════════════════════════════════════
-// HELPERS
-// ═══════════════════════════════════════════════════════════════════════════
 
 fn build_single_return_item(pair: Pair<Rule>) -> Result<ReturnItem, ParseError> {
     let mut inner = pair.into_inner();
@@ -2171,8 +2095,7 @@ fn build_create_fulltext_index(pair: Pair<Rule>) -> Result<SchemaCommand, ParseE
     let label = parse_label_binding(&mut inner);
     inner.next(); // ON
 
-    // Skip optional EACH keyword
-    if inner.peek().map(|p| p.as_rule()) == Some(Rule::EACH) {
+    if peek_is(&mut inner, Rule::EACH) {
         inner.next();
     }
 
@@ -2579,15 +2502,15 @@ fn build_constraint_target(pair: Pair<Rule>) -> Result<ConstraintTarget, ParseEr
     let mut inner = pair.into_inner();
     inner.next(); // FOR
 
-    let next = inner.peek().unwrap();
-    if next.as_rule() == Rule::EDGE {
+    let is_edge = inner.peek().is_some_and(|p| p.as_rule() == Rule::EDGE);
+    if is_edge {
         inner.next(); // EDGE
-        inner.next(); // (
-        let name = normalize_identifier(inner.next().unwrap().as_str());
+    }
+    inner.next(); // (
+    let name = normalize_identifier(inner.next().unwrap().as_str());
+    if is_edge {
         Ok(ConstraintTarget::EdgeType(name))
     } else {
-        inner.next(); // (
-        let name = normalize_identifier(inner.next().unwrap().as_str());
         Ok(ConstraintTarget::Label(name))
     }
 }
@@ -2693,8 +2616,8 @@ fn detect_file_format(path: &str, options: &std::collections::HashMap<String, Va
     "parquet".to_string()
 }
 
-fn check_if_not_exists<'a>(inner: &mut std::iter::Peekable<Pairs<'a, Rule>>) -> bool {
-    if inner.peek().map(|p| p.as_rule()) == Some(Rule::if_not_exists) {
+fn check_if_not_exists(inner: &mut std::iter::Peekable<Pairs<Rule>>) -> bool {
+    if peek_is(inner, Rule::if_not_exists) {
         inner.next();
         true
     } else {
@@ -2702,8 +2625,8 @@ fn check_if_not_exists<'a>(inner: &mut std::iter::Peekable<Pairs<'a, Rule>>) -> 
     }
 }
 
-fn check_if_exists<'a>(inner: &mut std::iter::Peekable<Pairs<'a, Rule>>) -> bool {
-    if inner.peek().map(|p| p.as_rule()) == Some(Rule::if_exists) {
+fn check_if_exists(inner: &mut std::iter::Peekable<Pairs<Rule>>) -> bool {
+    if peek_is(inner, Rule::if_exists) {
         inner.next();
         true
     } else {
