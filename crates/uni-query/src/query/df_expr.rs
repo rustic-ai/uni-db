@@ -223,10 +223,15 @@ fn is_list_expr(e: &DfExpr) -> bool {
         || matches!(e, DfExpr::ScalarFunction(f) if f.func.name() == "make_array")
 }
 
-/// Type of a variable in the query context.
+/// Entity kind of a variable in the physical query context.
 ///
 /// Used to determine the identity column when a bare variable is referenced
 /// (e.g., `n` in `RETURN n` should resolve to `n._vid` for nodes).
+///
+/// This is the physical-layer counterpart to [`crate::query::planner::VariableType`],
+/// which includes additional variants (`Scalar`, `ScalarLiteral`, `Imported`)
+/// for logical planning. `VariableKind` only tracks graph-entity types needed
+/// for physical expression compilation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VariableKind {
     /// Node variable - identity is `_vid`
@@ -578,6 +583,10 @@ pub struct TranslationContext {
 
     /// Variable kinds (node, edge, path) for identity column resolution.
     pub variable_kinds: std::collections::HashMap<String, VariableKind>,
+
+    /// Node variable names from CREATE/MERGE patterns (separate from variable_kinds
+    /// to avoid affecting ID/TYPE/HASLABEL translation). Used only by startNode/endNode UDFs.
+    pub node_variable_hints: Vec<String>,
 }
 
 impl TranslationContext {
@@ -1293,9 +1302,18 @@ pub(crate) fn cast_expr(expr: DfExpr, data_type: datafusion::arrow::datatypes::D
 /// the `_cypher_list_to_cv` UDF. Used by `coerce_branch_to` when CASE branches
 /// have mixed `LargeList<T>` and `LargeBinary` types.
 pub(crate) fn list_to_large_binary_expr(expr: DfExpr) -> DfExpr {
-    use std::sync::Arc;
     DfExpr::ScalarFunction(datafusion::logical_expr::expr::ScalarFunction::new_udf(
         Arc::new(crate::query::df_udfs::create_cypher_list_to_cv_udf()),
+        vec![expr],
+    ))
+}
+
+/// Wrap a native scalar expression (Int64, Float64, Utf8, Boolean, etc.) in the
+/// `_cypher_scalar_to_cv` UDF so it becomes CypherValue-encoded LargeBinary.
+/// Used to normalize mixed-type coalesce arguments.
+pub(crate) fn scalar_to_large_binary_expr(expr: DfExpr) -> DfExpr {
+    DfExpr::ScalarFunction(datafusion::logical_expr::expr::ScalarFunction::new_udf(
+        Arc::new(crate::query::df_udfs::create_cypher_scalar_to_cv_udf()),
         vec![expr],
     ))
 }
@@ -1902,6 +1920,28 @@ fn translate_graph_function(
                 // Fallback: pass through as dummy UDF
                 Some(Ok(dummy_udf_expr(name, df_args)))
             }
+        }
+        "STARTNODE" | "ENDNODE" => {
+            // startNode(r)/endNode(r): pass edge + all known node variables
+            // so the UDF can find the matching node by VID at runtime.
+            let mut udf_args = df_args;
+            let mut seen = std::collections::HashSet::new();
+            if let Some(ctx) = context {
+                // Add node variables from MATCH (registered in variable_kinds)
+                for (var, kind) in &ctx.variable_kinds {
+                    if matches!(kind, VariableKind::Node) && seen.insert(var.clone()) {
+                        udf_args.push(DfExpr::Column(Column::from_name(var.clone())));
+                    }
+                }
+                // Add node variables from CREATE/MERGE patterns (not in variable_kinds
+                // to avoid affecting ID/TYPE/HASLABEL dotted-column resolution)
+                for var in &ctx.node_variable_hints {
+                    if seen.insert(var.clone()) {
+                        udf_args.push(DfExpr::Column(Column::from_name(var.clone())));
+                    }
+                }
+            }
+            Some(Ok(dummy_udf_expr(&name_upper.to_lowercase(), udf_args)))
         }
         "NODES" | "RELATIONSHIPS" => Some(Ok(dummy_udf_expr(name, df_args))),
         "HASLABEL" => {
@@ -2741,9 +2781,35 @@ pub fn apply_type_coercion(expr: &DfExpr, schema: &datafusion::common::DFSchema)
                     .collect();
                 let has_mixed_types = types.windows(2).any(|w| w[0] != w[1]);
                 if has_mixed_types {
-                    // LargeBinary/List/LargeList family: normalize List/LargeList
-                    // args to LargeBinary so coalesce gets uniform types. Casting
-                    // LargeBinary to Utf8 would corrupt the binary-encoded data.
+                    let has_large_binary =
+                        types.iter().any(|t| matches!(t, DataType::LargeBinary));
+
+                    if has_large_binary {
+                        // When ANY arg is LargeBinary (CypherValue-encoded), normalize
+                        // ALL args to LargeBinary. Native scalars (Int64, Float64, etc.)
+                        // are wrapped in _cypher_scalar_to_cv; Lists in _cypher_list_to_cv.
+                        // Casting LargeBinary to Utf8 would corrupt the encoded data.
+                        let unified_args: Vec<DfExpr> = coerced_args
+                            .into_iter()
+                            .zip(types.iter())
+                            .map(|(arg, t)| match t {
+                                DataType::LargeBinary | DataType::Null => arg,
+                                DataType::List(_) | DataType::LargeList(_) => {
+                                    list_to_large_binary_expr(arg)
+                                }
+                                _ => scalar_to_large_binary_expr(arg),
+                            })
+                            .collect();
+                        return Ok(DfExpr::ScalarFunction(
+                            datafusion::logical_expr::expr::ScalarFunction {
+                                func: func.func.clone(),
+                                args: unified_args,
+                            },
+                        ));
+                    }
+
+                    // LargeBinary/List/LargeList family (no native scalars): normalize
+                    // List/LargeList args to LargeBinary.
                     let all_list_or_lb = types.iter().all(|t| {
                         matches!(
                             t,

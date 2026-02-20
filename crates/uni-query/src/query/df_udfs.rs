@@ -86,6 +86,8 @@ pub fn register_cypher_udfs(ctx: &SessionContext) -> DFResult<()> {
     ctx.register_udf(create_relationships_udf());
     ctx.register_udf(create_range_udf());
     ctx.register_udf(create_index_udf());
+    ctx.register_udf(create_startnode_udf());
+    ctx.register_udf(create_endnode_udf());
 
     // Type conversion UDFs
     ctx.register_udf(create_to_integer_udf());
@@ -199,6 +201,7 @@ pub fn register_cypher_udfs(ctx: &SessionContext) -> DFResult<()> {
     ctx.register_udf(create_cypher_last_udf());
     ctx.register_udf(create_cypher_reverse_udf());
     ctx.register_udf(create_cypher_list_to_cv_udf());
+    ctx.register_udf(create_cypher_scalar_to_cv_udf());
 
     // Temporal extraction UDFs (year, month, day, etc.)
     for name in &["year", "month", "day", "hour", "minute", "second"] {
@@ -858,6 +861,179 @@ impl ScalarUDFImpl for RelationshipsUdf {
 
             Ok(rels)
         })
+    }
+}
+
+// ============================================================================
+// startNode(relationship) -> Node
+// ============================================================================
+
+/// Create the `startnode` UDF for getting the start node of a relationship.
+///
+/// At translation time, all known node variable columns are appended as extra arguments
+/// so the UDF can find the matching node by VID at runtime.
+pub fn create_startnode_udf() -> ScalarUDF {
+    ScalarUDF::new_from_impl(StartNodeUdf::new())
+}
+
+#[derive(Debug)]
+struct StartNodeUdf {
+    signature: Signature,
+}
+
+impl StartNodeUdf {
+    fn new() -> Self {
+        Self {
+            signature: Signature::new(TypeSignature::VariadicAny, Volatility::Immutable),
+        }
+    }
+}
+
+impl_udf_eq_hash!(StartNodeUdf);
+
+impl ScalarUDFImpl for StartNodeUdf {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn name(&self) -> &str {
+        "startnode"
+    }
+
+    fn signature(&self) -> &Signature {
+        &self.signature
+    }
+
+    fn return_type(&self, _arg_types: &[DataType]) -> DFResult<DataType> {
+        Ok(DataType::LargeBinary)
+    }
+
+    fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DFResult<ColumnarValue> {
+        let output_type = DataType::LargeBinary;
+        invoke_cypher_udf(args, &output_type, |val_args| {
+            startnode_endnode_impl(val_args, true)
+        })
+    }
+}
+
+// ============================================================================
+// endNode(relationship) -> Node
+// ============================================================================
+
+/// Create the `endnode` UDF for getting the end node of a relationship.
+pub fn create_endnode_udf() -> ScalarUDF {
+    ScalarUDF::new_from_impl(EndNodeUdf::new())
+}
+
+#[derive(Debug)]
+struct EndNodeUdf {
+    signature: Signature,
+}
+
+impl EndNodeUdf {
+    fn new() -> Self {
+        Self {
+            signature: Signature::new(TypeSignature::VariadicAny, Volatility::Immutable),
+        }
+    }
+}
+
+impl_udf_eq_hash!(EndNodeUdf);
+
+impl ScalarUDFImpl for EndNodeUdf {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn name(&self) -> &str {
+        "endnode"
+    }
+
+    fn signature(&self) -> &Signature {
+        &self.signature
+    }
+
+    fn return_type(&self, _arg_types: &[DataType]) -> DFResult<DataType> {
+        Ok(DataType::LargeBinary)
+    }
+
+    fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DFResult<ColumnarValue> {
+        let output_type = DataType::LargeBinary;
+        invoke_cypher_udf(args, &output_type, |val_args| {
+            startnode_endnode_impl(val_args, false)
+        })
+    }
+}
+
+/// Shared implementation for startNode/endNode UDFs.
+///
+/// `val_args[0]` is the edge (cv_encoded), `val_args[1..]` are node variables.
+/// For `is_start=true`, finds the node matching `_src_vid`; for `false`, `_dst_vid`.
+fn startnode_endnode_impl(val_args: &[Value], is_start: bool) -> DFResult<Value> {
+    if val_args.is_empty() {
+        let fn_name = if is_start { "startNode" } else { "endNode" };
+        return Err(datafusion::error::DataFusionError::Execution(format!(
+            "{fn_name}(): requires at least 1 argument"
+        )));
+    }
+
+    let edge_val = &val_args[0];
+    let target_vid = extract_endpoint_vid(edge_val, is_start);
+
+    let target_vid = match target_vid {
+        Some(vid) => vid,
+        None => return Ok(Value::Null),
+    };
+
+    // Search node arguments (args[1..]) for a matching _vid
+    for node_val in val_args.iter().skip(1) {
+        if let Some(vid) = extract_vid(node_val)
+            && vid == target_vid
+        {
+            return Ok(node_val.clone());
+        }
+    }
+
+    // Fallback: return minimal node map with just _vid
+    let mut map = std::collections::HashMap::new();
+    map.insert("_vid".to_string(), Value::Int(target_vid as i64));
+    Ok(Value::Map(map))
+}
+
+/// Extract the src or dst VID from an edge value.
+fn extract_endpoint_vid(val: &Value, is_start: bool) -> Option<u64> {
+    match val {
+        Value::Edge(edge) => {
+            let vid = if is_start { edge.src } else { edge.dst };
+            Some(vid.as_u64())
+        }
+        Value::Map(map) => {
+            // Try _src_vid / _dst_vid first
+            let key = if is_start { "_src_vid" } else { "_dst_vid" };
+            if let Some(v) = map.get(key) {
+                return v.as_u64();
+            }
+            // Try _src / _dst
+            let key2 = if is_start { "_src" } else { "_dst" };
+            if let Some(v) = map.get(key2) {
+                return v.as_u64();
+            }
+            // Try _startNode / _endNode (return VID from nested node)
+            let node_key = if is_start { "_startNode" } else { "_endNode" };
+            if let Some(node_val) = map.get(node_key) {
+                return extract_vid(node_val);
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+/// Extract _vid from a node value.
+fn extract_vid(val: &Value) -> Option<u64> {
+    match val {
+        Value::Map(map) => map.get("_vid").and_then(|v| v.as_u64()),
+        _ => None,
     }
 }
 
@@ -4351,6 +4527,64 @@ impl ScalarUDFImpl for CypherListToCvUdf {
             if vals.len() != 1 {
                 return Err(datafusion::error::DataFusionError::Execution(
                     "_cypher_list_to_cv(): requires exactly 1 argument".to_string(),
+                ));
+            }
+            Ok(vals[0].clone())
+        })
+    }
+}
+
+// ============================================================================
+// _cypher_scalar_to_cv(scalar) -> LargeBinary (CypherValue)
+// ============================================================================
+
+/// Create the `_cypher_scalar_to_cv` UDF.
+///
+/// Converts a native scalar column (Int64, Float64, Utf8, Boolean, etc.) to
+/// CypherValue-encoded LargeBinary. Used when coalesce has mixed native +
+/// LargeBinary args so all branches can be normalized to LargeBinary.
+/// SQL NULLs are preserved as SQL NULLs (not encoded as CypherValue::Null).
+pub fn create_cypher_scalar_to_cv_udf() -> ScalarUDF {
+    ScalarUDF::new_from_impl(CypherScalarToCvUdf::new())
+}
+
+#[derive(Debug)]
+struct CypherScalarToCvUdf {
+    signature: Signature,
+}
+
+impl CypherScalarToCvUdf {
+    fn new() -> Self {
+        Self {
+            signature: Signature::any(1, Volatility::Immutable),
+        }
+    }
+}
+
+impl_udf_eq_hash!(CypherScalarToCvUdf);
+
+impl ScalarUDFImpl for CypherScalarToCvUdf {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn name(&self) -> &str {
+        "_cypher_scalar_to_cv"
+    }
+
+    fn signature(&self) -> &Signature {
+        &self.signature
+    }
+
+    fn return_type(&self, _arg_types: &[DataType]) -> DFResult<DataType> {
+        Ok(DataType::LargeBinary)
+    }
+
+    fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DFResult<ColumnarValue> {
+        invoke_cypher_udf(args, &DataType::LargeBinary, |vals| {
+            if vals.len() != 1 {
+                return Err(datafusion::error::DataFusionError::Execution(
+                    "_cypher_scalar_to_cv(): requires exactly 1 argument".to_string(),
                 ));
             }
             Ok(vals[0].clone())

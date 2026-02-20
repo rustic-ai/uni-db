@@ -10,12 +10,10 @@
 //! where the traversals are single-hop and the path variable needs to be materialized.
 
 use super::GraphExecutionContext;
-use super::common::{compute_plan_properties, labels_data_type};
-use arrow_array::builder::{
-    LargeBinaryBuilder, ListBuilder, StringBuilder, StructBuilder, UInt64Builder,
-};
-use arrow_array::{Array, ArrayRef, RecordBatch, StructArray};
-use arrow_schema::{DataType, Field, Fields, Schema, SchemaRef};
+use super::common::{compute_plan_properties, extract_column_value};
+use arrow_array::builder::{LargeBinaryBuilder, ListBuilder, StringBuilder, StructBuilder, UInt64Builder};
+use arrow_array::{ArrayRef, RecordBatch};
+use arrow_schema::SchemaRef;
 use datafusion::common::Result as DFResult;
 use datafusion::execution::{RecordBatchStream, SendableRecordBatchStream, TaskContext};
 use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
@@ -27,7 +25,6 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 use uni_common::core::id::{Eid, Vid};
-use uni_store::runtime::l0_visibility;
 
 /// Execution plan that binds a fixed-length path from existing node/edge columns.
 ///
@@ -96,40 +93,8 @@ impl BindFixedPathExec {
     /// Build output schema by adding the path variable column.
     /// Uses the same path struct format as BindZeroLengthPathExec and VLP.
     fn build_schema(input_schema: SchemaRef, path_variable: &str) -> SchemaRef {
-        let mut fields: Vec<Field> = input_schema
-            .fields()
-            .iter()
-            .map(|f| f.as_ref().clone())
-            .collect();
-
-        fields.push(build_path_struct_field(path_variable));
-        Arc::new(Schema::new(fields))
+        super::common::extend_schema_with_path(input_schema, path_variable)
     }
-}
-
-/// Build the path struct field definition used by all path binding executors.
-pub fn build_path_struct_field(path_variable: &str) -> Field {
-    let node_struct_fields = Fields::from(vec![
-        Field::new("_vid", DataType::UInt64, false),
-        Field::new("_labels", labels_data_type(), true),
-        Field::new("properties", DataType::LargeBinary, true),
-    ]);
-    let node_item = Field::new("item", DataType::Struct(node_struct_fields), true);
-    let nodes_field = Field::new("nodes", DataType::List(Arc::new(node_item)), true);
-
-    let edge_struct_fields = Fields::from(vec![
-        Field::new("_eid", DataType::UInt64, false),
-        Field::new("_type_name", DataType::Utf8, false),
-        Field::new("_src", DataType::UInt64, false),
-        Field::new("_dst", DataType::UInt64, false),
-        Field::new("properties", DataType::LargeBinary, true),
-    ]);
-    let edge_item = Field::new("item", DataType::Struct(edge_struct_fields), true);
-    let relationships_field =
-        Field::new("relationships", DataType::List(Arc::new(edge_item)), true);
-
-    let path_struct_fields = Fields::from(vec![nodes_field, relationships_field]);
-    Field::new(path_variable, DataType::Struct(path_struct_fields), true)
 }
 
 impl DisplayAs for BindFixedPathExec {
@@ -228,19 +193,9 @@ impl BindFixedPathStream {
         let num_rows = batch.num_rows();
         let query_ctx = self.graph_ctx.query_context();
 
-        // Build node and edge struct fields (same as BindZeroLengthPathExec)
-        let node_struct_fields = Fields::from(vec![
-            Field::new("_vid", DataType::UInt64, false),
-            Field::new("_labels", labels_data_type(), true),
-            Field::new("properties", DataType::LargeBinary, true),
-        ]);
-        let edge_struct_fields = Fields::from(vec![
-            Field::new("_eid", DataType::UInt64, false),
-            Field::new("_type_name", DataType::Utf8, false),
-            Field::new("_src", DataType::UInt64, false),
-            Field::new("_dst", DataType::UInt64, false),
-            Field::new("properties", DataType::LargeBinary, true),
-        ]);
+        // Build node and edge struct fields
+        let node_struct_fields = super::common::node_struct_fields();
+        let edge_struct_fields = super::common::edge_struct_fields();
 
         let mut nodes_builder = ListBuilder::new(StructBuilder::new(
             node_struct_fields,
@@ -301,7 +256,11 @@ impl BindFixedPathStream {
                     |arr: &arrow_array::UInt64Array, i| Vid::from(arr.value(i)),
                 );
 
-                self.append_node(&mut nodes_builder, vid, &query_ctx);
+                super::common::append_node_to_struct_optional(
+                    nodes_builder.values(),
+                    vid,
+                    &query_ctx,
+                );
             }
             nodes_builder.append(true);
 
@@ -322,6 +281,21 @@ impl BindFixedPathStream {
                     row_idx,
                     |arr: &arrow_array::UInt64Array, i| Eid::from(arr.value(i)),
                 );
+
+                // Try to get the edge type name from the batch column (populated by
+                // GraphTraverseExec from the schema). This is the primary source;
+                // L0 lookup is only a fallback for in-memory mutations.
+                let batch_type_name: Option<String> = if !edge_var.starts_with("__eid_to_") {
+                    let type_col_name = format!("{}._type", edge_var);
+                    extract_column_value(
+                        &batch,
+                        &type_col_name,
+                        row_idx,
+                        |arr: &arrow_array::StringArray, i| arr.value(i).to_string(),
+                    )
+                } else {
+                    None
+                };
 
                 // Get src/dst VIDs from adjacent node variables
                 let src_vid = self
@@ -351,7 +325,14 @@ impl BindFixedPathStream {
                     })
                     .unwrap_or(0);
 
-                self.append_edge(&mut rels_builder, eid, src_vid, dst_vid, &query_ctx);
+                super::common::append_edge_to_struct_optional(
+                    rels_builder.values(),
+                    eid,
+                    src_vid,
+                    dst_vid,
+                    batch_type_name,
+                    &query_ctx,
+                );
             }
             rels_builder.append(true);
             path_validity.push(true);
@@ -360,18 +341,8 @@ impl BindFixedPathStream {
         let nodes_array = Arc::new(nodes_builder.finish()) as ArrayRef;
         let rels_array = Arc::new(rels_builder.finish()) as ArrayRef;
 
-        let path_array = StructArray::try_new(
-            Fields::from(vec![
-                Arc::new(Field::new("nodes", nodes_array.data_type().clone(), true)),
-                Arc::new(Field::new(
-                    "relationships",
-                    rels_array.data_type().clone(),
-                    true,
-                )),
-            ]),
-            vec![nodes_array, rels_array],
-            Some(arrow::buffer::NullBuffer::from(path_validity)),
-        )?;
+        let path_array =
+            super::common::build_path_struct_array(nodes_array, rels_array, path_validity)?;
 
         let mut columns: Vec<ArrayRef> = batch.columns().to_vec();
         columns.push(Arc::new(path_array));
@@ -380,111 +351,6 @@ impl BindFixedPathStream {
             .map_err(|e| datafusion::error::DataFusionError::ArrowError(Box::new(e), None))
     }
 
-    fn append_node(
-        &self,
-        nodes_builder: &mut ListBuilder<StructBuilder>,
-        vid: Option<Vid>,
-        query_ctx: &uni_store::QueryContext,
-    ) {
-        let nodes_struct = nodes_builder.values();
-
-        let (vid_value, all_labels, props_json) = match vid {
-            Some(v) => {
-                let labels = l0_visibility::get_vertex_labels(v, query_ctx);
-                let props = l0_visibility::get_vertex_properties(v, query_ctx)
-                    .map(|p| super::common::encode_props_to_cv(&p));
-                (v.as_u64(), labels, props)
-            }
-            None => (0, vec![], None),
-        };
-
-        nodes_struct
-            .field_builder::<UInt64Builder>(0)
-            .unwrap()
-            .append_value(vid_value);
-
-        let labels_builder = nodes_struct
-            .field_builder::<ListBuilder<StringBuilder>>(1)
-            .unwrap();
-        for lbl in &all_labels {
-            labels_builder.values().append_value(lbl);
-        }
-        labels_builder.append(true);
-
-        let props_builder = nodes_struct.field_builder::<LargeBinaryBuilder>(2).unwrap();
-        match props_json {
-            Some(json) => props_builder.append_value(&json),
-            None => props_builder.append_null(),
-        }
-
-        nodes_struct.append(true);
-    }
-
-    fn append_edge(
-        &self,
-        rels_builder: &mut ListBuilder<StructBuilder>,
-        eid: Option<Eid>,
-        src_vid: u64,
-        dst_vid: u64,
-        query_ctx: &uni_store::QueryContext,
-    ) {
-        let rels_struct = rels_builder.values();
-
-        let (eid_value, type_name, props_json) = match eid {
-            Some(e) => {
-                let type_name = l0_visibility::get_edge_type(e, query_ctx).unwrap_or_default();
-                let props = l0_visibility::get_edge_properties(e, query_ctx)
-                    .map(|p| super::common::encode_props_to_cv(&p));
-                (e.as_u64(), type_name, props)
-            }
-            None => (0, String::new(), None),
-        };
-
-        rels_struct
-            .field_builder::<UInt64Builder>(0)
-            .unwrap()
-            .append_value(eid_value);
-
-        rels_struct
-            .field_builder::<StringBuilder>(1)
-            .unwrap()
-            .append_value(&type_name);
-
-        rels_struct
-            .field_builder::<UInt64Builder>(2)
-            .unwrap()
-            .append_value(src_vid);
-
-        rels_struct
-            .field_builder::<UInt64Builder>(3)
-            .unwrap()
-            .append_value(dst_vid);
-
-        let props_builder = rels_struct.field_builder::<LargeBinaryBuilder>(4).unwrap();
-        match props_json {
-            Some(json) => props_builder.append_value(&json),
-            None => props_builder.append_null(),
-        }
-
-        rels_struct.append(true);
-    }
-}
-
-/// Extract a typed value from a column at a given row index.
-fn extract_column_value<T: arrow_array::Array + 'static, R>(
-    batch: &RecordBatch,
-    col_name: &str,
-    row_idx: usize,
-    extract_fn: impl FnOnce(&T, usize) -> R,
-) -> Option<R> {
-    let (idx, _) = batch.schema().column_with_name(col_name)?;
-    let col = batch.column(idx);
-    let arr = col.as_any().downcast_ref::<T>()?;
-    if arr.is_valid(row_idx) {
-        Some(extract_fn(arr, row_idx))
-    } else {
-        None
-    }
 }
 
 impl Stream for BindFixedPathStream {

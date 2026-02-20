@@ -8,7 +8,7 @@ use lancedb::query::{ExecutableQuery, QueryBase};
 use std::collections::HashMap;
 use std::sync::Arc;
 use uni_common::DataType;
-use uni_common::Value;
+use uni_common::{Path, Value};
 use uni_common::core::id::{Eid, Vid};
 use uni_common::core::schema::{Constraint, ConstraintTarget, ConstraintType, SchemaManager};
 use uni_cypher::ast::{
@@ -179,12 +179,16 @@ impl Executor {
                 if let Some(Value::Map(node_map)) = row.get_mut(variable) {
                     // Remove old user property keys, keep internal fields
                     node_map.retain(|k, _| k.starts_with('_') || k == "ext_id");
-                    // Insert effective (non-null) properties
-                    for (k, v) in enriched {
-                        if !v.is_null() {
-                            node_map.insert(k, v);
-                        }
+                    // Build effective (non-null) properties
+                    let effective: HashMap<String, Value> = enriched
+                        .into_iter()
+                        .filter(|(_, v)| !v.is_null())
+                        .collect();
+                    for (k, v) in &effective {
+                        node_map.insert(k.clone(), v.clone());
                     }
+                    // Replace _all_props to reflect the complete property set
+                    node_map.insert("_all_props".to_string(), Value::Map(effective));
                 }
             }
             Some(Value::Edge(ref edge)) => {
@@ -225,11 +229,15 @@ impl Executor {
                     // Update the in-memory map-encoded edge binding
                     if let Some(Value::Map(edge_map)) = row.get_mut(variable) {
                         edge_map.retain(|k, _| k.starts_with('_'));
-                        for (k, v) in write_props {
-                            if !v.is_null() {
-                                edge_map.insert(k, v);
-                            }
+                        let effective: HashMap<String, Value> = write_props
+                            .into_iter()
+                            .filter(|(_, v)| !v.is_null())
+                            .collect();
+                        for (k, v) in &effective {
+                            edge_map.insert(k.clone(), v.clone());
                         }
+                        // Replace _all_props to reflect the complete property set
+                        edge_map.insert("_all_props".to_string(), Value::Map(effective));
                     }
                 }
             }
@@ -1416,6 +1424,10 @@ impl Executor {
                                     _ => (src, current_vid),
                                 };
 
+                                let store_props = !rel_var.is_empty();
+                                let user_props =
+                                    if store_props { rel_props.clone() } else { HashMap::new() };
+
                                 writer
                                     .insert_edge(edge_src, edge_dst, type_id, eid, rel_props)
                                     .await?;
@@ -1423,7 +1435,7 @@ impl Executor {
                                 // Store edge type name for all edges
                                 writer.set_edge_type(eid, type_name.clone());
 
-                                if !rel_var.is_empty() {
+                                if store_props {
                                     let mut edge_map = HashMap::new();
                                     edge_map.insert(
                                         "_eid".to_string(),
@@ -1439,6 +1451,10 @@ impl Executor {
                                     );
                                     edge_map
                                         .insert("_type".to_string(), Value::Int(type_id as i64));
+                                    // Include user properties so downstream RETURN sees them
+                                    for (k, v) in user_props {
+                                        edge_map.insert(k, v);
+                                    }
                                     row.insert(rel_var, Value::Map(edge_map));
                                 }
                             }
@@ -1477,7 +1493,23 @@ impl Executor {
 
     /// Validates that a value is a valid property type per OpenCypher.
     /// Rejects maps, nodes, edges, paths, and lists containing those types or nested lists.
-    fn validate_property_value(prop_name: &str, val: &Value) -> Result<()> {
+    /// Skips validation for CypherValue-typed properties which accept any value.
+    fn validate_property_value(
+        prop_name: &str,
+        val: &Value,
+        schema: &uni_common::core::schema::Schema,
+        labels: &[String],
+    ) -> Result<()> {
+        // CypherValue-typed properties accept any value (including Maps)
+        for label in labels {
+            if let Some(props) = schema.properties.get(label)
+                && let Some(prop_meta) = props.get(prop_name)
+                && prop_meta.r#type == uni_common::core::schema::DataType::CypherValue
+            {
+                return Ok(());
+            }
+        }
+
         match val {
             Value::Map(_) | Value::Node(_) | Value::Edge(_) | Value::Path(_) => {
                 anyhow::bail!(
@@ -1524,6 +1556,9 @@ impl Executor {
                         && let Some(node_val) = row.get(var_name)
                     {
                         if let Ok(vid) = Self::vid_from_value(node_val) {
+                            let labels =
+                                Self::extract_labels_from_node(node_val).unwrap_or_default();
+                            let schema = self.storage.schema_manager().schema().clone();
                             let mut props = prop_manager
                                 .get_all_vertex_props_with_ctx(vid, ctx)
                                 .await?
@@ -1531,13 +1566,10 @@ impl Executor {
                             let val = self
                                 .evaluate_expr(value, row, prop_manager, params, ctx)
                                 .await?;
-                            Self::validate_property_value(prop_name, &val)?;
+                            Self::validate_property_value(prop_name, &val, &schema, &labels)?;
                             props.insert(prop_name.clone(), val.clone());
 
                             // Enrich with generated columns
-                            // In the new storage model, get labels from the node value or context
-                            let labels =
-                                Self::extract_labels_from_node(node_val).unwrap_or_default();
                             for label_name in &labels {
                                 self.enrich_properties_with_generated_columns(
                                     label_name,
@@ -1558,12 +1590,18 @@ impl Executor {
                                 node.properties.insert(prop_name.clone(), val);
                             }
                         } else if let Value::Map(map) = node_val
-                            && map.contains_key("_eid")
-                            && map.contains_key("_src")
-                            && map.contains_key("_dst")
-                            && map.contains_key("_type")
+                            && map.get("_eid").is_some_and(|v| !v.is_null())
+                            && map.get("_src").is_some_and(|v| !v.is_null())
+                            && map.get("_dst").is_some_and(|v| !v.is_null())
+                            && map.get("_type").is_some_and(|v| !v.is_null())
                         {
                             let ei = self.extract_edge_identity(map)?;
+                            let schema = self.storage.schema_manager().schema().clone();
+                            let edge_type_name = map
+                                .get("_type")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string();
 
                             let mut props = prop_manager
                                 .get_all_edge_props_with_ctx(ei.eid, ctx)
@@ -1572,7 +1610,12 @@ impl Executor {
                             let val = self
                                 .evaluate_expr(value, row, prop_manager, params, ctx)
                                 .await?;
-                            Self::validate_property_value(prop_name, &val)?;
+                            Self::validate_property_value(
+                                prop_name,
+                                &val,
+                                &schema,
+                                &[edge_type_name],
+                            )?;
                             props.insert(prop_name.clone(), val.clone());
                             writer
                                 .insert_edge(ei.src, ei.dst, ei.edge_type_id, ei.eid, props)
@@ -1589,8 +1632,10 @@ impl Executor {
                             let eid = edge.eid;
                             let src = edge.src;
                             let dst = edge.dst;
+                            let edge_type_name = edge.edge_type.clone();
                             let etype =
-                                self.resolve_edge_type_id(&Value::String(edge.edge_type.clone()))?;
+                                self.resolve_edge_type_id(&Value::String(edge_type_name.clone()))?;
+                            let schema = self.storage.schema_manager().schema().clone();
 
                             let mut props = prop_manager
                                 .get_all_edge_props_with_ctx(eid, ctx)
@@ -1599,7 +1644,12 @@ impl Executor {
                             let val = self
                                 .evaluate_expr(value, row, prop_manager, params, ctx)
                                 .await?;
-                            Self::validate_property_value(prop_name, &val)?;
+                            Self::validate_property_value(
+                                prop_name,
+                                &val,
+                                &schema,
+                                &[edge_type_name],
+                            )?;
                             props.insert(prop_name.clone(), val.clone());
                             writer.insert_edge(src, dst, etype, eid, props).await?;
 
@@ -1740,19 +1790,31 @@ impl Executor {
                     for prop_name in prop_names {
                         props.insert(prop_name.clone(), Value::Null);
                     }
+                }
+                // Compute effective properties (post-removal) for _all_props
+                let effective: HashMap<String, Value> = props
+                    .iter()
+                    .filter(|(_, v)| !v.is_null())
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect();
+                if any_exist {
                     let labels = Self::extract_labels_from_node(node_val).unwrap_or_default();
                     let _ = writer.insert_vertex_with_labels(vid, props, labels).await?;
                 }
 
-                // Update the row map regardless (downstream sees Null)
+                // Update the row map: set removed props to Null
                 if let Some(Value::Map(node_map)) = row.get_mut(var_name) {
                     for prop_name in prop_names {
                         node_map.insert(prop_name.clone(), Value::Null);
                     }
+                    // Set _all_props to the complete effective property set
+                    node_map.insert("_all_props".to_string(), Value::Map(effective));
                 }
             } else if let Value::Map(map) = node_val {
                 // Edge property removal (map-encoded)
-                if map.contains_key("_eid") {
+                // Check for non-null _eid to skip OPTIONAL MATCH null edges
+                let mut edge_effective: Option<HashMap<String, Value>> = None;
+                if map.get("_eid").is_some_and(|v| !v.is_null()) {
                     let ei = self.extract_edge_identity(map)?;
                     let mut props = prop_manager
                         .get_all_edge_props_with_ctx(ei.eid, ctx)
@@ -1766,6 +1828,16 @@ impl Executor {
                         for prop_name in prop_names {
                             props.insert(prop_name.to_string(), Value::Null);
                         }
+                    }
+                    // Compute effective properties (post-removal) for _all_props
+                    edge_effective = Some(
+                        props
+                            .iter()
+                            .filter(|(_, v)| !v.is_null())
+                            .map(|(k, v)| (k.clone(), v.clone()))
+                            .collect(),
+                    );
+                    if any_exist {
                         writer
                             .insert_edge(ei.src, ei.dst, ei.edge_type_id, ei.eid, props)
                             .await?;
@@ -1775,6 +1847,9 @@ impl Executor {
                 if let Some(Value::Map(edge_map)) = row.get_mut(var_name) {
                     for prop_name in prop_names {
                         edge_map.insert(prop_name.clone(), Value::Null);
+                    }
+                    if let Some(effective) = edge_effective {
+                        edge_map.insert("_all_props".to_string(), Value::Map(effective));
                     }
                 }
             } else if let Value::Edge(edge) = node_val {
@@ -1900,7 +1975,24 @@ impl Executor {
                 }
             }
             _ => {
-                if let Ok(vid) = Self::vid_from_value(val) {
+                // Try Path reconstruction from Map first (Arrow loses Path type)
+                if let Ok(path) = Path::try_from(val) {
+                    for edge in &path.edges {
+                        let etype = self.resolve_edge_type_id_for_edge(edge, writer)?;
+                        writer
+                            .delete_edge(edge.eid, edge.src, edge.dst, etype)
+                            .await?;
+                    }
+                    for node in &path.nodes {
+                        self.execute_delete_vertex(
+                            node.vid,
+                            detach,
+                            Some(node.labels.clone()),
+                            writer,
+                        )
+                        .await?;
+                    }
+                } else if let Ok(vid) = Self::vid_from_value(val) {
                     let labels = Self::extract_labels_from_node(val);
                     self.execute_delete_vertex(vid, detach, labels, writer)
                         .await?;
@@ -1978,7 +2070,8 @@ impl Executor {
         map: &HashMap<String, Value>,
         writer: &mut Writer,
     ) -> Result<()> {
-        if map.contains_key("_eid") {
+        // Check for non-null _eid to skip OPTIONAL MATCH null edges
+        if map.get("_eid").is_some_and(|v| !v.is_null()) {
             let ei = self.extract_edge_identity(map)?;
             writer
                 .delete_edge(ei.eid, ei.src, ei.dst, ei.edge_type_id)

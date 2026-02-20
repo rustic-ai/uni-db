@@ -17,13 +17,11 @@
 
 use crate::query::df_graph::GraphExecutionContext;
 use crate::query::df_graph::common::{
-    column_as_vid_array, compute_plan_properties, labels_data_type,
+    column_as_vid_array, compute_plan_properties, edge_struct_fields, new_node_list_builder,
 };
-use arrow_array::builder::{
-    LargeBinaryBuilder, ListBuilder, StringBuilder, StructBuilder, UInt64Builder,
-};
-use arrow_array::{Array, ArrayRef, RecordBatch, StructArray, UInt64Array};
-use arrow_schema::{DataType, Field, Fields, Schema, SchemaRef};
+use arrow_array::builder::{ListBuilder, StructBuilder, UInt64Builder};
+use arrow_array::{Array, ArrayRef, RecordBatch, UInt64Array};
+use arrow_schema::{DataType, Field, Schema, SchemaRef};
 use datafusion::common::Result as DFResult;
 use datafusion::execution::{RecordBatchStream, SendableRecordBatchStream, TaskContext};
 use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
@@ -156,7 +154,7 @@ impl GraphShortestPathExec {
 
         // Add the proper path struct column (nodes + relationships)
         fields
-            .push(crate::query::df_graph::bind_fixed_path::build_path_struct_field(path_variable));
+            .push(crate::query::df_graph::common::build_path_struct_field(path_variable));
 
         // Add path column (raw VID list for internal use)
         let path_col_name = format!("{}._path", path_variable);
@@ -397,29 +395,9 @@ impl GraphShortestPathStream {
         let mut columns: Vec<ArrayRef> = input.columns().to_vec();
 
         // Build the path struct column (nodes + relationships)
-        let node_struct_fields = Fields::from(vec![
-            Field::new("_vid", DataType::UInt64, false),
-            Field::new("_labels", labels_data_type(), true),
-            Field::new("properties", DataType::LargeBinary, true),
-        ]);
-        let edge_struct_fields = Fields::from(vec![
-            Field::new("_eid", DataType::UInt64, false),
-            Field::new("_type_name", DataType::Utf8, false),
-            Field::new("_src", DataType::UInt64, false),
-            Field::new("_dst", DataType::UInt64, false),
-            Field::new("properties", DataType::LargeBinary, true),
-        ]);
-
-        let mut nodes_builder = ListBuilder::new(StructBuilder::new(
-            node_struct_fields,
-            vec![
-                Box::new(UInt64Builder::new()),
-                Box::new(ListBuilder::new(StringBuilder::new())),
-                Box::new(LargeBinaryBuilder::new()),
-            ],
-        ));
+        let mut nodes_builder = new_node_list_builder();
         let mut rels_builder =
-            ListBuilder::new(StructBuilder::from_fields(edge_struct_fields, num_rows));
+            ListBuilder::new(StructBuilder::from_fields(edge_struct_fields(), num_rows));
         let mut path_validity = Vec::with_capacity(num_rows);
 
         for path in paths {
@@ -427,25 +405,11 @@ impl GraphShortestPathStream {
                 Some(vids) => {
                     // Add all nodes
                     for &vid in vids {
-                        let all_labels = l0_visibility::get_vertex_labels(vid, &query_ctx);
-                        let props = l0_visibility::get_vertex_properties(vid, &query_ctx)
-                            .map(|p| super::common::encode_props_to_cv(&p));
-
-                        let ns = nodes_builder.values();
-                        ns.field_builder::<UInt64Builder>(0)
-                            .unwrap()
-                            .append_value(vid.as_u64());
-                        let lb = ns.field_builder::<ListBuilder<StringBuilder>>(1).unwrap();
-                        for lbl in &all_labels {
-                            lb.values().append_value(lbl);
-                        }
-                        lb.append(true);
-                        let pb = ns.field_builder::<LargeBinaryBuilder>(2).unwrap();
-                        match &props {
-                            Some(json) => pb.append_value(json),
-                            None => pb.append_null(),
-                        }
-                        ns.append(true);
+                        super::common::append_node_to_struct(
+                            nodes_builder.values(),
+                            vid,
+                            &query_ctx,
+                        );
                     }
                     nodes_builder.append(true);
 
@@ -454,28 +418,15 @@ impl GraphShortestPathStream {
                     for window in vids.windows(2) {
                         let src = window[0];
                         let dst = window[1];
-                        // Find the edge connecting src to dst
-                        let edge_info = self.find_edge(src, dst);
-                        let rs = rels_builder.values();
-
-                        rs.field_builder::<UInt64Builder>(0)
-                            .unwrap()
-                            .append_value(edge_info.0); // eid
-                        rs.field_builder::<StringBuilder>(1)
-                            .unwrap()
-                            .append_value(&edge_info.1); // type_name
-                        rs.field_builder::<UInt64Builder>(2)
-                            .unwrap()
-                            .append_value(src.as_u64());
-                        rs.field_builder::<UInt64Builder>(3)
-                            .unwrap()
-                            .append_value(dst.as_u64());
-                        let pb = rs.field_builder::<LargeBinaryBuilder>(4).unwrap();
-                        match &edge_info.2 {
-                            Some(json) => pb.append_value(json),
-                            None => pb.append_null(),
-                        }
-                        rs.append(true);
+                        let (eid, type_name) = self.find_edge(src, dst);
+                        super::common::append_edge_to_struct(
+                            rels_builder.values(),
+                            eid,
+                            &type_name,
+                            src.as_u64(),
+                            dst.as_u64(),
+                            &query_ctx,
+                        );
                     }
                     rels_builder.append(true);
                     path_validity.push(true);
@@ -492,18 +443,8 @@ impl GraphShortestPathStream {
         let nodes_array = Arc::new(nodes_builder.finish()) as ArrayRef;
         let rels_array = Arc::new(rels_builder.finish()) as ArrayRef;
 
-        let path_struct = StructArray::try_new(
-            Fields::from(vec![
-                Arc::new(Field::new("nodes", nodes_array.data_type().clone(), true)),
-                Arc::new(Field::new(
-                    "relationships",
-                    rels_array.data_type().clone(),
-                    true,
-                )),
-            ]),
-            vec![nodes_array, rels_array],
-            Some(arrow::buffer::NullBuffer::from(path_validity)),
-        )?;
+        let path_struct =
+            super::common::build_path_struct_array(nodes_array, rels_array, path_validity)?;
         columns.push(Arc::new(path_struct));
 
         // Build raw path list column (VID list for internal use)
@@ -536,8 +477,8 @@ impl GraphShortestPathStream {
     }
 
     /// Find an edge connecting src to dst.
-    /// Returns (eid, type_name, properties_json).
-    fn find_edge(&self, src: Vid, dst: Vid) -> (u64, String, Option<Vec<u8>>) {
+    /// Returns (eid, type_name). Property lookup is handled by `append_edge_to_struct`.
+    fn find_edge(&self, src: Vid, dst: Vid) -> (uni_common::core::id::Eid, String) {
         let query_ctx = self.graph_ctx.query_context();
         for &edge_type in &self.edge_type_ids {
             let neighbors = self.graph_ctx.get_neighbors(src, edge_type, self.direction);
@@ -545,13 +486,11 @@ impl GraphShortestPathStream {
                 if neighbor == dst {
                     let type_name =
                         l0_visibility::get_edge_type(eid, &query_ctx).unwrap_or_default();
-                    let props = l0_visibility::get_edge_properties(eid, &query_ctx)
-                        .map(|p| super::common::encode_props_to_cv(&p));
-                    return (eid.as_u64(), type_name, props);
+                    return (eid, type_name);
                 }
             }
         }
-        (0, String::new(), None)
+        (uni_common::core::id::Eid::from(0u64), String::new())
     }
 }
 

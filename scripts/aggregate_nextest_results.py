@@ -6,6 +6,10 @@ Reads individual result files from a nextest output directory and produces
 a timestamped results file in the same format as cucumber's JSON writer,
 so analyze_tck_json.py can consume it.
 
+If a manifest.json exists (written by `cargo nextest list`), scenarios
+present in the manifest but missing from results are reported as "crashed"
+(the test process died before writing a result).
+
 Usage:
     python scripts/aggregate_nextest_results.py
 
@@ -20,6 +24,24 @@ import sys
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
+
+
+def load_manifest(results_dir):
+    """Load manifest.json and return a list of (feature_path, scenario_name, line) tuples."""
+    manifest_path = results_dir / "manifest.json"
+    if not manifest_path.exists():
+        return None
+
+    try:
+        with open(manifest_path) as f:
+            data = json.load(f)
+        return [
+            (s["feature_path"], s["scenario_name"], s["line"])
+            for s in data.get("scenarios", [])
+        ]
+    except (json.JSONDecodeError, KeyError) as e:
+        print(f"  ⚠ Failed to load manifest.json: {e}", file=sys.stderr)
+        return None
 
 
 def main():
@@ -50,7 +72,11 @@ def main():
         print(f"❌ No results directory found at {results_dir}", file=sys.stderr)
         sys.exit(1)
 
-    result_files = sorted(results_dir.glob("*.json"))
+    # Exclude manifest.json from result files
+    result_files = sorted(
+        p for p in results_dir.glob("*.json")
+        if p.name != "manifest.json"
+    )
     if not result_files:
         print(f"❌ No result files found in {results_dir}", file=sys.stderr)
         sys.exit(1)
@@ -59,13 +85,39 @@ def main():
 
     # Group scenarios by feature file
     features = defaultdict(list)
+    # Track which (feature_path, line) combos we have results for
+    seen_results = set()
     for path in result_files:
         try:
             with open(path) as f:
                 data = json.load(f)
             features[data["feature_path"]].append(data)
+            seen_results.add((data["feature_path"], data["line"]))
         except (json.JSONDecodeError, KeyError) as e:
             print(f"  ⚠ Skipping {path.name}: {e}", file=sys.stderr)
+
+    # Cross-reference against manifest to detect crashed scenarios
+    manifest_scenarios = load_manifest(results_dir)
+    crashed_count = 0
+    if manifest_scenarios is not None:
+        for feature_path, scenario_name, line in manifest_scenarios:
+            if (feature_path, line) not in seen_results:
+                # This scenario is in the manifest but has no result file — it crashed
+                crashed_count += 1
+                features[feature_path].append({
+                    "feature_path": feature_path,
+                    "scenario_name": scenario_name,
+                    "line": line,
+                    "status": "crashed",
+                    "error_message": (
+                        f"Test process crashed (SIGABRT/segfault/OOM) before writing result. "
+                        f"Scenario: {scenario_name} (line {line})"
+                    ),
+                })
+                print(
+                    f"  ⚠ CRASHED: {Path(feature_path).stem}:{line} — {scenario_name}",
+                    file=sys.stderr,
+                )
 
     # Build cucumber JSON format
     cucumber_json = []
@@ -77,8 +129,8 @@ def main():
         for sc in sorted(scenarios, key=lambda s: s["line"]):
             status = sc["status"]
             step_result = {"status": status}
-            if status in {"failed", "skipped"}:
-                # Preserve detailed failure/skip reason from the test runner when available.
+            if status in {"failed", "skipped", "crashed"}:
+                # Preserve detailed failure/skip/crash reason from the test runner when available.
                 step_result["error_message"] = sc.get(
                     "error_message",
                     f"Scenario failed: {sc['scenario_name']}",
@@ -130,8 +182,18 @@ def main():
         if el["steps"][0]["result"]["status"] == "skipped"
     )
 
+    summary_parts = [f"Passed: {passed}", f"Failed: {failed}", f"Skipped: {skipped}"]
+    if crashed_count > 0:
+        summary_parts.append(f"Crashed: {crashed_count}")
+
     print(f"✅ Wrote {output_path} ({len(cucumber_json)} features, {total} scenarios)", file=sys.stderr)
-    print(f"   Passed: {passed}, Failed: {failed}, Skipped: {skipped}", file=sys.stderr)
+    print(f"   {', '.join(summary_parts)}", file=sys.stderr)
+
+    if crashed_count > 0:
+        print(
+            f"   ⚠ {crashed_count} scenario(s) crashed — test process died before writing results",
+            file=sys.stderr,
+        )
 
     # Print path to stdout for scripts to capture
     print(output_path)

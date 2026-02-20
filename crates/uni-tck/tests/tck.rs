@@ -83,6 +83,17 @@ fn main() {
     let feature_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tck/features");
     let scenarios = discover_scenarios(&feature_dir);
 
+    // Write a manifest of all discovered scenarios when explicitly requested
+    // via UNI_TCK_WRITE_MANIFEST=1. The shell script sets this during the
+    // dedicated `cargo nextest list` step (full runs only) so the aggregator
+    // can detect crashes (scenarios that never wrote a result JSON).
+    // We gate on an env var rather than `args.list` because nextest also
+    // calls --list internally during `nextest run`, which would overwrite
+    // the manifest and cause false crash detections for filtered runs.
+    if std::env::var("UNI_TCK_WRITE_MANIFEST").as_deref() == Ok("1") && args.list {
+        write_manifest(&scenarios);
+    }
+
     // Build base test names and detect duplicates
     let base_names: Vec<String> = scenarios
         .iter()
@@ -431,6 +442,34 @@ fn nextest_results_dir() -> PathBuf {
             }
         }
         _ => repo_root.join("target/cucumber/nextest"),
+    }
+}
+
+/// Write a manifest of all discovered scenarios to `manifest.json` in the
+/// nextest results directory. Called during `--list` (i.e. `cargo nextest list`)
+/// so the aggregator can detect scenarios that crashed (never wrote a result).
+fn write_manifest(scenarios: &[(PathBuf, String, usize)]) {
+    let results_dir = nextest_results_dir();
+    let _ = std::fs::create_dir_all(&results_dir);
+
+    let entries: Vec<serde_json::Value> = scenarios
+        .iter()
+        .map(|(fp, sn, line)| {
+            serde_json::json!({
+                "feature_path": fp.to_string_lossy(),
+                "scenario_name": sn,
+                "line": line,
+            })
+        })
+        .collect();
+
+    let manifest = serde_json::json!({
+        "version": 1,
+        "scenarios": entries,
+    });
+
+    if let Ok(mut f) = std::fs::File::create(results_dir.join("manifest.json")) {
+        let _ = f.write_all(serde_json::to_string_pretty(&manifest).unwrap().as_bytes());
     }
 }
 

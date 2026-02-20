@@ -26,9 +26,9 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use uni_common::Value;
+use uni_common::{Path, Value};
 use uni_common::core::id::Vid;
-use uni_cypher::ast::{Expr, Pattern, RemoveItem, SetClause, SetItem};
+use uni_cypher::ast::{Expr, Pattern, PatternElement, RemoveItem, SetClause, SetItem};
 use uni_store::runtime::property_manager::PropertyManager;
 use uni_store::runtime::writer::Writer;
 use uni_store::storage::arrow_convert;
@@ -153,22 +153,117 @@ pub fn batches_to_rows(batches: &[RecordBatch]) -> Result<Vec<HashMap<String, Va
     Ok(rows)
 }
 
+/// After mutations, sync `_all_props` within bare variable Maps from their direct property keys.
+///
+/// SET/REMOVE modify direct property keys in the bare Map (e.g., `row["n"]["name"] = "Bob"`)
+/// but the `_all_props` sub-map retains its stale pre-mutation values. The result normalizer
+/// and property UDFs (keys(), properties()) read from `_all_props`, so it must be kept in sync.
+///
+/// This must be called BEFORE `sync_dotted_columns` so that the dotted `n._all_props` column
+/// also gets the updated value.
+fn sync_all_props_in_maps(rows: &mut [HashMap<String, Value>]) {
+    for row in rows.iter_mut() {
+        let map_keys: Vec<String> = row
+            .keys()
+            .filter(|k| !k.contains('.') && matches!(row.get(*k), Some(Value::Map(_))))
+            .cloned()
+            .collect();
+
+        for key in map_keys {
+            if let Some(Value::Map(map)) = row.get_mut(&key)
+                && map.contains_key("_all_props")
+            {
+                // Collect non-internal property keys and their values
+                let updates: Vec<(String, Value)> = map
+                    .iter()
+                    .filter(|(k, _)| !k.starts_with('_') && k.as_str() != "ext_id")
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect();
+
+                if !updates.is_empty()
+                    && let Some(Value::Map(all_props)) = map.get_mut("_all_props")
+                {
+                    for (k, v) in updates {
+                        all_props.insert(k, v);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// After mutations, sync dotted property columns from bare variable Maps.
+///
+/// SET/REMOVE modify the bare Map (e.g., `row["n"]["name"] = "Bob"`) but the
+/// dotted column (`row["n.name"]`) retains its stale pre-mutation value.
+/// This step overwrites dotted columns from the Map so `rows_to_batches()`
+/// produces correct output. Also handles newly created variables from CREATE/MERGE
+/// by inserting dotted columns that didn't exist in the input.
+fn sync_dotted_columns(rows: &mut [HashMap<String, Value>], schema: &SchemaRef) {
+    for row in rows.iter_mut() {
+        for field in schema.fields() {
+            let name = field.name();
+            if let Some(dot_pos) = name.find('.') {
+                let var_name = &name[..dot_pos];
+                let prop_name = &name[dot_pos + 1..];
+                if let Some(Value::Map(map)) = row.get(var_name) {
+                    if let Some(val) = map.get(prop_name) {
+                        row.insert(name.clone(), val.clone());
+                    } else {
+                        // Property was removed or doesn't exist — set to Null
+                        row.insert(name.clone(), Value::Null);
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Merge system fields into bare variable maps for write helper consumption.
 ///
 /// The write helpers expect variables like `n` to be a Map containing `_vid`, `_labels`, etc.
 /// This merges dotted columns (like `n._vid`, `n._labels`) into the variable Map,
 /// while KEEPING the dotted columns in the row so `rows_to_batches` still works.
 fn merge_system_fields_for_write(row: &mut HashMap<String, Value>) {
+    // Vertex system fields (overwrite into the bare map) and edge system fields
+    // (insert only if absent) that should be copied from dotted columns.
+    const VERTEX_FIELDS: &[&str] = &["_vid", "_labels"];
+    const EDGE_FIELDS: &[&str] = &["_eid", "_type"];
+    const EDGE_EXTRA: &[&str] = &["_src_vid", "_dst_vid"];
+
+    // Collect all variable names that have dotted columns (var.field).
+    let mut dotted_vars: HashSet<String> = HashSet::new();
+    for key in row.keys() {
+        if let Some(dot_pos) = key.find('.') {
+            dotted_vars.insert(key[..dot_pos].to_string());
+        }
+    }
+
+    // For each variable with dotted columns, ensure a bare Map exists.
+    // If the variable is only represented via dotted columns (e.g., edge from
+    // TraverseMainByType), assemble a Map from those columns.
+    for var in &dotted_vars {
+        if !row.contains_key(var) {
+            // No bare entry — create one from dotted columns
+            let mut map = HashMap::new();
+            let prefix = format!("{var}.");
+            for (k, v) in row.iter() {
+                if let Some(field) = k.strip_prefix(prefix.as_str()) {
+                    map.insert(field.to_string(), v.clone());
+                }
+            }
+            if !map.is_empty() {
+                row.insert(var.clone(), Value::Map(map));
+            }
+        }
+    }
+
+    // Now merge system fields into all bare Maps.
     let bare_vars: Vec<String> = row
         .keys()
         .filter(|k| !k.contains('.') && matches!(row.get(*k), Some(Value::Map(_))))
         .cloned()
         .collect();
-
-    // Vertex system fields (overwrite into the bare map) and edge system fields
-    // (insert only if absent) that should be copied from dotted columns.
-    const VERTEX_FIELDS: &[&str] = &["_vid", "_labels"];
-    const EDGE_FIELDS: &[&str] = &["_eid", "_type"];
 
     for var in &bare_vars {
         for &field in VERTEX_FIELDS {
@@ -178,7 +273,7 @@ fn merge_system_fields_for_write(row: &mut HashMap<String, Value>) {
                 map.insert(field.to_string(), v);
             }
         }
-        for &field in EDGE_FIELDS {
+        for &field in EDGE_FIELDS.iter().chain(EDGE_EXTRA.iter()) {
             if let Some(v) = row.get(&format!("{var}.{field}")).cloned()
                 && let Some(Value::Map(map)) = row.get_mut(var)
             {
@@ -200,11 +295,17 @@ pub fn rows_to_batches(
     rows: &[HashMap<String, Value>],
     schema: &SchemaRef,
 ) -> Result<Vec<RecordBatch>> {
-    if rows.is_empty() || schema.fields().is_empty() {
-        // Return an empty batch with the correct schema.
-        // When schema has no fields (e.g., standalone CREATE with no RETURN),
-        // the side effects have already been applied; just return empty.
+    if rows.is_empty() {
         let batch = RecordBatch::new_empty(schema.clone());
+        return Ok(vec![batch]);
+    }
+
+    if schema.fields().is_empty() {
+        // Schema has no fields but there ARE rows. Preserve the row count so that
+        // downstream operators (chained mutations, aggregations) see the correct
+        // number of rows. A RecordBatch with 0 columns can still carry a row count.
+        let options = arrow_array::RecordBatchOptions::new().with_row_count(Some(rows.len()));
+        let batch = RecordBatch::try_new_with_options(schema.clone(), vec![], &options)?;
         return Ok(vec![batch]);
     }
 
@@ -236,6 +337,9 @@ fn value_column_to_arrow(
 
     if *arrow_type == DataType::LargeBinary || is_cv_encoded {
         Ok(encode_as_large_binary(values))
+    } else if *arrow_type == DataType::Binary {
+        // Binary columns (e.g., CRDT payloads): encode as Binary, not LargeBinary
+        Ok(encode_as_binary(values))
     } else {
         // Use arrow_convert for scalar types, falling back to CypherValue encoding
         arrow_convert::values_to_array(values, arrow_type)
@@ -243,19 +347,31 @@ fn value_column_to_arrow(
     }
 }
 
+/// Encode values as CypherValue blobs using the given builder type.
+macro_rules! encode_as_cv {
+    ($builder_ty:ty, $values:expr) => {{
+        let values = $values;
+        let mut builder = <$builder_ty>::with_capacity(values.len(), values.len() * 64);
+        for v in values {
+            if v.is_null() {
+                builder.append_null();
+            } else {
+                let bytes = uni_common::cypher_value_codec::encode(v);
+                builder.append_value(&bytes);
+            }
+        }
+        Arc::new(builder.finish()) as arrow_array::ArrayRef
+    }};
+}
+
+/// Encode values as CypherValue Binary blobs.
+fn encode_as_binary(values: &[Value]) -> arrow_array::ArrayRef {
+    encode_as_cv!(arrow_array::builder::BinaryBuilder, values)
+}
+
 /// Encode values as CypherValue LargeBinary blobs.
 fn encode_as_large_binary(values: &[Value]) -> arrow_array::ArrayRef {
-    let mut builder =
-        arrow_array::builder::LargeBinaryBuilder::with_capacity(values.len(), values.len() * 64);
-    for v in values {
-        if v.is_null() {
-            builder.append_null();
-        } else {
-            let bytes = uni_common::cypher_value_codec::encode(v);
-            builder.append_value(&bytes);
-        }
-    }
-    Arc::new(builder.finish())
+    encode_as_cv!(arrow_array::builder::LargeBinaryBuilder, values)
 }
 
 /// Execute a mutation stream: collect all input batches, apply mutations, yield output.
@@ -284,6 +400,7 @@ pub fn execute_mutation_stream(
 
     let stream = futures::stream::once(execute_mutation_inner(
         input,
+        output_schema.clone(),
         mutation_ctx,
         mutation_kind,
         partition,
@@ -303,10 +420,12 @@ pub fn execute_mutation_stream(
 /// annotation, avoiding type inference issues with multiple From<DataFusionError> impls.
 ///
 /// Mutations are applied as storage-level side effects via Writer/L0 buffer.
-/// The original input batches are passed through unchanged to downstream operators.
-/// This avoids the complex row→batch reconstruction for Struct/entity columns.
+/// After mutations, output batches are reconstructed from the modified rows
+/// so downstream operators (RETURN, WITH, subsequent mutations) see the
+/// created/updated variables and properties.
 async fn execute_mutation_inner(
     input: Arc<dyn ExecutionPlan>,
+    output_schema: SchemaRef,
     mutation_ctx: Arc<MutationContext>,
     mutation_kind: MutationKind,
     partition: usize,
@@ -348,7 +467,7 @@ async fn execute_mutation_inner(
         let params = &mutation_ctx.params;
         let ctx = mutation_ctx.query_ctx.as_ref();
 
-        let result_rows = exec
+        let mut result_rows = exec
             .execute_merge(rows, pattern, on_match.as_ref(), on_create.as_ref(), pm, params, ctx)
             .await
             .map_err(|e| {
@@ -362,9 +481,16 @@ async fn execute_mutation_inner(
             "MERGE mutation complete"
         );
 
-        // MERGE returns its own result rows — pass through original input batches
-        // (side effects are already applied).
-        let results: Vec<DFResult<RecordBatch>> = input_batches.into_iter().map(Ok).collect();
+        // Reconstruct output batches from modified rows so downstream operators
+        // (RETURN, WITH, subsequent mutations) see the merged/created variables.
+        sync_all_props_in_maps(&mut result_rows);
+        sync_dotted_columns(&mut result_rows, &output_schema);
+        let result_batches = rows_to_batches(&result_rows, &output_schema).map_err(|e| {
+            datafusion::error::DataFusionError::Execution(format!(
+                "Failed to reconstruct MERGE batches: {e}"
+            ))
+        })?;
+        let results: Vec<DFResult<RecordBatch>> = result_batches.into_iter().map(Ok).collect();
         return Ok(futures::stream::iter(results));
     }
 
@@ -378,12 +504,91 @@ async fn execute_mutation_inner(
         "Mutation complete"
     );
 
-    // 4. Pass through original input batches unchanged.
-    // Mutations are storage-level side effects (writes to Writer/L0 buffer).
-    // The original batch schema (including Struct columns for entities) is
-    // preserved without complex reconstruction.
-    let results: Vec<DFResult<RecordBatch>> = input_batches.into_iter().map(Ok).collect();
+    // 4. Reconstruct output batches from modified rows.
+    // Mutations modify the row HashMaps in place (CREATE adds new variable keys,
+    // SET updates property values). Reconstruct batches so downstream operators
+    // (RETURN, WITH, subsequent mutations) see these modifications.
+    sync_all_props_in_maps(&mut rows);
+    sync_dotted_columns(&mut rows, &output_schema);
+    let result_batches = rows_to_batches(&rows, &output_schema).map_err(|e| {
+        datafusion::error::DataFusionError::Execution(format!(
+            "Failed to reconstruct batches: {e}"
+        ))
+    })?;
+    let results: Vec<DFResult<RecordBatch>> = result_batches.into_iter().map(Ok).collect();
     Ok(futures::stream::iter(results))
+}
+
+/// Collects and classifies DELETE targets into nodes and edges.
+///
+/// Handles `Value::Path`, `Value::Node`, `Value::Edge`, map-encoded paths
+/// (from Arrow round-trip), and raw VID values. When `dedup` is true,
+/// uses HashSets to skip duplicates (needed for non-DETACH DELETE to
+/// handle shared nodes across paths).
+struct DeleteCollector {
+    /// Collected node entries: (vid, labels) pairs.
+    node_entries: Vec<(Vid, Option<Vec<String>>)>,
+    /// Collected edge values to delete.
+    edge_vals: Vec<Value>,
+    /// Deduplication sets (only used when dedup=true).
+    seen_vids: HashSet<u64>,
+    seen_eids: HashSet<u64>,
+    dedup: bool,
+}
+
+impl DeleteCollector {
+    fn new(dedup: bool) -> Self {
+        Self {
+            node_entries: Vec::new(),
+            edge_vals: Vec::new(),
+            seen_vids: HashSet::new(),
+            seen_eids: HashSet::new(),
+            dedup,
+        }
+    }
+
+    fn add(&mut self, val: Value) {
+        if val.is_null() {
+            return;
+        }
+
+        // Try to resolve value as a Path (native or map-encoded).
+        let path = match &val {
+            Value::Path(p) => Some(p.clone()),
+            _ => Path::try_from(&val).ok(),
+        };
+
+        if let Some(path) = path {
+            for edge in &path.edges {
+                if !self.dedup || self.seen_eids.insert(edge.eid.as_u64()) {
+                    self.edge_vals.push(Value::Edge(edge.clone()));
+                }
+            }
+            for node in &path.nodes {
+                self.add_node(node.vid, Some(node.labels.clone()));
+            }
+            return;
+        }
+
+        // Not a path -- try as a node (by VID).
+        if let Ok(vid) = Executor::vid_from_value(&val) {
+            let labels = Executor::extract_labels_from_node(&val);
+            self.add_node(vid, labels);
+            return;
+        }
+
+        // Otherwise treat as an edge value.
+        if matches!(&val, Value::Map(_) | Value::Edge(_)) {
+            self.edge_vals.push(val);
+        }
+    }
+
+    fn add_node(&mut self, vid: Vid, labels: Option<Vec<String>>) {
+        if self.dedup && !self.seen_vids.insert(vid.as_u64()) {
+            return;
+        }
+        self.node_entries.push((vid, labels));
+    }
 }
 
 /// Apply mutations to rows using the appropriate executor helper.
@@ -440,103 +645,33 @@ async fn apply_mutations(
             }
         }
         MutationKind::Delete { items, detach } => {
-            if *detach {
-                let mut vertex_vids = Vec::new();
-                let mut vertex_labels = Vec::new();
-                let mut edge_vals = Vec::new();
-
-                for row in rows.iter() {
-                    for expr in items {
-                        let val = exec
-                            .evaluate_expr(expr, row, pm, params, ctx)
-                            .await
-                            .map_err(|e| df_err("DELETE eval failed", e))?;
-                        match &val {
-                            Value::Null => {
-                                // DELETE null is a no-op
-                            }
-                            Value::Path(path) => {
-                                // Decompose path into nodes and edges
-                                for node in &path.nodes {
-                                    vertex_vids.push(node.vid);
-                                    vertex_labels.push(Some(node.labels.clone()));
-                                }
-                                for edge in &path.edges {
-                                    edge_vals.push(Value::Edge(edge.clone()));
-                                }
-                            }
-                            _ => {
-                                if let Ok(vid) = Executor::vid_from_value(&val) {
-                                    vertex_labels.push(Executor::extract_labels_from_node(&val));
-                                    vertex_vids.push(vid);
-                                } else if matches!(&val, Value::Map(_) | Value::Edge(_)) {
-                                    edge_vals.push(val);
-                                }
-                            }
-                        }
-                    }
+            // Evaluate all DELETE targets and classify into nodes vs edges.
+            let mut collector = DeleteCollector::new(!*detach);
+            for row in rows.iter() {
+                for expr in items {
+                    let val = exec
+                        .evaluate_expr(expr, row, pm, params, ctx)
+                        .await
+                        .map_err(|e| df_err("DELETE eval failed", e))?;
+                    collector.add(val);
                 }
+            }
 
-                exec.batch_detach_delete_vertices(&vertex_vids, vertex_labels, writer)
+            // Delete edges before nodes so non-detach DELETE satisfies constraints.
+            for val in &collector.edge_vals {
+                exec.execute_delete_item_locked(val, false, writer)
+                    .await
+                    .map_err(|e| df_err("DELETE edge failed", e))?;
+            }
+
+            if *detach {
+                let (vids, labels): (Vec<Vid>, Vec<Option<Vec<String>>>) =
+                    collector.node_entries.into_iter().unzip();
+                exec.batch_detach_delete_vertices(&vids, labels, writer)
                     .await
                     .map_err(|e| df_err("DETACH DELETE failed", e))?;
-
-                for val in &edge_vals {
-                    exec.execute_delete_item_locked(val, false, writer)
-                        .await
-                        .map_err(|e| df_err("DELETE edge failed", e))?;
-                }
             } else {
-                // Non-detach delete: two-pass to handle shared nodes across paths.
-                // Pass 1: Evaluate all items, collect edges and nodes separately.
-                let mut all_edge_vals: Vec<Value> = Vec::new();
-                let mut all_node_vals: Vec<(Vid, Option<Vec<String>>)> = Vec::new();
-                let mut seen_vids: HashSet<u64> = HashSet::new();
-                let mut seen_eids: HashSet<u64> = HashSet::new();
-
-                for row in rows.iter() {
-                    for expr in items {
-                        let val = exec
-                            .evaluate_expr(expr, row, pm, params, ctx)
-                            .await
-                            .map_err(|e| df_err("DELETE eval failed", e))?;
-                        match &val {
-                            Value::Null => {}
-                            Value::Path(path) => {
-                                for edge in &path.edges {
-                                    if seen_eids.insert(edge.eid.as_u64()) {
-                                        all_edge_vals.push(Value::Edge(edge.clone()));
-                                    }
-                                }
-                                for node in &path.nodes {
-                                    if seen_vids.insert(node.vid.as_u64()) {
-                                        all_node_vals.push((node.vid, Some(node.labels.clone())));
-                                    }
-                                }
-                            }
-                            _ => {
-                                if let Ok(vid) = Executor::vid_from_value(&val) {
-                                    if seen_vids.insert(vid.as_u64()) {
-                                        let labels = Executor::extract_labels_from_node(&val);
-                                        all_node_vals.push((vid, labels));
-                                    }
-                                } else {
-                                    all_edge_vals.push(val);
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // Pass 2a: Delete all edges first.
-                for val in &all_edge_vals {
-                    exec.execute_delete_item_locked(val, false, writer)
-                        .await
-                        .map_err(|e| df_err("DELETE edge failed", e))?;
-                }
-
-                // Pass 2b: Delete all nodes (edges are already gone).
-                for (vid, labels) in &all_node_vals {
+                for (vid, labels) in &collector.node_entries {
                     exec.execute_delete_vertex(*vid, false, labels.clone(), writer)
                         .await
                         .map_err(|e| df_err("DELETE node failed", e))?;
@@ -551,6 +686,111 @@ async fn apply_mutations(
     }
 
     Ok(())
+}
+
+/// Extract variable names introduced by a CREATE/MERGE pattern.
+///
+/// Walks the pattern tree and collects all node and relationship variable names.
+/// Used to compute extended output schemas for CREATE/MERGE operators.
+pub fn pattern_variable_names(pattern: &Pattern) -> Vec<String> {
+    let mut vars = Vec::new();
+    for path in &pattern.paths {
+        if let Some(ref v) = path.variable {
+            vars.push(v.clone());
+        }
+        for element in &path.elements {
+            match element {
+                PatternElement::Node(n) => {
+                    if let Some(ref v) = n.variable {
+                        vars.push(v.clone());
+                    }
+                }
+                PatternElement::Relationship(r) => {
+                    if let Some(ref v) = r.variable {
+                        vars.push(v.clone());
+                    }
+                }
+                PatternElement::Parenthesized { pattern, .. } => {
+                    // Recurse into parenthesized sub-patterns
+                    let sub = Pattern {
+                        paths: vec![pattern.as_ref().clone()],
+                    };
+                    vars.extend(pattern_variable_names(&sub));
+                }
+            }
+        }
+    }
+    vars
+}
+
+/// Normalize a schema for mutation output.
+///
+/// After mutation processing, entity values (nodes/edges) are stored as
+/// `Value::Map` in row HashMaps. The input schema may have Struct columns
+/// for these entities, but `rows_to_batches()` encodes Map values as
+/// cv_encoded LargeBinary. This function converts Struct and Binary entity
+/// columns to cv_encoded LargeBinary to match the actual output format.
+fn normalize_mutation_schema(schema: &SchemaRef) -> SchemaRef {
+    use arrow_schema::{Field, Schema};
+
+    let fields: Vec<Arc<Field>> = schema
+        .fields()
+        .iter()
+        .map(|field| {
+            // Struct columns are entity variables (nodes/edges) that become
+            // Value::Map after batches_to_rows(). They must be converted to
+            // cv_encoded LargeBinary for rows_to_batches() to work correctly.
+            if matches!(field.data_type(), DataType::Struct(_)) {
+                let mut metadata = field.metadata().clone();
+                metadata.insert("cv_encoded".to_string(), "true".to_string());
+                Arc::new(
+                    Field::new(field.name(), DataType::LargeBinary, true).with_metadata(metadata),
+                )
+            } else {
+                field.clone()
+            }
+        })
+        .collect();
+
+    Arc::new(Schema::new(fields))
+}
+
+/// Compute an extended output schema that includes columns for newly created variables.
+///
+/// For each variable name in `new_vars` that is not already in `input_schema`,
+/// adds a LargeBinary field with `cv_encoded=true` metadata. This lets downstream
+/// operators (RETURN, WITH) see the created entities.
+///
+/// Also normalizes existing Struct entity columns to cv_encoded LargeBinary,
+/// since after mutation processing, entities are stored as Maps in row HashMaps.
+pub fn extended_schema_for_new_vars(
+    input_schema: &SchemaRef,
+    new_vars: &[String],
+) -> SchemaRef {
+    use arrow_schema::{Field, Schema};
+
+    // First normalize existing columns
+    let normalized = normalize_mutation_schema(input_schema);
+
+    let existing_names: HashSet<&str> = normalized
+        .fields()
+        .iter()
+        .map(|f| f.name().as_str())
+        .collect();
+
+    let mut fields: Vec<Arc<arrow_schema::Field>> =
+        normalized.fields().iter().cloned().collect();
+
+    for var_name in new_vars {
+        if !existing_names.contains(var_name.as_str()) {
+            let mut metadata = std::collections::HashMap::new();
+            metadata.insert("cv_encoded".to_string(), "true".to_string());
+            let field = Field::new(var_name, DataType::LargeBinary, true).with_metadata(metadata);
+            fields.push(Arc::new(field));
+        }
+    }
+
+    Arc::new(Schema::new(fields))
 }
 
 /// Human-readable label for a MutationKind (used in tracing spans).
@@ -603,13 +843,17 @@ pub struct MutationExec {
 
 impl MutationExec {
     /// Create a new `MutationExec` with the given kind.
+    ///
+    /// The output schema is derived from the input schema with Struct entity
+    /// columns normalized to cv_encoded LargeBinary. For mutations that
+    /// introduce new variables (CREATE, MERGE), use [`new_with_schema`] instead.
     pub fn new(
         input: Arc<dyn ExecutionPlan>,
         kind: MutationKind,
         display_name: &'static str,
         mutation_ctx: Arc<MutationContext>,
     ) -> Self {
-        let schema = input.schema();
+        let schema = normalize_mutation_schema(&input.schema());
         let properties = compute_plan_properties(schema.clone());
         Self {
             input,
@@ -617,6 +861,29 @@ impl MutationExec {
             display_name,
             mutation_ctx,
             schema,
+            properties,
+            metrics: ExecutionPlanMetricsSet::new(),
+        }
+    }
+
+    /// Create a new `MutationExec` with an explicit output schema.
+    ///
+    /// Used by CREATE and MERGE operators whose output includes newly created
+    /// variables not present in the input schema.
+    pub fn new_with_schema(
+        input: Arc<dyn ExecutionPlan>,
+        kind: MutationKind,
+        display_name: &'static str,
+        mutation_ctx: Arc<MutationContext>,
+        output_schema: SchemaRef,
+    ) -> Self {
+        let properties = compute_plan_properties(output_schema.clone());
+        Self {
+            input,
+            kind,
+            display_name,
+            mutation_ctx,
+            schema: output_schema,
             properties,
             metrics: ExecutionPlanMetricsSet::new(),
         }
@@ -669,11 +936,12 @@ impl ExecutionPlan for MutationExec {
                 self.display_name,
             )));
         }
-        Ok(Arc::new(MutationExec::new(
+        Ok(Arc::new(MutationExec::new_with_schema(
             children[0].clone(),
             self.kind.clone(),
             self.display_name,
             self.mutation_ctx.clone(),
+            self.schema.clone(),
         )))
     }
 
@@ -695,6 +963,54 @@ impl ExecutionPlan for MutationExec {
     fn metrics(&self) -> Option<MetricsSet> {
         Some(self.metrics.clone_inner())
     }
+}
+
+/// Create a new `MutationExec` configured for a CREATE clause.
+///
+/// Computes an extended output schema that includes LargeBinary cv_encoded
+/// columns for any variables introduced by the pattern that are not already
+/// in the input schema.
+pub fn new_create_exec(
+    input: Arc<dyn ExecutionPlan>,
+    pattern: Pattern,
+    mutation_ctx: Arc<MutationContext>,
+) -> MutationExec {
+    let new_vars = pattern_variable_names(&pattern);
+    let output_schema = extended_schema_for_new_vars(&input.schema(), &new_vars);
+    MutationExec::new_with_schema(
+        input,
+        MutationKind::Create { pattern },
+        "MutationCreateExec",
+        mutation_ctx,
+        output_schema,
+    )
+}
+
+/// Create a new `MutationExec` configured for a MERGE clause.
+///
+/// Computes an extended output schema that includes LargeBinary cv_encoded
+/// columns for any variables introduced by the pattern that are not already
+/// in the input schema.
+pub fn new_merge_exec(
+    input: Arc<dyn ExecutionPlan>,
+    pattern: Pattern,
+    on_match: Option<SetClause>,
+    on_create: Option<SetClause>,
+    mutation_ctx: Arc<MutationContext>,
+) -> MutationExec {
+    let new_vars = pattern_variable_names(&pattern);
+    let output_schema = extended_schema_for_new_vars(&input.schema(), &new_vars);
+    MutationExec::new_with_schema(
+        input,
+        MutationKind::Merge {
+            pattern,
+            on_match,
+            on_create,
+        },
+        "MutationMergeExec",
+        mutation_ctx,
+        output_schema,
+    )
 }
 
 #[cfg(test)]

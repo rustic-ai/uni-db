@@ -6,7 +6,7 @@
 //! This module provides shared utilities to reduce code duplication across
 //! the df_graph module's execution plan implementations.
 
-use arrow_array::RecordBatch;
+use arrow_array::{ArrayRef, RecordBatch};
 use arrow_schema::{DataType, Field, Schema, SchemaRef};
 use datafusion::arrow::array::Array;
 use datafusion::common::Result as DFResult;
@@ -182,6 +182,27 @@ pub fn extract_vids_from_cypher_value_column(col: &dyn Array) -> DFResult<arrow_
     Ok(Arc::new(builder.finish()) as arrow_array::ArrayRef)
 }
 
+/// Extract a typed value from a column at a given row index.
+///
+/// Looks up `col_name` in the batch schema, downcasts to `T`, and applies
+/// `extract_fn` if the value is valid. Returns `None` if the column is missing,
+/// the downcast fails, or the value is null.
+pub(crate) fn extract_column_value<T: arrow_array::Array + 'static, R>(
+    batch: &RecordBatch,
+    col_name: &str,
+    row_idx: usize,
+    extract_fn: impl FnOnce(&T, usize) -> R,
+) -> Option<R> {
+    let (idx, _) = batch.schema().column_with_name(col_name)?;
+    let col = batch.column(idx);
+    let arr = col.as_any().downcast_ref::<T>()?;
+    if arr.is_valid(row_idx) {
+        Some(extract_fn(arr, row_idx))
+    } else {
+        None
+    }
+}
+
 /// Build the standard node struct fields for path structures.
 ///
 /// Used when materializing path objects containing nodes.
@@ -247,6 +268,48 @@ pub fn build_path_struct_field(path_var: &str) -> Field {
         ])),
         true,
     )
+}
+
+/// Extend an input schema with a path struct field.
+///
+/// Clones the fields from `input_schema` and appends a path struct field
+/// using [`build_path_struct_field`].
+pub fn extend_schema_with_path(input_schema: SchemaRef, path_variable: &str) -> SchemaRef {
+    let mut fields: Vec<Field> = input_schema
+        .fields()
+        .iter()
+        .map(|f| f.as_ref().clone())
+        .collect();
+    fields.push(build_path_struct_field(path_variable));
+    Arc::new(Schema::new(fields))
+}
+
+/// Build a path struct array from nodes and relationships list arrays.
+///
+/// Combines the nodes and relationships arrays into a single `StructArray` with
+/// the standard path structure (`nodes`, `relationships`), applying the given
+/// validity mask.
+pub fn build_path_struct_array(
+    nodes_array: ArrayRef,
+    rels_array: ArrayRef,
+    path_validity: Vec<bool>,
+) -> DFResult<arrow_array::StructArray> {
+    Ok(arrow_array::StructArray::try_new(
+        arrow_schema::Fields::from(vec![
+            Arc::new(Field::new(
+                "nodes",
+                nodes_array.data_type().clone(),
+                true,
+            )),
+            Arc::new(Field::new(
+                "relationships",
+                rels_array.data_type().clone(),
+                true,
+            )),
+        ]),
+        vec![nodes_array, rels_array],
+        Some(arrow::buffer::NullBuffer::from(path_validity)),
+    )?)
 }
 
 /// Create a `ListBuilder<StructBuilder>` for building edge list arrays.
@@ -332,6 +395,57 @@ pub fn append_edge_to_struct(
     struct_builder.append(true);
 }
 
+/// Append an edge to a struct builder, handling the `Option<Eid>` case.
+///
+/// When `eid` is `Some`, resolves the type name from `batch_type_name` (primary)
+/// or L0 visibility (fallback), then delegates to [`append_edge_to_struct`].
+/// When `eid` is `None`, writes a placeholder edge with eid=0, empty type,
+/// and null properties.
+pub fn append_edge_to_struct_optional(
+    struct_builder: &mut arrow_array::builder::StructBuilder,
+    eid: Option<uni_common::core::id::Eid>,
+    src_vid: u64,
+    dst_vid: u64,
+    batch_type_name: Option<String>,
+    query_ctx: &uni_store::runtime::context::QueryContext,
+) {
+    use uni_store::runtime::l0_visibility;
+
+    match eid {
+        Some(e) => {
+            let type_name = batch_type_name
+                .or_else(|| l0_visibility::get_edge_type(e, query_ctx))
+                .unwrap_or_default();
+            append_edge_to_struct(struct_builder, e, &type_name, src_vid, dst_vid, query_ctx);
+        }
+        None => {
+            use arrow_array::builder::{LargeBinaryBuilder, StringBuilder, UInt64Builder};
+
+            struct_builder
+                .field_builder::<UInt64Builder>(0)
+                .unwrap()
+                .append_value(0);
+            struct_builder
+                .field_builder::<StringBuilder>(1)
+                .unwrap()
+                .append_value("");
+            struct_builder
+                .field_builder::<UInt64Builder>(2)
+                .unwrap()
+                .append_value(src_vid);
+            struct_builder
+                .field_builder::<UInt64Builder>(3)
+                .unwrap()
+                .append_value(dst_vid);
+            struct_builder
+                .field_builder::<LargeBinaryBuilder>(4)
+                .unwrap()
+                .append_null();
+            struct_builder.append(true);
+        }
+    }
+}
+
 /// Append a single node to a node struct builder.
 ///
 /// Writes `_vid`, `_labels`, and `properties` fields, then appends the struct
@@ -368,6 +482,38 @@ pub fn append_node_to_struct(
         props_builder.append_null();
     }
     struct_builder.append(true);
+}
+
+/// Append a node to a struct builder, handling the `Option<Vid>` case.
+///
+/// When `vid` is `Some`, delegates to [`append_node_to_struct`].
+/// When `vid` is `None`, writes a placeholder node with vid=0, empty labels,
+/// and null properties.
+pub fn append_node_to_struct_optional(
+    struct_builder: &mut arrow_array::builder::StructBuilder,
+    vid: Option<uni_common::core::id::Vid>,
+    query_ctx: &uni_store::runtime::context::QueryContext,
+) {
+    match vid {
+        Some(v) => append_node_to_struct(struct_builder, v, query_ctx),
+        None => {
+            use arrow_array::builder::{LargeBinaryBuilder, ListBuilder, StringBuilder, UInt64Builder};
+
+            struct_builder
+                .field_builder::<UInt64Builder>(0)
+                .unwrap()
+                .append_value(0);
+            let labels_builder = struct_builder
+                .field_builder::<ListBuilder<StringBuilder>>(1)
+                .unwrap();
+            labels_builder.append(true);
+            struct_builder
+                .field_builder::<LargeBinaryBuilder>(2)
+                .unwrap()
+                .append_null();
+            struct_builder.append(true);
+        }
+    }
 }
 
 /// Re-encode a `LargeListArray` of CypherValue elements into a `LargeBinaryArray` of CypherValue arrays.
@@ -989,6 +1135,44 @@ pub(crate) fn evaluate_simple_expr(
             expr
         ))),
     }
+}
+
+/// Merge edge property metadata across multiple edge types.
+///
+/// When a traversal spans several edge types, property columns must accommodate
+/// all of them. This function collects property metadata from each type and
+/// resolves conflicts: if two types define the same property with different
+/// data types, the merged type widens to `CypherValue`. Nullability is merged
+/// with OR (if either is nullable, the result is nullable).
+pub fn merged_edge_schema_props(
+    uni_schema: &UniSchema,
+    edge_type_ids: &[u32],
+) -> HashMap<String, uni_common::core::schema::PropertyMeta> {
+    let mut merged: HashMap<String, uni_common::core::schema::PropertyMeta> = HashMap::new();
+    let mut sorted_ids = edge_type_ids.to_vec();
+    sorted_ids.sort_unstable();
+
+    for edge_type_id in sorted_ids {
+        if let Some(edge_type_name) = uni_schema.edge_type_name_by_id_unified(edge_type_id)
+            && let Some(props) = uni_schema.properties.get(edge_type_name.as_str())
+        {
+            for (prop_name, meta) in props {
+                match merged.get_mut(prop_name) {
+                    Some(existing) => {
+                        if existing.r#type != meta.r#type {
+                            existing.r#type = uni_common::core::schema::DataType::CypherValue;
+                        }
+                        existing.nullable |= meta.nullable;
+                    }
+                    None => {
+                        merged.insert(prop_name.clone(), meta.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    merged
 }
 
 #[cfg(test)]

@@ -80,36 +80,7 @@ fn resolve_edge_property_type(
     }
 }
 
-fn merged_edge_schema_props(
-    uni_schema: &uni_common::core::schema::Schema,
-    edge_type_ids: &[u32],
-) -> HashMap<String, uni_common::core::schema::PropertyMeta> {
-    let mut merged: HashMap<String, uni_common::core::schema::PropertyMeta> = HashMap::new();
-    let mut sorted_ids = edge_type_ids.to_vec();
-    sorted_ids.sort_unstable();
-
-    for edge_type_id in sorted_ids {
-        if let Some(edge_type_name) = uni_schema.edge_type_name_by_id_unified(edge_type_id)
-            && let Some(props) = uni_schema.properties.get(edge_type_name.as_str())
-        {
-            for (prop_name, meta) in props {
-                match merged.get_mut(prop_name) {
-                    Some(existing) => {
-                        if existing.r#type != meta.r#type {
-                            existing.r#type = uni_common::core::schema::DataType::CypherValue;
-                        }
-                        existing.nullable |= meta.nullable;
-                    }
-                    None => {
-                        merged.insert(prop_name.clone(), meta.clone());
-                    }
-                }
-            }
-        }
-    }
-
-    merged
-}
+use crate::query::df_graph::common::merged_edge_schema_props;
 
 /// Expansion tuple for variable-length traversal: (input_row_idx, target_vid, hop_count, node_path, edge_path)
 type VarLengthExpansion = (usize, Vid, usize, Vec<Vid>, Vec<Eid>);
@@ -666,6 +637,203 @@ impl GraphTraverseStream {
     }
 }
 
+/// Build target vertex labels column from L0 buffers.
+fn build_target_labels_column(
+    target_vids: &[Vid],
+    target_label_name: &Option<String>,
+    graph_ctx: &GraphExecutionContext,
+) -> ArrayRef {
+    use arrow_array::builder::{ListBuilder, StringBuilder};
+    let mut labels_builder = ListBuilder::new(StringBuilder::new());
+    let query_ctx = graph_ctx.query_context();
+    for vid in target_vids {
+        let row_labels: Vec<String> =
+            match l0_visibility::get_vertex_labels_optional(*vid, &query_ctx) {
+                Some(labels) => labels,
+                None => {
+                    // Vertex not in L0 — trust schema label (storage already filtered)
+                    if let Some(label_name) = target_label_name {
+                        vec![label_name.clone()]
+                    } else {
+                        vec![]
+                    }
+                }
+            };
+        let values = labels_builder.values();
+        for lbl in &row_labels {
+            values.append_value(lbl);
+        }
+        labels_builder.append(true);
+    }
+    Arc::new(labels_builder.finish())
+}
+
+/// Build target vertex property columns from storage and L0.
+async fn build_target_property_columns(
+    target_vids: &[Vid],
+    target_properties: &[String],
+    target_label_name: &Option<String>,
+    graph_ctx: &Arc<GraphExecutionContext>,
+) -> DFResult<Vec<ArrayRef>> {
+    let mut columns = Vec::new();
+
+    if let Some(label_name) = target_label_name {
+        let property_manager = graph_ctx.property_manager();
+        let query_ctx = graph_ctx.query_context();
+
+        let props_map = property_manager
+            .get_batch_vertex_props_for_label(target_vids, label_name, Some(&query_ctx))
+            .await
+            .map_err(|e| datafusion::error::DataFusionError::Execution(e.to_string()))?;
+
+        let uni_schema = graph_ctx.storage().schema_manager().schema();
+        let label_props = uni_schema.properties.get(label_name.as_str());
+
+        for prop_name in target_properties {
+            let data_type = resolve_property_type(prop_name, label_props);
+            let column =
+                build_property_column_static(target_vids, &props_map, prop_name, &data_type)?;
+            columns.push(column);
+        }
+    } else {
+        // No label name — use label-agnostic property lookup.
+        let non_internal_props: Vec<&str> = target_properties
+            .iter()
+            .filter(|p| *p != "_all_props")
+            .map(|s| s.as_str())
+            .collect();
+        let property_manager = graph_ctx.property_manager();
+        let query_ctx = graph_ctx.query_context();
+
+        let props_map = if !non_internal_props.is_empty() {
+            property_manager
+                .get_batch_vertex_props(target_vids, &non_internal_props, Some(&query_ctx))
+                .await
+                .map_err(|e| datafusion::error::DataFusionError::Execution(e.to_string()))?
+        } else {
+            std::collections::HashMap::new()
+        };
+
+        for prop_name in target_properties {
+            if prop_name == "_all_props" {
+                columns.push(build_all_props_column(target_vids, &props_map, graph_ctx));
+            } else {
+                let column = build_property_column_static(
+                    target_vids,
+                    &props_map,
+                    prop_name,
+                    &arrow::datatypes::DataType::LargeBinary,
+                )?;
+                columns.push(column);
+            }
+        }
+    }
+
+    Ok(columns)
+}
+
+/// Build a CypherValue blob column from all vertex properties (L0 + storage).
+fn build_all_props_column(
+    target_vids: &[Vid],
+    props_map: &HashMap<Vid, HashMap<String, uni_common::Value>>,
+    graph_ctx: &Arc<GraphExecutionContext>,
+) -> ArrayRef {
+    use crate::query::df_graph::scan::encode_cypher_value;
+    use arrow_array::builder::LargeBinaryBuilder;
+
+    let mut builder = LargeBinaryBuilder::new();
+    let l0_ctx = graph_ctx.l0_context();
+    for vid in target_vids {
+        let mut merged_props = serde_json::Map::new();
+        if let Some(vid_props) = props_map.get(vid) {
+            for (k, v) in vid_props.iter() {
+                let json_val: serde_json::Value = v.clone().into();
+                merged_props.insert(k.to_string(), json_val);
+            }
+        }
+        for l0 in l0_ctx.iter_l0_buffers() {
+            let guard = l0.read();
+            if let Some(l0_props) = guard.vertex_properties.get(vid) {
+                for (k, v) in l0_props.iter() {
+                    let json_val: serde_json::Value = v.clone().into();
+                    merged_props.insert(k.to_string(), json_val);
+                }
+            }
+        }
+        if merged_props.is_empty() {
+            builder.append_null();
+        } else {
+            let json = serde_json::Value::Object(merged_props);
+            match encode_cypher_value(&json) {
+                Ok(bytes) => builder.append_value(bytes),
+                Err(_) => builder.append_null(),
+            }
+        }
+    }
+    Arc::new(builder.finish())
+}
+
+/// Build edge ID, type, and property columns for bound edge variables.
+async fn build_edge_columns(
+    expansions: &[(usize, Vid, u64, u32)],
+    edge_properties: &[String],
+    edge_type_ids: &[u32],
+    graph_ctx: &Arc<GraphExecutionContext>,
+) -> DFResult<Vec<ArrayRef>> {
+    let mut columns = Vec::new();
+
+    let eids: Vec<Eid> = expansions
+        .iter()
+        .map(|(_, _, eid, _)| Eid::from(*eid))
+        .collect();
+    let eid_u64s: Vec<u64> = eids.iter().map(|e| e.as_u64()).collect();
+    columns.push(Arc::new(UInt64Array::from(eid_u64s)) as ArrayRef);
+
+    // Edge _type column
+    {
+        let uni_schema = graph_ctx.storage().schema_manager().schema();
+        let mut type_builder = arrow_array::builder::StringBuilder::new();
+        for (_, _, _, edge_type_id) in expansions {
+            if let Some(name) = uni_schema.edge_type_name_by_id_unified(*edge_type_id) {
+                type_builder.append_value(&name);
+            } else {
+                type_builder.append_null();
+            }
+        }
+        columns.push(Arc::new(type_builder.finish()) as ArrayRef);
+    }
+
+    if !edge_properties.is_empty() {
+        let prop_name_refs: Vec<&str> = edge_properties.iter().map(|s| s.as_str()).collect();
+        let property_manager = graph_ctx.property_manager();
+        let query_ctx = graph_ctx.query_context();
+
+        let props_map = property_manager
+            .get_batch_edge_props(&eids, &prop_name_refs, Some(&query_ctx))
+            .await
+            .map_err(|e| datafusion::error::DataFusionError::Execution(e.to_string()))?;
+
+        let uni_schema = graph_ctx.storage().schema_manager().schema();
+        let merged_edge_props = merged_edge_schema_props(&uni_schema, edge_type_ids);
+        let edge_type_props = if merged_edge_props.is_empty() {
+            None
+        } else {
+            Some(&merged_edge_props)
+        };
+
+        let vid_keys: Vec<Vid> = eids.iter().map(|e| Vid::from(e.as_u64())).collect();
+
+        for prop_name in edge_properties {
+            let data_type = resolve_edge_property_type(prop_name, edge_type_props);
+            let column =
+                build_property_column_static(&vid_keys, &props_map, prop_name, &data_type)?;
+            columns.push(column);
+        }
+    }
+
+    Ok(columns)
+}
+
 /// Build the output batch with target vertex properties.
 ///
 /// This is a standalone async function so it can be boxed into a `Send` future
@@ -708,201 +876,48 @@ async fn build_traverse_output_batch(
         );
     }
 
-    // Build index array for take operation
+    // Expand input columns via index array
     let indices: Vec<u64> = expansions
         .iter()
         .map(|(idx, _, _, _)| *idx as u64)
         .collect();
     let indices_array = UInt64Array::from(indices);
+    let mut columns: Vec<ArrayRef> = input
+        .columns()
+        .iter()
+        .map(|col| take(col.as_ref(), &indices_array, None))
+        .collect::<Result<_, _>>()?;
 
-    // Expand input columns
-    let mut columns: Vec<ArrayRef> = Vec::new();
-    for col in input.columns() {
-        let expanded = take(col.as_ref(), &indices_array, None)?;
-        columns.push(expanded);
-    }
-
-    // Add target VID column
+    // Target VID column
     let target_vids: Vec<Vid> = expansions.iter().map(|(_, vid, _, _)| *vid).collect();
     let target_vid_u64s: Vec<u64> = target_vids.iter().map(|v| v.as_u64()).collect();
     columns.push(Arc::new(UInt64Array::from(target_vid_u64s)));
 
-    // Add target ._labels column (from L0 buffers)
-    {
-        use arrow_array::builder::{ListBuilder, StringBuilder};
-        let mut labels_builder = ListBuilder::new(StringBuilder::new());
-        let query_ctx = graph_ctx.query_context();
-        for vid in &target_vids {
-            let row_labels: Vec<String> =
-                match l0_visibility::get_vertex_labels_optional(*vid, &query_ctx) {
-                    Some(labels) => {
-                        // Vertex is in L0 — use actual labels only
-                        labels
-                    }
-                    None => {
-                        // Vertex not in L0 — trust schema label (storage already filtered)
-                        if let Some(ref label_name) = target_label_name {
-                            vec![label_name.clone()]
-                        } else {
-                            vec![]
-                        }
-                    }
-                };
-            let values = labels_builder.values();
-            for lbl in &row_labels {
-                values.append_value(lbl);
-            }
-            labels_builder.append(true);
-        }
-        columns.push(Arc::new(labels_builder.finish()));
-    }
+    // Target labels column
+    columns.push(build_target_labels_column(
+        &target_vids,
+        &target_label_name,
+        &graph_ctx,
+    ));
 
-    // Add target vertex property columns (async)
+    // Target vertex property columns
     if !target_properties.is_empty() {
-        if let Some(ref label_name) = target_label_name {
-            let property_manager = graph_ctx.property_manager();
-            let query_ctx = graph_ctx.query_context();
-
-            let props_map = property_manager
-                .get_batch_vertex_props_for_label(&target_vids, label_name, Some(&query_ctx))
-                .await
-                .map_err(|e| datafusion::error::DataFusionError::Execution(e.to_string()))?;
-
-            // Resolve property types from the uni schema
-            let uni_schema = graph_ctx.storage().schema_manager().schema();
-            let label_props = uni_schema.properties.get(label_name.as_str());
-
-            for prop_name in &target_properties {
-                let data_type = resolve_property_type(prop_name, label_props);
-                let column =
-                    build_property_column_static(&target_vids, &props_map, prop_name, &data_type)?;
-                columns.push(column);
-            }
-        } else {
-            // No label name — use label-agnostic property lookup.
-            // This scans all label datasets, slower but correct for label-less traversals.
-            let non_internal_props: Vec<&str> = target_properties
-                .iter()
-                .filter(|p| *p != "_all_props")
-                .map(|s| s.as_str())
-                .collect();
-            let property_manager = graph_ctx.property_manager();
-            let query_ctx = graph_ctx.query_context();
-
-            let props_map = if !non_internal_props.is_empty() {
-                property_manager
-                    .get_batch_vertex_props(&target_vids, &non_internal_props, Some(&query_ctx))
-                    .await
-                    .map_err(|e| datafusion::error::DataFusionError::Execution(e.to_string()))?
-            } else {
-                std::collections::HashMap::new()
-            };
-
-            for prop_name in &target_properties {
-                if prop_name == "_all_props" {
-                    // Build CypherValue blob from all vertex properties (L0 + storage)
-                    use crate::query::df_graph::scan::encode_cypher_value;
-                    use arrow_array::builder::LargeBinaryBuilder;
-
-                    let mut builder = LargeBinaryBuilder::new();
-                    let l0_ctx = graph_ctx.l0_context();
-                    for vid in &target_vids {
-                        let mut merged_props = serde_json::Map::new();
-                        // Collect from storage-hydrated props
-                        if let Some(vid_props) = props_map.get(vid) {
-                            for (k, v) in vid_props.iter() {
-                                let json_val: serde_json::Value = v.clone().into();
-                                merged_props.insert(k.to_string(), json_val);
-                            }
-                        }
-                        // Overlay L0 properties
-                        for l0 in l0_ctx.iter_l0_buffers() {
-                            let guard = l0.read();
-                            if let Some(l0_props) = guard.vertex_properties.get(vid) {
-                                for (k, v) in l0_props.iter() {
-                                    let json_val: serde_json::Value = v.clone().into();
-                                    merged_props.insert(k.to_string(), json_val);
-                                }
-                            }
-                        }
-                        if merged_props.is_empty() {
-                            builder.append_null();
-                        } else {
-                            let json = serde_json::Value::Object(merged_props);
-                            match encode_cypher_value(&json) {
-                                Ok(bytes) => builder.append_value(bytes),
-                                Err(_) => builder.append_null(),
-                            }
-                        }
-                    }
-                    columns.push(Arc::new(builder.finish()));
-                } else {
-                    let column = build_property_column_static(
-                        &target_vids,
-                        &props_map,
-                        prop_name,
-                        &arrow::datatypes::DataType::LargeBinary,
-                    )?;
-                    columns.push(column);
-                }
-            }
-        }
+        let prop_cols = build_target_property_columns(
+            &target_vids,
+            &target_properties,
+            &target_label_name,
+            &graph_ctx,
+        )
+        .await?;
+        columns.extend(prop_cols);
     }
 
-    // Add edge ID column and properties if edge is bound
+    // Edge columns (bound or internal tracking)
     if edge_variable.is_some() {
-        let eids: Vec<Eid> = expansions
-            .iter()
-            .map(|(_, _, eid, _)| Eid::from(*eid))
-            .collect();
-        let eid_u64s: Vec<u64> = eids.iter().map(|e| e.as_u64()).collect();
-        columns.push(Arc::new(UInt64Array::from(eid_u64s)));
-
-        // Add edge _type column
-        {
-            let uni_schema = graph_ctx.storage().schema_manager().schema();
-            let mut type_builder = arrow_array::builder::StringBuilder::new();
-            for (_, _, _, edge_type_id) in &expansions {
-                if let Some(name) = uni_schema.edge_type_name_by_id_unified(*edge_type_id) {
-                    type_builder.append_value(&name);
-                } else {
-                    type_builder.append_null();
-                }
-            }
-            columns.push(Arc::new(type_builder.finish()));
-        }
-
-        if !edge_properties.is_empty() {
-            let prop_name_refs: Vec<&str> = edge_properties.iter().map(|s| s.as_str()).collect();
-            let property_manager = graph_ctx.property_manager();
-            let query_ctx = graph_ctx.query_context();
-
-            let props_map = property_manager
-                .get_batch_edge_props(&eids, &prop_name_refs, Some(&query_ctx))
-                .await
-                .map_err(|e| datafusion::error::DataFusionError::Execution(e.to_string()))?;
-
-            let uni_schema = graph_ctx.storage().schema_manager().schema();
-            let merged_edge_props = merged_edge_schema_props(&uni_schema, &edge_type_ids);
-            let edge_type_props = if merged_edge_props.is_empty() {
-                None
-            } else {
-                Some(&merged_edge_props)
-            };
-
-            // Use Vid::from(eid) as key — matches PropertyManager's return format
-            let vid_keys: Vec<Vid> = eids.iter().map(|e| Vid::from(e.as_u64())).collect();
-
-            for prop_name in &edge_properties {
-                let data_type = resolve_edge_property_type(prop_name, edge_type_props);
-                let column =
-                    build_property_column_static(&vid_keys, &props_map, prop_name, &data_type)?;
-                columns.push(column);
-            }
-        }
+        let edge_cols =
+            build_edge_columns(&expansions, &edge_properties, &edge_type_ids, &graph_ctx).await?;
+        columns.extend(edge_cols);
     } else {
-        // Add internal edge ID column for relationship uniqueness tracking
-        // even when edge variable is not explicitly bound.
         let eid_u64s: Vec<u64> = expansions.iter().map(|(_, _, eid, _)| *eid).collect();
         columns.push(Arc::new(UInt64Array::from(eid_u64s)));
     }
@@ -910,8 +925,8 @@ async fn build_traverse_output_batch(
     let expanded_batch = RecordBatch::try_new(schema.clone(), columns)
         .map_err(|e| datafusion::error::DataFusionError::ArrowError(Box::new(e), None))?;
 
+    // Append null rows for unmatched optional sources
     if optional {
-        // Identify source groups that had no expansions and append one null row per group.
         let matched_indices: HashSet<usize> =
             expansions.iter().map(|(idx, _, _, _)| *idx).collect();
         let unmatched = collect_unmatched_optional_group_rows(
@@ -963,18 +978,11 @@ fn build_optional_null_batch_for_rows(
 }
 
 fn is_optional_column_for_vars(col_name: &str, optional_vars: &HashSet<String>) -> bool {
-    for var in optional_vars {
-        if col_name.starts_with(var.as_str()) && col_name[var.len()..].starts_with('.') {
-            return true;
-        }
-        if col_name == var.as_str() {
-            return true;
-        }
-        if col_name.starts_with("__eid_to_") && col_name.ends_with(var.as_str()) {
-            return true;
-        }
-    }
-    false
+    optional_vars.contains(col_name)
+        || optional_vars.iter().any(|var| {
+            (col_name.starts_with(var.as_str()) && col_name[var.len()..].starts_with('.'))
+                || (col_name.starts_with("__eid_to_") && col_name.ends_with(var.as_str()))
+        })
 }
 
 fn collect_unmatched_optional_group_rows(
@@ -1530,21 +1538,17 @@ impl GraphTraverseMainExec {
                 true,
             ));
 
-            // Edge properties: Utf8 for named props, LargeBinary for _all_props CypherValue
+            // Edge properties: LargeBinary (cv_encoded) to preserve value types.
+            // Schemaless edges store properties as CypherValue blobs so that
+            // Int, Float, etc. round-trip correctly through Arrow.
             for prop in edge_properties {
-                if prop == "_all_props" {
-                    fields.push(Field::new(
-                        format!("{}._all_props", edge_var),
-                        DataType::LargeBinary,
-                        true,
-                    ));
-                } else {
-                    fields.push(Field::new(
-                        format!("{}.{}", edge_var, prop),
-                        DataType::Utf8,
-                        true,
-                    ));
-                }
+                let col_name = format!("{}.{}", edge_var, prop);
+                let mut metadata = std::collections::HashMap::new();
+                metadata.insert("cv_encoded".to_string(), "true".to_string());
+                fields.push(
+                    Field::new(&col_name, DataType::LargeBinary, true)
+                        .with_metadata(metadata),
+                );
             }
         } else {
             // Add internal edge ID for anonymous relationships so BindPath can
@@ -1956,12 +1960,12 @@ impl GraphTraverseMainStream {
                 columns.push(Arc::new(type_builder.finish()));
             }
 
-            // Add edge property columns
+            // Add edge property columns as cv_encoded LargeBinary to preserve types
             for prop_name in &self.edge_properties {
+                use crate::query::df_graph::scan::encode_cypher_value;
+                let mut builder = arrow_array::builder::LargeBinaryBuilder::new();
                 if prop_name == "_all_props" {
                     // Serialize all edge properties to CypherValue blob
-                    use crate::query::df_graph::scan::encode_cypher_value;
-                    let mut builder = arrow_array::builder::LargeBinaryBuilder::new();
                     for (_, _, _, _, props) in &expansions {
                         if props.is_empty() {
                             builder.append_null();
@@ -1978,19 +1982,22 @@ impl GraphTraverseMainStream {
                             }
                         }
                     }
-                    columns.push(Arc::new(builder.finish()));
                 } else {
-                    // Named property as Utf8
-                    let mut builder = arrow_array::builder::StringBuilder::new();
+                    // Named property as cv_encoded CypherValue
                     for (_, _, _, _, props) in &expansions {
                         match props.get(prop_name) {
-                            Some(uni_common::Value::String(s)) => builder.append_value(s),
                             Some(uni_common::Value::Null) | None => builder.append_null(),
-                            Some(other) => builder.append_value(other.to_string()),
+                            Some(val) => {
+                                let json_val: serde_json::Value = val.clone().into();
+                                match encode_cypher_value(&json_val) {
+                                    Ok(bytes) => builder.append_value(bytes),
+                                    Err(_) => builder.append_null(),
+                                }
+                            }
                         }
                     }
-                    columns.push(Arc::new(builder.finish()));
                 }
+                columns.push(Arc::new(builder.finish()));
             }
         } else {
             let eids: Vec<u64> = expansions
@@ -4127,9 +4134,9 @@ mod tests {
         assert_eq!(output_schema.field(3).name(), "r._eid");
         assert_eq!(output_schema.field(4).name(), "r._type");
         assert_eq!(output_schema.field(5).name(), "r.weight");
-        assert_eq!(output_schema.field(5).data_type(), &DataType::Utf8);
+        assert_eq!(output_schema.field(5).data_type(), &DataType::LargeBinary);
         assert_eq!(output_schema.field(6).name(), "r.since");
-        assert_eq!(output_schema.field(6).data_type(), &DataType::Utf8);
+        assert_eq!(output_schema.field(6).data_type(), &DataType::LargeBinary);
     }
 
     #[test]

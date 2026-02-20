@@ -1194,7 +1194,7 @@ impl TryFrom<&Value> for Node {
         match value {
             Value::Node(n) => Ok(n.clone()),
             Value::Map(m) => {
-                let vid_val = get_with_fallback(m, &["_id", "vid"]);
+                let vid_val = get_with_fallback(m, &["_vid", "_id", "vid"]);
                 let props_val = m.get("properties");
 
                 let (Some(v), Some(p)) = (vid_val, props_val) else {
@@ -1235,8 +1235,8 @@ impl TryFrom<&Value> for Edge {
         match value {
             Value::Edge(e) => Ok(e.clone()),
             Value::Map(m) => {
-                let eid_val = get_with_fallback(m, &["_id", "eid"]);
-                let type_val = get_with_fallback(m, &["_type", "edge_type"]);
+                let eid_val = get_with_fallback(m, &["_eid", "_id", "eid"]);
+                let type_val = get_with_fallback(m, &["_type_name", "_type", "edge_type"]);
                 let src_val = get_with_fallback(m, &["_src", "src"]);
                 let dst_val = get_with_fallback(m, &["_dst", "dst"]);
                 let props_val = m.get("properties");

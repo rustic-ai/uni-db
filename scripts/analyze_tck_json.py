@@ -36,6 +36,10 @@ def build_scenario_index(results):
             sname = el.get('name', 'Unknown')
             line = el.get('line', 0)
             # Determine status from steps
+            crashed = any(
+                s.get('result', {}).get('status') == 'crashed'
+                for s in el.get('steps', [])
+            )
             failed = any(
                 s.get('result', {}).get('status') == 'failed'
                 for s in el.get('steps', [])
@@ -44,7 +48,9 @@ def build_scenario_index(results):
                 s.get('result', {}).get('status') == 'skipped'
                 for s in el.get('steps', [])
             )
-            if failed:
+            if crashed:
+                status = 'crashed'
+            elif failed:
                 status = 'failed'
             elif skipped:
                 status = 'skipped'
@@ -65,6 +71,7 @@ def analyze_features(results):
             'passed': 0,
             'failed': 0,
             'skipped': 0,
+            'crashed': 0,
             'scenarios': [],
         }
         for el in feature.get('elements', []):
@@ -74,6 +81,10 @@ def analyze_features(results):
             sname = el.get('name', 'Unknown')
             line = el.get('line', 0)
 
+            crashed = any(
+                s.get('result', {}).get('status') == 'crashed'
+                for s in el.get('steps', [])
+            )
             failed = any(
                 s.get('result', {}).get('status') == 'failed'
                 for s in el.get('steps', [])
@@ -82,7 +93,10 @@ def analyze_features(results):
                 s.get('result', {}).get('status') == 'skipped'
                 for s in el.get('steps', [])
             )
-            if failed:
+            if crashed:
+                status = 'crashed'
+                stats['crashed'] += 1
+            elif failed:
                 status = 'failed'
                 stats['failed'] += 1
             elif skipped:
@@ -94,7 +108,7 @@ def analyze_features(results):
 
             error = ''
             for s in el.get('steps', []):
-                if s.get('result', {}).get('status') == 'failed':
+                if s.get('result', {}).get('status') in ('failed', 'crashed'):
                     error = s.get('result', {}).get('error_message', '')
                     break
 
@@ -148,6 +162,7 @@ def generate_report(current_stats, prev_index, current_path, prev_path, output_p
     passed = sum(s['passed'] for s in current_stats)
     failed = sum(s['failed'] for s in current_stats)
     skipped = sum(s['skipped'] for s in current_stats)
+    crashed = sum(s['crashed'] for s in current_stats)
     rate = (passed / total * 100) if total > 0 else 0.0
 
     md.append("## Summary")
@@ -157,6 +172,7 @@ def generate_report(current_stats, prev_index, current_path, prev_path, output_p
         prev_total = len(prev_index)
         prev_passed = sum(1 for v in prev_index.values() if v == 'passed')
         prev_failed = sum(1 for v in prev_index.values() if v == 'failed')
+        prev_crashed = sum(1 for v in prev_index.values() if v == 'crashed')
         prev_rate = (prev_passed / prev_total * 100) if prev_total > 0 else 0.0
 
         # Compute regressions / fixes
@@ -165,14 +181,14 @@ def generate_report(current_stats, prev_index, current_path, prev_path, output_p
             for sc in s['scenarios']:
                 current_index[(s['name'], sc['name'], sc['line'])] = sc['status']
 
-        regressions = []  # were passing, now failing
-        fixes = []        # were failing, now passing
+        regressions = []  # were passing, now failing/crashed
+        fixes = []        # were failing/crashed, now passing
         for key in current_index:
             cur = current_index[key]
             prev = prev_index.get(key)
-            if prev == 'passed' and cur == 'failed':
+            if prev == 'passed' and cur in ('failed', 'crashed'):
                 regressions.append(key)
-            elif prev == 'failed' and cur == 'passed':
+            elif prev in ('failed', 'crashed') and cur == 'passed':
                 fixes.append(key)
 
         new_scenarios = [k for k in current_index if k not in prev_index]
@@ -185,6 +201,8 @@ def generate_report(current_stats, prev_index, current_path, prev_path, output_p
         md.append(f"| Scenarios | {total} | {prev_total} | {delta_str(total, prev_total)} |")
         md.append(f"| Passed | {passed} | {prev_passed} | {delta_str(passed, prev_passed)} |")
         md.append(f"| Failed | {failed} | {prev_failed} | {delta_str(failed, prev_failed)} |")
+        if crashed > 0 or prev_crashed > 0:
+            md.append(f"| Crashed | {crashed} | {prev_crashed} | {delta_str(crashed, prev_crashed)} |")
         md.append(f"| Pass Rate | {rate:.1f}% | {prev_rate:.1f}% | {rate_arrow} {rate_delta:+.1f}pp |")
         md.append("")
 
@@ -203,6 +221,8 @@ def generate_report(current_stats, prev_index, current_path, prev_path, output_p
         md.append(f"| Total Scenarios | {total} |")
         md.append(f"| Passed | {passed} ({rate:.1f}%) |")
         md.append(f"| Failed | {failed} |")
+        if crashed > 0:
+            md.append(f"| Crashed | {crashed} |")
         md.append(f"| Skipped | {skipped} |")
         md.append("")
         md.append("*No previous run found for comparison.*")
@@ -273,6 +293,30 @@ def generate_report(current_stats, prev_index, current_path, prev_path, output_p
             md.append(f"- **{fname}** — {sname} (line {line})")
         md.append("")
 
+    # --- Crashed Scenarios ---
+    if crashed > 0:
+        md.append("## Crashed Scenarios")
+        md.append("")
+        md.append("These scenarios crashed (SIGABRT/segfault/OOM) before writing a result:")
+        md.append("")
+
+        for stats in sorted(current_stats, key=lambda x: x['name']):
+            crashed_scenarios = [s for s in stats['scenarios'] if s['status'] == 'crashed']
+            if not crashed_scenarios:
+                continue
+            md.append(f"### {stats['name']}")
+            md.append("")
+            for sc in crashed_scenarios:
+                md.append(f"- **{sc['name']}** (line {sc['line']})")
+                if sc['error']:
+                    error = sc['error'][:300]
+                    md.append(f"  ```")
+                    md.append(f"  {error}")
+                    if len(sc['error']) > 300:
+                        md.append(f"  ... (truncated)")
+                    md.append(f"  ```")
+            md.append("")
+
     # --- Failed Scenarios ---
     md.append("## Failed Scenarios")
     md.append("")
@@ -338,10 +382,14 @@ def main():
     total = sum(s['total'] for s in current_stats)
     passed = sum(s['passed'] for s in current_stats)
     failed = sum(s['failed'] for s in current_stats)
+    crashed = sum(s['crashed'] for s in current_stats)
     rate = (passed / total * 100) if total > 0 else 0.0
 
     print("")
-    print(f"📈 Summary: {passed}/{total} passed ({rate:.1f}%), {failed} failed")
+    summary = f"📈 Summary: {passed}/{total} passed ({rate:.1f}%), {failed} failed"
+    if crashed > 0:
+        summary += f", {crashed} crashed"
+    print(summary)
     if prev_index is not None:
         prev_passed = sum(1 for v in prev_index.values() if v == 'passed')
         d = passed - prev_passed

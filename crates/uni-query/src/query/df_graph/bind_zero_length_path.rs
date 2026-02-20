@@ -15,12 +15,10 @@
 //! ```
 
 use super::GraphExecutionContext;
-use super::common::{compute_plan_properties, labels_data_type};
-use arrow_array::builder::{
-    LargeBinaryBuilder, ListBuilder, StringBuilder, StructBuilder, UInt64Builder,
-};
-use arrow_array::{Array, ArrayRef, RecordBatch, StructArray};
-use arrow_schema::{DataType, Field, Fields, Schema, SchemaRef};
+use super::common::compute_plan_properties;
+use arrow_array::builder::{LargeBinaryBuilder, ListBuilder, StringBuilder, StructBuilder, UInt64Builder};
+use arrow_array::{ArrayRef, RecordBatch};
+use arrow_schema::SchemaRef;
 use datafusion::common::Result as DFResult;
 use datafusion::execution::{RecordBatchStream, SendableRecordBatchStream, TaskContext};
 use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
@@ -31,8 +29,6 @@ use std::fmt;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
-use uni_store::runtime::l0_visibility;
-
 /// Execution plan that binds a zero-length path for single-node patterns.
 ///
 /// For patterns like `p = (a)`, this creates a Path struct with one node
@@ -105,42 +101,7 @@ impl BindZeroLengthPathExec {
     /// - `nodes`: List of node structs with `_vid`, `_label`, `properties`
     /// - `relationships`: List of edge structs (empty for zero-length paths)
     fn build_schema(input_schema: SchemaRef, path_variable: &str) -> SchemaRef {
-        let mut fields: Vec<Field> = input_schema
-            .fields()
-            .iter()
-            .map(|f| f.as_ref().clone())
-            .collect();
-
-        // Node struct fields: _vid, _labels, properties (as LargeBinary/JSON)
-        let node_struct_fields = Fields::from(vec![
-            Field::new("_vid", DataType::UInt64, false),
-            Field::new("_labels", labels_data_type(), true),
-            Field::new("properties", DataType::LargeBinary, true),
-        ]);
-        let node_item = Field::new("item", DataType::Struct(node_struct_fields), true);
-        let nodes_field = Field::new("nodes", DataType::List(Arc::new(node_item)), true);
-
-        // Edge struct fields: _eid, _type_name, _src, _dst, properties
-        let edge_struct_fields = Fields::from(vec![
-            Field::new("_eid", DataType::UInt64, false),
-            Field::new("_type_name", DataType::Utf8, false),
-            Field::new("_src", DataType::UInt64, false),
-            Field::new("_dst", DataType::UInt64, false),
-            Field::new("properties", DataType::LargeBinary, true),
-        ]);
-        let edge_item = Field::new("item", DataType::Struct(edge_struct_fields), true);
-        let relationships_field =
-            Field::new("relationships", DataType::List(Arc::new(edge_item)), true);
-
-        // Path struct with nodes and relationships
-        let path_struct_fields = Fields::from(vec![nodes_field, relationships_field]);
-        fields.push(Field::new(
-            path_variable,
-            DataType::Struct(path_struct_fields),
-            true,
-        ));
-
-        Arc::new(Schema::new(fields))
+        super::common::extend_schema_with_path(input_schema, path_variable)
     }
 }
 
@@ -239,22 +200,7 @@ struct BindZeroLengthPathStream {
     metrics: BaselineMetrics,
 }
 
-/// Extract a typed value from a column at a given row index.
-fn extract_column_value<T: arrow_array::Array + 'static, R>(
-    batch: &RecordBatch,
-    col_name: &str,
-    row_idx: usize,
-    extract_fn: impl FnOnce(&T, usize) -> R,
-) -> Option<R> {
-    let (idx, _) = batch.schema().column_with_name(col_name)?;
-    let col = batch.column(idx);
-    let arr = col.as_any().downcast_ref::<T>()?;
-    if arr.is_valid(row_idx) {
-        Some(extract_fn(arr, row_idx))
-    } else {
-        None
-    }
-}
+use super::common::extract_column_value;
 
 impl BindZeroLengthPathStream {
     /// Process a single input batch.
@@ -265,18 +211,8 @@ impl BindZeroLengthPathStream {
         let vid_col_name = format!("{}._vid", self.node_variable);
 
         // Create builders for nodes and empty edges
-        let node_struct_fields = Fields::from(vec![
-            Field::new("_vid", DataType::UInt64, false),
-            Field::new("_labels", labels_data_type(), true),
-            Field::new("properties", DataType::LargeBinary, true),
-        ]);
-        let edge_struct_fields = Fields::from(vec![
-            Field::new("_eid", DataType::UInt64, false),
-            Field::new("_type_name", DataType::Utf8, false),
-            Field::new("_src", DataType::UInt64, false),
-            Field::new("_dst", DataType::UInt64, false),
-            Field::new("properties", DataType::LargeBinary, true),
-        ]);
+        let node_struct_fields = super::common::node_struct_fields();
+        let edge_struct_fields = super::common::edge_struct_fields();
 
         let mut nodes_builder = ListBuilder::new(StructBuilder::new(
             node_struct_fields,
@@ -304,7 +240,12 @@ impl BindZeroLengthPathStream {
                 continue;
             }
 
-            self.append_node_to_builder(&mut nodes_builder, vid, &query_ctx);
+            super::common::append_node_to_struct_optional(
+                nodes_builder.values(),
+                vid,
+                &query_ctx,
+            );
+            nodes_builder.append(true);
             rels_builder.append(true);
             path_validity.push(true);
         }
@@ -312,65 +253,13 @@ impl BindZeroLengthPathStream {
         let nodes_array = Arc::new(nodes_builder.finish()) as ArrayRef;
         let rels_array = Arc::new(rels_builder.finish()) as ArrayRef;
 
-        let path_array = StructArray::try_new(
-            Fields::from(vec![
-                Arc::new(Field::new("nodes", nodes_array.data_type().clone(), true)),
-                Arc::new(Field::new(
-                    "relationships",
-                    rels_array.data_type().clone(),
-                    true,
-                )),
-            ]),
-            vec![nodes_array, rels_array],
-            Some(arrow::buffer::NullBuffer::from(path_validity)),
-        )?;
+        let path_array =
+            super::common::build_path_struct_array(nodes_array, rels_array, path_validity)?;
 
         let mut columns: Vec<ArrayRef> = batch.columns().to_vec();
         columns.push(Arc::new(path_array));
 
         Ok(RecordBatch::try_new(self.schema.clone(), columns)?)
-    }
-
-    /// Append a node entry to the nodes list builder.
-    fn append_node_to_builder(
-        &self,
-        nodes_builder: &mut ListBuilder<StructBuilder>,
-        vid: Option<uni_common::core::id::Vid>,
-        query_ctx: &uni_store::QueryContext,
-    ) {
-        let nodes_struct = nodes_builder.values();
-
-        let (vid_value, all_labels, props_json) = match vid {
-            Some(v) => {
-                let labels = l0_visibility::get_vertex_labels(v, query_ctx);
-                let props = l0_visibility::get_vertex_properties(v, query_ctx)
-                    .map(|p| super::common::encode_props_to_cv(&p));
-                (v.as_u64(), labels, props)
-            }
-            None => (0, vec![], None),
-        };
-
-        nodes_struct
-            .field_builder::<UInt64Builder>(0)
-            .unwrap()
-            .append_value(vid_value);
-
-        let labels_builder = nodes_struct
-            .field_builder::<ListBuilder<StringBuilder>>(1)
-            .unwrap();
-        for lbl in &all_labels {
-            labels_builder.values().append_value(lbl);
-        }
-        labels_builder.append(true);
-
-        let props_builder = nodes_struct.field_builder::<LargeBinaryBuilder>(2).unwrap();
-        match props_json {
-            Some(json) => props_builder.append_value(&json),
-            None => props_builder.append_null(),
-        }
-
-        nodes_struct.append(true);
-        nodes_builder.append(true);
     }
 }
 

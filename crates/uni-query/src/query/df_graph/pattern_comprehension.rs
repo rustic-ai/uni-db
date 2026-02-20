@@ -35,9 +35,7 @@ use uni_store::runtime::l0_visibility;
 use uni_store::storage::direction::Direction;
 
 use super::GraphExecutionContext;
-use crate::query::df_graph::common::{
-    build_path_struct_field, column_as_vid_array, labels_data_type,
-};
+use crate::query::df_graph::common::{build_path_struct_field, column_as_vid_array};
 use crate::query::df_graph::scan::build_property_column_static;
 
 /// A single hop derived from the pattern's elements.
@@ -652,18 +650,14 @@ impl PatternComprehensionExecExpr {
 
         let num_expanded = expansion.row_indices.len();
 
-        let node_struct_fields = vec![
-            Arc::new(Field::new("_vid", DataType::UInt64, false)),
-            Arc::new(Field::new("_labels", labels_data_type(), true)),
-            Arc::new(Field::new("properties", DataType::LargeBinary, true)),
-        ];
-        let edge_struct_fields = vec![
-            Arc::new(Field::new("_eid", DataType::UInt64, false)),
-            Arc::new(Field::new("_type_name", DataType::Utf8, false)),
-            Arc::new(Field::new("_src", DataType::UInt64, false)),
-            Arc::new(Field::new("_dst", DataType::UInt64, false)),
-            Arc::new(Field::new("properties", DataType::LargeBinary, true)),
-        ];
+        let node_struct_fields: Vec<Arc<Field>> = crate::query::df_graph::common::node_struct_fields()
+            .iter()
+            .cloned()
+            .collect();
+        let edge_struct_fields: Vec<Arc<Field>> = crate::query::df_graph::common::edge_struct_fields()
+            .iter()
+            .cloned()
+            .collect();
 
         let mut nodes_builder = ListBuilder::new(StructBuilder::new(
             node_struct_fields,
@@ -694,12 +688,16 @@ impl PatternComprehensionExecExpr {
             let anchor_vid = Vid::from(anchor_vid_u64);
 
             // Append anchor node
-            self.append_node_to_builder(nodes_builder.values(), anchor_vid, query_ctx);
+            super::common::append_node_to_struct(nodes_builder.values(), anchor_vid, query_ctx);
 
             // Append target node for each step
             for step_idx in 0..num_steps {
                 let target_vid = Vid::from(expansion.step_target_vids[step_idx][row_idx]);
-                self.append_node_to_builder(nodes_builder.values(), target_vid, query_ctx);
+                super::common::append_node_to_struct(
+                    nodes_builder.values(),
+                    target_vid,
+                    query_ctx,
+                );
             }
             nodes_builder.append(true);
 
@@ -720,7 +718,7 @@ impl PatternComprehensionExecExpr {
                 };
                 let dst_vid = expansion.step_target_vids[step_idx][row_idx];
 
-                self.append_edge_to_builder(
+                super::common::append_edge_to_struct(
                     rels_builder.values(),
                     eid,
                     &edge_type_name,
@@ -752,79 +750,6 @@ impl PatternComprehensionExecExpr {
         Ok(Arc::new(path_struct))
     }
 
-    /// Append a single node to the node list struct builder.
-    fn append_node_to_builder(
-        &self,
-        nodes_struct: &mut arrow_array::builder::StructBuilder,
-        vid: Vid,
-        query_ctx: &QueryContext,
-    ) {
-        use arrow_array::builder::{LargeBinaryBuilder, ListBuilder, StringBuilder, UInt64Builder};
-
-        nodes_struct
-            .field_builder::<UInt64Builder>(0)
-            .unwrap()
-            .append_value(vid.as_u64());
-
-        let all_labels = l0_visibility::get_vertex_labels(vid, query_ctx);
-        let labels_builder = nodes_struct
-            .field_builder::<ListBuilder<StringBuilder>>(1)
-            .unwrap();
-        for lbl in &all_labels {
-            labels_builder.values().append_value(lbl);
-        }
-        labels_builder.append(true);
-
-        let props_builder = nodes_struct.field_builder::<LargeBinaryBuilder>(2).unwrap();
-        if let Some(props) = l0_visibility::get_vertex_properties(vid, query_ctx) {
-            let cv_bytes = super::common::encode_props_to_cv(&props);
-            props_builder.append_value(&cv_bytes);
-        } else {
-            props_builder.append_null();
-        }
-
-        nodes_struct.append(true);
-    }
-
-    /// Append a single edge to the relationship list struct builder.
-    fn append_edge_to_builder(
-        &self,
-        rels_struct: &mut arrow_array::builder::StructBuilder,
-        eid: Eid,
-        edge_type_name: &str,
-        src_vid: u64,
-        dst_vid: u64,
-        query_ctx: &QueryContext,
-    ) {
-        use arrow_array::builder::{LargeBinaryBuilder, StringBuilder, UInt64Builder};
-
-        rels_struct
-            .field_builder::<UInt64Builder>(0)
-            .unwrap()
-            .append_value(eid.as_u64());
-        rels_struct
-            .field_builder::<StringBuilder>(1)
-            .unwrap()
-            .append_value(edge_type_name);
-        rels_struct
-            .field_builder::<UInt64Builder>(2)
-            .unwrap()
-            .append_value(src_vid);
-        rels_struct
-            .field_builder::<UInt64Builder>(3)
-            .unwrap()
-            .append_value(dst_vid);
-
-        let props_builder = rels_struct.field_builder::<LargeBinaryBuilder>(4).unwrap();
-        if let Some(props) = l0_visibility::get_edge_properties(eid, query_ctx) {
-            let cv_bytes = super::common::encode_props_to_cv(&props);
-            props_builder.append_value(&cv_bytes);
-        } else {
-            props_builder.append_null();
-        }
-
-        rels_struct.append(true);
-    }
 }
 
 // ─── Pattern Analysis Functions ──────────────────────────────────────────────

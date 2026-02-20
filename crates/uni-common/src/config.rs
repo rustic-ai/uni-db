@@ -392,33 +392,49 @@ pub enum MutationClause {
     Remove,
     Delete,
     Merge,
+    Foreach,
 }
 
 /// Per-clause gating for the DataFusion mutation path.
 ///
 /// When a clause is disabled, queries containing that mutation type are routed
 /// to the legacy fallback executor instead of the DataFusion MutationExec operators.
-/// All clauses are disabled by default (safe-by-default: fallback path), matching
-/// the M0 design doc contract.
-#[derive(Clone, Debug, Default)]
+/// All clauses are enabled by default (DataFusion path for all mutations).
+/// Individual clauses can be disabled as a rollback mechanism if needed.
+#[derive(Clone, Debug)]
 pub struct MutationPathConfig {
-    /// Route CREATE mutations through DataFusion (default: false).
+    /// Route CREATE mutations through DataFusion (default: true).
     pub create_enabled: bool,
-    /// Route SET mutations through DataFusion (default: false).
+    /// Route SET mutations through DataFusion (default: true).
     pub set_enabled: bool,
-    /// Route REMOVE mutations through DataFusion (default: false).
+    /// Route REMOVE mutations through DataFusion (default: true).
     pub remove_enabled: bool,
-    /// Route DELETE mutations through DataFusion (default: false).
+    /// Route DELETE mutations through DataFusion (default: true).
     pub delete_enabled: bool,
-    /// Route MERGE mutations through DataFusion (default: false).
+    /// Route MERGE mutations through DataFusion (default: true).
     pub merge_enabled: bool,
+    /// Route FOREACH mutations through DataFusion (default: true).
+    pub foreach_enabled: bool,
+}
+
+impl Default for MutationPathConfig {
+    fn default() -> Self {
+        Self::all_enabled()
+    }
 }
 
 impl MutationPathConfig {
     /// Returns a config with all mutation clauses disabled (forces fallback for all).
     #[must_use]
     pub fn all_disabled() -> Self {
-        Self::default()
+        Self {
+            create_enabled: false,
+            set_enabled: false,
+            remove_enabled: false,
+            delete_enabled: false,
+            merge_enabled: false,
+            foreach_enabled: false,
+        }
     }
 
     /// Returns a config with all mutation clauses enabled (DF path for all).
@@ -430,6 +446,7 @@ impl MutationPathConfig {
             remove_enabled: true,
             delete_enabled: true,
             merge_enabled: true,
+            foreach_enabled: true,
         }
     }
 
@@ -442,6 +459,7 @@ impl MutationPathConfig {
             MutationClause::Remove => self.remove_enabled,
             MutationClause::Delete => self.delete_enabled,
             MutationClause::Merge => self.merge_enabled,
+            MutationClause::Foreach => self.foreach_enabled,
         }
     }
 }
@@ -752,18 +770,20 @@ mod security_tests {
         use super::*;
 
         #[test]
-        fn test_mutation_path_config_default_all_disabled() {
+        fn test_mutation_path_config_default_all_enabled() {
             let config = MutationPathConfig::default();
-            assert!(!config.create_enabled);
-            assert!(!config.set_enabled);
-            assert!(!config.remove_enabled);
-            assert!(!config.delete_enabled);
-            assert!(!config.merge_enabled);
-            assert!(!config.is_clause_enabled(MutationClause::Create));
-            assert!(!config.is_clause_enabled(MutationClause::Set));
-            assert!(!config.is_clause_enabled(MutationClause::Remove));
-            assert!(!config.is_clause_enabled(MutationClause::Delete));
-            assert!(!config.is_clause_enabled(MutationClause::Merge));
+            assert!(config.create_enabled);
+            assert!(config.set_enabled);
+            assert!(config.remove_enabled);
+            assert!(config.delete_enabled);
+            assert!(config.merge_enabled);
+            assert!(config.foreach_enabled);
+            assert!(config.is_clause_enabled(MutationClause::Create));
+            assert!(config.is_clause_enabled(MutationClause::Set));
+            assert!(config.is_clause_enabled(MutationClause::Remove));
+            assert!(config.is_clause_enabled(MutationClause::Delete));
+            assert!(config.is_clause_enabled(MutationClause::Merge));
+            assert!(config.is_clause_enabled(MutationClause::Foreach));
         }
 
         #[test]
@@ -774,11 +794,13 @@ mod security_tests {
             assert!(!config.remove_enabled);
             assert!(!config.delete_enabled);
             assert!(!config.merge_enabled);
+            assert!(!config.foreach_enabled);
             assert!(!config.is_clause_enabled(MutationClause::Create));
             assert!(!config.is_clause_enabled(MutationClause::Set));
             assert!(!config.is_clause_enabled(MutationClause::Remove));
             assert!(!config.is_clause_enabled(MutationClause::Delete));
             assert!(!config.is_clause_enabled(MutationClause::Merge));
+            assert!(!config.is_clause_enabled(MutationClause::Foreach));
         }
 
         #[test]
@@ -789,11 +811,13 @@ mod security_tests {
             assert!(config.remove_enabled);
             assert!(config.delete_enabled);
             assert!(config.merge_enabled);
+            assert!(config.foreach_enabled);
             assert!(config.is_clause_enabled(MutationClause::Create));
             assert!(config.is_clause_enabled(MutationClause::Set));
             assert!(config.is_clause_enabled(MutationClause::Remove));
             assert!(config.is_clause_enabled(MutationClause::Delete));
             assert!(config.is_clause_enabled(MutationClause::Merge));
+            assert!(config.is_clause_enabled(MutationClause::Foreach));
         }
 
         #[test]
@@ -804,12 +828,14 @@ mod security_tests {
                 remove_enabled: true,
                 delete_enabled: false,
                 merge_enabled: true,
+                foreach_enabled: false,
             };
             assert!(config.is_clause_enabled(MutationClause::Create));
             assert!(!config.is_clause_enabled(MutationClause::Set));
             assert!(config.is_clause_enabled(MutationClause::Remove));
             assert!(!config.is_clause_enabled(MutationClause::Delete));
             assert!(config.is_clause_enabled(MutationClause::Merge));
+            assert!(!config.is_clause_enabled(MutationClause::Foreach));
         }
     }
 }

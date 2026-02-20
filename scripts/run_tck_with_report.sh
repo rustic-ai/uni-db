@@ -135,6 +135,15 @@ run_for_mode() {
     # Clean previous per-scenario results only for this mode.
     rm -rf "$raw_results_dir"
 
+    # For full (unfiltered) runs, write a manifest of all discovered scenarios
+    # so the aggregator can detect crashed tests that never wrote a result.
+    if [ -z "$filter" ]; then
+        UNI_TCK_SCHEMA_MODE="$mode" \
+        UNI_TCK_NEXTEST_RESULTS_DIR="$raw_results_dir" \
+        UNI_TCK_WRITE_MANIFEST=1 \
+        cargo nextest list -p uni-tck --test tck >/dev/null 2>&1
+    fi
+
     echo ""
     # Run tests via nextest (--no-fail-fast to collect all results)
     UNI_TCK_SCHEMA_MODE="$mode" \

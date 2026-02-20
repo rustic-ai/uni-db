@@ -209,6 +209,59 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
         }
     }
 
+    /// Build a scoped compiler that excludes the given variables from the translation context.
+    ///
+    /// When compiling inner expressions for list comprehensions, reduce, or quantifiers,
+    /// loop variables must be removed from `variable_kinds` so that property access on
+    /// them does not incorrectly generate flat columns that don't exist in the inner schema.
+    ///
+    /// If none of the `exclude_vars` are present in the current context, the returned
+    /// compiler simply reuses `self`'s translation context unchanged.
+    ///
+    /// The caller must own `scoped_ctx_slot` and keep it alive for the returned compiler's
+    /// lifetime.
+    fn scoped_compiler<'b>(
+        &'b self,
+        exclude_vars: &[&str],
+        scoped_ctx_slot: &'b mut Option<TranslationContext>,
+    ) -> CypherPhysicalExprCompiler<'b>
+    where
+        'a: 'b,
+    {
+        let needs_scoping = self.translation_ctx.is_some_and(|ctx| {
+            exclude_vars
+                .iter()
+                .any(|v| ctx.variable_kinds.contains_key(*v))
+        });
+
+        let ctx_ref = if needs_scoping {
+            let ctx = self.translation_ctx.unwrap();
+            let mut new_kinds = ctx.variable_kinds.clone();
+            for v in exclude_vars {
+                new_kinds.remove(*v);
+            }
+            *scoped_ctx_slot = Some(TranslationContext {
+                parameters: ctx.parameters.clone(),
+                variable_labels: ctx.variable_labels.clone(),
+                variable_kinds: new_kinds,
+                node_variable_hints: ctx.node_variable_hints.clone(),
+            });
+            scoped_ctx_slot.as_ref()
+        } else {
+            self.translation_ctx
+        };
+
+        CypherPhysicalExprCompiler {
+            state: self.state,
+            translation_ctx: ctx_ref,
+            graph_ctx: self.graph_ctx.clone(),
+            uni_schema: self.uni_schema.clone(),
+            session_ctx: self.session_ctx.clone(),
+            storage: self.storage.clone(),
+            params: self.params.clone(),
+        }
+    }
+
     /// Attach graph context and schema for pattern comprehension support.
     pub fn with_graph_ctx(
         mut self,
@@ -826,46 +879,8 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
         let inner_schema = Arc::new(Schema::new(fields));
 
         // Compile inner expressions with scoped translation context
-        let needs_scoping = self
-            .translation_ctx
-            .is_some_and(|ctx| ctx.variable_kinds.contains_key(variable));
-
-        let scoped_ctx: Option<TranslationContext>;
-        let inner_compiler: CypherPhysicalExprCompiler;
-
-        if needs_scoping {
-            let ctx = self.translation_ctx.unwrap();
-            let mut new_kinds = ctx.variable_kinds.clone();
-            new_kinds.remove(variable);
-            scoped_ctx = Some(TranslationContext {
-                parameters: ctx.parameters.clone(),
-                variable_labels: ctx.variable_labels.clone(),
-                variable_kinds: new_kinds,
-            });
-            inner_compiler = CypherPhysicalExprCompiler {
-                state: self.state,
-                translation_ctx: scoped_ctx.as_ref(),
-                graph_ctx: self.graph_ctx.clone(),
-                uni_schema: self.uni_schema.clone(),
-                session_ctx: self.session_ctx.clone(),
-                storage: self.storage.clone(),
-                params: self.params.clone(),
-            };
-        } else {
-            #[allow(unused_assignments)]
-            {
-                scoped_ctx = None;
-            }
-            inner_compiler = CypherPhysicalExprCompiler {
-                state: self.state,
-                translation_ctx: self.translation_ctx,
-                graph_ctx: self.graph_ctx.clone(),
-                uni_schema: self.uni_schema.clone(),
-                session_ctx: self.session_ctx.clone(),
-                storage: self.storage.clone(),
-                params: self.params.clone(),
-            };
-        }
+        let mut scoped_ctx = None;
+        let inner_compiler = self.scoped_compiler(&[variable], &mut scoped_ctx);
 
         let predicate_phy = if let Some(pred) = where_clause {
             Some(inner_compiler.compile(pred, &inner_schema)?)
@@ -927,48 +942,8 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
         let inner_schema = Arc::new(Schema::new(fields));
 
         // Compile reduce expression with scoped translation context
-        let needs_scoping = self.translation_ctx.is_some_and(|ctx| {
-            ctx.variable_kinds.contains_key(accumulator)
-                || ctx.variable_kinds.contains_key(variable)
-        });
-
-        let scoped_ctx: Option<TranslationContext>;
-        let reduce_compiler: CypherPhysicalExprCompiler;
-
-        if needs_scoping {
-            let ctx = self.translation_ctx.unwrap();
-            let mut new_kinds = ctx.variable_kinds.clone();
-            new_kinds.remove(accumulator);
-            new_kinds.remove(variable);
-            scoped_ctx = Some(TranslationContext {
-                parameters: ctx.parameters.clone(),
-                variable_labels: ctx.variable_labels.clone(),
-                variable_kinds: new_kinds,
-            });
-            reduce_compiler = CypherPhysicalExprCompiler {
-                state: self.state,
-                translation_ctx: scoped_ctx.as_ref(),
-                graph_ctx: self.graph_ctx.clone(),
-                uni_schema: self.uni_schema.clone(),
-                session_ctx: self.session_ctx.clone(),
-                storage: self.storage.clone(),
-                params: self.params.clone(),
-            };
-        } else {
-            #[allow(unused_assignments)]
-            {
-                scoped_ctx = None;
-            }
-            reduce_compiler = CypherPhysicalExprCompiler {
-                state: self.state,
-                translation_ctx: self.translation_ctx,
-                graph_ctx: self.graph_ctx.clone(),
-                uni_schema: self.uni_schema.clone(),
-                session_ctx: self.session_ctx.clone(),
-                storage: self.storage.clone(),
-                params: self.params.clone(),
-            };
-        }
+        let mut scoped_ctx = None;
+        let reduce_compiler = self.scoped_compiler(&[accumulator, variable], &mut scoped_ctx);
 
         let reduce_phy = reduce_compiler.compile(reduce_expr, &inner_schema)?;
         let output_type = reduce_phy.data_type(&inner_schema)?;
@@ -1017,46 +992,8 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
         // Compile predicate with a scoped translation context that removes the loop variable
         // from variable_kinds, so property access on the loop variable doesn't incorrectly
         // generate flat columns (like "x.name") that don't exist in the inner schema.
-        let needs_scoping = self
-            .translation_ctx
-            .is_some_and(|ctx| ctx.variable_kinds.contains_key(variable));
-
-        let scoped_ctx: Option<TranslationContext>;
-        let pred_compiler: CypherPhysicalExprCompiler;
-
-        if needs_scoping {
-            let ctx = self.translation_ctx.unwrap();
-            let mut new_kinds = ctx.variable_kinds.clone();
-            new_kinds.remove(variable);
-            scoped_ctx = Some(TranslationContext {
-                parameters: ctx.parameters.clone(),
-                variable_labels: ctx.variable_labels.clone(),
-                variable_kinds: new_kinds,
-            });
-            pred_compiler = CypherPhysicalExprCompiler {
-                state: self.state,
-                translation_ctx: scoped_ctx.as_ref(),
-                graph_ctx: self.graph_ctx.clone(),
-                uni_schema: self.uni_schema.clone(),
-                session_ctx: self.session_ctx.clone(),
-                storage: self.storage.clone(),
-                params: self.params.clone(),
-            };
-        } else {
-            #[allow(unused_assignments)]
-            {
-                scoped_ctx = None;
-            }
-            pred_compiler = CypherPhysicalExprCompiler {
-                state: self.state,
-                translation_ctx: self.translation_ctx,
-                graph_ctx: self.graph_ctx.clone(),
-                uni_schema: self.uni_schema.clone(),
-                session_ctx: self.session_ctx.clone(),
-                storage: self.storage.clone(),
-                params: self.params.clone(),
-            };
-        }
+        let mut scoped_ctx = None;
+        let pred_compiler = self.scoped_compiler(&[variable], &mut scoped_ctx);
 
         let mut predicate_phy = pred_compiler.compile(predicate, &inner_schema)?;
 

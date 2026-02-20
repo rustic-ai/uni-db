@@ -4259,6 +4259,28 @@ impl QueryPlanner {
             step_var.clone()
         };
 
+        // If we have a bound target variable from a previous clause (e.g. WITH),
+        // use a temp variable for the Traverse step, then filter to match the bound
+        // target — mirroring the bound edge pattern above.
+        let rebound_target_var = if target_is_bound && !target_variable.is_empty() {
+            let is_imported = find_var_in_scope(vars_in_scope, &target_variable)
+                .map(|info| info.var_type == VariableType::Imported)
+                .unwrap_or(false);
+            if !is_imported {
+                Some(target_variable.clone())
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        let effective_target_var = if let Some(ref bv) = rebound_target_var {
+            format!("__rebound_{}", bv)
+        } else {
+            target_variable.clone()
+        };
+
         // Collect all variables (node + edge) from the current MATCH clause scope
         // for relationship uniqueness scoping. Edge ID columns (both named `r._eid`
         // and anonymous `__eid_to_target`) are only included in uniqueness filtering
@@ -4274,14 +4296,14 @@ impl QueryPlanner {
             scope_match_variables.insert(sv.clone());
         }
         // Include the target variable (not yet added to vars_in_scope)
-        scope_match_variables.insert(target_variable.clone());
+        scope_match_variables.insert(effective_target_var.clone());
 
         let mut plan = LogicalPlan::Traverse {
             input: Box::new(plan),
             edge_type_ids,
             direction: params.rel.direction.clone(),
             source_variable: source_variable.to_string(),
-            target_variable: target_variable.clone(),
+            target_variable: effective_target_var.clone(),
             target_label_id: target_label_meta.map(|m| m.id).unwrap_or(0),
             step_variable: effective_step_var.clone(),
             min_hops,
@@ -4393,6 +4415,38 @@ impl QueryPlanner {
                 input: Box::new(plan),
                 predicate: bound_list_check,
                 optional_variables: filter_optional_vars.clone(),
+            };
+        }
+
+        // If we have a bound target variable (non-imported), add a filter to constrain
+        // the traversal output to match the previously bound target node.
+        if let Some(ref bv) = rebound_target_var {
+            let temp_var = format!("__rebound_{}", bv);
+            let bound_check = Expr::BinaryOp {
+                left: Box::new(Expr::Property(
+                    Box::new(Expr::Variable(temp_var.clone())),
+                    "_vid".to_string(),
+                )),
+                op: BinaryOp::Eq,
+                right: Box::new(Expr::Property(
+                    Box::new(Expr::Variable(bv.clone())),
+                    "_vid".to_string(),
+                )),
+            };
+            // For OPTIONAL MATCH, include the rebound variable in optional_variables
+            // so that OptionalFilterExec excludes it from the grouping key and
+            // properly nullifies it in recovery rows when all matches are filtered out.
+            // Without this, each traverse result creates its own group (keyed by
+            // __rebound_c._vid), and null-row recovery emits a spurious null row
+            // for every non-matching target instead of one per source group.
+            let mut rebound_filter_vars = filter_optional_vars.clone();
+            if params.optional {
+                rebound_filter_vars.insert(temp_var);
+            }
+            plan = LogicalPlan::Filter {
+                input: Box::new(plan),
+                predicate: bound_check,
+                optional_variables: rebound_filter_vars,
             };
         }
 
@@ -6833,21 +6887,55 @@ fn collect_properties_recursive(
             collect_properties_from_expr_into(expr, properties);
             collect_properties_recursive(input, properties);
         }
-        LogicalPlan::Create { input, .. } => {
+        LogicalPlan::Create { input, pattern } => {
+            // Mark variables referenced in CREATE patterns with "*" so plan_scan
+            // adds structural projections (bare entity columns). Without this,
+            // execute_create_pattern() can't find bound variables and creates
+            // spurious new nodes instead of using existing MATCH'd ones.
+            mark_pattern_variables(pattern, properties);
             collect_properties_recursive(input, properties);
         }
-        LogicalPlan::Merge { input, .. } => {
-            collect_properties_recursive(input, properties);
-        }
-        LogicalPlan::Set { input, items } => {
-            for item in items {
-                if let SetItem::Property { value, .. } = item {
-                    collect_properties_from_expr_into(value, properties);
-                }
+        LogicalPlan::CreateBatch { input, patterns } => {
+            for pattern in patterns {
+                mark_pattern_variables(pattern, properties);
             }
             collect_properties_recursive(input, properties);
         }
-        LogicalPlan::Remove { input, .. } => {
+        LogicalPlan::Merge {
+            input,
+            pattern,
+            on_match,
+            on_create,
+        } => {
+            mark_pattern_variables(pattern, properties);
+            if let Some(set_clause) = on_match {
+                mark_set_item_variables(&set_clause.items, properties);
+            }
+            if let Some(set_clause) = on_create {
+                mark_set_item_variables(&set_clause.items, properties);
+            }
+            collect_properties_recursive(input, properties);
+        }
+        LogicalPlan::Set { input, items } => {
+            mark_set_item_variables(items, properties);
+            collect_properties_recursive(input, properties);
+        }
+        LogicalPlan::Remove { input, items } => {
+            for item in items {
+                match item {
+                    RemoveItem::Property(expr) => {
+                        // REMOVE n.prop — mark n with "*"
+                        collect_properties_from_expr_into(expr, properties);
+                    }
+                    RemoveItem::Labels { variable, .. } => {
+                        // REMOVE n:Label — mark n with "*"
+                        properties
+                            .entry(variable.clone())
+                            .or_default()
+                            .insert("*".to_string());
+                    }
+                }
+            }
             collect_properties_recursive(input, properties);
         }
         LogicalPlan::Delete { input, items, .. } => {
@@ -6929,6 +7017,80 @@ fn collect_properties_recursive(
         }
         // DDL and other plans don't reference properties
         _ => {}
+    }
+}
+
+/// Mark target variables from SET items with "*" and collect value expressions.
+fn mark_set_item_variables(
+    items: &[SetItem],
+    properties: &mut HashMap<String, std::collections::HashSet<String>>,
+) {
+    for item in items {
+        match item {
+            SetItem::Property { expr, value } => {
+                // SET n.prop = val — mark n via the property expr, collect from value
+                collect_properties_from_expr_into(expr, properties);
+                collect_properties_from_expr_into(value, properties);
+            }
+            SetItem::Labels { variable, .. } => {
+                // SET n:Label — need full access to n
+                properties
+                    .entry(variable.clone())
+                    .or_default()
+                    .insert("*".to_string());
+            }
+            SetItem::Variable { variable, value }
+            | SetItem::VariablePlus { variable, value } => {
+                // SET n = {props} or SET n += {props}
+                properties
+                    .entry(variable.clone())
+                    .or_default()
+                    .insert("*".to_string());
+                collect_properties_from_expr_into(value, properties);
+            }
+        }
+    }
+}
+
+/// Mark all variables in a CREATE/MERGE pattern with "*" so that plan_scan
+/// adds structural projections (bare entity Struct columns) for them.
+/// This is needed so that execute_create_pattern() can find bound variables
+/// in the row HashMap and reuse existing nodes instead of creating new ones.
+fn mark_pattern_variables(
+    pattern: &Pattern,
+    properties: &mut HashMap<String, std::collections::HashSet<String>>,
+) {
+    for path in &pattern.paths {
+        if let Some(ref v) = path.variable {
+            properties.entry(v.clone()).or_default().insert("*".to_string());
+        }
+        for element in &path.elements {
+            match element {
+                PatternElement::Node(n) => {
+                    if let Some(ref v) = n.variable {
+                        properties.entry(v.clone()).or_default().insert("*".to_string());
+                    }
+                    // Also collect properties from inline property expressions
+                    if let Some(ref props) = n.properties {
+                        collect_properties_from_expr_into(props, properties);
+                    }
+                }
+                PatternElement::Relationship(r) => {
+                    if let Some(ref v) = r.variable {
+                        properties.entry(v.clone()).or_default().insert("*".to_string());
+                    }
+                    if let Some(ref props) = r.properties {
+                        collect_properties_from_expr_into(props, properties);
+                    }
+                }
+                PatternElement::Parenthesized { pattern, .. } => {
+                    let sub = Pattern {
+                        paths: vec![pattern.as_ref().clone()],
+                    };
+                    mark_pattern_variables(&sub, properties);
+                }
+            }
+        }
     }
 }
 

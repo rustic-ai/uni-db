@@ -35,6 +35,9 @@
 use crate::query::df_expr::{TranslationContext, VariableKind, cypher_expr_to_df};
 use crate::query::df_graph::bind_fixed_path::BindFixedPathExec;
 use crate::query::df_graph::bind_zero_length_path::BindZeroLengthPathExec;
+use crate::query::df_graph::mutation_common::{
+    MutationKind, extended_schema_for_new_vars, pattern_variable_names,
+};
 use crate::query::df_graph::mutation_create::new_create_exec;
 use crate::query::df_graph::mutation_delete::new_delete_exec;
 use crate::query::df_graph::mutation_merge::new_merge_exec;
@@ -47,7 +50,8 @@ use crate::query::df_graph::traverse::{
 use crate::query::df_graph::{
     GraphApplyExec, GraphExecutionContext, GraphExtIdLookupExec, GraphProcedureCallExec,
     GraphScanExec, GraphShortestPathExec, GraphTraverseExec, GraphTraverseMainExec,
-    GraphUnwindExec, GraphVectorKnnExec, L0Context, MutationContext, OptionalFilterExec,
+    GraphUnwindExec, GraphVectorKnnExec, L0Context, MutationContext, MutationExec,
+    OptionalFilterExec,
 };
 use crate::query::planner::{
     LogicalPlan, aggregate_column_name, classify_window_expressions, collect_properties_from_plan,
@@ -74,7 +78,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use uni_common::core::schema::{PropertyMeta, Schema as UniSchema};
-use uni_cypher::ast::{Direction as AstDirection, Expr, SortItem};
+use uni_cypher::ast::{Direction as AstDirection, Expr, Pattern, PatternElement, SortItem};
 use uni_store::runtime::l0::L0Buffer;
 use uni_store::runtime::property_manager::PropertyManager;
 use uni_store::storage::direction::Direction;
@@ -278,12 +282,15 @@ impl HybridPhysicalPlanner {
     fn translation_context_for_plan(&self, plan: &LogicalPlan) -> TranslationContext {
         let mut variable_kinds = HashMap::new();
         let mut variable_labels = HashMap::new();
+        let mut node_variable_hints = Vec::new();
         collect_variable_kinds(plan, &mut variable_kinds);
+        collect_mutation_node_hints(plan, &mut node_variable_hints);
         self.collect_variable_labels(plan, &mut variable_labels);
         TranslationContext {
             parameters: self.params.clone(),
             variable_labels,
             variable_kinds,
+            node_variable_hints,
         }
     }
 
@@ -298,12 +305,8 @@ impl HybridPhysicalPlanner {
                 variable,
                 labels: scan_labels,
                 ..
-            } => {
-                if let Some(first) = scan_labels.first() {
-                    labels.insert(variable.clone(), first.clone());
-                }
             }
-            LogicalPlan::ScanMainByLabels {
+            | LogicalPlan::ScanMainByLabels {
                 variable,
                 labels: scan_labels,
                 ..
@@ -383,21 +386,7 @@ impl HybridPhysicalPlanner {
     }
 
     fn merged_edge_type_properties(&self, edge_type_ids: &[u32]) -> HashMap<String, PropertyMeta> {
-        let mut merged = HashMap::new();
-        let mut sorted_ids = edge_type_ids.to_vec();
-        sorted_ids.sort_unstable();
-
-        for edge_type_id in sorted_ids {
-            if let Some(type_name) = self.schema.edge_type_name_by_id_unified(edge_type_id)
-                && let Some(props) = self.schema.properties.get(&type_name)
-            {
-                for (name, meta) in props {
-                    merged.entry(name.clone()).or_insert_with(|| meta.clone());
-                }
-            }
-        }
-
-        merged
+        crate::query::df_graph::common::merged_edge_schema_props(&self.schema, edge_type_ids)
     }
 
     /// Plan a logical plan into an execution plan.
@@ -631,7 +620,9 @@ impl HybridPhysicalPlanner {
                 input,
                 predicate,
                 optional_variables,
-            } => self.plan_filter(input, predicate, optional_variables, all_properties),
+            } => {
+                self.plan_filter(input, predicate, optional_variables, all_properties)
+            }
 
             LogicalPlan::Project { input, projections } => {
                 // Build alias map for ORDER BY alias resolution
@@ -735,17 +726,23 @@ impl HybridPhysicalPlanner {
                 );
                 let child = self.plan_internal(input, all_properties)?;
                 let mutation_ctx = self.require_mutation_ctx()?;
-                // CreateBatch uses the same MutationCreateExec, wrapping patterns individually.
-                // We chain multiple create ops: one per pattern.
-                let mut current = child;
-                for pattern in patterns {
-                    current = Arc::new(new_create_exec(
-                        current,
-                        pattern.clone(),
-                        mutation_ctx.clone(),
-                    ));
-                }
-                Ok(current)
+                // Use a single MutationExec with CreateBatch to avoid N nested
+                // operators (which cause stack overflow for large N).
+                let all_vars: Vec<String> = patterns
+                    .iter()
+                    .flat_map(pattern_variable_names)
+                    .collect();
+                let output_schema =
+                    extended_schema_for_new_vars(&child.schema(), &all_vars);
+                Ok(Arc::new(MutationExec::new_with_schema(
+                    child,
+                    MutationKind::CreateBatch {
+                        patterns: patterns.clone(),
+                    },
+                    "MutationCreateExec",
+                    mutation_ctx,
+                    output_schema,
+                )))
             }
             LogicalPlan::Set { input, items } => {
                 tracing::debug!(items = items.len(), "Planning MutationSetExec");
@@ -907,8 +904,24 @@ impl HybridPhysicalPlanner {
                 optional,
             } => self.plan_ext_id_lookup(variable, ext_id, filter.as_ref(), *optional),
 
-            LogicalPlan::Foreach { .. } => {
-                Err(anyhow!("FOREACH not yet supported in DataFusion engine"))
+            LogicalPlan::Foreach {
+                input,
+                variable,
+                list,
+                body,
+            } => {
+                tracing::debug!(variable = variable.as_str(), "Planning ForeachExec");
+                let child = self.plan_internal(input, all_properties)?;
+                let mutation_ctx = self.require_mutation_ctx()?;
+                Ok(Arc::new(
+                    super::df_graph::mutation_foreach::ForeachExec::new(
+                        child,
+                        variable.clone(),
+                        list.clone(),
+                        body.clone(),
+                        mutation_ctx,
+                    ),
+                ))
             }
 
             // DDL operations should be handled separately
@@ -1003,6 +1016,7 @@ impl HybridPhysicalPlanner {
             parameters: self.params.clone(),
             variable_labels,
             variable_kinds,
+            ..Default::default()
         };
         let df_filter = cypher_expr_to_df(filter_expr, Some(&ctx))?;
 
@@ -1262,9 +1276,8 @@ impl HybridPhysicalPlanner {
         ));
 
         // If we need the full object (structural access), add a Struct projection
-        if all_properties
-            .get(variable)
-            .is_some_and(|p| p.contains("*"))
+        let var_props = all_properties.get(variable);
+        if var_props.is_some_and(|p| p.contains("*"))
         {
             // Filter overflow_json from the structural projection — it's an internal
             // column, not a user-visible property for the struct.
@@ -1835,6 +1848,7 @@ impl HybridPhysicalPlanner {
                 parameters: self.params.clone(),
                 variable_labels,
                 variable_kinds,
+                ..Default::default()
             };
             let df_filter = cypher_expr_to_df(filter_expr, Some(&ctx))?;
             let schema = traverse_plan.schema();
@@ -2384,10 +2398,14 @@ impl HybridPhysicalPlanner {
             } else {
                 // DateTime/Time struct grouping: group by UTC-normalized values
                 // Two DateTimes with same UTC instant but different offsets should group together
-                let mut df_expr = cypher_expr_to_df(expr, Some(&ctx))?;
-                if let Ok(expr_type) = df_expr.get_type(&datafusion::common::DFSchema::try_from(
-                    schema.as_ref().clone(),
-                )?) {
+                let df_schema_ref =
+                    datafusion::common::DFSchema::try_from(schema.as_ref().clone())?;
+                let df_expr = cypher_expr_to_df(expr, Some(&ctx))?;
+                let df_expr = Self::resolve_udfs(&df_expr, &state)?;
+                let df_expr =
+                    crate::query::df_expr::apply_type_coercion(&df_expr, &df_schema_ref)?;
+                let mut df_expr = Self::resolve_udfs(&df_expr, &state)?;
+                if let Ok(expr_type) = df_expr.get_type(&df_schema_ref) {
                     if uni_common::core::schema::is_datetime_struct(&expr_type) {
                         // Group by UTC instant (nanos_since_epoch)
                         df_expr = crate::query::df_expr::extract_datetime_nanos(df_expr);
@@ -2399,11 +2417,7 @@ impl HybridPhysicalPlanner {
                 }
 
                 // Convert logical expression to physical
-                create_physical_expr(
-                    &df_expr,
-                    &datafusion::common::DFSchema::try_from(schema.as_ref().clone())?,
-                    state.execution_props(),
-                )?
+                create_physical_expr(&df_expr, &df_schema_ref, state.execution_props())?
             };
             group_exprs.push((physical_expr, name));
         }
@@ -3592,22 +3606,12 @@ impl HybridPhysicalPlanner {
 /// references to their identity columns (e.g., `n` → `n._vid` for nodes).
 fn collect_variable_kinds(plan: &LogicalPlan, kinds: &mut HashMap<String, VariableKind>) {
     match plan {
-        LogicalPlan::Scan { variable, .. } => {
-            kinds.insert(variable.clone(), VariableKind::Node);
-        }
-        LogicalPlan::ExtIdLookup { variable, .. } => {
-            kinds.insert(variable.clone(), VariableKind::Node);
-        }
-        LogicalPlan::ScanAll { variable, .. } => {
-            kinds.insert(variable.clone(), VariableKind::Node);
-        }
-        LogicalPlan::ScanMainByLabels { variable, .. } => {
-            kinds.insert(variable.clone(), VariableKind::Node);
-        }
-        LogicalPlan::VectorKnn { variable, .. } => {
-            kinds.insert(variable.clone(), VariableKind::Node);
-        }
-        LogicalPlan::InvertedIndexLookup { variable, .. } => {
+        LogicalPlan::Scan { variable, .. }
+        | LogicalPlan::ExtIdLookup { variable, .. }
+        | LogicalPlan::ScanAll { variable, .. }
+        | LogicalPlan::ScanMainByLabels { variable, .. }
+        | LogicalPlan::VectorKnn { variable, .. }
+        | LogicalPlan::InvertedIndexLookup { variable, .. } => {
             kinds.insert(variable.clone(), VariableKind::Node);
         }
         LogicalPlan::Traverse {
@@ -3644,13 +3648,8 @@ fn collect_variable_kinds(plan: &LogicalPlan, kinds: &mut HashMap<String, Variab
             target_variable,
             path_variable,
             ..
-        } => {
-            collect_variable_kinds(input, kinds);
-            kinds.insert(source_variable.clone(), VariableKind::Node);
-            kinds.insert(target_variable.clone(), VariableKind::Node);
-            kinds.insert(path_variable.clone(), VariableKind::Path);
         }
-        LogicalPlan::AllShortestPaths {
+        | LogicalPlan::AllShortestPaths {
             input,
             source_variable,
             target_variable,
@@ -3791,6 +3790,96 @@ fn collect_variable_kinds(plan: &LogicalPlan, kinds: &mut HashMap<String, Variab
         | LogicalPlan::Begin
         | LogicalPlan::Commit
         | LogicalPlan::Rollback => {}
+    }
+}
+
+/// Collect node variable names from CREATE/MERGE patterns for startNode/endNode UDFs.
+///
+/// These hints are stored separately from `variable_kinds` because registering
+/// CREATE/MERGE variables in `variable_kinds` would cause ID/TYPE/HASLABEL to use
+/// dotted column references (e.g., `n._vid`) that don't exist in mutation output schemas.
+fn collect_mutation_node_hints(plan: &LogicalPlan, hints: &mut Vec<String>) {
+    match plan {
+        LogicalPlan::Create { input, pattern } => {
+            collect_node_names_from_pattern(pattern, hints);
+            collect_mutation_node_hints(input, hints);
+        }
+        LogicalPlan::CreateBatch { input, patterns } => {
+            for pattern in patterns {
+                collect_node_names_from_pattern(pattern, hints);
+            }
+            collect_mutation_node_hints(input, hints);
+        }
+        LogicalPlan::Merge { input, pattern, .. } => {
+            collect_node_names_from_pattern(pattern, hints);
+            collect_mutation_node_hints(input, hints);
+        }
+        // For all other nodes, recurse into inputs
+        LogicalPlan::Traverse { input, .. }
+        | LogicalPlan::TraverseMainByType { input, .. }
+        | LogicalPlan::Filter { input, .. }
+        | LogicalPlan::Project { input, .. }
+        | LogicalPlan::Sort { input, .. }
+        | LogicalPlan::Limit { input, .. }
+        | LogicalPlan::Aggregate { input, .. }
+        | LogicalPlan::Distinct { input, .. }
+        | LogicalPlan::Window { input, .. }
+        | LogicalPlan::Unwind { input, .. }
+        | LogicalPlan::Set { input, .. }
+        | LogicalPlan::Remove { input, .. }
+        | LogicalPlan::Delete { input, .. }
+        | LogicalPlan::Foreach { input, .. }
+        | LogicalPlan::SubqueryCall { input, .. }
+        | LogicalPlan::ShortestPath { input, .. }
+        | LogicalPlan::AllShortestPaths { input, .. }
+        | LogicalPlan::QuantifiedPattern { input, .. }
+        | LogicalPlan::BindZeroLengthPath { input, .. }
+        | LogicalPlan::BindPath { input, .. } => {
+            collect_mutation_node_hints(input, hints);
+        }
+        LogicalPlan::Union { left, right, .. } | LogicalPlan::CrossJoin { left, right, .. } => {
+            collect_mutation_node_hints(left, hints);
+            collect_mutation_node_hints(right, hints);
+        }
+        LogicalPlan::Apply {
+            input, subquery, ..
+        } => {
+            collect_mutation_node_hints(input, hints);
+            collect_mutation_node_hints(subquery, hints);
+        }
+        LogicalPlan::RecursiveCTE {
+            initial, recursive, ..
+        } => {
+            collect_mutation_node_hints(initial, hints);
+            collect_mutation_node_hints(recursive, hints);
+        }
+        LogicalPlan::Explain { plan } => {
+            collect_mutation_node_hints(plan, hints);
+        }
+        // Leaf nodes — nothing to collect
+        _ => {}
+    }
+}
+
+/// Extract node variable names from a single Cypher pattern.
+fn collect_node_names_from_pattern(pattern: &Pattern, hints: &mut Vec<String>) {
+    for path in &pattern.paths {
+        for element in &path.elements {
+            match element {
+                PatternElement::Node(n) => {
+                    if let Some(ref v) = n.variable && !hints.contains(v) {
+                        hints.push(v.clone());
+                    }
+                }
+                PatternElement::Parenthesized { pattern, .. } => {
+                    let sub = Pattern {
+                        paths: vec![pattern.as_ref().clone()],
+                    };
+                    collect_node_names_from_pattern(&sub, hints);
+                }
+                _ => {}
+            }
+        }
     }
 }
 

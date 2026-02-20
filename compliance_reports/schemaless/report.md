@@ -1,16 +1,16 @@
 # TCK Compliance Report
 
-**Generated:** 2026-02-19 10:39:17
-**Results:** `results_20260219_103917.json`
-**Compared to:** `results_20260219_094513.json`
+**Generated:** 2026-02-19 22:25:26
+**Results:** `results_20260219_222526.json`
+**Compared to:** `results_20260219_205321.json`
 
 ## Summary
 
 | Metric | Current | Previous | Delta |
 |--------|---------|----------|-------|
 | Scenarios | 3897 | 3897 |  |
-| Passed | 3814 | 3814 |  |
-| Failed | 82 | 82 |  |
+| Passed | 3815 | 3815 |  |
+| Failed | 81 | 81 |  |
 | Pass Rate | 97.9% | 97.9% | ➡️ +0.0pp |
 
 ## Feature Breakdown
@@ -88,12 +88,12 @@
 | ✅ Match3 | 30 | 30 | 0 | 100% |  |
 | ⚠️ Match4 | 10 | 6 | 4 | 60% |  |
 | ✅ Match5 | 29 | 28 | 1 | 97% |  |
-| ✅ Match6 | 97 | 95 | 2 | 98% |  |
-| ✅ Match7 | 31 | 31 | 0 | 100% |  |
+| ✅ Match6 | 97 | 93 | 4 | 96% |  |
+| ✅ Match7 | 31 | 30 | 1 | 97% |  |
 | ⚠️ Match8 | 3 | 2 | 1 | 67% |  |
 | ✅ Match9 | 9 | 8 | 1 | 89% |  |
 | ✅ MatchWhere1 | 15 | 15 | 0 | 100% |  |
-| ⚠️ MatchWhere2 | 2 | 1 | 1 | 50% |  |
+| ✅ MatchWhere2 | 2 | 2 | 0 | 100% |  |
 | ✅ MatchWhere3 | 3 | 3 | 0 | 100% |  |
 | ⚠️ MatchWhere4 | 2 | 1 | 1 | 50% |  |
 | ✅ MatchWhere5 | 4 | 4 | 0 | 100% |  |
@@ -124,13 +124,13 @@
 | ✅ Precedence2 | 26 | 26 | 0 | 100% |  |
 | ✅ Precedence3 | 11 | 11 | 0 | 100% |  |
 | ✅ Precedence4 | 12 | 12 | 0 | 100% |  |
-| ✅ Quantifier1 | 105 | 104 | 1 | 99% |  |
+| ✅ Quantifier1 | 105 | 105 | 0 | 100% |  |
 | ✅ Quantifier10 | 8 | 8 | 0 | 100% |  |
 | ✅ Quantifier11 | 22 | 22 | 0 | 100% |  |
 | ✅ Quantifier12 | 17 | 17 | 0 | 100% |  |
-| ✅ Quantifier2 | 106 | 105 | 1 | 99% |  |
-| ✅ Quantifier3 | 105 | 104 | 1 | 99% |  |
-| ✅ Quantifier4 | 105 | 104 | 1 | 99% |  |
+| ✅ Quantifier2 | 106 | 106 | 0 | 100% |  |
+| ✅ Quantifier3 | 105 | 105 | 0 | 100% |  |
+| ✅ Quantifier4 | 105 | 105 | 0 | 100% |  |
 | ✅ Quantifier5 | 31 | 31 | 0 | 100% |  |
 | ✅ Quantifier6 | 21 | 21 | 0 | 100% |  |
 | ✅ Quantifier7 | 36 | 36 | 0 | 100% |  |
@@ -193,7 +193,7 @@
 | ✅ With3 | 1 | 1 | 0 | 100% |  |
 | ✅ With4 | 7 | 7 | 0 | 100% |  |
 | ✅ With5 | 2 | 2 | 0 | 100% |  |
-| ✅ With6 | 9 | 9 | 0 | 100% |  |
+| ✅ With6 | 9 | 8 | 1 | 89% |  |
 | ✅ With7 | 2 | 2 | 0 | 100% |  |
 | ✅ WithOrderBy1 | 96 | 96 | 0 | 100% |  |
 | ✅ WithOrderBy2 | 83 | 83 | 0 | 100% |  |
@@ -411,7 +411,7 @@
   Step failed:
       Defined: tck/features/expressions/graph/Graph9.feature:73:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("properties(n)", Some(Null)), ("properties(r)", Som
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("properties(n)", Some(Null)), ("properties(null)", 
   ... (truncated)
   ```
 
@@ -478,7 +478,7 @@
   Step failed:
       Defined: tck/features/expressions/literals/Literals7.feature:295:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("literal", Some(List([Map({"topping": List([
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("literal", Some(List([Map({"id": String("000
   ... (truncated)
   ```
 
@@ -489,7 +489,7 @@
   Step failed:
       Defined: tck/features/expressions/literals/Literals8.feature:294:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("literal", Some(Map({"data": List([Map({"nam
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("literal", Some(Map({"data": List([Map({"bat
   ... (truncated)
   ```
 
@@ -500,11 +500,11 @@
   Step failed:
       Defined: tck/features/expressions/map/Map1.feature:65:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): Expected column '(list[1]).missing' not found in result
+      Step panicked. Captured output: Result mismatch (any order): Expected column '(list[1]).notMissing' not found in result
 [Summary]
 1 feature
 1 scenario (1 failed)
-3 steps
+3 st
   ... (truncated)
   ```
 
@@ -530,7 +530,7 @@
   Step failed:
       Defined: tck/features/clauses/match/Match4.feature:111:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): Row count mismatch: expected 1, got 21
+      Step panicked. Captured output: Result mismatch (any order): Row count mismatch: expected 1, got 35
 [Summary]
 1 feature
 1 scenario (1 failed)
@@ -588,6 +588,22 @@
 
 ### Match6
 
+- **[12] Matching path with multiple bidirectional relationships** (line 217)
+  ```
+  Step failed:
+      Defined: tck/features/clauses/match/Match6.feature:230:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("p", Some(Null))]. Expected: [{"p": Path(Path { nodes:
+  ... (truncated)
+  ```
+- **[13] Matching path with both directions should respect other directions** (line 238)
+  ```
+  Step failed:
+      Defined: tck/features/clauses/match/Match6.feature:251:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("p", Some(Null))]. Expected: [{"p": Path(Path { nodes:
+  ... (truncated)
+  ```
 - **[14] Named path with undirected fixed variable length pattern** (line 257)
   ```
   Step failed:
@@ -606,6 +622,17 @@
       Defined: tck/features/clauses/match/Match6.feature:325:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
       Step panicked. Captured output: Result mismatch (any order): No match found for actual row 2. Actual values: [("p", Some(Path(Path { nodes: [Node { vid: Vid(0), labe
+  ... (truncated)
+  ```
+
+### Match7
+
+- **[17] Optionally matching named paths - existing result** (line 347)
+  ```
+  Step failed:
+      Defined: tck/features/clauses/match/Match7.feature:361:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("p", Some(Null)), ("x", Some(Node(Node { vid: Vid(1), 
   ... (truncated)
   ```
 
@@ -632,17 +659,6 @@
 1 feature
 1 scenario (1 failed)
 4 steps (3 passed, 1 fai
-  ... (truncated)
-  ```
-
-### MatchWhere2
-
-- **[1] Filter nodes with conjunctive two-part property predicate on multi variables with multiple bindings** (line 33)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/match-where/MatchWhere2.feature:52:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Error during planning: Cannot infer common argument type for comp
   ... (truncated)
   ```
 
@@ -722,50 +738,6 @@
 1 scenario (1 failed)
 3 steps (2 passed, 1 failed)
 
-  ```
-
-### Quantifier1
-
-- **[9] None quantifier on list containing relationships** (line 239)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/quantifier/Quantifier1.feature:266:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "SyntaxError: UnknownFunction - Error during planning: UDF 're
-  ... (truncated)
-  ```
-
-### Quantifier2
-
-- **[9] Single quantifier on list containing relationships** (line 239)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/quantifier/Quantifier2.feature:266:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "SyntaxError: UnknownFunction - Error during planning: UDF 're
-  ... (truncated)
-  ```
-
-### Quantifier3
-
-- **[9] Any quantifier on list containing relationships** (line 239)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/quantifier/Quantifier3.feature:266:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "SyntaxError: UnknownFunction - Error during planning: UDF 're
-  ... (truncated)
-  ```
-
-### Quantifier4
-
-- **[9] All quantifier on list containing relationships** (line 239)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/quantifier/Quantifier4.feature:266:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "SyntaxError: UnknownFunction - Error during planning: UDF 're
-  ... (truncated)
   ```
 
 ### Return2
@@ -901,7 +873,7 @@
   Step failed:
       Defined: tck/features/clauses/return/Return6.feature:294:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Error during planning: Cannot coerce arithmetic expression Utf8 / Int64 t
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "Error during planning: Function 'abs' expects NativeType::Numeric but rec
   ... (truncated)
   ```
 
@@ -1053,7 +1025,7 @@
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal5.feature:133:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("d.offsetMinutes", Some(Int(60))), ("d.offse
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("d.timezone", Some(String("Europe/Stockholm"
   ... (truncated)
   ```
 
@@ -1157,6 +1129,17 @@
 1 feature
 1 scenario (1 failed)
 4 steps (3 passed, 1
+  ... (truncated)
+  ```
+
+### With6
+
+- **[3] Implicit grouping with multiple node and relationship variables as grouping key and single aggregation** (line 74)
+  ```
+  Step failed:
+      Defined: tck/features/clauses/with/With6.feature:89:5
+      Matched: crates/uni-tck/src/steps/then.rs:20:1
+      Step panicked. Captured output: Query returned error instead of result: Query { message: "DataFusion planning failed: Schema error: No field named \"b._vid\". Did you m
   ... (truncated)
   ```
 

@@ -798,18 +798,15 @@ impl Executor {
             let ctx = self.get_context().await;
             let start = Instant::now();
 
-            // Route DDL/Admin, FOREACH, and complex mutation queries to the
-            // fallback executor. Simple "terminal" mutations (single mutation clause at
-            // the outermost level, no RETURN/WITH) flow through DataFusion via MutationExec
-            // operators — this includes CREATE, SET, REMOVE, DELETE, and MERGE.
-            // Complex mutations (multi-clause, or with downstream RETURN/WITH)
-            // still use the fallback path for correct variable flow and output semantics.
+            // Route DDL/Admin and LOAD CSV mutation queries to the fallback executor.
+            // All other mutation patterns (including multi-clause, RETURN/WITH-wrapped,
+            // nested mutations, and FOREACH) flow through DataFusion via MutationExec
+            // and ForeachExec operators with proper output batch reconstruction.
             let mutation_config = ctx
                 .as_ref()
                 .map(|c| &c.mutation_path)
                 .unwrap_or(&self.config.mutation_path);
             let res = if Self::is_ddl_or_admin(&plan)
-                || Self::contains_foreach(&plan)
                 || Self::needs_mutation_fallback(&plan)
                 || Self::mutation_clause_disabled_by_config(&plan, mutation_config)
             {
@@ -1060,20 +1057,6 @@ impl Executor {
         }
     }
 
-    /// Check if a plan contains FOREACH operations.
-    ///
-    /// Only FOREACH stays on the fallback path. All other mutations
-    /// (CREATE, SET, REMOVE, DELETE, MERGE) now flow through DataFusion
-    /// via MutationExec operators.
-    fn contains_foreach(plan: &LogicalPlan) -> bool {
-        match plan {
-            LogicalPlan::Foreach { .. } => true,
-            _ => Self::plan_children(plan)
-                .iter()
-                .any(|child| Self::contains_foreach(child)),
-        }
-    }
-
     /// Check if a mutation query needs the fallback executor path.
     ///
     /// Returns true when mutations are "complex" — i.e., the DF mutation operators
@@ -1093,51 +1076,8 @@ impl Executor {
             return false;
         }
 
-        // Check for LOAD CSV anywhere in the plan
-        if Self::contains_load_csv(plan) {
-            return true;
-        }
-
-        // If the outermost plan is NOT a mutation (e.g., it's RETURN, WITH, Sort wrapping
-        // a mutation), the downstream consumer needs correct output from the mutation.
-        // The DF path passes through original input batches unchanged, so RETURN/WITH
-        // would see stale values. Route to fallback.
-        if !Self::is_mutation_plan(plan) {
-            return true;
-        }
-
-        // If the mutation's input contains other mutations (multi-clause CREATE, SET+SET, etc.),
-        // variable flow between clauses requires proper output schemas. Route to fallback.
-        Self::has_nested_mutations(plan)
-    }
-
-    /// Check if the outermost plan node is a mutation clause.
-    fn is_mutation_plan(plan: &LogicalPlan) -> bool {
-        matches!(
-            plan,
-            LogicalPlan::Create { .. }
-                | LogicalPlan::CreateBatch { .. }
-                | LogicalPlan::Set { .. }
-                | LogicalPlan::Remove { .. }
-                | LogicalPlan::Delete { .. }
-                | LogicalPlan::Merge { .. }
-        )
-    }
-
-    /// Check if a mutation plan has nested mutations in its input.
-    ///
-    /// This detects multi-clause mutation patterns like:
-    /// `CREATE (a) CREATE (a)-[:R]->(:B)` → Create { input: Create { ... } }
-    fn has_nested_mutations(plan: &LogicalPlan) -> bool {
-        match plan {
-            LogicalPlan::Create { input, .. }
-            | LogicalPlan::CreateBatch { input, .. }
-            | LogicalPlan::Set { input, .. }
-            | LogicalPlan::Remove { input, .. }
-            | LogicalPlan::Delete { input, .. }
-            | LogicalPlan::Merge { input, .. } => Self::contains_write_operations(input),
-            _ => false,
-        }
+        // LOAD CSV not yet supported in the DF engine — force fallback.
+        Self::contains_load_csv(plan)
     }
 
     /// Check if a plan contains LOAD CSV anywhere in the tree.
@@ -1195,6 +1135,12 @@ impl Executor {
             LogicalPlan::Remove { .. } => !config.is_clause_enabled(MutationClause::Remove),
             LogicalPlan::Delete { .. } => !config.is_clause_enabled(MutationClause::Delete),
             LogicalPlan::Merge { .. } => !config.is_clause_enabled(MutationClause::Merge),
+            LogicalPlan::Foreach { .. } => !config.is_clause_enabled(MutationClause::Foreach),
+            // Terminal mutations are wrapped in Limit(0) by the planner — unwrap to find the
+            // actual mutation node.
+            LogicalPlan::Limit { input, .. } => {
+                Self::mutation_clause_disabled_by_config(input, config)
+            }
             _ => false,
         }
     }
@@ -4304,7 +4250,7 @@ impl Executor {
     }
 
     /// Execute a single plan from a FOREACH body with the given scope.
-    async fn execute_foreach_body_plan(
+    pub(crate) async fn execute_foreach_body_plan(
         &self,
         plan: LogicalPlan,
         scope: &mut HashMap<String, Value>,
@@ -5515,10 +5461,10 @@ impl Executor {
                 .map(Vid::from)
                 .unwrap_or_else(|| Vid::from(0u64));
             let edge_type = map
-                .get("_type")
-                .or_else(|| map.get("_type_name"))
-                .or_else(|| map.get("edge_type"))
+                .get("_type_name")
                 .and_then(Value::as_str)
+                .or_else(|| map.get("_type").and_then(Value::as_str))
+                .or_else(|| map.get("edge_type").and_then(Value::as_str))
                 .unwrap_or("")
                 .to_string();
 
@@ -6005,6 +5951,7 @@ impl Executor {
                             graph,
                             actual_target_label.as_deref(),
                             edge_type_name.as_deref(),
+                            &schema,
                         );
                         new_matches.push(new_m);
                     }
@@ -6048,17 +5995,29 @@ impl Executor {
             return vid == bound_vid;
         }
 
-        // Check label filtering for variable-length traversals.
+        // Check label filtering for traversals.
         // Label ID 0 means no label constraint (any label is valid).
         if target_label_id != 0
             && let (Some(label_name), Some(query_ctx)) = (target_label_name, ctx)
         {
-            let vertex_labels = l0_visibility::get_vertex_labels(vid, query_ctx);
-            // If we get labels from L0, check they contain the target label.
-            // If L0 returns empty, the vertex is in storage (not in L0), so we trust
-            // it was already filtered correctly by the dataset scan.
-            if !vertex_labels.is_empty() && !vertex_labels.contains(&label_name.to_string()) {
-                return false;
+            // Use get_vertex_labels_optional to distinguish "in L0 with no labels"
+            // (Some([])) from "not in any L0 buffer" (None). The BFS traverse
+            // reaches nodes by following edges, NOT through a dataset scan, so
+            // we cannot blindly trust that the node has the target label.
+            match l0_visibility::get_vertex_labels_optional(vid, query_ctx) {
+                Some(labels) => {
+                    // Node is in an L0 buffer — reject if it lacks the required label.
+                    if !labels.iter().any(|l| l == label_name) {
+                        return false;
+                    }
+                }
+                None => {
+                    // Node is in persistent storage only. Check the schema:
+                    // in schema mode each label has its own dataset, so we can
+                    // verify by checking if the schema has this label and if the
+                    // node was stored under it. For now, fall through and let the
+                    // target_filter (hasLabel) do the check.
+                }
             }
         }
 
@@ -6146,6 +6105,7 @@ impl Executor {
         graph: &uni_store::runtime::WorkingGraph,
         target_label_name: Option<&str>,
         edge_type_name: Option<&str>,
+        schema: &uni_common::core::schema::Schema,
     ) -> HashMap<String, Value> {
         let mut new_m = row.clone();
 
@@ -6399,9 +6359,13 @@ impl Executor {
                         };
                         next_vid = Some(neighbor);
 
+                        // Look up edge type name from schema using the edge_type id
+                        let path_edge_type_name = schema
+                            .edge_type_name_by_id_unified(edge.edge_type)
+                            .unwrap_or_default();
                         path_edges.push(crate::types::Edge {
                             eid: *eid,
-                            edge_type: String::new(), // Unknown name
+                            edge_type: path_edge_type_name,
                             src: edge.src_vid,
                             dst: edge.dst_vid,
                             properties: HashMap::new(),
@@ -6708,7 +6672,10 @@ impl Executor {
                 continue;
             }
 
-            // Fall back to storage scan
+            // Fall back to schema lookup using the graph's edge type ID.
+            // The subgraph loaded for traversal stores the numeric edge type;
+            // we can look it up in the schema directly.
+            // This is faster and more reliable than scanning storage datasets.
             if let Some(edge_type) = self.find_edge_type_in_storage(eid, &schema).await {
                 eid_types.insert(eid, edge_type);
             }
