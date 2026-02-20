@@ -150,7 +150,7 @@ pub fn register_cypher_udfs(ctx: &SessionContext) -> DFResult<()> {
     ctx.register_udf(create_duration_property_udf());
     ctx.register_udf(create_temporal_property_udf());
     ctx.register_udf(create_tostring_udf());
-    ctx.register_udf(create_type_rank_udf());
+    ctx.register_udf(create_cypher_sort_key_udf());
     ctx.register_udf(create_has_null_udf());
     ctx.register_udf(create_cypher_size_udf());
 
@@ -200,6 +200,8 @@ pub fn register_cypher_udfs(ctx: &SessionContext) -> DFResult<()> {
     ctx.register_udf(create_cypher_head_udf());
     ctx.register_udf(create_cypher_last_udf());
     ctx.register_udf(create_cypher_reverse_udf());
+    ctx.register_udf(create_cypher_substring_udf());
+    ctx.register_udf(create_cypher_split_udf());
     ctx.register_udf(create_cypher_list_to_cv_udf());
     ctx.register_udf(create_cypher_scalar_to_cv_udf());
 
@@ -512,6 +514,24 @@ impl ScalarUDFImpl for PropertiesUdf {
             let arg = &val_args[0];
             match arg {
                 Value::Map(map) => {
+                    // Detect null entities from OPTIONAL MATCH: when the entity's
+                    // identity field (_vid for nodes, _eid for edges) is present
+                    // but null, the entire entity is null. This happens because
+                    // add_structural_projection builds a named_struct from
+                    // individual columns, producing a valid struct with all-null
+                    // fields rather than a null struct.
+                    // Note: only check when the field EXISTS — regular maps passed
+                    // to properties() (e.g. properties({name: 'foo'})) won't have
+                    // these fields and should proceed normally.
+                    let identity_null = map
+                        .get("_vid")
+                        .map(|v| v.is_null())
+                        .or_else(|| map.get("_eid").map(|v| v.is_null()))
+                        .unwrap_or(false);
+                    if identity_null {
+                        return Ok(Value::Null);
+                    }
+
                     // For schemaless entities, properties are in _all_props.
                     let source = match map.get("_all_props") {
                         Some(Value::Map(all)) => all,
@@ -1059,10 +1079,50 @@ fn extract_i64_range_arg(arg: &ColumnarValue, name: &str) -> DFResult<i64> {
                 name
             ))),
         },
-        _ => Err(datafusion::error::DataFusionError::Execution(format!(
-            "ArgumentError: InvalidArgumentType - range() {} must be an integer",
-            name
-        ))),
+        ColumnarValue::Array(arr) => {
+            // Handle single-element arrays from columnar UDF context (e.g. size() output)
+            if !arr.is_empty() && !arr.is_null(0) {
+                use datafusion::arrow::array::{
+                    Int8Array, Int16Array, Int32Array, Int64Array, UInt8Array, UInt16Array,
+                    UInt32Array, UInt64Array,
+                };
+                match arr.data_type() {
+                    DataType::Int8 => {
+                        Ok(arr.as_any().downcast_ref::<Int8Array>().unwrap().value(0) as i64)
+                    }
+                    DataType::Int16 => {
+                        Ok(arr.as_any().downcast_ref::<Int16Array>().unwrap().value(0) as i64)
+                    }
+                    DataType::Int32 => {
+                        Ok(arr.as_any().downcast_ref::<Int32Array>().unwrap().value(0) as i64)
+                    }
+                    DataType::Int64 => {
+                        Ok(arr.as_any().downcast_ref::<Int64Array>().unwrap().value(0))
+                    }
+                    DataType::UInt8 => {
+                        Ok(arr.as_any().downcast_ref::<UInt8Array>().unwrap().value(0) as i64)
+                    }
+                    DataType::UInt16 => {
+                        Ok(arr.as_any().downcast_ref::<UInt16Array>().unwrap().value(0) as i64)
+                    }
+                    DataType::UInt32 => {
+                        Ok(arr.as_any().downcast_ref::<UInt32Array>().unwrap().value(0) as i64)
+                    }
+                    DataType::UInt64 => {
+                        Ok(arr.as_any().downcast_ref::<UInt64Array>().unwrap().value(0) as i64)
+                    }
+                    _ => Err(datafusion::error::DataFusionError::Execution(format!(
+                        "ArgumentError: InvalidArgumentType - range() {} must be an integer",
+                        name
+                    ))),
+                }
+            } else {
+                Err(datafusion::error::DataFusionError::Execution(format!(
+                    "ArgumentError: InvalidArgumentType - range() {} must be an integer",
+                    name
+                )))
+            }
+        }
     }
 }
 
@@ -1133,21 +1193,22 @@ impl ScalarUDFImpl for RangeUdf {
             ));
         }
 
-        // Generate range
+        // Generate range — return empty list when direction and step are inconsistent
         let mut values = Vec::new();
-        if step > 0 {
+        if step > 0 && start <= end {
             let mut current = start;
             while current <= end {
                 values.push(datafusion::common::ScalarValue::Int64(Some(current)));
                 current += step;
             }
-        } else {
+        } else if step < 0 && start >= end {
             let mut current = start;
             while current >= end {
                 values.push(datafusion::common::ScalarValue::Int64(Some(current)));
                 current += step;
             }
         }
+        // else: direction and step are inconsistent → return empty list
 
         let list = datafusion::common::ScalarValue::List(
             datafusion::common::ScalarValue::new_list(&values, &DataType::Int64, true),
@@ -1661,7 +1722,7 @@ impl ScalarUDFImpl for ToStringUdf {
                         _ => "Unknown",
                     };
                     Err(datafusion::error::DataFusionError::Execution(format!(
-                        "Type mismatch: expected String, Integer, Float, Boolean, Temporal, or Point but was {}",
+                        "TypeError: InvalidArgumentValue - toString() does not accept {} values",
                         type_name
                     )))
                 }
@@ -2464,20 +2525,21 @@ impl ScalarUDFImpl for ToBooleanUdf {
 }
 
 // ============================================================================
-// _try_to_float(x) -> Float64   (internal: returns NULL for unsupported types)
-// Used by ORDER BY type-ranked sorting, NOT user-facing.
+// _cypher_sort_key(x) -> LargeBinary
+// Order-preserving binary encoding for Cypher ORDER BY.
+// Produces byte sequences where memcmp matches Cypher's orderability rules.
 // ============================================================================
 
-pub fn create_try_to_float_udf() -> ScalarUDF {
-    ScalarUDF::new_from_impl(TryToFloatUdf::new())
+pub fn create_cypher_sort_key_udf() -> ScalarUDF {
+    ScalarUDF::new_from_impl(CypherSortKeyUdf::new())
 }
 
 #[derive(Debug)]
-struct TryToFloatUdf {
+struct CypherSortKeyUdf {
     signature: Signature,
 }
 
-impl TryToFloatUdf {
+impl CypherSortKeyUdf {
     fn new() -> Self {
         Self {
             signature: Signature::any(1, Volatility::Immutable),
@@ -2485,15 +2547,15 @@ impl TryToFloatUdf {
     }
 }
 
-impl_udf_eq_hash!(TryToFloatUdf);
+impl_udf_eq_hash!(CypherSortKeyUdf);
 
-impl ScalarUDFImpl for TryToFloatUdf {
+impl ScalarUDFImpl for CypherSortKeyUdf {
     fn as_any(&self) -> &dyn Any {
         self
     }
 
     fn name(&self) -> &str {
-        "_try_to_float"
+        "_cypher_sort_key"
     }
 
     fn signature(&self) -> &Signature {
@@ -2501,244 +2563,612 @@ impl ScalarUDFImpl for TryToFloatUdf {
     }
 
     fn return_type(&self, _arg_types: &[DataType]) -> DFResult<DataType> {
-        Ok(DataType::Float64)
-    }
-
-    fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DFResult<ColumnarValue> {
-        let output_type = self.return_type(&[])?;
-        invoke_cypher_udf(args, &output_type, |val_args| {
-            if val_args.is_empty() {
-                return Ok(Value::Null);
-            }
-            let val = &val_args[0];
-            Ok(match val {
-                Value::Int(i) => Value::Float(*i as f64),
-                Value::Float(f) => Value::Float(*f),
-                Value::String(s) => {
-                    if let Ok(f) = s.parse::<f64>() {
-                        Value::Float(f)
-                    } else {
-                        Value::Null
-                    }
-                }
-                _ => Value::Null,
-            })
-        })
-    }
-}
-
-// ============================================================================
-// _try_to_boolean(x) -> Boolean   (internal: returns NULL for unsupported types)
-// Used by ORDER BY type-ranked sorting, NOT user-facing.
-// ============================================================================
-
-pub fn create_try_to_boolean_udf() -> ScalarUDF {
-    ScalarUDF::new_from_impl(TryToBooleanUdf::new())
-}
-
-#[derive(Debug)]
-struct TryToBooleanUdf {
-    signature: Signature,
-}
-
-impl TryToBooleanUdf {
-    fn new() -> Self {
-        Self {
-            signature: Signature::any(1, Volatility::Immutable),
-        }
-    }
-}
-
-impl_udf_eq_hash!(TryToBooleanUdf);
-
-impl ScalarUDFImpl for TryToBooleanUdf {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
-    fn name(&self) -> &str {
-        "_try_to_boolean"
-    }
-
-    fn signature(&self) -> &Signature {
-        &self.signature
-    }
-
-    fn return_type(&self, _arg_types: &[DataType]) -> DFResult<DataType> {
-        Ok(DataType::Boolean)
-    }
-
-    fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DFResult<ColumnarValue> {
-        let output_type = self.return_type(&[])?;
-        invoke_cypher_udf(args, &output_type, |val_args| {
-            if val_args.is_empty() {
-                return Ok(Value::Null);
-            }
-            let val = &val_args[0];
-            Ok(match val {
-                Value::Bool(b) => Value::Bool(*b),
-                Value::String(s) => {
-                    let s_lower = s.to_lowercase();
-                    if s_lower == "true" {
-                        Value::Bool(true)
-                    } else if s_lower == "false" {
-                        Value::Bool(false)
-                    } else {
-                        Value::Null
-                    }
-                }
-                Value::Int(i) => Value::Bool(*i != 0),
-                _ => Value::Null,
-            })
-        })
-    }
-}
-
-// ============================================================================
-// _cypher_type_rank(x) -> Int32
-// Internal UDF for Cypher ORDER BY type ranking
-// ============================================================================
-
-pub fn create_type_rank_udf() -> ScalarUDF {
-    ScalarUDF::new_from_impl(TypeRankUdf::new())
-}
-
-#[derive(Debug)]
-struct TypeRankUdf {
-    signature: Signature,
-}
-
-impl TypeRankUdf {
-    fn new() -> Self {
-        Self {
-            signature: Signature::any(1, Volatility::Immutable),
-        }
-    }
-}
-
-impl_udf_eq_hash!(TypeRankUdf);
-
-impl ScalarUDFImpl for TypeRankUdf {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
-    fn name(&self) -> &str {
-        "_cypher_type_rank"
-    }
-
-    fn signature(&self) -> &Signature {
-        &self.signature
-    }
-
-    fn return_type(&self, _arg_types: &[DataType]) -> DFResult<DataType> {
-        Ok(DataType::Int32)
+        Ok(DataType::LargeBinary)
     }
 
     fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DFResult<ColumnarValue> {
         if args.args.len() != 1 {
             return Err(datafusion::error::DataFusionError::Execution(
-                "_cypher_type_rank(): requires 1 argument".to_string(),
+                "_cypher_sort_key(): requires 1 argument".to_string(),
             ));
         }
 
         let arg = &args.args[0];
         match arg {
             ColumnarValue::Scalar(s) => {
-                let rank = get_type_rank_scalar(s);
-                Ok(ColumnarValue::Scalar(ScalarValue::Int32(Some(rank))))
+                let val = if s.is_null() {
+                    Value::Null
+                } else {
+                    scalar_to_value(s)?
+                };
+                let key = encode_cypher_sort_key(&val);
+                Ok(ColumnarValue::Scalar(ScalarValue::LargeBinary(Some(key))))
             }
             ColumnarValue::Array(arr) => {
-                let ranks: arrow::array::Int32Array = (0..arr.len())
-                    .map(|i| {
-                        let scalar =
-                            ScalarValue::try_from_array(arr, i).unwrap_or(ScalarValue::Null);
-                        get_type_rank_scalar(&scalar)
-                    })
-                    .collect();
-                Ok(ColumnarValue::Array(Arc::new(ranks)))
+                let mut keys: Vec<Option<Vec<u8>>> = Vec::with_capacity(arr.len());
+                for i in 0..arr.len() {
+                    let val = if arr.is_null(i) {
+                        Value::Null
+                    } else {
+                        get_value_from_array(arr, i)?
+                    };
+                    keys.push(Some(encode_cypher_sort_key(&val)));
+                }
+                let array = LargeBinaryArray::from(
+                    keys.iter()
+                        .map(|k| k.as_deref())
+                        .collect::<Vec<Option<&[u8]>>>(),
+                );
+                Ok(ColumnarValue::Array(Arc::new(array)))
             }
         }
     }
 }
 
-fn get_type_rank_scalar(val: &ScalarValue) -> i32 {
-    if val.is_null() {
-        return 9;
+/// Encode a Cypher value into an order-preserving binary sort key.
+///
+/// The resulting byte sequence has the property that lexicographic (memcmp)
+/// comparison of two keys produces the same ordering as Cypher's ORDER BY
+/// semantics, including cross-type ordering and within-type comparisons.
+pub fn encode_cypher_sort_key(value: &Value) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(32);
+    encode_sort_key_to_buf(value, &mut buf);
+    buf
+}
+
+/// Recursive sort key encoder.
+fn encode_sort_key_to_buf(value: &Value, buf: &mut Vec<u8>) {
+    // Check for map-encoded temporals, nodes, edges, paths first
+    if let Value::Map(map) = value {
+        if let Some(tv) = sort_key_map_as_temporal(map) {
+            buf.push(0x07); // Temporal rank
+            encode_temporal_payload(&tv, buf);
+            return;
+        }
+        let rank = sort_key_map_rank(map);
+        if rank != 0 {
+            // Node, Edge, or Path encoded as map
+            buf.push(rank);
+            match rank {
+                0x01 => encode_map_as_node_payload(map, buf),
+                0x02 => encode_map_as_edge_payload(map, buf),
+                0x04 => encode_map_as_path_payload(map, buf),
+                _ => {} // shouldn't happen
+            }
+            return;
+        }
     }
 
-    match val {
-        ScalarValue::Int8(_)
-        | ScalarValue::Int16(_)
-        | ScalarValue::Int32(_)
-        | ScalarValue::Int64(_)
-        | ScalarValue::UInt8(_)
-        | ScalarValue::UInt16(_)
-        | ScalarValue::UInt32(_)
-        | ScalarValue::UInt64(_)
-        | ScalarValue::Float16(_)
-        | ScalarValue::Float32(_)
-        | ScalarValue::Float64(_) => 1,
+    // Check for temporal strings
+    if let Value::String(s) = value {
+        if let Some(tv) = sort_key_string_as_temporal(s) {
+            buf.push(0x07); // Temporal rank
+            encode_temporal_payload(&tv, buf);
+            return;
+        }
+        // Wide temporal: out-of-range dates that eval_datetime_function couldn't fit in i64 nanos.
+        // Parse directly with chrono and encode with i128 nanos for correct ordering.
+        if let Some(temporal_type) = crate::query::datetime::classify_temporal(s) {
+            buf.push(0x07); // Temporal rank
+            if encode_wide_temporal_sort_key(s, temporal_type, buf) {
+                return;
+            }
+            // If wide parse failed, remove the temporal rank byte we just pushed
+            buf.pop();
+        }
+    }
 
-        ScalarValue::Boolean(_) => 2,
+    let rank = sort_key_type_rank(value);
+    buf.push(rank);
 
-        ScalarValue::Utf8(Some(s)) | ScalarValue::LargeUtf8(Some(s)) => {
-            // Try to infer type from string content to fix sorting of coerced values
-            if s.parse::<f64>().is_ok() {
-                1 // Number
-            } else if s.eq_ignore_ascii_case("true") || s.eq_ignore_ascii_case("false") {
-                2 // Bool
-            } else {
-                3 // String
+    match value {
+        Value::Null => {}                   // rank byte 0x0A is sufficient
+        Value::Float(f) if f.is_nan() => {} // rank byte 0x09 is sufficient
+        Value::Bool(b) => buf.push(if *b { 0x01 } else { 0x00 }),
+        Value::Int(i) => {
+            let f = *i as f64;
+            buf.extend_from_slice(&encode_order_preserving_f64(f));
+        }
+        Value::Float(f) => {
+            buf.extend_from_slice(&encode_order_preserving_f64(*f));
+        }
+        Value::String(s) => {
+            byte_stuff_terminate(s.as_bytes(), buf);
+        }
+        Value::Temporal(tv) => {
+            encode_temporal_payload(tv, buf);
+        }
+        Value::List(items) => {
+            encode_list_payload(items, buf);
+        }
+        Value::Map(map) => {
+            encode_map_payload(map, buf);
+        }
+        Value::Node(node) => {
+            encode_node_payload(node, buf);
+        }
+        Value::Edge(edge) => {
+            encode_edge_payload(edge, buf);
+        }
+        Value::Path(path) => {
+            encode_path_payload(path, buf);
+        }
+        // Bytes and Vector get rank 0x0B - just encode raw bytes
+        Value::Bytes(b) => {
+            byte_stuff_terminate(b, buf);
+        }
+        Value::Vector(v) => {
+            for f in v {
+                buf.extend_from_slice(&encode_order_preserving_f64(*f as f64));
             }
         }
-        ScalarValue::Utf8(None) | ScalarValue::LargeUtf8(None) => 9,
-
-        ScalarValue::List(_) | ScalarValue::LargeList(_) | ScalarValue::FixedSizeList(_) => 4,
-
-        ScalarValue::Struct(arr) => {
-            let fields = arr.fields();
-            let field_names: Vec<&str> = fields.iter().map(|f| f.name().as_str()).collect();
-
-            if field_names.contains(&"_vid") {
-                7 // Node
-            } else if field_names.contains(&"_eid") {
-                6 // Rel
-            } else if field_names.contains(&"nodes") && field_names.contains(&"relationships") {
-                5 // Path
-            } else {
-                8 // Map
-            }
-        }
-
-        ScalarValue::Dictionary(_, val) => get_type_rank_scalar(val),
-
-        // LargeBinary: CypherValue-encoded properties — decode and rank semantically.
-        // Without this, all LB values get rank 0 (below Number/Bool/String), causing
-        // incorrect sort order in mixed-type ORDER BY.
-        ScalarValue::LargeBinary(Some(bytes)) => get_type_rank_from_cypher_value(bytes),
-
-        _ => 0,
+        _ => {} // Future variants: rank byte is sufficient
     }
 }
 
-/// Decode a CypherValue-encoded byte slice and return its semantic type rank.
-/// Cypher ORDER BY rank: Map(8) > Node(7) > Rel(6) > Path(5) > List(4) > String(3) > Bool(2) > Number(1)
-fn get_type_rank_from_cypher_value(bytes: &[u8]) -> i32 {
-    use uni_common::Value;
-    match uni_common::cypher_value_codec::decode(bytes) {
-        Ok(Value::Null) => 9,
-        Ok(Value::Int(_) | Value::Float(_)) => 1,
-        Ok(Value::Bool(_)) => 2,
-        Ok(Value::String(_)) => 3,
-        Ok(Value::List(_)) => 4,
-        Ok(Value::Map(_)) => 8,
-        Ok(Value::Node(_)) => 7,
-        Ok(Value::Edge(_)) => 6,
-        Ok(Value::Path(_)) => 5,
-        Ok(Value::Bytes(_) | Value::Vector(_) | Value::Temporal(_)) => 0,
-        Ok(_) => 0,
-        Err(_) => 0,
+/// Type rank for sort key encoding.
+///
+/// Matches the fallback executor's `order_by_type_rank` at core.rs:401.
+fn sort_key_type_rank(v: &Value) -> u8 {
+    match v {
+        Value::Map(map) => sort_key_map_rank(map),
+        Value::Node(_) => 0x01,
+        Value::Edge(_) => 0x02,
+        Value::List(_) => 0x03,
+        Value::Path(_) => 0x04,
+        Value::String(_) => 0x05,
+        Value::Bool(_) => 0x06,
+        Value::Temporal(_) => 0x07,
+        Value::Int(_) => 0x08,
+        Value::Float(f) if f.is_nan() => 0x09,
+        Value::Float(_) => 0x08,
+        Value::Null => 0x0A,
+        Value::Bytes(_) | Value::Vector(_) => 0x0B,
+        _ => 0x0B, // Future variants
+    }
+}
+
+/// Rank maps that represent other types (mirrors `map_order_rank` from core.rs:420).
+fn sort_key_map_rank(map: &std::collections::HashMap<String, Value>) -> u8 {
+    if sort_key_map_as_temporal(map).is_some() {
+        0x07
+    } else if map.contains_key("nodes")
+        && (map.contains_key("relationships") || map.contains_key("edges"))
+    {
+        0x04 // Path
+    } else if map.contains_key("_eid")
+        || map.contains_key("_src")
+        || map.contains_key("_dst")
+        || map.contains_key("_type")
+        || map.contains_key("_type_name")
+    {
+        0x02 // Edge
+    } else if map.contains_key("_vid") || map.contains_key("_labels") || map.contains_key("_label")
+    {
+        0x01 // Node
+    } else {
+        0x00 // Regular map
+    }
+}
+
+/// Try to interpret a map as a temporal value (mirrors `map_as_temporal` from core.rs:468).
+fn sort_key_map_as_temporal(
+    map: &std::collections::HashMap<String, Value>,
+) -> Option<uni_common::TemporalValue> {
+    if map.len() != 1 {
+        return None;
+    }
+
+    let as_i32 = |v: &Value| v.as_i64().and_then(|n| i32::try_from(n).ok());
+    let as_i64 = |v: &Value| v.as_i64();
+
+    if let Some(Value::Map(inner)) = map.get("Date") {
+        let days = inner.get("days_since_epoch").and_then(as_i32)?;
+        return Some(uni_common::TemporalValue::Date {
+            days_since_epoch: days,
+        });
+    }
+    if let Some(Value::Map(inner)) = map.get("LocalTime") {
+        let nanos = inner.get("nanos_since_midnight").and_then(as_i64)?;
+        return Some(uni_common::TemporalValue::LocalTime {
+            nanos_since_midnight: nanos,
+        });
+    }
+    if let Some(Value::Map(inner)) = map.get("Time") {
+        let nanos = inner.get("nanos_since_midnight").and_then(as_i64)?;
+        let offset = inner.get("offset_seconds").and_then(as_i32)?;
+        return Some(uni_common::TemporalValue::Time {
+            nanos_since_midnight: nanos,
+            offset_seconds: offset,
+        });
+    }
+    if let Some(Value::Map(inner)) = map.get("LocalDateTime") {
+        let nanos = inner.get("nanos_since_epoch").and_then(as_i64)?;
+        return Some(uni_common::TemporalValue::LocalDateTime {
+            nanos_since_epoch: nanos,
+        });
+    }
+    if let Some(Value::Map(inner)) = map.get("DateTime") {
+        let nanos = inner.get("nanos_since_epoch").and_then(as_i64)?;
+        let offset = inner.get("offset_seconds").and_then(as_i32)?;
+        let timezone_name = match inner.get("timezone_name") {
+            Some(Value::String(s)) => Some(s.clone()),
+            _ => None,
+        };
+        return Some(uni_common::TemporalValue::DateTime {
+            nanos_since_epoch: nanos,
+            offset_seconds: offset,
+            timezone_name,
+        });
+    }
+    if let Some(Value::Map(inner)) = map.get("Duration") {
+        let months = inner.get("months").and_then(as_i64)?;
+        let days = inner.get("days").and_then(as_i64)?;
+        let nanos = inner.get("nanos").and_then(as_i64)?;
+        return Some(uni_common::TemporalValue::Duration {
+            months,
+            days,
+            nanos,
+        });
+    }
+    None
+}
+
+/// Try to parse a string as a temporal value (mirrors `string_as_temporal` from core.rs:453).
+fn sort_key_string_as_temporal(s: &str) -> Option<uni_common::TemporalValue> {
+    use crate::query::datetime::{classify_temporal, eval_datetime_function};
+
+    let fn_name = match classify_temporal(s)? {
+        uni_common::TemporalType::Date => "DATE",
+        uni_common::TemporalType::LocalTime => "LOCALTIME",
+        uni_common::TemporalType::Time => "TIME",
+        uni_common::TemporalType::LocalDateTime => "LOCALDATETIME",
+        uni_common::TemporalType::DateTime => "DATETIME",
+        uni_common::TemporalType::Duration => "DURATION",
+    };
+    match eval_datetime_function(fn_name, &[Value::String(s.to_string())]).ok()? {
+        Value::Temporal(tv) => Some(tv),
+        _ => None,
+    }
+}
+
+/// Encode a wide (out-of-range) temporal sort key directly from a formatted string.
+///
+/// When `eval_datetime_function` returns `Value::String` because the nanos don't fit in i64,
+/// we parse the formatted string directly with chrono and encode the sort key using i128 nanos.
+/// This is called from `encode_sort_key_to_buf` as a fallback when `sort_key_string_as_temporal`
+/// returns None but `classify_temporal` recognizes the string.
+fn encode_wide_temporal_sort_key(
+    s: &str,
+    temporal_type: uni_common::TemporalType,
+    buf: &mut Vec<u8>,
+) -> bool {
+    match temporal_type {
+        uni_common::TemporalType::LocalDateTime => {
+            if let Some(ndt) = parse_naive_datetime(s) {
+                buf.push(0x03); // LocalDateTime variant
+                let wide_nanos = naive_datetime_to_wide_nanos(&ndt);
+                buf.extend_from_slice(&encode_order_preserving_i128(wide_nanos));
+                return true;
+            }
+            false
+        }
+        uni_common::TemporalType::DateTime => {
+            // Strip optional [timezone] suffix
+            let base = if let Some(bracket_pos) = s.find('[') {
+                &s[..bracket_pos]
+            } else {
+                s
+            };
+            if let Ok(dt) = chrono::DateTime::parse_from_str(base, "%Y-%m-%dT%H:%M:%S%.f%:z") {
+                buf.push(0x04); // DateTime variant
+                let utc = dt.naive_utc();
+                let wide_nanos = naive_datetime_to_wide_nanos(&utc);
+                buf.extend_from_slice(&encode_order_preserving_i128(wide_nanos));
+                return true;
+            }
+            if let Ok(dt) = chrono::DateTime::parse_from_str(base, "%Y-%m-%dT%H:%M:%S%:z") {
+                buf.push(0x04); // DateTime variant
+                let utc = dt.naive_utc();
+                let wide_nanos = naive_datetime_to_wide_nanos(&utc);
+                buf.extend_from_slice(&encode_order_preserving_i128(wide_nanos));
+                return true;
+            }
+            false
+        }
+        uni_common::TemporalType::Date => {
+            if let Ok(nd) = chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d")
+                && let Some(epoch) = chrono::NaiveDate::from_ymd_opt(1970, 1, 1)
+            {
+                buf.push(0x00); // Date variant
+                let days = nd.signed_duration_since(epoch).num_days() as i32;
+                buf.extend_from_slice(&encode_order_preserving_i32(days));
+                return true;
+            }
+            false
+        }
+        _ => false,
+    }
+}
+
+/// Parse a naive datetime string in ISO format.
+fn parse_naive_datetime(s: &str) -> Option<chrono::NaiveDateTime> {
+    chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S%.f")
+        .ok()
+        .or_else(|| chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S").ok())
+}
+
+/// Compute nanoseconds since Unix epoch as i128 for a NaiveDateTime.
+/// This handles dates outside the i64 nanos range (~1677-2262).
+fn naive_datetime_to_wide_nanos(ndt: &chrono::NaiveDateTime) -> i128 {
+    let secs = ndt.and_utc().timestamp() as i128;
+    let subsec_nanos = ndt.and_utc().timestamp_subsec_nanos() as i128;
+    secs * 1_000_000_000 + subsec_nanos
+}
+
+/// Encode a map that looks like a node into the node sort key payload.
+fn encode_map_as_node_payload(map: &std::collections::HashMap<String, Value>, buf: &mut Vec<u8>) {
+    // Extract labels
+    let mut labels: Vec<String> = Vec::new();
+    if let Some(Value::List(lbls)) = map.get("_labels") {
+        for l in lbls {
+            if let Value::String(s) = l {
+                labels.push(s.clone());
+            }
+        }
+    } else if let Some(Value::String(lbl)) = map.get("_label") {
+        labels.push(lbl.clone());
+    }
+    labels.sort();
+
+    // Extract vid
+    let vid = map.get("_vid").and_then(|v| v.as_i64()).unwrap_or(0) as u64;
+
+    // Labels
+    let labels_joined = labels.join("\x01");
+    byte_stuff_terminate(labels_joined.as_bytes(), buf);
+
+    // VID
+    buf.extend_from_slice(&vid.to_be_bytes());
+
+    // Properties (all keys except internal ones)
+    let mut props: std::collections::HashMap<String, Value> = std::collections::HashMap::new();
+    for (k, v) in map {
+        if !k.starts_with('_') {
+            props.insert(k.clone(), v.clone());
+        }
+    }
+    encode_map_payload(&props, buf);
+}
+
+/// Encode a map that looks like an edge into the edge sort key payload.
+fn encode_map_as_edge_payload(map: &std::collections::HashMap<String, Value>, buf: &mut Vec<u8>) {
+    let edge_type = map
+        .get("_type")
+        .or_else(|| map.get("_type_name"))
+        .and_then(|v| {
+            if let Value::String(s) = v {
+                Some(s.as_str())
+            } else {
+                None
+            }
+        })
+        .unwrap_or("");
+
+    byte_stuff_terminate(edge_type.as_bytes(), buf);
+
+    let src = map.get("_src").and_then(|v| v.as_i64()).unwrap_or(0) as u64;
+    let dst = map.get("_dst").and_then(|v| v.as_i64()).unwrap_or(0) as u64;
+    let eid = map.get("_eid").and_then(|v| v.as_i64()).unwrap_or(0) as u64;
+
+    buf.extend_from_slice(&src.to_be_bytes());
+    buf.extend_from_slice(&dst.to_be_bytes());
+    buf.extend_from_slice(&eid.to_be_bytes());
+
+    // Properties (all keys except internal ones)
+    let mut props: std::collections::HashMap<String, Value> = std::collections::HashMap::new();
+    for (k, v) in map {
+        if !k.starts_with('_') {
+            props.insert(k.clone(), v.clone());
+        }
+    }
+    encode_map_payload(&props, buf);
+}
+
+/// Encode a map that looks like a path into the path sort key payload.
+fn encode_map_as_path_payload(map: &std::collections::HashMap<String, Value>, buf: &mut Vec<u8>) {
+    // Nodes
+    if let Some(Value::List(nodes)) = map.get("nodes") {
+        encode_list_payload(nodes, buf);
+    } else {
+        buf.push(0x00); // empty list terminator
+    }
+    // Edges/relationships
+    let edges = map.get("relationships").or_else(|| map.get("edges"));
+    if let Some(Value::List(edges)) = edges {
+        encode_list_payload(edges, buf);
+    } else {
+        buf.push(0x00); // empty list terminator
+    }
+}
+
+// ─── Encoding helpers ───────────────────────────────────────────────────
+
+/// Order-preserving encoding of f64.
+///
+/// Transforms IEEE 754 bit pattern so that memcmp gives the correct
+/// numeric order: -inf < negatives < -0 = +0 < positives < +inf < NaN.
+fn encode_order_preserving_f64(f: f64) -> [u8; 8] {
+    let bits = f.to_bits();
+    let encoded = if bits >> 63 == 1 {
+        // Negative: flip all bits
+        !bits
+    } else {
+        // Non-negative: flip sign bit only
+        bits ^ (1u64 << 63)
+    };
+    encoded.to_be_bytes()
+}
+
+/// Order-preserving encoding of i64.
+fn encode_order_preserving_i64(i: i64) -> [u8; 8] {
+    // XOR with sign bit to flip ordering
+    ((i as u64) ^ (1u64 << 63)).to_be_bytes()
+}
+
+/// Order-preserving encoding of i32.
+fn encode_order_preserving_i32(i: i32) -> [u8; 4] {
+    ((i as u32) ^ (1u32 << 31)).to_be_bytes()
+}
+
+/// Order-preserving encoding of i128.
+fn encode_order_preserving_i128(i: i128) -> [u8; 16] {
+    ((i as u128) ^ (1u128 << 127)).to_be_bytes()
+}
+
+/// Byte-stuff and terminate: every 0x00 in data becomes 0x00 0xFF,
+/// then append 0x00 0x00 as terminator.
+///
+/// This preserves lexicographic order because 0x00 0xFF > 0x00 0x00.
+fn byte_stuff_terminate(data: &[u8], buf: &mut Vec<u8>) {
+    byte_stuff(data, buf);
+    buf.push(0x00);
+    buf.push(0x00);
+}
+
+/// Byte-stuff without terminator.
+fn byte_stuff(data: &[u8], buf: &mut Vec<u8>) {
+    for &b in data {
+        buf.push(b);
+        if b == 0x00 {
+            buf.push(0xFF);
+        }
+    }
+}
+
+/// Encode a list payload: each element wrapped, then end marker.
+///
+/// Format: `[0x01, stuffed(encode(elem)), 0x00, 0x00]...` then `0x00` end marker.
+/// Shorter list < longer list because 0x00 (end) < 0x01 (more elements).
+fn encode_list_payload(items: &[Value], buf: &mut Vec<u8>) {
+    for item in items {
+        buf.push(0x01); // element marker
+        let elem_key = encode_cypher_sort_key(item);
+        byte_stuff_terminate(&elem_key, buf);
+    }
+    buf.push(0x00); // end marker
+}
+
+/// Encode a map payload: entries sorted by key, then end marker.
+fn encode_map_payload(map: &std::collections::HashMap<String, Value>, buf: &mut Vec<u8>) {
+    let mut pairs: Vec<(&String, &Value)> = map.iter().collect();
+    pairs.sort_by_key(|(k, _)| *k);
+
+    for (key, value) in pairs {
+        buf.push(0x01); // entry marker
+        byte_stuff_terminate(key.as_bytes(), buf);
+        let val_key = encode_cypher_sort_key(value);
+        byte_stuff_terminate(&val_key, buf);
+    }
+    buf.push(0x00); // end marker
+}
+
+/// Encode node sort key payload.
+///
+/// Format: `stuffed(sorted_labels_joined_by_\x01), 0x00 0x00, vid_be, map_payload`
+fn encode_node_payload(node: &uni_common::Node, buf: &mut Vec<u8>) {
+    let mut labels = node.labels.clone();
+    labels.sort();
+    let labels_joined = labels.join("\x01");
+    byte_stuff_terminate(labels_joined.as_bytes(), buf);
+
+    buf.extend_from_slice(&node.vid.as_u64().to_be_bytes());
+
+    encode_map_payload(&node.properties, buf);
+}
+
+/// Encode edge sort key payload.
+///
+/// Format: `stuffed(edge_type), 0x00 0x00, src_be, dst_be, eid_be, map_payload`
+fn encode_edge_payload(edge: &uni_common::Edge, buf: &mut Vec<u8>) {
+    byte_stuff_terminate(edge.edge_type.as_bytes(), buf);
+
+    buf.extend_from_slice(&edge.src.as_u64().to_be_bytes());
+    buf.extend_from_slice(&edge.dst.as_u64().to_be_bytes());
+    buf.extend_from_slice(&edge.eid.as_u64().to_be_bytes());
+
+    encode_map_payload(&edge.properties, buf);
+}
+
+/// Encode path sort key payload.
+///
+/// Nodes encoded as list of node sort keys, edges encoded as list of edge sort keys.
+fn encode_path_payload(path: &uni_common::Path, buf: &mut Vec<u8>) {
+    // Nodes as list
+    for node in &path.nodes {
+        buf.push(0x01); // element marker
+        let mut node_key = Vec::new();
+        node_key.push(0x01); // Node rank
+        encode_node_payload(node, &mut node_key);
+        byte_stuff_terminate(&node_key, buf);
+    }
+    buf.push(0x00); // end nodes list
+
+    // Edges as list
+    for edge in &path.edges {
+        buf.push(0x01); // element marker
+        let mut edge_key = Vec::new();
+        edge_key.push(0x02); // Edge rank
+        encode_edge_payload(edge, &mut edge_key);
+        byte_stuff_terminate(&edge_key, buf);
+    }
+    buf.push(0x00); // end edges list
+}
+
+/// Encode temporal value payload.
+fn encode_temporal_payload(tv: &uni_common::TemporalValue, buf: &mut Vec<u8>) {
+    match tv {
+        uni_common::TemporalValue::Date { days_since_epoch } => {
+            buf.push(0x00); // variant rank: Date
+            buf.extend_from_slice(&encode_order_preserving_i32(*days_since_epoch));
+        }
+        uni_common::TemporalValue::LocalTime {
+            nanos_since_midnight,
+        } => {
+            buf.push(0x01); // variant rank: LocalTime
+            buf.extend_from_slice(&encode_order_preserving_i64(*nanos_since_midnight));
+        }
+        uni_common::TemporalValue::Time {
+            nanos_since_midnight,
+            offset_seconds,
+        } => {
+            buf.push(0x02); // variant rank: Time
+            let utc_nanos =
+                *nanos_since_midnight as i128 - (*offset_seconds as i128) * 1_000_000_000;
+            buf.extend_from_slice(&encode_order_preserving_i128(utc_nanos));
+        }
+        uni_common::TemporalValue::LocalDateTime { nanos_since_epoch } => {
+            buf.push(0x03); // variant rank: LocalDateTime
+            // Use i128 for consistent width with wide (out-of-range) temporal sort keys
+            buf.extend_from_slice(&encode_order_preserving_i128(*nanos_since_epoch as i128));
+        }
+        uni_common::TemporalValue::DateTime {
+            nanos_since_epoch, ..
+        } => {
+            buf.push(0x04); // variant rank: DateTime
+            // Use i128 for consistent width with wide (out-of-range) temporal sort keys
+            buf.extend_from_slice(&encode_order_preserving_i128(*nanos_since_epoch as i128));
+        }
+        uni_common::TemporalValue::Duration {
+            months,
+            days,
+            nanos,
+        } => {
+            buf.push(0x05); // variant rank: Duration
+            buf.extend_from_slice(&encode_order_preserving_i64(*months));
+            buf.extend_from_slice(&encode_order_preserving_i64(*days));
+            buf.extend_from_slice(&encode_order_preserving_i64(*nanos));
+        }
     }
 }
 
@@ -3200,7 +3630,10 @@ fn try_fast_compare(
                             None => builder.append_null(),
                         }
                     } else {
-                        builder.append_null(); // Mismatched types or unsupported
+                        // Complex types (lists, maps, temporals, nodes, edges, etc.)
+                        // can't be compared in the fast path — fall back to slow path
+                        // which fully decodes CypherValue to Value for comparison.
+                        return None;
                     }
                 }
             }
@@ -3753,14 +4186,28 @@ fn cypher_size_scalar(scalar: &ScalarValue) -> DFResult<ScalarValue> {
         // LargeBinary (CypherValue) — decode and check type
         ScalarValue::LargeBinary(Some(b)) => {
             if let Ok(uni_val) = uni_common::cypher_value_codec::decode(b) {
-                let json_val: serde_json::Value = uni_val.into();
-                match json_val {
-                    serde_json::Value::Array(arr) => Ok(ScalarValue::Int64(Some(arr.len() as i64))),
-                    serde_json::Value::String(s) => {
-                        Ok(ScalarValue::Int64(Some(s.chars().count() as i64)))
+                match &uni_val {
+                    uni_common::Value::Node(_) => {
+                        Err(datafusion::error::DataFusionError::Execution(
+                            "TypeError: InvalidArgumentValue - length() is not supported for Node values".to_string(),
+                        ))
                     }
-                    serde_json::Value::Object(m) => Ok(ScalarValue::Int64(Some(m.len() as i64))),
-                    _ => Ok(ScalarValue::Int64(None)),
+                    uni_common::Value::Edge(_) => {
+                        Err(datafusion::error::DataFusionError::Execution(
+                            "TypeError: InvalidArgumentValue - length() is not supported for Relationship values".to_string(),
+                        ))
+                    }
+                    _ => {
+                        let json_val: serde_json::Value = uni_val.into();
+                        match json_val {
+                            serde_json::Value::Array(arr) => Ok(ScalarValue::Int64(Some(arr.len() as i64))),
+                            serde_json::Value::String(s) => {
+                                Ok(ScalarValue::Int64(Some(s.chars().count() as i64)))
+                            }
+                            serde_json::Value::Object(m) => Ok(ScalarValue::Int64(Some(m.len() as i64))),
+                            _ => Ok(ScalarValue::Int64(None)),
+                        }
+                    }
                 }
             } else {
                 Ok(ScalarValue::Int64(None))
@@ -3780,8 +4227,23 @@ fn cypher_size_scalar(scalar: &ScalarValue) -> DFResult<ScalarValue> {
             if arr.is_null(0) {
                 Ok(ScalarValue::Int64(None))
             } else {
-                // Check if this is a path struct (has "relationships" field)
                 let schema = arr.fields();
+                let field_names: Vec<&str> = schema.iter().map(|f| f.name().as_str()).collect();
+                // Check if this is a node struct (_vid field present, no "relationships" field)
+                if field_names.contains(&"_vid") && !field_names.contains(&"relationships") {
+                    return Err(datafusion::error::DataFusionError::Execution(
+                        "TypeError: InvalidArgumentValue - length() is not supported for Node values".to_string(),
+                    ));
+                }
+                // Check if this is an edge struct (_eid or _src/_dst fields)
+                if field_names.contains(&"_eid")
+                    || (field_names.contains(&"_src") && field_names.contains(&"_dst"))
+                {
+                    return Err(datafusion::error::DataFusionError::Execution(
+                        "TypeError: InvalidArgumentValue - length() is not supported for Relationship values".to_string(),
+                    ));
+                }
+                // Path struct: has "relationships" field
                 if let Some((rels_idx, _)) = schema
                     .iter()
                     .enumerate()
@@ -4472,6 +4934,196 @@ impl ScalarUDFImpl for CypherReverseUdf {
                     other
                 ))),
             }
+        })
+    }
+}
+
+// ============================================================================
+// _cypher_substring(str, start [, length]) -> Utf8
+// ============================================================================
+
+/// Create the `_cypher_substring` UDF for Cypher `substring()`.
+///
+/// Uses 0-based indexing (Cypher convention):
+/// - `substring("hello", 1)` → `"ello"`
+/// - `substring("hello", 1, 3)` → `"ell"`
+/// - Any null argument → `null`
+pub fn create_cypher_substring_udf() -> ScalarUDF {
+    ScalarUDF::new_from_impl(CypherSubstringUdf::new())
+}
+
+#[derive(Debug)]
+struct CypherSubstringUdf {
+    signature: Signature,
+}
+
+impl CypherSubstringUdf {
+    fn new() -> Self {
+        Self {
+            signature: Signature::variadic_any(Volatility::Immutable),
+        }
+    }
+}
+
+impl_udf_eq_hash!(CypherSubstringUdf);
+
+impl ScalarUDFImpl for CypherSubstringUdf {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn name(&self) -> &str {
+        "_cypher_substring"
+    }
+
+    fn signature(&self) -> &Signature {
+        &self.signature
+    }
+
+    fn return_type(&self, _arg_types: &[DataType]) -> DFResult<DataType> {
+        Ok(DataType::Utf8)
+    }
+
+    fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DFResult<ColumnarValue> {
+        invoke_cypher_udf(args, &DataType::Utf8, |vals| {
+            if vals.len() < 2 || vals.len() > 3 {
+                return Err(datafusion::error::DataFusionError::Execution(
+                    "_cypher_substring(): requires 2 or 3 arguments".to_string(),
+                ));
+            }
+            // Null propagation
+            if vals.iter().any(|v| v.is_null()) {
+                return Ok(Value::Null);
+            }
+            let s = match &vals[0] {
+                Value::String(s) => s.as_str(),
+                other => {
+                    return Err(datafusion::error::DataFusionError::Execution(format!(
+                        "_cypher_substring(): first argument must be a string, got {:?}",
+                        other
+                    )));
+                }
+            };
+            let start = match &vals[1] {
+                Value::Int(i) => *i,
+                other => {
+                    return Err(datafusion::error::DataFusionError::Execution(format!(
+                        "_cypher_substring(): second argument must be an integer, got {:?}",
+                        other
+                    )));
+                }
+            };
+
+            // Cypher substring is 0-based, operates on characters (not bytes)
+            let chars: Vec<char> = s.chars().collect();
+            let len = chars.len() as i64;
+
+            // Clamp start to valid range
+            let start_idx = start.max(0).min(len) as usize;
+
+            let end_idx = if vals.len() == 3 {
+                let length = match &vals[2] {
+                    Value::Int(i) => *i,
+                    other => {
+                        return Err(datafusion::error::DataFusionError::Execution(format!(
+                            "_cypher_substring(): third argument must be an integer, got {:?}",
+                            other
+                        )));
+                    }
+                };
+                if length < 0 {
+                    return Err(datafusion::error::DataFusionError::Execution(
+                        "ArgumentError: NegativeIntegerArgument - substring length must be non-negative".to_string(),
+                    ));
+                }
+                (start_idx as i64 + length).min(len) as usize
+            } else {
+                len as usize
+            };
+
+            Ok(Value::String(chars[start_idx..end_idx].iter().collect()))
+        })
+    }
+}
+
+// ============================================================================
+// _cypher_split(str, delimiter) -> LargeBinary (CypherValue list of strings)
+// ============================================================================
+
+/// Create the `_cypher_split` UDF for Cypher `split()`.
+///
+/// - `split("one,two", ",")` → `["one", "two"]`
+/// - `split(null, ",")` → `null`
+pub fn create_cypher_split_udf() -> ScalarUDF {
+    ScalarUDF::new_from_impl(CypherSplitUdf::new())
+}
+
+#[derive(Debug)]
+struct CypherSplitUdf {
+    signature: Signature,
+}
+
+impl CypherSplitUdf {
+    fn new() -> Self {
+        Self {
+            signature: Signature::any(2, Volatility::Immutable),
+        }
+    }
+}
+
+impl_udf_eq_hash!(CypherSplitUdf);
+
+impl ScalarUDFImpl for CypherSplitUdf {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn name(&self) -> &str {
+        "_cypher_split"
+    }
+
+    fn signature(&self) -> &Signature {
+        &self.signature
+    }
+
+    fn return_type(&self, _arg_types: &[DataType]) -> DFResult<DataType> {
+        Ok(DataType::LargeBinary)
+    }
+
+    fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DFResult<ColumnarValue> {
+        invoke_cypher_udf(args, &DataType::LargeBinary, |vals| {
+            if vals.len() != 2 {
+                return Err(datafusion::error::DataFusionError::Execution(
+                    "_cypher_split(): requires exactly 2 arguments".to_string(),
+                ));
+            }
+            // Null propagation
+            if vals.iter().any(|v| v.is_null()) {
+                return Ok(Value::Null);
+            }
+            let s = match &vals[0] {
+                Value::String(s) => s.clone(),
+                other => {
+                    return Err(datafusion::error::DataFusionError::Execution(format!(
+                        "_cypher_split(): first argument must be a string, got {:?}",
+                        other
+                    )));
+                }
+            };
+            let delimiter = match &vals[1] {
+                Value::String(d) => d.clone(),
+                other => {
+                    return Err(datafusion::error::DataFusionError::Execution(format!(
+                        "_cypher_split(): second argument must be a string, got {:?}",
+                        other
+                    )));
+                }
+            };
+            let parts: Vec<Value> = s
+                .split(&delimiter)
+                .map(|p| Value::String(p.to_string()))
+                .collect();
+            Ok(Value::List(parts))
         })
     }
 }
@@ -6353,6 +7005,214 @@ mod tests {
             }
             ColumnarValue::Scalar(ScalarValue::LargeBinary(None)) => {}
             other => panic!("expected null result, got {other:?}"),
+        }
+    }
+
+    // ====================================================================
+    // _cypher_sort_key UDF Tests
+    // ====================================================================
+
+    #[test]
+    fn test_sort_key_cross_type_ordering() {
+        // Cypher ORDER BY type precedence (ascending):
+        // Map < Node < Edge < List < Path < String < Bool < Temporal < Number < NaN < Null
+        use uni_common::core::id::{Eid, Vid};
+        use uni_common::{Edge, Node, Path, TemporalValue, Value};
+
+        let map_val = Value::Map([("a".to_string(), Value::String("map".to_string()))].into());
+        let node_val = Value::Node(Node {
+            vid: Vid::new(1),
+            labels: vec!["L".to_string()],
+            properties: Default::default(),
+        });
+        let edge_val = Value::Edge(Edge {
+            eid: Eid::new(1),
+            edge_type: "T".to_string(),
+            src: Vid::new(1),
+            dst: Vid::new(2),
+            properties: Default::default(),
+        });
+        let list_val = Value::List(vec![Value::Int(1)]);
+        let path_val = Value::Path(Path {
+            nodes: vec![Node {
+                vid: Vid::new(1),
+                labels: vec!["L".to_string()],
+                properties: Default::default(),
+            }],
+            edges: vec![],
+        });
+        let string_val = Value::String("hello".to_string());
+        let bool_val = Value::Bool(false);
+        let temporal_val = Value::Temporal(TemporalValue::Date {
+            days_since_epoch: 1000,
+        });
+        let number_val = Value::Int(42);
+        let nan_val = Value::Float(f64::NAN);
+        let null_val = Value::Null;
+
+        let values = vec![
+            &map_val,
+            &node_val,
+            &edge_val,
+            &list_val,
+            &path_val,
+            &string_val,
+            &bool_val,
+            &temporal_val,
+            &number_val,
+            &nan_val,
+            &null_val,
+        ];
+
+        let keys: Vec<Vec<u8>> = values.iter().map(|v| encode_cypher_sort_key(v)).collect();
+
+        // Each key must be strictly less than the next
+        for i in 0..keys.len() - 1 {
+            assert!(
+                keys[i] < keys[i + 1],
+                "Expected sort_key({:?}) < sort_key({:?}), but {:?} >= {:?}",
+                values[i],
+                values[i + 1],
+                keys[i],
+                keys[i + 1]
+            );
+        }
+    }
+
+    #[test]
+    fn test_sort_key_numbers() {
+        let neg_inf = encode_cypher_sort_key(&Value::Float(f64::NEG_INFINITY));
+        let neg_100 = encode_cypher_sort_key(&Value::Float(-100.0));
+        let neg_1 = encode_cypher_sort_key(&Value::Int(-1));
+        let zero_int = encode_cypher_sort_key(&Value::Int(0));
+        let zero_float = encode_cypher_sort_key(&Value::Float(0.0));
+        let one_int = encode_cypher_sort_key(&Value::Int(1));
+        let one_float = encode_cypher_sort_key(&Value::Float(1.0));
+        let hundred = encode_cypher_sort_key(&Value::Int(100));
+        let pos_inf = encode_cypher_sort_key(&Value::Float(f64::INFINITY));
+        let nan = encode_cypher_sort_key(&Value::Float(f64::NAN));
+
+        assert!(neg_inf < neg_100, "-inf < -100");
+        assert!(neg_100 < neg_1, "-100 < -1");
+        assert!(neg_1 < zero_int, "-1 < 0");
+        assert_eq!(zero_int, zero_float, "0 int == 0.0 float");
+        assert!(zero_int < one_int, "0 < 1");
+        assert_eq!(one_int, one_float, "1 int == 1.0 float");
+        assert!(one_int < hundred, "1 < 100");
+        assert!(hundred < pos_inf, "100 < +inf");
+        // NaN gets rank 0x09, numbers get rank 0x08, so NaN > any number
+        assert!(pos_inf < nan, "+inf < NaN");
+    }
+
+    #[test]
+    fn test_sort_key_booleans() {
+        let f = encode_cypher_sort_key(&Value::Bool(false));
+        let t = encode_cypher_sort_key(&Value::Bool(true));
+        assert!(f < t, "false < true");
+    }
+
+    #[test]
+    fn test_sort_key_strings() {
+        let empty = encode_cypher_sort_key(&Value::String(String::new()));
+        let a = encode_cypher_sort_key(&Value::String("a".to_string()));
+        let ab = encode_cypher_sort_key(&Value::String("ab".to_string()));
+        let b = encode_cypher_sort_key(&Value::String("b".to_string()));
+
+        assert!(empty < a, "'' < 'a'");
+        assert!(a < ab, "'a' < 'ab'");
+        assert!(ab < b, "'ab' < 'b'");
+    }
+
+    #[test]
+    fn test_sort_key_lists() {
+        let empty = encode_cypher_sort_key(&Value::List(vec![]));
+        let one = encode_cypher_sort_key(&Value::List(vec![Value::Int(1)]));
+        let one_two = encode_cypher_sort_key(&Value::List(vec![Value::Int(1), Value::Int(2)]));
+        let two = encode_cypher_sort_key(&Value::List(vec![Value::Int(2)]));
+
+        assert!(empty < one, "[] < [1]");
+        assert!(one < one_two, "[1] < [1,2]");
+        assert!(one_two < two, "[1,2] < [2]");
+    }
+
+    #[test]
+    fn test_sort_key_temporal() {
+        use uni_common::TemporalValue;
+
+        let date1 = encode_cypher_sort_key(&Value::Temporal(TemporalValue::Date {
+            days_since_epoch: 100,
+        }));
+        let date2 = encode_cypher_sort_key(&Value::Temporal(TemporalValue::Date {
+            days_since_epoch: 200,
+        }));
+        assert!(date1 < date2, "earlier date < later date");
+
+        // Different temporal variants should sort by variant rank
+        let date = encode_cypher_sort_key(&Value::Temporal(TemporalValue::Date {
+            days_since_epoch: i32::MAX,
+        }));
+        let local_time = encode_cypher_sort_key(&Value::Temporal(TemporalValue::LocalTime {
+            nanos_since_midnight: 0,
+        }));
+        assert!(date < local_time, "Date < LocalTime (by variant rank)");
+    }
+
+    #[test]
+    fn test_sort_key_nested_lists() {
+        let inner_a = Value::List(vec![Value::Int(1)]);
+        let inner_b = Value::List(vec![Value::Int(2)]);
+
+        let list_a = encode_cypher_sort_key(&Value::List(vec![inner_a.clone()]));
+        let list_b = encode_cypher_sort_key(&Value::List(vec![inner_b.clone()]));
+
+        assert!(list_a < list_b, "[[1]] < [[2]]");
+    }
+
+    #[test]
+    fn test_sort_key_null_handling() {
+        let null_key = encode_cypher_sort_key(&Value::Null);
+        assert_eq!(null_key, vec![0x0A], "Null produces [0x0A]");
+
+        // Null should sort after everything else
+        let number_key = encode_cypher_sort_key(&Value::Int(42));
+        assert!(number_key < null_key, "number < null");
+    }
+
+    #[test]
+    fn test_byte_stuff_roundtrip() {
+        // Verify byte-stuffing preserves ordering with 0x00 bytes in data
+        let s1 = Value::String("a\x00b".to_string());
+        let s2 = Value::String("a\x00c".to_string());
+        let s3 = Value::String("a\x01".to_string());
+
+        let k1 = encode_cypher_sort_key(&s1);
+        let k2 = encode_cypher_sort_key(&s2);
+        let k3 = encode_cypher_sort_key(&s3);
+
+        assert!(k1 < k2, "a\\x00b < a\\x00c");
+        // After stuffing: "a\x00\xFFb" vs "a\x01"
+        // 0x00 0xFF < 0x01 => "a\x00b" < "a\x01"
+        assert!(k1 < k3, "a\\x00b < a\\x01");
+    }
+
+    #[test]
+    fn test_sort_key_order_preserving_f64() {
+        // Verify the f64 encoding preserves order
+        let vals = [f64::NEG_INFINITY, -1.0, -0.0, 0.0, 1.0, f64::INFINITY];
+        let encoded: Vec<[u8; 8]> = vals
+            .iter()
+            .map(|f| encode_order_preserving_f64(*f))
+            .collect();
+
+        for i in 0..encoded.len() - 1 {
+            assert!(
+                encoded[i] <= encoded[i + 1],
+                "encode({}) should <= encode({}), got {:?} vs {:?}",
+                vals[i],
+                vals[i + 1],
+                encoded[i],
+                encoded[i + 1]
+            );
         }
     }
 }

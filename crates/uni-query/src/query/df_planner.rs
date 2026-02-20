@@ -1637,6 +1637,36 @@ impl HybridPhysicalPlanner {
             // use a temporary edge variable `__rebound_{r}` for traversal and then filter on eid.
             // Do not treat the already-bound `{r}._eid` as "used" here, otherwise the only
             // candidate edge is filtered out before rebound matching.
+            // Handle rebound struct variables from WITH + aggregation.
+            // When edge or target variables have passed through aggregation, they become
+            // struct columns. Extract ALL fields as flat columns so that:
+            // 1. {edge}._eid is available for uniqueness checking
+            // 2. {edge}.{property} is available for downstream RETURN/WHERE
+            // 3. {target}._vid is available for the bound target filter
+            // 4. {target}.{property} is available for downstream RETURN/WHERE
+            let mut input_plan = input_plan;
+            for rebound_var in [
+                step_variable.and_then(|sv| sv.strip_prefix("__rebound_")),
+                target_variable.strip_prefix("__rebound_"),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                if input_plan
+                    .schema()
+                    .field_with_name(rebound_var)
+                    .ok()
+                    .is_some_and(|f| {
+                        matches!(
+                            f.data_type(),
+                            datafusion::arrow::datatypes::DataType::Struct(_)
+                        )
+                    })
+                {
+                    input_plan = Self::extract_all_struct_fields(input_plan, rebound_var)?;
+                }
+            }
+
             let rebound_bound_edge_col = step_variable
                 .and_then(|sv| sv.strip_prefix("__rebound_"))
                 .map(|bound| format!("{}._eid", bound));
@@ -2818,44 +2848,18 @@ impl HybridPhysicalPlanner {
             let df_expr = crate::query::df_expr::apply_type_coercion(&df_expr, &df_schema)?;
             // Resolve UDFs again: apply_type_coercion may create new dummy UDF
             // placeholders (e.g. _cv_to_bool, _cypher_add) that need resolution.
-            let mut df_expr = Self::resolve_udfs(&df_expr, &session.state())?;
-
-            // DateTime/Time struct sorting: replace with nanos_since_epoch/nanos_since_midnight
-            // to ensure sorting by UTC instant, not struct byte ordering
-            // Extract comparable values from temporal structs for correct sorting
-            if let Ok(expr_type) = df_expr.get_type(&df_schema) {
-                if uni_common::core::schema::is_datetime_struct(&expr_type) {
-                    // Sort by UTC instant (nanos_since_epoch)
-                    df_expr = crate::query::df_expr::extract_datetime_nanos(df_expr);
-                } else if uni_common::core::schema::is_time_struct(&expr_type) {
-                    // Sort by UTC-normalized time
-                    // extract_time_nanos does: nanos_since_midnight - (offset_seconds * 1e9)
-                    df_expr = crate::query::df_expr::extract_time_nanos(df_expr);
-                }
-            }
+            let df_expr = Self::resolve_udfs(&df_expr, &session.state())?;
 
             let asc = item.ascending;
             let nulls_first = !asc; // Standard SQL behavior: nulls last for ASC, first for DESC
 
-            // Cypher sort order: Map > Node > Rel > Path > List > String > Bool > Number
-            // We prepend a type rank sort key to ensure correct ordering across mixed types
-            let rank_udf = crate::query::df_udfs::create_type_rank_udf();
-            let rank_expr = rank_udf.call(vec![df_expr.clone()]);
-
-            // For ranks that share the same underlying DataFusion type (e.g. String vs Number vs Bool all coerced to String),
-            // we need secondary keys to sort correctly within the rank.
-            // Rank 1 (Number): sort by _try_to_float(x) — internal, returns NULL for unsupported types
-            let float_udf = crate::query::df_udfs::create_try_to_float_udf();
-            let float_expr = float_udf.call(vec![df_expr.clone()]);
-
-            // Rank 2 (Bool): sort by _try_to_boolean(x) — internal, returns NULL for unsupported types
-            let bool_udf = crate::query::df_udfs::create_try_to_boolean_udf();
-            let bool_expr = bool_udf.call(vec![df_expr.clone()]);
-
-            df_sort_exprs.push(DfSortExpr::new(rank_expr, asc, nulls_first));
-            df_sort_exprs.push(DfSortExpr::new(float_expr, asc, nulls_first));
-            df_sort_exprs.push(DfSortExpr::new(bool_expr, asc, nulls_first));
-            df_sort_exprs.push(DfSortExpr::new(df_expr, asc, nulls_first));
+            // Single order-preserving sort key: _cypher_sort_key(expr) -> LargeBinary
+            // The UDF handles all Cypher ordering semantics (cross-type ranks,
+            // within-type comparisons, temporal normalization, NaN/null placement)
+            // so memcmp of the resulting bytes gives correct Cypher ORDER BY.
+            let sort_key_udf = crate::query::df_udfs::create_cypher_sort_key_udf();
+            let sort_key_expr = sort_key_udf.call(vec![df_expr]);
+            df_sort_exprs.push(DfSortExpr::new(sort_key_expr, asc, nulls_first));
         }
 
         let physical_sort_exprs = create_physical_sort_exprs(
@@ -3570,6 +3574,69 @@ impl HybridPhysicalPlanner {
                     Arc::new(datafusion::common::config::ConfigOptions::default()),
                 )?);
                 proj_exprs.push((labels_expr, format!("{}._labels", variable)));
+            }
+        }
+
+        Ok(Arc::new(ProjectionExec::try_new(proj_exprs, input)?))
+    }
+
+    /// Add a projection that extracts ALL fields from a struct column named `{variable}`
+    /// as flat `{variable}.{field_name}` columns. Used when a variable that passed through
+    /// WITH + aggregation (and became a struct) is referenced by property access downstream.
+    fn extract_all_struct_fields(
+        input: Arc<dyn ExecutionPlan>,
+        variable: &str,
+    ) -> Result<Arc<dyn ExecutionPlan>> {
+        use datafusion::common::ScalarValue;
+        use datafusion::physical_plan::projection::ProjectionExec;
+
+        let schema = input.schema();
+        let mut proj_exprs: Vec<(Arc<dyn datafusion::physical_expr::PhysicalExpr>, String)> =
+            Vec::new();
+
+        // Keep all existing columns
+        for (i, field) in schema.fields().iter().enumerate() {
+            let col_expr = Arc::new(datafusion::physical_expr::expressions::Column::new(
+                field.name(),
+                i,
+            ));
+            proj_exprs.push((col_expr, field.name().clone()));
+        }
+
+        // Find the struct column and extract ALL fields
+        if let Some((struct_idx, struct_field)) = schema
+            .fields()
+            .iter()
+            .enumerate()
+            .find(|(_, f)| f.name() == variable)
+            && let datafusion::arrow::datatypes::DataType::Struct(fields) = struct_field.data_type()
+        {
+            let struct_col: Arc<dyn datafusion::physical_expr::PhysicalExpr> = Arc::new(
+                datafusion::physical_expr::expressions::Column::new(variable, struct_idx),
+            );
+            let get_field_udf: Arc<datafusion::logical_expr::ScalarUDF> =
+                Arc::new(datafusion::logical_expr::ScalarUDF::from(
+                    datafusion::functions::core::getfield::GetFieldFunc::new(),
+                ));
+
+            for field in fields.iter() {
+                let flat_name = format!("{}.{}", variable, field.name());
+                // Skip if already exists as a flat column
+                if schema.column_with_name(&flat_name).is_some() {
+                    continue;
+                }
+                let field_lit: Arc<dyn datafusion::physical_expr::PhysicalExpr> =
+                    Arc::new(datafusion::physical_expr::expressions::Literal::new(
+                        ScalarValue::Utf8(Some(field.name().to_string())),
+                    ));
+                let extract_expr =
+                    Arc::new(datafusion::physical_expr::ScalarFunctionExpr::try_new(
+                        get_field_udf.clone(),
+                        vec![struct_col.clone(), field_lit],
+                        schema.as_ref(),
+                        Arc::new(datafusion::common::config::ConfigOptions::default()),
+                    )?);
+                proj_exprs.push((extract_expr, flat_name));
             }
         }
 

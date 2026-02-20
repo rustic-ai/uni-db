@@ -189,10 +189,6 @@ fn infer_common_scalar_type(scalars: &[ScalarValue]) -> datafusion::arrow::datat
 }
 
 /// Check if a DataFusion expression is a string literal.
-fn is_string_literal(e: &DfExpr) -> bool {
-    matches!(e, DfExpr::Literal(ScalarValue::Utf8(_), _))
-}
-
 /// CypherValue list UDF names (LargeBinary-encoded lists).
 const CYPHER_LIST_FUNCS: &[&str] = &[
     "_make_cypher_list",
@@ -759,6 +755,7 @@ fn translate_list_literal(items: &[Expr], context: Option<&TranslationContext>) 
     let mut has_map = false;
     let mut has_numeric = false;
     let mut has_graph_entity = false;
+    let mut has_temporal = false;
 
     for item in items {
         match item {
@@ -779,6 +776,27 @@ fn translate_list_literal(items: &[Expr], context: Option<&TranslationContext>) 
                     has_graph_entity = true;
                 }
             }
+            // Temporal function calls produce Timestamp/Date32/Struct types that
+            // make_array cannot unify. Route through _make_cypher_list instead.
+            Expr::FunctionCall { name, .. } => {
+                let upper = name.to_uppercase();
+                if matches!(
+                    upper.as_str(),
+                    "DATE"
+                        | "TIME"
+                        | "LOCALTIME"
+                        | "LOCALDATETIME"
+                        | "DATETIME"
+                        | "DURATION"
+                        | "DATE.TRUNCATE"
+                        | "TIME.TRUNCATE"
+                        | "DATETIME.TRUNCATE"
+                        | "LOCALDATETIME.TRUNCATE"
+                        | "LOCALTIME.TRUNCATE"
+                ) {
+                    has_temporal = true;
+                }
+            }
             // Treat Null as compatible with anything
             _ => {}
         }
@@ -787,9 +805,9 @@ fn translate_list_literal(items: &[Expr], context: Option<&TranslationContext>) 
     // Check distinct non-null types count
     let types_count = has_numeric as u8 + has_string as u8 + has_bool as u8 + has_map as u8;
 
-    // Mixed types, nested lists, or graph entities mixed with other types:
+    // Mixed types, nested lists, graph entities, or temporal function calls:
     // encode as LargeBinary CypherValue to avoid Arrow type unification failures.
-    if has_list || has_map || types_count > 1 || has_graph_entity {
+    if has_list || has_map || types_count > 1 || has_graph_entity || has_temporal {
         // Try to convert all items to JSON values for CypherValue encoding
         if let Some(json_array) = try_items_to_json(items) {
             let uni_val: uni_common::Value = serde_json::Value::Array(json_array).into();
@@ -1215,11 +1233,7 @@ fn translate_binary_op(left: DfExpr, op: &BinaryOp, right: DfExpr) -> Result<DfE
 
         // Arithmetic operators
         BinaryOp::Add => {
-            if is_string_literal(&left) || is_string_literal(&right) {
-                Ok(datafusion::functions::string::expr_fn::concat(vec![
-                    left, right,
-                ]))
-            } else if is_list_expr(&left) || is_list_expr(&right) {
+            if is_list_expr(&left) || is_list_expr(&right) {
                 Ok(dummy_udf_expr("_cypher_list_concat", vec![left, right]))
             } else {
                 Ok(left + right)
@@ -1503,19 +1517,8 @@ fn translate_string_function(name_upper: &str, df_args: Vec<DfExpr>) -> Option<R
         }
         "SUBSTRING" => {
             check_n!(2, "substring");
-            // Cypher is 0-based, DataFusion substr is 1-based
-            let substr_expr = datafusion::functions::unicode::expr_fn::substr(
-                df_args[0].clone(),
-                df_args[1].clone() + lit(1i64),
-            );
-            if df_args.len() == 3 {
-                Some(Ok(datafusion::functions::unicode::expr_fn::left(
-                    substr_expr,
-                    df_args[2].clone(),
-                )))
-            } else {
-                Some(Ok(substr_expr))
-            }
+            // Route through custom UDF — Cypher uses 0-based indexing
+            Some(Ok(dummy_udf_expr("_cypher_substring", df_args)))
         }
         "TRIM" => {
             check1!("TRIM");
@@ -1563,11 +1566,8 @@ fn translate_string_function(name_upper: &str, df_args: Vec<DfExpr>) -> Option<R
         }
         "SPLIT" => {
             check_n!(2, "split");
-            Some(Ok(datafusion::functions_nested::expr_fn::string_to_array(
-                df_args[0].clone(),
-                df_args[1].clone(),
-                lit(datafusion::common::ScalarValue::Utf8(None)),
-            )))
+            // Route through custom UDF for consistent CypherValue list output
+            Some(Ok(dummy_udf_expr("_cypher_split", df_args)))
         }
         "SIZE" | "LENGTH" => {
             check1!(name_upper);
@@ -1855,11 +1855,22 @@ fn translate_graph_function(
         "TYPE" => {
             // type(r) returns the edge type name as a string.
             // When context provides the edge type via variable_labels, emit a string literal.
+            // Wrap in CASE WHEN to handle null (OPTIONAL MATCH produces null relationships).
             if let Some(Expr::Variable(var)) = args.first()
                 && let Some(ctx) = context
                 && let Some(label) = ctx.variable_labels.get(var)
             {
-                return Some(Ok(lit(label.clone())));
+                // Use CASE WHEN r._eid IS NOT NULL THEN 'TYPE' ELSE NULL END
+                // so that null relationships from OPTIONAL MATCH return null.
+                let eid_col = DfExpr::Column(Column::from_name(format!("{}._eid", var)));
+                return Some(Ok(DfExpr::Case(datafusion::logical_expr::Case {
+                    expr: None,
+                    when_then_expr: vec![(
+                        Box::new(eid_col.is_not_null()),
+                        Box::new(lit(label.clone())),
+                    )],
+                    else_expr: Some(Box::new(lit(ScalarValue::Utf8(None)))),
+                })));
             }
             // Use _type column only when the variable is a known edge in the context.
             // Non-edge variables (e.g. loop variables in list comprehensions) must go
@@ -3484,7 +3495,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "Arithmetic UDFs not yet implemented - Phase 5 optional work"]
     fn test_coercion_case_then_lb() {
         // CASE WHEN true THEN Col(LB) + 1 ELSE 0 END
         let schema = make_schema(&[("lb", DataType::LargeBinary)]);
@@ -3507,7 +3517,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "Arithmetic UDFs not yet implemented - Phase 5 optional work"]
     fn test_coercion_case_else_lb() {
         // CASE WHEN true THEN 1 ELSE Col(LB) + 2 END
         let schema = make_schema(&[("lb", DataType::LargeBinary)]);
@@ -3588,7 +3597,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "Arithmetic UDFs not yet implemented - Phase 5 optional work"]
     fn test_coercion_lb_plus_int64_unchanged() {
         // Regression: LB + Int64 should route to _cypher_add, NOT list append
         let schema = make_schema(&[("lb", DataType::LargeBinary), ("i", DataType::Int64)]);
