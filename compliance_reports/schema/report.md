@@ -1,19 +1,17 @@
 # TCK Compliance Report
 
-**Generated:** 2026-02-20 14:00:10
-**Results:** `results_20260220_140010.json`
-**Compared to:** `results_20260220_120919.json`
+**Generated:** 2026-02-20 15:06:17
+**Results:** `results_20260220_150617.json`
+**Compared to:** `results_20260220_140010.json`
 
 ## Summary
 
 | Metric | Current | Previous | Delta |
 |--------|---------|----------|-------|
 | Scenarios | 3897 | 3897 |  |
-| Passed | 3859 | 3811 | +48 |
-| Failed | 37 | 85 | -48 |
-| Pass Rate | 99.0% | 97.8% | 📈 +1.2pp |
-
-**🟢 Fixed:** 48 scenarios now passing
+| Passed | 3859 | 3859 |  |
+| Failed | 37 | 37 |  |
+| Pass Rate | 99.0% | 99.0% | ➡️ +0.0pp |
 
 ## Feature Breakdown
 
@@ -88,12 +86,12 @@
 | ✅ Match1 | 86 | 86 | 0 | 100% |  |
 | ✅ Match2 | 86 | 86 | 0 | 100% |  |
 | ✅ Match3 | 30 | 30 | 0 | 100% |  |
-| ⚠️ Match4 | 10 | 7 | 3 | 70% | +10pp |
+| ⚠️ Match4 | 10 | 7 | 3 | 70% |  |
 | ✅ Match5 | 29 | 28 | 1 | 97% |  |
 | ✅ Match6 | 97 | 93 | 4 | 96% |  |
 | ✅ Match7 | 31 | 30 | 1 | 97% |  |
 | ⚠️ Match8 | 3 | 2 | 1 | 67% |  |
-| ✅ Match9 | 9 | 9 | 0 | 100% | +11pp |
+| ✅ Match9 | 9 | 9 | 0 | 100% |  |
 | ✅ MatchWhere1 | 15 | 15 | 0 | 100% |  |
 | ✅ MatchWhere2 | 2 | 2 | 0 | 100% |  |
 | ✅ MatchWhere3 | 3 | 3 | 0 | 100% |  |
@@ -146,7 +144,7 @@
 | ✅ Return3 | 3 | 3 | 0 | 100% |  |
 | ✅ Return4 | 11 | 11 | 0 | 100% |  |
 | ✅ Return5 | 5 | 5 | 0 | 100% |  |
-| ✅ Return6 | 21 | 20 | 1 | 95% | +5pp |
+| ✅ Return6 | 21 | 20 | 1 | 95% |  |
 | ✅ Return7 | 2 | 2 | 0 | 100% |  |
 | ✅ Return8 | 1 | 1 | 0 | 100% |  |
 | ✅ ReturnOrderBy1 | 12 | 12 | 0 | 100% |  |
@@ -195,12 +193,12 @@
 | ✅ With3 | 1 | 1 | 0 | 100% |  |
 | ✅ With4 | 7 | 7 | 0 | 100% |  |
 | ✅ With5 | 2 | 2 | 0 | 100% |  |
-| ✅ With6 | 9 | 9 | 0 | 100% | +11pp |
+| ✅ With6 | 9 | 9 | 0 | 100% |  |
 | ✅ With7 | 2 | 2 | 0 | 100% |  |
-| ✅ WithOrderBy1 | 96 | 96 | 0 | 100% | +25pp |
-| ✅ WithOrderBy2 | 83 | 83 | 0 | 100% | +23pp |
+| ✅ WithOrderBy1 | 96 | 96 | 0 | 100% |  |
+| ✅ WithOrderBy2 | 83 | 83 | 0 | 100% |  |
 | ✅ WithOrderBy3 | 93 | 93 | 0 | 100% |  |
-| ✅ WithOrderBy4 | 20 | 20 | 0 | 100% | +5pp |
+| ✅ WithOrderBy4 | 20 | 20 | 0 | 100% |  |
 | ✅ WithSkipLimit1 | 2 | 2 | 0 | 100% |  |
 | ✅ WithSkipLimit2 | 4 | 4 | 0 | 100% |  |
 | ✅ WithSkipLimit3 | 3 | 3 | 0 | 100% |  |
@@ -211,59 +209,6 @@
 | ✅ WithWhere5 | 4 | 4 | 0 | 100% |  |
 | ✅ WithWhere6 | 1 | 1 | 0 | 100% |  |
 | ✅ WithWhere7 | 3 | 3 | 0 | 100% |  |
-
-## 🟢 Newly Passing
-
-Scenarios that were failing but are now passing:
-
-- **Match4** — [8] Matching relationships into a list and matching variable length using the list (line 176)
-- **Match9** — [6] Matching relationships into a list and matching variable length using the list, with bound nodes (line 122)
-- **Return6** — [16] Aggregation on complex expressions (line 267)
-- **With6** — [3] Implicit grouping with multiple node and relationship variables as grouping key and single aggregation (line 74)
-- **WithOrderBy1** — [17] Sort local date times in ascending order (line 323)
-- **WithOrderBy1** — [18] Sort local date times in descending order (line 344)
-- **WithOrderBy1** — [19] Sort date times in ascending order (line 365)
-- **WithOrderBy1** — [20] Sort date times in descending order (line 386)
-- **WithOrderBy1** — [39] Sort by a local date time variable projected from a node property in ascending order (line 986)
-- **WithOrderBy1** — [39] Sort by a local date time variable projected from a node property in ascending order (line 987)
-- **WithOrderBy1** — [39] Sort by a local date time variable projected from a node property in ascending order (line 988)
-- **WithOrderBy1** — [40] Sort by a local date time variable projected from a node property in descending order (line 1018)
-- **WithOrderBy1** — [40] Sort by a local date time variable projected from a node property in descending order (line 1019)
-- **WithOrderBy1** — [41] Sort by a date time variable projected from a node property in ascending order (line 1049)
-- **WithOrderBy1** — [41] Sort by a date time variable projected from a node property in ascending order (line 1050)
-- **WithOrderBy1** — [41] Sort by a date time variable projected from a node property in ascending order (line 1051)
-- **WithOrderBy1** — [42] Sort by a date time variable projected from a node property in descending order (line 1081)
-- **WithOrderBy1** — [42] Sort by a date time variable projected from a node property in descending order (line 1082)
-- **WithOrderBy1** — [45] Sort order should be consistent with comparisons where comparisons are defined #Example: booleans (line 1144)
-- **WithOrderBy1** — [45] Sort order should be consistent with comparisons where comparisons are defined #Example: dates (line 1149)
-- **WithOrderBy1** — [45] Sort order should be consistent with comparisons where comparisons are defined #Example: datetimes (line 1153)
-- **WithOrderBy1** — [45] Sort order should be consistent with comparisons where comparisons are defined #Example: floats (line 1146)
-- **WithOrderBy1** — [45] Sort order should be consistent with comparisons where comparisons are defined #Example: integers (line 1145)
-- **WithOrderBy1** — [45] Sort order should be consistent with comparisons where comparisons are defined #Example: lists (line 1148)
-- **WithOrderBy1** — [45] Sort order should be consistent with comparisons where comparisons are defined #Example: localdatetimes (line 1152)
-- **WithOrderBy1** — [45] Sort order should be consistent with comparisons where comparisons are defined #Example: localtimes (line 1150)
-- **WithOrderBy1** — [45] Sort order should be consistent with comparisons where comparisons are defined #Example: string (line 1147)
-- **WithOrderBy1** — [45] Sort order should be consistent with comparisons where comparisons are defined #Example: times (line 1151)
-- **WithOrderBy2** — [17] Sort by a local date time expression in ascending order (line 549)
-- **WithOrderBy2** — [17] Sort by a local date time expression in ascending order (line 550)
-- **WithOrderBy2** — [17] Sort by a local date time expression in ascending order (line 551)
-- **WithOrderBy2** — [18] Sort by a local date time expression in descending order (line 580)
-- **WithOrderBy2** — [18] Sort by a local date time expression in descending order (line 581)
-- **WithOrderBy2** — [19] Sort by a date time expression in ascending order (line 610)
-- **WithOrderBy2** — [19] Sort by a date time expression in ascending order (line 611)
-- **WithOrderBy2** — [19] Sort by a date time expression in ascending order (line 612)
-- **WithOrderBy2** — [20] Sort by a date time expression in descending order (line 641)
-- **WithOrderBy2** — [20] Sort by a date time expression in descending order (line 642)
-- **WithOrderBy2** — [21] Sort by an expression that is only partially orderable on a non-distinct binding table (line 670)
-- **WithOrderBy2** — [21] Sort by an expression that is only partially orderable on a non-distinct binding table (line 671)
-- **WithOrderBy2** — [23] Sort by an expression that is only partially orderable on a non-distinct binding table, but used in parts as a grouping key (line 726)
-- **WithOrderBy2** — [23] Sort by an expression that is only partially orderable on a non-distinct binding table, but used in parts as a grouping key (line 727)
-- **WithOrderBy2** — [7] Sort by a string expression in ascending order (line 244)
-- **WithOrderBy2** — [7] Sort by a string expression in ascending order (line 245)
-- **WithOrderBy2** — [7] Sort by a string expression in ascending order (line 246)
-- **WithOrderBy2** — [8] Sort by a string expression in descending order (line 275)
-- **WithOrderBy2** — [8] Sort by a string expression in descending order (line 276)
-- **WithOrderBy4** — [15] Sort by an aliased aggregate projection does allow subsequent matching (line 378)
 
 ## Failed Scenarios
 
@@ -456,7 +401,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/clauses/match/Match4.feature:111:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): Row count mismatch: expected 1, got 14
+      Step panicked. Captured output: Result mismatch (any order): Row count mismatch: expected 1, got 15
 [Summary]
 1 feature
 1 scenario (1 failed)
@@ -645,7 +590,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal5.feature:133:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("d.month", Some(Int(11))), ("d.offsetMinutes
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("d.microsecond", Some(Int(645876))), ("d.hou
   ... (truncated)
   ```
 

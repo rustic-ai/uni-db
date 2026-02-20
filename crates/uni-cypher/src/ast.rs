@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 use uni_common::Value;
 
@@ -67,7 +69,7 @@ pub struct CreateVectorIndex {
     pub name: String,
     pub label: String,
     pub property: String,
-    pub options: std::collections::HashMap<String, Value>,
+    pub options: HashMap<String, Value>,
     pub if_not_exists: bool,
 }
 
@@ -76,7 +78,7 @@ pub struct CreateFullTextIndex {
     pub name: String,
     pub label: String,
     pub properties: Vec<String>,
-    pub options: std::collections::HashMap<String, Value>,
+    pub options: HashMap<String, Value>,
     pub if_not_exists: bool,
 }
 
@@ -86,7 +88,7 @@ pub struct CreateScalarIndex {
     pub label: String,
     pub expressions: Vec<Expr>,
     pub where_clause: Option<Expr>,
-    pub options: std::collections::HashMap<String, Value>,
+    pub options: HashMap<String, Value>,
     pub if_not_exists: bool,
 }
 
@@ -95,7 +97,7 @@ pub struct CreateJsonFtsIndex {
     pub name: String,
     pub label: String,
     pub column: String,
-    pub options: std::collections::HashMap<String, Value>,
+    pub options: HashMap<String, Value>,
     pub if_not_exists: bool,
 }
 
@@ -167,7 +169,7 @@ pub struct CopyToCommand {
     pub label: String,
     pub path: String,
     pub format: String,
-    pub options: std::collections::HashMap<String, Value>,
+    pub options: HashMap<String, Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -175,7 +177,7 @@ pub struct CopyFromCommand {
     pub label: String,
     pub path: String,
     pub format: String,
-    pub options: std::collections::HashMap<String, Value>,
+    pub options: HashMap<String, Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -484,42 +486,42 @@ impl CypherLiteral {
 impl std::fmt::Display for CypherLiteral {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            CypherLiteral::Null => write!(f, "null"),
-            CypherLiteral::Bool(b) => write!(f, "{}", b),
-            CypherLiteral::Integer(i) => write!(f, "{}", i),
-            CypherLiteral::Float(v) => write!(f, "{}", v),
-            CypherLiteral::String(s) => write!(f, "\"{}\"", s),
+            CypherLiteral::Null => f.write_str("null"),
+            CypherLiteral::Bool(b) => write!(f, "{b}"),
+            CypherLiteral::Integer(i) => write!(f, "{i}"),
+            CypherLiteral::Float(v) => write!(f, "{v}"),
+            CypherLiteral::String(s) => write!(f, "\"{s}\""),
         }
     }
 }
 
 impl From<i64> for CypherLiteral {
     fn from(v: i64) -> Self {
-        CypherLiteral::Integer(v)
+        Self::Integer(v)
     }
 }
 
 impl From<f64> for CypherLiteral {
     fn from(v: f64) -> Self {
-        CypherLiteral::Float(v)
+        Self::Float(v)
     }
 }
 
 impl From<bool> for CypherLiteral {
     fn from(v: bool) -> Self {
-        CypherLiteral::Bool(v)
+        Self::Bool(v)
     }
 }
 
 impl From<String> for CypherLiteral {
     fn from(v: String) -> Self {
-        CypherLiteral::String(v)
+        Self::String(v)
     }
 }
 
 impl From<&str> for CypherLiteral {
     fn from(v: &str) -> Self {
-        CypherLiteral::String(v.to_string())
+        Self::String(v.to_string())
     }
 }
 
@@ -758,8 +760,7 @@ impl ListAfterIdentifier {
             },
             ListAfterIdentifier::ExpressionTail { suffix, more } => {
                 let first = apply_suffixes(Expr::Variable(id), suffix);
-                let mut items = vec![first];
-                items.extend(more);
+                let items = std::iter::once(first).chain(more).collect();
                 Expr::List(items)
             }
         }
@@ -824,7 +825,7 @@ pub fn extract_dotted_name(expr: &Expr) -> Option<String> {
         Expr::Variable(name) => Some(name.clone()),
         Expr::Property(base, prop) => {
             let base_name = extract_dotted_name(base)?;
-            Some(format!("{}.{}", base_name, prop))
+            Some(format!("{base_name}.{prop}"))
         }
         _ => None,
     }
@@ -846,8 +847,7 @@ pub fn apply_suffix(expr: Expr, suffix: PostfixSuffix) -> Expr {
         } => {
             let name = extract_dotted_name(&expr).unwrap_or_else(|| {
                 panic!(
-                    "apply_suffix: function call requires variable or property chain, got: {:?}",
-                    expr
+                    "apply_suffix: function call requires variable or property chain, got: {expr:?}"
                 )
             });
             Expr::FunctionCall {
@@ -876,15 +876,6 @@ pub fn apply_suffix(expr: Expr, suffix: PostfixSuffix) -> Expr {
     }
 }
 
-/// Helper to create a binary operation expression.
-fn make_binary_op(left: Expr, op: BinaryOp, right: Expr) -> Expr {
-    Expr::BinaryOp {
-        left: Box::new(left),
-        op,
-        right: Box::new(right),
-    }
-}
-
 /// Apply a sequence of expression suffixes to build a complete expression.
 /// Example: id.prop[0] + 1 => ((id.prop)[0]) + 1
 fn apply_suffixes(mut expr: Expr, suffixes: Vec<ExprSuffix>) -> Expr {
@@ -905,7 +896,7 @@ fn apply_suffixes(mut expr: Expr, suffixes: Vec<ExprSuffix>) -> Expr {
 
             ExprSuffix::FunctionCall(args) => {
                 let name = extract_dotted_name(&expr)
-                    .unwrap_or_else(|| panic!("Function call suffix requires variable or property chain expression, got: {:?}", expr));
+                    .unwrap_or_else(|| panic!("Function call suffix requires variable or property chain expression, got: {expr:?}"));
                 Expr::FunctionCall {
                     name,
                     args,
@@ -916,7 +907,12 @@ fn apply_suffixes(mut expr: Expr, suffixes: Vec<ExprSuffix>) -> Expr {
 
             ExprSuffix::IsNull => Expr::IsNull(Box::new(expr)),
             ExprSuffix::IsNotNull => Expr::IsNotNull(Box::new(expr)),
-            ExprSuffix::Binary(op, rhs) => make_binary_op(expr, op, rhs),
+
+            ExprSuffix::Binary(op, rhs) => Expr::BinaryOp {
+                left: Box::new(expr),
+                op,
+                right: Box::new(rhs),
+            },
 
             ExprSuffix::In(right) => Expr::In {
                 expr: Box::new(expr),
@@ -941,38 +937,33 @@ impl Expr {
 
     /// Extract a simple variable name if this expression is just a variable reference
     pub fn extract_variable(&self) -> Option<String> {
-        match self {
-            Expr::Variable(v) => Some(v.clone()),
-            _ => None,
+        if let Expr::Variable(v) = self {
+            Some(v.clone())
+        } else {
+            None
         }
     }
 
     /// Substitute all occurrences of a variable with a new variable name
     pub fn substitute_variable(&self, old_var: &str, new_var: &str) -> Expr {
+        let sub = |e: &Expr| e.substitute_variable(old_var, new_var);
+        let sub_box = |e: &Expr| Box::new(sub(e));
+        let sub_opt = |o: &Option<Box<Expr>>| o.as_ref().map(|e| sub_box(e));
+        let sub_vec = |v: &[Expr]| v.iter().map(sub).collect();
+
         match self {
             Expr::Variable(v) if v == old_var => Expr::Variable(new_var.to_string()),
             Expr::Variable(_) | Expr::Literal(_) | Expr::Parameter(_) | Expr::Wildcard => {
                 self.clone()
             }
 
-            Expr::Property(base, prop) => Expr::Property(
-                Box::new(base.substitute_variable(old_var, new_var)),
-                prop.clone(),
-            ),
+            Expr::Property(base, prop) => Expr::Property(sub_box(base), prop.clone()),
 
-            Expr::List(exprs) => Expr::List(
-                exprs
-                    .iter()
-                    .map(|e| e.substitute_variable(old_var, new_var))
-                    .collect(),
-            ),
+            Expr::List(exprs) => Expr::List(sub_vec(exprs)),
 
-            Expr::Map(entries) => Expr::Map(
-                entries
-                    .iter()
-                    .map(|(k, v)| (k.clone(), v.substitute_variable(old_var, new_var)))
-                    .collect(),
-            ),
+            Expr::Map(entries) => {
+                Expr::Map(entries.iter().map(|(k, v)| (k.clone(), sub(v))).collect())
+            }
 
             Expr::FunctionCall {
                 name,
@@ -981,23 +972,20 @@ impl Expr {
                 window_spec,
             } => Expr::FunctionCall {
                 name: name.clone(),
-                args: args
-                    .iter()
-                    .map(|e| e.substitute_variable(old_var, new_var))
-                    .collect(),
+                args: sub_vec(args),
                 distinct: *distinct,
                 window_spec: window_spec.clone(),
             },
 
             Expr::BinaryOp { left, op, right } => Expr::BinaryOp {
-                left: Box::new(left.substitute_variable(old_var, new_var)),
+                left: sub_box(left),
                 op: *op,
-                right: Box::new(right.substitute_variable(old_var, new_var)),
+                right: sub_box(right),
             },
 
             Expr::UnaryOp { op, expr } => Expr::UnaryOp {
                 op: *op,
-                expr: Box::new(expr.substitute_variable(old_var, new_var)),
+                expr: sub_box(expr),
             },
 
             Expr::Case {
@@ -1005,50 +993,32 @@ impl Expr {
                 when_then,
                 else_expr,
             } => Expr::Case {
-                expr: expr
-                    .as_ref()
-                    .map(|e| Box::new(e.substitute_variable(old_var, new_var))),
-                when_then: when_then
-                    .iter()
-                    .map(|(w, t)| {
-                        (
-                            w.substitute_variable(old_var, new_var),
-                            t.substitute_variable(old_var, new_var),
-                        )
-                    })
-                    .collect(),
-                else_expr: else_expr
-                    .as_ref()
-                    .map(|e| Box::new(e.substitute_variable(old_var, new_var))),
+                expr: sub_opt(expr),
+                when_then: when_then.iter().map(|(w, t)| (sub(w), sub(t))).collect(),
+                else_expr: sub_opt(else_expr),
             },
 
             // Don't substitute inside subqueries
             Expr::Exists { .. } | Expr::CountSubquery(_) | Expr::CollectSubquery(_) => self.clone(),
 
-            Expr::IsNull(e) => Expr::IsNull(Box::new(e.substitute_variable(old_var, new_var))),
-            Expr::IsNotNull(e) => {
-                Expr::IsNotNull(Box::new(e.substitute_variable(old_var, new_var)))
-            }
-            Expr::IsUnique(e) => Expr::IsUnique(Box::new(e.substitute_variable(old_var, new_var))),
+            Expr::IsNull(e) => Expr::IsNull(sub_box(e)),
+            Expr::IsNotNull(e) => Expr::IsNotNull(sub_box(e)),
+            Expr::IsUnique(e) => Expr::IsUnique(sub_box(e)),
 
             Expr::In { expr, list } => Expr::In {
-                expr: Box::new(expr.substitute_variable(old_var, new_var)),
-                list: Box::new(list.substitute_variable(old_var, new_var)),
+                expr: sub_box(expr),
+                list: sub_box(list),
             },
 
             Expr::ArrayIndex { array, index } => Expr::ArrayIndex {
-                array: Box::new(array.substitute_variable(old_var, new_var)),
-                index: Box::new(index.substitute_variable(old_var, new_var)),
+                array: sub_box(array),
+                index: sub_box(index),
             },
 
             Expr::ArraySlice { array, start, end } => Expr::ArraySlice {
-                array: Box::new(array.substitute_variable(old_var, new_var)),
-                start: start
-                    .as_ref()
-                    .map(|e| Box::new(e.substitute_variable(old_var, new_var))),
-                end: end
-                    .as_ref()
-                    .map(|e| Box::new(e.substitute_variable(old_var, new_var))),
+                array: sub_box(array),
+                start: sub_opt(start),
+                end: sub_opt(end),
             },
 
             Expr::Quantifier {
@@ -1061,11 +1031,11 @@ impl Expr {
                 Expr::Quantifier {
                     quantifier: *quantifier,
                     variable: variable.clone(),
-                    list: Box::new(list.substitute_variable(old_var, new_var)),
+                    list: sub_box(list),
                     predicate: if shadowed {
                         predicate.clone()
                     } else {
-                        Box::new(predicate.substitute_variable(old_var, new_var))
+                        sub_box(predicate)
                     },
                 }
             }
@@ -1080,13 +1050,13 @@ impl Expr {
                 let shadowed = variable == old_var || accumulator == old_var;
                 Expr::Reduce {
                     accumulator: accumulator.clone(),
-                    init: Box::new(init.substitute_variable(old_var, new_var)),
+                    init: sub_box(init),
                     variable: variable.clone(),
-                    list: Box::new(list.substitute_variable(old_var, new_var)),
+                    list: sub_box(list),
                     expr: if shadowed {
                         expr.clone()
                     } else {
-                        Box::new(expr.substitute_variable(old_var, new_var))
+                        sub_box(expr)
                     },
                 }
             }
@@ -1100,18 +1070,16 @@ impl Expr {
                 let shadowed = variable == old_var;
                 Expr::ListComprehension {
                     variable: variable.clone(),
-                    list: Box::new(list.substitute_variable(old_var, new_var)),
+                    list: sub_box(list),
                     where_clause: if shadowed {
                         where_clause.clone()
                     } else {
-                        where_clause
-                            .as_ref()
-                            .map(|e| Box::new(e.substitute_variable(old_var, new_var)))
+                        sub_opt(where_clause)
                     },
                     map_expr: if shadowed {
                         map_expr.clone()
                     } else {
-                        Box::new(map_expr.substitute_variable(old_var, new_var))
+                        sub_box(map_expr)
                     },
                 }
             }
@@ -1128,10 +1096,8 @@ impl Expr {
                     Expr::PatternComprehension {
                         path_variable: path_variable.clone(),
                         pattern: pattern.clone(),
-                        where_clause: where_clause
-                            .as_ref()
-                            .map(|e| Box::new(e.substitute_variable(old_var, new_var))),
-                        map_expr: Box::new(map_expr.substitute_variable(old_var, new_var)),
+                        where_clause: sub_opt(where_clause),
+                        map_expr: sub_box(map_expr),
                     }
                 }
             }
@@ -1142,22 +1108,19 @@ impl Expr {
                 start_prop,
                 end_prop,
             } => Expr::ValidAt {
-                entity: Box::new(entity.substitute_variable(old_var, new_var)),
-                timestamp: Box::new(timestamp.substitute_variable(old_var, new_var)),
+                entity: sub_box(entity),
+                timestamp: sub_box(timestamp),
                 start_prop: start_prop.clone(),
                 end_prop: end_prop.clone(),
             },
 
             Expr::MapProjection { base, items } => Expr::MapProjection {
-                base: Box::new(base.substitute_variable(old_var, new_var)),
+                base: sub_box(base),
                 items: items
                     .iter()
                     .map(|item| match item {
                         MapProjectionItem::LiteralEntry(key, expr) => {
-                            MapProjectionItem::LiteralEntry(
-                                key.clone(),
-                                Box::new(expr.substitute_variable(old_var, new_var)),
-                            )
+                            MapProjectionItem::LiteralEntry(key.clone(), sub_box(expr))
                         }
                         MapProjectionItem::Variable(v) if v == old_var => {
                             MapProjectionItem::Variable(new_var.to_string())
@@ -1168,7 +1131,7 @@ impl Expr {
             },
 
             Expr::LabelCheck { expr, labels } => Expr::LabelCheck {
-                expr: Box::new(expr.substitute_variable(old_var, new_var)),
+                expr: sub_box(expr),
                 labels: labels.clone(),
             },
         }
@@ -1248,21 +1211,28 @@ impl Expr {
     /// Generate a string representation of this expression for debugging/display
     pub fn to_string_repr(&self) -> String {
         match self {
-            Expr::Literal(v) => format!("{}", v),
-            Expr::Parameter(p) => format!("${}", p),
+            Expr::Literal(v) => v.to_string(),
+            Expr::Parameter(p) => format!("${p}"),
             Expr::Variable(v) => v.clone(),
             Expr::Wildcard => "*".to_string(),
-            Expr::Property(base, prop) => format!("{}.{}", base.to_string_repr(), prop),
+            Expr::Property(base, prop) => {
+                format!("{}.{prop}", base.to_string_repr())
+            }
             Expr::List(exprs) => {
-                let items: Vec<_> = exprs.iter().map(|e| e.to_string_repr()).collect();
-                format!("[{}]", items.join(", "))
+                let items = exprs
+                    .iter()
+                    .map(|e| e.to_string_repr())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("[{items}]")
             }
             Expr::Map(entries) => {
-                let items: Vec<_> = entries
+                let items = entries
                     .iter()
-                    .map(|(k, v)| format!("{}: {}", k, v.to_string_repr()))
-                    .collect();
-                format!("{{{}}}", items.join(", "))
+                    .map(|(k, v)| format!("{k}: {}", v.to_string_repr()))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("{{{items}}}")
             }
             Expr::FunctionCall {
                 name,
@@ -1270,49 +1240,39 @@ impl Expr {
                 distinct,
                 window_spec,
             } => {
-                let args_str: Vec<_> = args.iter().map(|e| e.to_string_repr()).collect();
+                let args_str = args
+                    .iter()
+                    .map(|e| e.to_string_repr())
+                    .collect::<Vec<_>>()
+                    .join(", ");
                 let distinct_str = if *distinct { "DISTINCT " } else { "" };
-                let base = format!("{}({}{})", name, distinct_str, args_str.join(", "));
-                if let Some(window) = window_spec {
-                    let partition_str = if !window.partition_by.is_empty() {
-                        format!(
-                            "PARTITION BY {}",
-                            window
-                                .partition_by
-                                .iter()
-                                .map(|e| e.to_string_repr())
-                                .collect::<Vec<_>>()
-                                .join(", ")
-                        )
-                    } else {
-                        String::new()
-                    };
-                    let order_str = if !window.order_by.is_empty() {
-                        let items = window
-                            .order_by
-                            .iter()
-                            .map(|s| {
-                                format!(
-                                    "{} {}",
-                                    s.expr.to_string_repr(),
-                                    if s.ascending { "ASC" } else { "DESC" }
-                                )
-                            })
-                            .collect::<Vec<_>>()
-                            .join(", ");
-                        format!("ORDER BY {}", items)
-                    } else {
-                        String::new()
-                    };
-                    let over_contents = vec![partition_str, order_str]
-                        .into_iter()
-                        .filter(|s| !s.is_empty())
+                let base = format!("{name}({distinct_str}{args_str})");
+                let Some(window) = window_spec else {
+                    return base;
+                };
+                let mut parts = Vec::new();
+                if !window.partition_by.is_empty() {
+                    let cols = window
+                        .partition_by
+                        .iter()
+                        .map(|e| e.to_string_repr())
                         .collect::<Vec<_>>()
-                        .join(" ");
-                    format!("{} OVER ({})", base, over_contents)
-                } else {
-                    base
+                        .join(", ");
+                    parts.push(format!("PARTITION BY {cols}"));
                 }
+                if !window.order_by.is_empty() {
+                    let items = window
+                        .order_by
+                        .iter()
+                        .map(|s| {
+                            let dir = if s.ascending { "ASC" } else { "DESC" };
+                            format!("{} {dir}", s.expr.to_string_repr())
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    parts.push(format!("ORDER BY {items}"));
+                }
+                format!("{base} OVER ({})", parts.join(" "))
             }
             Expr::BinaryOp { left, op, right } => {
                 format!(
@@ -1323,29 +1283,29 @@ impl Expr {
                 )
             }
             Expr::UnaryOp { op, expr } => {
-                format!("{}{}", op, expr.to_string_repr())
+                format!("{op}{}", expr.to_string_repr())
             }
             Expr::Case {
                 expr,
                 when_then,
                 else_expr,
             } => {
-                let mut result = "CASE".to_string();
+                let mut s = "CASE".to_string();
                 if let Some(e) = expr {
-                    result.push_str(&format!(" {}", e.to_string_repr()));
+                    s.push_str(&format!(" {}", e.to_string_repr()));
                 }
                 for (w, t) in when_then {
-                    result.push_str(&format!(
+                    s.push_str(&format!(
                         " WHEN {} THEN {}",
                         w.to_string_repr(),
                         t.to_string_repr()
                     ));
                 }
                 if let Some(e) = else_expr {
-                    result.push_str(&format!(" ELSE {}", e.to_string_repr()));
+                    s.push_str(&format!(" ELSE {}", e.to_string_repr()));
                 }
-                result.push_str(" END");
-                result
+                s.push_str(" END");
+                s
             }
             Expr::Exists { .. } => "EXISTS {...}".to_string(),
             Expr::CountSubquery(_) => "COUNT {...}".to_string(),
@@ -1374,9 +1334,7 @@ impl Expr {
                 predicate,
             } => {
                 format!(
-                    "{}({} IN {} WHERE {})",
-                    quantifier,
-                    variable,
+                    "{quantifier}({variable} IN {} WHERE {})",
                     list.to_string_repr(),
                     predicate.to_string_repr()
                 )
@@ -1389,10 +1347,8 @@ impl Expr {
                 expr,
             } => {
                 format!(
-                    "REDUCE({} = {}, {} IN {} | {})",
-                    accumulator,
+                    "REDUCE({accumulator} = {}, {variable} IN {} | {})",
                     init.to_string_repr(),
-                    variable,
                     list.to_string_repr(),
                     expr.to_string_repr()
                 )
@@ -1408,10 +1364,8 @@ impl Expr {
                     .as_ref()
                     .map_or(String::new(), |e| format!(" WHERE {}", e.to_string_repr()));
                 format!(
-                    "[{} IN {}{}  | {}]",
-                    variable,
+                    "[{variable} IN {}{where_str}  | {}]",
                     list.to_string_repr(),
-                    where_str,
                     map_expr.to_string_repr()
                 )
             }
@@ -1424,16 +1378,13 @@ impl Expr {
             } => {
                 let var_part = path_variable
                     .as_ref()
-                    .map(|v| format!("{} = ", v))
+                    .map(|v| format!("{v} = "))
                     .unwrap_or_default();
                 let where_str = where_clause
                     .as_ref()
                     .map_or(String::new(), |e| format!(" WHERE {}", e.to_string_repr()));
                 format!(
-                    "[{}{:?}{} | {}]",
-                    var_part,
-                    pattern,
-                    where_str,
+                    "[{var_part}{pattern:?}{where_str} | {}]",
                     map_expr.to_string_repr()
                 )
             }
@@ -1443,42 +1394,38 @@ impl Expr {
                 timestamp,
                 start_prop,
                 end_prop,
-            } => {
-                if let (Some(start), Some(end)) = (start_prop, end_prop) {
-                    format!(
-                        "{} VALID_AT({}, '{}', '{}')",
-                        entity.to_string_repr(),
-                        timestamp.to_string_repr(),
-                        start,
-                        end
-                    )
-                } else {
-                    format!(
-                        "{} VALID_AT {}",
-                        entity.to_string_repr(),
-                        timestamp.to_string_repr()
-                    )
-                }
-            }
+            } => match (start_prop, end_prop) {
+                (Some(start), Some(end)) => format!(
+                    "{} VALID_AT({}, '{start}', '{end}')",
+                    entity.to_string_repr(),
+                    timestamp.to_string_repr(),
+                ),
+                _ => format!(
+                    "{} VALID_AT {}",
+                    entity.to_string_repr(),
+                    timestamp.to_string_repr(),
+                ),
+            },
 
             Expr::MapProjection { base, items } => {
-                let items_str: Vec<_> = items
+                let items_str = items
                     .iter()
                     .map(|item| match item {
-                        MapProjectionItem::Property(prop) => format!(".{}", prop),
+                        MapProjectionItem::Property(prop) => format!(".{prop}"),
                         MapProjectionItem::AllProperties => ".*".to_string(),
                         MapProjectionItem::LiteralEntry(key, expr) => {
-                            format!("{}: {}", key, expr.to_string_repr())
+                            format!("{key}: {}", expr.to_string_repr())
                         }
                         MapProjectionItem::Variable(v) => v.clone(),
                     })
-                    .collect();
-                format!("{}{{{}}}", base.to_string_repr(), items_str.join(", "))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("{}{{{items_str}}}", base.to_string_repr())
             }
 
             Expr::LabelCheck { expr, labels } => {
-                let labels_str: String = labels.iter().map(|l| format!(":{}", l)).collect();
-                format!("{}{}", expr.to_string_repr(), labels_str)
+                let labels_str: String = labels.iter().map(|l| format!(":{l}")).collect();
+                format!("{}{labels_str}", expr.to_string_repr())
             }
         }
     }

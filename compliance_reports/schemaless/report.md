@@ -1,8 +1,8 @@
 # TCK Compliance Report
 
-**Generated:** 2026-02-20 13:55:58
-**Results:** `results_20260220_135557.json`
-**Compared to:** `results_20260220_134207.json`
+**Generated:** 2026-02-20 15:02:03
+**Results:** `results_20260220_150203.json`
+**Compared to:** `results_20260220_135557.json`
 
 ## Summary
 
@@ -416,7 +416,7 @@
   Step failed:
       Defined: tck/features/clauses/match/Match4.feature:111:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): Row count mismatch: expected 1, got 37
+      Step panicked. Captured output: Result mismatch (any order): Row count mismatch: expected 1, got 33
 [Summary]
 1 feature
 1 scenario (1 failed)

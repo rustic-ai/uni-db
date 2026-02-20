@@ -171,15 +171,14 @@ fn invalid_unicode_character(input: &str, pos: usize) -> Option<char> {
 fn map_pest_error(input: &str, e: pest::error::Error<Rule>) -> ParseError {
     let pos = error_position(&e);
     if is_invalid_relationship_pattern(input, pos) {
-        return ParseError::new(format!("SyntaxError: InvalidRelationshipPattern - {}", e));
+        return ParseError::new(format!("SyntaxError: InvalidRelationshipPattern - {e}"));
     }
     if is_invalid_number_literal(input, pos) {
-        return ParseError::new(format!("SyntaxError: InvalidNumberLiteral - {}", e));
+        return ParseError::new(format!("SyntaxError: InvalidNumberLiteral - {e}"));
     }
     if let Some(ch) = invalid_unicode_character(input, pos) {
         return ParseError::new(format!(
-            "SyntaxError: InvalidUnicodeCharacter - Invalid character '{}'",
-            ch
+            "SyntaxError: InvalidUnicodeCharacter - Invalid character '{ch}'"
         ));
     }
 

@@ -1,8 +1,10 @@
-use super::ParseError;
-use super::Rule;
-use crate::ast::*;
+use std::collections::HashMap;
+
 use pest::iterators::{Pair, Pairs};
 use uni_common::Value;
+
+use super::{ParseError, Rule};
+use crate::ast::*;
 
 /// Check if the next token in a peekable iterator matches the given rule.
 fn peek_is(inner: &mut std::iter::Peekable<Pairs<Rule>>, rule: Rule) -> bool {
@@ -15,6 +17,30 @@ fn normalize_identifier(s: &str) -> String {
         .and_then(|s| s.strip_suffix('`'))
         .unwrap_or(s)
         .to_string()
+}
+
+/// Extract the expression from a `where_clause` pair (skips the WHERE keyword).
+fn extract_where_expr(pair: Pair<Rule>) -> Result<Expr, ParseError> {
+    build_expression(pair.into_inner().nth(1).unwrap())
+}
+
+/// Consume an identifier token if it is the next token, returning its string value.
+fn consume_identifier(inner: &mut std::iter::Peekable<Pairs<Rule>>) -> Option<String> {
+    if peek_is(inner, Rule::identifier) {
+        Some(inner.next().unwrap().as_str().to_string())
+    } else {
+        None
+    }
+}
+
+fn match_query(pattern: Pattern, where_clause: Option<Expr>) -> Query {
+    Query::Single(Statement {
+        clauses: vec![Clause::Match(MatchClause {
+            optional: false,
+            pattern,
+            where_clause,
+        })],
+    })
 }
 
 pub fn build_query(pairs: Pairs<Rule>) -> Result<Query, ParseError> {
@@ -136,22 +162,12 @@ fn build_clause(pair: Pair<Rule>) -> Result<Clause, ParseError> {
 fn build_match_clause(pair: Pair<Rule>) -> Result<Clause, ParseError> {
     let mut inner = pair.into_inner().peekable();
 
-    let optional = peek_is(&mut inner, Rule::OPTIONAL);
-    if optional {
-        inner.next();
-    }
-
+    let optional = consume_if_present(&mut inner, Rule::OPTIONAL);
     inner.next(); // MATCH
 
     let pattern = build_pattern(inner.next().unwrap())?;
 
-    let where_clause = if let Some(p) = inner.next() {
-        let mut where_inner = p.into_inner();
-        where_inner.next(); // Skip WHERE keyword
-        Some(build_expression(where_inner.next().unwrap())?)
-    } else {
-        None
-    };
+    let where_clause = inner.next().map(extract_where_expr).transpose()?;
 
     Ok(Clause::Match(MatchClause {
         optional,
@@ -193,11 +209,7 @@ fn parse_projection_modifiers(pairs: Pairs<Rule>) -> Result<ProjectionModifiers,
             Rule::limit_clause => {
                 limit = Some(build_expression(p.into_inner().nth(1).unwrap())?);
             }
-            Rule::where_clause => {
-                let mut wc_inner = p.into_inner();
-                wc_inner.next(); // Skip WHERE keyword
-                where_clause = Some(build_expression(wc_inner.next().unwrap())?);
-            }
+            Rule::where_clause => where_clause = Some(extract_where_expr(p)?),
             _ => {}
         }
     }
@@ -289,11 +301,7 @@ fn build_unwind_clause(pair: Pair<Rule>) -> Result<Clause, ParseError> {
 fn build_delete_clause(pair: Pair<Rule>) -> Result<Clause, ParseError> {
     let mut inner = pair.into_inner().peekable();
 
-    let detach = peek_is(&mut inner, Rule::DETACH);
-    if detach {
-        inner.next();
-    }
-
+    let detach = consume_if_present(&mut inner, Rule::DETACH);
     inner.next(); // DELETE
     let items = build_expression_list(inner.next().unwrap())?;
 
@@ -472,36 +480,22 @@ fn build_call_clause(pair: Pair<Rule>) -> Result<Clause, ParseError> {
                         let mut y_inner = p.into_inner();
                         y_inner.next(); // YIELD
                         let yield_items_pair = y_inner.next().unwrap();
-                        match yield_items_pair.as_rule() {
-                            Rule::yield_items => {
-                                let mut yi_inner = yield_items_pair.into_inner();
-                                let first = yi_inner.next().unwrap();
-                                if first.as_rule() == Rule::star {
-                                    // Preserve YIELD * explicitly so planner can validate
-                                    // standalone-vs-in-query restrictions.
-                                    yield_items = vec![YieldItem {
-                                        name: "*".to_string(),
-                                        alias: None,
-                                    }];
-                                } else {
-                                    // Regular yield items
-                                    yield_items.push(build_yield_item(first)?);
-                                    for yi in yi_inner {
-                                        yield_items.push(build_yield_item(yi)?);
-                                    }
-                                }
-                            }
-                            _ => unreachable!(
-                                "Unexpected rule in yield_clause: {:?}",
-                                yield_items_pair.as_rule()
-                            ),
+                        let mut yi_inner = yield_items_pair.into_inner();
+                        let first = yi_inner.next().unwrap();
+                        if first.as_rule() == Rule::star {
+                            yield_items = vec![YieldItem {
+                                name: "*".to_string(),
+                                alias: None,
+                            }];
+                        } else {
+                            yield_items = std::iter::once(first)
+                                .chain(yi_inner)
+                                .map(build_yield_item)
+                                .collect::<Result<_, _>>()?;
                         }
 
-                        // Check for optional WHERE clause after yield items
                         if let Some(where_pair) = y_inner.next() {
-                            let mut where_inner = where_pair.into_inner();
-                            where_inner.next(); // Skip WHERE keyword
-                            where_clause = Some(build_expression(where_inner.next().unwrap())?);
+                            where_clause = Some(extract_where_expr(where_pair)?);
                         }
                     }
                     _ => {}
@@ -548,14 +542,10 @@ fn build_load_csv_clause(pair: Pair<Rule>) -> Result<Clause, ParseError> {
     }
 
     inner.next(); // FROM
-    let url_expr = build_expression(inner.next().unwrap())?;
-    let url = match url_expr {
-        Expr::Literal(CypherLiteral::String(s)) => s,
-        _ => {
-            return Err(ParseError::new(
-                "LOAD CSV URL must be a string literal".to_string(),
-            ));
-        }
+    let Expr::Literal(CypherLiteral::String(url)) = build_expression(inner.next().unwrap())? else {
+        return Err(ParseError::new(
+            "LOAD CSV URL must be a string literal".to_string(),
+        ));
     };
 
     inner.next(); // AS
@@ -605,11 +595,18 @@ pub fn build_expression(pair: Pair<Rule>) -> Result<Expr, ParseError> {
     }
 }
 
-// Helpers for binary ops
 fn build_binary_left_assoc(pair: Pair<Rule>, op: BinaryOp) -> Result<Expr, ParseError> {
+    build_binary_left_assoc_dynamic(pair, |_| op)
+}
+
+fn build_binary_left_assoc_dynamic(
+    pair: Pair<Rule>,
+    map_op: impl Fn(Rule) -> BinaryOp,
+) -> Result<Expr, ParseError> {
     let mut inner = pair.into_inner();
     let mut left = build_expression(inner.next().unwrap())?;
-    while inner.next().is_some() {
+    while let Some(op_pair) = inner.next() {
+        let op = map_op(op_pair.as_rule());
         let right = build_expression(inner.next().unwrap())?;
         left = Expr::BinaryOp {
             left: Box::new(left),
@@ -621,51 +618,26 @@ fn build_binary_left_assoc(pair: Pair<Rule>, op: BinaryOp) -> Result<Expr, Parse
 }
 
 fn build_additive_expression(pair: Pair<Rule>) -> Result<Expr, ParseError> {
-    let mut inner = pair.into_inner();
-    let mut left = build_expression(inner.next().unwrap())?;
-    while let Some(op_pair) = inner.next() {
-        let op = match op_pair.as_rule() {
-            Rule::plus => BinaryOp::Add,
-            Rule::minus => BinaryOp::Sub,
-            _ => unreachable!(),
-        };
-        let right = build_expression(inner.next().unwrap())?;
-        left = Expr::BinaryOp {
-            left: Box::new(left),
-            op,
-            right: Box::new(right),
-        };
-    }
-    Ok(left)
+    build_binary_left_assoc_dynamic(pair, |rule| match rule {
+        Rule::plus => BinaryOp::Add,
+        Rule::minus => BinaryOp::Sub,
+        _ => unreachable!(),
+    })
 }
 
 fn build_multiplicative_expression(pair: Pair<Rule>) -> Result<Expr, ParseError> {
-    let mut inner = pair.into_inner();
-    let mut left = build_expression(inner.next().unwrap())?;
-    while let Some(op_pair) = inner.next() {
-        let op = match op_pair.as_rule() {
-            Rule::star => BinaryOp::Mul,
-            Rule::slash => BinaryOp::Div,
-            Rule::percent => BinaryOp::Mod,
-            _ => unreachable!(),
-        };
-        let right = build_expression(inner.next().unwrap())?;
-        left = Expr::BinaryOp {
-            left: Box::new(left),
-            op,
-            right: Box::new(right),
-        };
-    }
-    Ok(left)
+    build_binary_left_assoc_dynamic(pair, |rule| match rule {
+        Rule::star => BinaryOp::Mul,
+        Rule::slash => BinaryOp::Div,
+        Rule::percent => BinaryOp::Mod,
+        _ => unreachable!(),
+    })
 }
 
 fn build_not_expression(pair: Pair<Rule>) -> Result<Expr, ParseError> {
     let mut inner = pair.into_inner().peekable();
-    let mut not_count = 0;
-    while peek_is(&mut inner, Rule::NOT) {
-        inner.next();
-        not_count += 1;
-    }
+    let not_count =
+        std::iter::from_fn(|| peek_is(&mut inner, Rule::NOT).then(|| inner.next())).count();
     let mut expr = build_expression(inner.next().unwrap())?;
     for _ in 0..not_count {
         expr = Expr::UnaryOp {
@@ -764,6 +736,20 @@ fn build_comparison_expression(pair: Pair<Rule>) -> Result<Expr, ParseError> {
     Ok(final_expr)
 }
 
+/// Accumulate a label onto an expression, merging with existing LabelCheck if present.
+fn accumulate_label(expr: Expr, label: String) -> Expr {
+    match expr {
+        Expr::LabelCheck { expr, mut labels } => {
+            labels.push(label);
+            Expr::LabelCheck { expr, labels }
+        }
+        _ => Expr::LabelCheck {
+            expr: Box::new(expr),
+            labels: vec![label],
+        },
+    }
+}
+
 fn apply_tail_to_expr(
     left: Expr,
     rule: Rule,
@@ -778,19 +764,8 @@ fn apply_tail_to_expr(
                 Rule::NOT => Ok(Expr::IsNotNull(Box::new(left))),
                 Rule::UNIQUE => Ok(Expr::IsUnique(Box::new(left))),
                 _ => {
-                    // IS :Label - check if variable has label
-                    // Skip the colon, get the label name
                     let label = tail_inner.next().unwrap().as_str().to_string();
-                    match left {
-                        Expr::LabelCheck { expr, mut labels } => {
-                            labels.push(label);
-                            Ok(Expr::LabelCheck { expr, labels })
-                        }
-                        _ => Ok(Expr::LabelCheck {
-                            expr: Box::new(left),
-                            labels: vec![label],
-                        }),
-                    }
+                    Ok(accumulate_label(left, label))
                 }
             }
         }
@@ -828,7 +803,6 @@ fn apply_tail_to_expr(
             let timestamp = build_expression(tail_inner.next().unwrap())?;
             let start_prop = tail_inner.next().map(build_string_literal).transpose()?;
             let end_prop = tail_inner.next().map(build_string_literal).transpose()?;
-
             Ok(Expr::ValidAt {
                 entity: Box::new(left),
                 timestamp: Box::new(timestamp),
@@ -836,21 +810,10 @@ fn apply_tail_to_expr(
                 end_prop,
             })
         }
-        Rule::identifier_or_keyword => {
-            // Bare :Label predicate (without IS)
-            let label = normalize_identifier(op_pair.as_str());
-            // If left is already a LabelCheck, accumulate labels (conjunctive: a:A:B)
-            match left {
-                Expr::LabelCheck { expr, mut labels } => {
-                    labels.push(label);
-                    Ok(Expr::LabelCheck { expr, labels })
-                }
-                _ => Ok(Expr::LabelCheck {
-                    expr: Box::new(left),
-                    labels: vec![label],
-                }),
-            }
-        }
+        Rule::identifier_or_keyword => Ok(accumulate_label(
+            left,
+            normalize_identifier(op_pair.as_str()),
+        )),
         _ => unreachable!("Unexpected non-chainable rule: {:?}", rule),
     }
 }
@@ -935,7 +898,7 @@ fn make_function_call(
     window_spec: Option<WindowSpec>,
 ) -> Result<Expr, ParseError> {
     let name = extract_dotted_name(base)
-        .ok_or_else(|| ParseError::new(format!("Invalid call base: {:?}", base)))?;
+        .ok_or_else(|| ParseError::new(format!("Invalid call base: {base:?}")))?;
     Ok(Expr::FunctionCall {
         name,
         args,
@@ -1035,18 +998,7 @@ fn build_primary_expression(pair: Pair<Rule>) -> Result<Expr, ParseError> {
             let inner = first.into_inner().nth(1).unwrap();
             let query = match inner.as_rule() {
                 Rule::statement => Query::Single(build_statement(inner)?),
-                Rule::pattern => {
-                    // Wrap bare pattern in MATCH clause
-                    let pattern = build_pattern(inner)?;
-                    let match_clause = Clause::Match(MatchClause {
-                        optional: false,
-                        pattern,
-                        where_clause: None,
-                    });
-                    Query::Single(Statement {
-                        clauses: vec![match_clause],
-                    })
-                }
+                Rule::pattern => match_query(build_pattern(inner)?, None),
                 _ => unreachable!("Unexpected rule in count_subquery: {:?}", inner.as_rule()),
             };
             Ok(Expr::CountSubquery(Box::new(query)))
@@ -1056,42 +1008,26 @@ fn build_primary_expression(pair: Pair<Rule>) -> Result<Expr, ParseError> {
             Ok(Expr::CollectSubquery(Box::new(Query::Single(stmt))))
         }
         Rule::exists_expression => {
-            let content = first.into_inner().nth(1).unwrap(); // Get exists_subquery_content
+            let content = first.into_inner().nth(1).unwrap();
             let mut content_inner = content.into_inner();
             let first_item = content_inner.next().unwrap();
 
             let query = match first_item.as_rule() {
                 Rule::statement => Query::Single(build_statement(first_item)?),
                 Rule::pattern => {
-                    // Pattern with optional WHERE clause
                     let pattern = build_pattern(first_item)?;
-                    // Check for optional WHERE clause
-                    let where_clause = if let Some(where_pair) = content_inner.next() {
-                        if where_pair.as_rule() == Rule::where_clause {
-                            Some(build_expression(where_pair.into_inner().nth(1).unwrap())?)
-                        } else {
-                            None
-                        }
-                    } else {
-                        None
-                    };
-                    let match_clause = Clause::Match(MatchClause {
-                        optional: false,
-                        pattern,
-                        where_clause,
-                    });
-                    Query::Single(Statement {
-                        clauses: vec![match_clause],
-                    })
+                    let where_clause = content_inner
+                        .next()
+                        .filter(|p| p.as_rule() == Rule::where_clause)
+                        .map(extract_where_expr)
+                        .transpose()?;
+                    match_query(pattern, where_clause)
                 }
                 _ => unreachable!(
                     "Unexpected rule in exists_subquery_content: {:?}",
                     first_item.as_rule()
                 ),
             };
-            // Note: Validation that EXISTS subqueries cannot contain updating clauses
-            // (SET, DELETE, CREATE, MERGE, REMOVE) is a semantic check performed
-            // at planning/execution time, not during parsing.
             Ok(Expr::Exists {
                 query: Box::new(query),
                 from_pattern_predicate: false,
@@ -1104,24 +1040,15 @@ fn build_primary_expression(pair: Pair<Rule>) -> Result<Expr, ParseError> {
                 .into_inner()
                 .map(build_pattern_child)
                 .collect::<Result<Vec<_>, _>>()?;
-            let path = PathPattern {
-                variable: None,
-                elements,
-                shortest_path_mode: None,
-            };
-            let pattern = Pattern { paths: vec![path] };
-
-            // Convert to EXISTS { MATCH pattern }
-            let match_clause = Clause::Match(MatchClause {
-                optional: false,
-                pattern,
-                where_clause: None,
-            });
-            let statement = Statement {
-                clauses: vec![match_clause],
+            let pattern = Pattern {
+                paths: vec![PathPattern {
+                    variable: None,
+                    elements,
+                    shortest_path_mode: None,
+                }],
             };
             Ok(Expr::Exists {
-                query: Box::new(Query::Single(statement)),
+                query: Box::new(match_query(pattern, None)),
                 from_pattern_predicate: true,
             })
         }
@@ -1181,41 +1108,22 @@ fn unescape_string(s: &str, quote_char: char) -> Result<String, ParseError> {
                 Some('r') => result.push('\r'),
                 Some('b') => result.push('\u{0008}'), // backspace
                 Some('f') => result.push('\u{000C}'), // form feed
-                Some('u') => {
-                    // 4-digit unicode: \uXXXX
-                    let hex: String = chars.by_ref().take(4).collect();
-                    if hex.len() != 4 {
+                Some(esc @ ('u' | 'U')) => {
+                    let expected_len = if esc == 'u' { 4 } else { 6 };
+                    let hex: String = chars.by_ref().take(expected_len).collect();
+                    if hex.len() != expected_len {
                         return Err(ParseError::new(format!(
-                            "InvalidUnicodeLiteral: Invalid \\u escape: \\u{}",
-                            hex
+                            "InvalidUnicodeLiteral: Invalid \\{esc} escape: \\{esc}{hex}"
                         )));
                     }
                     let code = u32::from_str_radix(&hex, 16).map_err(|_| {
-                        ParseError::new(format!("InvalidUnicodeLiteral: Invalid hex in \\u{}", hex))
-                    })?;
-                    result.push(char::from_u32(code).ok_or_else(|| {
                         ParseError::new(format!(
-                            "InvalidUnicodeLiteral: Invalid unicode \\u{}",
-                            hex
+                            "InvalidUnicodeLiteral: Invalid hex in \\{esc}{hex}"
                         ))
-                    })?);
-                }
-                Some('U') => {
-                    // 6-digit unicode: \UXXXXXX
-                    let hex: String = chars.by_ref().take(6).collect();
-                    if hex.len() != 6 {
-                        return Err(ParseError::new(format!(
-                            "InvalidUnicodeLiteral: Invalid \\U escape: \\U{}",
-                            hex
-                        )));
-                    }
-                    let code = u32::from_str_radix(&hex, 16).map_err(|_| {
-                        ParseError::new(format!("InvalidUnicodeLiteral: Invalid hex in \\U{}", hex))
                     })?;
                     result.push(char::from_u32(code).ok_or_else(|| {
                         ParseError::new(format!(
-                            "InvalidUnicodeLiteral: Invalid unicode \\U{}",
-                            hex
+                            "InvalidUnicodeLiteral: Invalid unicode \\{esc}{hex}"
                         ))
                     })?);
                 }
@@ -1260,7 +1168,7 @@ fn parse_integer_safe(s: &str, radix: u32) -> Result<i64, ParseError> {
     }
 
     let magnitude = u64::from_str_radix(s, radix)
-        .map_err(|e| ParseError::new(format!("Invalid integer: {}", e)))?;
+        .map_err(|e| ParseError::new(format!("Invalid integer: {e}")))?;
 
     if magnitude <= i64::MAX as u64 {
         Ok(magnitude as i64)
@@ -1292,13 +1200,12 @@ fn build_literal(pair: Pair<Rule>) -> Result<Expr, ParseError> {
             let s = inner.as_str().replace('_', ""); // Remove underscores
             let value = s
                 .parse::<f64>()
-                .map_err(|e| ParseError::new(format!("Invalid float: {}", e)))?;
+                .map_err(|e| ParseError::new(format!("Invalid float: {e}")))?;
             // Allow overflow to infinity at parse time — overflow is a runtime concern
             Ok(Expr::Literal(CypherLiteral::Float(value)))
         }
         Rule::infinity => {
-            let s = inner.as_str();
-            let value = if s.starts_with('-') {
+            let value = if inner.as_str().starts_with('-') {
                 f64::NEG_INFINITY
             } else {
                 f64::INFINITY
@@ -1329,11 +1236,7 @@ fn build_list_expression(pair: Pair<Rule>) -> Result<Expr, ParseError> {
     match first.as_rule() {
         Rule::pattern_comprehension_body => {
             let mut p_inner = first.into_inner().peekable();
-            let variable = if peek_is(&mut p_inner, Rule::identifier) {
-                Some(p_inner.next().unwrap().as_str().to_string())
-            } else {
-                None
-            };
+            let variable = consume_identifier(&mut p_inner);
             let path = build_path_pattern(p_inner.next().unwrap())?;
             let pattern = Pattern { paths: vec![path] };
 
@@ -1563,11 +1466,7 @@ fn process_pattern_element(
 fn build_path_pattern(pair: Pair<Rule>) -> Result<PathPattern, ParseError> {
     let mut inner = pair.into_inner().peekable();
 
-    let variable = if peek_is(&mut inner, Rule::identifier) {
-        Some(inner.next().unwrap().as_str().to_string())
-    } else {
-        None
-    };
+    let variable = consume_identifier(&mut inner);
 
     let mut shortest_path_mode = None;
     let mut elements = vec![];
@@ -1604,11 +1503,7 @@ fn build_path_pattern(pair: Pair<Rule>) -> Result<PathPattern, ParseError> {
 fn build_parenthesized_pattern(pair: Pair<Rule>) -> Result<PatternElement, ParseError> {
     let mut inner = pair.into_inner().peekable();
 
-    let variable = if peek_is(&mut inner, Rule::identifier) {
-        Some(inner.next().unwrap().as_str().to_string())
-    } else {
-        None
-    };
+    let variable = consume_identifier(&mut inner);
 
     let pattern_part = inner.next().unwrap();
     let elements = pattern_part
@@ -1767,17 +1662,19 @@ fn build_node_pattern(pair: Pair<Rule>) -> Result<NodePattern, ParseError> {
 }
 
 fn build_relationship_pattern(pair: Pair<Rule>) -> Result<RelationshipPattern, ParseError> {
-    let inner: Vec<_> = pair.into_inner().collect();
-    let has_left = inner.iter().any(|p| p.as_rule() == Rule::arrow_left);
-    let has_right = inner.iter().any(|p| p.as_rule() == Rule::arrow_right);
-    let has_bidir = inner
-        .iter()
-        .any(|p| p.as_rule() == Rule::arrow_bidirectional);
+    let children: Vec<_> = pair.into_inner().collect();
 
-    let direction = match (has_bidir, has_left, has_right) {
-        (false, true, false) => Direction::Incoming,
-        (false, false, true) => Direction::Outgoing,
-        _ => Direction::Both,
+    let direction = {
+        let has_left = children.iter().any(|p| p.as_rule() == Rule::arrow_left);
+        let has_right = children.iter().any(|p| p.as_rule() == Rule::arrow_right);
+        let has_bidir = children
+            .iter()
+            .any(|p| p.as_rule() == Rule::arrow_bidirectional);
+        match (has_bidir, has_left, has_right) {
+            (false, true, false) => Direction::Incoming,
+            (false, false, true) => Direction::Outgoing,
+            _ => Direction::Both,
+        }
     };
 
     let mut variable = None;
@@ -1786,7 +1683,7 @@ fn build_relationship_pattern(pair: Pair<Rule>) -> Result<RelationshipPattern, P
     let mut properties = None;
     let mut where_clause = None;
 
-    for p in inner {
+    for p in children {
         if p.as_rule() == Rule::relationship_detail {
             for detail in p.into_inner() {
                 match detail.as_rule() {
@@ -1866,11 +1763,7 @@ fn build_sort_items(pair: Pair<Rule>) -> Result<Vec<SortItem>, ParseError> {
         .map(|p| {
             let mut i = p.into_inner();
             let expr = build_expression(i.next().unwrap())?;
-            let ascending = if let Some(order) = i.next() {
-                order.as_rule() == Rule::ASC
-            } else {
-                true
-            };
+            let ascending = i.next().is_none_or(|o| o.as_rule() == Rule::ASC);
             Ok(SortItem { expr, ascending })
         })
         .collect()
@@ -2053,9 +1946,7 @@ fn extract_property_name(pair: Pair<Rule>) -> String {
 }
 
 /// Parse OPTIONS clause if present, returning empty map otherwise.
-fn parse_options<'a, I>(
-    inner: &mut I,
-) -> Result<std::collections::HashMap<String, Value>, ParseError>
+fn parse_options<'a, I>(inner: &mut I) -> Result<HashMap<String, Value>, ParseError>
 where
     I: Iterator<Item = Pair<'a, Rule>>,
 {
@@ -2064,7 +1955,7 @@ where
     {
         return build_map_options(inner.next().unwrap());
     }
-    Ok(std::collections::HashMap::new())
+    Ok(HashMap::new())
 }
 
 fn build_create_vector_index(pair: Pair<Rule>) -> Result<SchemaCommand, ParseError> {
@@ -2074,7 +1965,7 @@ fn build_create_vector_index(pair: Pair<Rule>) -> Result<SchemaCommand, ParseErr
     inner.next(); // INDEX
 
     let name = inner.next().unwrap().as_str().to_string();
-    let if_not_exists = check_if_not_exists(&mut inner);
+    let if_not_exists = consume_if_present(&mut inner, Rule::if_not_exists);
     inner.next(); // FOR
 
     let label = parse_label_binding(&mut inner);
@@ -2099,15 +1990,13 @@ fn build_create_fulltext_index(pair: Pair<Rule>) -> Result<SchemaCommand, ParseE
     inner.next(); // INDEX
 
     let name = inner.next().unwrap().as_str().to_string();
-    let if_not_exists = check_if_not_exists(&mut inner);
+    let if_not_exists = consume_if_present(&mut inner, Rule::if_not_exists);
     inner.next(); // FOR
 
     let label = parse_label_binding(&mut inner);
     inner.next(); // ON
 
-    if peek_is(&mut inner, Rule::EACH) {
-        inner.next();
-    }
+    consume_if_present(&mut inner, Rule::EACH);
 
     // Parse property_expression_list
     let prop_list = inner.next().unwrap();
@@ -2133,7 +2022,7 @@ fn build_create_scalar_index(pair: Pair<Rule>) -> Result<SchemaCommand, ParseErr
     inner.next(); // CREATE
     inner.next(); // INDEX
 
-    let if_not_exists = check_if_not_exists(&mut inner);
+    let if_not_exists = consume_if_present(&mut inner, Rule::if_not_exists);
     let name = inner.next().unwrap().as_str().to_string();
 
     // FOR clause: expect identifier ":" label
@@ -2147,19 +2036,15 @@ fn build_create_scalar_index(pair: Pair<Rule>) -> Result<SchemaCommand, ParseErr
     let expr_list = inner.next().unwrap();
     let expressions: Vec<Expr> = expr_list
         .into_inner()
-        .map(|expr_pair| build_expression(expr_pair))
+        .map(build_expression)
         .collect::<Result<Vec<_>, _>>()?;
 
     let mut where_clause = None;
-    let mut options = std::collections::HashMap::new();
+    let mut options = HashMap::new();
 
     for p in inner {
         match p.as_rule() {
-            Rule::where_clause => {
-                let mut wc_inner = p.into_inner();
-                wc_inner.next(); // Skip WHERE keyword
-                where_clause = Some(build_expression(wc_inner.next().unwrap())?);
-            }
+            Rule::where_clause => where_clause = Some(extract_where_expr(p)?),
             Rule::OPTIONS => {
                 // Next item should be map_literal
             }
@@ -2188,7 +2073,7 @@ fn build_create_json_index(pair: Pair<Rule>) -> Result<SchemaCommand, ParseError
     inner.next(); // INDEX
 
     let name = inner.next().unwrap().as_str().to_string();
-    let if_not_exists = check_if_not_exists(&mut inner);
+    let if_not_exists = consume_if_present(&mut inner, Rule::if_not_exists);
     inner.next(); // FOR
 
     let _variable = inner.next().unwrap(); // e.g., "a"
@@ -2212,7 +2097,7 @@ fn build_drop_index(pair: Pair<Rule>) -> Result<SchemaCommand, ParseError> {
     inner.next(); // DROP_KW
     inner.next(); // INDEX
 
-    let _if_exists = check_if_exists(&mut inner);
+    let _if_exists = consume_if_present(&mut inner, Rule::if_exists);
     let name = inner.next().unwrap().as_str().to_string();
 
     Ok(SchemaCommand::DropIndex(DropIndex { name }))
@@ -2223,19 +2108,18 @@ fn build_create_constraint(pair: Pair<Rule>) -> Result<SchemaCommand, ParseError
     inner.next(); // CREATE
     inner.next(); // CONSTRAINT
 
-    let _if_not_exists = check_if_not_exists(&mut inner);
+    let _if_not_exists = consume_if_present(&mut inner, Rule::if_not_exists);
 
     // Optional constraint name - check if next token is an identifier or ON
     let name = {
         let next_pair = inner.next().unwrap();
-        if next_pair.as_rule() == Rule::identifier
-            || next_pair.as_rule() == Rule::identifier_or_keyword
-        {
-            // It's a constraint name, skip ON and return the name
+        if matches!(
+            next_pair.as_rule(),
+            Rule::identifier | Rule::identifier_or_keyword
+        ) {
             inner.next(); // Skip ON
             Some(normalize_identifier(next_pair.as_str()))
         } else {
-            // It's ON, we already consumed it, no name
             None
         }
     };
@@ -2275,16 +2159,11 @@ fn build_constraint_assertion(
             // n.prop IS UNIQUE or n.prop IS KEY
             let props = extract_property_names_from_expr(first, var)?;
             inner.next(); // IS
-            let constraint_kw = inner.next().unwrap();
-
-            // Check for optional NODE keyword before KEY
-            let constraint_kw = if constraint_kw.as_rule() == Rule::NODE {
-                inner.next().unwrap() // Get the actual KEY/UNIQUE
-            } else {
-                constraint_kw
-            };
-
-            let ctype = match constraint_kw.as_rule() {
+            let mut kw = inner.next().unwrap();
+            if kw.as_rule() == Rule::NODE {
+                kw = inner.next().unwrap();
+            }
+            let ctype = match kw.as_rule() {
                 Rule::UNIQUE => ConstraintType::Unique,
                 Rule::KEY => ConstraintType::NodeKey,
                 _ => return Err(ParseError::new("Expected UNIQUE or KEY".to_string())),
@@ -2308,9 +2187,8 @@ fn build_constraint_assertion(
             inner.next(); // )
             inner.next(); // IS
 
-            // Optional NODE or RELATIONSHIP
             let mut next = inner.next().unwrap();
-            if next.as_rule() == Rule::NODE || next.as_rule() == Rule::RELATIONSHIP {
+            if matches!(next.as_rule(), Rule::NODE | Rule::RELATIONSHIP) {
                 next = inner.next().unwrap();
             }
 
@@ -2329,33 +2207,24 @@ fn extract_property_names_from_expr(
     pair: Pair<Rule>,
     expected_var: &str,
 ) -> Result<Vec<String>, ParseError> {
-    // For property_expr like n.prop or n.prop1.prop2, extract the property names
-    // We expect the expression to be in the form: var.prop1.prop2...
     let mut parts: Vec<String> = Vec::new();
 
-    fn extract_from_pair(pair: Pair<Rule>, parts: &mut Vec<String>) {
-        match pair.as_rule() {
-            Rule::property_expr => {
-                for child in pair.into_inner() {
-                    extract_from_pair(child, parts);
-                }
-            }
-            Rule::identifier | Rule::identifier_or_keyword => {
-                // Skip the variable name, only collect property names
-                parts.push(pair.as_str().to_string());
-            }
-            _ => {
-                for child in pair.into_inner() {
-                    extract_from_pair(child, parts);
-                }
+    fn collect_identifiers(pair: Pair<Rule>, parts: &mut Vec<String>) {
+        if matches!(
+            pair.as_rule(),
+            Rule::identifier | Rule::identifier_or_keyword
+        ) {
+            parts.push(pair.as_str().to_string());
+        } else {
+            for child in pair.into_inner() {
+                collect_identifiers(child, parts);
             }
         }
     }
 
-    extract_from_pair(pair, &mut parts);
+    collect_identifiers(pair, &mut parts);
 
-    // Remove the first element which should be the variable name
-    if !parts.is_empty() && parts[0] == expected_var {
+    if parts.first().is_some_and(|p| p == expected_var) {
         parts.remove(0);
     }
 
@@ -2367,7 +2236,7 @@ fn build_drop_constraint(pair: Pair<Rule>) -> Result<SchemaCommand, ParseError> 
     inner.next(); // DROP_KW
     inner.next(); // CONSTRAINT
 
-    let _if_exists = check_if_exists(&mut inner);
+    let _if_exists = consume_if_present(&mut inner, Rule::if_exists);
     let name = inner.next().unwrap().as_str().to_string();
 
     Ok(SchemaCommand::DropConstraint(DropConstraint { name }))
@@ -2378,7 +2247,7 @@ fn build_create_label(pair: Pair<Rule>) -> Result<SchemaCommand, ParseError> {
     inner.next(); // CREATE
     inner.next(); // LABEL
 
-    let if_not_exists = check_if_not_exists(&mut inner);
+    let if_not_exists = consume_if_present(&mut inner, Rule::if_not_exists);
     let name = normalize_identifier(inner.next().unwrap().as_str());
 
     let prop_defs = inner.next().unwrap();
@@ -2397,7 +2266,7 @@ fn build_create_edge_type(pair: Pair<Rule>) -> Result<SchemaCommand, ParseError>
     inner.next(); // EDGE
     inner.next(); // TYPE
 
-    let if_not_exists = check_if_not_exists(&mut inner);
+    let if_not_exists = consume_if_present(&mut inner, Rule::if_not_exists);
     let name = normalize_identifier(inner.next().unwrap().as_str());
 
     let mut properties = vec![];
@@ -2478,7 +2347,7 @@ fn build_drop_label(pair: Pair<Rule>) -> Result<SchemaCommand, ParseError> {
     let mut inner = pair.into_inner().peekable();
     inner.next(); // DROP_KW
     inner.next(); // LABEL
-    let if_exists = check_if_exists(&mut inner);
+    let if_exists = consume_if_present(&mut inner, Rule::if_exists);
     let name = normalize_identifier(inner.next().unwrap().as_str());
 
     Ok(SchemaCommand::DropLabel(DropLabel { name, if_exists }))
@@ -2489,7 +2358,7 @@ fn build_drop_edge_type(pair: Pair<Rule>) -> Result<SchemaCommand, ParseError> {
     inner.next(); // DROP_KW
     inner.next(); // EDGE
     inner.next(); // TYPE
-    let if_exists = check_if_exists(&mut inner);
+    let if_exists = consume_if_present(&mut inner, Rule::if_exists);
     let name = normalize_identifier(inner.next().unwrap().as_str());
 
     Ok(SchemaCommand::DropEdgeType(DropEdgeType {
@@ -2509,20 +2378,17 @@ fn build_show_constraints(pair: Pair<Rule>) -> Result<SchemaCommand, ParseError>
 }
 
 fn build_constraint_target(pair: Pair<Rule>) -> Result<ConstraintTarget, ParseError> {
-    let mut inner = pair.into_inner();
+    let mut inner = pair.into_inner().peekable();
     inner.next(); // FOR
 
-    let is_edge = inner.peek().is_some_and(|p| p.as_rule() == Rule::EDGE);
-    if is_edge {
-        inner.next(); // EDGE
-    }
+    let is_edge = consume_if_present(&mut inner, Rule::EDGE);
     inner.next(); // (
     let name = normalize_identifier(inner.next().unwrap().as_str());
-    if is_edge {
-        Ok(ConstraintTarget::EdgeType(name))
+    Ok(if is_edge {
+        ConstraintTarget::EdgeType(name)
     } else {
-        Ok(ConstraintTarget::Label(name))
-    }
+        ConstraintTarget::Label(name)
+    })
 }
 
 fn build_show_indexes(pair: Pair<Rule>) -> Result<SchemaCommand, ParseError> {
@@ -2530,8 +2396,7 @@ fn build_show_indexes(pair: Pair<Rule>) -> Result<SchemaCommand, ParseError> {
     inner.next(); // SHOW
 
     let filter = inner.next().and_then(|p| match p.as_rule() {
-        Rule::VECTOR => Some("VECTOR".to_string()),
-        Rule::FULLTEXT => Some("FULLTEXT".to_string()),
+        Rule::VECTOR | Rule::FULLTEXT => Some(p.as_str().to_uppercase()),
         _ => None,
     });
 
@@ -2549,26 +2414,30 @@ fn build_backup_command(pair: Pair<Rule>) -> Result<SchemaCommand, ParseError> {
 }
 
 /// Parse WITH options clause if present.
-fn parse_with_options(
-    inner: &mut Pairs<Rule>,
-) -> Result<std::collections::HashMap<String, Value>, ParseError> {
+fn parse_with_options(inner: &mut Pairs<Rule>) -> Result<HashMap<String, Value>, ParseError> {
     if let Some(p) = inner.next()
         && p.as_rule() == Rule::WITH
     {
         return build_map_options(inner.next().unwrap());
     }
-    Ok(std::collections::HashMap::new())
+    Ok(HashMap::new())
 }
 
-fn build_copy_to(pair: Pair<Rule>) -> Result<SchemaCommand, ParseError> {
+fn parse_copy_fields(
+    pair: Pair<Rule>,
+) -> Result<(String, String, String, HashMap<String, Value>), ParseError> {
     let mut inner = pair.into_inner();
     inner.next(); // COPY
     let label = normalize_identifier(inner.next().unwrap().as_str());
-    inner.next(); // TO
+    inner.next(); // TO or FROM
     let path = build_string_literal(inner.next().unwrap())?;
     let options = parse_with_options(&mut inner)?;
     let format = detect_file_format(&path, &options);
+    Ok((label, path, format, options))
+}
 
+fn build_copy_to(pair: Pair<Rule>) -> Result<SchemaCommand, ParseError> {
+    let (label, path, format, options) = parse_copy_fields(pair)?;
     Ok(SchemaCommand::CopyTo(CopyToCommand {
         label,
         path,
@@ -2578,14 +2447,7 @@ fn build_copy_to(pair: Pair<Rule>) -> Result<SchemaCommand, ParseError> {
 }
 
 fn build_copy_from(pair: Pair<Rule>) -> Result<SchemaCommand, ParseError> {
-    let mut inner = pair.into_inner();
-    inner.next(); // COPY
-    let label = normalize_identifier(inner.next().unwrap().as_str());
-    inner.next(); // FROM
-    let path = build_string_literal(inner.next().unwrap())?;
-    let options = parse_with_options(&mut inner)?;
-    let format = detect_file_format(&path, &options);
-
+    let (label, path, format, options) = parse_copy_fields(pair)?;
     Ok(SchemaCommand::CopyFrom(CopyFromCommand {
         label,
         path,
@@ -2602,41 +2464,28 @@ fn build_copy_from(pair: Pair<Rule>) -> Result<SchemaCommand, ParseError> {
 /// 1. Explicit 'format' option in the WITH clause
 /// 2. File extension (.csv, .parquet, etc.)
 /// 3. Default to 'parquet' if neither is available
-fn detect_file_format(path: &str, options: &std::collections::HashMap<String, Value>) -> String {
-    // Check if format is explicitly provided in options
+fn detect_file_format(path: &str, options: &HashMap<String, Value>) -> String {
     if let Some(format_value) = options.get("format")
         && let Some(format_str) = format_value.as_str()
     {
         return format_str.to_lowercase();
     }
 
-    // Detect from file extension
-    if let Some(ext) = std::path::Path::new(path).extension()
-        && let Some(ext_str) = ext.to_str()
-    {
-        let ext_lower = ext_str.to_lowercase();
-        match ext_lower.as_str() {
-            "csv" => return "csv".to_string(),
-            "parquet" | "pq" => return "parquet".to_string(),
-            _ => {}
-        }
-    }
+    let ext = std::path::Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("");
 
-    // Default to parquet
-    "parquet".to_string()
+    match ext.to_lowercase().as_str() {
+        "csv" => "csv",
+        "parquet" | "pq" => "parquet",
+        _ => "parquet",
+    }
+    .to_string()
 }
 
-fn check_if_not_exists(inner: &mut std::iter::Peekable<Pairs<Rule>>) -> bool {
-    if peek_is(inner, Rule::if_not_exists) {
-        inner.next();
-        true
-    } else {
-        false
-    }
-}
-
-fn check_if_exists(inner: &mut std::iter::Peekable<Pairs<Rule>>) -> bool {
-    if peek_is(inner, Rule::if_exists) {
+fn consume_if_present(inner: &mut std::iter::Peekable<Pairs<Rule>>, rule: Rule) -> bool {
+    if peek_is(inner, rule) {
         inner.next();
         true
     } else {
@@ -2691,21 +2540,19 @@ fn build_property_definition(pair: Pair<Rule>) -> Result<PropertyDefinition, Par
 fn expr_to_value(expr: Expr) -> Result<Value, ParseError> {
     match expr {
         Expr::Literal(lit) => Ok(lit.to_value()),
-
         Expr::Map(entries) => {
-            let mut map = std::collections::HashMap::new();
-            for (key, value_expr) in entries {
-                map.insert(key, expr_to_value(value_expr)?);
-            }
+            let map = entries
+                .into_iter()
+                .map(|(k, v)| Ok((k, expr_to_value(v)?)))
+                .collect::<Result<_, ParseError>>()?;
             Ok(Value::Map(map))
         }
-
-        Expr::List(items) => {
-            let values: Result<Vec<Value>, ParseError> =
-                items.into_iter().map(expr_to_value).collect();
-            Ok(Value::List(values?))
-        }
-
+        Expr::List(items) => Ok(Value::List(
+            items
+                .into_iter()
+                .map(expr_to_value)
+                .collect::<Result<_, _>>()?,
+        )),
         _ => Err(ParseError::new(format!(
             "OPTIONS values must be literals, maps, or lists. Got: {:?}",
             expr
@@ -2713,21 +2560,14 @@ fn expr_to_value(expr: Expr) -> Result<Value, ParseError> {
     }
 }
 
-fn build_map_options(
-    pair: Pair<Rule>,
-) -> Result<std::collections::HashMap<String, Value>, ParseError> {
-    let map = build_map_literal(pair)?;
-    if let Expr::Map(entries) = map {
-        let mut result = std::collections::HashMap::new();
-        for (key, value_expr) in entries {
-            result.insert(key, expr_to_value(value_expr)?);
-        }
-        Ok(result)
-    } else {
-        Err(ParseError::new(
-            "Expected map literal for options".to_string(),
-        ))
-    }
+fn build_map_options(pair: Pair<Rule>) -> Result<HashMap<String, Value>, ParseError> {
+    let Expr::Map(entries) = build_map_literal(pair)? else {
+        unreachable!("build_map_literal always returns Expr::Map");
+    };
+    entries
+        .into_iter()
+        .map(|(key, expr)| Ok((key, expr_to_value(expr)?)))
+        .collect()
 }
 
 fn build_string_literal(pair: Pair<Rule>) -> Result<String, ParseError> {
