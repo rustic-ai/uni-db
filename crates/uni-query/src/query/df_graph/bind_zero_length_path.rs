@@ -16,7 +16,9 @@
 
 use super::GraphExecutionContext;
 use super::common::compute_plan_properties;
-use arrow_array::builder::{LargeBinaryBuilder, ListBuilder, StringBuilder, StructBuilder, UInt64Builder};
+use arrow_array::builder::{
+    LargeBinaryBuilder, ListBuilder, StringBuilder, StructBuilder, UInt64Builder,
+};
 use arrow_array::{ArrayRef, RecordBatch};
 use arrow_schema::SchemaRef;
 use datafusion::common::Result as DFResult;
@@ -96,18 +98,12 @@ impl BindZeroLengthPathExec {
 }
 
 impl DisplayAs for BindZeroLengthPathExec {
-    fn fmt_as(&self, t: DisplayFormatType, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match t {
-            DisplayFormatType::Default
-            | DisplayFormatType::Verbose
-            | DisplayFormatType::TreeRender => {
-                write!(
-                    f,
-                    "BindZeroLengthPathExec: {} = ({})",
-                    self.path_variable, self.node_variable
-                )
-            }
-        }
+    fn fmt_as(&self, _t: DisplayFormatType, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "BindZeroLengthPathExec: {} = ({})",
+            self.path_variable, self.node_variable
+        )
     }
 }
 
@@ -230,11 +226,7 @@ impl BindZeroLengthPathStream {
                 continue;
             }
 
-            super::common::append_node_to_struct_optional(
-                nodes_builder.values(),
-                vid,
-                &query_ctx,
-            );
+            super::common::append_node_to_struct_optional(nodes_builder.values(), vid, &query_ctx);
             nodes_builder.append(true);
             rels_builder.append(true);
             path_validity.push(true);

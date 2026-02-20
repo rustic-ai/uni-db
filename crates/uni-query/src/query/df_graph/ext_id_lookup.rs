@@ -121,18 +121,12 @@ impl GraphExtIdLookupExec {
 }
 
 impl DisplayAs for GraphExtIdLookupExec {
-    fn fmt_as(&self, t: DisplayFormatType, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match t {
-            DisplayFormatType::Default
-            | DisplayFormatType::Verbose
-            | DisplayFormatType::TreeRender => {
-                write!(
-                    f,
-                    "GraphExtIdLookupExec: ext_id={}, variable={}, optional={}",
-                    self.ext_id, self.variable, self.optional
-                )
-            }
-        }
+    fn fmt_as(&self, _t: DisplayFormatType, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "GraphExtIdLookupExec: ext_id={}, variable={}, optional={}",
+            self.ext_id, self.variable, self.optional
+        )
     }
 }
 

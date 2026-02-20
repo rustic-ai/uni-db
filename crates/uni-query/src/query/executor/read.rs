@@ -605,7 +605,10 @@ impl Executor {
 
                     // Check if this field contains JSON-encoded values (e.g., from UNWIND)
                     // Parse JSON string to restore the original type
-                    if field.metadata().get("cv_encoded").is_some_and(|v| v == "true")
+                    if field
+                        .metadata()
+                        .get("cv_encoded")
+                        .is_some_and(|v| v == "true")
                         && let Value::String(s) = &value
                         && let Ok(parsed) = serde_json::from_str::<serde_json::Value>(s)
                     {
@@ -4713,7 +4716,7 @@ impl Executor {
     /// - Zero-length paths (min_hops=0): Source equals target with empty edge list
     /// - step_variable holds `Value::List` of edge maps (even for single-hop VLP)
     /// - path_variable holds `Value::Path` with nodes and edges
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     pub(crate) async fn execute_vlp(
         &self,
         input_matches: Vec<HashMap<String, Value>>,
@@ -4755,7 +4758,7 @@ impl Executor {
         .await
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     async fn execute_vlp_inner(
         &self,
         input_matches: Vec<HashMap<String, Value>>,
@@ -6090,7 +6093,7 @@ impl Executor {
     }
 
     /// Build a match result for BFS traversal with optional step variable.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     pub(crate) fn build_traverse_match(
         row: &HashMap<String, Value>,
         target_variable: &str,
@@ -7158,7 +7161,7 @@ impl Executor {
     ///
     /// Uses `&self` for consistency with other evaluation methods, though it only
     /// recurses for property access.
-    #[allow(clippy::only_used_in_recursion)]
+    #[expect(clippy::only_used_in_recursion)]
     fn evaluate_simple_expr(&self, expr: &Expr, row: &HashMap<String, Value>) -> Result<Value> {
         match expr {
             Expr::Variable(name) => row
@@ -8226,7 +8229,7 @@ impl Executor {
     }
 
     /// Execute a vector KNN search.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     pub(crate) async fn execute_vector_knn(
         &self,
         label_id: u16,
@@ -8287,7 +8290,7 @@ impl Executor {
         Ok(matches)
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     pub(crate) async fn execute_inverted_index_lookup(
         &self,
         label_id: u16,
@@ -8559,7 +8562,6 @@ impl Executor {
     }
 
     /// Execute a MERGE operation.
-    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn execute_cross_join(
         &self,
         left: Box<LogicalPlan>,

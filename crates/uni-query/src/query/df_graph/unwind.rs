@@ -177,11 +177,7 @@ impl GraphUnwindExec {
     /// columns when possible. Falls back to JSON-encoded `Utf8` for
     /// heterogeneous or non-inferrable expressions.
     fn build_schema(input_schema: SchemaRef, variable: &str, expr: &Expr) -> SchemaRef {
-        let mut fields: Vec<Field> = input_schema
-            .fields()
-            .iter()
-            .map(|f| f.as_ref().clone())
-            .collect();
+        let mut fields: Vec<Arc<Field>> = input_schema.fields().to_vec();
 
         let type_info = Self::infer_element_type(expr);
 
@@ -191,26 +187,20 @@ impl GraphUnwindExec {
             metadata.insert("cv_encoded".to_string(), "true".to_string());
             field = field.with_metadata(metadata);
         }
-        fields.push(field);
+        fields.push(Arc::new(field));
 
         Arc::new(Schema::new(fields))
     }
 }
 
 impl DisplayAs for GraphUnwindExec {
-    fn fmt_as(&self, t: DisplayFormatType, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match t {
-            DisplayFormatType::Default
-            | DisplayFormatType::Verbose
-            | DisplayFormatType::TreeRender => {
-                write!(
-                    f,
-                    "GraphUnwindExec: {} AS {}",
-                    self.expr.to_string_repr(),
-                    self.variable
-                )
-            }
-        }
+    fn fmt_as(&self, _t: DisplayFormatType, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "GraphUnwindExec: {} AS {}",
+            self.expr.to_string_repr(),
+            self.variable
+        )
     }
 }
 
@@ -525,10 +515,10 @@ impl GraphUnwindStream {
             (DataType::Boolean, false) => {
                 let mut builder = BooleanBuilder::with_capacity(num_rows);
                 for (_, value) in expansions {
-                    match value {
-                        Value::Bool(b) => builder.append_value(*b),
-                        Value::Null => builder.append_null(),
-                        _ => builder.append_null(),
+                    if let Value::Bool(b) = value {
+                        builder.append_value(*b);
+                    } else {
+                        builder.append_null();
                     }
                 }
                 Arc::new(builder.finish())
@@ -536,10 +526,10 @@ impl GraphUnwindStream {
             (DataType::Int64, false) => {
                 let mut builder = Int64Builder::with_capacity(num_rows);
                 for (_, value) in expansions {
-                    match value {
-                        Value::Int(i) => builder.append_value(*i),
-                        Value::Null => builder.append_null(),
-                        _ => builder.append_null(),
+                    if let Value::Int(i) = value {
+                        builder.append_value(*i);
+                    } else {
+                        builder.append_null();
                     }
                 }
                 Arc::new(builder.finish())
@@ -547,22 +537,21 @@ impl GraphUnwindStream {
             (DataType::Float64, false) => {
                 let mut builder = Float64Builder::with_capacity(num_rows);
                 for (_, value) in expansions {
-                    match value {
-                        Value::Float(f) => builder.append_value(*f),
-                        Value::Null => builder.append_null(),
-                        _ => builder.append_null(),
+                    if let Value::Float(f) = value {
+                        builder.append_value(*f);
+                    } else {
+                        builder.append_null();
                     }
                 }
                 Arc::new(builder.finish())
             }
             (DataType::Utf8, false) => {
-                // Plain string values (no JSON encoding)
                 let mut builder = StringBuilder::new();
                 for (_, value) in expansions {
-                    match value {
-                        Value::String(s) => builder.append_value(s),
-                        Value::Null => builder.append_null(),
-                        _ => builder.append_null(),
+                    if let Value::String(s) = value {
+                        builder.append_value(s);
+                    } else {
+                        builder.append_null();
                     }
                 }
                 Arc::new(builder.finish())
@@ -738,7 +727,11 @@ mod tests {
         assert_eq!(output_schema.field(2).name(), "item");
         assert_eq!(output_schema.field(2).data_type(), &DataType::LargeBinary);
         assert_eq!(
-            output_schema.field(2).metadata().get("cv_encoded").map(String::as_str),
+            output_schema
+                .field(2)
+                .metadata()
+                .get("cv_encoded")
+                .map(String::as_str),
             Some("true")
         );
     }

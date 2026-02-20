@@ -7039,8 +7039,7 @@ fn mark_set_item_variables(
                     .or_default()
                     .insert("*".to_string());
             }
-            SetItem::Variable { variable, value }
-            | SetItem::VariablePlus { variable, value } => {
+            SetItem::Variable { variable, value } | SetItem::VariablePlus { variable, value } => {
                 // SET n = {props} or SET n += {props}
                 properties
                     .entry(variable.clone())
@@ -7062,13 +7061,19 @@ fn mark_pattern_variables(
 ) {
     for path in &pattern.paths {
         if let Some(ref v) = path.variable {
-            properties.entry(v.clone()).or_default().insert("*".to_string());
+            properties
+                .entry(v.clone())
+                .or_default()
+                .insert("*".to_string());
         }
         for element in &path.elements {
             match element {
                 PatternElement::Node(n) => {
                     if let Some(ref v) = n.variable {
-                        properties.entry(v.clone()).or_default().insert("*".to_string());
+                        properties
+                            .entry(v.clone())
+                            .or_default()
+                            .insert("*".to_string());
                     }
                     // Also collect properties from inline property expressions
                     if let Some(ref props) = n.properties {
@@ -7077,7 +7082,10 @@ fn mark_pattern_variables(
                 }
                 PatternElement::Relationship(r) => {
                     if let Some(ref v) = r.variable {
-                        properties.entry(v.clone()).or_default().insert("*".to_string());
+                        properties
+                            .entry(v.clone())
+                            .or_default()
+                            .insert("*".to_string());
                     }
                     if let Some(ref props) = r.properties {
                         collect_properties_from_expr_into(props, properties);

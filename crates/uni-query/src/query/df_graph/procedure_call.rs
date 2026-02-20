@@ -233,18 +233,12 @@ impl GraphProcedureCallExec {
 }
 
 impl DisplayAs for GraphProcedureCallExec {
-    fn fmt_as(&self, t: DisplayFormatType, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match t {
-            DisplayFormatType::Default
-            | DisplayFormatType::Verbose
-            | DisplayFormatType::TreeRender => {
-                write!(
-                    f,
-                    "GraphProcedureCallExec: procedure={}",
-                    self.procedure_name
-                )
-            }
-        }
+    fn fmt_as(&self, _t: DisplayFormatType, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "GraphProcedureCallExec: procedure={}",
+            self.procedure_name
+        )
     }
 }
 

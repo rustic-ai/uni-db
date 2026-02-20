@@ -338,22 +338,16 @@ impl GraphTraverseExec {
 }
 
 impl DisplayAs for GraphTraverseExec {
-    fn fmt_as(&self, t: DisplayFormatType, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match t {
-            DisplayFormatType::Default
-            | DisplayFormatType::Verbose
-            | DisplayFormatType::TreeRender => {
-                write!(
-                    f,
-                    "GraphTraverseExec: {} --[{:?}]--> {}",
-                    self.source_column, self.edge_type_ids, self.target_variable
-                )?;
-                if let Some(ref edge_var) = self.edge_variable {
-                    write!(f, " as {}", edge_var)?;
-                }
-                Ok(())
-            }
+    fn fmt_as(&self, _t: DisplayFormatType, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "GraphTraverseExec: {} --[{:?}]--> {}",
+            self.source_column, self.edge_type_ids, self.target_variable
+        )?;
+        if let Some(ref edge_var) = self.edge_variable {
+            write!(f, " as {}", edge_var)?;
         }
+        Ok(())
     }
 }
 
@@ -1546,8 +1540,7 @@ impl GraphTraverseMainExec {
                 let mut metadata = std::collections::HashMap::new();
                 metadata.insert("cv_encoded".to_string(), "true".to_string());
                 fields.push(
-                    Field::new(&col_name, DataType::LargeBinary, true)
-                        .with_metadata(metadata),
+                    Field::new(&col_name, DataType::LargeBinary, true).with_metadata(metadata),
                 );
             }
         } else {
@@ -1574,18 +1567,12 @@ impl GraphTraverseMainExec {
 }
 
 impl DisplayAs for GraphTraverseMainExec {
-    fn fmt_as(&self, t: DisplayFormatType, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match t {
-            DisplayFormatType::Default
-            | DisplayFormatType::Verbose
-            | DisplayFormatType::TreeRender => {
-                write!(
-                    f,
-                    "GraphTraverseMainExec: types={:?}, direction={:?}",
-                    self.type_names, self.direction
-                )
-            }
-        }
+    fn fmt_as(&self, _t: DisplayFormatType, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "GraphTraverseMainExec: types={:?}, direction={:?}",
+            self.type_names, self.direction
+        )
     }
 }
 
@@ -2485,18 +2472,12 @@ impl GraphVariableLengthTraverseExec {
 }
 
 impl DisplayAs for GraphVariableLengthTraverseExec {
-    fn fmt_as(&self, t: DisplayFormatType, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match t {
-            DisplayFormatType::Default
-            | DisplayFormatType::Verbose
-            | DisplayFormatType::TreeRender => {
-                write!(
-                    f,
-                    "GraphVariableLengthTraverseExec: {} --[{:?}*{}..{}]--> target",
-                    self.source_column, self.edge_type_ids, self.min_hops, self.max_hops
-                )
-            }
-        }
+    fn fmt_as(&self, _t: DisplayFormatType, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "GraphVariableLengthTraverseExec: {} --[{:?}*{}..{}]--> target",
+            self.source_column, self.edge_type_ids, self.min_hops, self.max_hops
+        )
     }
 }
 
@@ -3420,18 +3401,12 @@ impl GraphVariableLengthTraverseMainExec {
 }
 
 impl DisplayAs for GraphVariableLengthTraverseMainExec {
-    fn fmt_as(&self, t: DisplayFormatType, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match t {
-            DisplayFormatType::Default
-            | DisplayFormatType::Verbose
-            | DisplayFormatType::TreeRender => {
-                write!(
-                    f,
-                    "GraphVariableLengthTraverseMainExec: {} --[{:?}*{}..{}]--> target",
-                    self.source_column, self.type_names, self.min_hops, self.max_hops
-                )
-            }
-        }
+    fn fmt_as(&self, _t: DisplayFormatType, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "GraphVariableLengthTraverseMainExec: {} --[{:?}*{}..{}]--> target",
+            self.source_column, self.type_names, self.min_hops, self.max_hops
+        )
     }
 }
 

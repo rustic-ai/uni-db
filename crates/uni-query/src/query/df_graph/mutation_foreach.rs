@@ -8,7 +8,7 @@
 //! passed through unchanged (FOREACH does not modify the caller-visible result).
 
 use super::common::compute_plan_properties;
-use super::mutation_common::{batches_to_rows, rows_to_batches, MutationContext};
+use super::mutation_common::{MutationContext, batches_to_rows, rows_to_batches};
 use arrow_array::RecordBatch;
 use arrow_schema::SchemaRef;
 use datafusion::common::Result as DFResult;
@@ -164,7 +164,7 @@ impl ExecutionPlan for ForeachExec {
 }
 
 /// Inner async function for FOREACH execution.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 async fn execute_foreach_inner(
     input: Arc<dyn ExecutionPlan>,
     schema: SchemaRef,
@@ -191,9 +191,8 @@ async fn execute_foreach_inner(
     };
 
     // 2. Convert to rows for expression evaluation
-    let rows = batches_to_rows(&input_batches).map_err(|e| {
-        df_err("failed to convert batches to rows", &e)
-    })?;
+    let rows = batches_to_rows(&input_batches)
+        .map_err(|e| df_err("failed to convert batches to rows", &e))?;
 
     // 3. Execute FOREACH body per row, per list item
     let exec = &mutation_ctx.executor;
@@ -251,9 +250,8 @@ async fn execute_foreach_inner(
 
     // 4. Pass through original rows (FOREACH is side-effect only)
     // Reconstruct from rows in case the schema needs normalization
-    let result_batches = rows_to_batches(&rows, &schema).map_err(|e| {
-        df_err("failed to reconstruct batches", &e)
-    })?;
+    let result_batches =
+        rows_to_batches(&rows, &schema).map_err(|e| df_err("failed to reconstruct batches", &e))?;
     let results: Vec<DFResult<RecordBatch>> = result_batches.into_iter().map(Ok).collect();
     Ok(futures::stream::iter(results))
 }

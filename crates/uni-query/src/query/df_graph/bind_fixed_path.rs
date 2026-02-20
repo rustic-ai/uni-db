@@ -11,7 +11,9 @@
 
 use super::GraphExecutionContext;
 use super::common::{compute_plan_properties, extract_column_value};
-use arrow_array::builder::{LargeBinaryBuilder, ListBuilder, StringBuilder, StructBuilder, UInt64Builder};
+use arrow_array::builder::{
+    LargeBinaryBuilder, ListBuilder, StringBuilder, StructBuilder, UInt64Builder,
+};
 use arrow_array::{ArrayRef, RecordBatch};
 use arrow_schema::SchemaRef;
 use datafusion::common::Result as DFResult;
@@ -92,20 +94,14 @@ impl BindFixedPathExec {
 }
 
 impl DisplayAs for BindFixedPathExec {
-    fn fmt_as(&self, t: DisplayFormatType, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match t {
-            DisplayFormatType::Default
-            | DisplayFormatType::Verbose
-            | DisplayFormatType::TreeRender => {
-                write!(
-                    f,
-                    "BindFixedPathExec: {} = ({}) via [{}]",
-                    self.path_variable,
-                    self.node_variables.join(", "),
-                    self.edge_variables.join(", "),
-                )
-            }
-        }
+    fn fmt_as(&self, _t: DisplayFormatType, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "BindFixedPathExec: {} = ({}) via [{}]",
+            self.path_variable,
+            self.node_variables.join(", "),
+            self.edge_variables.join(", "),
+        )
     }
 }
 
@@ -344,7 +340,6 @@ impl BindFixedPathStream {
         RecordBatch::try_new(self.schema.clone(), columns)
             .map_err(|e| datafusion::error::DataFusionError::ArrowError(Box::new(e), None))
     }
-
 }
 
 impl Stream for BindFixedPathStream {

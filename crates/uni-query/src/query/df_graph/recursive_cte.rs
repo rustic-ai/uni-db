@@ -131,14 +131,8 @@ impl RecursiveCTEExec {
 }
 
 impl DisplayAs for RecursiveCTEExec {
-    fn fmt_as(&self, t: DisplayFormatType, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match t {
-            DisplayFormatType::Default
-            | DisplayFormatType::Verbose
-            | DisplayFormatType::TreeRender => {
-                write!(f, "RecursiveCTEExec: {}", self.cte_name)
-            }
-        }
+    fn fmt_as(&self, _t: DisplayFormatType, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "RecursiveCTEExec: {}", self.cte_name)
     }
 }
 

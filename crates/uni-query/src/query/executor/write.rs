@@ -8,9 +8,9 @@ use lancedb::query::{ExecutableQuery, QueryBase};
 use std::collections::HashMap;
 use std::sync::Arc;
 use uni_common::DataType;
-use uni_common::{Path, Value};
 use uni_common::core::id::{Eid, Vid};
 use uni_common::core::schema::{Constraint, ConstraintTarget, ConstraintType, SchemaManager};
+use uni_common::{Path, Value};
 use uni_cypher::ast::{
     AlterAction, AlterEdgeType, AlterLabel, BinaryOp, ConstraintType as AstConstraintType,
     CreateConstraint, CreateEdgeType, CreateLabel, CypherLiteral, Direction, DropConstraint,
@@ -110,7 +110,7 @@ impl Executor {
     ///
     /// Returns an error if the entity cannot be found in the storage layer, or
     /// if the writer fails to persist the updated properties.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     async fn apply_properties_to_entity(
         &self,
         variable: &str,
@@ -180,10 +180,8 @@ impl Executor {
                     // Remove old user property keys, keep internal fields
                     node_map.retain(|k, _| k.starts_with('_') || k == "ext_id");
                     // Build effective (non-null) properties
-                    let effective: HashMap<String, Value> = enriched
-                        .into_iter()
-                        .filter(|(_, v)| !v.is_null())
-                        .collect();
+                    let effective: HashMap<String, Value> =
+                        enriched.into_iter().filter(|(_, v)| !v.is_null()).collect();
                     for (k, v) in &effective {
                         node_map.insert(k.clone(), v.clone());
                     }
@@ -1168,7 +1166,7 @@ impl Executor {
             .cloned()
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     pub(crate) async fn execute_merge(
         &self,
         rows: Vec<HashMap<String, Value>>,
@@ -1425,8 +1423,11 @@ impl Executor {
                                 };
 
                                 let store_props = !rel_var.is_empty();
-                                let user_props =
-                                    if store_props { rel_props.clone() } else { HashMap::new() };
+                                let user_props = if store_props {
+                                    rel_props.clone()
+                                } else {
+                                    HashMap::new()
+                                };
 
                                 writer
                                     .insert_edge(edge_src, edge_dst, type_id, eid, rel_props)

@@ -620,9 +620,7 @@ impl HybridPhysicalPlanner {
                 input,
                 predicate,
                 optional_variables,
-            } => {
-                self.plan_filter(input, predicate, optional_variables, all_properties)
-            }
+            } => self.plan_filter(input, predicate, optional_variables, all_properties),
 
             LogicalPlan::Project { input, projections } => {
                 // Build alias map for ORDER BY alias resolution
@@ -728,12 +726,9 @@ impl HybridPhysicalPlanner {
                 let mutation_ctx = self.require_mutation_ctx()?;
                 // Use a single MutationExec with CreateBatch to avoid N nested
                 // operators (which cause stack overflow for large N).
-                let all_vars: Vec<String> = patterns
-                    .iter()
-                    .flat_map(pattern_variable_names)
-                    .collect();
-                let output_schema =
-                    extended_schema_for_new_vars(&child.schema(), &all_vars);
+                let all_vars: Vec<String> =
+                    patterns.iter().flat_map(pattern_variable_names).collect();
+                let output_schema = extended_schema_for_new_vars(&child.schema(), &all_vars);
                 Ok(Arc::new(MutationExec::new_with_schema(
                     child,
                     MutationKind::CreateBatch {
@@ -1117,8 +1112,7 @@ impl HybridPhysicalPlanner {
         let sub_schema = infer_logical_plan_schema(subquery, &self.schema);
 
         // 3. Merge schemas: input fields + subquery fields (skip duplicates by name)
-        let mut fields: Vec<Arc<arrow_schema::Field>> =
-            input_schema.fields().iter().cloned().collect();
+        let mut fields: Vec<Arc<arrow_schema::Field>> = input_schema.fields().to_vec();
         let input_field_names: HashSet<&str> = input_schema
             .fields()
             .iter()
@@ -1277,8 +1271,7 @@ impl HybridPhysicalPlanner {
 
         // If we need the full object (structural access), add a Struct projection
         let var_props = all_properties.get(variable);
-        if var_props.is_some_and(|p| p.contains("*"))
-        {
+        if var_props.is_some_and(|p| p.contains("*")) {
             // Filter overflow_json from the structural projection — it's an internal
             // column, not a user-visible property for the struct.
             let struct_props: Vec<String> = properties
@@ -2402,8 +2395,7 @@ impl HybridPhysicalPlanner {
                     datafusion::common::DFSchema::try_from(schema.as_ref().clone())?;
                 let df_expr = cypher_expr_to_df(expr, Some(&ctx))?;
                 let df_expr = Self::resolve_udfs(&df_expr, &state)?;
-                let df_expr =
-                    crate::query::df_expr::apply_type_coercion(&df_expr, &df_schema_ref)?;
+                let df_expr = crate::query::df_expr::apply_type_coercion(&df_expr, &df_schema_ref)?;
                 let mut df_expr = Self::resolve_udfs(&df_expr, &state)?;
                 if let Ok(expr_type) = df_expr.get_type(&df_schema_ref) {
                     if uni_common::core::schema::is_datetime_struct(&expr_type) {
@@ -3867,7 +3859,9 @@ fn collect_node_names_from_pattern(pattern: &Pattern, hints: &mut Vec<String>) {
         for element in &path.elements {
             match element {
                 PatternElement::Node(n) => {
-                    if let Some(ref v) = n.variable && !hints.contains(v) {
+                    if let Some(ref v) = n.variable
+                        && !hints.contains(v)
+                    {
                         hints.push(v.clone());
                     }
                 }

@@ -454,9 +454,11 @@ impl GraphExecutionContext {
                 );
             }
 
-            for (neighbor, eid) in neighbors {
-                results.push((vid, neighbor, eid));
-            }
+            results.extend(
+                neighbors
+                    .into_iter()
+                    .map(|(neighbor, eid)| (vid, neighbor, eid)),
+            );
         }
 
         results
@@ -481,7 +483,7 @@ fn overlay_l0_neighbors(
     let mut neighbor_map: HashMap<Eid, Vid> = neighbors.drain(..).map(|(v, e)| (e, v)).collect();
 
     // Query L0 for each direction
-    for simple_dir in direction.to_simple_directions() {
+    for &simple_dir in direction.to_simple_directions() {
         for (neighbor, eid, version) in l0.get_neighbors(vid, edge_type, simple_dir) {
             // Skip edges beyond snapshot boundary
             if version_hwm.is_some_and(|hwm| version > hwm) {
@@ -503,16 +505,16 @@ fn overlay_l0_neighbors(
 
 /// Extension trait to convert storage Direction to SimpleGraph directions.
 trait DirectionExt {
-    fn to_simple_directions(&self) -> Vec<uni_common::graph::simple_graph::Direction>;
+    fn to_simple_directions(&self) -> &'static [uni_common::graph::simple_graph::Direction];
 }
 
 impl DirectionExt for Direction {
-    fn to_simple_directions(&self) -> Vec<uni_common::graph::simple_graph::Direction> {
+    fn to_simple_directions(&self) -> &'static [uni_common::graph::simple_graph::Direction] {
         use uni_common::graph::simple_graph::Direction as SimpleDirection;
         match self {
-            Direction::Outgoing => vec![SimpleDirection::Outgoing],
-            Direction::Incoming => vec![SimpleDirection::Incoming],
-            Direction::Both => vec![SimpleDirection::Outgoing, SimpleDirection::Incoming],
+            Direction::Outgoing => &[SimpleDirection::Outgoing],
+            Direction::Incoming => &[SimpleDirection::Incoming],
+            Direction::Both => &[SimpleDirection::Outgoing, SimpleDirection::Incoming],
         }
     }
 }

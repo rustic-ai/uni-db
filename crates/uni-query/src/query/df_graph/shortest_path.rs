@@ -153,8 +153,9 @@ impl GraphShortestPathExec {
             .collect();
 
         // Add the proper path struct column (nodes + relationships)
-        fields
-            .push(crate::query::df_graph::common::build_path_struct_field(path_variable));
+        fields.push(crate::query::df_graph::common::build_path_struct_field(
+            path_variable,
+        ));
 
         // Add path column (raw VID list for internal use)
         let path_col_name = format!("{}._path", path_variable);
@@ -173,18 +174,12 @@ impl GraphShortestPathExec {
 }
 
 impl DisplayAs for GraphShortestPathExec {
-    fn fmt_as(&self, t: DisplayFormatType, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match t {
-            DisplayFormatType::Default
-            | DisplayFormatType::Verbose
-            | DisplayFormatType::TreeRender => {
-                write!(
-                    f,
-                    "GraphShortestPathExec: {} -> {} via {:?}",
-                    self.source_column, self.target_column, self.edge_type_ids
-                )
-            }
-        }
+    fn fmt_as(&self, _t: DisplayFormatType, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "GraphShortestPathExec: {} -> {} via {:?}",
+            self.source_column, self.target_column, self.edge_type_ids
+        )
     }
 }
 

@@ -340,23 +340,17 @@ impl GraphScanExec {
 }
 
 impl DisplayAs for GraphScanExec {
-    fn fmt_as(&self, t: DisplayFormatType, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match t {
-            DisplayFormatType::Default
-            | DisplayFormatType::Verbose
-            | DisplayFormatType::TreeRender => {
-                let scan_type = if self.is_edge_scan { "Edge" } else { "Vertex" };
-                write!(
-                    f,
-                    "GraphScanExec: {}={}, properties={:?}",
-                    scan_type, self.label, self.projected_properties
-                )?;
-                if self.filter.is_some() {
-                    write!(f, ", filter=<pushed>")?;
-                }
-                Ok(())
-            }
+    fn fmt_as(&self, _t: DisplayFormatType, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let scan_type = if self.is_edge_scan { "Edge" } else { "Vertex" };
+        write!(
+            f,
+            "GraphScanExec: {}={}, properties={:?}",
+            scan_type, self.label, self.projected_properties
+        )?;
+        if self.filter.is_some() {
+            write!(f, ", filter=<pushed>")?;
         }
+        Ok(())
     }
 }
 

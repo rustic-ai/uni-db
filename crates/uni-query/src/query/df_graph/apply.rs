@@ -130,22 +130,16 @@ impl GraphApplyExec {
 }
 
 impl DisplayAs for GraphApplyExec {
-    fn fmt_as(&self, t: DisplayFormatType, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match t {
-            DisplayFormatType::Default
-            | DisplayFormatType::Verbose
-            | DisplayFormatType::TreeRender => {
-                write!(
-                    f,
-                    "GraphApplyExec: filter={}",
-                    if self.input_filter.is_some() {
-                        "yes"
-                    } else {
-                        "none"
-                    }
-                )
+    fn fmt_as(&self, _t: DisplayFormatType, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "GraphApplyExec: filter={}",
+            if self.input_filter.is_some() {
+                "yes"
+            } else {
+                "none"
             }
-        }
+        )
     }
 }
 

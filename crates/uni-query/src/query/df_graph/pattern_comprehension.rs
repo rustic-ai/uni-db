@@ -650,14 +650,16 @@ impl PatternComprehensionExecExpr {
 
         let num_expanded = expansion.row_indices.len();
 
-        let node_struct_fields: Vec<Arc<Field>> = crate::query::df_graph::common::node_struct_fields()
-            .iter()
-            .cloned()
-            .collect();
-        let edge_struct_fields: Vec<Arc<Field>> = crate::query::df_graph::common::edge_struct_fields()
-            .iter()
-            .cloned()
-            .collect();
+        let node_struct_fields: Vec<Arc<Field>> =
+            crate::query::df_graph::common::node_struct_fields()
+                .iter()
+                .cloned()
+                .collect();
+        let edge_struct_fields: Vec<Arc<Field>> =
+            crate::query::df_graph::common::edge_struct_fields()
+                .iter()
+                .cloned()
+                .collect();
 
         let mut nodes_builder = ListBuilder::new(StructBuilder::new(
             node_struct_fields,
@@ -693,11 +695,7 @@ impl PatternComprehensionExecExpr {
             // Append target node for each step
             for step_idx in 0..num_steps {
                 let target_vid = Vid::from(expansion.step_target_vids[step_idx][row_idx]);
-                super::common::append_node_to_struct(
-                    nodes_builder.values(),
-                    target_vid,
-                    query_ctx,
-                );
+                super::common::append_node_to_struct(nodes_builder.values(), target_vid, query_ctx);
             }
             nodes_builder.append(true);
 
@@ -749,7 +747,6 @@ impl PatternComprehensionExecExpr {
 
         Ok(Arc::new(path_struct))
     }
-
 }
 
 // ─── Pattern Analysis Functions ──────────────────────────────────────────────

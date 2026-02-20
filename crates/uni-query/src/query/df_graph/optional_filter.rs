@@ -88,21 +88,14 @@ impl fmt::Debug for OptionalFilterExec {
 impl OptionalFilterExec {
     /// Check whether a column belongs to an optional variable.
     fn is_optional_column_name(optional_variables: &HashSet<String>, col_name: &str) -> bool {
-        for var in optional_variables {
-            // Match columns like "m._vid", "m.name", "r._eid", "r._type"
-            if col_name.starts_with(var.as_str()) && col_name[var.len()..].starts_with('.') {
-                return true;
-            }
-            // Also match the bare variable column itself (struct column)
-            if col_name == var.as_str() {
-                return true;
-            }
+        optional_variables.iter().any(|var| {
+            // Match "m._vid", "m.name", etc.
+            col_name.starts_with(var.as_str()) && col_name[var.len()..].starts_with('.')
+            // Match the bare variable column itself (struct column)
+            || col_name == var.as_str()
             // Match internal EID tracking columns like "__eid_to_m"
-            if col_name.starts_with("__eid_to_") && col_name.ends_with(var.as_str()) {
-                return true;
-            }
-        }
-        false
+            || (col_name.starts_with("__eid_to_") && col_name.ends_with(var.as_str()))
+        })
     }
 
     /// Create a new optional filter execution plan.
@@ -152,23 +145,17 @@ impl OptionalFilterExec {
 }
 
 impl DisplayAs for OptionalFilterExec {
-    fn fmt_as(&self, t: DisplayFormatType, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match t {
-            DisplayFormatType::Default
-            | DisplayFormatType::Verbose
-            | DisplayFormatType::TreeRender => {
-                write!(
-                    f,
-                    "OptionalFilterExec: predicate={}, optional_vars=[{}]",
-                    self.predicate,
-                    self.optional_variables
-                        .iter()
-                        .cloned()
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                )
-            }
-        }
+    fn fmt_as(&self, _t: DisplayFormatType, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "OptionalFilterExec: predicate={}, optional_vars=[{}]",
+            self.predicate,
+            self.optional_variables
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
     }
 }
 
@@ -297,11 +284,10 @@ impl OptionalFilterStream {
 
         for row_idx in 0..batch.num_rows() {
             let key = self.compute_source_key(&batch, row_idx);
-            let entry = groups.entry(key.clone());
-            if matches!(entry, std::collections::hash_map::Entry::Vacant(_)) {
+            if !groups.contains_key(&key) {
                 group_order.push(key.clone());
             }
-            entry.or_default().push(row_idx);
+            groups.entry(key).or_default().push(row_idx);
         }
 
         // For each group, check if any row passes the filter.

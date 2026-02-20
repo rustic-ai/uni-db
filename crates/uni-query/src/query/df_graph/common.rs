@@ -130,13 +130,12 @@ fn extract_vid_from_value(val: &Value) -> Option<u64> {
             }
             // Also check _id (from Value::Node → serde_json round-trip)
             if let Some(Value::String(id_str)) = map.get("_id") {
-                let trimmed = id_str
+                return id_str
                     .strip_prefix("Vid(")
-                    .and_then(|s| s.strip_suffix(')'));
-                if let Some(num_str) = trimmed {
-                    return num_str.parse::<u64>().ok();
-                }
-                return id_str.parse::<u64>().ok();
+                    .and_then(|s| s.strip_suffix(')'))
+                    .unwrap_or(id_str)
+                    .parse::<u64>()
+                    .ok();
             }
             if let Some(Value::Int(id)) = map.get("_id") {
                 return Some(*id as u64);
@@ -171,12 +170,13 @@ pub fn extract_vids_from_cypher_value_column(col: &dyn Array) -> DFResult<arrow_
             builder.append_null();
             continue;
         }
-        match cypher_value_codec::decode(binary_col.value(i)) {
-            Ok(ref val) => match extract_vid_from_value(val) {
-                Some(vid) => builder.append_value(vid),
-                None => builder.append_null(),
-            },
-            Err(_) => builder.append_null(),
+        let vid = cypher_value_codec::decode(binary_col.value(i))
+            .ok()
+            .as_ref()
+            .and_then(extract_vid_from_value);
+        match vid {
+            Some(v) => builder.append_value(v),
+            None => builder.append_null(),
         }
     }
     Ok(Arc::new(builder.finish()) as arrow_array::ArrayRef)
@@ -275,12 +275,8 @@ pub fn build_path_struct_field(path_var: &str) -> Field {
 /// Clones the fields from `input_schema` and appends a path struct field
 /// using [`build_path_struct_field`].
 pub fn extend_schema_with_path(input_schema: SchemaRef, path_variable: &str) -> SchemaRef {
-    let mut fields: Vec<Field> = input_schema
-        .fields()
-        .iter()
-        .map(|f| f.as_ref().clone())
-        .collect();
-    fields.push(build_path_struct_field(path_variable));
+    let mut fields: Vec<Arc<Field>> = input_schema.fields().to_vec();
+    fields.push(Arc::new(build_path_struct_field(path_variable)));
     Arc::new(Schema::new(fields))
 }
 
@@ -296,11 +292,7 @@ pub fn build_path_struct_array(
 ) -> DFResult<arrow_array::StructArray> {
     Ok(arrow_array::StructArray::try_new(
         arrow_schema::Fields::from(vec![
-            Arc::new(Field::new(
-                "nodes",
-                nodes_array.data_type().clone(),
-                true,
-            )),
+            Arc::new(Field::new("nodes", nodes_array.data_type().clone(), true)),
             Arc::new(Field::new(
                 "relationships",
                 rels_array.data_type().clone(),
@@ -497,7 +489,9 @@ pub fn append_node_to_struct_optional(
     match vid {
         Some(v) => append_node_to_struct(struct_builder, v, query_ctx),
         None => {
-            use arrow_array::builder::{LargeBinaryBuilder, ListBuilder, StringBuilder, UInt64Builder};
+            use arrow_array::builder::{
+                LargeBinaryBuilder, ListBuilder, StringBuilder, UInt64Builder,
+            };
 
             struct_builder
                 .field_builder::<UInt64Builder>(0)
@@ -837,18 +831,16 @@ pub fn cv_array_to_large_list(
             let mut builder = datafusion::arrow::array::builder::Int64Builder::new();
             for elems in &all_elements {
                 for elem in elems {
-                    match elem {
-                        serde_json::Value::Number(n) => {
-                            if let Some(i) = n.as_i64() {
-                                builder.append_value(i);
-                            } else if let Some(f) = n.as_f64() {
-                                builder.append_value(f as i64);
-                            } else {
-                                builder.append_null();
-                            }
+                    if let serde_json::Value::Number(n) = elem {
+                        if let Some(i) = n.as_i64() {
+                            builder.append_value(i);
+                        } else if let Some(f) = n.as_f64() {
+                            builder.append_value(f as i64);
+                        } else {
+                            builder.append_null();
                         }
-                        serde_json::Value::Null => builder.append_null(),
-                        _ => builder.append_null(),
+                    } else {
+                        builder.append_null();
                     }
                 }
                 offsets.push(offsets.last().unwrap() + elems.len() as i64);
@@ -859,16 +851,12 @@ pub fn cv_array_to_large_list(
             let mut builder = datafusion::arrow::array::builder::Float64Builder::new();
             for elems in &all_elements {
                 for elem in elems {
-                    match elem {
-                        serde_json::Value::Number(n) => {
-                            if let Some(f) = n.as_f64() {
-                                builder.append_value(f);
-                            } else {
-                                builder.append_null();
-                            }
-                        }
-                        serde_json::Value::Null => builder.append_null(),
-                        _ => builder.append_null(),
+                    if let serde_json::Value::Number(n) = elem
+                        && let Some(f) = n.as_f64()
+                    {
+                        builder.append_value(f);
+                    } else {
+                        builder.append_null();
                     }
                 }
                 offsets.push(offsets.last().unwrap() + elems.len() as i64);
@@ -893,10 +881,10 @@ pub fn cv_array_to_large_list(
             let mut builder = datafusion::arrow::array::builder::BooleanBuilder::new();
             for elems in &all_elements {
                 for elem in elems {
-                    match elem {
-                        serde_json::Value::Bool(b) => builder.append_value(*b),
-                        serde_json::Value::Null => builder.append_null(),
-                        _ => builder.append_null(),
+                    if let serde_json::Value::Bool(b) = elem {
+                        builder.append_value(*b);
+                    } else {
+                        builder.append_null();
                     }
                 }
                 offsets.push(offsets.last().unwrap() + elems.len() as i64);
@@ -1123,10 +1111,10 @@ pub(crate) fn evaluate_simple_expr(
         }),
 
         Expr::List(items) => {
-            let mut values = Vec::with_capacity(items.len());
-            for item in items {
-                values.push(evaluate_simple_expr(item, params)?);
-            }
+            let values: Vec<Value> = items
+                .iter()
+                .map(|item| evaluate_simple_expr(item, params))
+                .collect::<DFResult<_>>()?;
             Ok(Value::List(values))
         }
 

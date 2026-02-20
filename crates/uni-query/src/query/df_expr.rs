@@ -46,16 +46,6 @@ const COL_EID: &str = "_eid";
 const COL_LABELS: &str = "_labels";
 const COL_TYPE: &str = "_type";
 
-/// Check if an Arrow DataType is the canonical DateTime struct.
-pub(crate) fn is_datetime_struct_type(dt: &datafusion::arrow::datatypes::DataType) -> bool {
-    uni_common::core::schema::is_datetime_struct(dt)
-}
-
-/// Check if an Arrow DataType is the canonical Time struct.
-pub(crate) fn is_time_struct_type(dt: &datafusion::arrow::datatypes::DataType) -> bool {
-    uni_common::core::schema::is_time_struct(dt)
-}
-
 /// Returns true if the type is a primitive (non-compound) type for coercion purposes.
 ///
 /// Compound types (LargeBinary, Struct, List, LargeList) require special handling
@@ -298,7 +288,7 @@ pub fn cypher_expr_to_df(expr: &Expr, context: Option<&TranslationContext>) -> R
         )),
         // TODO: Resolve wildcard to concrete expressions per DataFusion guidance
         // See: https://github.com/apache/datafusion/issues/7765
-        #[allow(deprecated)]
+        #[expect(deprecated)]
         Expr::Wildcard => Ok(DfExpr::Wildcard {
             qualifier: None,
             options: Default::default(),
@@ -807,10 +797,10 @@ fn translate_list_literal(items: &[Expr], context: Option<&TranslationContext>) 
             return Ok(lit(ScalarValue::LargeBinary(Some(cv_bytes))));
         }
         // Non-literal items (e.g. variables): delegate to _make_cypher_list UDF
-        let mut df_args = Vec::with_capacity(items.len());
-        for item in items {
-            df_args.push(cypher_expr_to_df(item, context)?);
-        }
+        let df_args: Vec<DfExpr> = items
+            .iter()
+            .map(|item| cypher_expr_to_df(item, context))
+            .collect::<Result<_>>()?;
         return Ok(dummy_udf_expr("_make_cypher_list", df_args));
     }
 
@@ -2516,8 +2506,8 @@ pub fn apply_type_coercion(expr: &DfExpr, schema: &datafusion::common::DFSchema)
                 // DateTime struct comparisons: compare nanos_since_epoch fields.
                 // Per Cypher semantics, two DateTimes with the same UTC instant but different
                 // offsets/timezones are equal.
-                if is_datetime_struct_type(&left_type)
-                    && is_datetime_struct_type(&right_type)
+                if uni_common::core::schema::is_datetime_struct(&left_type)
+                    && uni_common::core::schema::is_datetime_struct(&right_type)
                     && is_comparison
                 {
                     return Ok(binary_expr(
@@ -2528,8 +2518,8 @@ pub fn apply_type_coercion(expr: &DfExpr, schema: &datafusion::common::DFSchema)
                 }
 
                 // Time struct comparisons: compare UTC-normalized nanos
-                if is_time_struct_type(&left_type)
-                    && is_time_struct_type(&right_type)
+                if uni_common::core::schema::is_time_struct(&left_type)
+                    && uni_common::core::schema::is_time_struct(&right_type)
                     && is_comparison
                 {
                     return Ok(binary_expr(
@@ -2548,15 +2538,16 @@ pub fn apply_type_coercion(expr: &DfExpr, schema: &datafusion::common::DFSchema)
                     matches!(right_type, DataType::Timestamp(TimeUnit::Nanosecond, _));
 
                 if is_comparison
-                    && ((left_is_ts && is_datetime_struct_type(&right_type))
-                        || (is_datetime_struct_type(&left_type) && right_is_ts))
+                    && ((left_is_ts && uni_common::core::schema::is_datetime_struct(&right_type))
+                        || (uni_common::core::schema::is_datetime_struct(&left_type)
+                            && right_is_ts))
                 {
-                    let left_nanos = if is_datetime_struct_type(&left_type) {
+                    let left_nanos = if uni_common::core::schema::is_datetime_struct(&left_type) {
                         extract_datetime_nanos(left)
                     } else {
                         left
                     };
-                    let right_nanos = if is_datetime_struct_type(&right_type) {
+                    let right_nanos = if uni_common::core::schema::is_datetime_struct(&right_type) {
                         extract_datetime_nanos(right)
                     } else {
                         right
@@ -2781,8 +2772,7 @@ pub fn apply_type_coercion(expr: &DfExpr, schema: &datafusion::common::DFSchema)
                     .collect();
                 let has_mixed_types = types.windows(2).any(|w| w[0] != w[1]);
                 if has_mixed_types {
-                    let has_large_binary =
-                        types.iter().any(|t| matches!(t, DataType::LargeBinary));
+                    let has_large_binary = types.iter().any(|t| matches!(t, DataType::LargeBinary));
 
                     if has_large_binary {
                         // When ANY arg is LargeBinary (CypherValue-encoded), normalize

@@ -26,8 +26,8 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use uni_common::{Path, Value};
 use uni_common::core::id::Vid;
+use uni_common::{Path, Value};
 use uni_cypher::ast::{Expr, Pattern, PatternElement, RemoveItem, SetClause, SetItem};
 use uni_store::runtime::property_manager::PropertyManager;
 use uni_store::runtime::writer::Writer;
@@ -130,7 +130,10 @@ pub fn batches_to_rows(batches: &[RecordBatch]) -> Result<Vec<HashMap<String, Va
 
                 // Check if this field contains JSON-encoded values (e.g., from UNWIND)
                 // Parse JSON string to restore the original type
-                if field.metadata().get("cv_encoded").is_some_and(|v| v == "true")
+                if field
+                    .metadata()
+                    .get("cv_encoded")
+                    .is_some_and(|v| v == "true")
                     && let Value::String(s) = &value
                     && let Ok(parsed) = serde_json::from_str::<serde_json::Value>(s)
                 {
@@ -207,12 +210,8 @@ fn sync_dotted_columns(rows: &mut [HashMap<String, Value>], schema: &SchemaRef) 
                 let var_name = &name[..dot_pos];
                 let prop_name = &name[dot_pos + 1..];
                 if let Some(Value::Map(map)) = row.get(var_name) {
-                    if let Some(val) = map.get(prop_name) {
-                        row.insert(name.clone(), val.clone());
-                    } else {
-                        // Property was removed or doesn't exist — set to Null
-                        row.insert(name.clone(), Value::Null);
-                    }
+                    let val = map.get(prop_name).cloned().unwrap_or(Value::Null);
+                    row.insert(name.clone(), val);
                 }
             }
         }
@@ -228,8 +227,7 @@ fn merge_system_fields_for_write(row: &mut HashMap<String, Value>) {
     // Vertex system fields (overwrite into the bare map) and edge system fields
     // (insert only if absent) that should be copied from dotted columns.
     const VERTEX_FIELDS: &[&str] = &["_vid", "_labels"];
-    const EDGE_FIELDS: &[&str] = &["_eid", "_type"];
-    const EDGE_EXTRA: &[&str] = &["_src_vid", "_dst_vid"];
+    const EDGE_FIELDS: &[&str] = &["_eid", "_type", "_src_vid", "_dst_vid"];
 
     // Collect all variable names that have dotted columns (var.field).
     let mut dotted_vars: HashSet<String> = HashSet::new();
@@ -273,7 +271,7 @@ fn merge_system_fields_for_write(row: &mut HashMap<String, Value>) {
                 map.insert(field.to_string(), v);
             }
         }
-        for &field in EDGE_FIELDS.iter().chain(EDGE_EXTRA.iter()) {
+        for &field in EDGE_FIELDS {
             if let Some(v) = row.get(&format!("{var}.{field}")).cloned()
                 && let Some(Value::Map(map)) = row.get_mut(var)
             {
@@ -333,7 +331,10 @@ fn value_column_to_arrow(
     arrow_type: &DataType,
     field: &arrow_schema::Field,
 ) -> Result<arrow_array::ArrayRef> {
-    let is_cv_encoded = field.metadata().get("cv_encoded").is_some_and(|v| v == "true");
+    let is_cv_encoded = field
+        .metadata()
+        .get("cv_encoded")
+        .is_some_and(|v| v == "true");
 
     if *arrow_type == DataType::LargeBinary || is_cv_encoded {
         Ok(encode_as_large_binary(values))
@@ -468,7 +469,15 @@ async fn execute_mutation_inner(
         let ctx = mutation_ctx.query_ctx.as_ref();
 
         let mut result_rows = exec
-            .execute_merge(rows, pattern, on_match.as_ref(), on_create.as_ref(), pm, params, ctx)
+            .execute_merge(
+                rows,
+                pattern,
+                on_match.as_ref(),
+                on_create.as_ref(),
+                pm,
+                params,
+                ctx,
+            )
             .await
             .map_err(|e| {
                 datafusion::error::DataFusionError::Execution(format!("MERGE failed: {e}"))
@@ -511,9 +520,7 @@ async fn execute_mutation_inner(
     sync_all_props_in_maps(&mut rows);
     sync_dotted_columns(&mut rows, &output_schema);
     let result_batches = rows_to_batches(&rows, &output_schema).map_err(|e| {
-        datafusion::error::DataFusionError::Execution(format!(
-            "Failed to reconstruct batches: {e}"
-        ))
+        datafusion::error::DataFusionError::Execution(format!("Failed to reconstruct batches: {e}"))
     })?;
     let results: Vec<DFResult<RecordBatch>> = result_batches.into_iter().map(Ok).collect();
     Ok(futures::stream::iter(results))
@@ -733,13 +740,19 @@ pub fn pattern_variable_names(pattern: &Pattern) -> Vec<String> {
 fn normalize_mutation_schema(schema: &SchemaRef) -> SchemaRef {
     use arrow_schema::{Field, Schema};
 
+    let needs_normalization = schema
+        .fields()
+        .iter()
+        .any(|f| matches!(f.data_type(), DataType::Struct(_)));
+
+    if !needs_normalization {
+        return schema.clone();
+    }
+
     let fields: Vec<Arc<Field>> = schema
         .fields()
         .iter()
         .map(|field| {
-            // Struct columns are entity variables (nodes/edges) that become
-            // Value::Map after batches_to_rows(). They must be converted to
-            // cv_encoded LargeBinary for rows_to_batches() to work correctly.
             if matches!(field.data_type(), DataType::Struct(_)) {
                 let mut metadata = field.metadata().clone();
                 metadata.insert("cv_encoded".to_string(), "true".to_string());
@@ -763,10 +776,7 @@ fn normalize_mutation_schema(schema: &SchemaRef) -> SchemaRef {
 ///
 /// Also normalizes existing Struct entity columns to cv_encoded LargeBinary,
 /// since after mutation processing, entities are stored as Maps in row HashMaps.
-pub fn extended_schema_for_new_vars(
-    input_schema: &SchemaRef,
-    new_vars: &[String],
-) -> SchemaRef {
+pub fn extended_schema_for_new_vars(input_schema: &SchemaRef, new_vars: &[String]) -> SchemaRef {
     use arrow_schema::{Field, Schema};
 
     // First normalize existing columns
@@ -778,8 +788,7 @@ pub fn extended_schema_for_new_vars(
         .map(|f| f.name().as_str())
         .collect();
 
-    let mut fields: Vec<Arc<arrow_schema::Field>> =
-        normalized.fields().iter().cloned().collect();
+    let mut fields: Vec<Arc<arrow_schema::Field>> = normalized.fields().to_vec();
 
     for var_name in new_vars {
         if !existing_names.contains(var_name.as_str()) {

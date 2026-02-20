@@ -3004,7 +3004,7 @@ pub fn create_cypher_gt_eq_udf() -> ScalarUDF {
 }
 
 /// Apply a comparison operator to an `Ordering` result.
-#[allow(clippy::match_like_matches_macro)]
+#[expect(clippy::match_like_matches_macro)]
 fn apply_comparison_op(ord: std::cmp::Ordering, op: &BinaryOp) -> bool {
     use std::cmp::Ordering;
     match (ord, op) {

@@ -84,14 +84,16 @@ pub(crate) fn type_compat(left: &DataType, right: &DataType) -> TypeCompat {
     }
 
     // Rule 6: Both DateTime struct → DateTimeStruct
-    if super::df_expr::is_datetime_struct_type(left)
-        && super::df_expr::is_datetime_struct_type(right)
+    if uni_common::core::schema::is_datetime_struct(left)
+        && uni_common::core::schema::is_datetime_struct(right)
     {
         return DateTimeStruct;
     }
 
     // Rule 7: Both Time struct → TimeStruct
-    if super::df_expr::is_time_struct_type(left) && super::df_expr::is_time_struct_type(right) {
+    if uni_common::core::schema::is_time_struct(left)
+        && uni_common::core::schema::is_time_struct(right)
+    {
         return TimeStruct;
     }
 
@@ -401,7 +403,7 @@ pub(crate) fn find_common_result_type(
     // Rule 4: All DateTime struct → DateTime struct type
     if non_null_types
         .iter()
-        .all(|t| super::df_expr::is_datetime_struct_type(t))
+        .all(|t| uni_common::core::schema::is_datetime_struct(t))
     {
         return first.clone(); // All are DateTime structs, return first
     }
@@ -409,7 +411,7 @@ pub(crate) fn find_common_result_type(
     // Rule 5: All Time struct → Time struct type
     if non_null_types
         .iter()
-        .all(|t| super::df_expr::is_time_struct_type(t))
+        .all(|t| uni_common::core::schema::is_time_struct(t))
     {
         return first.clone(); // All are Time structs, return first
     }
