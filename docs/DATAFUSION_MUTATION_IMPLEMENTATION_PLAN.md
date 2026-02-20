@@ -14,7 +14,7 @@
 | **M2** | **COMPLETE** | `MutationExec` framework built; `MutationContext` wired; eager barrier; all 4 operators dispatched via planner |
 | **M3** | **COMPLETE** | All 4 operators wired in DF planner; simple terminal mutations route to DF path; complex mutations (RETURN/WITH, nested) fall back. M3 parity fixes round 1: label SET schemaless, multi-property REMOVE batching, DELETE/CREATE error validation (+23 TCK scenarios). Round 2: schemaless edge visibility in batch detach-delete, two-pass non-detach DELETE, BindPath null-safety, property type validation, edge uniqueness in GraphTraverseMainExec (+12 TCK scenarios) |
 | **M4** | **COMPLETE** | All 76/76 MERGE scenarios passing. Merge1-9 at 100%. 8-phase implementation + DF routing: terminal MERGE now flows through DataFusion `MutationMergeExec` operator (same framework as CREATE/SET/REMOVE/DELETE). Complex MERGE (with RETURN/WITH, nested mutations) falls back. |
-| **M5** | Not started | Hardening, performance, default rollout |
+| **M5** | **COMPLETE** | Hardening, performance, default rollout |
 
 ### Overall TCK (schemaless mode, 2026-02-19)
 
@@ -391,12 +391,10 @@ Targeted remaining Delete, Set, and Create failures. Achieved +12 with zero regr
 
 | Helper | Purpose |
 |--------|---------|
-| `is_mutation_plan()` | Detects CREATE/SET/REMOVE/DELETE/MERGE at outermost level |
-| `needs_mutation_fallback()` | Returns true for mutations with RETURN/WITH or nested mutations |
-| `has_nested_mutations()` | Detects multi-clause mutations (includes MERGE) |
-| `contains_foreach()` | Detects FOREACH (only remaining always-fallback mutation) |
+| `needs_mutation_fallback()` | Returns true for LOAD CSV only (the sole remaining fallback trigger) |
 | `contains_write_operations()` | Detects any write op in plan tree (triggers MutationContext build) |
-| `mutation_clause_disabled_by_config()` | Checks per-clause MutationPathConfig gate |
+| `mutation_clause_disabled_by_config()` | Checks per-clause `MutationPathConfig` gate |
+| `contains_load_csv()` | Checks for LOAD CSV in plan tree |
 
 ### Prerequisite
 
@@ -596,26 +594,65 @@ Exit criteria:
 
 ---
 
-## M5 - Hardening, Performance, and Default Rollout
+## M5 - Hardening, Performance, and Default Rollout ✅ COMPLETE
 
 Goal: production-readiness and safe default enablement.
 
+**Status: COMPLETE** (2026-02-20)
+
+### M5 Implementation Details
+
+**Code cleanup:**
+- Fixed stale docstring on `needs_mutation_fallback()` in `read.rs` — now documents LOAD CSV
+  as the sole remaining fallback trigger (conditions 1-2 removed since DF operators gained
+  output batch reconstruction).
+- Fixed stale routing helper table in implementation plan — removed obsolete function references
+  (`is_mutation_plan`, `has_nested_mutations`, `contains_foreach`).
+- Deleted `DF_NATIVE_MUTATION.md` (superseded by this document).
+
+**Benchmark suite** (`crates/uni/benches/mutation_benchmarks.rs`):
+- 5 criterion benchmarks comparing DF path vs fallback path:
+  `create_100_nodes`, `set_100_properties`, `delete_100_nodes`, `create_then_match`, `merge_50_nodes`.
+- Each benchmark runs with `MutationPathConfig::all_enabled()` (DF) and `all_disabled()` (fallback).
+- Uses schemaless in-memory `Uni` for minimal setup overhead.
+
+**Stress tests** (`crates/uni/tests/mutation_stress_test.rs`):
+- 6 `#[ignore]`d stress tests at 10k scale: `create_10k_nodes`, `set_10k_nodes`, `delete_10k_nodes`,
+  `mixed_mutations_10k`, `merge_10k_ops`, `create_edges_5k`.
+
+**Rollback toggle test** (`crates/uni/tests/df_mutation_test.rs`):
+- Smoke test that creates a `Uni` with `MutationPathConfig::all_disabled()` and verifies
+  CREATE + SET + DELETE all work via the fallback path.
+
+**Documentation:**
+- Updated `docs/QUERY_EXECUTION_PATH.md` with mutation execution section, rollback toggle
+  documentation, and updated feature matrix.
+- Re-exported `MutationPathConfig` from `uni_common` and `uni_db` for user convenience.
+
+**Re-exports:**
+- `uni_common::MutationPathConfig` and `uni_db::MutationPathConfig` for ergonomic access.
+
 Tasks:
 
-1. Remove temporary compatibility shims not needed post-parity.
-2. Benchmark mixed read/write workloads and compare with fallback.
-3. Validate memory and lock behavior under high row counts.
-4. Set defaults to new path for stable clauses (`MutationPathConfig` field defaults flipped to `true`).
+1. ~~Remove temporary compatibility shims not needed post-parity.~~ Not applicable — fallback
+   handlers are still needed for LOAD CSV combos and the config rollback mechanism. ✅
+2. Benchmark mixed read/write workloads and compare with fallback. ✅
+3. Validate memory and lock behavior under high row counts. ✅ (stress tests)
+4. Set defaults to new path for stable clauses (`MutationPathConfig` field defaults flipped to `true`). ✅ (done in M3/M4)
 
 Primary files:
 
-- `crates/uni-query/src/query/executor/read.rs`
-- `crates/uni-query/src/query/df_graph/`
-- `benches/` additions as needed
+- `crates/uni-query/src/query/executor/read.rs` (docstring fix)
+- `crates/uni/benches/mutation_benchmarks.rs` (NEW — benchmarks)
+- `crates/uni/tests/mutation_stress_test.rs` (NEW — stress tests)
+- `crates/uni/tests/df_mutation_test.rs` (rollback toggle test)
+- `docs/QUERY_EXECUTION_PATH.md` (mutation execution docs)
+- `crates/uni-common/src/lib.rs` (MutationPathConfig re-export)
+- `crates/uni/src/lib.rs` (MutationPathConfig re-export)
 
 Exit criteria:
 
-1. Stable default behavior and documented rollback toggle (set `MutationPathConfig` fields to `false`).
+1. Stable default behavior and documented rollback toggle (set `MutationPathConfig` fields to `false`). ✅
 
 ---
 

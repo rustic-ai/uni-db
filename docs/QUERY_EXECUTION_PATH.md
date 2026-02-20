@@ -1,6 +1,6 @@
 # Query Execution Path
 
-**Date**: 2026-01-24
+**Date**: 2026-02-20
 **Purpose**: Document the dual execution strategy (DataFusion + Legacy Executor)
 
 ---
@@ -43,32 +43,33 @@ pub fn execute(&self, plan: LogicalPlan, ...) -> Result<Vec<HashMap<String, Valu
 
 ### When Used
 - Read queries (MATCH, RETURN, WITH, aggregations)
+- **Mutation queries** (CREATE, SET, REMOVE, DELETE, MERGE, FOREACH) — default since M3/M4
 - Queries with expressions that can be translated to DataFusion
 
 ### Advantages
-- ✅ Vectorized execution (SIMD)
-- ✅ Columnar processing with Apache Arrow
-- ✅ Query optimization (predicate pushdown, projection pushdown)
-- ✅ Parallel execution
-- ✅ Memory-efficient streaming
+- Vectorized execution (SIMD)
+- Columnar processing with Apache Arrow
+- Query optimization (predicate pushdown, projection pushdown)
+- Parallel execution
+- Memory-efficient streaming
 
 ### Translation Layer
 Located in: `crates/uni-query/src/query/df_expr.rs`
 
 Converts Cypher AST to DataFusion expressions:
-- ✅ Arithmetic operators
-- ✅ Comparison operators
-- ✅ Boolean logic (AND, OR, NOT)
-- ✅ String operations (CONTAINS, STARTS WITH, ENDS WITH)
-- ✅ Array indexing and slicing
-- ✅ Aggregate functions (COUNT, SUM, AVG, MIN, MAX)
-- ✅ Math functions (ABS, CEIL, FLOOR, LOG, SIN, COS, etc.)
-- ✅ String functions (UPPER, LOWER, TRIM, SUBSTRING, etc.)
+- Arithmetic operators
+- Comparison operators
+- Boolean logic (AND, OR, NOT)
+- String operations (CONTAINS, STARTS WITH, ENDS WITH)
+- Array indexing and slicing
+- Aggregate functions (COUNT, SUM, AVG, MIN, MAX)
+- Math functions (ABS, CEIL, FLOOR, LOG, SIN, COS, etc.)
+- String functions (UPPER, LOWER, TRIM, SUBSTRING, etc.)
 
 ### What Falls Back to Legacy
 Located in: `df_expr.rs` - expressions that return `Err(anyhow!(...)`
 
-**❌ Blocked by DataFusion Limitations:**
+**Blocked by DataFusion Limitations:**
 1. **Quantifier expressions** (ALL/ANY/SINGLE/NONE)
    - Requires lambda functions
    - Tracked: https://github.com/apache/datafusion/issues/14205
@@ -88,23 +89,82 @@ Located in: `df_expr.rs` - expressions that return `Err(anyhow!(...)`
 
 ---
 
+## Mutation Execution
+
+All mutation types route through DataFusion by default via `MutationExec` operators. The only
+remaining fallback trigger for mutations is **LOAD CSV** (not yet supported in the DF engine).
+
+### Mutation Routing Table
+
+| Mutation Type | DataFusion Operator | Default Path | Fallback Trigger |
+|---------------|-------------------|--------------|-----------------|
+| CREATE | `MutationCreateExec` | DF | LOAD CSV, config toggle |
+| SET | `MutationSetExec` | DF | LOAD CSV, config toggle |
+| REMOVE | `MutationRemoveExec` | DF | LOAD CSV, config toggle |
+| DELETE | `MutationDeleteExec` | DF | LOAD CSV, config toggle |
+| MERGE | `MutationMergeExec` | DF | LOAD CSV, config toggle |
+| FOREACH | `ForeachExec` | DF | LOAD CSV, config toggle |
+
+### Rollback Toggle
+
+Mutations can be rolled back to the legacy fallback path per-clause or globally using
+`MutationPathConfig`. This is a runtime configuration — no recompilation needed.
+
+**Disable all mutations (global rollback):**
+```rust
+use uni_db::{Uni, UniConfig, MutationPathConfig};
+
+let config = UniConfig {
+    mutation_path: MutationPathConfig::all_disabled(),
+    ..Default::default()
+};
+let db = Uni::in_memory().config(config).build().await?;
+```
+
+**Disable a single clause:**
+```rust
+use uni_db::{Uni, UniConfig, MutationPathConfig};
+
+let config = UniConfig {
+    mutation_path: MutationPathConfig {
+        merge_enabled: false,  // Only MERGE uses fallback
+        ..MutationPathConfig::all_enabled()
+    },
+    ..Default::default()
+};
+let db = Uni::in_memory().config(config).build().await?;
+```
+
+### Implementation Details
+
+Located in: `crates/uni-query/src/query/df_graph/mutation_common.rs`
+
+- `MutationExec` implements DataFusion's `ExecutionPlan` trait with `MutationKind` dispatch.
+- `MutationContext` holds shared resources (executor, writer, property manager, params, query context).
+- Eager barrier: input batches are fully consumed before mutation dispatch (clause-scoped writer lock).
+- MERGE manages its own writer lock internally (acquires/releases per-row for read subplans).
+- Routing logic in `read.rs`: DDL/Admin → LOAD CSV fallback → config gate → DataFusion path.
+
+---
+
 ## Legacy Executor Path (Row-by-Row)
 
 ### When Used
-1. **Always** for DDL/Admin operations (CREATE, DROP, ALTER, SHOW, etc.)
-2. **Fallback** when DataFusion translation fails
-3. **Queries with unsupported expressions** (quantifiers, subqueries)
+1. **Always** for DDL/Admin operations (CREATE INDEX, DROP, ALTER, SHOW, etc.)
+2. **Fallback** when DataFusion translation fails (quantifiers, subqueries)
+3. **Mutations with LOAD CSV** (not yet supported in DF engine)
+4. **Mutations with config toggle** (`MutationPathConfig` per-clause disable)
 
 ### Advantages
-- ✅ Full Cypher feature support
-- ✅ Graph-specific operations (traversals, path finding)
-- ✅ Variable binding and scoping
-- ✅ Flexible expression evaluation
+- Full Cypher feature support
+- Graph-specific operations (traversals, path finding)
+- Variable binding and scoping
+- Flexible expression evaluation
 
 ### Disadvantages
-- ⚠️ Row-by-row processing (not vectorized)
-- ⚠️ No SIMD optimizations
-- ⚠️ Higher memory usage per row
+- Row-by-row processing (not vectorized)
+- No SIMD optimizations
+- Higher memory usage per row
 
 ### Implementation
 Located in: `crates/uni-query/src/query/executor/read.rs`
@@ -123,36 +183,43 @@ Key functions:
 | Feature | DataFusion | Legacy | Notes |
 |---------|-----------|--------|-------|
 | **Core Operators** |
-| Arithmetic (+, -, *, /, %, ^) | ✅ | ✅ | Fully vectorized |
-| Comparison (=, <>, <, >, <=, >=) | ✅ | ✅ | Pushdown to storage |
-| Boolean (AND, OR, XOR, NOT) | ✅ | ✅ | |
-| Bitwise (&, \|, ^^, ~, <<, >>) | ✅ | ✅ | |
+| Arithmetic (+, -, *, /, %, ^) | Yes | Yes | Fully vectorized |
+| Comparison (=, <>, <, >, <=, >=) | Yes | Yes | Pushdown to storage |
+| Boolean (AND, OR, XOR, NOT) | Yes | Yes | |
+| Bitwise (&, \|, ^^, ~, <<, >>) | Yes | Yes | |
 | **String Operations** |
-| CONTAINS, STARTS WITH, ENDS WITH | ✅ | ✅ | |
-| Regex (=~) | ✅ | ✅ | Uses DataFusion regexp_match |
-| String functions (UPPER, LOWER, etc.) | ✅ | ✅ | |
+| CONTAINS, STARTS WITH, ENDS WITH | Yes | Yes | |
+| Regex (=~) | Yes | Yes | Uses DataFusion regexp_match |
+| String functions (UPPER, LOWER, etc.) | Yes | Yes | |
 | **Array Operations** |
-| Array indexing `list[0]` | ✅ | ✅ | DataFusion array_element |
-| Array slicing `list[1..3]` | ✅ | ✅ | DataFusion array_slice |
-| Array functions (size, head, tail) | ✅ | ✅ | |
+| Array indexing `list[0]` | Yes | Yes | DataFusion array_element |
+| Array slicing `list[1..3]` | Yes | Yes | DataFusion array_slice |
+| Array functions (size, head, tail) | Yes | Yes | |
 | **List Operations** |
-| Quantifiers (ALL/ANY/SINGLE/NONE) | ❌ | ✅ | Blocked by lambda support |
-| List comprehensions | ❌ | ❌ | Not implemented yet |
-| UNWIND | ✅ | ✅ | DataFusion unnest |
+| Quantifiers (ALL/ANY/SINGLE/NONE) | No | Yes | Blocked by lambda support |
+| List comprehensions | No | No | Not implemented yet |
+| UNWIND | Yes | Yes | DataFusion unnest |
 | **Aggregations** |
-| COUNT, SUM, AVG, MIN, MAX | ✅ | ✅ | Vectorized in DataFusion |
-| collect() | ✅ | ✅ | DataFusion array_agg |
+| COUNT, SUM, AVG, MIN, MAX | Yes | Yes | Vectorized in DataFusion |
+| collect() | Yes | Yes | DataFusion array_agg |
 | **Subqueries** |
-| EXISTS { ... } | ❌ | ✅ | Correlated subquery |
-| COUNT { ... } | ❌ | ✅ | |
-| Scalar subqueries | ❌ | ✅ | |
+| EXISTS { ... } | No | Yes | Correlated subquery |
+| COUNT { ... } | No | Yes | |
+| Scalar subqueries | No | Yes | |
 | **Graph Operations** |
-| Pattern matching | ⚠️ | ✅ | Partial DF support |
-| Variable-length paths | ❌ | ✅ | Graph-specific |
-| Path expressions | ❌ | ✅ | |
+| Pattern matching | Partial | Yes | Partial DF support |
+| Variable-length paths | No | Yes | Graph-specific |
+| Path expressions | No | Yes | |
+| **Mutations** |
+| CREATE (nodes/edges) | Yes | Yes | DF default, MutationCreateExec |
+| SET (properties/labels) | Yes | Yes | DF default, MutationSetExec |
+| REMOVE (properties/labels) | Yes | Yes | DF default, MutationRemoveExec |
+| DELETE / DETACH DELETE | Yes | Yes | DF default, MutationDeleteExec |
+| MERGE | Yes | Yes | DF default, MutationMergeExec |
+| FOREACH | Yes | Yes | DF default, ForeachExec |
 | **DDL/Admin** |
-| CREATE, DROP, ALTER | N/A | ✅ | Schema operations |
-| SHOW, VACUUM | N/A | ✅ | |
+| CREATE INDEX, DROP, ALTER | N/A | Yes | Schema operations |
+| SHOW, VACUUM | N/A | Yes | |
 
 ---
 
@@ -207,7 +274,6 @@ Key functions:
 ### Short-Term (DataFusion Updates)
 1. **Lambda function support** ([Issue #14205](https://github.com/apache/datafusion/issues/14205))
    - Would enable vectorized quantifiers
-   - Estimated: 2025-2026
 
 2. **Better correlated subquery support**
    - Would enable EXISTS translation
@@ -226,6 +292,10 @@ Key functions:
 3. **Cost-based execution path selection**
    - Estimate rows/complexity
    - Choose DataFusion vs legacy based on query characteristics
+
+4. **LOAD CSV support in DataFusion engine**
+   - Last remaining mutation fallback trigger
+   - Would eliminate all mutation-specific fallback paths
 
 ---
 
@@ -261,6 +331,9 @@ log::debug!("DataFusion execution failed (falling back to legacy): {}", e);
 3. **DDL query**
    - Path: Legacy executor (no DataFusion attempt)
 
+4. **Mutation with LOAD CSV**
+   - Path: Legacy executor (LOAD CSV not supported in DF engine)
+
 ---
 
 ## References
@@ -270,9 +343,11 @@ log::debug!("DataFusion execution failed (falling back to legacy): {}", e);
 - [DataFusion Array Functions](https://datafusion.apache.org/user-guide/sql/special_functions.html)
 - `crates/uni-query/src/query/executor/read.rs` - Main executor
 - `crates/uni-query/src/query/df_expr.rs` - DataFusion translation
+- `crates/uni-query/src/query/df_graph/mutation_common.rs` - Mutation operators
+- `docs/DATAFUSION_MUTATION_IMPLEMENTATION_PLAN.md` - Full mutation migration plan
 - `CYPHER_IMPLEMENTATION_STATUS.md` - Feature coverage
 
 ---
 
-**Last Updated**: 2026-01-24
+**Last Updated**: 2026-02-20
 **Maintained By**: Development Team

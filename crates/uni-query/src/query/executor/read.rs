@@ -668,6 +668,17 @@ impl Executor {
                             map.entry("_type".to_string()).or_insert(v);
                         }
                     }
+
+                    // Remove remaining dotted helper columns (e.g. _all_props, _src_vid, _dst_vid)
+                    let prefix = format!("{}.", var);
+                    let helper_keys: Vec<String> = row
+                        .keys()
+                        .filter(|k| k.starts_with(&prefix))
+                        .cloned()
+                        .collect();
+                    for key in helper_keys {
+                        row.remove(&key);
+                    }
                 }
 
                 rows.push(row);
@@ -855,15 +866,6 @@ impl Executor {
                         .await?;
                     self.record_batches_to_rows(batches)
                 }
-            } else if Self::contains_sort(&plan)
-                && !Self::contains_pattern_comprehension(&plan)
-                && !Self::needs_datafusion_for_step_indexing(&plan)
-            {
-                // Route non-window ORDER BY through fallback executor for Cypher
-                // ordering semantics (mixed-type precedence, list lexicographic,
-                // NaN/null handling) until DataFusion parity is complete.
-                self.execute_subplan(plan, prop_manager, params, ctx.as_ref())
-                    .await
             } else {
                 // Execute using DataFusion engine
                 let batches = self
@@ -923,7 +925,7 @@ impl Executor {
     /// Return all direct child plan references from a `LogicalPlan`.
     ///
     /// This centralizes the variant→children mapping so that recursive walkers
-    /// (e.g., `contains_sort`, `contains_write_operations`) can delegate the
+    /// (e.g., `contains_write_operations`) can delegate the
     /// "recurse into children" logic instead of duplicating the match arms.
     ///
     /// Note: `Foreach` returns only its `input`; the `body: Vec<LogicalPlan>`
@@ -1062,18 +1064,10 @@ impl Executor {
 
     /// Check if a mutation query needs the fallback executor path.
     ///
-    /// Returns true when mutations are "complex" — i.e., the DF mutation operators
-    /// can't produce correct output because:
-    /// 1. The mutation is wrapped by RETURN/WITH (needs updated values or created variables
-    ///    in the output batch, which requires complex row→batch Struct reconstruction)
-    /// 2. The mutation has nested mutations (multi-clause CREATE needs variable flow
-    ///    between clauses, which requires created variables in intermediate output)
-    /// 3. The plan contains LOAD CSV (not yet supported in DF engine)
-    ///
-    /// Simple "terminal" mutations (outermost plan is a single mutation clause,
-    /// input is a read plan) are safe for DF: the mutation is a storage-level side
-    /// effect and the output batches (passed through from the read operators) aren't
-    /// consumed for their mutation-affected values.
+    /// Returns true when the plan contains LOAD CSV, which is the only remaining
+    /// construct not yet supported in the DataFusion mutation engine. All other
+    /// mutation types (CREATE, SET, REMOVE, DELETE, MERGE, FOREACH) route through
+    /// DataFusion by default.
     fn needs_mutation_fallback(plan: &LogicalPlan) -> bool {
         if !Self::contains_write_operations(plan) {
             return false;
@@ -1157,275 +1151,6 @@ impl Executor {
             | LogicalPlan::Project { input, .. } => Self::contains_window_functions(input),
             _ => false,
         }
-    }
-
-    /// Check if a logical plan contains ORDER BY (Sort) anywhere in the tree.
-    fn contains_sort(plan: &LogicalPlan) -> bool {
-        match plan {
-            LogicalPlan::Sort { .. } => true,
-            _ => Self::plan_children(plan)
-                .iter()
-                .any(|child| Self::contains_sort(child)),
-        }
-    }
-
-    fn expr_contains_pattern_comprehension(expr: &Expr) -> bool {
-        match expr {
-            Expr::PatternComprehension { .. } => true,
-            Expr::Property(base, _) | Expr::UnaryOp { expr: base, .. } => {
-                Self::expr_contains_pattern_comprehension(base)
-            }
-            Expr::BinaryOp { left, right, .. } => {
-                Self::expr_contains_pattern_comprehension(left)
-                    || Self::expr_contains_pattern_comprehension(right)
-            }
-            Expr::FunctionCall { args, .. } | Expr::List(args) => {
-                args.iter().any(Self::expr_contains_pattern_comprehension)
-            }
-            Expr::Map(entries) => entries
-                .iter()
-                .any(|(_, v)| Self::expr_contains_pattern_comprehension(v)),
-            Expr::Case {
-                expr,
-                when_then,
-                else_expr,
-            } => {
-                expr.as_ref()
-                    .is_some_and(|e| Self::expr_contains_pattern_comprehension(e.as_ref()))
-                    || when_then.iter().any(|(w, t)| {
-                        Self::expr_contains_pattern_comprehension(w)
-                            || Self::expr_contains_pattern_comprehension(t)
-                    })
-                    || else_expr
-                        .as_ref()
-                        .is_some_and(|e| Self::expr_contains_pattern_comprehension(e.as_ref()))
-            }
-            _ => false,
-        }
-    }
-
-    /// Detect pattern comprehensions, which are DataFusion-only in the current fallback engine.
-    fn contains_pattern_comprehension(plan: &LogicalPlan) -> bool {
-        // Check expressions in nodes that carry them
-        let has_expr = match plan {
-            LogicalPlan::Filter { predicate, .. } => {
-                Self::expr_contains_pattern_comprehension(predicate)
-            }
-            LogicalPlan::Project { projections, .. } => projections
-                .iter()
-                .any(|(e, _)| Self::expr_contains_pattern_comprehension(e)),
-            LogicalPlan::Sort { order_by, .. } => order_by
-                .iter()
-                .any(|s| Self::expr_contains_pattern_comprehension(&s.expr)),
-            LogicalPlan::Aggregate {
-                group_by,
-                aggregates,
-                ..
-            } => {
-                group_by
-                    .iter()
-                    .any(Self::expr_contains_pattern_comprehension)
-                    || aggregates
-                        .iter()
-                        .any(Self::expr_contains_pattern_comprehension)
-            }
-            LogicalPlan::Window { window_exprs, .. } => window_exprs
-                .iter()
-                .any(Self::expr_contains_pattern_comprehension),
-            _ => false,
-        };
-        if has_expr {
-            return true;
-        }
-        // Recurse into child plans
-        Self::plan_children(plan)
-            .iter()
-            .any(|child| Self::contains_pattern_comprehension(child))
-    }
-
-    /// Detect traversals with step variables; DataFusion currently handles these
-    /// more robustly for indexed list access semantics (e.g. r[0].prop).
-    fn contains_step_variable_traversal(plan: &LogicalPlan) -> bool {
-        match plan {
-            LogicalPlan::Traverse {
-                step_variable,
-                input,
-                ..
-            }
-            | LogicalPlan::TraverseMainByType {
-                step_variable,
-                input,
-                ..
-            } => step_variable.is_some() || Self::contains_step_variable_traversal(input),
-            _ => Self::plan_children(plan)
-                .iter()
-                .any(|child| Self::contains_step_variable_traversal(child)),
-        }
-    }
-
-    fn expr_contains_array_index(expr: &Expr) -> bool {
-        match expr {
-            Expr::ArrayIndex { .. } | Expr::ArraySlice { .. } => true,
-            Expr::Property(base, _)
-            | Expr::UnaryOp { expr: base, .. }
-            | Expr::IsNull(base)
-            | Expr::IsNotNull(base)
-            | Expr::IsUnique(base) => Self::expr_contains_array_index(base),
-            Expr::BinaryOp { left, right, .. } => {
-                Self::expr_contains_array_index(left) || Self::expr_contains_array_index(right)
-            }
-            Expr::FunctionCall { args, .. } | Expr::List(args) => {
-                args.iter().any(Self::expr_contains_array_index)
-            }
-            Expr::Map(entries) => entries
-                .iter()
-                .any(|(_, v)| Self::expr_contains_array_index(v)),
-            Expr::Case {
-                expr,
-                when_then,
-                else_expr,
-            } => {
-                expr.as_ref()
-                    .is_some_and(|e| Self::expr_contains_array_index(e.as_ref()))
-                    || when_then.iter().any(|(w, t)| {
-                        Self::expr_contains_array_index(w) || Self::expr_contains_array_index(t)
-                    })
-                    || else_expr
-                        .as_ref()
-                        .is_some_and(|e| Self::expr_contains_array_index(e.as_ref()))
-            }
-            Expr::In { expr, list } => {
-                Self::expr_contains_array_index(expr) || Self::expr_contains_array_index(list)
-            }
-            Expr::Quantifier {
-                list, predicate, ..
-            } => {
-                Self::expr_contains_array_index(list) || Self::expr_contains_array_index(predicate)
-            }
-            Expr::Reduce {
-                init, list, expr, ..
-            } => {
-                Self::expr_contains_array_index(init)
-                    || Self::expr_contains_array_index(list)
-                    || Self::expr_contains_array_index(expr)
-            }
-            Expr::ListComprehension {
-                list,
-                where_clause,
-                map_expr,
-                ..
-            } => {
-                Self::expr_contains_array_index(list)
-                    || where_clause
-                        .as_ref()
-                        .is_some_and(|e| Self::expr_contains_array_index(e.as_ref()))
-                    || Self::expr_contains_array_index(map_expr)
-            }
-            Expr::PatternComprehension {
-                where_clause,
-                map_expr,
-                ..
-            } => {
-                where_clause
-                    .as_ref()
-                    .is_some_and(|e| Self::expr_contains_array_index(e.as_ref()))
-                    || Self::expr_contains_array_index(map_expr)
-            }
-            Expr::MapProjection { base, items } => {
-                Self::expr_contains_array_index(base)
-                    || items.iter().any(|item| match item {
-                        MapProjectionItem::Property(_) | MapProjectionItem::Variable(_) => false,
-                        MapProjectionItem::LiteralEntry(_, expr) => {
-                            Self::expr_contains_array_index(expr)
-                        }
-                        MapProjectionItem::AllProperties => false,
-                    })
-            }
-            Expr::ValidAt {
-                entity, timestamp, ..
-            } => {
-                Self::expr_contains_array_index(entity)
-                    || Self::expr_contains_array_index(timestamp)
-            }
-            Expr::LabelCheck { expr, .. } => Self::expr_contains_array_index(expr),
-            _ => false,
-        }
-    }
-
-    fn plan_contains_array_index(plan: &LogicalPlan) -> bool {
-        match plan {
-            LogicalPlan::Filter {
-                input, predicate, ..
-            } => {
-                Self::expr_contains_array_index(predicate) || Self::plan_contains_array_index(input)
-            }
-            LogicalPlan::Project { input, projections } => {
-                projections
-                    .iter()
-                    .any(|(e, _)| Self::expr_contains_array_index(e))
-                    || Self::plan_contains_array_index(input)
-            }
-            LogicalPlan::Sort { input, order_by } => {
-                order_by
-                    .iter()
-                    .any(|s| Self::expr_contains_array_index(&s.expr))
-                    || Self::plan_contains_array_index(input)
-            }
-            LogicalPlan::Aggregate {
-                input,
-                group_by,
-                aggregates,
-            } => {
-                group_by.iter().any(Self::expr_contains_array_index)
-                    || aggregates.iter().any(Self::expr_contains_array_index)
-                    || Self::plan_contains_array_index(input)
-            }
-            LogicalPlan::Window {
-                input,
-                window_exprs,
-            } => {
-                window_exprs.iter().any(Self::expr_contains_array_index)
-                    || Self::plan_contains_array_index(input)
-            }
-            LogicalPlan::Union { left, right, .. } | LogicalPlan::CrossJoin { left, right } => {
-                Self::plan_contains_array_index(left) || Self::plan_contains_array_index(right)
-            }
-            LogicalPlan::Traverse { input, .. }
-            | LogicalPlan::TraverseMainByType { input, .. }
-            | LogicalPlan::Create { input, .. }
-            | LogicalPlan::CreateBatch { input, .. }
-            | LogicalPlan::Merge { input, .. }
-            | LogicalPlan::Set { input, .. }
-            | LogicalPlan::Remove { input, .. }
-            | LogicalPlan::Delete { input, .. }
-            | LogicalPlan::Foreach { input, .. }
-            | LogicalPlan::Limit { input, .. }
-            | LogicalPlan::Distinct { input }
-            | LogicalPlan::SubqueryCall { input, .. }
-            | LogicalPlan::ShortestPath { input, .. }
-            | LogicalPlan::AllShortestPaths { input, .. }
-            | LogicalPlan::QuantifiedPattern { input, .. }
-            | LogicalPlan::BindZeroLengthPath { input, .. }
-            | LogicalPlan::BindPath { input, .. }
-            | LogicalPlan::Unwind { input, .. } => Self::plan_contains_array_index(input),
-            LogicalPlan::Apply {
-                input, subquery, ..
-            } => {
-                Self::plan_contains_array_index(input) || Self::plan_contains_array_index(subquery)
-            }
-            LogicalPlan::RecursiveCTE {
-                initial, recursive, ..
-            } => {
-                Self::plan_contains_array_index(initial)
-                    || Self::plan_contains_array_index(recursive)
-            }
-            LogicalPlan::Explain { plan } => Self::plan_contains_array_index(plan),
-            _ => false,
-        }
-    }
-
-    fn needs_datafusion_for_step_indexing(plan: &LogicalPlan) -> bool {
-        Self::contains_step_variable_traversal(plan) && Self::plan_contains_array_index(plan)
     }
 
     /// Extract window expressions from a logical plan (recursively unwrap Sort/Limit/etc).

@@ -283,7 +283,8 @@ impl Uni {
     ) -> Result<QueryCursor> {
         let ast = uni_query::parse_cypher(cypher).map_err(into_parse_error)?;
 
-        let planner = uni_query::QueryPlanner::new(self.schema.schema().clone().into());
+        let planner = uni_query::QueryPlanner::new(self.schema.schema().clone().into())
+            .with_params(params.clone());
         let logical_plan = planner.plan(ast).map_err(|e| into_query_error(e, cypher))?;
 
         let mut executor = uni_query::Executor::new(self.storage.clone());
@@ -404,7 +405,8 @@ impl Uni {
         params: HashMap<String, ApiValue>,
         config: UniConfig,
     ) -> Result<QueryResult> {
-        let planner = uni_query::QueryPlanner::new(self.schema.schema().clone().into());
+        let planner = uni_query::QueryPlanner::new(self.schema.schema().clone().into())
+            .with_params(params.clone());
         let logical_plan = planner.plan(ast).map_err(|e| into_query_error(e, cypher))?;
 
         let mut executor = uni_query::Executor::new(self.storage.clone());

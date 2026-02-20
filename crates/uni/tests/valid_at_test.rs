@@ -567,12 +567,6 @@ async fn test_valid_at_custom_prop_suggestion() -> Result<()> {
 }
 
 /// Test schemaless edge temporal property access after flush.
-///
-/// Known issue: schemaless edge properties (edges registered without `.property()` calls)
-/// may not be accessible via named property access (e.g. `e.valid_from`) after flush,
-/// because the schemaless property storage path differs from schema-defined edges.
-/// See docs/DATAFUSION_MUTATION_IMPLEMENTATION_PLAN.md for details.
-#[ignore]
 #[tokio::test]
 async fn test_valid_at_schemaless_edge_temporal() -> Result<()> {
     let db = Uni::in_memory().build().await?;

@@ -293,7 +293,13 @@ pub enum ReturnItem {
     /// RETURN * - return all variables
     All,
     /// RETURN expr [AS alias]
-    Expr { expr: Expr, alias: Option<String> },
+    Expr {
+        expr: Expr,
+        alias: Option<String>,
+        /// Original source text of the expression (for column naming).
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        source_text: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

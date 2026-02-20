@@ -57,6 +57,10 @@ harness = false
 name = "micro_benchmarks"
 harness = false
 
+[[bench]]
+name = "mutation_benchmarks"
+harness = false
+
 [features]
 default = ["candle-text"]
 snapshot-internals = []

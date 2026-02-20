@@ -102,7 +102,7 @@ async fn test_null_handling_functions() -> anyhow::Result<()> {
         .execute(plan, &prop_manager, &HashMap::new())
         .await?;
 
-    let coalesce_key = "coalesce(n.nickname, n.age, \"Unknown\")";
+    let coalesce_key = "coalesce(n.nickname, n.age, 'Unknown')";
 
     // Expected results sorted by name: Alice, Bob, Charlie
     // Alice: nickname=null, age=30 -> 30 (may be string "30" in vectorized engine due to mixed type promotion)
@@ -133,7 +133,7 @@ async fn test_null_handling_functions() -> anyhow::Result<()> {
         .execute(plan, &prop_manager, &HashMap::new())
         .await?;
 
-    let nullif_key = "nullIf(n.name, \"Bob\")";
+    let nullif_key = "nullIf(n.name, 'Bob')";
 
     // Alice: 'Alice' != 'Bob' -> 'Alice'
     assert_eq!(results[0].get("n.name"), Some(&unival!("Alice")));

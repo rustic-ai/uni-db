@@ -58,11 +58,18 @@ impl VariableType {
 pub struct VariableInfo {
     pub name: String,
     pub var_type: VariableType,
+    /// True if this is a variable-length path (VLP) step variable.
+    /// VLP step variables are typed as Edge but semantically hold edge lists.
+    pub is_vlp: bool,
 }
 
 impl VariableInfo {
     pub fn new(name: String, var_type: VariableType) -> Self {
-        Self { name, var_type }
+        Self {
+            name,
+            var_type,
+            is_vlp: false,
+        }
     }
 }
 
@@ -496,6 +503,21 @@ fn validate_function_call(name: &str, args: &[Expr], vars_in_scope: &[VariableIn
         ));
     }
 
+    // length()/size() do NOT accept Node or single-Edge arguments.
+    // VLP step variables (e.g. `r` in `-[r*1..2]->`) are typed as Edge
+    // but are actually edge lists — size()/length() is valid on those.
+    if (name_lower == "length" || name_lower == "size")
+        && let Some(Expr::Variable(var_name)) = args.first()
+        && let Some(info) = find_var_in_scope(vars_in_scope, var_name)
+        && (info.var_type == VariableType::Node
+            || (info.var_type == VariableType::Edge && !info.is_vlp))
+    {
+        return Err(anyhow!(
+            "SyntaxError: InvalidArgumentType - {}() requires a string, list, or path argument",
+            name_lower
+        ));
+    }
+
     Ok(())
 }
 
@@ -904,6 +926,28 @@ fn contains_aggregate_recursive(expr: &Expr) -> bool {
     }
 }
 
+/// Check if an expression contains a non-deterministic function (e.g. rand()).
+fn contains_non_deterministic(expr: &Expr) -> bool {
+    match expr {
+        Expr::FunctionCall { name, args, .. } => {
+            if name.eq_ignore_ascii_case("rand") {
+                return true;
+            }
+            args.iter().any(contains_non_deterministic)
+        }
+        Expr::BinaryOp { left, right, .. } => {
+            contains_non_deterministic(left) || contains_non_deterministic(right)
+        }
+        Expr::UnaryOp { expr: e, .. }
+        | Expr::IsNull(e)
+        | Expr::IsNotNull(e)
+        | Expr::IsUnique(e) => contains_non_deterministic(e),
+        Expr::List(items) => items.iter().any(contains_non_deterministic),
+        Expr::Property(base, _) => contains_non_deterministic(base),
+        _ => false,
+    }
+}
+
 fn collect_aggregate_reprs(expr: &Expr, out: &mut HashSet<String>) {
     match expr {
         Expr::FunctionCall { name, args, .. } => {
@@ -1138,20 +1182,39 @@ impl ConstNumber {
     }
 }
 
-fn eval_const_numeric_expr(expr: &Expr) -> Result<ConstNumber> {
+fn eval_const_numeric_expr(
+    expr: &Expr,
+    params: &std::collections::HashMap<String, uni_common::Value>,
+) -> Result<ConstNumber> {
     match expr {
         Expr::Literal(CypherLiteral::Integer(n)) => Ok(ConstNumber::Int(*n)),
         Expr::Literal(CypherLiteral::Float(f)) => Ok(ConstNumber::Float(*f)),
+        Expr::Parameter(name) => match params.get(name) {
+            Some(uni_common::Value::Int(n)) => Ok(ConstNumber::Int(*n)),
+            Some(uni_common::Value::Float(f)) => Ok(ConstNumber::Float(*f)),
+            Some(uni_common::Value::Null) => Err(anyhow!(
+                "TypeError: InvalidArgumentType - expected numeric value for parameter ${}, got null",
+                name
+            )),
+            Some(other) => Err(anyhow!(
+                "TypeError: InvalidArgumentType - expected numeric value for parameter ${}, got {:?}",
+                name,
+                other
+            )),
+            None => Err(anyhow!(
+                "SyntaxError: InvalidArgumentType - expression is not a constant integer expression"
+            )),
+        },
         Expr::UnaryOp {
             op: uni_cypher::ast::UnaryOp::Neg,
             expr,
-        } => match eval_const_numeric_expr(expr)? {
+        } => match eval_const_numeric_expr(expr, params)? {
             ConstNumber::Int(v) => Ok(ConstNumber::Int(-v)),
             ConstNumber::Float(v) => Ok(ConstNumber::Float(-v)),
         },
         Expr::BinaryOp { left, op, right } => {
-            let l = eval_const_numeric_expr(left)?;
-            let r = eval_const_numeric_expr(right)?;
+            let l = eval_const_numeric_expr(left, params)?;
+            let r = eval_const_numeric_expr(right, params)?;
             match op {
                 BinaryOp::Add => match (l, r) {
                     (ConstNumber::Int(a), ConstNumber::Int(b)) => Ok(ConstNumber::Int(a + b)),
@@ -1185,18 +1248,18 @@ fn eval_const_numeric_expr(expr: &Expr) -> Result<ConstNumber> {
                     Ok(ConstNumber::Float(rng.r#gen::<f64>()))
                 }
                 "tointeger" | "toint" if args.len() == 1 => {
-                    match eval_const_numeric_expr(&args[0])? {
+                    match eval_const_numeric_expr(&args[0], params)? {
                         ConstNumber::Int(v) => Ok(ConstNumber::Int(v)),
                         ConstNumber::Float(v) => Ok(ConstNumber::Int(v.trunc() as i64)),
                     }
                 }
                 "ceil" if args.len() == 1 => Ok(ConstNumber::Float(
-                    eval_const_numeric_expr(&args[0])?.to_f64().ceil(),
+                    eval_const_numeric_expr(&args[0], params)?.to_f64().ceil(),
                 )),
                 "floor" if args.len() == 1 => Ok(ConstNumber::Float(
-                    eval_const_numeric_expr(&args[0])?.to_f64().floor(),
+                    eval_const_numeric_expr(&args[0], params)?.to_f64().floor(),
                 )),
-                "abs" if args.len() == 1 => match eval_const_numeric_expr(&args[0])? {
+                "abs" if args.len() == 1 => match eval_const_numeric_expr(&args[0], params)? {
                     ConstNumber::Int(v) => Ok(ConstNumber::Int(v.abs())),
                     ConstNumber::Float(v) => Ok(ConstNumber::Float(v.abs())),
                 },
@@ -1213,7 +1276,11 @@ fn eval_const_numeric_expr(expr: &Expr) -> Result<ConstNumber> {
 
 /// Parse and validate a non-negative integer expression for SKIP or LIMIT.
 /// Returns `Ok(Some(n))` for valid constants, or an error for negative/float/non-constant values.
-fn parse_non_negative_integer(expr: &Expr, clause_name: &str) -> Result<Option<usize>> {
+fn parse_non_negative_integer(
+    expr: &Expr,
+    clause_name: &str,
+    params: &std::collections::HashMap<String, uni_common::Value>,
+) -> Result<Option<usize>> {
     let referenced_vars = collect_expr_variables(expr);
     if !referenced_vars.is_empty() {
         return Err(anyhow!(
@@ -1222,7 +1289,7 @@ fn parse_non_negative_integer(expr: &Expr, clause_name: &str) -> Result<Option<u
         ));
     }
 
-    let value = eval_const_numeric_expr(expr)?;
+    let value = eval_const_numeric_expr(expr, params)?;
     let as_int = match value {
         ConstNumber::Int(v) => v,
         ConstNumber::Float(v) => {
@@ -1253,6 +1320,12 @@ fn validate_no_nested_aggregation(expr: &Expr) -> Result<()> {
             if contains_aggregate_recursive(arg) {
                 return Err(anyhow!(
                     "SyntaxError: NestedAggregation - Cannot nest aggregation functions"
+                ));
+            }
+            // Non-deterministic functions like rand() are not allowed inside aggregations
+            if contains_non_deterministic(arg) {
+                return Err(anyhow!(
+                    "SyntaxError: NonConstantExpression - Non-deterministic function inside aggregation"
                 ));
             }
         }
@@ -1287,6 +1360,89 @@ fn validate_no_nested_aggregation(expr: &Expr) -> Result<()> {
             }
             if let Some(e) = else_expr {
                 validate_no_nested_aggregation(e)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Validate that an expression does not access properties or labels of
+/// deleted entities. `type(r)` on a deleted relationship is allowed per
+/// OpenCypher spec, but `n.prop` and `labels(n)` are not.
+fn validate_no_deleted_entity_access(
+    expr: &Expr,
+    deleted_vars: &std::collections::HashSet<String>,
+) -> Result<()> {
+    match expr {
+        // n.prop on a deleted variable
+        Expr::Property(inner, _) if matches!(inner.as_ref(), Expr::Variable(name) if deleted_vars.contains(name)) =>
+        {
+            let name = if let Expr::Variable(n) = inner.as_ref() {
+                n
+            } else {
+                unreachable!()
+            };
+            return Err(anyhow!(
+                "EntityNotFound: DeletedEntityAccess - Cannot access properties of deleted entity '{}'",
+                name
+            ));
+        }
+        // labels(n) or keys(n) on a deleted variable
+        Expr::FunctionCall { name, args, .. }
+            if matches!(name.to_lowercase().as_str(), "labels" | "keys")
+                && args.len() == 1
+                && matches!(&args[0], Expr::Variable(v) if deleted_vars.contains(v)) =>
+        {
+            let var = if let Expr::Variable(v) = &args[0] {
+                v
+            } else {
+                unreachable!()
+            };
+            return Err(anyhow!(
+                "EntityNotFound: DeletedEntityAccess - Cannot access {} of deleted entity '{}'",
+                name.to_lowercase(),
+                var
+            ));
+        }
+        _ => {}
+    }
+    // Recurse into sub-expressions
+    match expr {
+        Expr::BinaryOp { left, right, .. } => {
+            validate_no_deleted_entity_access(left, deleted_vars)?;
+            validate_no_deleted_entity_access(right, deleted_vars)?;
+        }
+        Expr::FunctionCall { args, .. } => {
+            for arg in args {
+                validate_no_deleted_entity_access(arg, deleted_vars)?;
+            }
+        }
+        Expr::List(items) => {
+            for item in items {
+                validate_no_deleted_entity_access(item, deleted_vars)?;
+            }
+        }
+        Expr::Property(inner, _) => {
+            validate_no_deleted_entity_access(inner, deleted_vars)?;
+        }
+        Expr::UnaryOp { expr: inner, .. } | Expr::IsNull(inner) | Expr::IsNotNull(inner) => {
+            validate_no_deleted_entity_access(inner, deleted_vars)?;
+        }
+        Expr::Case {
+            expr: case_expr,
+            when_then,
+            else_expr,
+        } => {
+            if let Some(e) = case_expr {
+                validate_no_deleted_entity_access(e, deleted_vars)?;
+            }
+            for (w, t) in when_then {
+                validate_no_deleted_entity_access(w, deleted_vars)?;
+                validate_no_deleted_entity_access(t, deleted_vars)?;
+            }
+            if let Some(e) = else_expr {
+                validate_no_deleted_entity_access(e, deleted_vars)?;
             }
         }
         _ => {}
@@ -2115,6 +2271,8 @@ pub struct QueryPlanner {
     gen_expr_cache: std::collections::HashMap<(String, String), Expr>,
     /// Counter for generating unique anonymous variable names.
     anon_counter: std::cell::Cell<usize>,
+    /// Optional query parameters for resolving $param in SKIP/LIMIT.
+    params: std::collections::HashMap<String, uni_common::Value>,
 }
 
 struct TraverseParams<'a> {
@@ -2144,7 +2302,17 @@ impl QueryPlanner {
             schema,
             gen_expr_cache,
             anon_counter: std::cell::Cell::new(0),
+            params: std::collections::HashMap::new(),
         }
+    }
+
+    /// Set query parameters for resolving `$param` references in SKIP/LIMIT.
+    pub fn with_params(
+        mut self,
+        params: std::collections::HashMap<String, uni_common::Value>,
+    ) -> Self {
+        self.params = params;
+        self
     }
 
     pub fn plan(&self, query: Query) -> Result<LogicalPlan> {
@@ -2273,8 +2441,18 @@ impl QueryPlanner {
         for item in &return_clause.items {
             match item {
                 ReturnItem::All => {
-                    // RETURN * - add all variables in scope
-                    for v in vars_in_scope {
+                    // RETURN * - add all user-named variables in scope
+                    // (anonymous variables like _anon_0 are excluded)
+                    let user_vars: Vec<_> = vars_in_scope
+                        .iter()
+                        .filter(|v| !v.name.starts_with("_anon_"))
+                        .collect();
+                    if user_vars.is_empty() {
+                        return Err(anyhow!(
+                            "SyntaxError: NoVariablesInScope - RETURN * is not allowed when there are no variables in scope"
+                        ));
+                    }
+                    for v in user_vars {
                         projections.push((Expr::Variable(v.name.clone()), Some(v.name.clone())));
                         if !group_by.contains(&Expr::Variable(v.name.clone())) {
                             group_by.push(Expr::Variable(v.name.clone()));
@@ -2283,7 +2461,11 @@ impl QueryPlanner {
                         projected_simple_reprs.insert(v.name.clone());
                     }
                 }
-                ReturnItem::Expr { expr, alias } => {
+                ReturnItem::Expr {
+                    expr,
+                    alias,
+                    source_text,
+                } => {
                     if matches!(expr, Expr::Wildcard) {
                         for v in vars_in_scope {
                             projections
@@ -2306,7 +2488,9 @@ impl QueryPlanner {
                             ));
                         }
 
-                        projections.push((expr.clone(), alias.clone()));
+                        // Use source text as column name when no explicit alias
+                        let effective_alias = alias.clone().or_else(|| source_text.clone());
+                        projections.push((expr.clone(), effective_alias));
                         if expr.is_aggregate() && !is_compound_aggregate(expr) {
                             // Bare aggregate — push directly
                             has_agg = true;
@@ -2579,13 +2763,13 @@ impl QueryPlanner {
             let skip = return_clause
                 .skip
                 .as_ref()
-                .map(|e| parse_non_negative_integer(e, "SKIP"))
+                .map(|e| parse_non_negative_integer(e, "SKIP", &self.params))
                 .transpose()?
                 .flatten();
             let fetch = return_clause
                 .limit
                 .as_ref()
-                .map(|e| parse_non_negative_integer(e, "LIMIT"))
+                .map(|e| parse_non_negative_integer(e, "LIMIT", &self.params))
                 .transpose()?
                 .flatten();
 
@@ -2713,6 +2897,9 @@ impl QueryPlanner {
         // from CREATE-introduced variables (which can be referenced as bare nodes).
         let mut create_introduced_vars: std::collections::HashSet<String> =
             std::collections::HashSet::new();
+        // Track variables targeted by DELETE so we can reject property/label
+        // access on deleted entities in subsequent RETURN clauses.
+        let mut deleted_vars: std::collections::HashSet<String> = std::collections::HashSet::new();
 
         let clause_count = query.clauses.len();
         for (clause_idx, clause) in query.clauses.into_iter().enumerate() {
@@ -2763,6 +2950,15 @@ impl QueryPlanner {
                                 if yield_names.contains(output_name) {
                                     return Err(anyhow!(
                                         "SyntaxError: VariableAlreadyBound - Variable '{}' already appears in YIELD clause",
+                                        output_name
+                                    ));
+                                }
+                                // Check against existing scope (in-query CALL must not shadow)
+                                if clause_idx > 0
+                                    && vars_in_scope.iter().any(|v| v.name == *output_name)
+                                {
+                                    return Err(anyhow!(
+                                        "SyntaxError: VariableAlreadyBound - Variable '{}' already declared in outer scope",
                                         output_name
                                     ));
                                 }
@@ -3068,6 +3264,12 @@ impl QueryPlanner {
                             ));
                         }
                     }
+                    // Track deleted variables for later validation
+                    for item in &delete_clause.items {
+                        if let Expr::Variable(name) = item {
+                            deleted_vars.insert(name.clone());
+                        }
+                    }
                     plan = LogicalPlan::Delete {
                         input: Box::new(plan),
                         items: delete_clause.items.clone(),
@@ -3091,6 +3293,14 @@ impl QueryPlanner {
                     )?;
                 }
                 Clause::Return(return_clause) => {
+                    // Check for property/label access on deleted entities
+                    if !deleted_vars.is_empty() {
+                        for item in &return_clause.items {
+                            if let ReturnItem::Expr { expr, .. } = item {
+                                validate_no_deleted_entity_access(expr, &deleted_vars)?;
+                            }
+                        }
+                    }
                     plan = self.plan_return_clause(&return_clause, plan, &vars_in_scope)?;
                 } // All Clause variants are handled above - no catch-all needed
             }
@@ -4180,6 +4390,11 @@ impl QueryPlanner {
             // Add the bound variables to scope
             if let Some(sv) = &step_var {
                 add_var_to_scope(vars_in_scope, sv, VariableType::Edge)?;
+                if is_variable_length
+                    && let Some(info) = vars_in_scope.iter_mut().find(|v| v.name == *sv)
+                {
+                    info.is_vlp = true;
+                }
             }
             if let Some(pv) = &path_var
                 && !is_var_in_scope(vars_in_scope, pv)
@@ -4457,6 +4672,11 @@ impl QueryPlanner {
             && bound_edge_list_var.is_none()
         {
             add_var_to_scope(vars_in_scope, sv, VariableType::Edge)?;
+            if is_variable_length
+                && let Some(info) = vars_in_scope.iter_mut().find(|v| v.name == *sv)
+            {
+                info.is_vlp = true;
+            }
         }
         if let Some(pv) = &path_var
             && !is_var_in_scope(vars_in_scope, pv)
@@ -5186,7 +5406,7 @@ impl QueryPlanner {
                     }
                     new_vars.extend(vars_in_scope.iter().cloned());
                 }
-                ReturnItem::Expr { expr, alias } => {
+                ReturnItem::Expr { expr, alias, .. } => {
                     if matches!(expr, Expr::Wildcard) {
                         for v in vars_in_scope {
                             projections
@@ -5466,13 +5686,13 @@ impl QueryPlanner {
         let skip = with_clause
             .skip
             .as_ref()
-            .map(|e| parse_non_negative_integer(e, "SKIP"))
+            .map(|e| parse_non_negative_integer(e, "SKIP", &self.params))
             .transpose()?
             .flatten();
         let fetch = with_clause
             .limit
             .as_ref()
-            .map(|e| parse_non_negative_integer(e, "LIMIT"))
+            .map(|e| parse_non_negative_integer(e, "LIMIT", &self.params))
             .transpose()?
             .flatten();
 

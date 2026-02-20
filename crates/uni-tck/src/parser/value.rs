@@ -204,8 +204,10 @@ fn node(input: &str) -> IResult<&str, Node> {
 fn edge(input: &str) -> IResult<&str, Edge> {
     let (input, (edge_type, properties)) = parse_edge_brackets(input)?;
 
-    // Require at least an edge type or properties to disambiguate from `[]`.
-    if edge_type.is_none() && properties.is_none() {
+    // Require an explicit edge type to disambiguate from lists.
+    // `[{}]` is a list containing an empty map, not an edge with empty properties.
+    // `[:TYPE {props}]` or `[:TYPE]` are edges.
+    if edge_type.is_none() {
         return Err(nom::Err::Error(nom::error::Error::new(
             input,
             nom::error::ErrorKind::Verify,

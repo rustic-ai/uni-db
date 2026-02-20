@@ -434,6 +434,18 @@ impl GraphUnwindStream {
                         }
                         Ok(Value::Null)
                     }
+                    // Temporal constructors: date(), time(), localtime(), datetime(), localdatetime(), duration()
+                    "date" | "time" | "localtime" | "datetime" | "localdatetime" | "duration" => {
+                        let mut eval_args = Vec::with_capacity(args.len());
+                        for arg in args {
+                            eval_args.push(self.evaluate_expr_impl(arg, batch, row_idx)?);
+                        }
+                        crate::query::datetime::eval_datetime_function(
+                            &name.to_uppercase(),
+                            &eval_args,
+                        )
+                        .map_err(|e| datafusion::error::DataFusionError::Execution(e.to_string()))
+                    }
                     _ => {
                         // Unsupported function - return empty list
                         Ok(Value::List(vec![]))
@@ -457,6 +469,25 @@ impl GraphUnwindStream {
                     map.insert(key.clone(), val);
                 }
                 Ok(Value::Map(map))
+            }
+
+            // Array index: qrows[p]
+            Expr::ArrayIndex { array, index } => {
+                let arr_val = self.evaluate_expr_impl(array, batch, row_idx)?;
+                let idx_val = self.evaluate_expr_impl(index, batch, row_idx)?;
+                match (&arr_val, idx_val.as_i64()) {
+                    (Value::List(list), Some(i)) => {
+                        // Cypher uses 0-based indexing; negative indices count from end
+                        let len = list.len() as i64;
+                        let resolved = if i < 0 { len + i } else { i };
+                        if resolved >= 0 && (resolved as usize) < list.len() {
+                            Ok(list[resolved as usize].clone())
+                        } else {
+                            Ok(Value::Null)
+                        }
+                    }
+                    _ => Ok(Value::Null),
+                }
             }
 
             // Unsupported expressions return null

@@ -104,6 +104,12 @@ pub fn column_as_vid_array(
         return Ok(std::borrow::Cow::Owned(vids));
     }
 
+    // OPTIONAL MATCH can produce all-null columns with Arrow Null type
+    if *col.data_type() == DataType::Null {
+        let vids: UInt64Array = (0..col.len()).map(|_| None::<u64>).collect();
+        return Ok(std::borrow::Cow::Owned(vids));
+    }
+
     Err(datafusion::error::DataFusionError::Execution(format!(
         "VID column has type {:?}, expected UInt64 or Int64",
         col.data_type()
@@ -391,8 +397,8 @@ pub fn append_edge_to_struct(
 ///
 /// When `eid` is `Some`, resolves the type name from `batch_type_name` (primary)
 /// or L0 visibility (fallback), then delegates to [`append_edge_to_struct`].
-/// When `eid` is `None`, writes a placeholder edge with eid=0, empty type,
-/// and null properties.
+/// When `eid` is `None`, appends a null struct row (the entire struct is null,
+/// not just an empty edge).
 pub fn append_edge_to_struct_optional(
     struct_builder: &mut arrow_array::builder::StructBuilder,
     eid: Option<uni_common::core::id::Eid>,
@@ -413,6 +419,8 @@ pub fn append_edge_to_struct_optional(
         None => {
             use arrow_array::builder::{LargeBinaryBuilder, StringBuilder, UInt64Builder};
 
+            // Append placeholder values for each field (required by Arrow struct builder
+            // even for null structs) then mark the struct row as null.
             struct_builder
                 .field_builder::<UInt64Builder>(0)
                 .unwrap()
@@ -433,7 +441,7 @@ pub fn append_edge_to_struct_optional(
                 .field_builder::<LargeBinaryBuilder>(4)
                 .unwrap()
                 .append_null();
-            struct_builder.append(true);
+            struct_builder.append(false);
         }
     }
 }
@@ -479,8 +487,8 @@ pub fn append_node_to_struct(
 /// Append a node to a struct builder, handling the `Option<Vid>` case.
 ///
 /// When `vid` is `Some`, delegates to [`append_node_to_struct`].
-/// When `vid` is `None`, writes a placeholder node with vid=0, empty labels,
-/// and null properties.
+/// When `vid` is `None`, appends a null struct row (the entire struct is null,
+/// not just an empty node).
 pub fn append_node_to_struct_optional(
     struct_builder: &mut arrow_array::builder::StructBuilder,
     vid: Option<uni_common::core::id::Vid>,
@@ -493,6 +501,8 @@ pub fn append_node_to_struct_optional(
                 LargeBinaryBuilder, ListBuilder, StringBuilder, UInt64Builder,
             };
 
+            // Append placeholder values for each field (required by Arrow struct builder
+            // even for null structs) then mark the struct row as null.
             struct_builder
                 .field_builder::<UInt64Builder>(0)
                 .unwrap()
@@ -505,7 +515,7 @@ pub fn append_node_to_struct_optional(
                 .field_builder::<LargeBinaryBuilder>(2)
                 .unwrap()
                 .append_null();
-            struct_builder.append(true);
+            struct_builder.append(false);
         }
     }
 }

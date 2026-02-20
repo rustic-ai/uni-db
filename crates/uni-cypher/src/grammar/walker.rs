@@ -1089,6 +1089,9 @@ fn build_primary_expression(pair: Pair<Rule>) -> Result<Expr, ParseError> {
                     first_item.as_rule()
                 ),
             };
+            // Note: Validation that EXISTS subqueries cannot contain updating clauses
+            // (SET, DELETE, CREATE, MERGE, REMOVE) is a semantic check performed
+            // at planning/execution time, not during parsing.
             Ok(Expr::Exists {
                 query: Box::new(query),
                 from_pattern_predicate: false,
@@ -1290,6 +1293,7 @@ fn build_literal(pair: Pair<Rule>) -> Result<Expr, ParseError> {
             let value = s
                 .parse::<f64>()
                 .map_err(|e| ParseError::new(format!("Invalid float: {}", e)))?;
+            // Allow overflow to infinity at parse time — overflow is a runtime concern
             Ok(Expr::Literal(CypherLiteral::Float(value)))
         }
         Rule::infinity => {
@@ -1823,14 +1827,20 @@ fn build_relationship_pattern(pair: Pair<Rule>) -> Result<RelationshipPattern, P
 
 fn build_single_return_item(pair: Pair<Rule>) -> Result<ReturnItem, ParseError> {
     let mut inner = pair.into_inner();
-    let expr = build_expression(inner.next().unwrap())?;
+    let expr_pair = inner.next().unwrap();
+    let source_text = expr_pair.as_str().trim().to_string();
+    let expr = build_expression(expr_pair)?;
     let alias = if inner.next().is_some() {
         // AS keyword consumed; next is the alias identifier
         Some(inner.next().unwrap().as_str().to_string())
     } else {
         None
     };
-    Ok(ReturnItem::Expr { expr, alias })
+    Ok(ReturnItem::Expr {
+        expr,
+        alias,
+        source_text: Some(source_text),
+    })
 }
 
 fn build_return_items(pair: Pair<Rule>) -> Result<Vec<ReturnItem>, ParseError> {

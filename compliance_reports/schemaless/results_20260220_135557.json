@@ -209,8 +209,7 @@
             "keyword": "Scenario ",
             "name": "[15] In-query procedure call should fail if shadowing an already bound variable",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/call/Call1.feature:224:5\n      Matched: crates/uni-tck/src/steps/then.rs:90:1\n      Step panicked. Captured output: No error found\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -273,7 +272,7 @@
             "name": "[3] Standalone call to procedure with implicit arguments",
             "result": {
               "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/call/Call2.feature:89:5\n      Matched: crates/uni-tck/src/steps/then.rs:37:1\n      Step panicked. Captured output: No result found\n[Summary]\n1 feature\n1 scenario (1 failed)\n5 steps (4 passed, 1 failed)\n"
+              "error_message": "Step failed:\n      Defined: tck/features/clauses/call/Call2.feature:89:5\n      Matched: crates/uni-tck/src/steps/then.rs:37:1\n      Step panicked. Captured output: Query returned error instead of result: Query { message: \"MissingParameter: Procedure 'test.my.proc' requires 2 implicit argument(s)\", query: Some(\"\\nCALL test.my.proc\\n\") }\n[Summary]\n1 feature\n1 scenario (1 failed)\n5 steps (4 passed, 1 failed)\n"
             }
           }
         ]
@@ -5923,7 +5922,7 @@
             "name": "[4] Matching longer variable length paths",
             "result": {
               "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/match/Match4.feature:111:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Result mismatch (any order): Row count mismatch: expected 1, got 33\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
+              "error_message": "Step failed:\n      Defined: tck/features/clauses/match/Match4.feature:111:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Result mismatch (any order): Row count mismatch: expected 1, got 37\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
             }
           }
         ]
@@ -5981,8 +5980,7 @@
             "keyword": "Scenario ",
             "name": "[8] Matching relationships into a list and matching variable length using the list",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/match/Match4.feature:192:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Result mismatch (any order): Row count mismatch: expected 1, got 0\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -8371,8 +8369,7 @@
             "keyword": "Scenario ",
             "name": "[6] Matching relationships into a list and matching variable length using the list, with bound nodes",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/match/Match9.feature:138:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Result mismatch (any order): Row count mismatch: expected 1, got 0\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -10558,8 +10555,7 @@
             "keyword": "Scenario ",
             "name": "[2] Start the result from the second row by param",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/return-skip-limit/ReturnSkipLimit1.feature:76:5\n      Matched: crates/uni-tck/src/steps/then.rs:37:1\n      Step panicked. Captured output: No result found\n[Summary]\n1 feature\n1 scenario (1 failed)\n5 steps (4 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -10963,8 +10959,7 @@
             "keyword": "Scenario ",
             "name": "[2] Get rows in the middle by param",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/return-skip-limit/ReturnSkipLimit3.feature:78:5\n      Matched: crates/uni-tck/src/steps/then.rs:37:1\n      Step panicked. Captured output: No result found\n[Summary]\n1 feature\n1 scenario (1 failed)\n5 steps (4 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -11130,8 +11125,7 @@
             "keyword": "Scenario ",
             "name": "[8] Returning label predicate expression",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/return/Return2.feature:151:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Result mismatch (any order): Expected column '(n:Foo)' not found in result\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -11145,8 +11139,7 @@
             "keyword": "Scenario ",
             "name": "[9] Returning a projected map",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/return/Return2.feature:167:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Result mismatch (any order): Expected column '{a: 1, b: 'foo'}' not found in result\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -11230,8 +11223,7 @@
             "keyword": "Scenario ",
             "name": "[15] Fail when returning properties of deleted nodes",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/return/Return2.feature:264:5\n      Matched: crates/uni-tck/src/steps/then.rs:90:1\n      Step panicked. Captured output: No error found\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -11245,8 +11237,7 @@
             "keyword": "Scenario ",
             "name": "[16] Fail when returning labels of deleted nodes",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/return/Return2.feature:278:5\n      Matched: crates/uni-tck/src/steps/then.rs:90:1\n      Step panicked. Captured output: No error found\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -11260,8 +11251,7 @@
             "keyword": "Scenario ",
             "name": "[17] Fail when returning properties of deleted relationships",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/return/Return2.feature:292:5\n      Matched: crates/uni-tck/src/steps/then.rs:90:1\n      Step panicked. Captured output: No error found\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -11385,8 +11375,7 @@
             "keyword": "Scenario ",
             "name": "[4] Keeping used expression 1",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/return/Return4.feature:93:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Result mismatch (any order): Expected column 'cOuNt( * )' not found in result\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -11414,8 +11403,7 @@
             "keyword": "Scenario ",
             "name": "[6] Keeping used expression 3",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/return/Return4.feature:125:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Result mismatch (any order): Expected column 'coUnt( dIstInct p )' not found in result\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -11429,8 +11417,7 @@
             "keyword": "Scenario ",
             "name": "[7] Keeping used expression 4",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/return/Return4.feature:141:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Result mismatch (any order): Expected column 'aVg(    n.aGe     )' not found in result\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -11751,7 +11738,7 @@
             "name": "[13] Returning the minimum length of paths",
             "result": {
               "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/return/Return6.feature:246:5\n      Matched: crates/uni-tck/src/steps/then.rs:48:1\n      Step panicked. Captured output: No result found\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
+              "error_message": "Step failed:\n      Defined: tck/features/clauses/return/Return6.feature:246:5\n      Matched: crates/uni-tck/src/steps/then.rs:54:1\n      Step panicked. Captured output: Query returned error instead of result: Query { message: \"Schema error: No field named other. Did you mean 'other._vid'?.\", query: Some(\"\\nMATCH p = (a:T {name: 'a'})-[:R*]->(other:T)\\nWHERE other <> a\\nWITH a, other, min(length(p)) AS len\\nRETURN a.name AS name, collect(other.name) AS others, len\\n\") }\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
             }
           }
         ]
@@ -11779,8 +11766,7 @@
             "keyword": "Scenario ",
             "name": "[15] Using `rand()` in aggregations",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/return/Return6.feature:265:5\n      Matched: crates/uni-tck/src/steps/then.rs:90:1\n      Step panicked. Captured output: No error found\n[Summary]\n1 feature\n1 scenario (1 failed)\n3 steps (2 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -11899,8 +11885,7 @@
             "keyword": "Scenario ",
             "name": "[2] Fail when using RETURN * without variables in scope",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/return/Return7.feature:56:5\n      Matched: crates/uni-tck/src/steps/then.rs:90:1\n      Step panicked. Captured output: No error found\n[Summary]\n1 feature\n1 scenario (1 failed)\n3 steps (2 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -12760,8 +12745,7 @@
             "keyword": "Scenario ",
             "name": "[4] Should be able to create text output from union queries",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/union/Union1.feature:95:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Result mismatch (any order): Unexpected column 'a._all_props' in result\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -12837,8 +12821,7 @@
             "keyword": "Scenario ",
             "name": "[4] Should be able to create text output from union all queries",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/union/Union2.feature:98:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Result mismatch (any order): Unexpected column 'a._all_props' in result\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -17330,8 +17313,7 @@
             "keyword": "Scenario ",
             "name": "[2] Get rows in the middle by param",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/with-skip-limit/WithSkipLimit3.feature:109:5\n      Matched: crates/uni-tck/src/steps/then.rs:37:1\n      Step panicked. Captured output: No result found\n[Summary]\n1 feature\n1 scenario (1 failed)\n5 steps (4 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -17984,8 +17966,7 @@
             "keyword": "Scenario ",
             "name": "[3] Implicit grouping with multiple node and relationship variables as grouping key and single aggregation",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/with/With6.feature:89:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Query returned error instead of result: Query { message: \"DataFusion planning failed: Schema error: No field named \\\"b._vid\\\". Did you mean 'a._vid'?.\", query: Some(\"\\nMATCH (a)-[r1]->(b:X)\\nWITH a, r1 AS r2, b, count(*) AS c\\nMATCH (a)-[r2]->(b)\\nRETURN r2 AS rel\\n\") }\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -22097,7 +22078,7 @@
             "name": "[3] Full existential subquery with update clause should fail",
             "result": {
               "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/expressions/existentialSubqueries/ExistentialSubquery2.feature:88:5\n      Matched: crates/uni-tck/src/steps/then.rs:90:1\n      Step panicked. Captured output: No error found\n[Summary]\n1 feature\n1 scenario (1 failed)\n3 steps (2 passed, 1 failed)\n"
+              "error_message": "Step failed:\n      Defined: tck/features/expressions/existentialSubqueries/ExistentialSubquery2.feature:88:5\n      Matched: crates/uni-tck/src/steps/then.rs:114:1\n      Step panicked. Captured output: No error found\n[Summary]\n1 feature\n1 scenario (1 failed)\n3 steps (2 passed, 1 failed)\n"
             }
           }
         ]
@@ -22327,8 +22308,7 @@
             "keyword": "Scenario ",
             "name": "[3] `type()` on null relationship",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/expressions/graph/Graph4.feature:77:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [(\"type(r)\", Some(String(\"NOT_THERE\"))), (\"type(null)\", Some(Null))]. Expected: [{\"type(r)\": Null, \"type(null)\": Null}]\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -22342,8 +22322,7 @@
             "keyword": "Scenario ",
             "name": "[4] `type()` on mixed null and non-null relationships",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/expressions/graph/Graph4.feature:94:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 1. Actual values: [(\"type(r)\", Some(String(\"T\")))]. Expected: [{\"type(r)\": Null}]\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -22635,8 +22614,7 @@
             "keyword": "Scenario ",
             "name": "[4] Statically access a property of a node resulting from an expression",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/expressions/graph/Graph6.feature:90:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Result mismatch (any order): Expected column '(list[1]).missing' not found in result\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -22693,8 +22671,7 @@
             "keyword": "Scenario ",
             "name": "[8] Statically access a property of a relationship resulting from an expression",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/expressions/graph/Graph6.feature:151:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Result mismatch (any order): Expected column '(list[1]).missingToo' not found in result\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -22992,8 +22969,7 @@
             "keyword": "Scenario ",
             "name": "[3] `properties()` on null",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/expressions/graph/Graph9.feature:73:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [(\"properties(r)\", Some(Map({}))), (\"properties(null)\", Some(Null)), (\"properties(n)\", Some(Null))]. Expected: [{\"properties(r)\": Null, \"properties(null)\": Null, \"properties(n)\": Null}]\n[Summary]\n1 feature\n1 scenario (1 failed)\n3 steps (2 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -26720,7 +26696,7 @@
             "name": "[27] Fail when float value is too large",
             "result": {
               "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/expressions/literals/Literals5.feature:325:5\n      Matched: crates/uni-tck/src/steps/then.rs:90:1\n      Step panicked. Captured output: No error found\n[Summary]\n1 feature\n1 scenario (1 failed)\n3 steps (2 passed, 1 failed)\n"
+              "error_message": "Step failed:\n      Defined: tck/features/expressions/literals/Literals5.feature:325:5\n      Matched: crates/uni-tck/src/steps/then.rs:114:1\n      Step panicked. Captured output: No error found\n[Summary]\n1 feature\n1 scenario (1 failed)\n3 steps (2 passed, 1 failed)\n"
             }
           }
         ]
@@ -27098,8 +27074,7 @@
             "keyword": "Scenario ",
             "name": "[13] Return a list containing an empty map",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/expressions/literals/Literals7.feature:171:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [(\"literal\", Some(List([Map({})])))]. Expected: [{\"literal\": Edge(Edge { eid: Eid(0), edge_type: \"\", src: Vid(0), dst: Vid(0), properties: {} })}]\n[Summary]\n1 feature\n1 scenario (1 failed)\n3 steps (2 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -27155,8 +27130,7 @@
             "keyword": "Scenario ",
             "name": "[18] Return a complex list containing multiple mixed and nested values",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/expressions/literals/Literals7.feature:295:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [(\"literal\", Some(List([Map({\"type\": String(\"donut\"), \"name\": String(\"Cake\"), \"topping\": List([Map({\"id\": String(\"5001\"), \"type\": String(\"None\")}), Map({\"type\": String(\"Glazed\"), \"id\": String(\"5002\")}), Map({\"id\": String(\"5005\"), \"type\": String(\"Sugar\")}), Map({\"type\": String(\"Powdered Sugar\"), \"id\": String(\"5007\")}), Map({\"type\": String(\"Chocolate Sprinkles\"), \"id\": String(\"5006\")}), Map({\"id\": String(\"5003\"), \"type\": String(\"Chocolate\")}), Map({\"type\": String(\"Maple\"), \"id\": String(\"5004\")})]), \"ppu\": Float(0.55), \"id\": String(\"0001\"), \"batters\": Map({\"batter\": List([Map({\"id\": String(\"1001\"), \"type\": String(\"Regular\")}), Map({\"id\": String(\"1002\"), \"type\": String(\"Chocolate\")}), Map({\"id\": String(\"1003\"), \"type\": String(\"Blueberry\")}), Map({\"type\": String(\"Devils Food\"), \"id\": String(\"1004\")})])})}), Map({\"ppu\": Float(0.55), \"name\": String(\"Raised\"), \"id\": String(\"0002\"), \"topping\": List([Map({\"id\": String(\"5001\"), \"type\": String(\"None\")}), Map({\"id\": String(\"5002\"), \"type\": String(\"Glazed\")}), Map({\"id\": String(\"5005\"), \"type\": String(\"Sugar\")}), Map({\"type\": String(\"Chocolate\"), \"id\": String(\"5003\")}), Map({\"type\": String(\"Maple\"), \"id\": String(\"5004\")})]), \"batters\": Map({\"batter\": List([Map({\"id\": String(\"1001\"), \"type\": String(\"Regular\")})])}), \"type\": String(\"donut\")}), Map({\"topping\": List([Map({\"id\": String(\"5001\"), \"type\": String(\"None\")}), Map({\"type\": String(\"Glazed\"), \"id\": String(\"5002\")}), Map({\"type\": String(\"Chocolate\"), \"id\": String(\"5003\")}), Map({\"id\": String(\"5004\"), \"type\": String(\"Maple\")})]), \"id\": String(\"0003\"), \"ppu\": Float(0.55), \"type\": String(\"donut\"), \"name\": String(\"Old Fashioned\"), \"batters\": Map({\"batter\": List([Map({\"id\": String(\"1001\"), \"type\": String(\"Regular\")}), Map({\"id\": Stri..."
+              "status": "passed"
             }
           }
         ]
@@ -27456,8 +27430,7 @@
             "keyword": "Scenario ",
             "name": "[18] Return a complex map containing multiple mixed and nested values",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/expressions/literals/Literals8.feature:294:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [(\"literal\", Some(Map({\"data\": List([Map({\"ppu\": Float(0.55), \"batters\": Map({\"batter\": List([Map({\"type\": String(\"Regular\"), \"id\": String(\"1001\")}), Map({\"id\": String(\"1002\"), \"type\": String(\"Chocolate\")}), Map({\"type\": String(\"Blueberry\"), \"id\": String(\"1003\")}), Map({\"type\": String(\"Devils Food\"), \"id\": String(\"1004\")})])}), \"name\": String(\"Cake\"), \"topping\": List([Map({\"id\": String(\"5001\"), \"type\": String(\"None\")}), Map({\"type\": String(\"Glazed\"), \"id\": String(\"5002\")}), Map({\"id\": String(\"5005\"), \"type\": String(\"Sugar\")}), Map({\"type\": String(\"Powdered Sugar\"), \"id\": String(\"5007\")}), Map({\"id\": String(\"5006\"), \"type\": String(\"Chocolate Sprinkles\")}), Map({\"type\": String(\"Chocolate\"), \"id\": String(\"5003\")}), Map({\"id\": String(\"5004\"), \"type\": String(\"Maple\")})]), \"id\": String(\"0001\"), \"type\": String(\"donut\")}), Map({\"name\": String(\"Raised\"), \"batters\": Map({\"batter\": List([Map({\"type\": String(\"Regular\"), \"id\": String(\"1001\")})])}), \"id\": String(\"0002\"), \"topping\": List([Map({\"id\": String(\"5001\"), \"type\": String(\"None\")}), Map({\"id\": String(\"5002\"), \"type\": String(\"Glazed\")}), Map({\"type\": String(\"Sugar\"), \"id\": String(\"5005\")}), Map({\"type\": String(\"Chocolate\"), \"id\": String(\"5003\")}), Map({\"id\": String(\"5004\"), \"type\": String(\"Maple\")})]), \"type\": String(\"donut\"), \"ppu\": Float(0.55)}), Map({\"id\": String(\"0003\"), \"name\": String(\"Old Fashioned\"), \"type\": String(\"donut\"), \"topping\": List([Map({\"id\": String(\"5001\"), \"type\": String(\"None\")}), Map({\"id\": String(\"5002\"), \"type\": String(\"Glazed\")}), Map({\"id\": String(\"5003\"), \"type\": String(\"Chocolate\")}), Map({\"id\": String(\"5004\"), \"type\": String(\"Maple\")})]), \"ppu\": Float(0.55), \"batters\": Map({\"batter\": List([Map({\"type\": String(\"Regular\"), \"id\": String(\"1001\")}), Ma..."
+              "status": "passed"
             }
           }
         ]
@@ -27631,8 +27604,7 @@
             "keyword": "Scenario ",
             "name": "[3] Statically access a field of a map resulting from an expression",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/expressions/map/Map1.feature:65:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Result mismatch (any order): Expected column '(list[1]).existing' not found in result\n[Summary]\n1 feature\n1 scenario (1 failed)\n3 steps (2 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -28332,8 +28304,7 @@
             "keyword": "Scenario ",
             "name": "[2] Arithmetic precedence with parenthesis test",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/expressions/mathematical/Mathematical8.feature:50:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Result mismatch (any order): Expected column '12 / 4 * (3 - 2 * 4)' not found in result\n[Summary]\n1 feature\n1 scenario (1 failed)\n3 steps (2 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -28987,8 +28958,7 @@
             "keyword": "Scenario ",
             "name": "[1] `nodes()` on null path",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/expressions/path/Path1.feature:41:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Query returned error instead of result: Query { message: \"Execution error: VID column has type Null, expected UInt64 or Int64\", query: Some(\"\\nWITH null AS a\\nOPTIONAL MATCH p = (a)-[r]->()\\nRETURN nodes(p), nodes(null)\\n\") }\n[Summary]\n1 feature\n1 scenario (1 failed)\n3 steps (2 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -29036,8 +29006,7 @@
             "keyword": "Scenario ",
             "name": "[3] `relationships()` on null path",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/expressions/path/Path2.feature:74:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Query returned error instead of result: Query { message: \"Execution error: VID column has type Null, expected UInt64 or Int64\", query: Some(\"\\nWITH null AS a\\nOPTIONAL MATCH p = (a)-[r]->()\\nRETURN relationships(p), relationships(null)\\n\") }\n[Summary]\n1 feature\n1 scenario (1 failed)\n3 steps (2 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -29071,8 +29040,7 @@
             "keyword": "Scenario ",
             "name": "[2] Failing when using `length()` on a node",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/expressions/path/Path3.feature:58:5\n      Matched: crates/uni-tck/src/steps/then.rs:90:1\n      Step panicked. Captured output: No error found\n[Summary]\n1 feature\n1 scenario (1 failed)\n3 steps (2 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -29086,8 +29054,7 @@
             "keyword": "Scenario ",
             "name": "[3] Failing when using `length()` on a relationship",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/expressions/path/Path3.feature:67:5\n      Matched: crates/uni-tck/src/steps/then.rs:90:1\n      Step panicked. Captured output: No error found\n[Summary]\n1 feature\n1 scenario (1 failed)\n3 steps (2 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -40065,8 +40032,7 @@
             "keyword": "Scenario ",
             "name": "[1] `substring()` with default second argument",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/expressions/string/String1.feature:39:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [(\"s\", Some(Null))]. Expected: [{\"s\": String(\"123456789\")}]\n[Summary]\n1 feature\n1 scenario (1 failed)\n3 steps (2 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -40252,8 +40218,7 @@
             "keyword": "Scenario ",
             "name": "[1] `reverse()`",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/expressions/string/String3.feature:39:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Result mismatch (any order): Expected column 'reverse('raksO')' not found in result\n[Summary]\n1 feature\n1 scenario (1 failed)\n3 steps (2 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -49248,7 +49213,7 @@
             "name": "[6] Should provide accessors for date time",
             "result": {
               "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/expressions/temporal/Temporal5.feature:133:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [(\"d.second\", Some(Int(14))), (\"d.hour\", Some(Int(12))), (\"d.epochSeconds\", Some(Int(469024274))), (\"d.epochMillis\", Some(Int(469024274645))), (\"d.year\", Some(Int(1984))), (\"d.day\", Some(Int(11))), (\"d.nanosecond\", Some(Int(645876123))), (\"d.offset\", Some(String(\"+01:00\"))), (\"d.microsecond\", Some(Int(645876))), (\"d.weekDay\", Some(Int(7))), (\"d.offsetSeconds\", Some(Int(3600))), (\"d.month\", Some(Int(11))), (\"d.week\", Some(Int(45))), (\"d.dayOfQuarter\", Some(Int(42))), (\"d.offsetMinutes\", Some(Int(60))), (\"d.minute\", Some(Int(31))), (\"d.weekYear\", Some(Int(1984))), (\"d.quarter\", Some(Int(4))), (\"d.ordinalDay\", Some(Int(316))), (\"d.timezone\", Some(String(\"Europe/Stockholm\"))), (\"d.millisecond\", Some(Int(645)))]. Expected: [{\"d.second\": Int(14), \"d.hour\": Int(12), \"d.epochSeconds\": Int(469020674), \"d.epochMillis\": Int(469020674645), \"d.year\": Int(1984), \"d.day\": Int(11), \"d.nanosecond\": Int(645876123), \"d.offset\": String(\"+01:00\"), \"d.microsecond\": Int(645876), \"d.weekDay\": Int(7), \"d.offsetSeconds\": Int(3600), \"d.month\": Int(11), \"d.week\": Int(45), \"d.dayOfQuarter\": Int(42), \"d.offsetMinutes\": Int(60), \"d.minute\": Int(31), \"d.weekYear\": Int(1984), \"d.quarter\": Int(4), \"d.ordinalDay\": Int(316), \"d.timezone\": String(\"Europe/Stockholm\"), \"d.millisecond\": Int(645)}]\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
+              "error_message": "Step failed:\n      Defined: tck/features/expressions/temporal/Temporal5.feature:133:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [(\"d.ordinalDay\", Some(Int(316))), (\"d.year\", Some(Int(1984))), (\"d.weekYear\", Some(Int(1984))), (\"d.dayOfQuarter\", Some(Int(42))), (\"d.microsecond\", Some(Int(645876))), (\"d.quarter\", Some(Int(4))), (\"d.weekDay\", Some(Int(7))), (\"d.nanosecond\", Some(Int(645876123))), (\"d.day\", Some(Int(11))), (\"d.month\", Some(Int(11))), (\"d.minute\", Some(Int(31))), (\"d.second\", Some(Int(14))), (\"d.millisecond\", Some(Int(645))), (\"d.timezone\", Some(String(\"Europe/Stockholm\"))), (\"d.offset\", Some(String(\"+01:00\"))), (\"d.offsetMinutes\", Some(Int(60))), (\"d.offsetSeconds\", Some(Int(3600))), (\"d.epochSeconds\", Some(Int(469024274))), (\"d.epochMillis\", Some(Int(469024274645))), (\"d.hour\", Some(Int(12))), (\"d.week\", Some(Int(45)))]. Expected: [{\"d.ordinalDay\": Int(316), \"d.year\": Int(1984), \"d.weekYear\": Int(1984), \"d.dayOfQuarter\": Int(42), \"d.microsecond\": Int(645876), \"d.quarter\": Int(4), \"d.weekDay\": Int(7), \"d.nanosecond\": Int(645876123), \"d.day\": Int(11), \"d.month\": Int(11), \"d.minute\": Int(31), \"d.second\": Int(14), \"d.millisecond\": Int(645), \"d.timezone\": String(\"Europe/Stockholm\"), \"d.offset\": String(\"+01:00\"), \"d.offsetMinutes\": Int(60), \"d.offsetSeconds\": Int(3600), \"d.epochSeconds\": Int(469020674), \"d.epochMillis\": Int(469020674645), \"d.hour\": Int(12), \"d.week\": Int(45)}]\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
             }
           }
         ]
@@ -55291,8 +55256,7 @@
             "keyword": "Scenario ",
             "name": "[10] Fail `toString()` on invalid types #Example: list",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/expressions/typeConversion/TypeConversion4.feature:162:5\n      Matched: crates/uni-tck/src/steps/then.rs:90:1\n      Step panicked. Captured output: Error mismatch: Error detail mismatch: expected message to contain 'InvalidArgumentValue', got 'Query error: Execution error: Type mismatch: expected String, Integer, Float, Boolean, Temporal, or Point but was List'\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -55306,8 +55270,7 @@
             "keyword": "Scenario ",
             "name": "[10] Fail `toString()` on invalid types #Example: map",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/expressions/typeConversion/TypeConversion4.feature:162:5\n      Matched: crates/uni-tck/src/steps/then.rs:90:1\n      Step panicked. Captured output: Error mismatch: Error detail mismatch: expected message to contain 'InvalidArgumentValue', got 'Query error: Execution error: Type mismatch: expected String, Integer, Float, Boolean, Temporal, or Point but was Map'\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -55321,8 +55284,7 @@
             "keyword": "Scenario ",
             "name": "[10] Fail `toString()` on invalid types #Example: node",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/expressions/typeConversion/TypeConversion4.feature:162:5\n      Matched: crates/uni-tck/src/steps/then.rs:90:1\n      Step panicked. Captured output: Error mismatch: Error detail mismatch: expected message to contain 'InvalidArgumentValue', got 'Query error: Execution error: Type mismatch: expected String, Integer, Float, Boolean, Temporal, or Point but was Map'\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -55336,8 +55298,7 @@
             "keyword": "Scenario ",
             "name": "[10] Fail `toString()` on invalid types #Example: relationship",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/expressions/typeConversion/TypeConversion4.feature:162:5\n      Matched: crates/uni-tck/src/steps/then.rs:90:1\n      Step panicked. Captured output: Error mismatch: Error detail mismatch: expected message to contain 'InvalidArgumentValue', got 'Query error: Execution error: Type mismatch: expected String, Integer, Float, Boolean, Temporal, or Point but was Map'\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -55351,8 +55312,7 @@
             "keyword": "Scenario ",
             "name": "[10] Fail `toString()` on invalid types #Example: path",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/expressions/typeConversion/TypeConversion4.feature:162:5\n      Matched: crates/uni-tck/src/steps/then.rs:90:1\n      Step panicked. Captured output: Error mismatch: Error detail mismatch: expected message to contain 'InvalidArgumentValue', got 'Query error: Execution error: Type mismatch: expected String, Integer, Float, Boolean, Temporal, or Point but was Map'\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]

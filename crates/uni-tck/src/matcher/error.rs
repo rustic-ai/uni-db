@@ -131,6 +131,7 @@ fn is_runtime_detail_code(detail: &str) -> bool {
     matches!(
         detail,
         "DeleteConnectedNode"
+            | "DeletedEntityAccess"
             | "MergeReadOwnWrites"
             | "NumberOutOfRange"
             | "MapElementAccessByNonString"
@@ -157,6 +158,7 @@ fn extract_detail_code(message: &str) -> Option<String> {
         "TypeError:",
         "SemanticError:",
         "ArgumentError:",
+        "EntityNotFound:",
         "ParameterMissing:",
         "ConstraintVerificationFailed:",
         "ProcedureError:",
@@ -195,6 +197,8 @@ fn classify_error(error: &UniError) -> TckErrorType {
                 TckErrorType::TypeError
             } else if message.starts_with("ArgumentError:") {
                 TckErrorType::ArgumentError
+            } else if message.starts_with("EntityNotFound:") {
+                TckErrorType::EntityNotFound
             } else {
                 TckErrorType::SemanticError
             }

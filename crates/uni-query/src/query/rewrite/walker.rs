@@ -268,9 +268,14 @@ impl<'a> ExpressionWalker<'a> {
 
         match item {
             ReturnItem::All => ReturnItem::All,
-            ReturnItem::Expr { expr, alias } => ReturnItem::Expr {
+            ReturnItem::Expr {
+                expr,
+                alias,
+                source_text,
+            } => ReturnItem::Expr {
                 expr: self.rewrite_expr(expr),
                 alias,
+                source_text,
             },
         }
     }

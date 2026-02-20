@@ -332,16 +332,14 @@ async fn test_where_label_predicate() -> Result<()> {
 }
 
 /// WHERE with IS NULL
-/// TODO: This test requires nullable property support in schema
 #[tokio::test]
-#[ignore = "requires nullable property support in schema"]
 async fn test_where_is_null() -> Result<()> {
     let db = Uni::in_memory().build().await?;
 
     db.schema()
         .label("Person")
         .property("name", DataType::String)
-        .property("age", DataType::Int64)
+        .property_nullable("age", DataType::Int64)
         .apply()
         .await?;
 
@@ -362,16 +360,14 @@ async fn test_where_is_null() -> Result<()> {
 }
 
 /// WHERE with IS NOT NULL
-/// TODO: This test requires nullable property support in schema
 #[tokio::test]
-#[ignore = "requires nullable property support in schema"]
 async fn test_where_is_not_null() -> Result<()> {
     let db = Uni::in_memory().build().await?;
 
     db.schema()
         .label("Person")
         .property("name", DataType::String)
-        .property("age", DataType::Int64)
+        .property_nullable("age", DataType::Int64)
         .apply()
         .await?;
 
@@ -1139,57 +1135,15 @@ async fn test_where_parameter_filter_return_edge() -> Result<()> {
 /// MatchWhere6 scenario [5]: Reused relationship variable in OPTIONAL MATCH
 /// This tests the case where a relationship variable from MATCH is reused in OPTIONAL MATCH.
 ///
-/// KNOWN LIMITATION: Bound relationship variables in patterns need special handling.
-/// When a relationship is already bound and used in a pattern like OPTIONAL MATCH (a)<-[r]-(b),
-/// the current implementation re-traverses instead of using the bound edge directly.
+/// Graph: (:A)-[:T]->(:B)
+/// The relationship r goes A->B. OPTIONAL MATCH (a2)<-[r]-(b2) means b2-[r]->a2,
+/// so a2=B, b2=A. WHERE a1=a2 means A=B, which is false, so OPTIONAL MATCH fails → nulls.
 #[tokio::test]
-#[ignore = "Known limitation: bound relationship variables in patterns need architectural support"]
 async fn test_optional_match_reused_relationship() -> Result<()> {
     let db = Uni::in_memory().build().await?;
 
-    // Setup: CREATE (:A)-[:T]->(:B)
     db.execute("CREATE (:A)-[:T]->(:B)").await?;
 
-    // Debug: Check the graph
-    let edges = db
-        .query("MATCH (a)-[r]->(b) RETURN a, r, b, labels(a) as a_lbls, labels(b) as b_lbls")
-        .await?;
-    eprintln!("All edges ({}):", edges.len());
-    for row in edges.rows() {
-        eprintln!(
-            "  a={:?} (labels={:?}), r={:?}, b={:?} (labels={:?})",
-            row.value("a"),
-            row.value("a_lbls"),
-            row.value("r"),
-            row.value("b"),
-            row.value("b_lbls")
-        );
-    }
-
-    // The TCK query:
-    // MATCH (a1)-[r]->()
-    // WITH r, a1 LIMIT 1
-    // OPTIONAL MATCH (a2)<-[r]-(b2)
-    // WHERE a1 = a2
-    // RETURN a1, r, b2, a2
-
-    // Step 1: Just MATCH (a1)-[r]->()
-    let step1 = db.query("MATCH (a1)-[r]->() RETURN a1, r").await?;
-    eprintln!("Step 1 - MATCH (a1)-[r]->() ({}):", step1.len());
-    for row in step1.rows() {
-        eprintln!("  a1={:?}, r={:?}", row.value("a1"), row.value("r"));
-    }
-
-    // Step 2: WITH r, a1 LIMIT 1
-    let step2 = db
-        .query("MATCH (a1)-[r]->() WITH r, a1 LIMIT 1 RETURN a1, r")
-        .await?;
-    eprintln!("Step 2 - WITH r, a1 LIMIT 1 ({}):", step2.len());
-    for row in step2.rows() {
-        eprintln!("  a1={:?}, r={:?}", row.value("a1"), row.value("r"));
-    }
-
-    // The full query
     let result = db
         .query(
             "
@@ -1202,29 +1156,10 @@ async fn test_optional_match_reused_relationship() -> Result<()> {
         )
         .await?;
 
-    eprintln!("Full query result ({}):", result.len());
-    for row in result.rows() {
-        eprintln!(
-            "  a1={:?}, r={:?}, b2={:?}, a2={:?}",
-            row.value("a1"),
-            row.value("r"),
-            row.value("b2"),
-            row.value("a2")
-        );
-    }
-
-    // Expected: 1 row
-    // The relationship r goes A-[:T]->B
-    // OPTIONAL MATCH (a2)<-[r]-(b2) is looking for: a2 is the target of r, b2 is the source of r
-    // So a2=B, b2=A
-    // But WHERE a1 = a2 means A = B, which is false
-    // So OPTIONAL MATCH fails and a2=null, b2=null
     assert_eq!(result.len(), 1, "Expected 1 row, got {}", result.len());
 
-    // Check that a2 is null (OPTIONAL MATCH failed due to WHERE)
     let row = &result.rows()[0];
     let a2_val = row.value("a2");
-    eprintln!("a2 = {:?}", a2_val);
     assert!(
         a2_val.is_none() || matches!(a2_val, Some(uni_db::Value::Null)),
         "a2 should be NULL because WHERE a1=a2 failed (A != B), got {:?}",
