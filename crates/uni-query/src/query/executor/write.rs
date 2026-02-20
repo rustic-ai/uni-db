@@ -848,7 +848,7 @@ impl Executor {
         // Build Arrow schema with proper types based on DB schema
         let mut arrow_fields: Vec<Arc<Field>> = Vec::new();
         let col_names: Vec<String> = if has_headers {
-            headers.clone()
+            headers
         } else {
             (0..rows[0].len()).map(|i| format!("col{}", i)).collect()
         };
@@ -2186,7 +2186,7 @@ impl Executor {
     ) -> Result<Vec<HashMap<String, Value>>> {
         // Construct a LogicalPlan for the MATCH part of MERGE
         let planner = crate::query::planner::QueryPlanner::new(Arc::new(
-            self.storage.schema_manager().schema().clone(),
+            self.storage.schema_manager().schema(),
         ));
 
         // We need to construct a CypherQuery to use the planner's plan() method,

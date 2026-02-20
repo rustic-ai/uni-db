@@ -925,7 +925,7 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
         // Create inner schema with accumulator and loop variable (shadow outer variables if same names)
         let mut fields = input_schema.fields().to_vec();
 
-        let acc_field = Arc::new(Field::new(accumulator, acc_type.clone(), true));
+        let acc_field = Arc::new(Field::new(accumulator, acc_type, true));
         if let Some(pos) = fields.iter().position(|f| f.name() == accumulator) {
             fields[pos] = acc_field;
         } else {

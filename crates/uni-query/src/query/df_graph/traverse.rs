@@ -1907,7 +1907,7 @@ impl GraphTraverseMainStream {
             .map(|(_, vid, _, _, _)| vid.as_u64())
             .collect();
         if input.schema().column_with_name(&target_vid_name).is_none() {
-            columns.push(Arc::new(UInt64Array::from(target_vids.clone())));
+            columns.push(Arc::new(UInt64Array::from(target_vids)));
         }
 
         // Add target ._labels column (only if not already in input)

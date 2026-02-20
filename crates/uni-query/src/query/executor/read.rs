@@ -521,7 +521,7 @@ impl Executor {
             self.storage.clone(),
             l0_context,
             prop_manager_arc.clone(),
-            Arc::new(self.storage.schema_manager().schema().clone()),
+            Arc::new(self.storage.schema_manager().schema()),
             params.clone(),
         );
 
@@ -605,7 +605,7 @@ impl Executor {
 
                     // Check if this field contains JSON-encoded values (e.g., from UNWIND)
                     // Parse JSON string to restore the original type
-                    if field.metadata().get("cv_encoded") == Some(&"true".to_string())
+                    if field.metadata().get("cv_encoded").is_some_and(|v| v == "true")
                         && let Value::String(s) = &value
                         && let Ok(parsed) = serde_json::from_str::<serde_json::Value>(s)
                     {
@@ -1848,7 +1848,7 @@ impl Executor {
                 Expr::Exists { query, .. } => {
                     // Plan and execute subquery; failures return false (pattern doesn't match)
                     let planner =
-                        QueryPlanner::new(Arc::new(this.storage.schema_manager().schema().clone()));
+                        QueryPlanner::new(Arc::new(this.storage.schema_manager().schema()));
                     let vars_in_scope: Vec<String> = row.keys().cloned().collect();
 
                     match planner.plan_with_scope(*query.clone(), vars_in_scope) {
@@ -1873,7 +1873,7 @@ impl Executor {
                 Expr::CountSubquery(query) => {
                     // Similar to Exists but returns count
                     let planner =
-                        QueryPlanner::new(Arc::new(this.storage.schema_manager().schema().clone()));
+                        QueryPlanner::new(Arc::new(this.storage.schema_manager().schema()));
 
                     let vars_in_scope: Vec<String> = row.keys().cloned().collect();
 
@@ -2990,7 +2990,7 @@ impl Executor {
                                 .unwrap_or_else(|| "Unknown".to_string());
                             props_json.insert(
                                 "_labels".to_string(),
-                                Value::List(vec![Value::String(label_name.to_string())]),
+                                Value::List(vec![Value::String(label_name)]),
                             );
 
                             let mut map = HashMap::new();

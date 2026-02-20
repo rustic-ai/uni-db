@@ -80,8 +80,7 @@ impl BindZeroLengthPathExec {
         path_variable: String,
         graph_ctx: Arc<GraphExecutionContext>,
     ) -> Self {
-        // Build output schema: input schema + path variable column
-        let schema = Self::build_schema(input.schema(), &path_variable);
+        let schema = super::common::extend_schema_with_path(input.schema(), &path_variable);
         let properties = compute_plan_properties(schema.clone());
 
         Self {
@@ -93,15 +92,6 @@ impl BindZeroLengthPathExec {
             properties,
             metrics: ExecutionPlanMetricsSet::new(),
         }
-    }
-
-    /// Build output schema by adding the path variable column.
-    ///
-    /// The path structure matches what VLP produces:
-    /// - `nodes`: List of node structs with `_vid`, `_label`, `properties`
-    /// - `relationships`: List of edge structs (empty for zero-length paths)
-    fn build_schema(input_schema: SchemaRef, path_variable: &str) -> SchemaRef {
-        super::common::extend_schema_with_path(input_schema, path_variable)
     }
 }
 
@@ -273,9 +263,7 @@ impl Stream for BindZeroLengthPathStream {
                 let result = self.process_batch(batch);
                 Poll::Ready(Some(result))
             }
-            Poll::Ready(Some(Err(e))) => Poll::Ready(Some(Err(e))),
-            Poll::Ready(None) => Poll::Ready(None),
-            Poll::Pending => Poll::Pending,
+            other => other,
         }
     }
 }

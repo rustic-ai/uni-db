@@ -4303,7 +4303,7 @@ impl QueryPlanner {
             edge_type_ids,
             direction: params.rel.direction.clone(),
             source_variable: source_variable.to_string(),
-            target_variable: effective_target_var.clone(),
+            target_variable: effective_target_var,
             target_label_id: target_label_meta.map(|m| m.id).unwrap_or(0),
             step_variable: effective_step_var.clone(),
             min_hops,
@@ -4380,7 +4380,7 @@ impl QueryPlanner {
             let temp_var = format!("__rebound_{}", bv);
             let temp_eids = Expr::ListComprehension {
                 variable: "__rebound_edge".to_string(),
-                list: Box::new(Expr::Variable(temp_var.clone())),
+                list: Box::new(Expr::Variable(temp_var)),
                 where_clause: None,
                 map_expr: Box::new(Expr::FunctionCall {
                     name: "toInteger".to_string(),
@@ -4439,7 +4439,7 @@ impl QueryPlanner {
             // Without this, each traverse result creates its own group (keyed by
             // __rebound_c._vid), and null-row recovery emits a spurious null row
             // for every non-matching target instead of one per source group.
-            let mut rebound_filter_vars = filter_optional_vars.clone();
+            let mut rebound_filter_vars = filter_optional_vars;
             if params.optional {
                 rebound_filter_vars.insert(temp_var);
             }
@@ -5690,7 +5690,7 @@ impl QueryPlanner {
                     LogicalPlan::Scan {
                         label_id,
                         labels,
-                        variable: scan_var.clone(),
+                        variable: scan_var,
                         filter,
                         optional,
                     }

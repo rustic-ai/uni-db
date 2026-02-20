@@ -614,9 +614,7 @@ impl Stream for GraphUnwindStream {
                 let result = self.process_batch(batch);
                 Poll::Ready(Some(result))
             }
-            Poll::Ready(Some(Err(e))) => Poll::Ready(Some(Err(e))),
-            Poll::Ready(None) => Poll::Ready(None),
-            Poll::Pending => Poll::Pending,
+            other => other,
         }
     }
 }
@@ -740,8 +738,8 @@ mod tests {
         assert_eq!(output_schema.field(2).name(), "item");
         assert_eq!(output_schema.field(2).data_type(), &DataType::LargeBinary);
         assert_eq!(
-            output_schema.field(2).metadata().get("cv_encoded"),
-            Some(&"true".to_string())
+            output_schema.field(2).metadata().get("cv_encoded").map(String::as_str),
+            Some("true")
         );
     }
 
@@ -846,8 +844,8 @@ mod tests {
         assert_eq!(field.name(), "x");
         assert_eq!(field.data_type(), &DataType::LargeBinary);
         assert_eq!(
-            field.metadata().get("cv_encoded"),
-            Some(&"true".to_string())
+            field.metadata().get("cv_encoded").map(String::as_str),
+            Some("true")
         );
     }
 

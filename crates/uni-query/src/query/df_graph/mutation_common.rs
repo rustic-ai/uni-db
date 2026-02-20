@@ -130,7 +130,7 @@ pub fn batches_to_rows(batches: &[RecordBatch]) -> Result<Vec<HashMap<String, Va
 
                 // Check if this field contains JSON-encoded values (e.g., from UNWIND)
                 // Parse JSON string to restore the original type
-                if field.metadata().get("cv_encoded") == Some(&"true".to_string())
+                if field.metadata().get("cv_encoded").is_some_and(|v| v == "true")
                     && let Value::String(s) = &value
                     && let Ok(parsed) = serde_json::from_str::<serde_json::Value>(s)
                 {
@@ -333,7 +333,7 @@ fn value_column_to_arrow(
     arrow_type: &DataType,
     field: &arrow_schema::Field,
 ) -> Result<arrow_array::ArrayRef> {
-    let is_cv_encoded = field.metadata().get("cv_encoded") == Some(&"true".to_string());
+    let is_cv_encoded = field.metadata().get("cv_encoded").is_some_and(|v| v == "true");
 
     if *arrow_type == DataType::LargeBinary || is_cv_encoded {
         Ok(encode_as_large_binary(values))
