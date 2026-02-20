@@ -6,7 +6,7 @@ use crate::query::datetime::{classify_temporal, eval_datetime_function, parse_da
 use crate::query::expr_eval::{
     eval_binary_op, eval_in_op, eval_scalar_function, eval_vector_similarity,
 };
-use crate::query::planner::{LogicalPlan, QueryPlanner, classify_window_expressions};
+use crate::query::planner::{LogicalPlan, QueryPlanner};
 use crate::query::pushdown::LanceFilterGenerator;
 use crate::types::Value;
 use anyhow::{Result, anyhow};
@@ -836,36 +836,11 @@ impl Executor {
                 self.execute_subplan(plan, prop_manager, params, ctx.as_ref())
                     .await
             } else if Self::contains_window_functions(&plan) {
-                // Extract window expressions from the plan (may be wrapped in Sort/Limit/etc)
-                let window_exprs = Self::extract_window_expressions(&plan);
-
-                if !window_exprs.is_empty() {
-                    // Classify window functions before routing
-                    let (manual_exprs, df_exprs) = classify_window_expressions(&window_exprs);
-
-                    if !df_exprs.is_empty() && !manual_exprs.is_empty() {
-                        // Mixed: not yet supported
-                        return Err(anyhow!(
-                            "Queries with both aggregate and manual window functions not yet supported"
-                        ));
-                    } else if !df_exprs.is_empty() {
-                        // Aggregate windows: MUST use DataFusion
-                        let batches = self
-                            .execute_datafusion(plan.clone(), prop_manager, params)
-                            .await?;
-                        self.record_batches_to_rows(batches)
-                    } else {
-                        // Manual windows only: use fallback executor
-                        self.execute_subplan(plan, prop_manager, params, ctx.as_ref())
-                            .await
-                    }
-                } else {
-                    // No window functions found - use DataFusion
-                    let batches = self
-                        .execute_datafusion(plan.clone(), prop_manager, params)
-                        .await?;
-                    self.record_batches_to_rows(batches)
-                }
+                // All window functions (manual and aggregate) execute through DataFusion
+                let batches = self
+                    .execute_datafusion(plan.clone(), prop_manager, params)
+                    .await?;
+                self.record_batches_to_rows(batches)
             } else {
                 // Execute using DataFusion engine
                 let batches = self
@@ -1150,17 +1125,6 @@ impl Executor {
             | LogicalPlan::Limit { input, .. }
             | LogicalPlan::Project { input, .. } => Self::contains_window_functions(input),
             _ => false,
-        }
-    }
-
-    /// Extract window expressions from a logical plan (recursively unwrap Sort/Limit/etc).
-    fn extract_window_expressions(plan: &LogicalPlan) -> Vec<Expr> {
-        match plan {
-            LogicalPlan::Window { window_exprs, .. } => window_exprs.clone(),
-            LogicalPlan::Sort { input, .. }
-            | LogicalPlan::Limit { input, .. }
-            | LogicalPlan::Project { input, .. } => Self::extract_window_expressions(input),
-            _ => Vec::new(),
         }
     }
 

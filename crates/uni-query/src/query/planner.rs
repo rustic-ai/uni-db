@@ -2,7 +2,6 @@
 // Copyright 2024-2026 Dragonscale Team
 
 use crate::query::pushdown::PredicateAnalyzer;
-use crate::query::{AGGREGATE_WINDOW_FUNCTIONS, MANUAL_WINDOW_FUNCTIONS};
 use anyhow::{Result, anyhow};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -6957,41 +6956,6 @@ impl QueryPlanner {
             batch_size: 32,
         }))
     }
-}
-
-/// Check if a function name is a manual window function (ROW_NUMBER, RANK, etc.).
-pub fn is_manual_window_function(name: &str) -> bool {
-    MANUAL_WINDOW_FUNCTIONS.contains(&name.to_uppercase().as_str())
-}
-
-/// Check if a function name is an aggregate window function (SUM, AVG, etc.).
-pub fn is_aggregate_window_function(name: &str) -> bool {
-    AGGREGATE_WINDOW_FUNCTIONS.contains(&name.to_uppercase().as_str())
-}
-
-/// Classify window expressions into manual and DataFusion-backed groups.
-///
-/// Returns: (manual_exprs, datafusion_exprs)
-pub fn classify_window_expressions(exprs: &[Expr]) -> (Vec<Expr>, Vec<Expr>) {
-    let mut manual = Vec::new();
-    let mut datafusion = Vec::new();
-
-    for expr in exprs {
-        if let Expr::FunctionCall {
-            name,
-            window_spec: Some(_),
-            ..
-        } = expr
-        {
-            if is_manual_window_function(name) {
-                manual.push(expr.clone());
-            } else if is_aggregate_window_function(name) {
-                datafusion.push(expr.clone());
-            }
-        }
-    }
-
-    (manual, datafusion)
 }
 
 /// Collect all properties referenced anywhere in the LogicalPlan tree.

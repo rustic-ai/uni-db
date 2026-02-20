@@ -34,20 +34,6 @@ pub const WINDOW_FUNCTIONS: &[&str] = &[
     "COUNT",
 ];
 
-/// Manual window functions implemented in the executor.
-/// These require custom logic and are not delegated to DataFusion.
-pub const MANUAL_WINDOW_FUNCTIONS: &[&str] = &[
-    "ROW_NUMBER",
-    "RANK",
-    "DENSE_RANK",
-    "LAG",
-    "LEAD",
-    "NTILE",
-    "FIRST_VALUE",
-    "LAST_VALUE",
-    "NTH_VALUE",
-];
-
-/// Aggregate window functions that can be delegated to DataFusion.
-/// These leverage DataFusion's WindowAggExec for optimal performance.
-pub const AGGREGATE_WINDOW_FUNCTIONS: &[&str] = &["SUM", "AVG", "MIN", "MAX", "COUNT"];
+// All window functions (both positional/ranking and aggregate) now route through
+// DataFusion's WindowAggExec via WindowUDF (manual) or AggregateUDF (aggregate).
+// The WINDOW_FUNCTIONS constant above is the single authoritative list.

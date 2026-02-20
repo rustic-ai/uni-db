@@ -53,9 +53,7 @@ use crate::query::df_graph::{
     GraphUnwindExec, GraphVectorKnnExec, L0Context, MutationContext, MutationExec,
     OptionalFilterExec,
 };
-use crate::query::planner::{
-    LogicalPlan, aggregate_column_name, classify_window_expressions, collect_properties_from_plan,
-};
+use crate::query::planner::{LogicalPlan, aggregate_column_name, collect_properties_from_plan};
 use anyhow::{Result, anyhow};
 use arrow_schema::{Schema, SchemaRef};
 use datafusion::common::JoinType;
@@ -78,7 +76,9 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use uni_common::core::schema::{PropertyMeta, Schema as UniSchema};
-use uni_cypher::ast::{Direction as AstDirection, Expr, Pattern, PatternElement, SortItem};
+use uni_cypher::ast::{
+    CypherLiteral, Direction as AstDirection, Expr, Pattern, PatternElement, SortItem,
+};
 use uni_store::runtime::l0::L0Buffer;
 use uni_store::runtime::property_manager::PropertyManager;
 use uni_store::storage::direction::Direction;
@@ -796,23 +796,9 @@ impl HybridPhysicalPlanner {
                 input,
                 window_exprs,
             } => {
-                // Classify window expressions into manual and DataFusion-backed
-                let (manual_exprs, df_exprs) = classify_window_expressions(window_exprs);
-
-                // Only DataFusion aggregate window functions are supported here
-                // Manual window functions (ROW_NUMBER, RANK, etc.) stay in fallback executor
-                if !manual_exprs.is_empty() {
-                    return Err(anyhow!(
-                        "Manual window functions (ROW_NUMBER, RANK, etc.) must be executed in fallback executor, not DataFusion"
-                    ));
-                }
-
-                // Plan input first
                 let input_plan = self.plan_internal(input, all_properties)?;
-
-                // Plan DataFusion window aggregates if present
-                if !df_exprs.is_empty() {
-                    self.plan_window_aggregate(input_plan, &df_exprs, Some(input.as_ref()))
+                if !window_exprs.is_empty() {
+                    self.plan_window_functions(input_plan, window_exprs, Some(input.as_ref()))
                 } else {
                     Ok(input_plan)
                 }
@@ -2954,11 +2940,12 @@ impl HybridPhysicalPlanner {
         }
     }
 
-    /// Plan aggregate window functions using DataFusion's WindowAggExec.
+    /// Plan all window functions (aggregate and manual) using DataFusion's WindowAggExec.
     ///
-    /// Translates Cypher window aggregate expressions (SUM, AVG, MIN, MAX, COUNT with OVER)
-    /// to DataFusion's window function execution plan.
-    fn plan_window_aggregate(
+    /// Translates Cypher window expressions to DataFusion's window function execution plan.
+    /// Supports both aggregate window functions (SUM, AVG, etc.) via AggregateUDF and
+    /// manual window functions (ROW_NUMBER, RANK, LAG, etc.) via WindowUDF.
+    fn plan_window_functions(
         &self,
         input: Arc<dyn ExecutionPlan>,
         window_exprs: &[Expr],
@@ -2968,6 +2955,13 @@ impl HybridPhysicalPlanner {
         use datafusion::functions_aggregate::count::count_udaf;
         use datafusion::functions_aggregate::min_max::{max_udaf, min_udaf};
         use datafusion::functions_aggregate::sum::sum_udaf;
+        use datafusion::functions_window::lead_lag::{lag_udwf, lead_udwf};
+        use datafusion::functions_window::nth_value::{
+            first_value_udwf, last_value_udwf, nth_value_udwf,
+        };
+        use datafusion::functions_window::ntile::ntile_udwf;
+        use datafusion::functions_window::rank::{dense_rank_udwf, rank_udwf};
+        use datafusion::functions_window::row_number::row_number_udwf;
         use datafusion::logical_expr::{WindowFrame, WindowFunctionDefinition};
         use datafusion::physical_expr::LexOrdering;
         use datafusion::physical_plan::sorts::sort::SortExec;
@@ -2996,40 +2990,80 @@ impl HybridPhysicalPlanner {
 
             let name_lower = name.to_lowercase();
 
-            // Get the appropriate aggregate UDF
-            let aggregate_udf = match name_lower.as_str() {
-                "count" => count_udaf(),
-                "sum" => sum_udaf(),
-                "avg" => avg_udaf(),
-                "min" => min_udaf(),
-                "max" => max_udaf(),
-                other => return Err(anyhow!("Unsupported aggregate window function: {}", other)),
+            // Resolve the window function definition: either AggregateUDF or WindowUDF
+            let (window_fn_def, is_aggregate) = match name_lower.as_str() {
+                // Aggregate window functions → AggregateUDF
+                "count" => (WindowFunctionDefinition::AggregateUDF(count_udaf()), true),
+                "sum" => (WindowFunctionDefinition::AggregateUDF(sum_udaf()), true),
+                "avg" => (WindowFunctionDefinition::AggregateUDF(avg_udaf()), true),
+                "min" => (WindowFunctionDefinition::AggregateUDF(min_udaf()), true),
+                "max" => (WindowFunctionDefinition::AggregateUDF(max_udaf()), true),
+                // Manual window functions → WindowUDF
+                "row_number" => (
+                    WindowFunctionDefinition::WindowUDF(row_number_udwf()),
+                    false,
+                ),
+                "rank" => (WindowFunctionDefinition::WindowUDF(rank_udwf()), false),
+                "dense_rank" => (
+                    WindowFunctionDefinition::WindowUDF(dense_rank_udwf()),
+                    false,
+                ),
+                "lag" => (WindowFunctionDefinition::WindowUDF(lag_udwf()), false),
+                "lead" => (WindowFunctionDefinition::WindowUDF(lead_udwf()), false),
+                "ntile" => {
+                    // Validate NTILE bucket count: must be positive
+                    if let Some(Expr::Literal(CypherLiteral::Integer(n))) = args.first()
+                        && *n <= 0
+                    {
+                        return Err(anyhow!("NTILE bucket count must be positive, got: {}", n));
+                    }
+                    (WindowFunctionDefinition::WindowUDF(ntile_udwf()), false)
+                }
+                "first_value" => (
+                    WindowFunctionDefinition::WindowUDF(first_value_udwf()),
+                    false,
+                ),
+                "last_value" => (
+                    WindowFunctionDefinition::WindowUDF(last_value_udwf()),
+                    false,
+                ),
+                "nth_value" => (WindowFunctionDefinition::WindowUDF(nth_value_udwf()), false),
+                other => return Err(anyhow!("Unsupported window function: {}", other)),
             };
 
             // Translate argument expressions to physical expressions
             let physical_args: Vec<Arc<dyn datafusion::physical_expr::PhysicalExpr>> =
                 if args.is_empty() || matches!(args.as_slice(), [Expr::Wildcard]) {
-                    // COUNT(*) case - args contain a single Wildcard or are empty
-                    vec![create_physical_expr(
-                        &datafusion::logical_expr::lit(1),
-                        &df_schema,
-                        state.execution_props(),
-                    )?]
+                    // COUNT(*) or zero-arg functions (row_number, rank, dense_rank)
+                    if is_aggregate {
+                        vec![create_physical_expr(
+                            &datafusion::logical_expr::lit(1),
+                            &df_schema,
+                            state.execution_props(),
+                        )?]
+                    } else {
+                        // Manual window functions with no args (row_number, rank, dense_rank)
+                        vec![]
+                    }
                 } else {
                     args.iter()
                         .map(|arg| {
                             let mut df_expr = cypher_expr_to_df(arg, tx_ctx.as_ref())?;
 
-                            // Cast numeric types for aggregate functions:
+                            // Cast numeric types only for SUM/AVG aggregate functions:
                             // SUM needs Int64 to avoid overflow, AVG needs Float64
-                            use datafusion::logical_expr::Cast;
-                            let cast_type = match name_lower.as_str() {
-                                "sum" => Some(datafusion::arrow::datatypes::DataType::Int64),
-                                "avg" => Some(datafusion::arrow::datatypes::DataType::Float64),
-                                _ => None,
-                            };
-                            if let Some(target_type) = cast_type {
-                                df_expr = DfExpr::Cast(Cast::new(Box::new(df_expr), target_type));
+                            if is_aggregate {
+                                let cast_type = match name_lower.as_str() {
+                                    "sum" => Some(datafusion::arrow::datatypes::DataType::Int64),
+                                    "avg" => Some(datafusion::arrow::datatypes::DataType::Float64),
+                                    _ => None,
+                                };
+                                if let Some(target_type) = cast_type {
+                                    df_expr = DfExpr::Cast(datafusion::logical_expr::Cast::new(
+                                        Box::new(df_expr),
+                                        target_type,
+                                    ));
+                                }
                             }
 
                             create_physical_expr(&df_expr, &df_schema, state.execution_props())
@@ -3084,24 +3118,32 @@ impl HybridPhysicalPlanner {
                 }
             }
 
-            // Create window frame based on whether there's an ORDER BY
-            // - No ORDER BY: ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING (full partition)
-            // - With ORDER BY: RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW (cumulative)
-            let window_frame = if window_spec.order_by.is_empty() {
-                // No ORDER BY: aggregate over entire partition
-                use datafusion::logical_expr::{WindowFrame, WindowFrameBound, WindowFrameUnits};
+            // Create window frame based on function type:
+            // - Aggregate functions: cumulative when ORDER BY present, full partition when absent
+            // - Manual window functions: always full partition (frame is irrelevant for ranking,
+            //   and value functions like last_value/first_value expect full-partition semantics)
+            let window_frame = if is_aggregate {
+                if window_spec.order_by.is_empty() {
+                    // No ORDER BY: aggregate over entire partition
+                    use datafusion::logical_expr::{WindowFrameBound, WindowFrameUnits};
+                    Arc::new(WindowFrame::new_bounds(
+                        WindowFrameUnits::Rows,
+                        WindowFrameBound::Preceding(datafusion::common::ScalarValue::UInt64(None)),
+                        WindowFrameBound::Following(datafusion::common::ScalarValue::UInt64(None)),
+                    ))
+                } else {
+                    // With ORDER BY: cumulative from partition start to current row
+                    Arc::new(WindowFrame::new(Some(false)))
+                }
+            } else {
+                // Manual window functions: ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
+                use datafusion::logical_expr::{WindowFrameBound, WindowFrameUnits};
                 Arc::new(WindowFrame::new_bounds(
                     WindowFrameUnits::Rows,
-                    WindowFrameBound::Preceding(datafusion::common::ScalarValue::UInt64(None)), // UNBOUNDED PRECEDING
-                    WindowFrameBound::Following(datafusion::common::ScalarValue::UInt64(None)), // UNBOUNDED FOLLOWING
+                    WindowFrameBound::Preceding(datafusion::common::ScalarValue::UInt64(None)),
+                    WindowFrameBound::Following(datafusion::common::ScalarValue::UInt64(None)),
                 ))
-            } else {
-                // With ORDER BY: cumulative from partition start to current row
-                Arc::new(WindowFrame::new(Some(false)))
             };
-
-            // Create the window function definition
-            let window_fn_def = WindowFunctionDefinition::AggregateUDF(aggregate_udf);
 
             // Get the output name
             let alias = expr.to_string_repr();
