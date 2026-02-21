@@ -283,10 +283,29 @@ impl GraphProcedureCallExec {
                 }
             }
             _ => {
-                // Generic fallback: all columns as Utf8
-                for (name, alias) in yield_items {
-                    let col_name = alias.as_ref().unwrap_or(name);
-                    fields.push(Field::new(col_name, DataType::Utf8, true));
+                // Check external procedure registry for type information
+                if let Some(registry) = graph_ctx.procedure_registry()
+                    && let Some(proc_def) = registry.get(procedure_name)
+                {
+                    for (name, alias) in yield_items {
+                        let col_name = alias.as_ref().unwrap_or(name);
+                        // Find the output type from the procedure definition
+                        let data_type = proc_def
+                            .outputs
+                            .iter()
+                            .find(|o| o.name == *name)
+                            .map(|o| procedure_value_type_to_arrow(&o.output_type))
+                            .unwrap_or(DataType::Utf8);
+                        fields.push(Field::new(col_name, data_type, true));
+                    }
+                } else if yield_items.is_empty() {
+                    // Void procedure (no YIELD) — no output columns
+                } else {
+                    // Unknown procedure without registry: fallback to Utf8
+                    for (name, alias) in yield_items {
+                        let col_name = alias.as_ref().unwrap_or(name);
+                        fields.push(Field::new(col_name, DataType::Utf8, true));
+                    }
                 }
             }
         }
@@ -324,6 +343,19 @@ fn is_complex_value_type(vt: &uni_algo::algo::procedures::ValueType) -> bool {
             | ValueType::Relationship
             | ValueType::Path
     )
+}
+
+/// Convert a `ProcedureValueType` to an Arrow `DataType`.
+fn procedure_value_type_to_arrow(
+    vt: &crate::query::executor::procedure::ProcedureValueType,
+) -> DataType {
+    use crate::query::executor::procedure::ProcedureValueType;
+    match vt {
+        ProcedureValueType::Integer => DataType::Int64,
+        ProcedureValueType::Float | ProcedureValueType::Number => DataType::Float64,
+        ProcedureValueType::Boolean => DataType::Boolean,
+        ProcedureValueType::String | ProcedureValueType::Any => DataType::Utf8,
+    }
 }
 
 impl DisplayAs for GraphProcedureCallExec {
@@ -548,10 +580,9 @@ async fn execute_procedure(
         name if name.starts_with("uni.algo.") => {
             execute_algo_procedure(graph_ctx, name, args, yield_items, schema).await
         }
-        _ => Err(datafusion::error::DataFusionError::Execution(format!(
-            "Procedure '{}' not supported in DataFusion engine",
-            procedure_name
-        ))),
+        _ => {
+            execute_registered_procedure(graph_ctx, procedure_name, args, yield_items, schema).await
+        }
     }
 }
 
@@ -881,6 +912,124 @@ fn build_scalar_batch(
     let batch = RecordBatch::try_new(schema.clone(), columns)
         .map_err(|e| datafusion::error::DataFusionError::ArrowError(Box::new(e), None))?;
     Ok(Some(batch))
+}
+
+// ---------------------------------------------------------------------------
+// External/registered procedures
+// ---------------------------------------------------------------------------
+
+/// Execute an externally registered procedure (e.g., TCK test procedures).
+///
+/// Looks up the procedure in the `ProcedureRegistry`, evaluates arguments,
+/// filters data rows by matching input columns, and projects output columns.
+async fn execute_registered_procedure(
+    graph_ctx: &GraphExecutionContext,
+    procedure_name: &str,
+    args: &[Value],
+    yield_items: &[(String, Option<String>)],
+    schema: &SchemaRef,
+) -> DFResult<Option<RecordBatch>> {
+    let registry = graph_ctx.procedure_registry().ok_or_else(|| {
+        datafusion::error::DataFusionError::Execution(format!(
+            "Procedure '{}' not supported in DataFusion engine (no procedure registry)",
+            procedure_name
+        ))
+    })?;
+
+    let proc_def = registry.get(procedure_name).ok_or_else(|| {
+        datafusion::error::DataFusionError::Execution(format!(
+            "ProcedureNotFound: Unknown procedure '{}'",
+            procedure_name
+        ))
+    })?;
+
+    // Validate argument count
+    if args.len() != proc_def.params.len() {
+        return Err(datafusion::error::DataFusionError::Execution(format!(
+            "InvalidNumberOfArguments: Procedure '{}' expects {} argument(s), got {}",
+            proc_def.name,
+            proc_def.params.len(),
+            args.len()
+        )));
+    }
+
+    // Validate argument types
+    for (i, (arg_val, param)) in args.iter().zip(&proc_def.params).enumerate() {
+        if !arg_val.is_null() && !check_proc_type_compatible(arg_val, &param.param_type) {
+            return Err(datafusion::error::DataFusionError::Execution(format!(
+                "InvalidArgumentType: Argument {} ('{}') of procedure '{}' has incompatible type",
+                i, param.name, proc_def.name
+            )));
+        }
+    }
+
+    // Filter data rows: keep rows where input columns match the provided args
+    let filtered: Vec<&HashMap<String, Value>> = proc_def
+        .data
+        .iter()
+        .filter(|row| {
+            for (param, arg_val) in proc_def.params.iter().zip(args) {
+                if let Some(row_val) = row.get(&param.name)
+                    && !proc_values_match(row_val, arg_val)
+                {
+                    return false;
+                }
+            }
+            true
+        })
+        .collect();
+
+    // If the procedure has no yield items (void procedure), return empty batch
+    if yield_items.is_empty() {
+        return Ok(Some(RecordBatch::new_empty(schema.clone())));
+    }
+
+    if filtered.is_empty() {
+        return Ok(Some(RecordBatch::new_empty(schema.clone())));
+    }
+
+    // Project output columns based on yield items
+    // We need to map yield names back to output column names in the procedure definition
+    let num_rows = filtered.len();
+    let mut columns: Vec<ArrayRef> = Vec::new();
+
+    for (idx, (name, _alias)) in yield_items.iter().enumerate() {
+        let field = schema.field(idx);
+        let values = filtered.iter().map(|row| row.get(name.as_str()));
+        columns.push(build_typed_column(values, num_rows, field.data_type()));
+    }
+
+    let batch = RecordBatch::try_new(schema.clone(), columns)
+        .map_err(|e| datafusion::error::DataFusionError::ArrowError(Box::new(e), None))?;
+    Ok(Some(batch))
+}
+
+/// Checks whether a value is compatible with a procedure type (DF engine version).
+fn check_proc_type_compatible(
+    val: &Value,
+    expected: &crate::query::executor::procedure::ProcedureValueType,
+) -> bool {
+    use crate::query::executor::procedure::ProcedureValueType;
+    match expected {
+        ProcedureValueType::Any => true,
+        ProcedureValueType::String => val.is_string(),
+        ProcedureValueType::Boolean => val.is_bool(),
+        ProcedureValueType::Integer => val.is_i64(),
+        ProcedureValueType::Float => val.is_f64() || val.is_i64(),
+        ProcedureValueType::Number => val.is_number(),
+    }
+}
+
+/// Checks whether two values match for input-column filtering (DF engine version).
+fn proc_values_match(row_val: &Value, arg_val: &Value) -> bool {
+    if arg_val.is_null() || row_val.is_null() {
+        return arg_val.is_null() && row_val.is_null();
+    }
+    // Compare numbers by f64 to handle int/float cross-comparison
+    if let (Some(a), Some(b)) = (row_val.as_f64(), arg_val.as_f64()) {
+        return (a - b).abs() < f64::EPSILON;
+    }
+    row_val == arg_val
 }
 
 // ---------------------------------------------------------------------------

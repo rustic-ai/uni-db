@@ -60,6 +60,86 @@ type BfsResult = (Vid, usize, Vec<Vid>, Vec<Eid>);
 /// Expansion record: (original_row_idx, target_vid, hop_count, node_path, edge_path)
 type ExpansionRecord = (usize, Vid, usize, Vec<Vid>, Vec<Eid>);
 
+/// Prepend nodes and edges from an existing path struct column into builders.
+///
+/// Used when a VLP extends a path that was partially built by a prior `BindFixedPath`.
+/// Reads the nodes and relationships from the existing path at `row_idx` and appends
+/// them to the provided builders. The caller should then skip the first VLP node
+/// (which is the junction point already present in the existing path).
+fn prepend_existing_path(
+    existing_path: &arrow_array::StructArray,
+    row_idx: usize,
+    nodes_builder: &mut arrow_array::builder::ListBuilder<arrow_array::builder::StructBuilder>,
+    rels_builder: &mut arrow_array::builder::ListBuilder<arrow_array::builder::StructBuilder>,
+    query_ctx: &uni_store::runtime::context::QueryContext,
+) {
+    // Read existing nodes
+    let nodes_list = existing_path
+        .column(0)
+        .as_any()
+        .downcast_ref::<arrow_array::ListArray>()
+        .unwrap();
+    let node_values = nodes_list.value(row_idx);
+    let node_struct = node_values
+        .as_any()
+        .downcast_ref::<arrow_array::StructArray>()
+        .unwrap();
+    let vid_col = node_struct
+        .column(0)
+        .as_any()
+        .downcast_ref::<UInt64Array>()
+        .unwrap();
+    for i in 0..vid_col.len() {
+        append_node_to_struct(
+            nodes_builder.values(),
+            Vid::from(vid_col.value(i)),
+            query_ctx,
+        );
+    }
+
+    // Read existing edges
+    let rels_list = existing_path
+        .column(1)
+        .as_any()
+        .downcast_ref::<arrow_array::ListArray>()
+        .unwrap();
+    let edge_values = rels_list.value(row_idx);
+    let edge_struct = edge_values
+        .as_any()
+        .downcast_ref::<arrow_array::StructArray>()
+        .unwrap();
+    let eid_col = edge_struct
+        .column(0)
+        .as_any()
+        .downcast_ref::<UInt64Array>()
+        .unwrap();
+    let type_col = edge_struct
+        .column(1)
+        .as_any()
+        .downcast_ref::<arrow_array::StringArray>()
+        .unwrap();
+    let src_col = edge_struct
+        .column(2)
+        .as_any()
+        .downcast_ref::<UInt64Array>()
+        .unwrap();
+    let dst_col = edge_struct
+        .column(3)
+        .as_any()
+        .downcast_ref::<UInt64Array>()
+        .unwrap();
+    for i in 0..eid_col.len() {
+        append_edge_to_struct(
+            rels_builder.values(),
+            Eid::from(eid_col.value(i)),
+            type_col.value(i),
+            src_col.value(i),
+            dst_col.value(i),
+            query_ctx,
+        );
+    }
+}
+
 /// Resolve edge property Arrow type, falling back to `LargeBinary` (CypherValue) for
 /// schemaless properties. Unlike vertex properties, schemaless edge properties must
 /// preserve original JSON value types (int, float, etc.) since edge types commonly
@@ -2462,8 +2542,10 @@ impl GraphVariableLengthTraverseExec {
             fields.push(build_edge_list_field(step_var));
         }
 
-        // Add path struct if bound
-        if let Some(path_var) = path_variable {
+        // Add path struct if bound (only if not already in input from prior BindFixedPath)
+        if let Some(path_var) = path_variable
+            && input_schema.column_with_name(path_var).is_none()
+        {
             fields.push(build_path_struct_field(path_var));
         }
 
@@ -2993,20 +3075,54 @@ impl GraphVariableLengthTraverseStream {
 
         // Add path variable column if bound.
         // For named paths, we output a Path struct with nodes and relationships arrays.
+        // If a path column already exists in input (from a prior BindFixedPath), extend it
+        // rather than building from scratch.
         if self.exec.path_variable.is_some() {
+            let path_var_name = self.exec.path_variable.as_ref().unwrap();
+            let existing_path_col_idx = input
+                .schema()
+                .column_with_name(path_var_name)
+                .map(|(idx, _)| idx);
+            // Clone the Arc so we can read existing path without borrowing `columns`
+            let existing_path_arc = existing_path_col_idx.map(|idx| columns[idx].clone());
+            let existing_path = existing_path_arc
+                .as_ref()
+                .and_then(|arc| arc.as_any().downcast_ref::<arrow_array::StructArray>());
+
             let mut nodes_builder = new_node_list_builder();
             let mut rels_builder = new_edge_list_builder();
             let query_ctx = self.exec.graph_ctx.query_context();
             let mut path_validity = Vec::with_capacity(expansions.len());
 
-            for (_, _, _, node_path, edge_path) in expansions {
+            for (row_out_idx, (_, _, _, node_path, edge_path)) in expansions.iter().enumerate() {
                 if node_path.is_empty() && edge_path.is_empty() {
                     nodes_builder.append(false);
                     rels_builder.append(false);
                     path_validity.push(false);
                     continue;
                 }
-                for vid in node_path {
+
+                // Prepend existing path prefix if extending
+                let skip_first_vlp_node = if let Some(existing) = existing_path {
+                    if !existing.is_null(row_out_idx) {
+                        prepend_existing_path(
+                            existing,
+                            row_out_idx,
+                            &mut nodes_builder,
+                            &mut rels_builder,
+                            &query_ctx,
+                        );
+                        true
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                };
+
+                // Append VLP nodes (skip first if extending — it's the junction point)
+                let start_idx = if skip_first_vlp_node { 1 } else { 0 };
+                for vid in &node_path[start_idx..] {
                     append_node_to_struct(nodes_builder.values(), *vid, &query_ctx);
                 }
                 nodes_builder.append(true);
@@ -3047,7 +3163,11 @@ impl GraphVariableLengthTraverseStream {
             )
             .map_err(|e| datafusion::error::DataFusionError::ArrowError(Box::new(e), None))?;
 
-            columns.push(Arc::new(path_struct));
+            if let Some(idx) = existing_path_col_idx {
+                columns[idx] = Arc::new(path_struct);
+            } else {
+                columns.push(Arc::new(path_struct));
+            }
         }
 
         self.metrics.record_output(num_rows);
@@ -3382,8 +3502,10 @@ impl GraphVariableLengthTraverseMainExec {
             fields.push(build_edge_list_field(step_var));
         }
 
-        // Add path struct if bound
-        if let Some(path_var) = path_variable {
+        // Add path struct if bound (only if not already in input from prior BindFixedPath)
+        if let Some(path_var) = path_variable
+            && input_schema.column_with_name(path_var).is_none()
+        {
             fields.push(build_path_struct_field(path_var));
         }
 
@@ -3754,21 +3876,54 @@ impl GraphVariableLengthTraverseMainStream {
         }
 
         // Add path variable column if bound.
+        // If a path column already exists in input (from a prior BindFixedPath), extend it
+        // rather than building from scratch.
         if self.path_variable.is_some() {
+            let path_var_name = self.path_variable.as_ref().unwrap();
+            let existing_path_col_idx = batch
+                .schema()
+                .column_with_name(path_var_name)
+                .map(|(idx, _)| idx);
+            let existing_path_arc = existing_path_col_idx.map(|idx| columns[idx].clone());
+            let existing_path = existing_path_arc
+                .as_ref()
+                .and_then(|arc| arc.as_any().downcast_ref::<arrow_array::StructArray>());
+
             let mut nodes_builder = new_node_list_builder();
             let mut rels_builder = new_edge_list_builder();
             let query_ctx = self.graph_ctx.query_context();
             let type_names_str = self.type_names.join("|");
             let mut path_validity = Vec::with_capacity(expansions.len());
 
-            for (_, _, _, node_path, edge_path) in expansions.iter() {
+            for (row_out_idx, (_, _, _, node_path, edge_path)) in expansions.iter().enumerate() {
                 if node_path.is_empty() && edge_path.is_empty() {
                     nodes_builder.append(false);
                     rels_builder.append(false);
                     path_validity.push(false);
                     continue;
                 }
-                for vid in node_path {
+
+                // Prepend existing path prefix if extending
+                let skip_first_vlp_node = if let Some(existing) = existing_path {
+                    if !existing.is_null(row_out_idx) {
+                        prepend_existing_path(
+                            existing,
+                            row_out_idx,
+                            &mut nodes_builder,
+                            &mut rels_builder,
+                            &query_ctx,
+                        );
+                        true
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                };
+
+                // Append VLP nodes (skip first if extending — it's the junction point)
+                let start_idx = if skip_first_vlp_node { 1 } else { 0 };
+                for vid in &node_path[start_idx..] {
                     append_node_to_struct(nodes_builder.values(), *vid, &query_ctx);
                 }
                 nodes_builder.append(true);
@@ -3807,7 +3962,11 @@ impl GraphVariableLengthTraverseMainStream {
             )
             .map_err(|e| datafusion::error::DataFusionError::ArrowError(Box::new(e), None))?;
 
-            columns.push(Arc::new(path_struct));
+            if let Some(idx) = existing_path_col_idx {
+                columns[idx] = Arc::new(path_struct);
+            } else {
+                columns.push(Arc::new(path_struct));
+            }
         }
 
         // Add target property columns as NULL for now (skip if already in input).

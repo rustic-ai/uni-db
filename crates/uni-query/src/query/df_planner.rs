@@ -286,6 +286,26 @@ impl HybridPhysicalPlanner {
         self
     }
 
+    /// Set the external procedure registry for test/user-defined procedures.
+    ///
+    /// Rebuilds the inner `GraphExecutionContext` with the registry attached.
+    pub fn with_procedure_registry(
+        mut self,
+        registry: Arc<crate::query::executor::procedure::ProcedureRegistry>,
+    ) -> Self {
+        let ctx = Arc::try_unwrap(self.graph_ctx)
+            .unwrap_or_else(|arc| {
+                GraphExecutionContext::with_l0_context(
+                    arc.storage().clone(),
+                    arc.l0_context().clone(),
+                    arc.property_manager().clone(),
+                )
+            })
+            .with_procedure_registry(registry);
+        self.graph_ctx = Arc::new(ctx);
+        self
+    }
+
     /// Set the mutation context for write operations.
     pub fn with_mutation_context(mut self, ctx: Arc<MutationContext>) -> Self {
         self.mutation_ctx = Some(ctx);
@@ -319,6 +339,7 @@ impl HybridPhysicalPlanner {
             variable_labels,
             variable_kinds,
             node_variable_hints,
+            ..Default::default()
         }
     }
 
@@ -569,14 +590,15 @@ impl HybridPhysicalPlanner {
                 min_hops,
                 max_hops,
                 optional,
-                target_filter: _, // Applied as FilterExec later
+                target_filter,
                 path_variable,
                 is_variable_length,
                 scope_match_variables,
+                optional_pattern_vars,
                 ..
             } => {
                 if *is_variable_length {
-                    self.plan_traverse_main_by_type_vlp(
+                    let vlp_plan = self.plan_traverse_main_by_type_vlp(
                         input,
                         type_names,
                         direction.clone(),
@@ -588,7 +610,41 @@ impl HybridPhysicalPlanner {
                         path_variable.as_deref(),
                         *optional,
                         all_properties,
-                    )
+                    )?;
+                    // Apply target_filter for schemaless VLP (mirrors schema-based
+                    // filter application in plan_traverse lines 1929-1981)
+                    if let Some(filter_expr) = target_filter {
+                        let mut variable_kinds = HashMap::new();
+                        variable_kinds.insert(source_variable.to_string(), VariableKind::Node);
+                        variable_kinds.insert(target_variable.to_string(), VariableKind::Node);
+                        if let Some(sv) = step_variable {
+                            variable_kinds.insert(sv.to_string(), VariableKind::edge_for(true));
+                        }
+                        if let Some(pv) = path_variable {
+                            variable_kinds.insert(pv.to_string(), VariableKind::Path);
+                        }
+                        let ctx = TranslationContext {
+                            parameters: self.params.clone(),
+                            variable_kinds,
+                            ..Default::default()
+                        };
+                        let df_filter = cypher_expr_to_df(filter_expr, Some(&ctx))?;
+                        let schema = vlp_plan.schema();
+                        let session = self.session_ctx.read();
+                        let physical_filter =
+                            self.create_physical_filter_expr(&df_filter, &schema, &session)?;
+                        if *optional {
+                            Ok(Arc::new(OptionalFilterExec::new(
+                                vlp_plan,
+                                physical_filter,
+                                optional_pattern_vars.clone(),
+                            )))
+                        } else {
+                            Ok(Arc::new(FilterExec::try_new(physical_filter, vlp_plan)?))
+                        }
+                    } else {
+                        Ok(vlp_plan)
+                    }
                 } else {
                     self.plan_traverse_main_by_type(
                         input,

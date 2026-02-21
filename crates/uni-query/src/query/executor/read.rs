@@ -393,6 +393,11 @@ impl Executor {
         // Thread algorithm registry for uni.algo.* procedure dispatch
         planner = planner.with_algo_registry(self.algo_registry.clone());
 
+        // Thread external procedure registry for test/user-defined procedures
+        if let Some(ref registry) = self.procedure_registry {
+            planner = planner.with_procedure_registry(registry.clone());
+        }
+
         // Build MutationContext when the plan contains write operations
         if Self::contains_write_operations(&plan) {
             let writer = self
@@ -2679,21 +2684,29 @@ impl Executor {
                         )
                         .await?;
 
-                    // Handle aliasing
-                    let mut aliased_results = Vec::with_capacity(results.len());
-                    for mut row in results {
-                        let mut new_row = row.clone();
-                        for (name, alias) in &yield_items {
-                            if let Some(a) = alias
-                                && let Some(val) = row.remove(name)
-                            {
-                                new_row.remove(name);
-                                new_row.insert(a.clone(), val);
+                    // Handle aliasing: collect all original values first, then
+                    // build the aliased row in one pass. This avoids issues when
+                    // an alias matches another yield item's original name (e.g.,
+                    // YIELD a AS b, b AS d — renaming "a" to "b" must not
+                    // clobber the original "b" before it is renamed to "d").
+                    let has_aliases = yield_items.iter().any(|(_, a)| a.is_some());
+                    if !has_aliases {
+                        // No aliases (includes YIELD * which produces empty yield_items) —
+                        // pass through the procedure output rows unchanged.
+                        Ok(results)
+                    } else {
+                        let mut aliased_results = Vec::with_capacity(results.len());
+                        for row in results {
+                            let mut new_row = HashMap::new();
+                            for (name, alias) in &yield_items {
+                                let col_name = alias.as_ref().unwrap_or(name);
+                                let val = row.get(name).cloned().unwrap_or(Value::Null);
+                                new_row.insert(col_name.clone(), val);
                             }
+                            aliased_results.push(new_row);
                         }
-                        aliased_results.push(new_row);
+                        Ok(aliased_results)
                     }
-                    Ok(aliased_results)
                 }
                 LogicalPlan::VectorKnn { .. } => {
                     unreachable!("VectorKnn is handled by DataFusion engine")

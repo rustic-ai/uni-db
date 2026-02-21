@@ -1509,15 +1509,7 @@ impl ScalarUDFImpl for TemporalUdf {
         // Extraction functions return Int64
         if matches!(
             name.as_str(),
-            "year"
-                | "month"
-                | "day"
-                | "hour"
-                | "minute"
-                | "second"
-                | "duration.inmonths"
-                | "duration.indays"
-                | "duration.inseconds"
+            "year" | "month" | "day" | "hour" | "minute" | "second"
         ) {
             Ok(DataType::Int64)
         } else {
@@ -1525,6 +1517,8 @@ impl ScalarUDFImpl for TemporalUdf {
                 // Temporal constructors use LargeBinary (CypherValue codec) to preserve
                 // timezone names, Duration components, and nanosecond precision through
                 // the DataFusion pipeline. Constant-folded calls bypass UDFs entirely.
+                // duration.inMonths/inDays/inSeconds compute durations between two temporal
+                // values and return Duration compound types, not plain integers.
                 "datetime"
                 | "localdatetime"
                 | "date"
@@ -1537,6 +1531,9 @@ impl ScalarUDFImpl for TemporalUdf {
                 | "localdatetime.truncate"
                 | "localtime.truncate"
                 | "duration.between"
+                | "duration.inmonths"
+                | "duration.indays"
+                | "duration.inseconds"
                 | "datetime.fromepoch"
                 | "datetime.fromepochmillis"
                 | "datetime.transaction"

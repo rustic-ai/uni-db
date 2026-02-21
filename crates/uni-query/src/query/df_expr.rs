@@ -558,7 +558,7 @@ pub fn cypher_expr_to_df(expr: &Expr, context: Option<&TranslationContext>) -> R
 /// Context for expression translation.
 ///
 /// Provides parameter values and schema information for resolving expressions.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Clone)]
 pub struct TranslationContext {
     /// Parameter values for query parameterization.
     pub parameters: std::collections::HashMap<String, Value>,
@@ -572,6 +572,24 @@ pub struct TranslationContext {
     /// Node variable names from CREATE/MERGE patterns (separate from variable_kinds
     /// to avoid affecting ID/TYPE/HASLABEL translation). Used only by startNode/endNode UDFs.
     pub node_variable_hints: Vec<String>,
+
+    /// Frozen statement clock for consistent temporal function evaluation.
+    /// All bare temporal constructors (`time()`, `datetime()`, etc.) and their
+    /// `.statement()`/`.transaction()` variants use this frozen instant so that
+    /// `duration.inSeconds(time(), time())` returns zero.
+    pub statement_time: chrono::DateTime<chrono::Utc>,
+}
+
+impl Default for TranslationContext {
+    fn default() -> Self {
+        Self {
+            parameters: std::collections::HashMap::new(),
+            variable_labels: std::collections::HashMap::new(),
+            variable_kinds: std::collections::HashMap::new(),
+            node_variable_hints: Vec::new(),
+            statement_time: chrono::Utc::now(),
+        }
+    }
 }
 
 impl TranslationContext {
@@ -1617,6 +1635,7 @@ fn translate_temporal_function(
     name_upper: &str,
     name: &str,
     df_args: &[DfExpr],
+    context: Option<&TranslationContext>,
 ) -> Option<Result<DfExpr>> {
     match name_upper {
         "DATE"
@@ -1657,9 +1676,12 @@ fn translate_temporal_function(
         | "LOCALDATETIME.TRANSACTION"
         | "LOCALDATETIME.STATEMENT"
         | "LOCALDATETIME.REALTIME" => {
-            // Try constant-folding first: if all args are literals, evaluate at planning time
+            // Try constant-folding first: if all args are literals, evaluate at planning time.
+            // For zero-arg temporal constructors (statement clock), use the frozen
+            // statement_time from the translation context.
+            let stmt_time = context.map(|c| c.statement_time);
             if can_constant_fold(name_upper, df_args)
-                && let Ok(folded) = try_constant_fold_temporal(name_upper, df_args)
+                && let Ok(folded) = try_constant_fold_temporal(name_upper, df_args, stmt_time)
             {
                 return Some(Ok(folded));
             }
@@ -1671,13 +1693,36 @@ fn translate_temporal_function(
 
 /// Check if a temporal function call can be constant-folded (all args are literals).
 fn can_constant_fold(name: &str, args: &[DfExpr]) -> bool {
-    // Clock functions return current time, never constant
-    if name.contains("TRANSACTION") || name.contains("STATEMENT") || name.contains("REALTIME") {
+    // `.realtime()` variants must always read the wall clock — never constant-fold.
+    if name.contains("REALTIME") {
         return false;
     }
-    // Zero-arg calls return current time/date, not constant
+    // Zero-arg temporal constructors (time(), date(), datetime(), localtime(),
+    // localdatetime()) represent the OpenCypher *statement clock* — they return the
+    // same value within a single statement.  Constant-folding at planning time is
+    // correct because planning IS the start of the statement.
+    //
+    // `.statement()` and `.transaction()` variants are semantically identical for
+    // single-statement transactions (the common case) and can also be folded.
     if args.is_empty() {
-        return false;
+        return matches!(
+            name,
+            "DATE"
+                | "TIME"
+                | "LOCALTIME"
+                | "LOCALDATETIME"
+                | "DATETIME"
+                | "DATE.STATEMENT"
+                | "TIME.STATEMENT"
+                | "LOCALTIME.STATEMENT"
+                | "LOCALDATETIME.STATEMENT"
+                | "DATETIME.STATEMENT"
+                | "DATE.TRANSACTION"
+                | "TIME.TRANSACTION"
+                | "LOCALTIME.TRANSACTION"
+                | "LOCALDATETIME.TRANSACTION"
+                | "DATETIME.TRANSACTION"
+        );
     }
     // All args must be constant expressions (literals or named_struct with all-literal args)
     args.iter().all(is_constant_expr)
@@ -1697,15 +1742,30 @@ fn is_constant_expr(expr: &DfExpr) -> bool {
 
 /// Try to constant-fold a temporal function call by evaluating it at planning time.
 /// Returns a `DfExpr::Literal` with the resulting scalar value.
-fn try_constant_fold_temporal(name: &str, args: &[DfExpr]) -> Result<DfExpr> {
+///
+/// For zero-arg temporal constructors (statement clock), uses the frozen `stmt_time`
+/// so that all occurrences of `time()` etc. within a single statement return the same value.
+fn try_constant_fold_temporal(
+    name: &str,
+    args: &[DfExpr],
+    stmt_time: Option<chrono::DateTime<chrono::Utc>>,
+) -> Result<DfExpr> {
     // Extract DfExpr args → Value args
     let val_args: Vec<Value> = args
         .iter()
         .map(extract_constant_value)
         .collect::<Result<_>>()?;
 
-    // Call the temporal eval function
-    let result = crate::query::datetime::eval_datetime_function(name, &val_args)?;
+    // For zero-arg temporal constructors, use the frozen statement clock
+    let result = if val_args.is_empty() {
+        if let Some(frozen) = stmt_time {
+            crate::query::datetime::eval_datetime_function_with_clock(name, &val_args, frozen)?
+        } else {
+            crate::query::datetime::eval_datetime_function(name, &val_args)?
+        }
+    } else {
+        crate::query::datetime::eval_datetime_function(name, &val_args)?
+    };
 
     // Convert Value::Temporal → ScalarValue
     let scalar = value_to_scalar(&result)?;
@@ -1957,7 +2017,7 @@ fn translate_function_call(
         return result;
     }
 
-    if let Some(result) = translate_temporal_function(&name_upper, name, &df_args) {
+    if let Some(result) = translate_temporal_function(&name_upper, name, &df_args, context) {
         return result;
     }
 

@@ -267,12 +267,72 @@ pub fn parse_datetime_utc(s: &str) -> Result<DateTime<Utc>> {
         .map_err(|_| anyhow!("Invalid datetime format: {}", s))
 }
 
-/// Evaluate date/time functions.
+/// Evaluate a temporal function using a frozen statement clock.
 ///
 /// Routes to the appropriate handler based on function name. Supports:
 /// - Basic constructors: DATE, TIME, DATETIME, LOCALDATETIME, LOCALTIME, DURATION
 /// - Extraction: YEAR, MONTH, DAY, HOUR, MINUTE, SECOND
 /// - Dotted namespace functions: DATETIME.FROMEPOCH, DATE.TRUNCATE, etc.
+///
+/// For zero-arg temporal constructors (e.g. `time()`, `datetime()`), uses the
+/// provided `frozen_now` instead of calling `Utc::now()`.  This ensures that
+/// all occurrences within the same statement return an identical value, as
+/// required by the OpenCypher specification.
+pub fn eval_datetime_function_with_clock(
+    name: &str,
+    args: &[Value],
+    frozen_now: chrono::DateTime<chrono::Utc>,
+) -> Result<Value> {
+    // Zero-arg temporal constructors use the frozen clock
+    if args.is_empty() {
+        match name {
+            "DATE" | "DATE.STATEMENT" | "DATE.TRANSACTION" => {
+                let d = frozen_now.date_naive();
+                return Ok(Value::Temporal(TemporalValue::Date {
+                    days_since_epoch: date_to_days_since_epoch(&d),
+                }));
+            }
+            "TIME" | "TIME.STATEMENT" | "TIME.TRANSACTION" => {
+                let t = frozen_now.time();
+                return Ok(Value::Temporal(TemporalValue::Time {
+                    nanos_since_midnight: time_to_nanos(&t),
+                    offset_seconds: 0,
+                }));
+            }
+            "LOCALTIME" | "LOCALTIME.STATEMENT" | "LOCALTIME.TRANSACTION" => {
+                let local = frozen_now.with_timezone(&chrono::Local).time();
+                return Ok(Value::Temporal(TemporalValue::LocalTime {
+                    nanos_since_midnight: time_to_nanos(&local),
+                }));
+            }
+            "DATETIME" | "DATETIME.STATEMENT" | "DATETIME.TRANSACTION" => {
+                return Ok(Value::Temporal(TemporalValue::DateTime {
+                    nanos_since_epoch: frozen_now.timestamp_nanos_opt().unwrap_or(0),
+                    offset_seconds: 0,
+                    timezone_name: None,
+                }));
+            }
+            "LOCALDATETIME" | "LOCALDATETIME.STATEMENT" | "LOCALDATETIME.TRANSACTION" => {
+                let local = frozen_now.with_timezone(&chrono::Local).naive_local();
+                let epoch = NaiveDateTime::new(
+                    NaiveDate::from_ymd_opt(1970, 1, 1).unwrap(),
+                    NaiveTime::from_hms_opt(0, 0, 0).unwrap(),
+                );
+                let nanos = local
+                    .signed_duration_since(epoch)
+                    .num_nanoseconds()
+                    .unwrap_or(0);
+                return Ok(Value::Temporal(TemporalValue::LocalDateTime {
+                    nanos_since_epoch: nanos,
+                }));
+            }
+            _ => {}
+        }
+    }
+    // Fall through to the regular eval for non-clock functions or functions with args
+    eval_datetime_function(name, args)
+}
+
 pub fn eval_datetime_function(name: &str, args: &[Value]) -> Result<Value> {
     match name {
         // Basic constructors

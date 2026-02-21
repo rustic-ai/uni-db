@@ -61,6 +61,7 @@ pub mod traverse;
 pub mod unwind;
 pub mod vector_knn;
 
+use crate::query::executor::procedure::ProcedureRegistry;
 use parking_lot::RwLock;
 use std::sync::Arc;
 use std::time::Instant;
@@ -125,6 +126,9 @@ pub struct GraphExecutionContext {
 
     /// Algorithm registry for `uni.algo.*` procedure dispatch.
     algo_registry: Option<Arc<AlgorithmRegistry>>,
+
+    /// External procedure registry for test/user-defined procedures.
+    procedure_registry: Option<Arc<ProcedureRegistry>>,
 }
 
 impl std::fmt::Debug for GraphExecutionContext {
@@ -219,6 +223,7 @@ impl GraphExecutionContext {
             property_manager,
             deadline: None,
             algo_registry: None,
+            procedure_registry: None,
         }
     }
 
@@ -240,6 +245,7 @@ impl GraphExecutionContext {
             property_manager,
             deadline: None,
             algo_registry: None,
+            procedure_registry: None,
         }
     }
 
@@ -255,6 +261,7 @@ impl GraphExecutionContext {
             property_manager,
             deadline: query_ctx.deadline,
             algo_registry: None,
+            procedure_registry: None,
         }
     }
 
@@ -273,6 +280,17 @@ impl GraphExecutionContext {
     /// Get a reference to the algorithm registry, if set.
     pub fn algo_registry(&self) -> Option<&Arc<AlgorithmRegistry>> {
         self.algo_registry.as_ref()
+    }
+
+    /// Set the external procedure registry for test/user-defined procedures.
+    pub fn with_procedure_registry(mut self, registry: Arc<ProcedureRegistry>) -> Self {
+        self.procedure_registry = Some(registry);
+        self
+    }
+
+    /// Get a reference to the procedure registry, if set.
+    pub fn procedure_registry(&self) -> Option<&Arc<ProcedureRegistry>> {
+        self.procedure_registry.as_ref()
     }
 
     /// Check if the query has timed out.

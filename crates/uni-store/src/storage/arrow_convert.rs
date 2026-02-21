@@ -451,6 +451,33 @@ pub fn arrow_to_value(col: &dyn Array, row: usize, data_type: Option<&DataType>)
         });
     }
 
+    // Time64 (microseconds since midnight) - convert to nanoseconds
+    if let Some(t) = col
+        .as_any()
+        .downcast_ref::<arrow_array::Time64MicrosecondArray>()
+    {
+        let micros = t.value(row);
+        return Value::Temporal(uni_common::TemporalValue::LocalTime {
+            nanos_since_midnight: micros * 1000,
+        });
+    }
+
+    // DurationMicrosecond - convert to Duration with nanoseconds
+    if let Some(d) = col
+        .as_any()
+        .downcast_ref::<arrow_array::DurationMicrosecondArray>()
+    {
+        let micros = d.value(row);
+        let total_nanos = micros * 1000;
+        let seconds = total_nanos / 1_000_000_000;
+        let remaining_nanos = total_nanos % 1_000_000_000;
+        return Value::Temporal(uni_common::TemporalValue::Duration {
+            months: 0,
+            days: 0,
+            nanos: seconds * 1_000_000_000 + remaining_nanos,
+        });
+    }
+
     // IntervalMonthDayNano - return as Value::Temporal(Duration)
     if let Some(interval) = col.as_any().downcast_ref::<IntervalMonthDayNanoArray>() {
         let val = interval.value(row);

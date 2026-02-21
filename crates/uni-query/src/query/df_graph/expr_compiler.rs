@@ -245,6 +245,7 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
                 variable_labels: ctx.variable_labels.clone(),
                 variable_kinds: new_kinds,
                 node_variable_hints: ctx.node_variable_hints.clone(),
+                statement_time: ctx.statement_time,
             });
             scoped_ctx_slot.as_ref()
         } else {

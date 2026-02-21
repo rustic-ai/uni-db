@@ -1,17 +1,17 @@
 # TCK Compliance Report
 
-**Generated:** 2026-02-21 01:16:45
-**Results:** `results_20260221_011645.json`
-**Compared to:** `results_20260221_010120.json`
+**Generated:** 2026-02-21 04:42:31
+**Results:** `results_20260221_044231.json`
+**Compared to:** `results_20260221_042331.json`
 
 ## Summary
 
 | Metric | Current | Previous | Delta |
 |--------|---------|----------|-------|
 | Scenarios | 3897 | 3897 |  |
-| Passed | 3853 | 3853 |  |
-| Failed | 43 | 43 |  |
-| Pass Rate | 98.9% | 98.9% | ➡️ +0.0pp |
+| Passed | 3869 | 3869 |  |
+| Failed | 27 | 27 |  |
+| Pass Rate | 99.3% | 99.3% | ➡️ +0.0pp |
 
 ## Feature Breakdown
 
@@ -28,12 +28,12 @@
 | ✅ Boolean3 | 30 | 30 | 0 | 100% |  |
 | ✅ Boolean4 | 52 | 52 | 0 | 100% |  |
 | ✅ Boolean5 | 8 | 8 | 0 | 100% |  |
-| ✅ Call1 | 16 | 15 | 1 | 94% |  |
+| ✅ Call1 | 16 | 16 | 0 | 100% |  |
 | ✅ Call2 | 6 | 5 | 1 | 83% |  |
 | ✅ Call3 | 6 | 6 | 0 | 100% |  |
 | ✅ Call4 | 2 | 2 | 0 | 100% |  |
-| ✅ Call5 | 19 | 17 | 2 | 89% |  |
-| ⚠️ Call6 | 3 | 2 | 1 | 67% |  |
+| ✅ Call5 | 19 | 19 | 0 | 100% |  |
+| ✅ Call6 | 3 | 3 | 0 | 100% |  |
 | ✅ Comparison1 | 43 | 43 | 0 | 100% |  |
 | ✅ Comparison2 | 19 | 19 | 0 | 100% |  |
 | ✅ Comparison3 | 9 | 9 | 0 | 100% |  |
@@ -88,14 +88,14 @@
 | ✅ Match3 | 30 | 30 | 0 | 100% |  |
 | ⚠️ Match4 | 10 | 7 | 3 | 70% |  |
 | ✅ Match5 | 29 | 28 | 1 | 97% |  |
-| ✅ Match6 | 97 | 93 | 4 | 96% |  |
-| ✅ Match7 | 31 | 30 | 1 | 97% |  |
+| ✅ Match6 | 97 | 97 | 0 | 100% |  |
+| ✅ Match7 | 31 | 31 | 0 | 100% |  |
 | ⚠️ Match8 | 3 | 2 | 1 | 67% |  |
 | ✅ Match9 | 9 | 9 | 0 | 100% |  |
 | ✅ MatchWhere1 | 15 | 15 | 0 | 100% |  |
 | ✅ MatchWhere2 | 2 | 2 | 0 | 100% |  |
 | ✅ MatchWhere3 | 3 | 3 | 0 | 100% |  |
-| ⚠️ MatchWhere4 | 2 | 1 | 1 | 50% |  |
+| ✅ MatchWhere4 | 2 | 2 | 0 | 100% |  |
 | ✅ MatchWhere5 | 4 | 4 | 0 | 100% |  |
 | ✅ MatchWhere6 | 8 | 8 | 0 | 100% |  |
 | ✅ Mathematical11 | 1 | 1 | 0 | 100% |  |
@@ -170,7 +170,7 @@
 | ✅ String8 | 9 | 9 | 0 | 100% |  |
 | ✅ String9 | 9 | 9 | 0 | 100% |  |
 | ✅ Temporal1 | 207 | 207 | 0 | 100% |  |
-| ✅ Temporal10 | 131 | 124 | 7 | 95% |  |
+| ✅ Temporal10 | 131 | 129 | 2 | 98% |  |
 | ✅ Temporal2 | 53 | 53 | 0 | 100% |  |
 | ✅ Temporal3 | 183 | 183 | 0 | 100% |  |
 | ✅ Temporal4 | 39 | 39 | 0 | 100% |  |
@@ -205,27 +205,12 @@
 | ✅ WithWhere1 | 4 | 4 | 0 | 100% |  |
 | ✅ WithWhere2 | 2 | 2 | 0 | 100% |  |
 | ✅ WithWhere3 | 3 | 3 | 0 | 100% |  |
-| ⚠️ WithWhere4 | 2 | 1 | 1 | 50% |  |
+| ✅ WithWhere4 | 2 | 2 | 0 | 100% |  |
 | ✅ WithWhere5 | 4 | 4 | 0 | 100% |  |
 | ✅ WithWhere6 | 1 | 1 | 0 | 100% |  |
 | ✅ WithWhere7 | 3 | 3 | 0 | 100% |  |
 
 ## Failed Scenarios
-
-### Call1
-
-- **[4] In-query call to procedure that takes no arguments and yields no results and consumes no rows** (line 69)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/call/Call1.feature:85:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): Row count mismatch: expected 3, got 0
-[Summary]
-1 feature
-1 scenario (1 failed)
-5 steps (4 passed, 1 failed
-  ... (truncated)
-  ```
 
 ### Call2
 
@@ -235,48 +220,6 @@
       Defined: tck/features/clauses/call/Call2.feature:89:5
       Matched: crates/uni-tck/src/steps/then.rs:37:1
       Step panicked. Captured output: Query returned error instead of result: Query { message: "MissingParameter: Procedure 'test.my.proc' requires 2 implicit argument(s)", q
-  ... (truncated)
-  ```
-
-### Call5
-
-- **[4] Rename outputs to unbound variable names** (line 101)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/call/Call5.feature:93:5
-      Matched: crates/uni-tck/src/steps/then.rs:37:1
-      Step panicked. Captured output: Result mismatch (in order): Value mismatch at row 0 column 'b': expected Int(1), got Null
-[Summary]
-1 feature
-1 scenario (1 failed)
-4 st
-  ... (truncated)
-  ```
-- **[4] Rename outputs to unbound variable names** (line 103)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/call/Call5.feature:93:5
-      Matched: crates/uni-tck/src/steps/then.rs:37:1
-      Step panicked. Captured output: Result mismatch (in order): Value mismatch at row 0 column 'b': expected Int(1), got Null
-[Summary]
-1 feature
-1 scenario (1 failed)
-4 st
-  ... (truncated)
-  ```
-
-### Call6
-
-- **[1] Calling the same STRING procedure twice using the same outputs in each call** (line 33)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/call/Call6.feature:47:5
-      Matched: crates/uni-tck/src/steps/then.rs:37:1
-      Step panicked. Captured output: Result mismatch (in order): Value mismatch at row 0 column 'c': expected Int(3), got Null
-[Summary]
-1 feature
-1 scenario (1 failed)
-4 st
   ... (truncated)
   ```
 
@@ -416,7 +359,7 @@
   Step failed:
       Defined: tck/features/clauses/match/Match4.feature:111:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): Row count mismatch: expected 1, got 35
+      Step panicked. Captured output: Result mismatch (any order): Row count mismatch: expected 1, got 14
 [Summary]
 1 feature
 1 scenario (1 failed)
@@ -460,56 +403,6 @@
   ... (truncated)
   ```
 
-### Match6
-
-- **[12] Matching path with multiple bidirectional relationships** (line 217)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/match/Match6.feature:230:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("p", Some(Null))]. Expected: [{"p": Path(Path { nodes:
-  ... (truncated)
-  ```
-- **[13] Matching path with both directions should respect other directions** (line 238)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/match/Match6.feature:251:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("p", Some(Null))]. Expected: [{"p": Path(Path { nodes:
-  ... (truncated)
-  ```
-- **[14] Named path with undirected fixed variable length pattern** (line 257)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/match/Match6.feature:273:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): Row count mismatch: expected 4, got 12
-[Summary]
-1 feature
-1 scenario (1 failed)
-4 steps (3 passed, 1 fa
-  ... (truncated)
-  ```
-- **[17] Return a named var length path of length zero** (line 314)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/match/Match6.feature:325:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 2. Actual values: [("p", Some(Path(Path { nodes: [Node { vid: Vid(0), labe
-  ... (truncated)
-  ```
-
-### Match7
-
-- **[17] Optionally matching named paths - existing result** (line 347)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/match/Match7.feature:361:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("x", Some(Node(Node { vid: Vid(1), labels: [], propert
-  ... (truncated)
-  ```
-
 ### Match8
 
 - **[2] Counting rows after MATCH, MERGE, OPTIONAL MATCH** (line 54)
@@ -518,21 +411,6 @@
       Defined: tck/features/clauses/match/Match8.feature:70:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
       Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("count(*)", Some(Int(4)))]. Expected: [{"count(*)": Int
-  ... (truncated)
-  ```
-
-### MatchWhere4
-
-- **[2] Join with disjunctive multi-part predicates including patterns** (line 51)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/match-where/MatchWhere4.feature:67:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): Row count mismatch: expected 1, got 2
-[Summary]
-1 feature
-1 scenario (1 failed)
-4 steps (3 pas
   ... (truncated)
   ```
 
@@ -614,46 +492,6 @@
       Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: localdatetime(): Cannot parse datetime: -999999
   ... (truncated)
   ```
-- **[12] Should compute durations with no difference** (line 311)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal10.feature:304:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Arrow error: Invalid argument error: column types must match sch
-  ... (truncated)
-  ```
-- **[12] Should compute durations with no difference** (line 312)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal10.feature:304:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Arrow error: Invalid argument error: column types must match sch
-  ... (truncated)
-  ```
-- **[12] Should compute durations with no difference** (line 313)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal10.feature:304:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Arrow error: Invalid argument error: column types must match sch
-  ... (truncated)
-  ```
-- **[12] Should compute durations with no difference** (line 314)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal10.feature:304:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Arrow error: Invalid argument error: column types must match sch
-  ... (truncated)
-  ```
-- **[12] Should compute durations with no difference** (line 315)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal10.feature:304:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Arrow error: Invalid argument error: column types must match sch
-  ... (truncated)
-  ```
 
 ### Temporal5
 
@@ -662,7 +500,7 @@
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal5.feature:133:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("d.weekYear", Some(Int(1984))), ("d.offsetMi
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("d.epochSeconds", Some(Int(469024274))), ("d
   ... (truncated)
   ```
 
@@ -693,20 +531,5 @@
       Defined: tck/features/expressions/temporal/Temporal7.feature:125:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
       Step panicked. Captured output: Query returned error instead of result: Query { message: "Error during planning: Cannot infer common argument type for comp
-  ... (truncated)
-  ```
-
-### WithWhere4
-
-- **[2] Join with disjunctive multi-part predicates including patterns** (line 52)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/with-where/WithWhere4.feature:69:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): Row count mismatch: expected 1, got 2
-[Summary]
-1 feature
-1 scenario (1 failed)
-4 steps (3 passe
   ... (truncated)
   ```

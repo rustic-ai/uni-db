@@ -27,7 +27,7 @@ fn extract_where_expr(pair: Pair<Rule>) -> Result<Expr, ParseError> {
 /// Consume an identifier token if it is the next token, returning its string value.
 fn consume_identifier(inner: &mut std::iter::Peekable<Pairs<Rule>>) -> Option<String> {
     if peek_is(inner, Rule::identifier) {
-        Some(inner.next().unwrap().as_str().to_string())
+        Some(normalize_identifier(inner.next().unwrap().as_str()))
     } else {
         None
     }
@@ -519,10 +519,10 @@ fn build_call_clause(pair: Pair<Rule>) -> Result<Clause, ParseError> {
 
 fn build_yield_item(pair: Pair<Rule>) -> Result<YieldItem, ParseError> {
     let mut inner = pair.into_inner();
-    let name = inner.next().unwrap().as_str().to_string();
+    let name = normalize_identifier(inner.next().unwrap().as_str());
     let alias = if inner.next().is_some() {
         // AS
-        Some(inner.next().unwrap().as_str().to_string())
+        Some(normalize_identifier(inner.next().unwrap().as_str()))
     } else {
         None
     };
@@ -1686,7 +1686,7 @@ fn build_single_return_item(pair: Pair<Rule>) -> Result<ReturnItem, ParseError> 
     let expr = build_expression(expr_pair)?;
     let alias = if inner.next().is_some() {
         // AS keyword consumed; next is the alias identifier
-        Some(inner.next().unwrap().as_str().to_string())
+        Some(normalize_identifier(inner.next().unwrap().as_str()))
     } else {
         None
     };

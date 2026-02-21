@@ -2824,6 +2824,15 @@ impl QueryPlanner {
                             procedure,
                             arguments,
                         } => {
+                            // Validate that procedure arguments don't contain aggregation functions
+                            for arg in arguments {
+                                if contains_aggregate_recursive(arg) {
+                                    return Err(anyhow!(
+                                        "SyntaxError: InvalidAggregation - Aggregation expressions are not allowed as arguments to procedure calls"
+                                    ));
+                                }
+                            }
+
                             let has_yield_star = call_clause.yield_items.len() == 1
                                 && call_clause.yield_items[0].name == "*"
                                 && call_clause.yield_items[0].alias.is_none();
@@ -2873,11 +2882,26 @@ impl QueryPlanner {
                                     VariableType::Imported,
                                 )?;
                             }
-                            plan = LogicalPlan::ProcedureCall {
+                            let proc_plan = LogicalPlan::ProcedureCall {
                                 procedure_name: procedure.clone(),
                                 arguments: arguments.clone(),
-                                yield_items: yields,
+                                yield_items: yields.clone(),
                             };
+
+                            if matches!(plan, LogicalPlan::Empty) {
+                                // Standalone CALL (first clause) — use directly
+                                plan = proc_plan;
+                            } else if yields.is_empty() {
+                                // In-query CALL with no YIELD (void procedure):
+                                // preserve the input rows unchanged
+                            } else {
+                                // In-query CALL with YIELD: cross-join input × procedure output
+                                plan = LogicalPlan::Apply {
+                                    input: Box::new(plan),
+                                    subquery: Box::new(proc_plan),
+                                    input_filter: None,
+                                };
+                            }
                         }
                         CallKind::Subquery(query) => {
                             let subquery_plan =
@@ -3920,32 +3944,59 @@ impl QueryPlanner {
                                     let traverse_path_var =
                                         if is_vlp { path_variable.clone() } else { None };
 
+                                    // If we're about to start a VLP segment and there are
+                                    // collected fixed-hop path vars, create an intermediate
+                                    // BindPath for the fixed prefix first. The VLP will then
+                                    // extend this existing path.
+                                    if is_vlp
+                                        && let Some(pv) = path_variable.as_ref()
+                                        && !path_node_vars.is_empty()
+                                    {
+                                        plan = LogicalPlan::BindPath {
+                                            input: Box::new(plan),
+                                            node_variables: std::mem::take(&mut path_node_vars),
+                                            edge_variables: std::mem::take(&mut path_edge_vars),
+                                            path_variable: pv.clone(),
+                                        };
+                                        if !is_var_in_scope(vars_in_scope, pv) {
+                                            add_var_to_scope(
+                                                vars_in_scope,
+                                                pv,
+                                                VariableType::Path,
+                                            )?;
+                                        }
+                                    }
+
                                     // Plan the traverse from the current source node
-                                    let (new_plan, target_var) = self.plan_traverse_with_source(
-                                        plan,
-                                        vars_in_scope,
-                                        TraverseParams {
-                                            rel: r,
-                                            target_node: n_target,
-                                            optional,
-                                            path_variable: traverse_path_var,
-                                            optional_pattern_vars: optional_pattern_vars.clone(),
-                                        },
-                                        &current_source_var,
-                                        vars_before_pattern,
-                                    )?;
+                                    let (new_plan, target_var, effective_target) = self
+                                        .plan_traverse_with_source(
+                                            plan,
+                                            vars_in_scope,
+                                            TraverseParams {
+                                                rel: r,
+                                                target_node: n_target,
+                                                optional,
+                                                path_variable: traverse_path_var,
+                                                optional_pattern_vars: optional_pattern_vars
+                                                    .clone(),
+                                            },
+                                            &current_source_var,
+                                            vars_before_pattern,
+                                        )?;
                                     plan = new_plan;
 
                                     // Track edge/target node for BindPath
                                     if path_variable.is_some() && !is_vlp {
                                         // Use the edge variable if given, otherwise use
-                                        // the internal tracking column pattern
+                                        // the internal tracking column pattern.
+                                        // Use effective_target (which may be __rebound_x
+                                        // for bound-target traversals) to match the actual
+                                        // column name produced by GraphTraverseExec.
                                         if let Some(ev) = &r.variable {
                                             path_edge_vars.push(ev.clone());
                                         } else {
-                                            // Anonymous edge: GraphTraverseExec creates
-                                            // __eid_to_{target} tracking column
-                                            path_edge_vars.push(format!("__eid_to_{}", target_var));
+                                            path_edge_vars
+                                                .push(format!("__eid_to_{}", effective_target));
                                         }
                                         path_node_vars.push(target_var.clone());
                                     }
@@ -4029,19 +4080,20 @@ impl QueryPlanner {
                     }
 
                     // Plan traverse with quantified relationship
-                    let (new_plan, _target_var) = self.plan_traverse_with_source(
-                        plan,
-                        vars_in_scope,
-                        TraverseParams {
-                            rel: &relationship,
-                            target_node,
-                            optional,
-                            path_variable: path_variable.clone(),
-                            optional_pattern_vars: optional_pattern_vars.clone(),
-                        },
-                        &source_variable,
-                        vars_before_pattern,
-                    )?;
+                    let (new_plan, _target_var, _effective_target) = self
+                        .plan_traverse_with_source(
+                            plan,
+                            vars_in_scope,
+                            TraverseParams {
+                                rel: &relationship,
+                                target_node,
+                                optional,
+                                path_variable: path_variable.clone(),
+                                optional_pattern_vars: optional_pattern_vars.clone(),
+                            },
+                            &source_variable,
+                            vars_before_pattern,
+                        )?;
                     plan = new_plan;
                     had_traverses = true;
 
@@ -4085,6 +4137,11 @@ impl QueryPlanner {
     }
 
     /// Plan a traverse with an explicit source variable name.
+    ///
+    /// Returns `(plan, target_variable, effective_target_variable)` where:
+    /// - `target_variable` is the semantic variable name for downstream scope
+    /// - `effective_target_variable` is the actual column-name prefix used by
+    ///   the traverse (may be `__rebound_x` for bound-target patterns)
     fn plan_traverse_with_source(
         &self,
         plan: LogicalPlan,
@@ -4092,7 +4149,7 @@ impl QueryPlanner {
         params: TraverseParams<'_>,
         source_variable: &str,
         vars_before_pattern: usize,
-    ) -> Result<(LogicalPlan, String)> {
+    ) -> Result<(LogicalPlan, String, String)> {
         // Check for parameter used as relationship predicate
         if let Some(Expr::Parameter(_)) = &params.rel.properties {
             return Err(anyhow!(
@@ -4298,7 +4355,7 @@ impl QueryPlanner {
                 add_var_to_scope(vars_in_scope, &target_variable, VariableType::Node)?;
             }
 
-            return Ok((plan, target_variable));
+            return Ok((plan, target_variable.clone(), target_variable));
         }
 
         // If we have a mix of known and unknown types, error for now
@@ -4411,7 +4468,7 @@ impl QueryPlanner {
             edge_type_ids,
             direction: params.rel.direction.clone(),
             source_variable: source_variable.to_string(),
-            target_variable: effective_target_var,
+            target_variable: effective_target_var.clone(),
             target_label_id: target_label_meta.map(|m| m.id).unwrap_or(0),
             step_variable: effective_step_var.clone(),
             min_hops,
@@ -4580,7 +4637,7 @@ impl QueryPlanner {
             add_var_to_scope(vars_in_scope, &target_variable, VariableType::Node)?;
         }
 
-        Ok((plan, target_variable))
+        Ok((plan, target_variable, effective_target_var))
     }
 
     /// Combine a new scan plan with an existing plan.

@@ -54,8 +54,7 @@
             "keyword": "Scenario ",
             "name": "[4] In-query call to procedure that takes no arguments and yields no results and consumes no rows",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/call/Call1.feature:85:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Result mismatch (any order): Row count mismatch: expected 3, got 0\n[Summary]\n1 feature\n1 scenario (1 failed)\n5 steps (4 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -528,8 +527,7 @@
             "keyword": "Scenario ",
             "name": "[4] Rename outputs to unbound variable names",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/call/Call5.feature:93:5\n      Matched: crates/uni-tck/src/steps/then.rs:37:1\n      Step panicked. Captured output: Result mismatch (in order): Value mismatch at row 0 column 'b': expected Int(1), got Null\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -557,8 +555,7 @@
             "keyword": "Scenario ",
             "name": "[4] Rename outputs to unbound variable names",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/call/Call5.feature:93:5\n      Matched: crates/uni-tck/src/steps/then.rs:37:1\n      Step panicked. Captured output: Result mismatch (in order): Value mismatch at row 0 column 'b': expected Int(1), got Null\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -732,8 +729,7 @@
             "keyword": "Scenario ",
             "name": "[1] Calling the same STRING procedure twice using the same outputs in each call",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/call/Call6.feature:47:5\n      Matched: crates/uni-tck/src/steps/then.rs:37:1\n      Step panicked. Captured output: Result mismatch (in order): Value mismatch at row 0 column 'c': expected Int(3), got Null\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -5920,7 +5916,7 @@
             "name": "[4] Matching longer variable length paths",
             "result": {
               "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/match/Match4.feature:111:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Result mismatch (any order): Row count mismatch: expected 1, got 17\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
+              "error_message": "Step failed:\n      Defined: tck/features/clauses/match/Match4.feature:111:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Result mismatch (any order): Row count mismatch: expected 1, got 15\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
             }
           }
         ]
@@ -6593,8 +6589,7 @@
             "keyword": "Scenario ",
             "name": "[12] Matching path with multiple bidirectional relationships",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/match/Match6.feature:230:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [(\"p\", Some(Null))]. Expected: [{\"p\": Path(Path { nodes: [Node { vid: Vid(0), labels: [\"A\"], properties: {} }, Node { vid: Vid(0), labels: [\"B\"], properties: {} }, Node { vid: Vid(0), labels: [\"A\"], properties: {} }], edges: [Edge { eid: Eid(0), edge_type: \"T2\", src: Vid(0), dst: Vid(0), properties: {} }, Edge { eid: Eid(0), edge_type: \"T1\", src: Vid(0), dst: Vid(0), properties: {} }] })}, {\"p\": Path(Path { nodes: [Node { vid: Vid(0), labels: [\"A\"], properties: {} }, Node { vid: Vid(0), labels: [\"B\"], properties: {} }, Node { vid: Vid(0), labels: [\"A\"], properties: {} }], edges: [Edge { eid: Eid(0), edge_type: \"T1\", src: Vid(0), dst: Vid(0), properties: {} }, Edge { eid: Eid(0), edge_type: \"T2\", src: Vid(0), dst: Vid(0), properties: {} }] })}, {\"p\": Path(Path { nodes: [Node { vid: Vid(0), labels: [\"B\"], properties: {} }, Node { vid: Vid(0), labels: [\"A\"], properties: {} }, Node { vid: Vid(0), labels: [\"B\"], properties: {} }], edges: [Edge { eid: Eid(0), edge_type: \"T1\", src: Vid(0), dst: Vid(0), properties: {} }, Edge { eid: Eid(0), edge_type: \"T2\", src: Vid(0), dst: Vid(0), properties: {} }] })}, {\"p\": Path(Path { nodes: [Node { vid: Vid(0), labels: [\"B\"], properties: {} }, Node { vid: Vid(0), labels: [\"A\"], properties: {} }, Node { vid: Vid(0), labels: [\"B\"], properties: {} }], edges: [Edge { eid: Eid(0), edge_type: \"T2\", src: Vid(0), dst: Vid(0), properties: {} }, Edge { eid: Eid(0), edge_type: \"T1\", src: Vid(0), dst: Vid(0), properties: {} }] })}]\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -6608,8 +6603,7 @@
             "keyword": "Scenario ",
             "name": "[13] Matching path with both directions should respect other directions",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/match/Match6.feature:251:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [(\"p\", Some(Null))]. Expected: [{\"p\": Path(Path { nodes: [Node { vid: Vid(0), labels: [\"A\"], properties: {} }, Node { vid: Vid(0), labels: [\"B\"], properties: {} }, Node { vid: Vid(0), labels: [\"A\"], properties: {} }], edges: [Edge { eid: Eid(0), edge_type: \"T2\", src: Vid(0), dst: Vid(0), properties: {} }, Edge { eid: Eid(0), edge_type: \"T1\", src: Vid(0), dst: Vid(0), properties: {} }] })}, {\"p\": Path(Path { nodes: [Node { vid: Vid(0), labels: [\"B\"], properties: {} }, Node { vid: Vid(0), labels: [\"A\"], properties: {} }, Node { vid: Vid(0), labels: [\"B\"], properties: {} }], edges: [Edge { eid: Eid(0), edge_type: \"T1\", src: Vid(0), dst: Vid(0), properties: {} }, Edge { eid: Eid(0), edge_type: \"T2\", src: Vid(0), dst: Vid(0), properties: {} }] })}]\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -6623,8 +6617,7 @@
             "keyword": "Scenario ",
             "name": "[14] Named path with undirected fixed variable length pattern",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/match/Match6.feature:273:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [(\"topRoute\", Some(Path(Path { nodes: [Node { vid: Vid(2), labels: [], properties: {} }, Node { vid: Vid(3), labels: [], properties: {} }, Node { vid: Vid(2), labels: [], properties: {} }, Node { vid: Vid(1), labels: [\"End\"], properties: {} }], edges: [Edge { eid: Eid(4), edge_type: \"CONNECTED_TO\", src: Vid(2), dst: Vid(3), properties: {} }, Edge { eid: Eid(3), edge_type: \"CONNECTED_TO\", src: Vid(3), dst: Vid(2), properties: {} }, Edge { eid: Eid(1), edge_type: \"CONNECTED_TO\", src: Vid(2), dst: Vid(1), properties: {} }] })))]. Expected: [{\"topRoute\": Path(Path { nodes: [Node { vid: Vid(0), labels: [\"Start\"], properties: {} }, Node { vid: Vid(0), labels: [], properties: {} }, Node { vid: Vid(0), labels: [], properties: {} }, Node { vid: Vid(0), labels: [], properties: {} }, Node { vid: Vid(0), labels: [\"End\"], properties: {} }], edges: [Edge { eid: Eid(0), edge_type: \"CONNECTED_TO\", src: Vid(0), dst: Vid(0), properties: {} }, Edge { eid: Eid(0), edge_type: \"CONNECTED_TO\", src: Vid(0), dst: Vid(0), properties: {} }, Edge { eid: Eid(0), edge_type: \"CONNECTED_TO\", src: Vid(0), dst: Vid(0), properties: {} }, Edge { eid: Eid(0), edge_type: \"CONNECTED_TO\", src: Vid(0), dst: Vid(0), properties: {} }] })}, {\"topRoute\": Path(Path { nodes: [Node { vid: Vid(0), labels: [\"Start\"], properties: {} }, Node { vid: Vid(0), labels: [], properties: {} }, Node { vid: Vid(0), labels: [], properties: {} }, Node { vid: Vid(0), labels: [], properties: {} }, Node { vid: Vid(0), labels: [\"End\"], properties: {} }], edges: [Edge { eid: Eid(0), edge_type: \"CONNECTED_TO\", src: Vid(0), dst: Vid(0), properties: {} }, Edge { eid: Eid(0), edge_type: \"CONNECTED_TO\", src: Vid(0), dst: Vid(0), properties: {} }, Edge { eid: Eid(0), edge_type: \"CONNECTED_TO\", src: V..."
+              "status": "passed"
             }
           }
         ]
@@ -6666,8 +6659,7 @@
             "keyword": "Scenario ",
             "name": "[17] Return a named var length path of length zero",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/match/Match6.feature:325:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 2. Actual values: [(\"p\", Some(Path(Path { nodes: [Node { vid: Vid(0), labels: [\"A\"], properties: {\"name\": String(\"A\")} }, Node { vid: Vid(1), labels: [\"B\"], properties: {\"name\": String(\"B\")} }], edges: [Edge { eid: Eid(0), edge_type: \"KNOWS\", src: Vid(0), dst: Vid(1), properties: {} }] })))]. Expected: [{\"p\": Path(Path { nodes: [Node { vid: Vid(0), labels: [\"A\"], properties: {\"name\": String(\"A\")} }, Node { vid: Vid(0), labels: [\"B\"], properties: {\"name\": String(\"B\")} }, Node { vid: Vid(0), labels: [\"C\"], properties: {\"name\": String(\"C\")} }], edges: [Edge { eid: Eid(0), edge_type: \"KNOWS\", src: Vid(0), dst: Vid(0), properties: {} }, Edge { eid: Eid(0), edge_type: \"FRIEND\", src: Vid(0), dst: Vid(0), properties: {} }] })}]\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -8031,8 +8023,7 @@
             "keyword": "Scenario ",
             "name": "[17] Optionally matching named paths - existing result",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/match/Match7.feature:361:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [(\"x\", Some(Node(Node { vid: Vid(1), labels: [], properties: {\"name\": String(\"B\")} }))), (\"p\", Some(Null))]. Expected: [{\"x\": Node(Node { vid: Vid(0), labels: [], properties: {\"name\": String(\"B\")} }), \"p\": Path(Path { nodes: [Node { vid: Vid(0), labels: [], properties: {\"name\": String(\"A\")} }, Node { vid: Vid(0), labels: [], properties: {\"name\": String(\"B\")} }], edges: [Edge { eid: Eid(0), edge_type: \"X\", src: Vid(0), dst: Vid(0), properties: {} }] })}, {\"x\": Node(Node { vid: Vid(0), labels: [], properties: {\"name\": String(\"C\")} }), \"p\": Null}]\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -45134,8 +45125,7 @@
             "keyword": "Scenario ",
             "name": "[12] Should compute durations with no difference",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/expressions/temporal/Temporal10.feature:304:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Query returned error instead of result: Query { message: \"Arrow error: Invalid argument error: column types must match schema types, expected Int64 but found Interval(MonthDayNano) at column index 0\", query: Some(\"\\nRETURN duration.inSeconds(localtime(), localtime()) AS duration\\n\") }\n[Summary]\n1 feature\n1 scenario (1 failed)\n3 steps (2 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -45149,8 +45139,7 @@
             "keyword": "Scenario ",
             "name": "[12] Should compute durations with no difference",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/expressions/temporal/Temporal10.feature:304:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Query returned error instead of result: Query { message: \"Arrow error: Invalid argument error: column types must match schema types, expected Int64 but found Interval(MonthDayNano) at column index 0\", query: Some(\"\\nRETURN duration.inSeconds(time(), time()) AS duration\\n\") }\n[Summary]\n1 feature\n1 scenario (1 failed)\n3 steps (2 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -45164,8 +45153,7 @@
             "keyword": "Scenario ",
             "name": "[12] Should compute durations with no difference",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/expressions/temporal/Temporal10.feature:304:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Query returned error instead of result: Query { message: \"Arrow error: Invalid argument error: column types must match schema types, expected Int64 but found Interval(MonthDayNano) at column index 0\", query: Some(\"\\nRETURN duration.inSeconds(date(), date()) AS duration\\n\") }\n[Summary]\n1 feature\n1 scenario (1 failed)\n3 steps (2 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -45179,8 +45167,7 @@
             "keyword": "Scenario ",
             "name": "[12] Should compute durations with no difference",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/expressions/temporal/Temporal10.feature:304:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Query returned error instead of result: Query { message: \"Arrow error: Invalid argument error: column types must match schema types, expected Int64 but found Interval(MonthDayNano) at column index 0\", query: Some(\"\\nRETURN duration.inSeconds(localdatetime(), localdatetime()) AS duration\\n\") }\n[Summary]\n1 feature\n1 scenario (1 failed)\n3 steps (2 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -45194,8 +45181,7 @@
             "keyword": "Scenario ",
             "name": "[12] Should compute durations with no difference",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/expressions/temporal/Temporal10.feature:304:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Query returned error instead of result: Query { message: \"Arrow error: Invalid argument error: column types must match schema types, expected Int64 but found Interval(MonthDayNano) at column index 0\", query: Some(\"\\nRETURN duration.inSeconds(datetime(), datetime()) AS duration\\n\") }\n[Summary]\n1 feature\n1 scenario (1 failed)\n3 steps (2 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -49210,7 +49196,7 @@
             "name": "[6] Should provide accessors for date time",
             "result": {
               "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/expressions/temporal/Temporal5.feature:133:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [(\"d.offsetMinutes\", Some(Int(60))), (\"d.epochSeconds\", Some(Int(469024274))), (\"d.quarter\", Some(Int(4))), (\"d.weekYear\", Some(Int(1984))), (\"d.weekDay\", Some(Int(7))), (\"d.second\", Some(Int(14))), (\"d.week\", Some(Int(45))), (\"d.nanosecond\", Some(Int(645876123))), (\"d.offsetSeconds\", Some(Int(3600))), (\"d.ordinalDay\", Some(Int(316))), (\"d.millisecond\", Some(Int(645))), (\"d.offset\", Some(String(\"+01:00\"))), (\"d.microsecond\", Some(Int(645876))), (\"d.hour\", Some(Int(12))), (\"d.dayOfQuarter\", Some(Int(42))), (\"d.year\", Some(Int(1984))), (\"d.minute\", Some(Int(31))), (\"d.day\", Some(Int(11))), (\"d.month\", Some(Int(11))), (\"d.epochMillis\", Some(Int(469024274645))), (\"d.timezone\", Some(String(\"Europe/Stockholm\")))]. Expected: [{\"d.offsetMinutes\": Int(60), \"d.epochSeconds\": Int(469020674), \"d.quarter\": Int(4), \"d.weekYear\": Int(1984), \"d.weekDay\": Int(7), \"d.second\": Int(14), \"d.week\": Int(45), \"d.nanosecond\": Int(645876123), \"d.offsetSeconds\": Int(3600), \"d.ordinalDay\": Int(316), \"d.millisecond\": Int(645), \"d.offset\": String(\"+01:00\"), \"d.microsecond\": Int(645876), \"d.hour\": Int(12), \"d.dayOfQuarter\": Int(42), \"d.year\": Int(1984), \"d.minute\": Int(31), \"d.day\": Int(11), \"d.month\": Int(11), \"d.epochMillis\": Int(469020674645), \"d.timezone\": String(\"Europe/Stockholm\")}]\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
+              "error_message": "Step failed:\n      Defined: tck/features/expressions/temporal/Temporal5.feature:133:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [(\"d.epochMillis\", Some(Int(469024274645))), (\"d.epochSeconds\", Some(Int(469024274))), (\"d.ordinalDay\", Some(Int(316))), (\"d.offsetSeconds\", Some(Int(3600))), (\"d.day\", Some(Int(11))), (\"d.minute\", Some(Int(31))), (\"d.second\", Some(Int(14))), (\"d.microsecond\", Some(Int(645876))), (\"d.nanosecond\", Some(Int(645876123))), (\"d.offset\", Some(String(\"+01:00\"))), (\"d.weekYear\", Some(Int(1984))), (\"d.millisecond\", Some(Int(645))), (\"d.offsetMinutes\", Some(Int(60))), (\"d.quarter\", Some(Int(4))), (\"d.timezone\", Some(String(\"Europe/Stockholm\"))), (\"d.dayOfQuarter\", Some(Int(42))), (\"d.hour\", Some(Int(12))), (\"d.weekDay\", Some(Int(7))), (\"d.week\", Some(Int(45))), (\"d.month\", Some(Int(11))), (\"d.year\", Some(Int(1984)))]. Expected: [{\"d.epochMillis\": Int(469020674645), \"d.epochSeconds\": Int(469020674), \"d.ordinalDay\": Int(316), \"d.offsetSeconds\": Int(3600), \"d.day\": Int(11), \"d.minute\": Int(31), \"d.second\": Int(14), \"d.microsecond\": Int(645876), \"d.nanosecond\": Int(645876123), \"d.offset\": String(\"+01:00\"), \"d.weekYear\": Int(1984), \"d.millisecond\": Int(645), \"d.offsetMinutes\": Int(60), \"d.quarter\": Int(4), \"d.timezone\": String(\"Europe/Stockholm\"), \"d.dayOfQuarter\": Int(42), \"d.hour\": Int(12), \"d.weekDay\": Int(7), \"d.week\": Int(45), \"d.month\": Int(11), \"d.year\": Int(1984)}]\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
             }
           }
         ]
