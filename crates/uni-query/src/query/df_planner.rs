@@ -191,6 +191,10 @@ impl HybridPhysicalPlanner {
         schema_name: &str,
         all_properties: &HashMap<String, HashSet<String>>,
     ) -> Vec<String> {
+        // System columns managed by the engine — never treat as user properties.
+        const SYSTEM_COLUMNS: &[&str] =
+            &["_vid", "_labels", "_eid", "_src_vid", "_dst_vid", "_type"];
+
         all_properties
             .get(variable)
             .map(|props| {
@@ -221,11 +225,15 @@ impl HybridPhysicalPlanner {
                             combined.push(p);
                         }
                     }
+                    combined.retain(|p| !SYSTEM_COLUMNS.contains(&p.as_str()));
                     combined.sort();
                     combined
                 } else {
-                    let mut explicit_props: Vec<String> =
-                        props.iter().filter(|p| *p != "*").cloned().collect();
+                    let mut explicit_props: Vec<String> = props
+                        .iter()
+                        .filter(|p| *p != "*" && !SYSTEM_COLUMNS.contains(&p.as_str()))
+                        .cloned()
+                        .collect();
                     explicit_props.sort();
                     explicit_props
                 }
@@ -427,6 +435,23 @@ impl HybridPhysicalPlanner {
         let all_properties = collect_properties_from_plan(logical);
 
         // Delegate to internal planning with properties context
+        self.plan_internal(logical, &all_properties)
+    }
+
+    /// Plan a LogicalPlan with additional property requirements.
+    ///
+    /// Merges `extra_properties` into the auto-collected properties from the plan tree.
+    /// Used by MERGE execution to ensure structural projections are applied for
+    /// variables that need full node/edge Maps in the output.
+    pub fn plan_with_properties(
+        &self,
+        logical: &LogicalPlan,
+        extra_properties: HashMap<String, HashSet<String>>,
+    ) -> Result<Arc<dyn ExecutionPlan>> {
+        let mut all_properties = collect_properties_from_plan(logical);
+        for (var, props) in extra_properties {
+            all_properties.entry(var).or_default().extend(props);
+        }
         self.plan_internal(logical, &all_properties)
     }
 
@@ -894,10 +919,6 @@ impl HybridPhysicalPlanner {
                 self.plan_apply(input, subquery, None, all_properties)
             }
 
-            LogicalPlan::LoadCsv { .. } => {
-                Err(anyhow!("LOAD CSV not yet supported in DataFusion engine"))
-            }
-
             LogicalPlan::ExtIdLookup {
                 variable,
                 ext_id,
@@ -1275,6 +1296,12 @@ impl HybridPhysicalPlanner {
             None, // Filter will be applied as FilterExec on top
         ));
 
+        // Apply filter BEFORE structural projection so that the schema is
+        // unambiguous (no duplicate `variable._vid` from both flat column and
+        // struct field). This prevents "Ambiguous reference" errors when
+        // comparing `_vid` (UInt64) against Int64 literals in type coercion.
+        scan_plan = self.apply_scan_filter(scan_plan, variable, filter, Some(label_name))?;
+
         // If we need the full object (structural access), add a Struct projection
         let var_props = all_properties.get(variable);
         if var_props.is_some_and(|p| p.contains("*")) {
@@ -1288,9 +1315,7 @@ impl HybridPhysicalPlanner {
             scan_plan = self.add_structural_projection(scan_plan, variable, &struct_props)?;
         }
 
-        let filtered_plan =
-            self.apply_scan_filter(scan_plan, variable, filter, Some(label_name))?;
-        self.wrap_optional(filtered_plan, optional)
+        self.wrap_optional(scan_plan, optional)
     }
 
     /// Plan a schemaless vertex scan using the main vertices table.
@@ -1357,24 +1382,95 @@ impl HybridPhysicalPlanner {
         (properties, need_full)
     }
 
-    fn plan_schemaless_scan(
+    /// Collect edge columns (`._eid` and `__eid_to_*`) from a schema, filtered to the
+    /// current MATCH scope. Optionally excludes a specific column (for rebound edge patterns).
+    fn collect_used_edge_columns(
+        schema: &SchemaRef,
+        scope_match_variables: &HashSet<String>,
+        exclude_col: Option<&str>,
+    ) -> Vec<String> {
+        schema
+            .fields()
+            .iter()
+            .filter_map(|f| {
+                let name = f.name();
+                if exclude_col.is_some_and(|exc| name == exc) {
+                    None
+                } else if name.ends_with("._eid") {
+                    let var_name = name.trim_end_matches("._eid");
+                    scope_match_variables
+                        .contains(var_name)
+                        .then(|| name.clone())
+                } else if name.starts_with("__eid_to_") {
+                    let var_name = name.trim_start_matches("__eid_to_");
+                    scope_match_variables
+                        .contains(var_name)
+                        .then(|| name.clone())
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    /// Conditionally add edge structural projection when the edge variable has wildcard access.
+    /// Skips if `skip_if_vlp` is true (VLP step variables are already `List<Edge>`).
+    fn maybe_add_edge_structural_projection(
         &self,
-        label_name: &str,
+        plan: Arc<dyn ExecutionPlan>,
+        step_variable: Option<&str>,
+        source_variable: &str,
+        target_variable: &str,
+        all_properties: &HashMap<String, HashSet<String>>,
+        skip_if_vlp: bool,
+    ) -> Result<Arc<dyn ExecutionPlan>> {
+        if skip_if_vlp {
+            return Ok(plan);
+        }
+        let Some(edge_var) = step_variable else {
+            return Ok(plan);
+        };
+        if !all_properties
+            .get(edge_var)
+            .is_some_and(|p| p.contains("*"))
+        {
+            return Ok(plan);
+        }
+        // Derive edge properties from the plan's output schema
+        let prefix = format!("{}.", edge_var);
+        let edge_props: Vec<String> = plan
+            .schema()
+            .fields()
+            .iter()
+            .filter_map(|f| {
+                f.name()
+                    .strip_prefix(&prefix)
+                    .filter(|prop| !prop.starts_with('_') && *prop != "overflow_json")
+                    .map(|prop| prop.to_string())
+            })
+            .collect();
+        self.add_edge_structural_projection(
+            plan,
+            edge_var,
+            &edge_props,
+            source_variable,
+            target_variable,
+        )
+    }
+
+    /// Apply filter, optional structural projection, and optional wrapping to a schemaless scan.
+    fn finalize_schemaless_scan(
+        &self,
+        scan_plan: Arc<dyn ExecutionPlan>,
         variable: &str,
         filter: Option<&Expr>,
         optional: bool,
-        all_properties: &HashMap<String, HashSet<String>>,
+        properties: &[String],
+        need_full: bool,
     ) -> Result<Arc<dyn ExecutionPlan>> {
-        let (properties, need_full) = Self::resolve_schemaless_properties(variable, all_properties);
-
-        let mut scan_plan: Arc<dyn ExecutionPlan> =
-            Arc::new(GraphScanExec::new_schemaless_vertex_scan(
-                self.graph_ctx.clone(),
-                label_name.to_string(),
-                variable.to_string(),
-                properties.clone(),
-                None, // Filter will be applied as FilterExec on top
-            ));
+        // Apply filter BEFORE structural projection to avoid ambiguous column
+        // references (flat `var._vid` vs struct `var._vid` field).
+        let mut plan = self.apply_scan_filter(scan_plan, variable, filter, None)?;
 
         // If we need the full object (structural access), build a struct with _labels + properties.
         // This enables labels(n)/keys(n) UDFs which expect a Struct column with a _labels field.
@@ -1384,11 +1480,37 @@ impl HybridPhysicalPlanner {
             // property names at runtime from the CypherValue blob.
             let struct_props: Vec<String> =
                 properties.iter().filter(|p| *p != "*").cloned().collect();
-            scan_plan = self.add_structural_projection(scan_plan, variable, &struct_props)?;
+            plan = self.add_structural_projection(plan, variable, &struct_props)?;
         }
 
-        let filtered_plan = self.apply_scan_filter(scan_plan, variable, filter, None)?;
-        self.wrap_optional(filtered_plan, optional)
+        self.wrap_optional(plan, optional)
+    }
+
+    fn plan_schemaless_scan(
+        &self,
+        label_name: &str,
+        variable: &str,
+        filter: Option<&Expr>,
+        optional: bool,
+        all_properties: &HashMap<String, HashSet<String>>,
+    ) -> Result<Arc<dyn ExecutionPlan>> {
+        let (properties, need_full) = Self::resolve_schemaless_properties(variable, all_properties);
+        let scan_plan: Arc<dyn ExecutionPlan> =
+            Arc::new(GraphScanExec::new_schemaless_vertex_scan(
+                self.graph_ctx.clone(),
+                label_name.to_string(),
+                variable.to_string(),
+                properties.clone(),
+                None,
+            ));
+        self.finalize_schemaless_scan(
+            scan_plan,
+            variable,
+            filter,
+            optional,
+            &properties,
+            need_full,
+        )
     }
 
     /// Plan a multi-label vertex scan using the main vertices table.
@@ -1403,8 +1525,7 @@ impl HybridPhysicalPlanner {
         all_properties: &HashMap<String, HashSet<String>>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
         let (properties, need_full) = Self::resolve_schemaless_properties(variable, all_properties);
-
-        let mut scan_plan: Arc<dyn ExecutionPlan> =
+        let scan_plan: Arc<dyn ExecutionPlan> =
             Arc::new(GraphScanExec::new_multi_label_vertex_scan(
                 self.graph_ctx.clone(),
                 labels.to_vec(),
@@ -1412,26 +1533,19 @@ impl HybridPhysicalPlanner {
                 properties.clone(),
                 None,
             ));
-
-        // If we need the full object (structural access), build a struct with _labels + properties.
-        // This enables labels(n)/keys(n) UDFs which expect a Struct column with a _labels field.
-        if need_full {
-            // Filter out "*" (wildcard marker) from struct_props.
-            // Keep "_all_props" so that keys()/properties() UDFs can extract
-            // property names at runtime from the CypherValue blob.
-            let struct_props: Vec<String> =
-                properties.iter().filter(|p| *p != "*").cloned().collect();
-            scan_plan = self.add_structural_projection(scan_plan, variable, &struct_props)?;
-        }
-
-        let filtered_plan = self.apply_scan_filter(scan_plan, variable, filter, None)?;
-        self.wrap_optional(filtered_plan, optional)
+        self.finalize_schemaless_scan(
+            scan_plan,
+            variable,
+            filter,
+            optional,
+            &properties,
+            need_full,
+        )
     }
 
     /// Plan a scan of all vertices regardless of label.
     ///
     /// This is used for `MATCH (n)` without a label filter.
-    /// Uses the schemaless scan with an empty label to signal "scan all".
     fn plan_scan_all(
         &self,
         variable: &str,
@@ -1440,28 +1554,20 @@ impl HybridPhysicalPlanner {
         all_properties: &HashMap<String, HashSet<String>>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
         let (properties, need_full) = Self::resolve_schemaless_properties(variable, all_properties);
-
-        let mut scan_plan: Arc<dyn ExecutionPlan> =
-            Arc::new(GraphScanExec::new_schemaless_all_scan(
-                self.graph_ctx.clone(),
-                variable.to_string(),
-                properties.clone(),
-                None, // Filter will be applied as FilterExec on top
-            ));
-
-        // If we need the full object (structural access), build a struct with _labels + properties.
-        // This enables labels(n)/keys(n) UDFs which expect a Struct column with a _labels field.
-        if need_full {
-            // Filter out "*" (wildcard marker) from struct_props.
-            // Keep "_all_props" so that keys()/properties() UDFs can extract
-            // property names at runtime from the CypherValue blob.
-            let struct_props: Vec<String> =
-                properties.iter().filter(|p| *p != "*").cloned().collect();
-            scan_plan = self.add_structural_projection(scan_plan, variable, &struct_props)?;
-        }
-
-        let filtered_plan = self.apply_scan_filter(scan_plan, variable, filter, None)?;
-        self.wrap_optional(filtered_plan, optional)
+        let scan_plan: Arc<dyn ExecutionPlan> = Arc::new(GraphScanExec::new_schemaless_all_scan(
+            self.graph_ctx.clone(),
+            variable.to_string(),
+            properties.clone(),
+            None,
+        ));
+        self.finalize_schemaless_scan(
+            scan_plan,
+            variable,
+            filter,
+            optional,
+            &properties,
+            need_full,
+        )
     }
 
     /// Plan a graph traversal.
@@ -1677,38 +1783,11 @@ impl HybridPhysicalPlanner {
                 .and_then(|sv| sv.strip_prefix("__rebound_"))
                 .map(|bound| format!("{}._eid", bound));
 
-            let used_edge_columns: Vec<String> = input_plan
-                .schema()
-                .fields()
-                .iter()
-                .filter_map(|f| {
-                    let name = f.name();
-                    if rebound_bound_edge_col
-                        .as_ref()
-                        .is_some_and(|bound_col| name == bound_col)
-                    {
-                        None
-                    } else if name.ends_with("._eid") {
-                        // Only include if the edge variable is in current MATCH scope
-                        let var_name = name.trim_end_matches("._eid");
-                        if scope_match_variables.contains(var_name) {
-                            Some(name.clone())
-                        } else {
-                            None
-                        }
-                    } else if name.starts_with("__eid_to_") {
-                        // Internal tracking columns - include only if associated variable is in scope
-                        let var_name = name.trim_start_matches("__eid_to_");
-                        if scope_match_variables.contains(var_name) {
-                            Some(name.clone())
-                        } else {
-                            None
-                        }
-                    } else {
-                        None
-                    }
-                })
-                .collect();
+            let used_edge_columns = Self::collect_used_edge_columns(
+                &input_plan.schema(),
+                scope_match_variables,
+                rebound_bound_edge_col.as_deref(),
+            );
 
             Arc::new(GraphTraverseExec::new(
                 input_plan,
@@ -1817,35 +1896,14 @@ impl HybridPhysicalPlanner {
 
         // Structural projection for edge variable
         // Only for single-hop traversals; VLP step variables are already List<Edge>
-        if let Some(edge_var) = step_variable
-            && !is_variable_length
-            && all_properties
-                .get(edge_var)
-                .is_some_and(|p| p.contains("*"))
-        {
-            // Derive edge properties from the traverse plan's output schema
-            // instead of from all_properties (which may only contain {"*"}).
-            // The traverse exec already materialized columns like `r.since`.
-            let prefix = format!("{}.", edge_var);
-            let edge_props: Vec<String> = traverse_plan
-                .schema()
-                .fields()
-                .iter()
-                .filter_map(|f| {
-                    f.name()
-                        .strip_prefix(&prefix)
-                        .filter(|prop| !prop.starts_with('_') && *prop != "overflow_json")
-                        .map(|prop| prop.to_string())
-                })
-                .collect();
-            traverse_plan = self.add_edge_structural_projection(
-                traverse_plan,
-                edge_var,
-                &edge_props,
-                source_variable,
-                target_variable,
-            )?;
-        }
+        traverse_plan = self.maybe_add_edge_structural_projection(
+            traverse_plan,
+            step_variable,
+            source_variable,
+            target_variable,
+            all_properties,
+            is_variable_length,
+        )?;
 
         // Apply target filter if present
         if let Some(filter_expr) = target_filter {
@@ -1970,33 +2028,8 @@ impl HybridPhysicalPlanner {
         }
 
         // Compute used_edge_columns for relationship uniqueness (same logic as Traverse).
-        // Only include edge columns whose associated variable is in the current MATCH scope.
-        // This prevents relationship uniqueness from being enforced across MATCH clauses.
-        let used_edge_columns: Vec<String> = input_plan
-            .schema()
-            .fields()
-            .iter()
-            .filter_map(|f| {
-                let name = f.name();
-                if name.ends_with("._eid") {
-                    let var_name = name.trim_end_matches("._eid");
-                    if scope_match_variables.contains(var_name) {
-                        Some(name.clone())
-                    } else {
-                        None
-                    }
-                } else if name.starts_with("__eid_to_") {
-                    let var_name = name.trim_start_matches("__eid_to_");
-                    if scope_match_variables.contains(var_name) {
-                        Some(name.clone())
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                }
-            })
-            .collect();
+        let used_edge_columns =
+            Self::collect_used_edge_columns(&input_plan.schema(), scope_match_variables, None);
 
         // Create the schemaless traversal execution plan
         let traverse_plan: Arc<dyn ExecutionPlan> = Arc::new(GraphTraverseMainExec::new(
@@ -2021,32 +2054,14 @@ impl HybridPhysicalPlanner {
             self.add_wildcard_structural_projection(result_plan, target_variable, all_properties)?;
 
         // Structural projection for edge variable (type(r), RETURN r, etc.)
-        if let Some(edge_var) = step_variable
-            && all_properties
-                .get(edge_var)
-                .is_some_and(|p| p.contains("*"))
-        {
-            // Derive edge properties from the plan's output schema
-            let prefix = format!("{}.", edge_var);
-            let actual_edge_props: Vec<String> = result_plan
-                .schema()
-                .fields()
-                .iter()
-                .filter_map(|f| {
-                    f.name()
-                        .strip_prefix(&prefix)
-                        .filter(|prop| !prop.starts_with('_') && *prop != "overflow_json")
-                        .map(|prop| prop.to_string())
-                })
-                .collect();
-            result_plan = self.add_edge_structural_projection(
-                result_plan,
-                edge_var,
-                &actual_edge_props,
-                source_variable,
-                target_variable,
-            )?;
-        }
+        result_plan = self.maybe_add_edge_structural_projection(
+            result_plan,
+            step_variable,
+            source_variable,
+            target_variable,
+            all_properties,
+            false, // not variable-length
+        )?;
 
         Ok(result_plan)
     }
@@ -3883,7 +3898,6 @@ fn collect_variable_kinds(plan: &LogicalPlan, kinds: &mut HashMap<String, Variab
         }
         // Leaf nodes with no variables or not applicable
         LogicalPlan::Empty
-        | LogicalPlan::LoadCsv { .. }
         | LogicalPlan::CreateVectorIndex { .. }
         | LogicalPlan::CreateFullTextIndex { .. }
         | LogicalPlan::CreateScalarIndex { .. }

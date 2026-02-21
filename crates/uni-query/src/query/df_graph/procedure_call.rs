@@ -49,6 +49,9 @@ pub(crate) fn map_yield_to_canonical(yield_name: &str) -> String {
         "vid" | "_vid" => "vid",
         "distance" | "dist" | "_distance" => "distance",
         "score" | "_score" => "score",
+        "vector_score" => "vector_score",
+        "fts_score" => "fts_score",
+        "raw_score" => "raw_score",
         _ => "node",
     }
     .to_string()
@@ -238,7 +241,7 @@ impl GraphProcedureCallExec {
                         "distance" => {
                             fields.push(Field::new(output_name, DataType::Float64, true));
                         }
-                        "score" => {
+                        "score" | "vector_score" | "fts_score" | "raw_score" => {
                             fields.push(Field::new(output_name, DataType::Float32, true));
                         }
                         "vid" => {
@@ -539,6 +542,9 @@ async fn execute_procedure(
         "uni.fts.query" => {
             execute_fts_query(graph_ctx, args, yield_items, target_properties, schema).await
         }
+        "uni.search" => {
+            execute_hybrid_search(graph_ctx, args, yield_items, target_properties, schema).await
+        }
         name if name.starts_with("uni.algo.") => {
             execute_algo_procedure(graph_ctx, name, args, yield_items, schema).await
         }
@@ -644,60 +650,40 @@ async fn execute_schema_indexes(
 
     let mut rows: Vec<HashMap<String, Value>> = Vec::new();
     for idx in uni_schema.indexes {
-        let mut row = HashMap::new();
-        row.insert("state".to_string(), Value::String("ONLINE".to_string()));
+        use uni_common::core::schema::IndexDefinition;
 
-        match idx {
-            uni_common::core::schema::IndexDefinition::Vector(v) => {
-                row.insert("name".to_string(), Value::String(v.name));
-                row.insert("type".to_string(), Value::String("VECTOR".to_string()));
-                row.insert("label".to_string(), Value::String(v.label));
-                row.insert(
-                    "properties".to_string(),
-                    Value::String(serde_json::to_string(&[&v.property]).unwrap_or_default()),
-                );
-            }
-            uni_common::core::schema::IndexDefinition::FullText(f) => {
-                row.insert("name".to_string(), Value::String(f.name));
-                row.insert("type".to_string(), Value::String("FULLTEXT".to_string()));
-                row.insert("label".to_string(), Value::String(f.label));
-                row.insert(
-                    "properties".to_string(),
-                    Value::String(serde_json::to_string(&f.properties).unwrap_or_default()),
-                );
-            }
-            uni_common::core::schema::IndexDefinition::Scalar(s) => {
-                row.insert("name".to_string(), Value::String(s.name));
-                row.insert("type".to_string(), Value::String("SCALAR".to_string()));
-                row.insert("label".to_string(), Value::String(s.label));
-                row.insert(
-                    "properties".to_string(),
-                    Value::String(serde_json::to_string(&s.properties).unwrap_or_default()),
-                );
-            }
-            uni_common::core::schema::IndexDefinition::JsonFullText(j) => {
-                row.insert("name".to_string(), Value::String(j.name));
-                row.insert("type".to_string(), Value::String("JSON_FTS".to_string()));
-                row.insert("label".to_string(), Value::String(j.label));
-                row.insert(
-                    "properties".to_string(),
-                    Value::String(serde_json::to_string(&[&j.column]).unwrap_or_default()),
-                );
-            }
-            uni_common::core::schema::IndexDefinition::Inverted(inv) => {
-                row.insert("name".to_string(), Value::String(inv.name));
-                row.insert("type".to_string(), Value::String("INVERTED".to_string()));
-                row.insert("label".to_string(), Value::String(inv.label));
-                row.insert(
-                    "properties".to_string(),
-                    Value::String(serde_json::to_string(&[&inv.property]).unwrap_or_default()),
-                );
-            }
-            _ => {
-                row.insert("name".to_string(), Value::String("UNKNOWN".to_string()));
-                row.insert("type".to_string(), Value::String("UNKNOWN".to_string()));
-            }
-        }
+        // Extract type name and properties JSON per variant
+        let (type_name, properties_json) = match &idx {
+            IndexDefinition::Vector(v) => (
+                "VECTOR",
+                serde_json::to_string(&[&v.property]).unwrap_or_default(),
+            ),
+            IndexDefinition::FullText(f) => (
+                "FULLTEXT",
+                serde_json::to_string(&f.properties).unwrap_or_default(),
+            ),
+            IndexDefinition::Scalar(s) => (
+                "SCALAR",
+                serde_json::to_string(&s.properties).unwrap_or_default(),
+            ),
+            IndexDefinition::JsonFullText(j) => (
+                "JSON_FTS",
+                serde_json::to_string(&[&j.column]).unwrap_or_default(),
+            ),
+            IndexDefinition::Inverted(inv) => (
+                "INVERTED",
+                serde_json::to_string(&[&inv.property]).unwrap_or_default(),
+            ),
+            _ => ("UNKNOWN", String::new()),
+        };
+
+        let row = HashMap::from([
+            ("state".to_string(), Value::String("ONLINE".to_string())),
+            ("name".to_string(), Value::String(idx.name().to_string())),
+            ("type".to_string(), Value::String(type_name.to_string())),
+            ("label".to_string(), Value::String(idx.label().to_string())),
+            ("properties".to_string(), Value::String(properties_json)),
+        ]);
         rows.push(row);
     }
 
@@ -765,15 +751,7 @@ async fn execute_schema_label_info(
     yield_items: &[(String, Option<String>)],
     schema: &SchemaRef,
 ) -> DFResult<Option<RecordBatch>> {
-    let label_name = args
-        .first()
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| {
-            datafusion::error::DataFusionError::Execution(
-                "uni.schema.labelInfo: first argument (label) must be a string".to_string(),
-            )
-        })?
-        .to_string();
+    let label_name = require_string_arg(args, 0, "uni.schema.labelInfo: first argument (label)")?;
 
     let uni_schema = graph_ctx.storage().schema_manager().schema();
 
@@ -826,6 +804,61 @@ async fn execute_schema_label_info(
     build_scalar_batch(&rows, yield_items, schema)
 }
 
+/// Build a typed Arrow column from an iterator of optional `Value`s.
+///
+/// Dispatches on `data_type` to build the appropriate Arrow array. For types
+/// not explicitly handled (Utf8 fallback), values are stringified.
+fn build_typed_column<'a>(
+    values: impl Iterator<Item = Option<&'a Value>>,
+    num_rows: usize,
+    data_type: &DataType,
+) -> ArrayRef {
+    match data_type {
+        DataType::Int64 => {
+            let mut builder = Int64Builder::with_capacity(num_rows);
+            for val in values {
+                match val.and_then(|v| v.as_i64()) {
+                    Some(i) => builder.append_value(i),
+                    None => builder.append_null(),
+                }
+            }
+            Arc::new(builder.finish())
+        }
+        DataType::Float64 => {
+            let mut builder = Float64Builder::with_capacity(num_rows);
+            for val in values {
+                match val.and_then(|v| v.as_f64()) {
+                    Some(f) => builder.append_value(f),
+                    None => builder.append_null(),
+                }
+            }
+            Arc::new(builder.finish())
+        }
+        DataType::Boolean => {
+            let mut builder = BooleanBuilder::with_capacity(num_rows);
+            for val in values {
+                match val.and_then(|v| v.as_bool()) {
+                    Some(b) => builder.append_value(b),
+                    None => builder.append_null(),
+                }
+            }
+            Arc::new(builder.finish())
+        }
+        _ => {
+            // Utf8 fallback: stringify values
+            let mut builder = StringBuilder::with_capacity(num_rows, num_rows * 32);
+            for val in values {
+                match val {
+                    Some(Value::String(s)) => builder.append_value(s),
+                    Some(v) => builder.append_value(format!("{v}")),
+                    None => builder.append_null(),
+                }
+            }
+            Arc::new(builder.finish())
+        }
+    }
+}
+
 /// Build a RecordBatch from scalar-valued rows for schema procedures.
 fn build_scalar_batch(
     rows: &[HashMap<String, Value>],
@@ -841,79 +874,8 @@ fn build_scalar_batch(
 
     for (idx, (name, _alias)) in yield_items.iter().enumerate() {
         let field = schema.field(idx);
-        match field.data_type() {
-            DataType::Utf8 => {
-                let mut builder = StringBuilder::with_capacity(num_rows, num_rows * 32);
-                for row in rows {
-                    if let Some(val) = row.get(name) {
-                        match val {
-                            Value::String(s) => builder.append_value(s),
-                            other => builder.append_value(format!("{}", other)),
-                        }
-                    } else {
-                        builder.append_null();
-                    }
-                }
-                columns.push(Arc::new(builder.finish()));
-            }
-            DataType::Int64 => {
-                let mut builder = Int64Builder::with_capacity(num_rows);
-                for row in rows {
-                    if let Some(val) = row.get(name) {
-                        if let Some(i) = val.as_i64() {
-                            builder.append_value(i);
-                        } else {
-                            builder.append_null();
-                        }
-                    } else {
-                        builder.append_null();
-                    }
-                }
-                columns.push(Arc::new(builder.finish()));
-            }
-            DataType::Float64 => {
-                let mut builder = Float64Builder::with_capacity(num_rows);
-                for row in rows {
-                    if let Some(val) = row.get(name) {
-                        if let Some(f) = val.as_f64() {
-                            builder.append_value(f);
-                        } else {
-                            builder.append_null();
-                        }
-                    } else {
-                        builder.append_null();
-                    }
-                }
-                columns.push(Arc::new(builder.finish()));
-            }
-            DataType::Boolean => {
-                let mut builder = BooleanBuilder::with_capacity(num_rows);
-                for row in rows {
-                    if let Some(val) = row.get(name) {
-                        if let Some(b) = val.as_bool() {
-                            builder.append_value(b);
-                        } else {
-                            builder.append_null();
-                        }
-                    } else {
-                        builder.append_null();
-                    }
-                }
-                columns.push(Arc::new(builder.finish()));
-            }
-            _ => {
-                // Fallback: convert everything to string
-                let mut builder = StringBuilder::with_capacity(num_rows, num_rows * 32);
-                for row in rows {
-                    if let Some(val) = row.get(name) {
-                        builder.append_value(format!("{}", val));
-                    } else {
-                        builder.append_null();
-                    }
-                }
-                columns.push(Arc::new(builder.finish()));
-            }
-        }
+        let values = rows.iter().map(|row| row.get(name));
+        columns.push(build_typed_column(values, num_rows, field.data_type()));
     }
 
     let batch = RecordBatch::try_new(schema.clone(), columns)
@@ -976,6 +938,25 @@ async fn execute_algo_procedure(
     build_algo_batch(&rows, &signature, yield_items, schema)
 }
 
+/// Convert a `serde_json::Value` to a `uni_common::Value` for column building.
+fn json_to_value(jv: &serde_json::Value) -> Value {
+    match jv {
+        serde_json::Value::Null => Value::Null,
+        serde_json::Value::Bool(b) => Value::Bool(*b),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                Value::Int(i)
+            } else if let Some(f) = n.as_f64() {
+                Value::Float(f)
+            } else {
+                Value::Null
+            }
+        }
+        serde_json::Value::String(s) => Value::String(s.clone()),
+        other => Value::String(other.to_string()),
+    }
+}
+
 /// Build a RecordBatch from algorithm result rows.
 fn build_algo_batch(
     rows: &[uni_algo::algo::procedures::AlgoResultRow],
@@ -991,77 +972,23 @@ fn build_algo_batch(
     let mut columns: Vec<ArrayRef> = Vec::new();
 
     for (idx, (yield_name, _alias)) in yield_items.iter().enumerate() {
-        // Find the column index in the signature yields
         let sig_idx = signature
             .yields
             .iter()
             .position(|(n, _)| *n == yield_name.as_str());
 
+        // Convert serde_json values to uni_common::Value for the shared column builder
+        let uni_values: Vec<Value> = rows
+            .iter()
+            .map(|row| match sig_idx {
+                Some(si) => json_to_value(&row.values[si]),
+                None => Value::Null,
+            })
+            .collect();
+
         let field = schema.field(idx);
-        match field.data_type() {
-            DataType::Int64 => {
-                let mut builder = Int64Builder::with_capacity(num_rows);
-                for row in rows {
-                    if let Some(si) = sig_idx {
-                        match &row.values[si] {
-                            serde_json::Value::Number(n) => {
-                                builder.append_value(n.as_i64().unwrap_or(0));
-                            }
-                            _ => builder.append_null(),
-                        }
-                    } else {
-                        builder.append_null();
-                    }
-                }
-                columns.push(Arc::new(builder.finish()));
-            }
-            DataType::Float64 => {
-                let mut builder = Float64Builder::with_capacity(num_rows);
-                for row in rows {
-                    if let Some(si) = sig_idx {
-                        match &row.values[si] {
-                            serde_json::Value::Number(n) => {
-                                builder.append_value(n.as_f64().unwrap_or(0.0));
-                            }
-                            _ => builder.append_null(),
-                        }
-                    } else {
-                        builder.append_null();
-                    }
-                }
-                columns.push(Arc::new(builder.finish()));
-            }
-            DataType::Boolean => {
-                let mut builder = BooleanBuilder::with_capacity(num_rows);
-                for row in rows {
-                    if let Some(si) = sig_idx {
-                        match &row.values[si] {
-                            serde_json::Value::Bool(b) => builder.append_value(*b),
-                            _ => builder.append_null(),
-                        }
-                    } else {
-                        builder.append_null();
-                    }
-                }
-                columns.push(Arc::new(builder.finish()));
-            }
-            _ => {
-                // Utf8 fallback
-                let mut builder = StringBuilder::with_capacity(num_rows, num_rows * 32);
-                for row in rows {
-                    if let Some(si) = sig_idx {
-                        match &row.values[si] {
-                            serde_json::Value::String(s) => builder.append_value(s),
-                            serde_json::Value::Null => builder.append_null(),
-                            other => builder.append_value(other.to_string()),
-                        }
-                    } else {
-                        builder.append_null();
-                    }
-                }
-                columns.push(Arc::new(builder.finish()));
-            }
-        }
+        let values = uni_values.iter().map(Some);
+        columns.push(build_typed_column(values, num_rows, field.data_type()));
     }
 
     let batch = RecordBatch::try_new(schema.clone(), columns)
@@ -1070,8 +997,88 @@ fn build_algo_batch(
 }
 
 // ---------------------------------------------------------------------------
-// Vector search procedure
+// Shared search argument helpers
 // ---------------------------------------------------------------------------
+
+/// Extract a required string argument from the argument list at a given position.
+fn require_string_arg(args: &[Value], index: usize, description: &str) -> DFResult<String> {
+    args.get(index)
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .ok_or_else(|| {
+            datafusion::error::DataFusionError::Execution(format!("{description} must be a string"))
+        })
+}
+
+/// Extract an optional filter string from the argument list.
+/// Returns `None` if the argument is missing, null, or not a string.
+fn extract_optional_filter(args: &[Value], index: usize) -> Option<String> {
+    args.get(index).and_then(|v| {
+        if v.is_null() {
+            None
+        } else {
+            v.as_str().map(|s| s.to_string())
+        }
+    })
+}
+
+/// Extract an optional float threshold from the argument list.
+/// Returns `None` if the argument is missing or null.
+fn extract_optional_threshold(args: &[Value], index: usize) -> Option<f64> {
+    args.get(index)
+        .and_then(|v| if v.is_null() { None } else { v.as_f64() })
+}
+
+/// Extract a required integer argument from the argument list at a given position.
+fn require_int_arg(args: &[Value], index: usize, description: &str) -> DFResult<usize> {
+    args.get(index)
+        .and_then(|v| v.as_u64())
+        .map(|v| v as usize)
+        .ok_or_else(|| {
+            datafusion::error::DataFusionError::Execution(format!(
+                "{description} must be an integer"
+            ))
+        })
+}
+
+// ---------------------------------------------------------------------------
+// Vector/FTS/Hybrid search procedures
+// ---------------------------------------------------------------------------
+
+/// Auto-embed a text query using the vector index's embedding configuration.
+///
+/// Looks up the embedding config from the index on `label.property` and uses
+/// it to embed the provided text query into a vector.
+async fn auto_embed_text(
+    storage: &Arc<uni_store::storage::manager::StorageManager>,
+    label: &str,
+    property: &str,
+    query_text: &str,
+) -> DFResult<Vec<f32>> {
+    let uni_schema = storage.schema_manager().schema();
+    let index_config = uni_schema.vector_index_for_property(label, property);
+
+    let embedding_config = index_config
+        .and_then(|cfg| cfg.embedding_config.as_ref())
+        .ok_or_else(|| {
+            datafusion::error::DataFusionError::Execution(format!(
+                "Cannot auto-embed: vector index for {label}.{property} has no embedding_config. \
+                 Either provide a pre-computed vector or create the index with embedding options."
+            ))
+        })?;
+
+    let service = uni_store::embedding::create_embedding_service(&embedding_config.model)
+        .map_err(|e| datafusion::error::DataFusionError::Execution(e.to_string()))?;
+    let embeddings = service
+        .embed(&[query_text])
+        .await
+        .map_err(|e| datafusion::error::DataFusionError::Execution(e.to_string()))?;
+    embeddings.into_iter().next().ok_or_else(|| {
+        datafusion::error::DataFusionError::Execution(
+            "Embedding service returned no results".to_string(),
+        )
+    })
+}
 
 async fn execute_vector_query(
     graph_ctx: &GraphExecutionContext,
@@ -1080,48 +1087,26 @@ async fn execute_vector_query(
     target_properties: &HashMap<String, Vec<String>>,
     schema: &SchemaRef,
 ) -> DFResult<Option<RecordBatch>> {
-    let label = args
-        .first()
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| {
-            datafusion::error::DataFusionError::Execution(
-                "uni.vector.query: first argument (label) must be a string".to_string(),
-            )
-        })?
-        .to_string();
+    let label = require_string_arg(args, 0, "uni.vector.query: first argument (label)")?;
+    let property = require_string_arg(args, 1, "uni.vector.query: second argument (property)")?;
 
-    let property = args
-        .get(1)
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| {
-            datafusion::error::DataFusionError::Execution(
-                "uni.vector.query: second argument (property) must be a string".to_string(),
-            )
-        })?
-        .to_string();
-
-    let query_vector = extract_vector(&args[2])?;
-
-    let k = args.get(3).and_then(|v| v.as_u64()).ok_or_else(|| {
+    let query_val = args.get(2).ok_or_else(|| {
         datafusion::error::DataFusionError::Execution(
-            "uni.vector.query: fourth argument (k) must be an integer".to_string(),
+            "uni.vector.query: third argument (query) is required".to_string(),
         )
-    })? as usize;
-
-    // Optional filter (arg 4) and threshold (arg 5)
-    let filter = args.get(4).and_then(|v| {
-        if v.is_null() {
-            None
-        } else {
-            v.as_str().map(|s| s.to_string())
-        }
-    });
-
-    let threshold = args
-        .get(5)
-        .and_then(|v| if v.is_null() { None } else { v.as_f64() });
+    })?;
 
     let storage = graph_ctx.storage();
+
+    let query_vector: Vec<f32> = if let Some(query_text) = query_val.as_str() {
+        auto_embed_text(storage, &label, &property, query_text).await?
+    } else {
+        extract_vector(query_val)?
+    };
+
+    let k = require_int_arg(args, 3, "uni.vector.query: fourth argument (k)")?;
+    let filter = extract_optional_filter(args, 4);
+    let threshold = extract_optional_threshold(args, 5);
     let query_ctx = graph_ctx.query_context();
 
     let mut results = storage
@@ -1176,53 +1161,12 @@ async fn execute_fts_query(
     target_properties: &HashMap<String, Vec<String>>,
     schema: &SchemaRef,
 ) -> DFResult<Option<RecordBatch>> {
-    let label = args
-        .first()
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| {
-            datafusion::error::DataFusionError::Execution(
-                "uni.fts.query: first argument (label) must be a string".to_string(),
-            )
-        })?
-        .to_string();
-
-    let property = args
-        .get(1)
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| {
-            datafusion::error::DataFusionError::Execution(
-                "uni.fts.query: second argument (property) must be a string".to_string(),
-            )
-        })?
-        .to_string();
-
-    let search_term = args
-        .get(2)
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| {
-            datafusion::error::DataFusionError::Execution(
-                "uni.fts.query: third argument (search_term) must be a string".to_string(),
-            )
-        })?
-        .to_string();
-
-    let k = args.get(3).and_then(|v| v.as_u64()).ok_or_else(|| {
-        datafusion::error::DataFusionError::Execution(
-            "uni.fts.query: fourth argument (k) must be an integer".to_string(),
-        )
-    })? as usize;
-
-    let filter = args.get(4).and_then(|v| {
-        if v.is_null() {
-            None
-        } else {
-            v.as_str().map(|s| s.to_string())
-        }
-    });
-
-    let threshold = args
-        .get(5)
-        .and_then(|v| if v.is_null() { None } else { v.as_f64() });
+    let label = require_string_arg(args, 0, "uni.fts.query: first argument (label)")?;
+    let property = require_string_arg(args, 1, "uni.fts.query: second argument (property)")?;
+    let search_term = require_string_arg(args, 2, "uni.fts.query: third argument (search_term)")?;
+    let k = require_int_arg(args, 3, "uni.fts.query: fourth argument (k)")?;
+    let filter = extract_optional_filter(args, 4);
+    let threshold = extract_optional_threshold(args, 5);
 
     let storage = graph_ctx.storage();
     let query_ctx = graph_ctx.query_context();
@@ -1259,6 +1203,381 @@ async fn execute_fts_query(
         schema,
     )
     .await
+}
+
+// ---------------------------------------------------------------------------
+// Hybrid search procedure
+// ---------------------------------------------------------------------------
+
+async fn execute_hybrid_search(
+    graph_ctx: &GraphExecutionContext,
+    args: &[Value],
+    yield_items: &[(String, Option<String>)],
+    target_properties: &HashMap<String, Vec<String>>,
+    schema: &SchemaRef,
+) -> DFResult<Option<RecordBatch>> {
+    let label = require_string_arg(args, 0, "uni.search: first argument (label)")?;
+
+    // Parse properties: {vector: '...', fts: '...'} or just a string
+    let properties_val = args.get(1).ok_or_else(|| {
+        datafusion::error::DataFusionError::Execution(
+            "uni.search: second argument (properties) is required".to_string(),
+        )
+    })?;
+
+    let (vector_prop, fts_prop) = if let Some(obj) = properties_val.as_object() {
+        let vec_prop = obj
+            .get("vector")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let fts_prop = obj
+            .get("fts")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        (vec_prop, fts_prop)
+    } else if let Some(prop) = properties_val.as_str() {
+        // Shorthand: just property name means both vector and FTS
+        (Some(prop.to_string()), Some(prop.to_string()))
+    } else {
+        return Err(datafusion::error::DataFusionError::Execution(
+            "Properties must be an object {vector: '...', fts: '...'} or a string".to_string(),
+        ));
+    };
+
+    let query_text = require_string_arg(args, 2, "uni.search: third argument (query_text)")?;
+
+    // Arg 3: query vector (optional, can be null)
+    let query_vector: Option<Vec<f32>> = args.get(3).and_then(|v| {
+        if v.is_null() {
+            return None;
+        }
+        v.as_array().map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_f64().map(|f| f as f32))
+                .collect()
+        })
+    });
+
+    let k = require_int_arg(args, 4, "uni.search: fifth argument (k)")?;
+    let filter = extract_optional_filter(args, 5);
+
+    // Arg 6: options (optional)
+    let options_val = args.get(6);
+    let options_map = options_val.and_then(|v| v.as_object());
+    let fusion_method = options_map
+        .and_then(|m| m.get("method"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("rrf")
+        .to_string();
+    let alpha = options_map
+        .and_then(|m| m.get("alpha"))
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.5) as f32;
+    let over_fetch_factor = options_map
+        .and_then(|m| m.get("over_fetch"))
+        .and_then(|v| v.as_f64())
+        .unwrap_or(2.0) as f32;
+    let rrf_k = options_map
+        .and_then(|m| m.get("rrf_k"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(60) as usize;
+
+    let over_fetch_k = (k as f32 * over_fetch_factor).ceil() as usize;
+
+    let storage = graph_ctx.storage();
+    let query_ctx = graph_ctx.query_context();
+
+    // Execute vector search if configured
+    let mut vector_results: Vec<(Vid, f32)> = Vec::new();
+    if let Some(ref vec_prop) = vector_prop {
+        // Get or generate query vector
+        let qvec = if let Some(ref v) = query_vector {
+            v.clone()
+        } else {
+            // Auto-embed the query text if embedding config exists
+            auto_embed_text(storage, &label, vec_prop, &query_text)
+                .await
+                .unwrap_or_default()
+        };
+
+        if !qvec.is_empty() {
+            vector_results = storage
+                .vector_search(
+                    &label,
+                    vec_prop,
+                    &qvec,
+                    over_fetch_k,
+                    filter.as_deref(),
+                    Some(&query_ctx),
+                )
+                .await
+                .map_err(|e| datafusion::error::DataFusionError::Execution(e.to_string()))?;
+        }
+    }
+
+    // Execute FTS search if configured
+    let mut fts_results: Vec<(Vid, f32)> = Vec::new();
+    if let Some(ref fts_prop) = fts_prop {
+        fts_results = storage
+            .fts_search(
+                &label,
+                fts_prop,
+                &query_text,
+                over_fetch_k,
+                filter.as_deref(),
+                Some(&query_ctx),
+            )
+            .await
+            .map_err(|e| datafusion::error::DataFusionError::Execution(e.to_string()))?;
+    }
+
+    // Fuse results
+    let fused_results = match fusion_method.as_str() {
+        "weighted" => fuse_weighted(&vector_results, &fts_results, alpha),
+        _ => fuse_rrf(&vector_results, &fts_results, rrf_k),
+    };
+
+    // Limit to k results
+    let final_results: Vec<_> = fused_results.into_iter().take(k).collect();
+
+    if final_results.is_empty() {
+        return Ok(Some(RecordBatch::new_empty(schema.clone())));
+    }
+
+    // Build lookup maps for original scores
+    let vec_score_map: HashMap<Vid, f32> = vector_results.iter().cloned().collect();
+    let fts_score_map: HashMap<Vid, f32> = fts_results.iter().cloned().collect();
+    let fts_max = fts_results.iter().map(|(_, s)| *s).fold(0.0f32, f32::max);
+
+    // Get distance metric for vector score normalization
+    let uni_schema = storage.schema_manager().schema();
+    let metric = vector_prop
+        .as_ref()
+        .and_then(|vp| {
+            uni_schema
+                .vector_index_for_property(&label, vp)
+                .map(|config| config.metric.clone())
+        })
+        .unwrap_or(uni_common::core::schema::DistanceMetric::L2);
+
+    let score_ctx = HybridScoreContext {
+        vec_score_map: &vec_score_map,
+        fts_score_map: &fts_score_map,
+        fts_max,
+        metric: &metric,
+    };
+
+    build_hybrid_search_batch(
+        &final_results,
+        &score_ctx,
+        &label,
+        yield_items,
+        target_properties,
+        graph_ctx,
+        schema,
+    )
+    .await
+}
+
+/// Reciprocal Rank Fusion (RRF) for combining search results.
+/// RRF score = sum(1 / (k + rank)) for each result list.
+fn fuse_rrf(vec_results: &[(Vid, f32)], fts_results: &[(Vid, f32)], k: usize) -> Vec<(Vid, f32)> {
+    let mut scores: HashMap<Vid, f32> = HashMap::new();
+
+    for (rank, (vid, _)) in vec_results.iter().enumerate() {
+        let rrf_score = 1.0 / (k as f32 + rank as f32 + 1.0);
+        *scores.entry(*vid).or_default() += rrf_score;
+    }
+
+    for (rank, (vid, _)) in fts_results.iter().enumerate() {
+        let rrf_score = 1.0 / (k as f32 + rank as f32 + 1.0);
+        *scores.entry(*vid).or_default() += rrf_score;
+    }
+
+    let mut results: Vec<_> = scores.into_iter().collect();
+    results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    results
+}
+
+/// Weighted fusion: alpha * vec_score + (1 - alpha) * fts_score.
+/// Both score sets are normalized to [0, 1] range.
+fn fuse_weighted(
+    vec_results: &[(Vid, f32)],
+    fts_results: &[(Vid, f32)],
+    alpha: f32,
+) -> Vec<(Vid, f32)> {
+    // Normalize vector scores (distance -> similarity)
+    let vec_max = vec_results.iter().map(|(_, s)| *s).fold(f32::MIN, f32::max);
+    let vec_min = vec_results.iter().map(|(_, s)| *s).fold(f32::MAX, f32::min);
+    let vec_range = if vec_max > vec_min {
+        vec_max - vec_min
+    } else {
+        1.0
+    };
+
+    let fts_max = fts_results.iter().map(|(_, s)| *s).fold(0.0f32, f32::max);
+
+    let vec_scores: HashMap<Vid, f32> = vec_results
+        .iter()
+        .map(|(vid, dist)| {
+            let norm = 1.0 - (dist - vec_min) / vec_range;
+            (*vid, norm)
+        })
+        .collect();
+
+    let fts_scores: HashMap<Vid, f32> = fts_results
+        .iter()
+        .map(|(vid, score)| {
+            let norm = if fts_max > 0.0 { score / fts_max } else { 0.0 };
+            (*vid, norm)
+        })
+        .collect();
+
+    let all_vids: std::collections::HashSet<Vid> = vec_scores
+        .keys()
+        .chain(fts_scores.keys())
+        .cloned()
+        .collect();
+
+    let mut results: Vec<(Vid, f32)> = all_vids
+        .into_iter()
+        .map(|vid| {
+            let vec_score = *vec_scores.get(&vid).unwrap_or(&0.0);
+            let fts_score = *fts_scores.get(&vid).unwrap_or(&0.0);
+            let fused = alpha * vec_score + (1.0 - alpha) * fts_score;
+            (vid, fused)
+        })
+        .collect();
+
+    results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    results
+}
+
+/// Precomputed score context for hybrid search batch building.
+struct HybridScoreContext<'a> {
+    vec_score_map: &'a HashMap<Vid, f32>,
+    fts_score_map: &'a HashMap<Vid, f32>,
+    fts_max: f32,
+    metric: &'a uni_common::core::schema::DistanceMetric,
+}
+
+/// Build a RecordBatch for hybrid search results with fused, vector, and FTS scores.
+async fn build_hybrid_search_batch(
+    results: &[(Vid, f32)],
+    scores: &HybridScoreContext<'_>,
+    label: &str,
+    yield_items: &[(String, Option<String>)],
+    target_properties: &HashMap<String, Vec<String>>,
+    graph_ctx: &GraphExecutionContext,
+    schema: &SchemaRef,
+) -> DFResult<Option<RecordBatch>> {
+    let num_rows = results.len();
+    let vids: Vec<Vid> = results.iter().map(|(vid, _)| *vid).collect();
+    let fused_scores: Vec<f32> = results.iter().map(|(_, s)| *s).collect();
+
+    // Pre-load properties for node-like yields
+    let property_manager = graph_ctx.property_manager();
+    let query_ctx = graph_ctx.query_context();
+    let uni_schema = graph_ctx.storage().schema_manager().schema();
+    let label_props = uni_schema.properties.get(label);
+
+    let has_node_yield = yield_items
+        .iter()
+        .any(|(name, _)| map_yield_to_canonical(name) == "node");
+
+    let props_map = if has_node_yield {
+        property_manager
+            .get_batch_vertex_props_for_label(&vids, label, Some(&query_ctx))
+            .await
+            .map_err(|e| datafusion::error::DataFusionError::Execution(e.to_string()))?
+    } else {
+        HashMap::new()
+    };
+
+    let mut columns: Vec<ArrayRef> = Vec::new();
+
+    for (name, alias) in yield_items {
+        let output_name = alias.as_ref().unwrap_or(name);
+        let canonical = map_yield_to_canonical(name);
+
+        match canonical.as_str() {
+            "node" => {
+                columns.extend(build_node_yield_columns(
+                    &vids,
+                    label,
+                    output_name,
+                    target_properties,
+                    &props_map,
+                    label_props,
+                )?);
+            }
+            "vid" => {
+                let mut builder = Int64Builder::with_capacity(num_rows);
+                for vid in &vids {
+                    builder.append_value(vid.as_u64() as i64);
+                }
+                columns.push(Arc::new(builder.finish()));
+            }
+            "score" => {
+                let mut builder = Float32Builder::with_capacity(num_rows);
+                for score in &fused_scores {
+                    builder.append_value(*score);
+                }
+                columns.push(Arc::new(builder.finish()));
+            }
+            "vector_score" => {
+                let mut builder = Float32Builder::with_capacity(num_rows);
+                for vid in &vids {
+                    if let Some(&dist) = scores.vec_score_map.get(vid) {
+                        let score = calculate_score(dist, scores.metric);
+                        builder.append_value(score);
+                    } else {
+                        builder.append_null();
+                    }
+                }
+                columns.push(Arc::new(builder.finish()));
+            }
+            "fts_score" => {
+                let mut builder = Float32Builder::with_capacity(num_rows);
+                for vid in &vids {
+                    if let Some(&raw_score) = scores.fts_score_map.get(vid) {
+                        let norm = if scores.fts_max > 0.0 {
+                            raw_score / scores.fts_max
+                        } else {
+                            0.0
+                        };
+                        builder.append_value(norm);
+                    } else {
+                        builder.append_null();
+                    }
+                }
+                columns.push(Arc::new(builder.finish()));
+            }
+            "distance" => {
+                // For hybrid search, distance is the vector distance if available
+                let mut builder = Float64Builder::with_capacity(num_rows);
+                for vid in &vids {
+                    if let Some(&dist) = scores.vec_score_map.get(vid) {
+                        builder.append_value(dist as f64);
+                    } else {
+                        builder.append_null();
+                    }
+                }
+                columns.push(Arc::new(builder.finish()));
+            }
+            _ => {
+                let mut builder = StringBuilder::with_capacity(num_rows, 0);
+                for _ in 0..num_rows {
+                    builder.append_null();
+                }
+                columns.push(Arc::new(builder.finish()));
+            }
+        }
+    }
+
+    let batch = RecordBatch::try_new(schema.clone(), columns)
+        .map_err(|e| datafusion::error::DataFusionError::ArrowError(Box::new(e), None))?;
+    Ok(Some(batch))
 }
 
 // ---------------------------------------------------------------------------
@@ -1308,7 +1627,6 @@ async fn build_search_result_batch(
 
     // Build columns in schema order
     let mut columns: Vec<ArrayRef> = Vec::new();
-    let mut field_idx = 0;
 
     for (name, alias) in yield_items {
         let output_name = alias.as_ref().unwrap_or(name);
@@ -1316,43 +1634,14 @@ async fn build_search_result_batch(
 
         match canonical.as_str() {
             "node" => {
-                // _vid column
-                let mut vid_builder = UInt64Builder::with_capacity(num_rows);
-                for vid in &vids {
-                    vid_builder.append_value(vid.as_u64());
-                }
-                columns.push(Arc::new(vid_builder.finish()));
-                field_idx += 1;
-
-                // variable column (VID as string)
-                let mut var_builder = StringBuilder::with_capacity(num_rows, num_rows * 20);
-                for vid in &vids {
-                    var_builder.append_value(vid.to_string());
-                }
-                columns.push(Arc::new(var_builder.finish()));
-                field_idx += 1;
-
-                // _labels column
-                let mut labels_builder =
-                    arrow_array::builder::ListBuilder::new(StringBuilder::new());
-                for _ in 0..num_rows {
-                    labels_builder.values().append_value(label);
-                    labels_builder.append(true);
-                }
-                columns.push(Arc::new(labels_builder.finish()));
-                field_idx += 1;
-
-                // Property columns
-                if let Some(props) = target_properties.get(output_name.as_str()) {
-                    for prop_name in props {
-                        let data_type = resolve_property_type(prop_name, label_props);
-                        let column = crate::query::df_graph::scan::build_property_column_static(
-                            &vids, &props_map, prop_name, &data_type,
-                        )?;
-                        columns.push(column);
-                        field_idx += 1;
-                    }
-                }
+                columns.extend(build_node_yield_columns(
+                    &vids,
+                    label,
+                    output_name,
+                    target_properties,
+                    &props_map,
+                    label_props,
+                )?);
             }
             "distance" => {
                 let mut builder = Float64Builder::with_capacity(num_rows);
@@ -1360,7 +1649,6 @@ async fn build_search_result_batch(
                     builder.append_value(*dist as f64);
                 }
                 columns.push(Arc::new(builder.finish()));
-                field_idx += 1;
             }
             "score" => {
                 let mut builder = Float32Builder::with_capacity(num_rows);
@@ -1368,7 +1656,6 @@ async fn build_search_result_batch(
                     builder.append_value(*score);
                 }
                 columns.push(Arc::new(builder.finish()));
-                field_idx += 1;
             }
             "vid" => {
                 let mut builder = Int64Builder::with_capacity(num_rows);
@@ -1376,7 +1663,6 @@ async fn build_search_result_batch(
                     builder.append_value(vid.as_u64() as i64);
                 }
                 columns.push(Arc::new(builder.finish()));
-                field_idx += 1;
             }
             _ => {
                 // Unknown yield — emit nulls
@@ -1385,12 +1671,9 @@ async fn build_search_result_batch(
                     builder.append_null();
                 }
                 columns.push(Arc::new(builder.finish()));
-                field_idx += 1;
             }
         }
     }
-
-    let _ = field_idx; // suppress unused warning
 
     let batch = RecordBatch::try_new(schema.clone(), columns)
         .map_err(|e| datafusion::error::DataFusionError::ArrowError(Box::new(e), None))?;
@@ -1400,6 +1683,55 @@ async fn build_search_result_batch(
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// Build the node-yield columns (_vid, variable, _labels, property columns) shared by
+/// search result batch builders. Returns the columns to append.
+fn build_node_yield_columns(
+    vids: &[Vid],
+    label: &str,
+    output_name: &str,
+    target_properties: &HashMap<String, Vec<String>>,
+    props_map: &HashMap<Vid, uni_common::Properties>,
+    label_props: Option<&std::collections::HashMap<String, uni_common::core::schema::PropertyMeta>>,
+) -> DFResult<Vec<ArrayRef>> {
+    let num_rows = vids.len();
+    let mut columns = Vec::new();
+
+    // _vid column
+    let mut vid_builder = UInt64Builder::with_capacity(num_rows);
+    for vid in vids {
+        vid_builder.append_value(vid.as_u64());
+    }
+    columns.push(Arc::new(vid_builder.finish()) as ArrayRef);
+
+    // variable column (VID as string)
+    let mut var_builder = StringBuilder::with_capacity(num_rows, num_rows * 20);
+    for vid in vids {
+        var_builder.append_value(vid.to_string());
+    }
+    columns.push(Arc::new(var_builder.finish()) as ArrayRef);
+
+    // _labels column
+    let mut labels_builder = arrow_array::builder::ListBuilder::new(StringBuilder::new());
+    for _ in 0..num_rows {
+        labels_builder.values().append_value(label);
+        labels_builder.append(true);
+    }
+    columns.push(Arc::new(labels_builder.finish()) as ArrayRef);
+
+    // Property columns
+    if let Some(props) = target_properties.get(output_name) {
+        for prop_name in props {
+            let data_type = resolve_property_type(prop_name, label_props);
+            let column = crate::query::df_graph::scan::build_property_column_static(
+                vids, props_map, prop_name, &data_type,
+            )?;
+            columns.push(column);
+        }
+    }
+
+    Ok(columns)
+}
 
 /// Extract a vector from a Value.
 fn extract_vector(val: &Value) -> DFResult<Vec<f32>> {

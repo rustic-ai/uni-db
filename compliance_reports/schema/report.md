@@ -1,16 +1,16 @@
 # TCK Compliance Report
 
-**Generated:** 2026-02-20 15:56:18
-**Results:** `results_20260220_155618.json`
-**Compared to:** `results_20260220_150617.json`
+**Generated:** 2026-02-21 01:21:03
+**Results:** `results_20260221_012103.json`
+**Compared to:** `results_20260220_224753.json`
 
 ## Summary
 
 | Metric | Current | Previous | Delta |
 |--------|---------|----------|-------|
 | Scenarios | 3897 | 3897 |  |
-| Passed | 3859 | 3859 |  |
-| Failed | 37 | 37 |  |
+| Passed | 3858 | 3858 |  |
+| Failed | 38 | 38 |  |
 | Pass Rate | 99.0% | 99.0% | ➡️ +0.0pp |
 
 ## Feature Breakdown
@@ -107,7 +107,7 @@
 | ✅ Merge2 | 6 | 6 | 0 | 100% |  |
 | ✅ Merge3 | 5 | 5 | 0 | 100% |  |
 | ✅ Merge4 | 2 | 2 | 0 | 100% |  |
-| ✅ Merge5 | 29 | 29 | 0 | 100% |  |
+| ✅ Merge5 | 29 | 28 | 1 | 97% |  |
 | ✅ Merge6 | 6 | 6 | 0 | 100% |  |
 | ✅ Merge7 | 5 | 5 | 0 | 100% |  |
 | ✅ Merge8 | 1 | 1 | 0 | 100% |  |
@@ -401,7 +401,7 @@
   Step failed:
       Defined: tck/features/clauses/match/Match4.feature:111:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): Row count mismatch: expected 1, got 15
+      Step panicked. Captured output: Result mismatch (any order): Row count mismatch: expected 1, got 14
 [Summary]
 1 feature
 1 scenario (1 failed)
@@ -502,6 +502,23 @@
   ... (truncated)
   ```
 
+### Merge5
+
+- **[15] Matching using list property** (line 287)
+  ```
+  Step failed:
+      Defined: tck/features/clauses/merge/Merge5.feature:303:5
+      Matched: crates/uni-tck/src/steps/and.rs:4:1
+      Step panicked. Captured output: assertion `left == right` failed: Edge count changed: 1 -> 2
+        left: 1
+       right: 2
+[Summary]
+1 feature
+1 scenario (1 failed)
+
+  ... (truncated)
+  ```
+
 ### Return6
 
 - **[13] Returning the minimum length of paths** (line 230)
@@ -590,7 +607,7 @@
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal5.feature:133:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("d.weekDay", Some(Int(7))), ("d.nanosecond",
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("d.year", Some(Int(1984))), ("d.second", Som
   ... (truncated)
   ```
 

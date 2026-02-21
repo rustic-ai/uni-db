@@ -2510,7 +2510,7 @@ impl Executor {
         }
 
         let db_matches = self
-            .execute_subplan(plan, prop_manager, params, ctx)
+            .execute_merge_read_plan(plan, prop_manager, params, vars_in_scope.clone())
             .await?;
 
         // Keep only DB results that are consistent with the input row bindings.

@@ -237,7 +237,6 @@ pub enum Clause {
     With(WithClause),
     WithRecursive(WithRecursiveClause),
     Unwind(UnwindClause),
-    LoadCsv(LoadCsvClause),
     Return(ReturnClause),
     Delete(DeleteClause),
     Set(SetClause),
@@ -308,14 +307,6 @@ pub enum ReturnItem {
 pub struct UnwindClause {
     pub expr: Expr,
     pub variable: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct LoadCsvClause {
-    pub url: String,
-    pub variable: String,
-    pub with_headers: bool,
-    pub field_terminator: Option<char>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1427,6 +1418,253 @@ impl Expr {
                 let labels_str: String = labels.iter().map(|l| format!(":{l}")).collect();
                 format!("{}{labels_str}", expr.to_string_repr())
             }
+        }
+    }
+
+    /// Call `f` on each direct child expression (non-recursive).
+    ///
+    /// Does NOT descend into subqueries (Exists, CountSubquery, CollectSubquery)
+    /// since those have separate variable scope.
+    pub fn for_each_child(&self, f: &mut dyn FnMut(&Expr)) {
+        match self {
+            Expr::Literal(_) | Expr::Parameter(_) | Expr::Variable(_) | Expr::Wildcard => {}
+            Expr::Property(base, _) => f(base),
+            Expr::List(items) => {
+                for item in items {
+                    f(item);
+                }
+            }
+            Expr::Map(entries) => {
+                for (_, expr) in entries {
+                    f(expr);
+                }
+            }
+            Expr::FunctionCall { args, .. } => {
+                for arg in args {
+                    f(arg);
+                }
+            }
+            Expr::BinaryOp { left, right, .. } => {
+                f(left);
+                f(right);
+            }
+            Expr::UnaryOp { expr, .. } => f(expr),
+            Expr::Case {
+                expr,
+                when_then,
+                else_expr,
+            } => {
+                if let Some(e) = expr {
+                    f(e);
+                }
+                for (w, t) in when_then {
+                    f(w);
+                    f(t);
+                }
+                if let Some(e) = else_expr {
+                    f(e);
+                }
+            }
+            Expr::Exists { .. } | Expr::CountSubquery(_) | Expr::CollectSubquery(_) => {}
+            Expr::IsNull(e) | Expr::IsNotNull(e) | Expr::IsUnique(e) => f(e),
+            Expr::In { expr, list } => {
+                f(expr);
+                f(list);
+            }
+            Expr::ArrayIndex { array, index } => {
+                f(array);
+                f(index);
+            }
+            Expr::ArraySlice { array, start, end } => {
+                f(array);
+                if let Some(s) = start {
+                    f(s);
+                }
+                if let Some(e) = end {
+                    f(e);
+                }
+            }
+            Expr::Quantifier {
+                list, predicate, ..
+            } => {
+                f(list);
+                f(predicate);
+            }
+            Expr::Reduce {
+                init, list, expr, ..
+            } => {
+                f(init);
+                f(list);
+                f(expr);
+            }
+            Expr::ListComprehension {
+                list,
+                where_clause,
+                map_expr,
+                ..
+            } => {
+                f(list);
+                if let Some(w) = where_clause {
+                    f(w);
+                }
+                f(map_expr);
+            }
+            Expr::PatternComprehension {
+                where_clause,
+                map_expr,
+                ..
+            } => {
+                if let Some(w) = where_clause {
+                    f(w);
+                }
+                f(map_expr);
+            }
+            Expr::ValidAt {
+                entity, timestamp, ..
+            } => {
+                f(entity);
+                f(timestamp);
+            }
+            Expr::MapProjection { base, items } => {
+                f(base);
+                for item in items {
+                    if let MapProjectionItem::LiteralEntry(_, expr) = item {
+                        f(expr);
+                    }
+                }
+            }
+            Expr::LabelCheck { expr, .. } => f(expr),
+        }
+    }
+
+    /// Map each direct child expression through `f`, producing a new Expr.
+    ///
+    /// Same scoping rules as `for_each_child`: does not descend into subqueries.
+    pub fn map_children(self, f: &mut dyn FnMut(Expr) -> Expr) -> Expr {
+        match self {
+            Expr::Literal(_) | Expr::Parameter(_) | Expr::Variable(_) | Expr::Wildcard => self,
+            Expr::Property(base, prop) => Expr::Property(Box::new(f(*base)), prop),
+            Expr::List(items) => Expr::List(items.into_iter().map(&mut *f).collect()),
+            Expr::Map(entries) => Expr::Map(entries.into_iter().map(|(k, v)| (k, f(v))).collect()),
+            Expr::FunctionCall {
+                name,
+                args,
+                distinct,
+                window_spec,
+            } => Expr::FunctionCall {
+                name,
+                args: args.into_iter().map(&mut *f).collect(),
+                distinct,
+                window_spec,
+            },
+            Expr::BinaryOp { left, op, right } => Expr::BinaryOp {
+                left: Box::new(f(*left)),
+                op,
+                right: Box::new(f(*right)),
+            },
+            Expr::UnaryOp { op, expr } => Expr::UnaryOp {
+                op,
+                expr: Box::new(f(*expr)),
+            },
+            Expr::Case {
+                expr,
+                when_then,
+                else_expr,
+            } => Expr::Case {
+                expr: expr.map(|e| Box::new(f(*e))),
+                when_then: when_then.into_iter().map(|(w, t)| (f(w), f(t))).collect(),
+                else_expr: else_expr.map(|e| Box::new(f(*e))),
+            },
+            Expr::Exists { .. } | Expr::CountSubquery(_) | Expr::CollectSubquery(_) => self,
+            Expr::IsNull(e) => Expr::IsNull(Box::new(f(*e))),
+            Expr::IsNotNull(e) => Expr::IsNotNull(Box::new(f(*e))),
+            Expr::IsUnique(e) => Expr::IsUnique(Box::new(f(*e))),
+            Expr::In { expr, list } => Expr::In {
+                expr: Box::new(f(*expr)),
+                list: Box::new(f(*list)),
+            },
+            Expr::ArrayIndex { array, index } => Expr::ArrayIndex {
+                array: Box::new(f(*array)),
+                index: Box::new(f(*index)),
+            },
+            Expr::ArraySlice { array, start, end } => Expr::ArraySlice {
+                array: Box::new(f(*array)),
+                start: start.map(|s| Box::new(f(*s))),
+                end: end.map(|e| Box::new(f(*e))),
+            },
+            Expr::Quantifier {
+                quantifier,
+                variable,
+                list,
+                predicate,
+            } => Expr::Quantifier {
+                quantifier,
+                variable,
+                list: Box::new(f(*list)),
+                predicate: Box::new(f(*predicate)),
+            },
+            Expr::Reduce {
+                accumulator,
+                init,
+                variable,
+                list,
+                expr,
+            } => Expr::Reduce {
+                accumulator,
+                init: Box::new(f(*init)),
+                variable,
+                list: Box::new(f(*list)),
+                expr: Box::new(f(*expr)),
+            },
+            Expr::ListComprehension {
+                variable,
+                list,
+                where_clause,
+                map_expr,
+            } => Expr::ListComprehension {
+                variable,
+                list: Box::new(f(*list)),
+                where_clause: where_clause.map(|w| Box::new(f(*w))),
+                map_expr: Box::new(f(*map_expr)),
+            },
+            Expr::PatternComprehension {
+                path_variable,
+                pattern,
+                where_clause,
+                map_expr,
+            } => Expr::PatternComprehension {
+                path_variable,
+                pattern,
+                where_clause: where_clause.map(|w| Box::new(f(*w))),
+                map_expr: Box::new(f(*map_expr)),
+            },
+            Expr::ValidAt {
+                entity,
+                timestamp,
+                start_prop,
+                end_prop,
+            } => Expr::ValidAt {
+                entity: Box::new(f(*entity)),
+                timestamp: Box::new(f(*timestamp)),
+                start_prop,
+                end_prop,
+            },
+            Expr::MapProjection { base, items } => Expr::MapProjection {
+                base: Box::new(f(*base)),
+                items: items
+                    .into_iter()
+                    .map(|item| match item {
+                        MapProjectionItem::LiteralEntry(key, expr) => {
+                            MapProjectionItem::LiteralEntry(key, Box::new(f(*expr)))
+                        }
+                        other => other,
+                    })
+                    .collect(),
+            },
+            Expr::LabelCheck { expr, labels } => Expr::LabelCheck {
+                expr: Box::new(f(*expr)),
+                labels,
+            },
         }
     }
 }

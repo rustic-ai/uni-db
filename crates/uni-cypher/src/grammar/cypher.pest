@@ -108,10 +108,6 @@ EXPLAIN   = @{ ^"explain" ~ !ident_char }
 DETACH    = @{ ^"detach" ~ !ident_char }
 OVER      = @{ ^"over" ~ !ident_char }
 PARTITION = @{ ^"partition" ~ !ident_char }
-LOAD      = @{ ^"load" ~ !ident_char }
-CSV       = @{ ^"csv" ~ !ident_char }
-HEADERS   = @{ ^"headers" ~ !ident_char }
-FIELDTERMINATOR = @{ ^"fieldterminator" ~ !ident_char }
 RECURSIVE = @{ ^"recursive" ~ !ident_char }
 VALID_AT  = @{ ^"valid_at" ~ !ident_char }
 JSON      = @{ ^"json" ~ !ident_char }
@@ -151,8 +147,8 @@ keyword_reserved = {
     CASE | WHEN | THEN | ELSE | END |
     IF | FROM | TO | ON |
     DROP_KW | ALTER | SHOW |
-    OVER | PARTITION | EXPLAIN | LOAD | CSV | HEADERS |
-    RECURSIVE | VALID_AT | EACH | FIELDTERMINATOR
+    OVER | PARTITION | EXPLAIN |
+    RECURSIVE | VALID_AT | EACH
 }
 
 // Non-reserved keywords - can be used as identifiers in most contexts
@@ -517,7 +513,6 @@ clause = {
     | return_clause
     | unwind_clause
     | call_clause
-    | load_csv_clause
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -588,11 +583,6 @@ yield_items = {
     | yield_item ~ ("," ~ yield_item)*
 }
 yield_item = { identifier_or_keyword ~ (AS ~ alias_identifier)? }
-
-load_csv_clause = {
-    LOAD ~ CSV ~ (WITH ~ HEADERS)? ~ FROM ~ expression ~ AS ~ identifier 
-    ~ (FIELDTERMINATOR ~ string)?
-}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // SPECIAL EXPRESSIONS

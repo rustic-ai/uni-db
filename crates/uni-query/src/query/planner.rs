@@ -84,32 +84,22 @@ fn is_var_in_scope(vars: &[VariableInfo], name: &str) -> bool {
 
 /// Check if an expression contains a pattern predicate.
 fn contains_pattern_predicate(expr: &Expr) -> bool {
-    match expr {
+    if matches!(
+        expr,
         Expr::Exists {
             from_pattern_predicate: true,
             ..
-        } => true,
-        Expr::FunctionCall { args, .. } => args.iter().any(contains_pattern_predicate),
-        Expr::BinaryOp { left, right, .. } => {
-            contains_pattern_predicate(left) || contains_pattern_predicate(right)
         }
-        Expr::UnaryOp { expr: e, .. } | Expr::Property(e, _) => contains_pattern_predicate(e),
-        Expr::List(items) => items.iter().any(contains_pattern_predicate),
-        Expr::Case {
-            expr,
-            when_then,
-            else_expr,
-        } => {
-            expr.as_ref().is_some_and(|e| contains_pattern_predicate(e))
-                || when_then
-                    .iter()
-                    .any(|(w, t)| contains_pattern_predicate(w) || contains_pattern_predicate(t))
-                || else_expr
-                    .as_ref()
-                    .is_some_and(|e| contains_pattern_predicate(e))
-        }
-        _ => false,
+    ) {
+        return true;
     }
+    let mut found = false;
+    expr.for_each_child(&mut |child| {
+        if !found {
+            found = contains_pattern_predicate(child);
+        }
+    });
+    found
 }
 
 /// Add a variable to scope with type conflict validation.
@@ -276,17 +266,9 @@ fn collect_expr_variables(expr: &Expr) -> Vec<String> {
 }
 
 fn collect_expr_variables_inner(expr: &Expr, vars: &mut Vec<String>) {
-    // Helper to add a variable if not already present
     let mut add_var = |name: &String| {
         if !vars.contains(name) {
             vars.push(name.clone());
-        }
-    };
-
-    // Helper to recurse into multiple expressions
-    let recurse_all = |exprs: &[Expr], vars: &mut Vec<String>| {
-        for e in exprs {
-            collect_expr_variables_inner(e, vars);
         }
     };
 
@@ -301,8 +283,16 @@ fn collect_expr_variables_inner(expr: &Expr, vars: &mut Vec<String>) {
         | Expr::IsNull(e)
         | Expr::IsNotNull(e)
         | Expr::IsUnique(e) => collect_expr_variables_inner(e, vars),
-        Expr::FunctionCall { args, .. } => recurse_all(args, vars),
-        Expr::List(items) => recurse_all(items, vars),
+        Expr::FunctionCall { args, .. } => {
+            for a in args {
+                collect_expr_variables_inner(a, vars);
+            }
+        }
+        Expr::List(items) => {
+            for item in items {
+                collect_expr_variables_inner(item, vars);
+            }
+        }
         Expr::In { expr: e, list } => {
             collect_expr_variables_inner(e, vars);
             collect_expr_variables_inner(list, vars);
@@ -342,7 +332,9 @@ fn collect_expr_variables_inner(expr: &Expr, vars: &mut Vec<String>) {
                 collect_expr_variables_inner(e, vars);
             }
         }
-        _ => {} // Literals, parameters, and other non-variable expressions
+        // Skip Quantifier/Reduce/ListComprehension/PatternComprehension —
+        // they introduce local variable bindings not in outer scope.
+        _ => {}
     }
 }
 
@@ -418,6 +410,8 @@ fn rewrite_order_by_expr_with_aliases(expr: &Expr, aliases: &HashMap<String, Exp
                 .as_ref()
                 .map(|e| Box::new(rewrite_order_by_expr_with_aliases(e, aliases))),
         },
+        // Skip Quantifier/Reduce/ListComprehension/PatternComprehension —
+        // they introduce local variable bindings that could shadow aliases.
         _ => expr.clone(),
     }
 }
@@ -534,41 +528,37 @@ fn is_non_boolean_literal(expr: &Expr) -> bool {
 
 /// Validate boolean expressions (AND/OR/NOT require boolean arguments).
 fn validate_boolean_expression(expr: &Expr) -> Result<()> {
-    match expr {
-        Expr::BinaryOp { left, op, right } => {
-            if matches!(op, BinaryOp::And | BinaryOp::Or | BinaryOp::Xor) {
-                let op_name = format!("{:?}", op).to_uppercase();
-                for operand in [left.as_ref(), right.as_ref()] {
-                    if is_non_boolean_literal(operand) {
-                        return Err(anyhow!(
-                            "SyntaxError: InvalidArgumentType - {} requires boolean arguments",
-                            op_name
-                        ));
-                    }
-                }
-            }
-            validate_boolean_expression(left)?;
-            validate_boolean_expression(right)?;
-        }
-        Expr::UnaryOp {
-            op: uni_cypher::ast::UnaryOp::Not,
-            expr: inner,
-        } => {
-            if is_non_boolean_literal(inner) {
+    // Check AND/OR/XOR operands and NOT operand for non-boolean literals
+    if let Expr::BinaryOp { left, op, right } = expr
+        && matches!(op, BinaryOp::And | BinaryOp::Or | BinaryOp::Xor)
+    {
+        let op_name = format!("{:?}", op).to_uppercase();
+        for operand in [left.as_ref(), right.as_ref()] {
+            if is_non_boolean_literal(operand) {
                 return Err(anyhow!(
-                    "SyntaxError: InvalidArgumentType - NOT requires a boolean argument"
+                    "SyntaxError: InvalidArgumentType - {} requires boolean arguments",
+                    op_name
                 ));
             }
-            validate_boolean_expression(inner)?;
         }
-        Expr::FunctionCall { args, .. } => {
-            for arg in args {
-                validate_boolean_expression(arg)?;
-            }
-        }
-        _ => {}
     }
-    Ok(())
+    if let Expr::UnaryOp {
+        op: uni_cypher::ast::UnaryOp::Not,
+        expr: inner,
+    } = expr
+        && is_non_boolean_literal(inner)
+    {
+        return Err(anyhow!(
+            "SyntaxError: InvalidArgumentType - NOT requires a boolean argument"
+        ));
+    }
+    let mut result = Ok(());
+    expr.for_each_child(&mut |child| {
+        if result.is_ok() {
+            result = validate_boolean_expression(child);
+        }
+    });
+    result
 }
 
 /// Validate that all variables used in an expression are in scope.
@@ -927,24 +917,16 @@ fn contains_aggregate_recursive(expr: &Expr) -> bool {
 
 /// Check if an expression contains a non-deterministic function (e.g. rand()).
 fn contains_non_deterministic(expr: &Expr) -> bool {
-    match expr {
-        Expr::FunctionCall { name, args, .. } => {
-            if name.eq_ignore_ascii_case("rand") {
-                return true;
-            }
-            args.iter().any(contains_non_deterministic)
-        }
-        Expr::BinaryOp { left, right, .. } => {
-            contains_non_deterministic(left) || contains_non_deterministic(right)
-        }
-        Expr::UnaryOp { expr: e, .. }
-        | Expr::IsNull(e)
-        | Expr::IsNotNull(e)
-        | Expr::IsUnique(e) => contains_non_deterministic(e),
-        Expr::List(items) => items.iter().any(contains_non_deterministic),
-        Expr::Property(base, _) => contains_non_deterministic(base),
-        _ => false,
+    if matches!(expr, Expr::FunctionCall { name, .. } if name.eq_ignore_ascii_case("rand")) {
+        return true;
     }
+    let mut found = false;
+    expr.for_each_child(&mut |child| {
+        if !found {
+            found = contains_non_deterministic(child);
+        }
+    });
+    found
 }
 
 fn collect_aggregate_reprs(expr: &Expr, out: &mut HashSet<String>) {
@@ -1321,7 +1303,6 @@ fn validate_no_nested_aggregation(expr: &Expr) -> Result<()> {
                     "SyntaxError: NestedAggregation - Cannot nest aggregation functions"
                 ));
             }
-            // Non-deterministic functions like rand() are not allowed inside aggregations
             if contains_non_deterministic(arg) {
                 return Err(anyhow!(
                     "SyntaxError: NonConstantExpression - Non-deterministic function inside aggregation"
@@ -1329,41 +1310,13 @@ fn validate_no_nested_aggregation(expr: &Expr) -> Result<()> {
             }
         }
     }
-    // Recurse into nested expressions
-    match expr {
-        Expr::BinaryOp { left, right, .. } => {
-            validate_no_nested_aggregation(left)?;
-            validate_no_nested_aggregation(right)?;
+    let mut result = Ok(());
+    expr.for_each_child(&mut |child| {
+        if result.is_ok() {
+            result = validate_no_nested_aggregation(child);
         }
-        Expr::FunctionCall { args, .. } => {
-            for arg in args {
-                validate_no_nested_aggregation(arg)?;
-            }
-        }
-        Expr::List(items) => {
-            for item in items {
-                validate_no_nested_aggregation(item)?;
-            }
-        }
-        Expr::Case {
-            expr,
-            when_then,
-            else_expr,
-        } => {
-            if let Some(e) = expr {
-                validate_no_nested_aggregation(e)?;
-            }
-            for (w, t) in when_then {
-                validate_no_nested_aggregation(w)?;
-                validate_no_nested_aggregation(t)?;
-            }
-            if let Some(e) = else_expr {
-                validate_no_nested_aggregation(e)?;
-            }
-        }
-        _ => {}
-    }
-    Ok(())
+    });
+    result
 }
 
 /// Validate that an expression does not access properties or labels of
@@ -1373,80 +1326,36 @@ fn validate_no_deleted_entity_access(
     expr: &Expr,
     deleted_vars: &std::collections::HashSet<String>,
 ) -> Result<()> {
-    match expr {
-        // n.prop on a deleted variable
-        Expr::Property(inner, _) if matches!(inner.as_ref(), Expr::Variable(name) if deleted_vars.contains(name)) =>
-        {
-            let name = if let Expr::Variable(n) = inner.as_ref() {
-                n
-            } else {
-                unreachable!()
-            };
-            return Err(anyhow!(
-                "EntityNotFound: DeletedEntityAccess - Cannot access properties of deleted entity '{}'",
-                name
-            ));
-        }
-        // labels(n) or keys(n) on a deleted variable
-        Expr::FunctionCall { name, args, .. }
-            if matches!(name.to_lowercase().as_str(), "labels" | "keys")
-                && args.len() == 1
-                && matches!(&args[0], Expr::Variable(v) if deleted_vars.contains(v)) =>
-        {
-            let var = if let Expr::Variable(v) = &args[0] {
-                v
-            } else {
-                unreachable!()
-            };
-            return Err(anyhow!(
-                "EntityNotFound: DeletedEntityAccess - Cannot access {} of deleted entity '{}'",
-                name.to_lowercase(),
-                var
-            ));
-        }
-        _ => {}
+    // Check n.prop on a deleted variable
+    if let Expr::Property(inner, _) = expr
+        && let Expr::Variable(name) = inner.as_ref()
+        && deleted_vars.contains(name)
+    {
+        return Err(anyhow!(
+            "EntityNotFound: DeletedEntityAccess - Cannot access properties of deleted entity '{}'",
+            name
+        ));
     }
-    // Recurse into sub-expressions
-    match expr {
-        Expr::BinaryOp { left, right, .. } => {
-            validate_no_deleted_entity_access(left, deleted_vars)?;
-            validate_no_deleted_entity_access(right, deleted_vars)?;
-        }
-        Expr::FunctionCall { args, .. } => {
-            for arg in args {
-                validate_no_deleted_entity_access(arg, deleted_vars)?;
-            }
-        }
-        Expr::List(items) => {
-            for item in items {
-                validate_no_deleted_entity_access(item, deleted_vars)?;
-            }
-        }
-        Expr::Property(inner, _) => {
-            validate_no_deleted_entity_access(inner, deleted_vars)?;
-        }
-        Expr::UnaryOp { expr: inner, .. } | Expr::IsNull(inner) | Expr::IsNotNull(inner) => {
-            validate_no_deleted_entity_access(inner, deleted_vars)?;
-        }
-        Expr::Case {
-            expr: case_expr,
-            when_then,
-            else_expr,
-        } => {
-            if let Some(e) = case_expr {
-                validate_no_deleted_entity_access(e, deleted_vars)?;
-            }
-            for (w, t) in when_then {
-                validate_no_deleted_entity_access(w, deleted_vars)?;
-                validate_no_deleted_entity_access(t, deleted_vars)?;
-            }
-            if let Some(e) = else_expr {
-                validate_no_deleted_entity_access(e, deleted_vars)?;
-            }
-        }
-        _ => {}
+    // Check labels(n) or keys(n) on a deleted variable
+    if let Expr::FunctionCall { name, args, .. } = expr
+        && matches!(name.to_lowercase().as_str(), "labels" | "keys")
+        && args.len() == 1
+        && let Expr::Variable(var) = &args[0]
+        && deleted_vars.contains(var)
+    {
+        return Err(anyhow!(
+            "EntityNotFound: DeletedEntityAccess - Cannot access {} of deleted entity '{}'",
+            name.to_lowercase(),
+            var
+        ));
     }
-    Ok(())
+    let mut result = Ok(());
+    expr.for_each_child(&mut |child| {
+        if result.is_ok() {
+            result = validate_no_deleted_entity_access(child, deleted_vars);
+        }
+    });
+    result
 }
 
 /// Validate that all variables referenced in properties are defined,
@@ -1809,12 +1718,6 @@ pub enum LogicalPlan {
         variable: String,
         filter: Option<Expr>,
         optional: bool,
-    },
-    LoadCsv {
-        url: String,
-        variable: String,
-        with_headers: bool,
-        field_terminator: Option<char>,
     },
     Empty, // Produces 1 empty row
     Unwind {
@@ -2914,15 +2817,6 @@ impl QueryPlanner {
                     };
                     let unwind_out_type = infer_unwind_output_type(&unwind.expr, &vars_in_scope);
                     add_var_to_scope(&mut vars_in_scope, &unwind.variable, unwind_out_type)?;
-                }
-                Clause::LoadCsv(load_csv) => {
-                    plan = LogicalPlan::LoadCsv {
-                        url: load_csv.url.clone(),
-                        variable: load_csv.variable.clone(),
-                        with_headers: load_csv.with_headers,
-                        field_terminator: load_csv.field_terminator,
-                    };
-                    add_var_to_scope(&mut vars_in_scope, &load_csv.variable, VariableType::Scalar)?;
                 }
                 Clause::Call(call_clause) => {
                     match &call_clause.kind {
@@ -6184,6 +6078,8 @@ impl QueryPlanner {
                 }
             }
             Expr::LabelCheck { expr, .. } => Self::collect_expr_variables_impl(expr, vars),
+            // Skip Quantifier/Reduce/ListComprehension/PatternComprehension —
+            // they introduce local variable bindings not in outer scope.
             _ => {}
         }
     }
@@ -7108,8 +7004,17 @@ fn collect_properties_recursive(
             for item in items {
                 match item {
                     RemoveItem::Property(expr) => {
-                        // REMOVE n.prop — mark n with "*"
+                        // REMOVE n.prop — collect the property and mark the variable
+                        // with "*" so full structural projection is applied.
                         collect_properties_from_expr_into(expr, properties);
+                        if let Expr::Property(base, _) = expr
+                            && let Expr::Variable(var) = base.as_ref()
+                        {
+                            properties
+                                .entry(var.clone())
+                                .or_default()
+                                .insert("*".to_string());
+                        }
                     }
                     RemoveItem::Labels { variable, .. } => {
                         // REMOVE n:Label — mark n with "*"
@@ -7199,6 +7104,10 @@ fn collect_properties_recursive(
         LogicalPlan::BindPath { input, .. } => {
             collect_properties_recursive(input, properties);
         }
+        LogicalPlan::SubqueryCall { input, subquery } => {
+            collect_properties_recursive(input, properties);
+            collect_properties_recursive(subquery, properties);
+        }
         // DDL and other plans don't reference properties
         _ => {}
     }
@@ -7212,9 +7121,19 @@ fn mark_set_item_variables(
     for item in items {
         match item {
             SetItem::Property { expr, value } => {
-                // SET n.prop = val — mark n via the property expr, collect from value
+                // SET n.prop = val — mark n via the property expr, collect from value.
+                // Also mark the variable with "*" for full structural projection so
+                // edge identity fields (_src/_dst) are available for write operations.
                 collect_properties_from_expr_into(expr, properties);
                 collect_properties_from_expr_into(value, properties);
+                if let Expr::Property(base, _) = expr
+                    && let Expr::Variable(var) = base.as_ref()
+                {
+                    properties
+                        .entry(var.clone())
+                        .or_default()
+                        .insert("*".to_string());
+                }
             }
             SetItem::Labels { variable, .. } => {
                 // SET n:Label — need full access to n
@@ -7327,9 +7246,12 @@ fn collect_properties_from_expr_into(
                     .entry(var.clone())
                     .or_default()
                     .insert(name.clone());
+                // Don't recurse into Variable — that would mark it as a bare
+                // variable reference (adding "*") when it's just a property base.
+            } else {
+                // Recurse for complex base expressions (nested property, function call, etc.)
+                collect_properties_from_expr_into(base, properties);
             }
-            // Also recurse into the base expression
-            collect_properties_from_expr_into(base, properties);
         }
         Expr::BinaryOp { left, right, .. } => {
             collect_properties_from_expr_into(left, properties);
@@ -7505,8 +7427,17 @@ fn collect_properties_from_expr_into(
         Expr::LabelCheck { expr, .. } => {
             collect_properties_from_expr_into(expr, properties);
         }
-        // Literals, parameters, wildcard don't reference properties
-        Expr::Literal(_) | Expr::Parameter(_) | Expr::Wildcard => {}
+        // Parameters reference outer-scope variables (e.g., $p in correlated subqueries).
+        // Mark them with "*" so the outer scan produces structural projections that
+        // extract_row_params can resolve.
+        Expr::Parameter(name) => {
+            properties
+                .entry(name.clone())
+                .or_default()
+                .insert("*".to_string());
+        }
+        // Literals and wildcard don't reference properties
+        Expr::Literal(_) | Expr::Wildcard => {}
     }
 }
 

@@ -283,13 +283,11 @@ impl Executor {
                 writer.l0_manager.get_pending_flush(),
             );
             ctx.set_deadline(Instant::now() + self.config.query_timeout);
-            ctx.set_mutation_path(self.config.mutation_path.clone());
             Some(ctx)
         } else {
             self.l0_manager.as_ref().map(|m| {
                 let mut ctx = QueryContext::new(m.get_current());
                 ctx.set_deadline(Instant::now() + self.config.query_timeout);
-                ctx.set_mutation_path(self.config.mutation_path.clone());
                 ctx
             })
         }

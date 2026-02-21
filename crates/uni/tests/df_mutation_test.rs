@@ -8,7 +8,6 @@
 //! buffer so that subsequent queries see the data (read-your-write semantics).
 
 use anyhow::Result;
-use uni_db::common::config::{MutationPathConfig, UniConfig};
 use uni_db::{DataType, Uni};
 
 /// Verify that a standalone CREATE (no RETURN) writes to L0 and a subsequent
@@ -184,48 +183,6 @@ async fn test_df_create_edge_read_your_write() -> Result<()> {
         .await?;
     assert_eq!(result.rows().len(), 1);
     assert_eq!(result.rows()[0].get::<i64>("b.id")?, 2);
-
-    Ok(())
-}
-
-/// Verify the rollback mechanism: with `MutationPathConfig::all_disabled()`,
-/// mutations still work via the fallback path.
-#[tokio::test]
-async fn test_rollback_toggle_all_disabled() -> Result<()> {
-    let config = UniConfig {
-        mutation_path: MutationPathConfig::all_disabled(),
-        ..Default::default()
-    };
-    let db = Uni::in_memory().config(config).build().await?;
-
-    // CREATE via fallback path
-    db.execute("CREATE (n:RollbackNode {val: 1})").await?;
-    db.execute("CREATE (n:RollbackNode {val: 2})").await?;
-
-    // MATCH should see both nodes
-    let result = db
-        .query("MATCH (n:RollbackNode) RETURN n.val ORDER BY n.val")
-        .await?;
-    assert_eq!(result.rows().len(), 2);
-    assert_eq!(result.rows()[0].get::<i64>("n.val")?, 1);
-    assert_eq!(result.rows()[1].get::<i64>("n.val")?, 2);
-
-    // SET via fallback path
-    db.execute("MATCH (n:RollbackNode {val: 1}) SET n.val = 10")
-        .await?;
-    let result = db
-        .query("MATCH (n:RollbackNode) RETURN n.val ORDER BY n.val")
-        .await?;
-    assert_eq!(result.rows()[0].get::<i64>("n.val")?, 2);
-    assert_eq!(result.rows()[1].get::<i64>("n.val")?, 10);
-
-    // DELETE via fallback path
-    db.execute("MATCH (n:RollbackNode {val: 2}) DETACH DELETE n")
-        .await?;
-    let result = db
-        .query("MATCH (n:RollbackNode) RETURN count(n) AS cnt")
-        .await?;
-    assert_eq!(result.rows()[0].get::<i64>("cnt")?, 1);
 
     Ok(())
 }

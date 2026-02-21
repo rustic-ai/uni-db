@@ -1,16 +1,16 @@
 # TCK Compliance Report
 
-**Generated:** 2026-02-20 16:51:58
-**Results:** `results_20260220_165158.json`
-**Compared to:** `results_20260220_155204.json`
+**Generated:** 2026-02-21 01:16:45
+**Results:** `results_20260221_011645.json`
+**Compared to:** `results_20260221_010120.json`
 
 ## Summary
 
 | Metric | Current | Previous | Delta |
 |--------|---------|----------|-------|
 | Scenarios | 3897 | 3897 |  |
-| Passed | 3855 | 3855 |  |
-| Failed | 41 | 41 |  |
+| Passed | 3853 | 3853 |  |
+| Failed | 43 | 43 |  |
 | Pass Rate | 98.9% | 98.9% | ➡️ +0.0pp |
 
 ## Feature Breakdown
@@ -107,9 +107,9 @@
 | ✅ Merge2 | 6 | 6 | 0 | 100% |  |
 | ✅ Merge3 | 5 | 5 | 0 | 100% |  |
 | ✅ Merge4 | 2 | 2 | 0 | 100% |  |
-| ✅ Merge5 | 29 | 29 | 0 | 100% |  |
+| ✅ Merge5 | 29 | 28 | 1 | 97% |  |
 | ✅ Merge6 | 6 | 6 | 0 | 100% |  |
-| ✅ Merge7 | 5 | 5 | 0 | 100% |  |
+| ✅ Merge7 | 5 | 4 | 1 | 80% |  |
 | ✅ Merge8 | 1 | 1 | 0 | 100% |  |
 | ✅ Merge9 | 4 | 4 | 0 | 100% |  |
 | ✅ Null1 | 17 | 17 | 0 | 100% |  |
@@ -416,7 +416,7 @@
   Step failed:
       Defined: tck/features/clauses/match/Match4.feature:111:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): Row count mismatch: expected 1, got 38
+      Step panicked. Captured output: Result mismatch (any order): Row count mismatch: expected 1, got 35
 [Summary]
 1 feature
 1 scenario (1 failed)
@@ -536,6 +536,36 @@
   ... (truncated)
   ```
 
+### Merge5
+
+- **[15] Matching using list property** (line 287)
+  ```
+  Step failed:
+      Defined: tck/features/clauses/merge/Merge5.feature:303:5
+      Matched: crates/uni-tck/src/steps/and.rs:4:1
+      Step panicked. Captured output: assertion `left == right` failed: Edge count changed: 1 -> 2
+        left: 1
+       right: 2
+[Summary]
+1 feature
+1 scenario (1 failed)
+
+  ... (truncated)
+  ```
+
+### Merge7
+
+- **[4] Copying properties from node with ON MATCH** (line 85)
+  ```
+  Step failed:
+      Defined: tck/features/clauses/merge/Merge7.feature:103:5
+      Matched: crates/uni-tck/src/steps/and.rs:27:1
+      Step panicked. Captured output: assertion `left == right` failed: Expected +properties=1, but got 0 (before=3, after=2, added=0, removed=1)
+        left: 0
+       rig
+  ... (truncated)
+  ```
+
 ### Return6
 
 - **[13] Returning the minimum length of paths** (line 230)
@@ -632,7 +662,7 @@
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal5.feature:133:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("d.day", Some(Int(11))), ("d.weekDay", Some(
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("d.weekYear", Some(Int(1984))), ("d.offsetMi
   ... (truncated)
   ```
 

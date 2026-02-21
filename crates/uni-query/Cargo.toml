@@ -36,7 +36,6 @@ indexmap = "2.0"
 parking_lot = { workspace = true }
 metrics = { workspace = true }
 csv = { workspace = true }
-reqwest = { workspace = true }
 parquet = { workspace = true }
 rand = { workspace = true }
 base64 = "0.21"

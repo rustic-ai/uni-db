@@ -154,7 +154,6 @@ fn build_clause(pair: Pair<Rule>) -> Result<Clause, ParseError> {
         Rule::unwind_clause => build_unwind_clause(inner),
         Rule::remove_clause => build_remove_clause(inner),
         Rule::call_clause => build_call_clause(inner),
-        Rule::load_csv_clause => build_load_csv_clause(inner),
         _ => unreachable!("Unexpected clause: {:?}", inner.as_rule()),
     }
 }
@@ -528,48 +527,6 @@ fn build_yield_item(pair: Pair<Rule>) -> Result<YieldItem, ParseError> {
         None
     };
     Ok(YieldItem { name, alias })
-}
-
-fn build_load_csv_clause(pair: Pair<Rule>) -> Result<Clause, ParseError> {
-    let mut inner = pair.into_inner();
-    inner.next(); // LOAD
-    inner.next(); // CSV
-
-    let with_headers = inner.peek().is_some_and(|p| p.as_rule() == Rule::WITH);
-    if with_headers {
-        inner.next(); // WITH
-        inner.next(); // HEADERS
-    }
-
-    inner.next(); // FROM
-    let Expr::Literal(CypherLiteral::String(url)) = build_expression(inner.next().unwrap())? else {
-        return Err(ParseError::new(
-            "LOAD CSV URL must be a string literal".to_string(),
-        ));
-    };
-
-    inner.next(); // AS
-    let variable = inner.next().unwrap().as_str().to_string();
-
-    let mut field_terminator = None;
-    if inner.next().is_some() {
-        // FIELDTERMINATOR
-        let s = inner.next().unwrap().as_str();
-        let clean = &s[1..s.len() - 1];
-        if clean.len() != 1 {
-            return Err(ParseError::new(
-                "FIELDTERMINATOR must be a single character".to_string(),
-            ));
-        }
-        field_terminator = Some(clean.chars().next().unwrap());
-    }
-
-    Ok(Clause::LoadCsv(LoadCsvClause {
-        url,
-        variable,
-        with_headers,
-        field_terminator,
-    }))
 }
 
 pub fn build_expression(pair: Pair<Rule>) -> Result<Expr, ParseError> {

@@ -165,7 +165,7 @@ pub fn batches_to_rows(batches: &[RecordBatch]) -> Result<Vec<HashMap<String, Va
 /// This must be called BEFORE `sync_dotted_columns` so that the dotted `n._all_props` column
 /// also gets the updated value.
 fn sync_all_props_in_maps(rows: &mut [HashMap<String, Value>]) {
-    for row in rows.iter_mut() {
+    for row in rows {
         let map_keys: Vec<String> = row
             .keys()
             .filter(|k| !k.contains('.') && matches!(row.get(*k), Some(Value::Map(_))))
@@ -203,7 +203,7 @@ fn sync_all_props_in_maps(rows: &mut [HashMap<String, Value>]) {
 /// produces correct output. Also handles newly created variables from CREATE/MERGE
 /// by inserting dotted columns that didn't exist in the input.
 fn sync_dotted_columns(rows: &mut [HashMap<String, Value>], schema: &SchemaRef) {
-    for row in rows.iter_mut() {
+    for row in rows {
         for field in schema.fields() {
             let name = field.name();
             if let Some(dot_pos) = name.find('.') {
@@ -215,6 +215,18 @@ fn sync_dotted_columns(rows: &mut [HashMap<String, Value>], schema: &SchemaRef) 
                 }
             }
         }
+    }
+}
+
+/// Normalize edge system field names in a map: `_src_vid` -> `_src`, `_dst_vid` -> `_dst`.
+///
+/// The write executor expects `_src`/`_dst` but DataFusion traverse emits `_src_vid`/`_dst_vid`.
+fn normalize_edge_field_names(map: &mut HashMap<String, Value>) {
+    if let Some(val) = map.remove("_src_vid") {
+        map.entry("_src".to_string()).or_insert(val);
+    }
+    if let Some(val) = map.remove("_dst_vid") {
+        map.entry("_dst".to_string()).or_insert(val);
     }
 }
 
@@ -230,33 +242,33 @@ fn merge_system_fields_for_write(row: &mut HashMap<String, Value>) {
     const EDGE_FIELDS: &[&str] = &["_eid", "_type", "_src_vid", "_dst_vid"];
 
     // Collect all variable names that have dotted columns (var.field).
-    let mut dotted_vars: HashSet<String> = HashSet::new();
-    for key in row.keys() {
-        if let Some(dot_pos) = key.find('.') {
-            dotted_vars.insert(key[..dot_pos].to_string());
-        }
-    }
+    let dotted_vars: HashSet<String> = row
+        .keys()
+        .filter_map(|key| key.find('.').map(|pos| key[..pos].to_string()))
+        .collect();
 
     // For each variable with dotted columns, ensure a bare Map exists.
     // If the variable is only represented via dotted columns (e.g., edge from
     // TraverseMainByType), assemble a Map from those columns.
     for var in &dotted_vars {
         if !row.contains_key(var) {
-            // No bare entry — create one from dotted columns
-            let mut map = HashMap::new();
             let prefix = format!("{var}.");
-            for (k, v) in row.iter() {
-                if let Some(field) = k.strip_prefix(prefix.as_str()) {
-                    map.insert(field.to_string(), v.clone());
-                }
-            }
+            let mut map: HashMap<String, Value> = row
+                .iter()
+                .filter_map(|(k, v)| {
+                    k.strip_prefix(prefix.as_str())
+                        .map(|field| (field.to_string(), v.clone()))
+                })
+                .collect();
+            normalize_edge_field_names(&mut map);
             if !map.is_empty() {
                 row.insert(var.clone(), Value::Map(map));
             }
         }
     }
 
-    // Now merge system fields into all bare Maps.
+    // Merge system fields from dotted columns into bare Maps and normalize edge names.
+    // Single pass: vertex fields overwrite, edge fields insert-if-absent, then normalize.
     let bare_vars: Vec<String> = row
         .keys()
         .filter(|k| !k.contains('.') && matches!(row.get(*k), Some(Value::Map(_))))
@@ -264,19 +276,32 @@ fn merge_system_fields_for_write(row: &mut HashMap<String, Value>) {
         .collect();
 
     for var in &bare_vars {
-        for &field in VERTEX_FIELDS {
-            if let Some(v) = row.get(&format!("{var}.{field}")).cloned()
-                && let Some(Value::Map(map)) = row.get_mut(var)
-            {
+        // Collect dotted values to merge (avoids borrowing row mutably while reading)
+        let vertex_vals: Vec<(&str, Value)> = VERTEX_FIELDS
+            .iter()
+            .filter_map(|&field| {
+                row.get(&format!("{var}.{field}"))
+                    .cloned()
+                    .map(|v| (field, v))
+            })
+            .collect();
+        let edge_vals: Vec<(&str, Value)> = EDGE_FIELDS
+            .iter()
+            .filter_map(|&field| {
+                row.get(&format!("{var}.{field}"))
+                    .cloned()
+                    .map(|v| (field, v))
+            })
+            .collect();
+
+        if let Some(Value::Map(map)) = row.get_mut(var) {
+            for (field, v) in vertex_vals {
                 map.insert(field.to_string(), v);
             }
-        }
-        for &field in EDGE_FIELDS {
-            if let Some(v) = row.get(&format!("{var}.{field}")).cloned()
-                && let Some(Value::Map(map)) = row.get_mut(var)
-            {
+            for (field, v) in edge_vals {
                 map.entry(field.to_string()).or_insert(v);
             }
+            normalize_edge_field_names(map);
         }
     }
 }
@@ -897,16 +922,11 @@ impl MutationExec {
             metrics: ExecutionPlanMetricsSet::new(),
         }
     }
-
-    /// Whether this is a DETACH DELETE mutation.
-    fn is_detach_delete(&self) -> bool {
-        matches!(&self.kind, MutationKind::Delete { detach: true, .. })
-    }
 }
 
 impl DisplayAs for MutationExec {
     fn fmt_as(&self, _t: DisplayFormatType, f: &mut fmt::Formatter) -> fmt::Result {
-        if self.is_detach_delete() {
+        if matches!(&self.kind, MutationKind::Delete { detach: true, .. }) {
             write!(f, "{} [DETACH]", self.display_name)
         } else {
             write!(f, "{}", self.display_name)
