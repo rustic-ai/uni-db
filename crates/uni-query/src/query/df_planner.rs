@@ -75,6 +75,7 @@ use parking_lot::RwLock;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use uni_algo::algo::AlgorithmRegistry;
 use uni_common::core::schema::{PropertyMeta, Schema as UniSchema};
 use uni_cypher::ast::{
     CypherLiteral, Direction as AstDirection, Expr, Pattern, PatternElement, SortItem,
@@ -256,6 +257,25 @@ impl HybridPhysicalPlanner {
             params,
             mutation_ctx: None,
         }
+    }
+
+    /// Set the algorithm registry for `uni.algo.*` procedure dispatch.
+    ///
+    /// Rebuilds the inner `GraphExecutionContext` with the registry attached.
+    pub fn with_algo_registry(mut self, registry: Arc<AlgorithmRegistry>) -> Self {
+        // Unwrap the Arc (or clone the inner value if other refs exist)
+        let ctx = Arc::try_unwrap(self.graph_ctx)
+            .unwrap_or_else(|arc| {
+                // Safety: all fields are cheap to clone (Arc-wrapped)
+                GraphExecutionContext::with_l0_context(
+                    arc.storage().clone(),
+                    arc.l0_context().clone(),
+                    arc.property_manager().clone(),
+                )
+            })
+            .with_algo_registry(registry);
+        self.graph_ctx = Arc::new(ctx);
+        self
     }
 
     /// Set the mutation context for write operations.

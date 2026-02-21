@@ -19,7 +19,7 @@ use crate::query::df_graph::common::{
 };
 use crate::query::df_graph::scan::resolve_property_type;
 use arrow_array::builder::{
-    Float32Builder, Float64Builder, Int64Builder, StringBuilder, UInt64Builder,
+    BooleanBuilder, Float32Builder, Float64Builder, Int64Builder, StringBuilder, UInt64Builder,
 };
 use arrow_array::{ArrayRef, RecordBatch};
 use arrow_schema::{DataType, Field, Schema, SchemaRef};
@@ -161,6 +161,37 @@ impl GraphProcedureCallExec {
                     fields.push(Field::new(col_name, data_type, true));
                 }
             }
+            "uni.schema.indexes" => {
+                for (name, alias) in yield_items {
+                    let col_name = alias.as_ref().unwrap_or(name);
+                    let data_type = match name.as_str() {
+                        "name" | "type" | "label" | "state" | "properties" => DataType::Utf8,
+                        _ => DataType::Utf8,
+                    };
+                    fields.push(Field::new(col_name, data_type, true));
+                }
+            }
+            "uni.schema.constraints" => {
+                for (name, alias) in yield_items {
+                    let col_name = alias.as_ref().unwrap_or(name);
+                    let data_type = match name.as_str() {
+                        "enabled" => DataType::Boolean,
+                        _ => DataType::Utf8,
+                    };
+                    fields.push(Field::new(col_name, data_type, true));
+                }
+            }
+            "uni.schema.labelInfo" => {
+                for (name, alias) in yield_items {
+                    let col_name = alias.as_ref().unwrap_or(name);
+                    let data_type = match name.as_str() {
+                        "property" | "dataType" => DataType::Utf8,
+                        "nullable" | "indexed" | "unique" => DataType::Boolean,
+                        _ => DataType::Utf8,
+                    };
+                    fields.push(Field::new(col_name, data_type, true));
+                }
+            }
             "uni.vector.query" | "uni.fts.query" | "uni.search" => {
                 // Search procedures yield node-like and scalar columns
                 for (name, alias) in yield_items {
@@ -219,6 +250,35 @@ impl GraphProcedureCallExec {
                     }
                 }
             }
+            name if name.starts_with("uni.algo.") => {
+                if let Some(registry) = graph_ctx.algo_registry()
+                    && let Some(procedure) = registry.get(name)
+                {
+                    let sig = procedure.signature();
+                    for (yield_name, alias) in yield_items {
+                        let col_name = alias.as_ref().unwrap_or(yield_name);
+                        let yield_vt = sig.yields.iter().find(|(n, _)| *n == yield_name.as_str());
+                        let data_type = yield_vt
+                            .map(|(_, vt)| value_type_to_arrow(vt))
+                            .unwrap_or(DataType::Utf8);
+                        let mut field = Field::new(col_name, data_type, true);
+                        // Tag complex types (List, Map, etc.) so record_batches_to_rows
+                        // can parse the JSON string back to the original type.
+                        if yield_vt.is_some_and(|(_, vt)| is_complex_value_type(vt)) {
+                            let mut metadata = std::collections::HashMap::new();
+                            metadata.insert("cv_encoded".to_string(), "true".to_string());
+                            field = field.with_metadata(metadata);
+                        }
+                        fields.push(field);
+                    }
+                } else {
+                    // Unknown algo or no registry: fallback to Utf8
+                    for (name, alias) in yield_items {
+                        let col_name = alias.as_ref().unwrap_or(name);
+                        fields.push(Field::new(col_name, DataType::Utf8, true));
+                    }
+                }
+            }
             _ => {
                 // Generic fallback: all columns as Utf8
                 for (name, alias) in yield_items {
@@ -230,6 +290,37 @@ impl GraphProcedureCallExec {
 
         Arc::new(Schema::new(fields))
     }
+}
+
+/// Convert an algorithm `ValueType` to an Arrow `DataType`.
+fn value_type_to_arrow(vt: &uni_algo::algo::procedures::ValueType) -> DataType {
+    use uni_algo::algo::procedures::ValueType;
+    match vt {
+        ValueType::Int => DataType::Int64,
+        ValueType::Float => DataType::Float64,
+        ValueType::String => DataType::Utf8,
+        ValueType::Bool => DataType::Boolean,
+        ValueType::List
+        | ValueType::Map
+        | ValueType::Node
+        | ValueType::Relationship
+        | ValueType::Path
+        | ValueType::Any => DataType::Utf8,
+    }
+}
+
+/// Returns true if the ValueType is a complex type that should be JSON-encoded as Utf8
+/// and tagged with `cv_encoded=true` metadata for downstream parsing.
+fn is_complex_value_type(vt: &uni_algo::algo::procedures::ValueType) -> bool {
+    use uni_algo::algo::procedures::ValueType;
+    matches!(
+        vt,
+        ValueType::List
+            | ValueType::Map
+            | ValueType::Node
+            | ValueType::Relationship
+            | ValueType::Path
+    )
 }
 
 impl DisplayAs for GraphProcedureCallExec {
@@ -435,11 +526,21 @@ async fn execute_procedure(
         "uni.schema.edgeTypes" | "uni.schema.relationshipTypes" => {
             execute_schema_edge_types(graph_ctx, yield_items, schema).await
         }
+        "uni.schema.indexes" => execute_schema_indexes(graph_ctx, yield_items, schema).await,
+        "uni.schema.constraints" => {
+            execute_schema_constraints(graph_ctx, yield_items, schema).await
+        }
+        "uni.schema.labelInfo" => {
+            execute_schema_label_info(graph_ctx, args, yield_items, schema).await
+        }
         "uni.vector.query" => {
             execute_vector_query(graph_ctx, args, yield_items, target_properties, schema).await
         }
         "uni.fts.query" => {
             execute_fts_query(graph_ctx, args, yield_items, target_properties, schema).await
+        }
+        name if name.starts_with("uni.algo.") => {
+            execute_algo_procedure(graph_ctx, name, args, yield_items, schema).await
         }
         _ => Err(datafusion::error::DataFusionError::Execution(format!(
             "Procedure '{}' not supported in DataFusion engine",
@@ -534,6 +635,197 @@ async fn execute_schema_edge_types(
     build_scalar_batch(&rows, yield_items, schema)
 }
 
+async fn execute_schema_indexes(
+    graph_ctx: &GraphExecutionContext,
+    yield_items: &[(String, Option<String>)],
+    schema: &SchemaRef,
+) -> DFResult<Option<RecordBatch>> {
+    let uni_schema = graph_ctx.storage().schema_manager().schema();
+
+    let mut rows: Vec<HashMap<String, Value>> = Vec::new();
+    for idx in uni_schema.indexes {
+        let mut row = HashMap::new();
+        row.insert("state".to_string(), Value::String("ONLINE".to_string()));
+
+        match idx {
+            uni_common::core::schema::IndexDefinition::Vector(v) => {
+                row.insert("name".to_string(), Value::String(v.name));
+                row.insert("type".to_string(), Value::String("VECTOR".to_string()));
+                row.insert("label".to_string(), Value::String(v.label));
+                row.insert(
+                    "properties".to_string(),
+                    Value::String(serde_json::to_string(&[&v.property]).unwrap_or_default()),
+                );
+            }
+            uni_common::core::schema::IndexDefinition::FullText(f) => {
+                row.insert("name".to_string(), Value::String(f.name));
+                row.insert("type".to_string(), Value::String("FULLTEXT".to_string()));
+                row.insert("label".to_string(), Value::String(f.label));
+                row.insert(
+                    "properties".to_string(),
+                    Value::String(serde_json::to_string(&f.properties).unwrap_or_default()),
+                );
+            }
+            uni_common::core::schema::IndexDefinition::Scalar(s) => {
+                row.insert("name".to_string(), Value::String(s.name));
+                row.insert("type".to_string(), Value::String("SCALAR".to_string()));
+                row.insert("label".to_string(), Value::String(s.label));
+                row.insert(
+                    "properties".to_string(),
+                    Value::String(serde_json::to_string(&s.properties).unwrap_or_default()),
+                );
+            }
+            uni_common::core::schema::IndexDefinition::JsonFullText(j) => {
+                row.insert("name".to_string(), Value::String(j.name));
+                row.insert("type".to_string(), Value::String("JSON_FTS".to_string()));
+                row.insert("label".to_string(), Value::String(j.label));
+                row.insert(
+                    "properties".to_string(),
+                    Value::String(serde_json::to_string(&[&j.column]).unwrap_or_default()),
+                );
+            }
+            uni_common::core::schema::IndexDefinition::Inverted(inv) => {
+                row.insert("name".to_string(), Value::String(inv.name));
+                row.insert("type".to_string(), Value::String("INVERTED".to_string()));
+                row.insert("label".to_string(), Value::String(inv.label));
+                row.insert(
+                    "properties".to_string(),
+                    Value::String(serde_json::to_string(&[&inv.property]).unwrap_or_default()),
+                );
+            }
+            _ => {
+                row.insert("name".to_string(), Value::String("UNKNOWN".to_string()));
+                row.insert("type".to_string(), Value::String("UNKNOWN".to_string()));
+            }
+        }
+        rows.push(row);
+    }
+
+    build_scalar_batch(&rows, yield_items, schema)
+}
+
+async fn execute_schema_constraints(
+    graph_ctx: &GraphExecutionContext,
+    yield_items: &[(String, Option<String>)],
+    schema: &SchemaRef,
+) -> DFResult<Option<RecordBatch>> {
+    let uni_schema = graph_ctx.storage().schema_manager().schema();
+
+    let mut rows: Vec<HashMap<String, Value>> = Vec::new();
+    for c in uni_schema.constraints {
+        let mut row = HashMap::new();
+        row.insert("name".to_string(), Value::String(c.name));
+        row.insert("enabled".to_string(), Value::Bool(c.enabled));
+
+        match c.constraint_type {
+            uni_common::core::schema::ConstraintType::Unique { properties } => {
+                row.insert("type".to_string(), Value::String("UNIQUE".to_string()));
+                row.insert(
+                    "properties".to_string(),
+                    Value::String(serde_json::to_string(&properties).unwrap_or_default()),
+                );
+            }
+            uni_common::core::schema::ConstraintType::Exists { property } => {
+                row.insert("type".to_string(), Value::String("EXISTS".to_string()));
+                row.insert(
+                    "properties".to_string(),
+                    Value::String(serde_json::to_string(&[&property]).unwrap_or_default()),
+                );
+            }
+            uni_common::core::schema::ConstraintType::Check { expression } => {
+                row.insert("type".to_string(), Value::String("CHECK".to_string()));
+                row.insert("expression".to_string(), Value::String(expression));
+            }
+            _ => {
+                row.insert("type".to_string(), Value::String("UNKNOWN".to_string()));
+            }
+        }
+
+        match c.target {
+            uni_common::core::schema::ConstraintTarget::Label(l) => {
+                row.insert("label".to_string(), Value::String(l));
+            }
+            uni_common::core::schema::ConstraintTarget::EdgeType(t) => {
+                row.insert("relationshipType".to_string(), Value::String(t));
+            }
+            _ => {
+                row.insert("target".to_string(), Value::String("UNKNOWN".to_string()));
+            }
+        }
+
+        rows.push(row);
+    }
+
+    build_scalar_batch(&rows, yield_items, schema)
+}
+
+async fn execute_schema_label_info(
+    graph_ctx: &GraphExecutionContext,
+    args: &[Value],
+    yield_items: &[(String, Option<String>)],
+    schema: &SchemaRef,
+) -> DFResult<Option<RecordBatch>> {
+    let label_name = args
+        .first()
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| {
+            datafusion::error::DataFusionError::Execution(
+                "uni.schema.labelInfo: first argument (label) must be a string".to_string(),
+            )
+        })?
+        .to_string();
+
+    let uni_schema = graph_ctx.storage().schema_manager().schema();
+
+    let mut rows: Vec<HashMap<String, Value>> = Vec::new();
+    if let Some(props) = uni_schema.properties.get(&label_name) {
+        for (prop_name, prop_meta) in props {
+            let mut row = HashMap::new();
+            row.insert("property".to_string(), Value::String(prop_name.clone()));
+            row.insert(
+                "dataType".to_string(),
+                Value::String(format!("{:?}", prop_meta.r#type)),
+            );
+            row.insert("nullable".to_string(), Value::Bool(prop_meta.nullable));
+
+            let is_indexed = uni_schema.indexes.iter().any(|idx| match idx {
+                uni_common::core::schema::IndexDefinition::Vector(v) => {
+                    v.label == label_name && v.property == *prop_name
+                }
+                uni_common::core::schema::IndexDefinition::Scalar(s) => {
+                    s.label == label_name && s.properties.contains(prop_name)
+                }
+                uni_common::core::schema::IndexDefinition::FullText(f) => {
+                    f.label == label_name && f.properties.contains(prop_name)
+                }
+                uni_common::core::schema::IndexDefinition::Inverted(inv) => {
+                    inv.label == label_name && inv.property == *prop_name
+                }
+                uni_common::core::schema::IndexDefinition::JsonFullText(j) => j.label == label_name,
+                _ => false,
+            });
+            row.insert("indexed".to_string(), Value::Bool(is_indexed));
+
+            let unique = uni_schema.constraints.iter().any(|c| {
+                if let uni_common::core::schema::ConstraintTarget::Label(l) = &c.target
+                    && l == &label_name
+                    && c.enabled
+                    && let uni_common::core::schema::ConstraintType::Unique { properties } =
+                        &c.constraint_type
+                {
+                    return properties.contains(prop_name);
+                }
+                false
+            });
+            row.insert("unique".to_string(), Value::Bool(unique));
+
+            rows.push(row);
+        }
+    }
+
+    build_scalar_batch(&rows, yield_items, schema)
+}
+
 /// Build a RecordBatch from scalar-valued rows for schema procedures.
 fn build_scalar_batch(
     rows: &[HashMap<String, Value>],
@@ -594,12 +886,175 @@ fn build_scalar_batch(
                 }
                 columns.push(Arc::new(builder.finish()));
             }
+            DataType::Boolean => {
+                let mut builder = BooleanBuilder::with_capacity(num_rows);
+                for row in rows {
+                    if let Some(val) = row.get(name) {
+                        if let Some(b) = val.as_bool() {
+                            builder.append_value(b);
+                        } else {
+                            builder.append_null();
+                        }
+                    } else {
+                        builder.append_null();
+                    }
+                }
+                columns.push(Arc::new(builder.finish()));
+            }
             _ => {
                 // Fallback: convert everything to string
                 let mut builder = StringBuilder::with_capacity(num_rows, num_rows * 32);
                 for row in rows {
                     if let Some(val) = row.get(name) {
                         builder.append_value(format!("{}", val));
+                    } else {
+                        builder.append_null();
+                    }
+                }
+                columns.push(Arc::new(builder.finish()));
+            }
+        }
+    }
+
+    let batch = RecordBatch::try_new(schema.clone(), columns)
+        .map_err(|e| datafusion::error::DataFusionError::ArrowError(Box::new(e), None))?;
+    Ok(Some(batch))
+}
+
+// ---------------------------------------------------------------------------
+// Algorithm procedures
+// ---------------------------------------------------------------------------
+
+async fn execute_algo_procedure(
+    graph_ctx: &GraphExecutionContext,
+    procedure_name: &str,
+    args: &[Value],
+    yield_items: &[(String, Option<String>)],
+    schema: &SchemaRef,
+) -> DFResult<Option<RecordBatch>> {
+    use futures::StreamExt;
+    use uni_algo::algo::procedures::AlgoContext;
+
+    let registry = graph_ctx.algo_registry().ok_or_else(|| {
+        datafusion::error::DataFusionError::Execution(
+            "Algorithm registry not available".to_string(),
+        )
+    })?;
+
+    let procedure = registry.get(procedure_name).ok_or_else(|| {
+        datafusion::error::DataFusionError::Execution(format!(
+            "Unknown algorithm: {}",
+            procedure_name
+        ))
+    })?;
+
+    let signature = procedure.signature();
+
+    // Convert uni_common::Value args to serde_json::Value for algo crate.
+    // Note: do NOT call validate_args here — the procedure's own execute()
+    // already validates and fills defaults internally.
+    let serde_args: Vec<serde_json::Value> = args.iter().cloned().map(|v| v.into()).collect();
+
+    // Build AlgoContext — no L0Manager in the DF path (read-only snapshot)
+    let algo_ctx = AlgoContext::new(graph_ctx.storage().clone(), None);
+
+    // Execute and collect stream
+    let mut stream = procedure.execute(algo_ctx, serde_args);
+    let mut rows = Vec::new();
+    while let Some(row_res) = stream.next().await {
+        // Check timeout periodically
+        if rows.len() % 1000 == 0 {
+            graph_ctx
+                .check_timeout()
+                .map_err(|e| datafusion::error::DataFusionError::Execution(e.to_string()))?;
+        }
+        let row =
+            row_res.map_err(|e| datafusion::error::DataFusionError::Execution(e.to_string()))?;
+        rows.push(row);
+    }
+
+    build_algo_batch(&rows, &signature, yield_items, schema)
+}
+
+/// Build a RecordBatch from algorithm result rows.
+fn build_algo_batch(
+    rows: &[uni_algo::algo::procedures::AlgoResultRow],
+    signature: &uni_algo::algo::procedures::ProcedureSignature,
+    yield_items: &[(String, Option<String>)],
+    schema: &SchemaRef,
+) -> DFResult<Option<RecordBatch>> {
+    if rows.is_empty() {
+        return Ok(Some(RecordBatch::new_empty(schema.clone())));
+    }
+
+    let num_rows = rows.len();
+    let mut columns: Vec<ArrayRef> = Vec::new();
+
+    for (idx, (yield_name, _alias)) in yield_items.iter().enumerate() {
+        // Find the column index in the signature yields
+        let sig_idx = signature
+            .yields
+            .iter()
+            .position(|(n, _)| *n == yield_name.as_str());
+
+        let field = schema.field(idx);
+        match field.data_type() {
+            DataType::Int64 => {
+                let mut builder = Int64Builder::with_capacity(num_rows);
+                for row in rows {
+                    if let Some(si) = sig_idx {
+                        match &row.values[si] {
+                            serde_json::Value::Number(n) => {
+                                builder.append_value(n.as_i64().unwrap_or(0));
+                            }
+                            _ => builder.append_null(),
+                        }
+                    } else {
+                        builder.append_null();
+                    }
+                }
+                columns.push(Arc::new(builder.finish()));
+            }
+            DataType::Float64 => {
+                let mut builder = Float64Builder::with_capacity(num_rows);
+                for row in rows {
+                    if let Some(si) = sig_idx {
+                        match &row.values[si] {
+                            serde_json::Value::Number(n) => {
+                                builder.append_value(n.as_f64().unwrap_or(0.0));
+                            }
+                            _ => builder.append_null(),
+                        }
+                    } else {
+                        builder.append_null();
+                    }
+                }
+                columns.push(Arc::new(builder.finish()));
+            }
+            DataType::Boolean => {
+                let mut builder = BooleanBuilder::with_capacity(num_rows);
+                for row in rows {
+                    if let Some(si) = sig_idx {
+                        match &row.values[si] {
+                            serde_json::Value::Bool(b) => builder.append_value(*b),
+                            _ => builder.append_null(),
+                        }
+                    } else {
+                        builder.append_null();
+                    }
+                }
+                columns.push(Arc::new(builder.finish()));
+            }
+            _ => {
+                // Utf8 fallback
+                let mut builder = StringBuilder::with_capacity(num_rows, num_rows * 32);
+                for row in rows {
+                    if let Some(si) = sig_idx {
+                        match &row.values[si] {
+                            serde_json::Value::String(s) => builder.append_value(s),
+                            serde_json::Value::Null => builder.append_null(),
+                            other => builder.append_value(other.to_string()),
+                        }
                     } else {
                         builder.append_null();
                     }

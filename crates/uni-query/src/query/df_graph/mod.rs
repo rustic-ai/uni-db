@@ -64,6 +64,7 @@ pub mod vector_knn;
 use parking_lot::RwLock;
 use std::sync::Arc;
 use std::time::Instant;
+use uni_algo::algo::AlgorithmRegistry;
 use uni_common::core::id::{Eid, Vid};
 use uni_store::runtime::context::QueryContext;
 use uni_store::runtime::l0::L0Buffer;
@@ -121,6 +122,9 @@ pub struct GraphExecutionContext {
 
     /// Query timeout deadline.
     deadline: Option<Instant>,
+
+    /// Algorithm registry for `uni.algo.*` procedure dispatch.
+    algo_registry: Option<Arc<AlgorithmRegistry>>,
 }
 
 impl std::fmt::Debug for GraphExecutionContext {
@@ -214,6 +218,7 @@ impl GraphExecutionContext {
             l0_context: L0Context::with_current(l0),
             property_manager,
             deadline: None,
+            algo_registry: None,
         }
     }
 
@@ -234,6 +239,7 @@ impl GraphExecutionContext {
             l0_context,
             property_manager,
             deadline: None,
+            algo_registry: None,
         }
     }
 
@@ -248,6 +254,7 @@ impl GraphExecutionContext {
             l0_context: L0Context::from_query_context(query_ctx),
             property_manager,
             deadline: query_ctx.deadline,
+            algo_registry: None,
         }
     }
 
@@ -255,6 +262,17 @@ impl GraphExecutionContext {
     pub fn with_deadline(mut self, deadline: Instant) -> Self {
         self.deadline = Some(deadline);
         self
+    }
+
+    /// Set the algorithm registry for `uni.algo.*` procedure dispatch.
+    pub fn with_algo_registry(mut self, registry: Arc<AlgorithmRegistry>) -> Self {
+        self.algo_registry = Some(registry);
+        self
+    }
+
+    /// Get a reference to the algorithm registry, if set.
+    pub fn algo_registry(&self) -> Option<&Arc<AlgorithmRegistry>> {
+        self.algo_registry.as_ref()
     }
 
     /// Check if the query has timed out.

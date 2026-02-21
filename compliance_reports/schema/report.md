@@ -1,8 +1,8 @@
 # TCK Compliance Report
 
-**Generated:** 2026-02-20 15:06:17
-**Results:** `results_20260220_150617.json`
-**Compared to:** `results_20260220_140010.json`
+**Generated:** 2026-02-20 15:56:18
+**Results:** `results_20260220_155618.json`
+**Compared to:** `results_20260220_150617.json`
 
 ## Summary
 
@@ -487,7 +487,7 @@
   Step failed:
       Defined: tck/features/clauses/match/Match7.feature:361:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("x", Some(Node(Node { vid: Vid(1), labels: [], propert
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("p", Some(Null)), ("x", Some(Node(Node { vid: Vid(1), 
   ... (truncated)
   ```
 
@@ -590,7 +590,7 @@
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal5.feature:133:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("d.microsecond", Some(Int(645876))), ("d.hou
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("d.weekDay", Some(Int(7))), ("d.nanosecond",
   ... (truncated)
   ```
 

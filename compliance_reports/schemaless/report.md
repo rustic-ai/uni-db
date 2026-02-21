@@ -1,8 +1,8 @@
 # TCK Compliance Report
 
-**Generated:** 2026-02-20 15:02:03
-**Results:** `results_20260220_150203.json`
-**Compared to:** `results_20260220_135557.json`
+**Generated:** 2026-02-20 16:51:58
+**Results:** `results_20260220_165158.json`
+**Compared to:** `results_20260220_155204.json`
 
 ## Summary
 
@@ -416,7 +416,7 @@
   Step failed:
       Defined: tck/features/clauses/match/Match4.feature:111:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): Row count mismatch: expected 1, got 33
+      Step panicked. Captured output: Result mismatch (any order): Row count mismatch: expected 1, got 38
 [Summary]
 1 feature
 1 scenario (1 failed)
@@ -506,7 +506,7 @@
   Step failed:
       Defined: tck/features/clauses/match/Match7.feature:361:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("p", Some(Null)), ("x", Some(Node(Node { vid: Vid(1), 
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("x", Some(Node(Node { vid: Vid(1), labels: [], propert
   ... (truncated)
   ```
 
@@ -632,7 +632,7 @@
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal5.feature:133:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("d.ordinalDay", Some(Int(316))), ("d.year", 
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("d.day", Some(Int(11))), ("d.weekDay", Some(
   ... (truncated)
   ```
 

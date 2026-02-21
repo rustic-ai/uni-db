@@ -525,6 +525,9 @@ impl Executor {
             params.clone(),
         );
 
+        // Thread algorithm registry for uni.algo.* procedure dispatch
+        planner = planner.with_algo_registry(self.algo_registry.clone());
+
         // Build MutationContext when the plan contains write operations
         if Self::contains_write_operations(&plan) {
             let writer = self
@@ -625,11 +628,50 @@ impl Executor {
                 // The projection step emits helper columns like "n._vid" and "n._labels"
                 // alongside the materialized "n" column (a Map of user properties).
                 // Here we merge those system fields into the map and remove the helpers.
+                //
+                // For search procedures (vector/FTS), the bare variable may be a VID
+                // string placeholder rather than a Map. In that case, promote it to a
+                // Map so we can merge system fields and properties into it.
                 let bare_vars: Vec<String> = row
                     .keys()
                     .filter(|k| !k.contains('.') && matches!(row.get(*k), Some(Value::Map(_))))
                     .cloned()
                     .collect();
+
+                // Detect VID-placeholder variables that have system columns
+                // (e.g., "node" is String("1") but "node._vid" exists).
+                // Promote these to Maps so system fields can be merged in.
+                let vid_placeholder_vars: Vec<String> = row
+                    .keys()
+                    .filter(|k| {
+                        !k.contains('.')
+                            && matches!(row.get(*k), Some(Value::String(_)))
+                            && row.contains_key(&format!("{}._vid", k))
+                    })
+                    .cloned()
+                    .collect();
+
+                for var in &vid_placeholder_vars {
+                    // Build a Map from system and property columns
+                    let prefix = format!("{}.", var);
+                    let mut map = HashMap::new();
+
+                    let dotted_keys: Vec<String> = row
+                        .keys()
+                        .filter(|k| k.starts_with(&prefix))
+                        .cloned()
+                        .collect();
+
+                    for key in &dotted_keys {
+                        let prop_name = &key[prefix.len()..];
+                        if let Some(val) = row.remove(key) {
+                            map.insert(prop_name.to_string(), val);
+                        }
+                    }
+
+                    // Replace the VID-string placeholder with the constructed Map
+                    row.insert(var.clone(), Value::Map(map));
+                }
 
                 for var in &bare_vars {
                     // Merge node system fields (_vid, _labels)
@@ -997,8 +1039,13 @@ impl Executor {
             | LogicalPlan::CopyFrom { .. }
             | LogicalPlan::Backup { .. }
             | LogicalPlan::Explain { .. }
-            | LogicalPlan::LoadCsv { .. }
-            | LogicalPlan::ProcedureCall { .. } => true,
+            | LogicalPlan::LoadCsv { .. } => true,
+
+            // Procedure calls: DF-eligible procedures go through DataFusion,
+            // everything else (DDL, admin, unknown) stays on fallback.
+            LogicalPlan::ProcedureCall { procedure_name, .. } => {
+                !Self::is_df_eligible_procedure(procedure_name)
+            }
 
             // Recurse through single-input wrapper nodes
             LogicalPlan::Project { input, .. }
@@ -1035,6 +1082,25 @@ impl Executor {
 
             _ => false,
         }
+    }
+
+    /// Returns `true` if the procedure is a read-only, data-producing procedure
+    /// that can be executed through the DataFusion engine.
+    ///
+    /// This is a **positive allowlist** — unknown procedures default to the
+    /// fallback executor (safe for TCK test procedures, future DDL, and admin).
+    fn is_df_eligible_procedure(name: &str) -> bool {
+        matches!(
+            name,
+            "uni.schema.labels"
+                | "uni.schema.edgeTypes"
+                | "uni.schema.relationshipTypes"
+                | "uni.schema.indexes"
+                | "uni.schema.constraints"
+                | "uni.schema.labelInfo"
+                | "uni.vector.query"
+                | "uni.fts.query"
+        ) || name.starts_with("uni.algo.")
     }
 
     /// Check if a mutation query needs the fallback executor path.
