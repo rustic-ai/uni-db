@@ -1,19 +1,17 @@
 # TCK Compliance Report
 
-**Generated:** 2026-02-21 04:46:48
-**Results:** `results_20260221_044648.json`
-**Compared to:** `results_20260221_012103.json`
+**Generated:** 2026-02-21 10:47:56
+**Results:** `results_20260221_104756.json`
+**Compared to:** `results_20260221_044648.json`
 
 ## Summary
 
 | Metric | Current | Previous | Delta |
 |--------|---------|----------|-------|
 | Scenarios | 3897 | 3897 |  |
-| Passed | 3872 | 3858 | +14 |
-| Failed | 24 | 38 | -14 |
-| Pass Rate | 99.4% | 99.0% | 📈 +0.4pp |
-
-**🟢 Fixed:** 14 scenarios now passing
+| Passed | 3872 | 3872 |  |
+| Failed | 24 | 24 |  |
+| Pass Rate | 99.4% | 99.4% | ➡️ +0.0pp |
 
 ## Feature Breakdown
 
@@ -30,12 +28,12 @@
 | ✅ Boolean3 | 30 | 30 | 0 | 100% |  |
 | ✅ Boolean4 | 52 | 52 | 0 | 100% |  |
 | ✅ Boolean5 | 8 | 8 | 0 | 100% |  |
-| ✅ Call1 | 16 | 16 | 0 | 100% | +6pp |
+| ✅ Call1 | 16 | 16 | 0 | 100% |  |
 | ✅ Call2 | 6 | 5 | 1 | 83% |  |
 | ✅ Call3 | 6 | 6 | 0 | 100% |  |
 | ✅ Call4 | 2 | 2 | 0 | 100% |  |
-| ✅ Call5 | 19 | 19 | 0 | 100% | +11pp |
-| ✅ Call6 | 3 | 3 | 0 | 100% | +33pp |
+| ✅ Call5 | 19 | 19 | 0 | 100% |  |
+| ✅ Call6 | 3 | 3 | 0 | 100% |  |
 | ✅ Comparison1 | 43 | 43 | 0 | 100% |  |
 | ✅ Comparison2 | 19 | 19 | 0 | 100% |  |
 | ✅ Comparison3 | 9 | 9 | 0 | 100% |  |
@@ -90,8 +88,8 @@
 | ✅ Match3 | 30 | 30 | 0 | 100% |  |
 | ⚠️ Match4 | 10 | 7 | 3 | 70% |  |
 | ✅ Match5 | 29 | 28 | 1 | 97% |  |
-| ✅ Match6 | 97 | 97 | 0 | 100% | +4pp |
-| ✅ Match7 | 31 | 31 | 0 | 100% | +3pp |
+| ✅ Match6 | 97 | 97 | 0 | 100% |  |
+| ✅ Match7 | 31 | 31 | 0 | 100% |  |
 | ⚠️ Match8 | 3 | 2 | 1 | 67% |  |
 | ✅ Match9 | 9 | 9 | 0 | 100% |  |
 | ✅ MatchWhere1 | 15 | 15 | 0 | 100% |  |
@@ -172,7 +170,7 @@
 | ✅ String8 | 9 | 9 | 0 | 100% |  |
 | ✅ String9 | 9 | 9 | 0 | 100% |  |
 | ✅ Temporal1 | 207 | 207 | 0 | 100% |  |
-| ✅ Temporal10 | 131 | 129 | 2 | 98% | +4pp |
+| ✅ Temporal10 | 131 | 129 | 2 | 98% |  |
 | ✅ Temporal2 | 53 | 53 | 0 | 100% |  |
 | ✅ Temporal3 | 183 | 183 | 0 | 100% |  |
 | ✅ Temporal4 | 39 | 39 | 0 | 100% |  |
@@ -211,25 +209,6 @@
 | ✅ WithWhere5 | 4 | 4 | 0 | 100% |  |
 | ✅ WithWhere6 | 1 | 1 | 0 | 100% |  |
 | ✅ WithWhere7 | 3 | 3 | 0 | 100% |  |
-
-## 🟢 Newly Passing
-
-Scenarios that were failing but are now passing:
-
-- **Call1** — [4] In-query call to procedure that takes no arguments and yields no results and consumes no rows (line 69)
-- **Call5** — [4] Rename outputs to unbound variable names (line 101)
-- **Call5** — [4] Rename outputs to unbound variable names (line 103)
-- **Call6** — [1] Calling the same STRING procedure twice using the same outputs in each call (line 33)
-- **Match6** — [12] Matching path with multiple bidirectional relationships (line 217)
-- **Match6** — [13] Matching path with both directions should respect other directions (line 238)
-- **Match6** — [14] Named path with undirected fixed variable length pattern (line 257)
-- **Match6** — [17] Return a named var length path of length zero (line 314)
-- **Match7** — [17] Optionally matching named paths - existing result (line 347)
-- **Temporal10** — [12] Should compute durations with no difference (line 311)
-- **Temporal10** — [12] Should compute durations with no difference (line 312)
-- **Temporal10** — [12] Should compute durations with no difference (line 313)
-- **Temporal10** — [12] Should compute durations with no difference (line 314)
-- **Temporal10** — [12] Should compute durations with no difference (line 315)
 
 ## Failed Scenarios
 
@@ -365,7 +344,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/clauses/match/Match4.feature:111:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): Row count mismatch: expected 1, got 15
+      Step panicked. Captured output: Result mismatch (any order): Row count mismatch: expected 1, got 17
 [Summary]
 1 feature
 1 scenario (1 failed)
@@ -485,7 +464,7 @@ Scenarios that were failing but are now passing:
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal5.feature:133:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("d.epochMillis", Some(Int(469024274645))), (
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("d.millisecond", Some(Int(645))), ("d.offset
   ... (truncated)
   ```
 

@@ -1,127 +1,28 @@
 # TCK Compliance Report
 
-**Generated:** 2026-02-21 04:42:31
-**Results:** `results_20260221_044231.json`
-**Compared to:** `results_20260221_042331.json`
+**Generated:** 2026-02-21 10:43:40
+**Results:** `results_20260221_104340.json`
+**Compared to:** `results_20260221_044231.json`
 
 ## Summary
 
 | Metric | Current | Previous | Delta |
 |--------|---------|----------|-------|
-| Scenarios | 3897 | 3897 |  |
-| Passed | 3869 | 3869 |  |
-| Failed | 27 | 27 |  |
-| Pass Rate | 99.3% | 99.3% | ➡️ +0.0pp |
+| Scenarios | 1752 | 3897 | -2145 |
+| Passed | 1740 | 3869 | -2129 |
+| Failed | 11 | 27 | -16 |
+| Pass Rate | 99.3% | 99.3% | 📈 +0.0pp |
 
 ## Feature Breakdown
 
 | Feature | Scenarios | Passed | Failed | Rate | Delta |
 |---------|-----------|--------|--------|------|-------|
-| ✅ Aggregation1 | 2 | 2 | 0 | 100% |  |
-| ✅ Aggregation2 | 12 | 12 | 0 | 100% |  |
-| ✅ Aggregation3 | 2 | 2 | 0 | 100% |  |
-| ✅ Aggregation5 | 2 | 2 | 0 | 100% |  |
-| ✅ Aggregation6 | 13 | 13 | 0 | 100% |  |
-| ✅ Aggregation8 | 4 | 4 | 0 | 100% |  |
-| ✅ Boolean1 | 30 | 30 | 0 | 100% |  |
-| ✅ Boolean2 | 30 | 30 | 0 | 100% |  |
-| ✅ Boolean3 | 30 | 30 | 0 | 100% |  |
-| ✅ Boolean4 | 52 | 52 | 0 | 100% |  |
-| ✅ Boolean5 | 8 | 8 | 0 | 100% |  |
-| ✅ Call1 | 16 | 16 | 0 | 100% |  |
-| ✅ Call2 | 6 | 5 | 1 | 83% |  |
-| ✅ Call3 | 6 | 6 | 0 | 100% |  |
-| ✅ Call4 | 2 | 2 | 0 | 100% |  |
-| ✅ Call5 | 19 | 19 | 0 | 100% |  |
-| ✅ Call6 | 3 | 3 | 0 | 100% |  |
-| ✅ Comparison1 | 43 | 43 | 0 | 100% |  |
-| ✅ Comparison2 | 19 | 19 | 0 | 100% |  |
-| ✅ Comparison3 | 9 | 9 | 0 | 100% |  |
-| ✅ Comparison4 | 1 | 1 | 0 | 100% |  |
-| ✅ Conditional1 | 1 | 1 | 0 | 100% |  |
-| ✅ Conditional2 | 12 | 12 | 0 | 100% |  |
 | ✅ CountingSubgraphMatches1 | 11 | 11 | 0 | 100% |  |
-| ✅ Create1 | 20 | 20 | 0 | 100% |  |
-| ✅ Create2 | 24 | 24 | 0 | 100% |  |
-| ✅ Create3 | 13 | 13 | 0 | 100% |  |
-| ✅ Create4 | 2 | 2 | 0 | 100% |  |
-| ✅ Create5 | 5 | 5 | 0 | 100% |  |
-| ✅ Create6 | 14 | 14 | 0 | 100% |  |
-| ✅ Delete1 | 8 | 8 | 0 | 100% |  |
-| ✅ Delete2 | 5 | 5 | 0 | 100% |  |
-| ✅ Delete3 | 2 | 2 | 0 | 100% |  |
-| ✅ Delete4 | 3 | 3 | 0 | 100% |  |
-| ✅ Delete5 | 9 | 9 | 0 | 100% |  |
-| ✅ Delete6 | 14 | 14 | 0 | 100% |  |
 | ⚠️ ExistentialSubquery1 | 4 | 3 | 1 | 75% |  |
 | ⚠️ ExistentialSubquery2 | 3 | 2 | 1 | 67% |  |
 | ❌ ExistentialSubquery3 | 3 | 1 | 2 | 33% |  |
-| ✅ Graph3 | 9 | 9 | 0 | 100% |  |
-| ✅ Graph4 | 11 | 11 | 0 | 100% |  |
-| ✅ Graph5 | 9 | 9 | 0 | 100% |  |
-| ✅ Graph6 | 14 | 13 | 1 | 93% |  |
-| ✅ Graph7 | 3 | 3 | 0 | 100% |  |
-| ✅ Graph8 | 8 | 8 | 0 | 100% |  |
-| ✅ Graph9 | 7 | 7 | 0 | 100% |  |
-| ✅ List1 | 23 | 23 | 0 | 100% |  |
-| ✅ List11 | 67 | 66 | 1 | 99% |  |
-| ✅ List12 | 7 | 6 | 1 | 86% |  |
-| ✅ List2 | 15 | 15 | 0 | 100% |  |
-| ✅ List3 | 7 | 7 | 0 | 100% |  |
-| ✅ List4 | 2 | 2 | 0 | 100% |  |
-| ✅ List5 | 46 | 46 | 0 | 100% |  |
-| ✅ List6 | 17 | 17 | 0 | 100% |  |
-| ✅ List9 | 1 | 1 | 0 | 100% |  |
-| ✅ Literals1 | 6 | 6 | 0 | 100% |  |
-| ✅ Literals2 | 12 | 12 | 0 | 100% |  |
-| ✅ Literals3 | 16 | 16 | 0 | 100% |  |
-| ✅ Literals4 | 10 | 10 | 0 | 100% |  |
-| ✅ Literals5 | 27 | 26 | 1 | 96% |  |
-| ✅ Literals6 | 13 | 12 | 1 | 92% |  |
-| ✅ Literals7 | 20 | 19 | 0 | 95% |  |
-| ✅ Literals8 | 27 | 27 | 0 | 100% |  |
-| ✅ Map1 | 19 | 19 | 0 | 100% |  |
-| ✅ Map2 | 14 | 14 | 0 | 100% |  |
-| ✅ Map3 | 11 | 11 | 0 | 100% |  |
-| ✅ Match1 | 86 | 86 | 0 | 100% |  |
-| ✅ Match2 | 86 | 85 | 1 | 99% |  |
-| ✅ Match3 | 30 | 30 | 0 | 100% |  |
-| ⚠️ Match4 | 10 | 7 | 3 | 70% |  |
-| ✅ Match5 | 29 | 28 | 1 | 97% |  |
-| ✅ Match6 | 97 | 97 | 0 | 100% |  |
-| ✅ Match7 | 31 | 31 | 0 | 100% |  |
-| ⚠️ Match8 | 3 | 2 | 1 | 67% |  |
-| ✅ Match9 | 9 | 9 | 0 | 100% |  |
-| ✅ MatchWhere1 | 15 | 15 | 0 | 100% |  |
-| ✅ MatchWhere2 | 2 | 2 | 0 | 100% |  |
-| ✅ MatchWhere3 | 3 | 3 | 0 | 100% |  |
-| ✅ MatchWhere4 | 2 | 2 | 0 | 100% |  |
-| ✅ MatchWhere5 | 4 | 4 | 0 | 100% |  |
-| ✅ MatchWhere6 | 8 | 8 | 0 | 100% |  |
-| ✅ Mathematical11 | 1 | 1 | 0 | 100% |  |
-| ✅ Mathematical13 | 1 | 1 | 0 | 100% |  |
-| ✅ Mathematical2 | 1 | 1 | 0 | 100% |  |
-| ✅ Mathematical3 | 1 | 1 | 0 | 100% |  |
-| ✅ Mathematical8 | 2 | 2 | 0 | 100% |  |
-| ✅ Merge1 | 17 | 17 | 0 | 100% |  |
-| ✅ Merge2 | 6 | 6 | 0 | 100% |  |
-| ✅ Merge3 | 5 | 5 | 0 | 100% |  |
-| ✅ Merge4 | 2 | 2 | 0 | 100% |  |
-| ✅ Merge5 | 29 | 28 | 1 | 97% |  |
-| ✅ Merge6 | 6 | 6 | 0 | 100% |  |
-| ✅ Merge7 | 5 | 4 | 1 | 80% |  |
-| ✅ Merge8 | 1 | 1 | 0 | 100% |  |
-| ✅ Merge9 | 4 | 4 | 0 | 100% |  |
-| ✅ Null1 | 17 | 17 | 0 | 100% |  |
-| ✅ Null2 | 17 | 17 | 0 | 100% |  |
-| ✅ Null3 | 10 | 10 | 0 | 100% |  |
-| ✅ Path1 | 1 | 1 | 0 | 100% |  |
-| ✅ Path2 | 3 | 3 | 0 | 100% |  |
-| ✅ Path3 | 3 | 3 | 0 | 100% |  |
-| ✅ Pattern1 | 39 | 39 | 0 | 100% |  |
-| ✅ Pattern2 | 11 | 11 | 0 | 100% |  |
-| ✅ Precedence1 | 72 | 72 | 0 | 100% |  |
-| ✅ Precedence2 | 26 | 26 | 0 | 100% |  |
+| ❌ Literals7 | 1 | 0 | 0 | 0% | -95pp |
+| ✅ Precedence2 | 1 | 1 | 0 | 100% |  |
 | ✅ Precedence3 | 11 | 11 | 0 | 100% |  |
 | ✅ Precedence4 | 12 | 12 | 0 | 100% |  |
 | ✅ Quantifier1 | 105 | 105 | 0 | 100% |  |
@@ -136,32 +37,6 @@
 | ✅ Quantifier7 | 36 | 36 | 0 | 100% |  |
 | ✅ Quantifier8 | 31 | 31 | 0 | 100% |  |
 | ✅ Quantifier9 | 17 | 17 | 0 | 100% |  |
-| ✅ Remove1 | 7 | 7 | 0 | 100% |  |
-| ✅ Remove2 | 5 | 5 | 0 | 100% |  |
-| ✅ Remove3 | 21 | 21 | 0 | 100% |  |
-| ✅ Return1 | 2 | 2 | 0 | 100% |  |
-| ✅ Return2 | 18 | 18 | 0 | 100% |  |
-| ✅ Return3 | 3 | 3 | 0 | 100% |  |
-| ✅ Return4 | 11 | 11 | 0 | 100% |  |
-| ✅ Return5 | 5 | 5 | 0 | 100% |  |
-| ✅ Return6 | 21 | 19 | 2 | 90% |  |
-| ✅ Return7 | 2 | 2 | 0 | 100% |  |
-| ✅ Return8 | 1 | 1 | 0 | 100% |  |
-| ✅ ReturnOrderBy1 | 12 | 12 | 0 | 100% |  |
-| ✅ ReturnOrderBy2 | 14 | 14 | 0 | 100% |  |
-| ✅ ReturnOrderBy3 | 1 | 1 | 0 | 100% |  |
-| ✅ ReturnOrderBy4 | 2 | 2 | 0 | 100% |  |
-| ✅ ReturnOrderBy5 | 1 | 1 | 0 | 100% |  |
-| ✅ ReturnOrderBy6 | 5 | 5 | 0 | 100% |  |
-| ✅ ReturnSkipLimit1 | 11 | 11 | 0 | 100% |  |
-| ✅ ReturnSkipLimit2 | 17 | 17 | 0 | 100% |  |
-| ✅ ReturnSkipLimit3 | 3 | 3 | 0 | 100% |  |
-| ✅ Set1 | 11 | 11 | 0 | 100% |  |
-| ✅ Set2 | 3 | 3 | 0 | 100% |  |
-| ✅ Set3 | 8 | 8 | 0 | 100% |  |
-| ✅ Set4 | 5 | 5 | 0 | 100% |  |
-| ✅ Set5 | 5 | 5 | 0 | 100% |  |
-| ✅ Set6 | 21 | 21 | 0 | 100% |  |
 | ✅ String1 | 1 | 1 | 0 | 100% |  |
 | ✅ String10 | 9 | 9 | 0 | 100% |  |
 | ✅ String11 | 2 | 2 | 0 | 100% |  |
@@ -184,44 +59,8 @@
 | ✅ TypeConversion2 | 12 | 12 | 0 | 100% |  |
 | ✅ TypeConversion3 | 11 | 11 | 0 | 100% |  |
 | ✅ TypeConversion4 | 14 | 14 | 0 | 100% |  |
-| ✅ Union1 | 5 | 5 | 0 | 100% |  |
-| ✅ Union2 | 5 | 5 | 0 | 100% |  |
-| ✅ Union3 | 2 | 2 | 0 | 100% |  |
-| ✅ Unwind1 | 14 | 14 | 0 | 100% |  |
-| ✅ With1 | 6 | 6 | 0 | 100% |  |
-| ✅ With2 | 2 | 2 | 0 | 100% |  |
-| ✅ With3 | 1 | 1 | 0 | 100% |  |
-| ✅ With4 | 7 | 7 | 0 | 100% |  |
-| ✅ With5 | 2 | 2 | 0 | 100% |  |
-| ✅ With6 | 9 | 9 | 0 | 100% |  |
-| ✅ With7 | 2 | 2 | 0 | 100% |  |
-| ✅ WithOrderBy1 | 96 | 96 | 0 | 100% |  |
-| ✅ WithOrderBy2 | 83 | 83 | 0 | 100% |  |
-| ✅ WithOrderBy3 | 93 | 93 | 0 | 100% |  |
-| ✅ WithOrderBy4 | 20 | 20 | 0 | 100% |  |
-| ✅ WithSkipLimit1 | 2 | 2 | 0 | 100% |  |
-| ✅ WithSkipLimit2 | 4 | 4 | 0 | 100% |  |
-| ✅ WithSkipLimit3 | 3 | 3 | 0 | 100% |  |
-| ✅ WithWhere1 | 4 | 4 | 0 | 100% |  |
-| ✅ WithWhere2 | 2 | 2 | 0 | 100% |  |
-| ✅ WithWhere3 | 3 | 3 | 0 | 100% |  |
-| ✅ WithWhere4 | 2 | 2 | 0 | 100% |  |
-| ✅ WithWhere5 | 4 | 4 | 0 | 100% |  |
-| ✅ WithWhere6 | 1 | 1 | 0 | 100% |  |
-| ✅ WithWhere7 | 3 | 3 | 0 | 100% |  |
 
 ## Failed Scenarios
-
-### Call2
-
-- **[3] Standalone call to procedure with implicit arguments** (line 72)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/call/Call2.feature:89:5
-      Matched: crates/uni-tck/src/steps/then.rs:37:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "MissingParameter: Procedure 'test.my.proc' requires 2 implicit argument(s)", q
-  ... (truncated)
-  ```
 
 ### ExistentialSubquery1
 
@@ -274,195 +113,6 @@
   ... (truncated)
   ```
 
-### Graph6
-
-- **[6] Statically access a property of a optional non-null relationship** (line 111)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/graph/Graph6.feature:122:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): Row count mismatch: expected 1, got 2
-[Summary]
-1 feature
-1 scenario (1 failed)
-4 steps (3 passed, 1
-  ... (truncated)
-  ```
-
-### List11
-
-- **[3] Create an empty list if range direction and step direction are inconsistent** (line 101)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/list/List11.feature:112:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "DataFusion planning failed: This feature is not implemented: Unsupported
-  ... (truncated)
-  ```
-
-### List12
-
-- **[6] Using a list comprehension in a WHERE** (line 127)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/list/List12.feature:141:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "IN operator with custom expressions not yet supported", query: Some("\nM
-  ... (truncated)
-  ```
-
-### Literals5
-
-- **[27] Fail when float value is too large** (line 319)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/literals/Literals5.feature:325:5
-      Matched: crates/uni-tck/src/steps/then.rs:114:1
-      Step panicked. Captured output: No error found
-[Summary]
-1 feature
-1 scenario (1 failed)
-3 steps (2 passed, 1 failed)
-
-  ```
-
-### Literals6
-
-- **[5] Return a single-quoted string with escaped characters** (line 78)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/literals/Literals6.feature:85:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("literal", Some(String("a\\bcn5t'\"\\//\\\"'"
-  ... (truncated)
-  ```
-
-### Match2
-
-- **[5] Match relationship with inline property value** (line 97)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/match/Match2.feature:108:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): Row count mismatch: expected 1, got 2
-[Summary]
-1 feature
-1 scenario (1 failed)
-4 steps (3 passed, 1 fai
-  ... (truncated)
-  ```
-
-### Match4
-
-- **[4] Matching longer variable length paths** (line 93)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/match/Match4.feature:111:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): Row count mismatch: expected 1, got 14
-[Summary]
-1 feature
-1 scenario (1 failed)
-4 steps (3 passed, 1 fa
-  ... (truncated)
-  ```
-- **[5] Matching variable length pattern with property predicate** (line 116)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/match/Match4.feature:129:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): Row count mismatch: expected 1, got 3
-[Summary]
-1 feature
-1 scenario (1 failed)
-4 steps (3 passed, 1 fai
-  ... (truncated)
-  ```
-- **[7] Matching variable length patterns including a bound relationship** (line 153)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/match/Match4.feature:171:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("c", Some(Int(84)))]. Expected: [{"c": Int(32)}]
-[Summ
-  ... (truncated)
-  ```
-
-### Match5
-
-- **[27] Handling mixed relationship patterns and directions 2** (line 541)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/match/Match5.feature:564:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): Row count mismatch: expected 16, got 20
-[Summary]
-1 feature
-1 scenario (1 failed)
-6 steps (5 passed, 1 f
-  ... (truncated)
-  ```
-
-### Match8
-
-- **[2] Counting rows after MATCH, MERGE, OPTIONAL MATCH** (line 54)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/match/Match8.feature:70:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("count(*)", Some(Int(4)))]. Expected: [{"count(*)": Int
-  ... (truncated)
-  ```
-
-### Merge5
-
-- **[15] Matching using list property** (line 287)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/merge/Merge5.feature:303:5
-      Matched: crates/uni-tck/src/steps/and.rs:4:1
-      Step panicked. Captured output: assertion `left == right` failed: Edge count changed: 1 -> 2
-        left: 1
-       right: 2
-[Summary]
-1 feature
-1 scenario (1 failed)
-
-  ... (truncated)
-  ```
-
-### Merge7
-
-- **[4] Copying properties from node with ON MATCH** (line 85)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/merge/Merge7.feature:103:5
-      Matched: crates/uni-tck/src/steps/and.rs:27:1
-      Step panicked. Captured output: assertion `left == right` failed: Expected +properties=1, but got 0 (before=3, after=2, added=0, removed=1)
-        left: 0
-       rig
-  ... (truncated)
-  ```
-
-### Return6
-
-- **[13] Returning the minimum length of paths** (line 230)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/return/Return6.feature:246:5
-      Matched: crates/uni-tck/src/steps/then.rs:54:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Schema error: No field named other. Did you mean 'other._vid'?.", query: 
-  ... (truncated)
-  ```
-- **[16] Aggregation on complex expressions** (line 267)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/return/Return6.feature:294:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Error during planning: Function 'abs' expects NativeType::Numeric but rec
-  ... (truncated)
-  ```
-
 ### String4
 
 - **[1] `split()`** (line 33)
@@ -500,7 +150,7 @@
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal5.feature:133:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("d.epochSeconds", Some(Int(469024274))), ("d
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("d.offset", Some(String("+01:00"))), ("d.epo
   ... (truncated)
   ```
 

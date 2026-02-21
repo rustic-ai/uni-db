@@ -5,8 +5,6 @@ use uni_db::Uni;
 
 #[derive(Debug, Deserialize)]
 struct GraphMetadata {
-    #[allow(dead_code)]
-    name: String,
     scripts: Vec<String>,
 }
 

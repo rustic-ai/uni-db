@@ -54,7 +54,6 @@ thiserror = "1.0"
 arrow = { version = "56.2.0", features = ["prettyprint"] }
 arrow-array = "56.2.0"
 arrow-schema = "56.2.0"
-arrow-cast = "56.2.0"
 lance = "1.0.1"
 futures = "0.3"
 async-trait = "0.1"
@@ -68,9 +67,7 @@ tempfile = "3.10"
 uuid = { version = "1.8", features = ["v4"] }
 chrono = "0.4.43"
 chrono-tz = "0.10"
-itertools = "0.12"
 fxhash = "0.2"
-smallvec = "1.11"
 bytes = "1.6"
 parking_lot = "0.12"
 # Embedding providers - Candle (default) or FastEmbed (optional, ONNX-based)
@@ -87,13 +84,7 @@ rayon = "1.10"
 csv = "1.3"
 parquet = "56.2.0"
 regex = "1.10"
-lazy_static = "1.4"
-async-recursion = "1.1"
-axum = "0.7"
-tower = "0.4"
-tower-http = { version = "0.5", features = ["cors", "trace", "fs"] }
 metrics = "0.22"
-metrics-exporter-prometheus = "0.13"
 pyo3 = { version = "0.27", features = ["extension-module", "abi3-py310"] }
 pyo3-async-runtimes = { version = "0.27", features = ["tokio-runtime"] }
 rustyline = "13.0"

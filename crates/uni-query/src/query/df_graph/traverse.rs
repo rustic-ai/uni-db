@@ -1758,16 +1758,7 @@ struct GraphTraverseMainStream {
     /// Source column name.
     source_column: String,
 
-    /// Edge type names (kept for debugging/future use).
-    #[allow(dead_code)]
-    type_names: Vec<String>,
-
-    /// Traversal direction (kept for debugging/future use).
-    #[allow(dead_code)]
-    direction: Direction,
-
-    /// Target variable name (kept for debugging/future use).
-    #[allow(dead_code)]
+    /// Target variable name.
     target_variable: String,
 
     /// Edge variable name.
@@ -1828,8 +1819,6 @@ impl GraphTraverseMainStream {
 
         Self {
             source_column,
-            type_names,
-            direction,
             target_variable,
             edge_variable,
             edge_properties,
