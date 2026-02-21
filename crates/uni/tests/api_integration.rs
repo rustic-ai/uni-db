@@ -116,21 +116,7 @@ async fn test_api_query_flow() -> Result<()> {
     // I need to use the Schema API or hacks.
     // But Schema API is Phase 3.
 
-    // Can I run a query without schema?
-    // "CREATE (n:Person {name: 'Alice'})"
-    // The legacy executor/planner might require schema for "name" property.
-    // Let's check if I can use raw `db.storage.schema_manager().add_label(...)`?
-    // No, `db.storage` is not pub.
-
-    // I can assume Phase 3 is next, so I can't test properties yet.
-    // But I can test CREATE (n:Person) without properties if it's allowed.
-    // `SchemaManager::add_label` checks existence.
-    // `Planner` checks if label exists.
-
-    // Implementation Plan Phase 3 is next.
-    // I should implement Phase 3 Schema API to test this properly?
-    // Or I can add a temporary helper in `Uni`?
-    // Or I can just test `RETURN 1` which doesn't need schema.
+    // Test basic queries that don't require schema setup.
 
     // Test 1: Simple scalar return
     let result = db.query("RETURN 1 AS num, 'hello' AS str").await?;
@@ -147,12 +133,6 @@ async fn test_api_query_flow() -> Result<()> {
     // Lists come back as Value::List
     let list: Vec<i64> = row.get("list")?;
     assert_eq!(list, vec![1, 2, 3]);
-
-    // Map support in Executor might be limited (it might return String if not handled well)
-    // But let's see. My `extract_value` handles StructArray -> Map.
-    // Does legacy executor return Map? Yes, JsonValue::Object -> Map.
-    // Does vectorized executor support Map construction?
-    // Vectorized projection of map literal might be supported.
 
     // Test 3: Params
     let result = db

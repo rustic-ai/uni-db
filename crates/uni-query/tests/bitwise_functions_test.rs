@@ -3,7 +3,7 @@
 
 //! Integration tests for uni.bitwise.* functions
 //!
-//! These tests verify that bitwise functions work correctly in the legacy executor.
+//! These tests verify that bitwise functions work correctly via the scalar function evaluator.
 
 use uni_common::unival;
 use uni_query::query::expr_eval::eval_scalar_function;

@@ -1,7 +1,10 @@
 # DataFusion Mutation Implementation Plan
 
 **Date:** 2026-02-18
-**Last updated:** 2026-02-19 (M4.1 MERGE DF routing: terminal MERGE now flows through DataFusion MutationExec path; 76/76 TCK, 3814/3897 overall 97.9%)
+**Last updated:** 2026-02-21
+**Status:** **COMPLETE** — All milestones (M0–M5) delivered. Legacy executor fallback has been removed;
+all queries now route exclusively through DataFusion. The `MutationPathConfig` rollback toggle and
+`LOAD CSV` clause have been removed. Historical references to these below are kept for context.
 **Depends on:** `docs/DATAFUSION_MUTATION_APPROACHES.md`
 **Primary strategy:** Implement Approach A first, keep Approach B as staged follow-up.
 
@@ -9,7 +12,7 @@
 
 | Milestone | Status | Summary |
 |-----------|--------|---------|
-| **M0** | **COMPLETE** | `MutationPathConfig` implemented in `uni_common::config`; routing checks in `read.rs`; baseline TCK archived in `compliance_reports/` |
+| **M0** | **COMPLETE** | Baseline TCK archived in `compliance_reports/`; routing infrastructure established (since removed — all queries now use DF exclusively) |
 | **M1** | **COMPLETE** | All SET semantic forms implemented; Gate A satisfied |
 | **M2** | **COMPLETE** | `MutationExec` framework built; `MutationContext` wired; eager barrier; all 4 operators dispatched via planner |
 | **M3** | **COMPLETE** | All 4 operators wired in DF planner; simple terminal mutations route to DF path; complex mutations (RETURN/WITH, nested) fall back. M3 parity fixes round 1: label SET schemaless, multi-property REMOVE batching, DELETE/CREATE error validation (+23 TCK scenarios). Round 2: schemaless edge visibility in batch detach-delete, two-pass non-detach DELETE, BindPath null-safety, property type validation, edge uniqueness in GraphTraverseMainExec (+12 TCK scenarios) |
@@ -79,7 +82,7 @@ Objectives:
 1. Route mutation queries through a DataFusion-compatible pipeline without losing openCypher semantics.
 2. Preserve writer durability and single-writer correctness.
 3. Reach mutation TCK parity in staged gates.
-4. Keep rollback/fallback path available during rollout.
+4. ~~Keep rollback/fallback path available during rollout.~~ (Completed and removed — DF is now the sole path.)
 
 ## 2. Definition of Done
 
@@ -108,41 +111,19 @@ Goal: establish controlled rollout and parity measurement before behavior change
 
 **Status: COMPLETE** (2026-02-18)
 
-### M0 Routing Toggle Design Decision (resolve before coding)
-
-The per-clause toggle is a `MutationPathConfig` struct field on `QueryContext`, one boolean per clause
-family (`create`, `delete`, `set`, `remove`, `merge`). Default for all fields is `false` (fallback path).
-This is a runtime configuration struct, not a Cargo feature flag, so it can be toggled per-query in
-tests and per-instance in production without recompilation. The toggle is checked at the point where
-the executor dispatches mutation clauses. When toggled to `true`, the clause routes to the new
-DF + Writer sink path; otherwise it falls through to the existing fallback executor.
-
 ### M0 Implementation Details
 
-- `MutationPathConfig` defined in `crates/uni-common/src/config.rs` with per-clause boolean fields.
-- Routing check implemented in `crates/uni-query/src/query/executor/read.rs` via
-  `mutation_clause_disabled_by_config()` method.
-- Baseline TCK reports archived in `compliance_reports/schema/` and `compliance_reports/schemaless/`
-  with pre-mutation snapshots (`results_pre_mutations.json`, `report_pre_mutations.md`).
+> **Note:** The `MutationPathConfig` routing toggle was used during the M0–M5 rollout to allow
+> per-clause fallback to the legacy executor. It has since been removed — all mutations now route
+> through DataFusion exclusively.
+
+- Baseline TCK reports archived in `compliance_reports/schema/` and `compliance_reports/schemaless/`.
 
 Tasks:
 
-1. Define `MutationPathConfig` struct and attach it to `QueryContext`. ✅
-2. Add per-clause routing check at dispatch points in the executor. ✅
-3. Add "new path vs fallback" marker in query metrics/logging using the existing tracing infrastructure. ✅
-4. Capture baseline TCK slices and store results in `compliance_reports/`. ✅
-
-Primary files:
-
-- `crates/uni-common/src/config.rs` (`MutationPathConfig` struct)
-- `crates/uni-query/src/query/executor/read.rs` (routing checks)
-- `compliance_reports/` (baseline snapshots)
-
-Exit criteria:
-
-1. `MutationPathConfig` is defined, all fields default to fallback, and routing checks compile. ✅
-2. Can toggle each mutation clause to fallback/new path independently via `QueryContext`. ✅
-3. Baseline TCK reports for mutation feature families are archived. ✅
+1. ~~Define `MutationPathConfig` struct and attach it to `QueryContext`.~~ ✅ (since removed)
+2. ~~Add per-clause routing check at dispatch points in the executor.~~ ✅ (since removed)
+3. Capture baseline TCK slices and store results in `compliance_reports/`. ✅
 
 ---
 
@@ -284,8 +265,7 @@ Goal: introduce a Writer-backed mutation sink abstraction and wire it into the e
 **Routing Logic:**
 - `execute_datafusion()` in `read.rs` builds `MutationContext` when `contains_write_operations()`
   detects write clauses in the plan.
-- Multi-level dispatch: DDL/Admin → FOREACH fallback → mutation config gate →
-  complex mutation fallback → window functions → DataFusion path.
+- Dispatch: DDL/Admin → DataFusion path for all reads and mutations.
 
 ### M2 Tasks
 
@@ -343,7 +323,7 @@ Test gates:
 
 Exit criteria:
 
-1. New path works for at least one write clause end-to-end under the `MutationPathConfig` flag. ✅
+1. New path works for at least one write clause end-to-end. ✅
 2. Eager barrier is proven correct by the read-your-write correctness test. ✅
 
 ---
@@ -391,10 +371,7 @@ Targeted remaining Delete, Set, and Create failures. Achieved +12 with zero regr
 
 | Helper | Purpose |
 |--------|---------|
-| `needs_mutation_fallback()` | Returns true for LOAD CSV only (the sole remaining fallback trigger) |
 | `contains_write_operations()` | Detects any write op in plan tree (triggers MutationContext build) |
-| `mutation_clause_disabled_by_config()` | Checks per-clause `MutationPathConfig` gate |
-| `contains_load_csv()` | Checks for LOAD CSV in plan tree |
 
 ### Prerequisite
 
@@ -409,7 +386,7 @@ Gate A must be satisfied (M1 exit criteria met) before enabling any clause on th
 
 ### Tasks Per Clause
 
-1. Enable routing for clause under `MutationPathConfig` flag. ✅ (all 4 wired)
+1. Enable routing for clause. ✅ (all 4 wired)
 2. Run clause-specific TCK family and targeted integration tests.
 3. Fix parity gaps.
 4. Promote clause flag to default-on only after TCK gate + perf sanity pass.
@@ -603,56 +580,38 @@ Goal: production-readiness and safe default enablement.
 ### M5 Implementation Details
 
 **Code cleanup:**
-- Fixed stale docstring on `needs_mutation_fallback()` in `read.rs` — now documents LOAD CSV
-  as the sole remaining fallback trigger (conditions 1-2 removed since DF operators gained
-  output batch reconstruction).
-- Fixed stale routing helper table in implementation plan — removed obsolete function references
-  (`is_mutation_plan`, `has_nested_mutations`, `contains_foreach`).
+- Removed legacy executor fallback paths, `MutationPathConfig`, and `LOAD CSV` clause.
+- All queries now route exclusively through DataFusion.
 - Deleted `DF_NATIVE_MUTATION.md` (superseded by this document).
 
 **Benchmark suite** (`crates/uni/benches/mutation_benchmarks.rs`):
-- 5 criterion benchmarks comparing DF path vs fallback path:
+- Criterion benchmarks for mutation operations:
   `create_100_nodes`, `set_100_properties`, `delete_100_nodes`, `create_then_match`, `merge_50_nodes`.
-- Each benchmark runs with `MutationPathConfig::all_enabled()` (DF) and `all_disabled()` (fallback).
 - Uses schemaless in-memory `Uni` for minimal setup overhead.
 
 **Stress tests** (`crates/uni/tests/mutation_stress_test.rs`):
 - 6 `#[ignore]`d stress tests at 10k scale: `create_10k_nodes`, `set_10k_nodes`, `delete_10k_nodes`,
   `mixed_mutations_10k`, `merge_10k_ops`, `create_edges_5k`.
 
-**Rollback toggle test** (`crates/uni/tests/df_mutation_test.rs`):
-- Smoke test that creates a `Uni` with `MutationPathConfig::all_disabled()` and verifies
-  CREATE + SET + DELETE all work via the fallback path.
-
 **Documentation:**
-- Updated `docs/QUERY_EXECUTION_PATH.md` with mutation execution section, rollback toggle
-  documentation, and updated feature matrix.
-- Re-exported `MutationPathConfig` from `uni_common` and `uni_db` for user convenience.
-
-**Re-exports:**
-- `uni_common::MutationPathConfig` and `uni_db::MutationPathConfig` for ergonomic access.
+- Updated `docs/QUERY_EXECUTION_PATH.md` with DataFusion-only execution architecture.
 
 Tasks:
 
-1. ~~Remove temporary compatibility shims not needed post-parity.~~ Not applicable — fallback
-   handlers are still needed for LOAD CSV combos and the config rollback mechanism. ✅
-2. Benchmark mixed read/write workloads and compare with fallback. ✅
+1. Remove legacy executor fallback and consolidate on DataFusion engine. ✅
+2. Benchmark mixed read/write workloads. ✅
 3. Validate memory and lock behavior under high row counts. ✅ (stress tests)
-4. Set defaults to new path for stable clauses (`MutationPathConfig` field defaults flipped to `true`). ✅ (done in M3/M4)
 
 Primary files:
 
-- `crates/uni-query/src/query/executor/read.rs` (docstring fix)
-- `crates/uni/benches/mutation_benchmarks.rs` (NEW — benchmarks)
-- `crates/uni/tests/mutation_stress_test.rs` (NEW — stress tests)
-- `crates/uni/tests/df_mutation_test.rs` (rollback toggle test)
-- `docs/QUERY_EXECUTION_PATH.md` (mutation execution docs)
-- `crates/uni-common/src/lib.rs` (MutationPathConfig re-export)
-- `crates/uni/src/lib.rs` (MutationPathConfig re-export)
+- `crates/uni-query/src/query/executor/read.rs`
+- `crates/uni/benches/mutation_benchmarks.rs` (benchmarks)
+- `crates/uni/tests/mutation_stress_test.rs` (stress tests)
+- `docs/QUERY_EXECUTION_PATH.md` (execution architecture docs)
 
 Exit criteria:
 
-1. Stable default behavior and documented rollback toggle (set `MutationPathConfig` fields to `false`). ✅
+1. All queries route through DataFusion exclusively. ✅
 
 ---
 
@@ -661,11 +620,8 @@ Exit criteria:
 ## 4.1 `crates/uni-query`
 
 1. `src/query/executor/read.rs` ✅
-   - `MutationPathConfig` routing check via `mutation_clause_disabled_by_config()`.
-   - Multi-level routing: DDL → FOREACH fallback → config gate → complexity fallback → DF path.
+   - DDL/Admin routing to dedicated handlers; all other queries through DataFusion.
    - `MutationContext` built in `execute_datafusion()` when write operations detected.
-   - `contains_foreach()` gates only FOREACH to fallback (MERGE removed in M4.1).
-   - `is_mutation_plan()` and `has_nested_mutations()` include MERGE.
 2. `src/query/executor/write.rs` ✅
    - All SET semantic forms implemented: map-replace, map-append, entity-copy, null-property.
    - Null-entity silent-skip guard at mutation helper entry.
@@ -673,7 +629,6 @@ Exit criteria:
      `execute_remove_items_locked()`, `execute_delete_item_locked()`.
    - `EdgeIdentity` struct + `extract_edge_identity()` for edge mutation helpers.
 3. `src/query/executor/core.rs`
-   - Passes `MutationPathConfig` to query context via `set_mutation_path()`.
 4. `src/query/df_planner.rs` ✅
    - All 5 mutation operators wired: `new_create_exec`, `new_set_exec`, `new_remove_exec`, `new_delete_exec`, `new_merge_exec`.
    - `with_mutation_context()` / `require_mutation_ctx()` for context management.
@@ -827,24 +782,20 @@ correctness and must be written as separate integration tests:
    - Status: M1 complete. All ON CREATE SET (Merge6: 6/6) and ON MATCH SET (Merge7: 5/5, Merge8: 1/1)
      forms working correctly including entity-copy and map-append.
 
-6. **Performance regressions in high-cardinality writes**
-   - Mitigation: benchmark before default-on and keep `MutationPathConfig` rollback available.
+6. **Performance regressions in high-cardinality writes** ✅ MITIGATED
+   - Mitigation: benchmarked before default-on; no regressions observed.
 
-7. **Lock contention / writer scope regressions**
+7. **Lock contention / writer scope regressions** ✅ MITIGATED
    - Mitigation: clause-scoped lock policy (lock acquired per clause, not per row) and load tests.
-
-8. **`MutationPathConfig` toggle overhead**
-   - Mitigation: toggle is a struct field check, not a lock; overhead is negligible. Confirm with
-     a micro-benchmark if the hot path is affected.
 
 ---
 
 ## 7. Rollout Strategy
 
-1. Ship feature-flagged by clause via `MutationPathConfig` (default all-fallback).
-2. Enable in this order: `CREATE` → `DELETE` → `REMOVE` → `SET` → `MERGE`.
-3. MERGE: Gate E satisfied, 76/76 TCK scenarios passing. DF routing wired (M4.1). Terminal MERGE flows through `MutationMergeExec`; complex MERGE falls back.
-4. Promote per clause after TCK gate + perf sanity + Gate D (no read regressions).
+**COMPLETE** — All mutation clauses now route through DataFusion exclusively.
+The `MutationPathConfig` toggle used during rollout has been removed.
+
+Historical rollout order: `CREATE` → `DELETE` → `REMOVE` → `SET` → `MERGE`.
 
 ---
 

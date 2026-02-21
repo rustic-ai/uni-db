@@ -16,11 +16,9 @@ use arrow_array::builder::{
     UInt64Builder,
 };
 use arrow_array::{
-    Array, ArrayRef, BinaryArray, BooleanArray, Date32Array, DurationMicrosecondArray,
-    FixedSizeListArray, Float32Array, Float64Array, Int32Array, Int64Array,
-    IntervalMonthDayNanoArray, LargeBinaryArray, ListArray, StringArray, StructArray,
-    Time64MicrosecondArray, Time64NanosecondArray, TimestampMicrosecondArray,
-    TimestampNanosecondArray, UInt64Array,
+    Array, ArrayRef, BinaryArray, BooleanArray, Date32Array, FixedSizeListArray, Float32Array,
+    Float64Array, Int32Array, Int64Array, IntervalMonthDayNanoArray, LargeBinaryArray, ListArray,
+    StringArray, StructArray, Time64NanosecondArray, TimestampNanosecondArray, UInt64Array,
 };
 use arrow_schema::{DataType as ArrowDataType, Field};
 use std::collections::HashMap;
@@ -445,27 +443,9 @@ pub fn arrow_to_value(col: &dyn Array, row: usize, data_type: Option<&DataType>)
         };
     }
 
-    // Timestamp (microseconds since epoch) - legacy fallback, convert to nanos
-    if let Some(ts) = col.as_any().downcast_ref::<TimestampMicrosecondArray>() {
-        let nanos = ts.value(row) * 1_000; // legacy fallback: micros→nanos
-        return Value::Temporal(uni_common::TemporalValue::DateTime {
-            nanos_since_epoch: nanos,
-            offset_seconds: 0,
-            timezone_name: None,
-        });
-    }
-
     // Time64 (nanoseconds since midnight) - return as Value::Temporal
     if let Some(t) = col.as_any().downcast_ref::<Time64NanosecondArray>() {
         let nanos = t.value(row);
-        return Value::Temporal(uni_common::TemporalValue::LocalTime {
-            nanos_since_midnight: nanos,
-        });
-    }
-
-    // Time64 (microseconds since midnight) - legacy fallback, convert to nanos
-    if let Some(t) = col.as_any().downcast_ref::<Time64MicrosecondArray>() {
-        let nanos = t.value(row) * 1_000; // legacy fallback: micros→nanos
         return Value::Temporal(uni_common::TemporalValue::LocalTime {
             nanos_since_midnight: nanos,
         });
@@ -478,18 +458,6 @@ pub fn arrow_to_value(col: &dyn Array, row: usize, data_type: Option<&DataType>)
             months: val.months as i64,
             days: val.days as i64,
             nanos: val.nanoseconds,
-        });
-    }
-
-    // Duration (microseconds) - legacy fallback, return as Value::Temporal
-    if let Some(d) = col.as_any().downcast_ref::<DurationMicrosecondArray>() {
-        let micros = d.value(row);
-        // Convert flat microseconds to duration components
-        let nanos = micros * 1000;
-        return Value::Temporal(uni_common::TemporalValue::Duration {
-            months: 0,
-            days: 0,
-            nanos,
         });
     }
 

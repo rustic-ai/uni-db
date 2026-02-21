@@ -1862,7 +1862,7 @@ fn get_value_from_array(arr: &ArrayRef, row: usize) -> DFResult<Value> {
             if let Ok(val) = uni_common::cypher_value_codec::decode(bytes) {
                 return Ok(val);
             }
-            // Fallback: try plain JSON text for UNWIND or legacy data
+            // UNWIND may produce JSON-encoded binary; try plain JSON decode
             Ok(serde_json::from_slice::<serde_json::Value>(bytes)
                 .map(Value::from)
                 .unwrap_or(Value::Null))
@@ -2026,11 +2026,10 @@ pub(crate) fn scalar_to_value(scalar: &ScalarValue) -> DFResult<Value> {
         }
         ScalarValue::LargeBinary(Some(b)) => {
             // LargeBinary contains CypherValue (MessagePack-tagged) binary encoding.
-            // Try CypherValue decode first, then fall back to plain JSON text for legacy data.
+            // Try CypherValue decode first; UNWIND may produce JSON-encoded binary.
             if let Ok(val) = uni_common::cypher_value_codec::decode(b) {
                 return Ok(val);
             }
-            // Fallback: try plain JSON text for UNWIND or legacy data
             if let Ok(obj) = serde_json::from_slice::<serde_json::Value>(b) {
                 Ok(Value::from(obj))
             } else {

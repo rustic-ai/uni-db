@@ -418,7 +418,7 @@ async fn test_standalone_call_still_works() -> Result<()> {
     let db = Uni::in_memory().build().await?;
     db.schema().label("Person").apply().await?;
 
-    // Standalone: goes through legacy executor, not DataFusion
+    // Standalone CALL routed through DataFusion
     let result = db
         .query("CALL uni.schema.labels() YIELD label RETURN label")
         .await?;
