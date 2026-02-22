@@ -23,7 +23,8 @@
 //! # Algorithm
 //!
 //! 1. Consume each input batch
-//! 2. Group rows by source VID columns (non-optional columns ending in `._vid`)
+//! 2. Group rows by source VID columns (non-optional columns with `._vid`
+//!    suffix OR struct columns containing a `_vid` field)
 //! 3. Evaluate the filter predicate on the batch
 //! 4. For each source group:
 //!    - If at least one row passes the filter, emit those rows
@@ -32,7 +33,7 @@
 
 use crate::query::df_graph::common::compute_plan_properties;
 use arrow_array::{Array, ArrayRef, BooleanArray, RecordBatch, new_null_array};
-use arrow_schema::{Field, Schema, SchemaRef};
+use arrow_schema::{DataType, Field, Schema, SchemaRef};
 use datafusion::common::Result as DFResult;
 use datafusion::execution::{RecordBatchStream, SendableRecordBatchStream, TaskContext};
 use datafusion::physical_expr::PhysicalExpr;
@@ -45,6 +46,21 @@ use std::fmt;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
+
+/// Describes how to extract a grouping value from a column.
+#[derive(Debug, Clone)]
+enum SourceKeyColumn {
+    /// Direct `._vid` column at the given index (e.g., column named `a._vid`).
+    FlatVid(usize),
+    /// Struct column at index, with `_vid` at the given field index within the struct.
+    /// This handles `WITH *` projections that bundle variables into struct columns
+    /// (e.g., column `a` containing fields `_vid`, `_labels`, etc.).
+    StructVid(usize, usize),
+    /// LargeBinary CypherValue blob column representing a node/edge variable.
+    /// Used when variables are produced as CypherValue blobs (e.g., from MERGE)
+    /// without flat `._vid` columns.
+    CypherValueBlob(usize),
+}
 
 /// Filter with OPTIONAL MATCH NULL row preservation.
 ///
@@ -142,6 +158,62 @@ impl OptionalFilterExec {
     fn is_optional_column(&self, col_name: &str) -> bool {
         Self::is_optional_column_name(&self.optional_variables, col_name)
     }
+
+    /// Compute source key columns for grouping.
+    ///
+    /// Finds columns suitable for source-row grouping:
+    /// 1. Flat `._vid` columns (e.g., `a._vid`) that are not optional
+    /// 2. Struct columns (e.g., `a`) that contain a `_vid` field and are not optional
+    /// 3. LargeBinary CypherValue blob columns for variables without a flat `._vid`
+    ///    column (e.g., `b` from MERGE output)
+    ///
+    /// The struct case handles `WITH *` projections that bundle node variables
+    /// into struct columns. The blob case handles MERGE output where variables
+    /// are serialized as CypherValue blobs without separate `._vid` columns.
+    fn compute_source_key_columns(&self) -> Vec<SourceKeyColumn> {
+        let mut result = Vec::new();
+        let mut covered_vars: HashSet<String> = HashSet::new();
+
+        // First pass: find FlatVid and StructVid columns
+        for (idx, field) in self.schema.fields().iter().enumerate() {
+            if self.is_optional_column(field.name()) {
+                continue;
+            }
+            if field.name().ends_with("._vid") {
+                result.push(SourceKeyColumn::FlatVid(idx));
+                if let Some(var_name) = field.name().strip_suffix("._vid") {
+                    covered_vars.insert(var_name.to_string());
+                }
+            } else if let DataType::Struct(struct_fields) = field.data_type() {
+                // Look for `_vid` field within struct (e.g., variable `a` has field `_vid`)
+                for (fi, sf) in struct_fields.iter().enumerate() {
+                    if sf.name() == "_vid" {
+                        result.push(SourceKeyColumn::StructVid(idx, fi));
+                        covered_vars.insert(field.name().to_string());
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Second pass: find LargeBinary variable blob columns not yet covered.
+        // These are bare variable names (no dots, no `__` prefix) of type LargeBinary
+        // that don't have a corresponding `._vid` FlatVid column.
+        for (idx, field) in self.schema.fields().iter().enumerate() {
+            if self.is_optional_column(field.name()) {
+                continue;
+            }
+            if *field.data_type() == DataType::LargeBinary
+                && !field.name().contains('.')
+                && !field.name().starts_with("__")
+                && !covered_vars.contains(field.name())
+            {
+                result.push(SourceKeyColumn::CypherValueBlob(idx));
+            }
+        }
+
+        result
+    }
 }
 
 impl DisplayAs for OptionalFilterExec {
@@ -206,21 +278,34 @@ impl ExecutionPlan for OptionalFilterExec {
         let metrics = BaselineMetrics::new(&self.metrics, partition);
 
         // Pre-compute which column indices are optional vs source.
-        let mut source_vid_indices = Vec::new();
+        let source_key_columns = self.compute_source_key_columns();
         let mut optional_col_indices = Vec::new();
         for (idx, field) in self.schema.fields().iter().enumerate() {
             if self.is_optional_column(field.name()) {
                 optional_col_indices.push(idx);
-            } else if field.name().ends_with("._vid") {
-                source_vid_indices.push(idx);
             }
         }
+
+        // Debug: log schema and source key columns
+        tracing::debug!(
+            "OptionalFilterExec schema: {:?}",
+            self.schema
+                .fields()
+                .iter()
+                .map(|f| format!("{}: {:?}", f.name(), f.data_type()))
+                .collect::<Vec<_>>()
+        );
+        tracing::debug!(
+            "OptionalFilterExec source_key_columns: {:?}, optional_cols: {:?}",
+            source_key_columns,
+            optional_col_indices
+        );
 
         Ok(Box::pin(OptionalFilterStream {
             input: input_stream,
             predicate: Arc::clone(&self.predicate),
             schema: Arc::clone(&self.schema),
-            source_vid_indices,
+            source_key_columns,
             optional_col_indices,
             metrics,
         }))
@@ -242,8 +327,8 @@ struct OptionalFilterStream {
     /// Output schema.
     schema: SchemaRef,
 
-    /// Indices of source VID columns (used for grouping).
-    source_vid_indices: Vec<usize>,
+    /// Source key columns for grouping (flat VID or struct VID).
+    source_key_columns: Vec<SourceKeyColumn>,
 
     /// Indices of optional columns (nulled for filtered-out groups).
     optional_col_indices: Vec<usize>,
@@ -351,26 +436,62 @@ impl OptionalFilterStream {
             .map_err(|e| datafusion::error::DataFusionError::ArrowError(Box::new(e), None))
     }
 
-    /// Compute a grouping key from source VID column values for a row.
+    /// Compute a grouping key from source column values for a row.
     fn compute_source_key(&self, batch: &RecordBatch, row_idx: usize) -> Vec<u8> {
-        use arrow_array::UInt64Array;
+        use arrow_array::{LargeBinaryArray, StructArray};
 
-        let mut key = Vec::with_capacity(self.source_vid_indices.len() * 8);
-        for &col_idx in &self.source_vid_indices {
-            let col = batch.column(col_idx);
-            if let Some(vid_array) = col.as_any().downcast_ref::<UInt64Array>() {
-                if vid_array.is_valid(row_idx) {
-                    key.extend_from_slice(&vid_array.value(row_idx).to_le_bytes());
-                } else {
-                    // NULL VID — use sentinel.
-                    key.extend_from_slice(&u64::MAX.to_le_bytes());
+        let mut key = Vec::with_capacity(self.source_key_columns.len() * 8);
+        for skc in &self.source_key_columns {
+            match skc {
+                SourceKeyColumn::FlatVid(col_idx) => {
+                    let vid = extract_u64_value(batch.column(*col_idx), row_idx);
+                    match vid {
+                        Some(v) => key.extend_from_slice(&v.to_le_bytes()),
+                        None => key.extend_from_slice(&u64::MAX.to_le_bytes()),
+                    }
                 }
-            } else {
-                // Non-UInt64 VID column (shouldn't happen) — use null sentinel.
-                key.extend_from_slice(&u64::MAX.to_le_bytes());
+                SourceKeyColumn::StructVid(col_idx, field_idx) => {
+                    let col = batch.column(*col_idx);
+                    let vid = if let Some(sa) = col.as_any().downcast_ref::<StructArray>() {
+                        extract_u64_value(sa.column(*field_idx), row_idx)
+                    } else {
+                        None
+                    };
+                    match vid {
+                        Some(v) => key.extend_from_slice(&v.to_le_bytes()),
+                        None => key.extend_from_slice(&u64::MAX.to_le_bytes()),
+                    }
+                }
+                SourceKeyColumn::CypherValueBlob(col_idx) => {
+                    let col = batch.column(*col_idx);
+                    if let Some(ba) = col.as_any().downcast_ref::<LargeBinaryArray>() {
+                        if ba.is_valid(row_idx) {
+                            let bytes = ba.value(row_idx);
+                            // Length-prefix for unambiguous concatenation
+                            key.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+                            key.extend_from_slice(bytes);
+                        } else {
+                            // NULL sentinel
+                            key.extend_from_slice(&u64::MAX.to_le_bytes());
+                        }
+                    } else {
+                        key.extend_from_slice(&u64::MAX.to_le_bytes());
+                    }
+                }
             }
         }
         key
+    }
+}
+
+/// Extract a u64 value from a column at a given row index.
+fn extract_u64_value(col: &dyn Array, row_idx: usize) -> Option<u64> {
+    use arrow_array::UInt64Array;
+    let vid_array = col.as_any().downcast_ref::<UInt64Array>()?;
+    if vid_array.is_valid(row_idx) {
+        Some(vid_array.value(row_idx))
+    } else {
+        None
     }
 }
 

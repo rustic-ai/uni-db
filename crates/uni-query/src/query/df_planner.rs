@@ -595,6 +595,8 @@ impl HybridPhysicalPlanner {
                 is_variable_length,
                 scope_match_variables,
                 optional_pattern_vars,
+                edge_filter_expr,
+                path_mode,
                 ..
             } => {
                 if *is_variable_length {
@@ -610,6 +612,9 @@ impl HybridPhysicalPlanner {
                         path_variable.as_deref(),
                         *optional,
                         all_properties,
+                        edge_filter_expr.as_ref(),
+                        path_mode,
+                        scope_match_variables,
                     )?;
                     // Apply target_filter for schemaless VLP (mirrors schema-based
                     // filter application in plan_traverse lines 1929-1981)
@@ -646,7 +651,7 @@ impl HybridPhysicalPlanner {
                         Ok(vlp_plan)
                     }
                 } else {
-                    self.plan_traverse_main_by_type(
+                    let base_plan = self.plan_traverse_main_by_type(
                         input,
                         type_names,
                         direction.clone(),
@@ -656,7 +661,38 @@ impl HybridPhysicalPlanner {
                         *optional,
                         all_properties,
                         scope_match_variables,
-                    )
+                    )?;
+                    // Apply edge property filter for fixed-length schemaless
+                    // traversal (mirrors target_filter pattern above)
+                    if let Some(filter_expr) = edge_filter_expr {
+                        let mut variable_kinds = HashMap::new();
+                        variable_kinds.insert(source_variable.to_string(), VariableKind::Node);
+                        variable_kinds.insert(target_variable.to_string(), VariableKind::Node);
+                        if let Some(sv) = step_variable {
+                            variable_kinds.insert(sv.to_string(), VariableKind::edge_for(false));
+                        }
+                        let ctx = TranslationContext {
+                            parameters: self.params.clone(),
+                            variable_kinds,
+                            ..Default::default()
+                        };
+                        let df_filter = cypher_expr_to_df(filter_expr, Some(&ctx))?;
+                        let schema = base_plan.schema();
+                        let session = self.session_ctx.read();
+                        let physical_filter =
+                            self.create_physical_filter_expr(&df_filter, &schema, &session)?;
+                        if *optional {
+                            Ok(Arc::new(OptionalFilterExec::new(
+                                base_plan,
+                                physical_filter,
+                                optional_pattern_vars.clone(),
+                            )))
+                        } else {
+                            Ok(Arc::new(FilterExec::try_new(physical_filter, base_plan)?))
+                        }
+                    } else {
+                        Ok(base_plan)
+                    }
                 }
             }
 
@@ -676,6 +712,9 @@ impl HybridPhysicalPlanner {
                 is_variable_length,
                 optional_pattern_vars,
                 scope_match_variables,
+                edge_filter_expr,
+                path_mode,
+                qpp_steps,
                 ..
             } => self.plan_traverse(
                 input,
@@ -694,6 +733,9 @@ impl HybridPhysicalPlanner {
                 optional_pattern_vars,
                 all_properties,
                 scope_match_variables,
+                edge_filter_expr.as_ref(),
+                path_mode,
+                qpp_steps.as_deref(),
             ),
 
             LogicalPlan::ShortestPath {
@@ -713,6 +755,7 @@ impl HybridPhysicalPlanner {
                 source_variable,
                 target_variable,
                 path_variable,
+                false,
                 all_properties,
             ),
 
@@ -951,9 +994,26 @@ impl HybridPhysicalPlanner {
                 "Full-text search not yet supported in DataFusion engine"
             )),
 
-            LogicalPlan::AllShortestPaths { .. } => Err(anyhow!(
-                "allShortestPaths not yet supported in DataFusion engine"
-            )),
+            LogicalPlan::AllShortestPaths {
+                input,
+                edge_type_ids,
+                direction,
+                source_variable,
+                target_variable,
+                target_label_id: _,
+                path_variable,
+                min_hops: _,
+                max_hops: _,
+            } => self.plan_shortest_path(
+                input,
+                edge_type_ids,
+                direction.clone(),
+                source_variable,
+                target_variable,
+                path_variable,
+                true,
+                all_properties,
+            ),
 
             LogicalPlan::QuantifiedPattern { .. } => Err(anyhow!(
                 "Quantified patterns not yet supported in DataFusion engine"
@@ -1413,8 +1473,26 @@ impl HybridPhysicalPlanner {
     ///
     /// Returns `Some("{target_variable}._vid")` when the column is present.
     fn detect_bound_target(input_schema: &SchemaRef, target_variable: &str) -> Option<String> {
+        // Standard: {var}._vid from ScanNodes output
         let col = format!("{}._vid", target_variable);
-        input_schema.column_with_name(&col).is_some().then_some(col)
+        if input_schema.column_with_name(&col).is_some() {
+            return Some(col);
+        }
+        // Fallback: bare variable name if it's a numeric (VID) column.
+        // This handles EXISTS subquery contexts where imported variables are
+        // projected as Parameter("{var}") → bare VID column.
+        // VIDs are UInt64 in Arrow, but may become Int64 after parameter
+        // round-tripping through Value::Integer → ScalarValue::Int64.
+        if let Ok(field) = input_schema.field_with_name(target_variable)
+            && matches!(
+                field.data_type(),
+                datafusion::arrow::datatypes::DataType::UInt64
+                    | datafusion::arrow::datatypes::DataType::Int64
+            )
+        {
+            return Some(target_variable.to_string());
+        }
+        None
     }
 
     /// Resolve the property list and wildcard flag for a schemaless vertex scan.
@@ -1649,6 +1727,9 @@ impl HybridPhysicalPlanner {
         optional_pattern_vars: &HashSet<String>,
         all_properties: &HashMap<String, HashSet<String>>,
         scope_match_variables: &HashSet<String>,
+        edge_filter_expr: Option<&Expr>,
+        path_mode: &crate::query::df_graph::nfa::PathMode,
+        qpp_steps: Option<&[crate::query::planner::QppStepInfo]>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
         let input_plan = self.plan_internal(input, all_properties)?;
 
@@ -1921,6 +2002,57 @@ impl HybridPhysicalPlanner {
                     vlp_target_properties.clear();
                 }
 
+                // VLP: compile edge predicates to Lance SQL for bitmap preselection
+                let edge_lance_filter: Option<String> = edge_filter_expr.and_then(|expr| {
+                    let edge_var_name = step_variable.unwrap_or("__anon_edge");
+                    crate::query::pushdown::LanceFilterGenerator::generate(
+                        std::slice::from_ref(expr),
+                        edge_var_name,
+                        None,
+                    )
+                });
+
+                // VLP: extract simple property equality conditions for L0 checking
+                let edge_property_conditions = edge_filter_expr
+                    .map(Self::extract_edge_property_conditions)
+                    .unwrap_or_default();
+
+                // VLP: collect used edge columns for cross-pattern relationship uniqueness
+                let used_edge_columns = Self::collect_used_edge_columns(
+                    &input_plan.schema(),
+                    scope_match_variables,
+                    None,
+                );
+
+                // VLP: determine output mode based on bound variables
+                let output_mode = if step_variable.is_some() {
+                    crate::query::df_graph::nfa::VlpOutputMode::StepVariable
+                } else if path_variable.is_some() {
+                    crate::query::df_graph::nfa::VlpOutputMode::FullPath
+                } else {
+                    crate::query::df_graph::nfa::VlpOutputMode::EndpointsOnly
+                };
+
+                // Compile QPP NFA if multi-step pattern, otherwise let exec compile VLP NFA
+                let qpp_nfa = qpp_steps.map(|steps| {
+                    use crate::query::df_graph::nfa::{QppStep, VertexConstraint};
+                    let hops_per_iter = steps.len();
+                    let min_iter = min_hops / hops_per_iter;
+                    let max_iter = max_hops / hops_per_iter;
+                    let nfa_steps: Vec<QppStep> = steps
+                        .iter()
+                        .map(|s| QppStep {
+                            edge_type_ids: s.edge_type_ids.clone(),
+                            direction: convert_direction(s.direction.clone()),
+                            target_constraint: s
+                                .target_label
+                                .as_ref()
+                                .map(|l| VertexConstraint::Label(l.clone())),
+                        })
+                        .collect();
+                    crate::query::df_graph::nfa::PathNfa::from_qpp(nfa_steps, min_iter, max_iter)
+                });
+
                 Arc::new(GraphVariableLengthTraverseExec::new(
                     input_plan,
                     source_col,
@@ -1936,6 +2068,12 @@ impl HybridPhysicalPlanner {
                     self.graph_ctx.clone(),
                     optional,
                     bound_target_column,
+                    edge_lance_filter,
+                    edge_property_conditions,
+                    used_edge_columns,
+                    path_mode.clone(),
+                    output_mode,
+                    qpp_nfa,
                 ))
             }
         };
@@ -2084,8 +2222,15 @@ impl HybridPhysicalPlanner {
         }
 
         // Compute used_edge_columns for relationship uniqueness (same logic as Traverse).
-        let used_edge_columns =
-            Self::collect_used_edge_columns(&input_plan.schema(), scope_match_variables, None);
+        // Exclude the rebound edge's own column so the BFS can match the bound edge.
+        let rebound_bound_edge_col = step_variable
+            .and_then(|sv| sv.strip_prefix("__rebound_"))
+            .map(|bound| format!("{}._eid", bound));
+        let used_edge_columns = Self::collect_used_edge_columns(
+            &input_plan.schema(),
+            scope_match_variables,
+            rebound_bound_edge_col.as_deref(),
+        );
 
         // Create the schemaless traversal execution plan
         let traverse_plan: Arc<dyn ExecutionPlan> = Arc::new(GraphTraverseMainExec::new(
@@ -2140,6 +2285,9 @@ impl HybridPhysicalPlanner {
         path_variable: Option<&str>,
         optional: bool,
         all_properties: &HashMap<String, HashSet<String>>,
+        edge_filter_expr: Option<&Expr>,
+        path_mode: &crate::query::df_graph::nfa::PathMode,
+        scope_match_variables: &HashSet<String>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
         let input_plan = self.plan_internal(input, all_properties)?;
 
@@ -2171,6 +2319,34 @@ impl HybridPhysicalPlanner {
             target_properties.clear();
         }
 
+        // VLP: compile edge predicates to Lance SQL for bitmap preselection
+        let edge_lance_filter: Option<String> = edge_filter_expr.and_then(|expr| {
+            let edge_var_name = step_variable.unwrap_or("__anon_edge");
+            crate::query::pushdown::LanceFilterGenerator::generate(
+                std::slice::from_ref(expr),
+                edge_var_name,
+                None,
+            )
+        });
+
+        // VLP: extract edge property conditions for BFS-level filtering
+        let edge_property_conditions = edge_filter_expr
+            .map(Self::extract_edge_property_conditions)
+            .unwrap_or_default();
+
+        // VLP: collect used edge columns for cross-pattern relationship uniqueness
+        let used_edge_columns =
+            Self::collect_used_edge_columns(&input_plan.schema(), scope_match_variables, None);
+
+        // VLP: determine output mode based on bound variables
+        let output_mode = if step_variable.is_some() {
+            crate::query::df_graph::nfa::VlpOutputMode::StepVariable
+        } else if path_variable.is_some() {
+            crate::query::df_graph::nfa::VlpOutputMode::FullPath
+        } else {
+            crate::query::df_graph::nfa::VlpOutputMode::EndpointsOnly
+        };
+
         let traverse_plan = Arc::new(GraphVariableLengthTraverseMainExec::new(
             input_plan,
             source_col,
@@ -2185,6 +2361,11 @@ impl HybridPhysicalPlanner {
             self.graph_ctx.clone(),
             optional,
             bound_target_column,
+            edge_lance_filter,
+            edge_property_conditions,
+            used_edge_columns,
+            path_mode.clone(),
+            output_mode,
         ));
 
         Ok(traverse_plan)
@@ -2200,6 +2381,7 @@ impl HybridPhysicalPlanner {
         source_variable: &str,
         target_variable: &str,
         path_variable: &str,
+        all_shortest: bool,
         all_properties: &HashMap<String, HashSet<String>>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
         let input_plan = self.plan_internal(input, all_properties)?;
@@ -2216,6 +2398,7 @@ impl HybridPhysicalPlanner {
             adj_direction,
             path_variable.to_string(),
             self.graph_ctx.clone(),
+            all_shortest,
         )))
     }
 
@@ -3376,6 +3559,50 @@ impl HybridPhysicalPlanner {
     }
 
     /// Create a physical filter expression.
+    /// Extract simple property equality conditions from a Cypher expression tree.
+    ///
+    /// Handles patterns generated by `properties_to_expr`:
+    /// - `variable.prop = literal` → `(prop, value)`
+    /// - `cond1 AND cond2` → recursive extraction
+    ///
+    /// Returns `Vec<(property_name, expected_value)>` for use in L0 edge property
+    /// checking during VLP BFS.
+    fn extract_edge_property_conditions(expr: &Expr) -> Vec<(String, uni_common::Value)> {
+        match expr {
+            Expr::BinaryOp {
+                left,
+                op: uni_cypher::ast::BinaryOp::Eq,
+                right,
+            } => {
+                // Pattern: variable.prop = literal
+                if let Expr::Property(inner, prop_name) = left.as_ref()
+                    && matches!(inner.as_ref(), Expr::Variable(_))
+                    && let Expr::Literal(lit) = right.as_ref()
+                {
+                    return vec![(prop_name.clone(), lit.to_value())];
+                }
+                // Reverse: literal = variable.prop
+                if let Expr::Literal(lit) = left.as_ref()
+                    && let Expr::Property(inner, prop_name) = right.as_ref()
+                    && matches!(inner.as_ref(), Expr::Variable(_))
+                {
+                    return vec![(prop_name.clone(), lit.to_value())];
+                }
+                vec![]
+            }
+            Expr::BinaryOp {
+                left,
+                op: uni_cypher::ast::BinaryOp::And,
+                right,
+            } => {
+                let mut result = Self::extract_edge_property_conditions(left);
+                result.extend(Self::extract_edge_property_conditions(right));
+                result
+            }
+            _ => vec![],
+        }
+    }
+
     ///
     /// Applies type coercion to resolve mismatches like Int32 vs Int64
     /// before creating the physical expression.
@@ -3543,14 +3770,28 @@ impl HybridPhysicalPlanner {
 
         // Add _src and _dst from source/target variable VIDs so the result
         // normalizer can detect this as an edge.
+        // Use {var}._vid when available, falling back to bare {var} column
+        // (e.g., in EXISTS subqueries where the source is a parameter VID).
+        let src_vid_col = format!("{}._vid", source_variable);
+        let src_col_name = if input_schema.column_with_name(&src_vid_col).is_some() {
+            src_vid_col
+        } else {
+            source_variable.to_string()
+        };
+        let dst_vid_col = format!("{}._vid", target_variable);
+        let dst_col_name = if input_schema.column_with_name(&dst_vid_col).is_some() {
+            dst_vid_col
+        } else {
+            target_variable.to_string()
+        };
         struct_args.push(lit("_src"));
         struct_args.push(DfExpr::Column(datafusion::common::Column::from_name(
-            format!("{}._vid", source_variable),
+            src_col_name,
         )));
 
         struct_args.push(lit("_dst"));
         struct_args.push(DfExpr::Column(datafusion::common::Column::from_name(
-            format!("{}._vid", target_variable),
+            dst_col_name,
         )));
 
         // Include _all_props if present (for keys()/properties() on schemaless edges)

@@ -2438,6 +2438,9 @@ impl Executor {
                                         is_variable_length,
                                         optional_pattern_vars: std::collections::HashSet::new(),
                                         scope_match_variables: std::collections::HashSet::new(),
+                                        edge_filter_expr: None,
+                                        path_mode: crate::query::df_graph::nfa::PathMode::Trail,
+                                        qpp_steps: None,
                                     };
 
                                     // Apply property filters for relationship

@@ -30,11 +30,14 @@
 //! L0 buffers are automatically overlaid for MVCC visibility.
 
 use crate::query::df_graph::GraphExecutionContext;
+use crate::query::df_graph::bitmap::{EidFilter, VidFilter};
 use crate::query::df_graph::common::{
     append_edge_to_struct, append_node_to_struct, build_edge_list_field, build_path_struct_field,
     column_as_vid_array, compute_plan_properties, labels_data_type, new_edge_list_builder,
     new_node_list_builder,
 };
+use crate::query::df_graph::nfa::{NfaStateId, PathNfa, PathSelector, VlpOutputMode};
+use crate::query::df_graph::pred_dag::PredecessorDag;
 use crate::query::df_graph::scan::{build_property_column_static, resolve_property_type};
 use arrow::compute::take;
 use arrow_array::{Array, ArrayRef, RecordBatch, UInt64Array};
@@ -44,12 +47,14 @@ use datafusion::execution::{RecordBatchStream, SendableRecordBatchStream, TaskCo
 use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties};
 use futures::{Stream, StreamExt};
+use fxhash::FxHashSet;
 use std::any::Any;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
+use uni_common::Value as UniValue;
 use uni_common::core::id::{Eid, Vid};
 use uni_store::runtime::l0_visibility;
 use uni_store::storage::direction::Direction;
@@ -2399,6 +2404,25 @@ pub struct GraphVariableLengthTraverseExec {
     /// Column name of an already-bound target VID (for patterns where target is in scope).
     bound_target_column: Option<String>,
 
+    /// Lance SQL filter for edge property predicates (VLP bitmap preselection).
+    edge_lance_filter: Option<String>,
+
+    /// Simple property equality conditions for per-edge L0 checking during BFS.
+    /// Each entry is (property_name, expected_value).
+    edge_property_conditions: Vec<(String, UniValue)>,
+
+    /// Edge ID columns from previous hops for cross-pattern relationship uniqueness.
+    used_edge_columns: Vec<String>,
+
+    /// Path semantics mode (Trail = no repeated edges, default for OpenCypher).
+    path_mode: super::nfa::PathMode,
+
+    /// Output mode determining BFS strategy.
+    output_mode: super::nfa::VlpOutputMode,
+
+    /// Compiled NFA for path pattern matching.
+    nfa: Arc<PathNfa>,
+
     /// Graph execution context.
     graph_ctx: Arc<GraphExecutionContext>,
 
@@ -2427,6 +2451,10 @@ impl fmt::Debug for GraphVariableLengthTraverseExec {
 
 impl GraphVariableLengthTraverseExec {
     /// Create a new variable-length traversal plan.
+    ///
+    /// For QPP (Quantified Path Patterns), pass a pre-compiled NFA via `qpp_nfa`.
+    /// For simple VLP patterns, pass `None` and the NFA will be compiled from
+    /// `edge_type_ids`, `direction`, `min_hops`, `max_hops`.
     #[expect(clippy::too_many_arguments)]
     pub fn new(
         input: Arc<dyn ExecutionPlan>,
@@ -2443,6 +2471,12 @@ impl GraphVariableLengthTraverseExec {
         graph_ctx: Arc<GraphExecutionContext>,
         is_optional: bool,
         bound_target_column: Option<String>,
+        edge_lance_filter: Option<String>,
+        edge_property_conditions: Vec<(String, UniValue)>,
+        used_edge_columns: Vec<String>,
+        path_mode: super::nfa::PathMode,
+        output_mode: super::nfa::VlpOutputMode,
+        qpp_nfa: Option<PathNfa>,
     ) -> Self {
         let source_column = source_column.into();
         let target_variable = target_variable.into();
@@ -2464,6 +2498,11 @@ impl GraphVariableLengthTraverseExec {
         );
         let properties = compute_plan_properties(schema.clone());
 
+        // Use pre-compiled QPP NFA if provided, otherwise compile from VLP parameters
+        let nfa = Arc::new(qpp_nfa.unwrap_or_else(|| {
+            PathNfa::from_vlp(edge_type_ids.clone(), direction, min_hops, max_hops)
+        }));
+
         Self {
             input,
             source_column,
@@ -2478,6 +2517,12 @@ impl GraphVariableLengthTraverseExec {
             target_label_name,
             is_optional,
             bound_target_column,
+            edge_lance_filter,
+            edge_property_conditions,
+            used_edge_columns,
+            path_mode,
+            output_mode,
+            nfa,
             graph_ctx,
             schema,
             properties,
@@ -2583,6 +2628,7 @@ impl ExecutionPlan for GraphVariableLengthTraverseExec {
             ));
         }
 
+        // Pass the existing NFA to avoid recompilation (important for QPP NFA)
         Ok(Arc::new(Self::new(
             children[0].clone(),
             self.source_column.clone(),
@@ -2598,6 +2644,12 @@ impl ExecutionPlan for GraphVariableLengthTraverseExec {
             self.graph_ctx.clone(),
             self.is_optional,
             self.bound_target_column.clone(),
+            self.edge_lance_filter.clone(),
+            self.edge_property_conditions.clone(),
+            self.used_edge_columns.clone(),
+            self.path_mode.clone(),
+            self.output_mode.clone(),
+            Some((*self.nfa).clone()),
         )))
     }
 
@@ -2644,12 +2696,19 @@ impl GraphVariableLengthTraverseExec {
             target_label_name: self.target_label_name.clone(),
             is_optional: self.is_optional,
             bound_target_column: self.bound_target_column.clone(),
+            edge_lance_filter: self.edge_lance_filter.clone(),
+            edge_property_conditions: self.edge_property_conditions.clone(),
+            used_edge_columns: self.used_edge_columns.clone(),
+            path_mode: self.path_mode.clone(),
+            output_mode: self.output_mode.clone(),
+            nfa: self.nfa.clone(),
             graph_ctx: self.graph_ctx.clone(),
         }
     }
 }
 
 /// Data needed by the stream (without ExecutionPlan overhead).
+#[allow(dead_code)] // Some fields accessed via NFA; kept for with_new_children reconstruction
 struct GraphVariableLengthTraverseExecData {
     source_column: String,
     edge_type_ids: Vec<u32>,
@@ -2663,74 +2722,265 @@ struct GraphVariableLengthTraverseExecData {
     target_label_name: Option<String>,
     is_optional: bool,
     bound_target_column: Option<String>,
+    #[allow(dead_code)] // Used in Phase 3 warming
+    edge_lance_filter: Option<String>,
+    /// Simple property equality conditions for per-edge L0 checking during BFS.
+    edge_property_conditions: Vec<(String, UniValue)>,
+    used_edge_columns: Vec<String>,
+    path_mode: super::nfa::PathMode,
+    output_mode: super::nfa::VlpOutputMode,
+    nfa: Arc<PathNfa>,
     graph_ctx: Arc<GraphExecutionContext>,
 }
 
+/// Safety cap for frontier size to prevent OOM on pathological graphs.
+const MAX_FRONTIER_SIZE: usize = 500_000;
+/// Safety cap for predecessor pool size.
+const MAX_PRED_POOL_SIZE: usize = 2_000_000;
+
 impl GraphVariableLengthTraverseExecData {
-    /// Perform BFS from a source vertex.
-    fn bfs(&self, source: Vid) -> Vec<BfsResult> {
-        let mut results = Vec::new();
-        let mut queue: VecDeque<BfsResult> = VecDeque::new();
+    /// Check if a vertex passes the target label filter.
+    fn check_target_label(&self, vid: Vid) -> bool {
+        if let Some(ref label_name) = self.target_label_name {
+            let query_ctx = self.graph_ctx.query_context();
+            match l0_visibility::get_vertex_labels_optional(vid, &query_ctx) {
+                Some(labels) => labels.contains(label_name),
+                None => true, // not in L0, trust storage
+            }
+        } else {
+            true
+        }
+    }
 
-        queue.push_back((source, 0, vec![source], vec![]));
+    /// Check if a vertex satisfies an NFA state constraint (QPP intermediate node label).
+    fn check_state_constraint(&self, vid: Vid, constraint: &super::nfa::VertexConstraint) -> bool {
+        match constraint {
+            super::nfa::VertexConstraint::Label(label_name) => {
+                let query_ctx = self.graph_ctx.query_context();
+                match l0_visibility::get_vertex_labels_optional(vid, &query_ctx) {
+                    Some(labels) => labels.contains(label_name),
+                    None => true, // not in L0, trust storage
+                }
+            }
+        }
+    }
 
+    /// Expand neighbors from a vertex through all NFA transitions from the given state.
+    /// Returns (neighbor_vid, neighbor_eid, destination_nfa_state) triples.
+    fn expand_neighbors(
+        &self,
+        vid: Vid,
+        state: NfaStateId,
+        eid_filter: &EidFilter,
+        used_eids: &FxHashSet<u64>,
+    ) -> Vec<(Vid, Eid, NfaStateId)> {
         let is_undirected = matches!(self.direction, Direction::Both);
+        let mut results = Vec::new();
 
-        while let Some((current, depth, node_path, edge_path)) = queue.pop_front() {
-            // Emit result if within hop range (including zero-length patterns)
-            if depth >= self.min_hops && depth <= self.max_hops {
-                // Filter by target label (same logic as fixed-length traversal).
-                // Only the final target node is constrained, not intermediate nodes.
-                let label_ok = if let Some(ref label_name) = self.target_label_name {
-                    let query_ctx = self.graph_ctx.query_context();
-                    match l0_visibility::get_vertex_labels_optional(current, &query_ctx) {
-                        Some(labels) => labels.contains(label_name),
-                        None => true, // not in L0, trust storage
+        for transition in self.nfa.transitions_from(state) {
+            let mut seen_edges: FxHashSet<u64> = FxHashSet::default();
+
+            for &etype in &transition.edge_type_ids {
+                for (neighbor, eid) in
+                    self.graph_ctx
+                        .get_neighbors(vid, etype, transition.direction)
+                {
+                    // Deduplicate edges for undirected patterns
+                    if is_undirected && !seen_edges.insert(eid.as_u64()) {
+                        continue;
                     }
-                } else {
-                    true
-                };
 
-                if label_ok {
-                    results.push((current, depth, node_path.clone(), edge_path.clone()));
+                    // Check EidFilter (edge property bitmap preselection)
+                    if !eid_filter.contains(eid) {
+                        continue;
+                    }
+
+                    // Check edge property conditions (L0 in-memory properties)
+                    if !self.edge_property_conditions.is_empty() {
+                        let query_ctx = self.graph_ctx.query_context();
+                        let passes = if let Some(props) =
+                            l0_visibility::accumulate_edge_props(eid, Some(&query_ctx))
+                        {
+                            self.edge_property_conditions
+                                .iter()
+                                .all(|(name, expected)| {
+                                    props.get(name).is_some_and(|actual| actual == expected)
+                                })
+                        } else {
+                            // Edge not in L0 (CSR/Lance) — relies on EidFilter
+                            // for correctness. TODO: build EidFilter from Lance
+                            // during warming for flushed edges.
+                            true
+                        };
+                        if !passes {
+                            continue;
+                        }
+                    }
+
+                    // Check cross-pattern relationship uniqueness
+                    if used_eids.contains(&eid.as_u64()) {
+                        continue;
+                    }
+
+                    // Check NFA state constraint on the destination state (QPP label filters)
+                    if let Some(constraint) = self.nfa.state_constraint(transition.to)
+                        && !self.check_state_constraint(neighbor, constraint)
+                    {
+                        continue;
+                    }
+
+                    results.push((neighbor, eid, transition.to));
+                }
+            }
+        }
+
+        results
+    }
+
+    /// NFA-driven BFS with predecessor DAG for full path enumeration (Mode B).
+    ///
+    /// Returns BFS results in the same format as the old bfs() for compatibility
+    /// with build_output_batch.
+    #[allow(clippy::too_many_arguments)]
+    fn bfs_with_dag(
+        &self,
+        source: Vid,
+        eid_filter: &EidFilter,
+        used_eids: &FxHashSet<u64>,
+        vid_filter: &VidFilter,
+    ) -> Vec<BfsResult> {
+        let nfa = &self.nfa;
+        let selector = PathSelector::All;
+        let mut dag = PredecessorDag::new(selector);
+        let mut accepting: Vec<(Vid, NfaStateId, u32)> = Vec::new();
+
+        // Handle zero-length paths (min_hops == 0)
+        if nfa.is_accepting(nfa.start_state())
+            && self.check_target_label(source)
+            && vid_filter.contains(source)
+        {
+            accepting.push((source, nfa.start_state(), 0));
+        }
+
+        // Per-depth frontier BFS
+        let mut frontier: Vec<(Vid, NfaStateId)> = vec![(source, nfa.start_state())];
+        let mut depth: u32 = 0;
+
+        while !frontier.is_empty() && depth < self.max_hops as u32 {
+            depth += 1;
+            let mut next_frontier: Vec<(Vid, NfaStateId)> = Vec::new();
+            let mut seen_at_depth: FxHashSet<(Vid, NfaStateId)> = FxHashSet::default();
+
+            for &(vid, state) in &frontier {
+                for (neighbor, eid, dst_state) in
+                    self.expand_neighbors(vid, state, eid_filter, used_eids)
+                {
+                    // Record in predecessor DAG
+                    dag.add_predecessor(neighbor, dst_state, vid, state, eid, depth);
+
+                    // Add to next frontier (deduplicated per depth)
+                    if seen_at_depth.insert((neighbor, dst_state)) {
+                        next_frontier.push((neighbor, dst_state));
+
+                        // Check if accepting
+                        if nfa.is_accepting(dst_state)
+                            && self.check_target_label(neighbor)
+                            && vid_filter.contains(neighbor)
+                        {
+                            accepting.push((neighbor, dst_state, depth));
+                        }
+                    }
                 }
             }
 
-            // Stop if at max depth
-            if depth >= self.max_hops {
-                continue;
+            // Safety cap
+            if next_frontier.len() > MAX_FRONTIER_SIZE || dag.pool_len() > MAX_PRED_POOL_SIZE {
+                break;
             }
 
-            // Get neighbors across all edge types
-            let mut all_neighbors = Vec::new();
-            for &edge_type_id in &self.edge_type_ids {
-                let neighbors = self
-                    .graph_ctx
-                    .get_neighbors(current, edge_type_id, self.direction);
-                all_neighbors.extend(neighbors);
-            }
+            frontier = next_frontier;
+        }
 
-            // For Direction::Both, deduplicate edges by eid at each hop.
-            // This prevents the same edge being found twice (once outgoing, once incoming).
-            let mut seen_edges_at_hop: HashSet<u64> = HashSet::new();
+        // Enumerate paths from DAG to produce BfsResult tuples
+        let mut results: Vec<BfsResult> = Vec::new();
+        for &(target, state, depth) in &accepting {
+            dag.enumerate_paths(
+                source,
+                target,
+                state,
+                depth,
+                depth,
+                &self.path_mode,
+                &mut |nodes, edges| {
+                    results.push((target, depth as usize, nodes.to_vec(), edges.to_vec()));
+                    std::ops::ControlFlow::Continue(())
+                },
+            );
+        }
 
-            for (neighbor, eid) in all_neighbors {
-                // Deduplicate edges for undirected patterns
-                if is_undirected && !seen_edges_at_hop.insert(eid.as_u64()) {
-                    continue;
+        results
+    }
+
+    /// NFA-driven BFS returning only endpoints and depths (Mode A).
+    ///
+    /// More efficient when no path/step variable is bound — skips full path enumeration.
+    /// Uses lightweight trail verification via has_trail_valid_path().
+    #[allow(clippy::too_many_arguments)]
+    fn bfs_endpoints_only(
+        &self,
+        source: Vid,
+        eid_filter: &EidFilter,
+        used_eids: &FxHashSet<u64>,
+        vid_filter: &VidFilter,
+    ) -> Vec<(Vid, u32)> {
+        let nfa = &self.nfa;
+        let selector = PathSelector::Any; // Only need existence, not all paths
+        let mut dag = PredecessorDag::new(selector);
+        let mut results: Vec<(Vid, u32)> = Vec::new();
+
+        // Handle zero-length paths
+        if nfa.is_accepting(nfa.start_state())
+            && self.check_target_label(source)
+            && vid_filter.contains(source)
+        {
+            results.push((source, 0));
+        }
+
+        // Per-depth frontier BFS
+        let mut frontier: Vec<(Vid, NfaStateId)> = vec![(source, nfa.start_state())];
+        let mut depth: u32 = 0;
+
+        while !frontier.is_empty() && depth < self.max_hops as u32 {
+            depth += 1;
+            let mut next_frontier: Vec<(Vid, NfaStateId)> = Vec::new();
+            let mut seen_at_depth: FxHashSet<(Vid, NfaStateId)> = FxHashSet::default();
+
+            for &(vid, state) in &frontier {
+                for (neighbor, eid, dst_state) in
+                    self.expand_neighbors(vid, state, eid_filter, used_eids)
+                {
+                    dag.add_predecessor(neighbor, dst_state, vid, state, eid, depth);
+
+                    if seen_at_depth.insert((neighbor, dst_state)) {
+                        next_frontier.push((neighbor, dst_state));
+
+                        // Check if accepting with trail verification
+                        if nfa.is_accepting(dst_state)
+                            && self.check_target_label(neighbor)
+                            && vid_filter.contains(neighbor)
+                            && dag.has_trail_valid_path(source, neighbor, dst_state, depth, depth)
+                        {
+                            results.push((neighbor, depth));
+                        }
+                    }
                 }
-
-                // Enforce relationship uniqueness per-path (Cypher semantics).
-                if edge_path.contains(&eid) {
-                    continue;
-                }
-
-                let mut new_node_path = node_path.clone();
-                new_node_path.push(neighbor);
-                let mut new_edge_path = edge_path.clone();
-                new_edge_path.push(eid);
-                queue.push_back((neighbor, depth + 1, new_node_path, new_edge_path));
             }
+
+            if next_frontier.len() > MAX_FRONTIER_SIZE || dag.pool_len() > MAX_PRED_POOL_SIZE {
+                break;
+            }
+
+            frontier = next_frontier;
         }
 
         results
@@ -2791,7 +3041,11 @@ impl Stream for GraphVariableLengthTraverseStream {
                     match self.input.poll_next_unpin(cx) {
                         Poll::Ready(Some(Ok(batch))) => {
                             // Build base batch synchronously (BFS + expand)
-                            let base_result = self.process_batch_base(batch);
+                            // TODO(Phase 3.5): Build real EidFilter/VidFilter during warming
+                            let eid_filter = EidFilter::AllAllowed;
+                            let vid_filter = VidFilter::AllAllowed;
+                            let base_result =
+                                self.process_batch_base(batch, &eid_filter, &vid_filter);
                             let base_batch = match base_result {
                                 Ok(b) => b,
                                 Err(e) => {
@@ -2863,7 +3117,12 @@ impl Stream for GraphVariableLengthTraverseStream {
 }
 
 impl GraphVariableLengthTraverseStream {
-    fn process_batch_base(&self, batch: RecordBatch) -> DFResult<RecordBatch> {
+    fn process_batch_base(
+        &self,
+        batch: RecordBatch,
+        eid_filter: &EidFilter,
+        vid_filter: &VidFilter,
+    ) -> DFResult<RecordBatch> {
         let source_col = batch
             .column_by_name(&self.exec.source_column)
             .ok_or_else(|| {
@@ -2886,6 +3145,19 @@ impl GraphVariableLengthTraverseStream {
             .transpose()?;
         let expected_targets: Option<&UInt64Array> = bound_target_cow.as_deref();
 
+        // Extract used edge columns for cross-pattern relationship uniqueness
+        let used_edge_arrays: Vec<&UInt64Array> = self
+            .exec
+            .used_edge_columns
+            .iter()
+            .filter_map(|col| {
+                batch
+                    .column_by_name(col)?
+                    .as_any()
+                    .downcast_ref::<UInt64Array>()
+            })
+            .collect();
+
         // Collect all BFS results
         let mut expansions: Vec<VarLengthExpansion> = Vec::new();
 
@@ -2894,23 +3166,58 @@ impl GraphVariableLengthTraverseStream {
 
             if let Some(src) = source_vid {
                 let vid = Vid::from(src);
-                let bfs_results = self.exec.bfs(vid);
 
-                for (target, hop_count, node_path, edge_path) in bfs_results {
-                    // Filter by bound target VID if set (for patterns where target is in scope).
-                    // NULL bound targets do not match anything.
-                    if let Some(targets) = expected_targets {
-                        if targets.is_null(row_idx) {
-                            continue;
+                // Collect used edge IDs from previous hops for this row
+                let used_eids: FxHashSet<u64> = used_edge_arrays
+                    .iter()
+                    .filter_map(|arr| {
+                        if arr.is_null(row_idx) {
+                            None
+                        } else {
+                            Some(arr.value(row_idx))
                         }
-                        let expected_vid = targets.value(row_idx);
-                        if target.as_u64() != expected_vid {
-                            continue;
+                    })
+                    .collect();
+
+                // Dispatch to appropriate BFS mode based on output_mode
+                match &self.exec.output_mode {
+                    VlpOutputMode::EndpointsOnly => {
+                        let endpoints = self
+                            .exec
+                            .bfs_endpoints_only(vid, eid_filter, &used_eids, vid_filter);
+                        for (target, depth) in endpoints {
+                            // Filter by bound target VID
+                            if let Some(targets) = expected_targets {
+                                if targets.is_null(row_idx) {
+                                    continue;
+                                }
+                                if target.as_u64() != targets.value(row_idx) {
+                                    continue;
+                                }
+                            }
+                            expansions.push((row_idx, target, depth as usize, vec![], vec![]));
+                            emitted_for_row = true;
                         }
                     }
-
-                    expansions.push((row_idx, target, hop_count, node_path, edge_path));
-                    emitted_for_row = true;
+                    _ => {
+                        // FullPath, StepVariable, CountOnly, etc.
+                        let bfs_results = self
+                            .exec
+                            .bfs_with_dag(vid, eid_filter, &used_eids, vid_filter);
+                        for (target, hop_count, node_path, edge_path) in bfs_results {
+                            // Filter by bound target VID
+                            if let Some(targets) = expected_targets {
+                                if targets.is_null(row_idx) {
+                                    continue;
+                                }
+                                if target.as_u64() != targets.value(row_idx) {
+                                    continue;
+                                }
+                            }
+                            expansions.push((row_idx, target, hop_count, node_path, edge_path));
+                            emitted_for_row = true;
+                        }
+                    }
                 }
             }
 
@@ -2950,10 +3257,11 @@ impl GraphVariableLengthTraverseStream {
         }
 
         // Collect target VIDs and unmatched markers for use in multiple places.
-        // Unmatched OPTIONAL rows are represented by empty node/edge paths.
+        // Unmatched OPTIONAL rows use the sentinel VID (u64::MAX) — not empty paths,
+        // because EndpointsOnly mode legitimately uses empty node/edge path vectors.
         let unmatched_rows: Vec<bool> = expansions
             .iter()
-            .map(|(_, _, _, node_path, edge_path)| node_path.is_empty() && edge_path.is_empty())
+            .map(|(_, vid, _, _, _)| vid.as_u64() == u64::MAX)
             .collect();
         let target_vids: Vec<Option<u64>> = expansions
             .iter()
@@ -3379,6 +3687,22 @@ pub struct GraphVariableLengthTraverseMainExec {
     /// Column name of an already-bound target VID (for patterns where target is in scope).
     bound_target_column: Option<String>,
 
+    /// Lance SQL filter for edge property predicates (VLP bitmap preselection).
+    edge_lance_filter: Option<String>,
+
+    /// Edge property conditions to check during BFS (e.g., `{year: 1988}`).
+    /// Each entry is (property_name, expected_value). All must match for an edge to be traversed.
+    edge_property_conditions: Vec<(String, UniValue)>,
+
+    /// Edge ID columns from previous hops for cross-pattern relationship uniqueness.
+    used_edge_columns: Vec<String>,
+
+    /// Path semantics mode (Trail = no repeated edges, default for OpenCypher).
+    path_mode: super::nfa::PathMode,
+
+    /// Output mode determining BFS strategy.
+    output_mode: super::nfa::VlpOutputMode,
+
     /// Graph execution context.
     graph_ctx: Arc<GraphExecutionContext>,
 
@@ -3422,6 +3746,11 @@ impl GraphVariableLengthTraverseMainExec {
         graph_ctx: Arc<GraphExecutionContext>,
         is_optional: bool,
         bound_target_column: Option<String>,
+        edge_lance_filter: Option<String>,
+        edge_property_conditions: Vec<(String, UniValue)>,
+        used_edge_columns: Vec<String>,
+        path_mode: super::nfa::PathMode,
+        output_mode: super::nfa::VlpOutputMode,
     ) -> Self {
         let source_column = source_column.into();
         let target_variable = target_variable.into();
@@ -3449,6 +3778,11 @@ impl GraphVariableLengthTraverseMainExec {
             target_properties,
             is_optional,
             bound_target_column,
+            edge_lance_filter,
+            edge_property_conditions,
+            used_edge_columns,
+            path_mode,
+            output_mode,
             graph_ctx,
             schema,
             properties,
@@ -3566,6 +3900,11 @@ impl ExecutionPlan for GraphVariableLengthTraverseMainExec {
             self.graph_ctx.clone(),
             self.is_optional,
             self.bound_target_column.clone(),
+            self.edge_lance_filter.clone(),
+            self.edge_property_conditions.clone(),
+            self.used_edge_columns.clone(),
+            self.path_mode.clone(),
+            self.output_mode.clone(),
         )))
     }
 
@@ -3598,6 +3937,11 @@ impl ExecutionPlan for GraphVariableLengthTraverseMainExec {
             graph_ctx: self.graph_ctx.clone(),
             is_optional: self.is_optional,
             bound_target_column: self.bound_target_column.clone(),
+            edge_lance_filter: self.edge_lance_filter.clone(),
+            edge_property_conditions: self.edge_property_conditions.clone(),
+            used_edge_columns: self.used_edge_columns.clone(),
+            path_mode: self.path_mode.clone(),
+            output_mode: self.output_mode.clone(),
             schema: self.schema.clone(),
             state: VarLengthMainStreamState::Loading(Box::pin(load_fut)),
             metrics,
@@ -3625,6 +3969,7 @@ enum VarLengthMainStreamState {
 }
 
 /// Stream for variable-length traversal on schemaless edges.
+#[allow(dead_code)] // VLP fields used in Phase 3
 struct GraphVariableLengthTraverseMainStream {
     input: SendableRecordBatchStream,
     source_column: String,
@@ -3640,6 +3985,12 @@ struct GraphVariableLengthTraverseMainStream {
     graph_ctx: Arc<GraphExecutionContext>,
     is_optional: bool,
     bound_target_column: Option<String>,
+    edge_lance_filter: Option<String>,
+    /// Edge property conditions to check during BFS.
+    edge_property_conditions: Vec<(String, UniValue)>,
+    used_edge_columns: Vec<String>,
+    path_mode: super::nfa::PathMode,
+    output_mode: super::nfa::VlpOutputMode,
     schema: SchemaRef,
     state: VarLengthMainStreamState,
     metrics: BaselineMetrics,
@@ -3672,7 +4023,7 @@ impl GraphVariableLengthTraverseMainStream {
                 let is_undirected = matches!(self.direction, Direction::Both);
                 let mut seen_edges_at_hop: HashSet<u64> = HashSet::new();
 
-                for (neighbor, eid, _edge_type, _props) in neighbors {
+                for (neighbor, eid, _edge_type, props) in neighbors {
                     // Deduplicate edges for undirected patterns
                     if is_undirected && !seen_edges_at_hop.insert(eid.as_u64()) {
                         continue;
@@ -3681,6 +4032,19 @@ impl GraphVariableLengthTraverseMainStream {
                     // Enforce relationship uniqueness per-path (Cypher semantics).
                     if edge_path.contains(eid) {
                         continue;
+                    }
+
+                    // Check edge property conditions (e.g., {year: 1988}).
+                    if !self.edge_property_conditions.is_empty() {
+                        let passes =
+                            self.edge_property_conditions
+                                .iter()
+                                .all(|(name, expected)| {
+                                    props.get(name).is_some_and(|actual| actual == expected)
+                                });
+                        if !passes {
+                            continue;
+                        }
                     }
 
                     let mut new_node_path = node_path.clone();

@@ -1,17 +1,17 @@
 # TCK Compliance Report
 
-**Generated:** 2026-02-21 10:47:56
-**Results:** `results_20260221_104756.json`
-**Compared to:** `results_20260221_044648.json`
+**Generated:** 2026-02-22 01:13:56
+**Results:** `results_20260222_011355.json`
+**Compared to:** `results_20260222_002200.json`
 
 ## Summary
 
 | Metric | Current | Previous | Delta |
 |--------|---------|----------|-------|
 | Scenarios | 3897 | 3897 |  |
-| Passed | 3872 | 3872 |  |
-| Failed | 24 | 24 |  |
-| Pass Rate | 99.4% | 99.4% | ➡️ +0.0pp |
+| Passed | 3881 | 3881 |  |
+| Failed | 15 | 15 |  |
+| Pass Rate | 99.6% | 99.6% | ➡️ +0.0pp |
 
 ## Feature Breakdown
 
@@ -53,9 +53,9 @@
 | ✅ Delete4 | 3 | 3 | 0 | 100% |  |
 | ✅ Delete5 | 9 | 9 | 0 | 100% |  |
 | ✅ Delete6 | 14 | 14 | 0 | 100% |  |
-| ⚠️ ExistentialSubquery1 | 4 | 3 | 1 | 75% |  |
-| ⚠️ ExistentialSubquery2 | 3 | 2 | 1 | 67% |  |
-| ❌ ExistentialSubquery3 | 3 | 1 | 2 | 33% |  |
+| ✅ ExistentialSubquery1 | 4 | 4 | 0 | 100% |  |
+| ✅ ExistentialSubquery2 | 3 | 3 | 0 | 100% |  |
+| ✅ ExistentialSubquery3 | 3 | 3 | 0 | 100% |  |
 | ✅ Graph3 | 9 | 9 | 0 | 100% |  |
 | ✅ Graph4 | 11 | 11 | 0 | 100% |  |
 | ✅ Graph5 | 9 | 9 | 0 | 100% |  |
@@ -86,11 +86,11 @@
 | ✅ Match1 | 86 | 86 | 0 | 100% |  |
 | ✅ Match2 | 86 | 86 | 0 | 100% |  |
 | ✅ Match3 | 30 | 30 | 0 | 100% |  |
-| ⚠️ Match4 | 10 | 7 | 3 | 70% |  |
-| ✅ Match5 | 29 | 28 | 1 | 97% |  |
+| ✅ Match4 | 10 | 10 | 0 | 100% |  |
+| ✅ Match5 | 29 | 29 | 0 | 100% |  |
 | ✅ Match6 | 97 | 97 | 0 | 100% |  |
 | ✅ Match7 | 31 | 31 | 0 | 100% |  |
-| ⚠️ Match8 | 3 | 2 | 1 | 67% |  |
+| ✅ Match8 | 3 | 3 | 0 | 100% |  |
 | ✅ Match9 | 9 | 9 | 0 | 100% |  |
 | ✅ MatchWhere1 | 15 | 15 | 0 | 100% |  |
 | ✅ MatchWhere2 | 2 | 2 | 0 | 100% |  |
@@ -223,57 +223,6 @@
   ... (truncated)
   ```
 
-### ExistentialSubquery1
-
-- **[2] Simple subquery with WHERE clause** (line 53)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/existentialSubqueries/ExistentialSubquery1.feature:69:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): Row count mismatch: expected 1, got 0
-[Summary]
-1 feature
-1 scenario (1
-  ... (truncated)
-  ```
-
-### ExistentialSubquery2
-
-- **[3] Full existential subquery with update clause should fail** (line 78)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/existentialSubqueries/ExistentialSubquery2.feature:88:5
-      Matched: crates/uni-tck/src/steps/then.rs:114:1
-      Step panicked. Captured output: No error found
-[Summary]
-1 feature
-1 scenario (1 failed)
-3 steps (2 passed, 1 failed)
-
-  ```
-
-### ExistentialSubquery3
-
-- **[1] Nested simple existential subquery** (line 33)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/existentialSubqueries/ExistentialSubquery3.feature:51:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): Row count mismatch: expected 1, got 0
-[Summary]
-1 feature
-1 scenario (1
-  ... (truncated)
-  ```
-- **[3] Nested full existential subquery with pattern predicate** (line 79)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/existentialSubqueries/ExistentialSubquery3.feature:97:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: EXISTS subquery execution
-  ... (truncated)
-  ```
-
 ### Graph6
 
 - **[6] Statically access a property of a optional non-null relationship** (line 111)
@@ -334,68 +283,6 @@
       Defined: tck/features/expressions/literals/Literals6.feature:85:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
       Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("literal", Some(String("a\\bcn5t'\"\\//\\\"'"
-  ... (truncated)
-  ```
-
-### Match4
-
-- **[4] Matching longer variable length paths** (line 93)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/match/Match4.feature:111:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): Row count mismatch: expected 1, got 17
-[Summary]
-1 feature
-1 scenario (1 failed)
-4 steps (3 passed, 1 fa
-  ... (truncated)
-  ```
-- **[5] Matching variable length pattern with property predicate** (line 116)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/match/Match4.feature:129:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): Row count mismatch: expected 1, got 3
-[Summary]
-1 feature
-1 scenario (1 failed)
-4 steps (3 passed, 1 fai
-  ... (truncated)
-  ```
-- **[7] Matching variable length patterns including a bound relationship** (line 153)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/match/Match4.feature:171:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("c", Some(Int(84)))]. Expected: [{"c": Int(32)}]
-[Summ
-  ... (truncated)
-  ```
-
-### Match5
-
-- **[27] Handling mixed relationship patterns and directions 2** (line 541)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/match/Match5.feature:564:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): Row count mismatch: expected 16, got 20
-[Summary]
-1 feature
-1 scenario (1 failed)
-6 steps (5 passed, 1 f
-  ... (truncated)
-  ```
-
-### Match8
-
-- **[2] Counting rows after MATCH, MERGE, OPTIONAL MATCH** (line 54)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/match/Match8.feature:70:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("count(*)", Some(Int(4)))]. Expected: [{"count(*)": Int
   ... (truncated)
   ```
 
@@ -464,7 +351,7 @@
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal5.feature:133:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("d.millisecond", Some(Int(645))), ("d.offset
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("d.day", Some(Int(11))), ("d.dayOfQuarter", 
   ... (truncated)
   ```
 

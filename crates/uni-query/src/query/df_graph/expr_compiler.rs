@@ -20,11 +20,14 @@ use datafusion::physical_plan::PhysicalExpr;
 use datafusion::physical_planner::PhysicalPlanner;
 use datafusion::prelude::SessionContext;
 use parking_lot::RwLock;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use uni_common::Value;
 use uni_common::core::schema::Schema as UniSchema;
-use uni_cypher::ast::{BinaryOp, CypherLiteral, Expr, Query, UnaryOp};
+use uni_cypher::ast::{
+    BinaryOp, Clause, CypherLiteral, Expr, MatchClause, Query, ReturnClause, ReturnItem, SortItem,
+    Statement, UnaryOp, UnwindClause, WithClause,
+};
 use uni_store::storage::manager::StorageManager;
 
 /// Check if a data type represents CypherValue (LargeBinary).
@@ -641,6 +644,13 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
 
     /// Compile EXISTS subquery expression.
     fn compile_exists(&self, query: &Query) -> Result<Arc<dyn PhysicalExpr>> {
+        // 7.1: Validate no mutation clauses in EXISTS body
+        if has_mutation_clause(query) {
+            return Err(anyhow!(
+                "SyntaxError: InvalidClauseComposition - EXISTS subquery cannot contain updating clauses"
+            ));
+        }
+
         let err = |dep: &str| anyhow!("EXISTS requires {}", dep);
 
         let graph_ctx = self
@@ -1951,6 +1961,7 @@ impl PhysicalExpr for ExistsExecExpr {
         Ok(true)
     }
 
+    #[allow(clippy::manual_try_fold)]
     fn evaluate(
         &self,
         batch: &arrow_array::RecordBatch,
@@ -1958,74 +1969,116 @@ impl PhysicalExpr for ExistsExecExpr {
         let num_rows = batch.num_rows();
         let mut builder = BooleanBuilder::with_capacity(num_rows);
 
-        for row_idx in 0..num_rows {
-            let row_params = extract_row_params(batch, row_idx);
-            let mut sub_params = self.params.clone();
-            sub_params.extend(row_params.clone());
+        // 7.2: Extract entity variable names from batch schema.
+        // Entity columns follow the pattern "varname._vid" (flattened) or are struct columns.
+        // We pass ONLY entity base names (e.g., "p", "n", "m") as vars_in_scope so the
+        // subquery planner treats them as bound (Imported) variables. The initial Project
+        // then creates Parameter("n") AS "n" etc. — the traverse reads the VID from this
+        // column via resolve_source_vid_col's bare-name fallback.
+        //
+        // We intentionally do NOT include raw column names (n._vid, n._labels, etc.) in
+        // vars_in_scope to avoid duplicate column conflicts with traverse output columns.
+        // Parameter expressions read directly from sub_params, not from plan columns.
+        let schema = batch.schema();
+        let mut entity_vars: HashSet<String> = HashSet::new();
+        for field in schema.fields() {
+            let name = field.name();
+            if let Some(base) = name.strip_suffix("._vid") {
+                entity_vars.insert(base.to_string());
+            }
+            if matches!(field.data_type(), DataType::Struct(_)) {
+                entity_vars.insert(name.to_string());
+            }
+            // Also detect bare VID columns from parent EXISTS parameter projections.
+            // In nested EXISTS, a parent level projects "n" as a bare Int64/UInt64 VID.
+            // Simple identifier (no dots, no leading underscore) + integer type = VID.
+            if !name.contains('.')
+                && !name.starts_with('_')
+                && matches!(field.data_type(), DataType::Int64 | DataType::UInt64)
+            {
+                entity_vars.insert(name.to_string());
+            }
+        }
+        let vars_in_scope: Vec<String> = entity_vars.iter().cloned().collect();
 
-            // Collect variable names in scope for the subquery planner
-            let vars_in_scope: Vec<String> = row_params.keys().cloned().collect();
+        // 7.3: Rewrite correlated property accesses to parameter references.
+        // e.g., `n.prop` where `n` is an outer entity → `$param("n.prop")`
+        let rewritten_query = rewrite_query_correlated(&self.query, &entity_vars);
 
-            // Plan the subquery with correlated variables in scope
-            let planner = QueryPlanner::new(self.uni_schema.clone());
-            let logical_plan = match planner.plan_with_scope(self.query.clone(), vars_in_scope) {
-                Ok(plan) => plan,
-                Err(e) => {
-                    return Err(datafusion::error::DataFusionError::Execution(format!(
-                        "EXISTS subquery planning failed: {}",
-                        e
-                    )));
-                }
-            };
+        // 7.4: Plan ONCE — the rewritten query is parameterized, same for all rows.
+        let planner = QueryPlanner::new(self.uni_schema.clone());
+        let logical_plan = match planner.plan_with_scope(rewritten_query, vars_in_scope) {
+            Ok(plan) => plan,
+            Err(e) => {
+                return Err(datafusion::error::DataFusionError::Execution(format!(
+                    "EXISTS subquery planning failed: {}",
+                    e
+                )));
+            }
+        };
 
-            // Execute the subquery synchronously (we're inside a sync evaluate call).
-            // Spawn the async work on a dedicated thread with its own runtime to
-            // avoid conflicts with both single-threaded and multi-threaded runtimes.
-            let graph_ctx = self.graph_ctx.clone();
-            let session_ctx = self.session_ctx.clone();
-            let storage = self.storage.clone();
-            let uni_schema = self.uni_schema.clone();
+        // Execute all rows on a dedicated thread with a single tokio runtime.
+        // The runtime must be created and dropped on this thread (not in an async context).
+        let graph_ctx = self.graph_ctx.clone();
+        let session_ctx = self.session_ctx.clone();
+        let storage = self.storage.clone();
+        let uni_schema = self.uni_schema.clone();
+        let base_params = self.params.clone();
 
-            let result = std::thread::scope(|s| {
-                s.spawn(|| {
-                    let rt = tokio::runtime::Builder::new_current_thread()
-                        .enable_all()
-                        .build()
-                        .map_err(|e| {
-                            datafusion::error::DataFusionError::Execution(format!(
-                                "Failed to create runtime for EXISTS: {}",
-                                e
-                            ))
-                        })?;
-                    rt.block_on(execute_subplan(
+        let result = std::thread::scope(|s| {
+            s.spawn(|| {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(|e| {
+                        datafusion::error::DataFusionError::Execution(format!(
+                            "Failed to create runtime for EXISTS: {}",
+                            e
+                        ))
+                    })?;
+
+                for row_idx in 0..num_rows {
+                    let row_params = extract_row_params(batch, row_idx);
+                    let mut sub_params = base_params.clone();
+                    sub_params.extend(row_params);
+
+                    // Add entity variable → VID value mappings so that
+                    // Parameter("n") resolves to the VID for traversal sources.
+                    for var in &entity_vars {
+                        let vid_key = format!("{}._vid", var);
+                        if let Some(vid_val) = sub_params.get(&vid_key).cloned() {
+                            sub_params.insert(var.clone(), vid_val);
+                        }
+                    }
+
+                    let batches = rt.block_on(execute_subplan(
                         &logical_plan,
                         &sub_params,
                         &graph_ctx,
                         &session_ctx,
                         &storage,
                         &uni_schema,
-                    ))
-                })
-                .join()
-                .unwrap_or_else(|_| {
-                    Err(datafusion::error::DataFusionError::Execution(
-                        "EXISTS subquery thread panicked".to_string(),
-                    ))
-                })
-            });
+                    ))?;
 
-            match result {
-                Ok(batches) => {
                     let has_rows = batches.iter().any(|b| b.num_rows() > 0);
                     builder.append_value(has_rows);
                 }
-                Err(e) => {
-                    return Err(datafusion::error::DataFusionError::Execution(format!(
-                        "EXISTS subquery execution failed: {}",
-                        e
-                    )));
-                }
-            }
+
+                Ok::<_, datafusion::error::DataFusionError>(())
+            })
+            .join()
+            .unwrap_or_else(|_| {
+                Err(datafusion::error::DataFusionError::Execution(
+                    "EXISTS subquery thread panicked".to_string(),
+                ))
+            })
+        });
+
+        if let Err(e) = result {
+            return Err(datafusion::error::DataFusionError::Execution(format!(
+                "EXISTS subquery execution failed: {}",
+                e
+            )));
         }
 
         Ok(datafusion::physical_plan::ColumnarValue::Array(Arc::new(
@@ -2051,5 +2104,214 @@ impl PhysicalExpr for ExistsExecExpr {
 
     fn fmt_sql(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// EXISTS subquery helpers
+// ---------------------------------------------------------------------------
+
+/// Check if a Query contains any mutation clauses (CREATE, SET, DELETE, REMOVE, MERGE).
+/// EXISTS subqueries must be read-only per OpenCypher spec.
+fn has_mutation_clause(query: &Query) -> bool {
+    match query {
+        Query::Single(stmt) => stmt.clauses.iter().any(|c| {
+            matches!(
+                c,
+                Clause::Create(_)
+                    | Clause::Delete(_)
+                    | Clause::Set(_)
+                    | Clause::Remove(_)
+                    | Clause::Merge(_)
+            ) || has_mutation_in_clause_exprs(c)
+        }),
+        Query::Union { left, right, .. } => has_mutation_clause(left) || has_mutation_clause(right),
+        _ => false,
+    }
+}
+
+/// Check if a clause contains nested EXISTS with mutations (recursive).
+fn has_mutation_in_clause_exprs(clause: &Clause) -> bool {
+    let check_expr = |e: &Expr| -> bool { has_mutation_in_expr(e) };
+
+    match clause {
+        Clause::Match(m) => m.where_clause.as_ref().is_some_and(check_expr),
+        Clause::With(w) => {
+            w.where_clause.as_ref().is_some_and(check_expr)
+                || w.items.iter().any(|item| match item {
+                    ReturnItem::Expr { expr, .. } => has_mutation_in_expr(expr),
+                    ReturnItem::All => false,
+                })
+        }
+        Clause::Return(r) => r.items.iter().any(|item| match item {
+            ReturnItem::Expr { expr, .. } => has_mutation_in_expr(expr),
+            ReturnItem::All => false,
+        }),
+        _ => false,
+    }
+}
+
+/// Check if an expression tree contains an EXISTS with mutation clauses.
+fn has_mutation_in_expr(expr: &Expr) -> bool {
+    match expr {
+        Expr::Exists { query, .. } => has_mutation_clause(query),
+        _ => {
+            let mut found = false;
+            expr.for_each_child(&mut |child| {
+                if has_mutation_in_expr(child) {
+                    found = true;
+                }
+            });
+            found
+        }
+    }
+}
+
+/// Rewrite a Query AST to replace correlated property accesses with parameter references.
+///
+/// For each `Property(Variable(v), key)` where `v` is an outer-scope entity variable,
+/// replaces it with `Parameter("{v}.{key}")`. This enables plan-once optimization since
+/// the rewritten query is parameterized (same structure for every row).
+fn rewrite_query_correlated(query: &Query, outer_vars: &HashSet<String>) -> Query {
+    match query {
+        Query::Single(stmt) => Query::Single(Statement {
+            clauses: stmt
+                .clauses
+                .iter()
+                .map(|c| rewrite_clause_correlated(c, outer_vars))
+                .collect(),
+        }),
+        Query::Union { left, right, all } => Query::Union {
+            left: Box::new(rewrite_query_correlated(left, outer_vars)),
+            right: Box::new(rewrite_query_correlated(right, outer_vars)),
+            all: *all,
+        },
+        other => other.clone(),
+    }
+}
+
+/// Rewrite expressions within a clause for correlated property access.
+fn rewrite_clause_correlated(clause: &Clause, outer_vars: &HashSet<String>) -> Clause {
+    match clause {
+        Clause::Match(m) => Clause::Match(MatchClause {
+            optional: m.optional,
+            pattern: m.pattern.clone(),
+            where_clause: m
+                .where_clause
+                .as_ref()
+                .map(|e| rewrite_expr_correlated(e, outer_vars)),
+        }),
+        Clause::With(w) => Clause::With(WithClause {
+            distinct: w.distinct,
+            items: w
+                .items
+                .iter()
+                .map(|item| rewrite_return_item(item, outer_vars))
+                .collect(),
+            order_by: w.order_by.as_ref().map(|items| {
+                items
+                    .iter()
+                    .map(|si| SortItem {
+                        expr: rewrite_expr_correlated(&si.expr, outer_vars),
+                        ascending: si.ascending,
+                    })
+                    .collect()
+            }),
+            skip: w
+                .skip
+                .as_ref()
+                .map(|e| rewrite_expr_correlated(e, outer_vars)),
+            limit: w
+                .limit
+                .as_ref()
+                .map(|e| rewrite_expr_correlated(e, outer_vars)),
+            where_clause: w
+                .where_clause
+                .as_ref()
+                .map(|e| rewrite_expr_correlated(e, outer_vars)),
+        }),
+        Clause::Return(r) => Clause::Return(ReturnClause {
+            distinct: r.distinct,
+            items: r
+                .items
+                .iter()
+                .map(|item| rewrite_return_item(item, outer_vars))
+                .collect(),
+            order_by: r.order_by.as_ref().map(|items| {
+                items
+                    .iter()
+                    .map(|si| SortItem {
+                        expr: rewrite_expr_correlated(&si.expr, outer_vars),
+                        ascending: si.ascending,
+                    })
+                    .collect()
+            }),
+            skip: r
+                .skip
+                .as_ref()
+                .map(|e| rewrite_expr_correlated(e, outer_vars)),
+            limit: r
+                .limit
+                .as_ref()
+                .map(|e| rewrite_expr_correlated(e, outer_vars)),
+        }),
+        Clause::Unwind(u) => Clause::Unwind(UnwindClause {
+            expr: rewrite_expr_correlated(&u.expr, outer_vars),
+            variable: u.variable.clone(),
+        }),
+        other => other.clone(),
+    }
+}
+
+fn rewrite_return_item(item: &ReturnItem, outer_vars: &HashSet<String>) -> ReturnItem {
+    match item {
+        ReturnItem::All => ReturnItem::All,
+        ReturnItem::Expr {
+            expr,
+            alias,
+            source_text,
+        } => ReturnItem::Expr {
+            expr: rewrite_expr_correlated(expr, outer_vars),
+            alias: alias.clone(),
+            source_text: source_text.clone(),
+        },
+    }
+}
+
+/// Rewrite a single expression: Property(Variable(v), key) → Parameter("{v}.{key}")
+/// when v is an outer-scope entity variable. Handles nested EXISTS recursively.
+fn rewrite_expr_correlated(expr: &Expr, outer_vars: &HashSet<String>) -> Expr {
+    match expr {
+        // Core rewrite: n.prop → $param("n.prop") when n is an outer entity
+        Expr::Property(base, key) => {
+            if let Expr::Variable(v) = base.as_ref()
+                && outer_vars.contains(v)
+            {
+                return Expr::Parameter(format!("{}.{}", v, key));
+            }
+            Expr::Property(
+                Box::new(rewrite_expr_correlated(base, outer_vars)),
+                key.clone(),
+            )
+        }
+        // Nested EXISTS — recurse into the subquery body
+        Expr::Exists {
+            query,
+            from_pattern_predicate,
+        } => Expr::Exists {
+            query: Box::new(rewrite_query_correlated(query, outer_vars)),
+            from_pattern_predicate: *from_pattern_predicate,
+        },
+        // CountSubquery and CollectSubquery — recurse into subquery body
+        Expr::CountSubquery(query) => {
+            Expr::CountSubquery(Box::new(rewrite_query_correlated(query, outer_vars)))
+        }
+        Expr::CollectSubquery(query) => {
+            Expr::CollectSubquery(Box::new(rewrite_query_correlated(query, outer_vars)))
+        }
+        // All other expressions: recursively transform children
+        other => other
+            .clone()
+            .map_children(&mut |child| rewrite_expr_correlated(&child, outer_vars)),
     }
 }

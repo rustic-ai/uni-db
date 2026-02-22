@@ -44,7 +44,7 @@ use crate::api::error::UniError;
 use crate::core::id::{Eid, Vid};
 use crate::value::{Edge, Node, Path, Value};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 // Tag constants
 pub const TAG_NULL: u8 = 0;
@@ -437,17 +437,18 @@ fn encode_to_buf(value: &Value, buf: &mut Vec<u8>) {
         }
         Value::Map(map) => {
             buf.push(TAG_MAP);
-            let blob_map: HashMap<String, Vec<u8>> =
+            let blob_map: BTreeMap<String, Vec<u8>> =
                 map.iter().map(|(k, v)| (k.clone(), encode(v))).collect();
             rmp_serde::encode::write(buf, &blob_map).expect("map encode failed");
         }
         Value::Node(node) => {
             buf.push(TAG_NODE);
-            let props_blobs: Vec<(String, Vec<u8>)> = node
+            let mut props_blobs: Vec<(String, Vec<u8>)> = node
                 .properties
                 .iter()
                 .map(|(k, v)| (k.clone(), encode(v)))
                 .collect();
+            props_blobs.sort_by(|a, b| a.0.cmp(&b.0));
             let payload = NodePayload {
                 vid: node.vid,
                 labels: node.labels.clone(),
@@ -457,11 +458,12 @@ fn encode_to_buf(value: &Value, buf: &mut Vec<u8>) {
         }
         Value::Edge(edge) => {
             buf.push(TAG_EDGE);
-            let props_blobs: Vec<(String, Vec<u8>)> = edge
+            let mut props_blobs: Vec<(String, Vec<u8>)> = edge
                 .properties
                 .iter()
                 .map(|(k, v)| (k.clone(), encode(v)))
                 .collect();
+            props_blobs.sort_by(|a, b| a.0.cmp(&b.0));
             let payload = EdgePayload {
                 eid: edge.eid,
                 edge_type: edge.edge_type.clone(),

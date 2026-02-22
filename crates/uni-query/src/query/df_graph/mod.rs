@@ -38,6 +38,7 @@
 pub mod apply;
 pub mod bind_fixed_path;
 pub mod bind_zero_length_path;
+pub mod bitmap;
 pub mod common;
 pub mod comprehension;
 pub mod expr_compiler;
@@ -49,8 +50,10 @@ pub mod mutation_foreach;
 pub mod mutation_merge;
 pub mod mutation_remove;
 pub mod mutation_set;
+pub mod nfa;
 pub mod optional_filter;
 pub mod pattern_comprehension;
+pub mod pred_dag;
 pub mod procedure_call;
 pub mod quantifier;
 pub mod recursive_cte;

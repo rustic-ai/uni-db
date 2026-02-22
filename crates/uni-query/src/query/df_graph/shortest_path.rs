@@ -19,14 +19,16 @@ use crate::query::df_graph::GraphExecutionContext;
 use crate::query::df_graph::common::{
     column_as_vid_array, compute_plan_properties, edge_struct_fields, new_node_list_builder,
 };
+use arrow::compute::take;
 use arrow_array::builder::{ListBuilder, StructBuilder, UInt64Builder};
-use arrow_array::{Array, ArrayRef, RecordBatch, UInt64Array};
+use arrow_array::{Array, ArrayRef, RecordBatch, UInt32Array, UInt64Array};
 use arrow_schema::{DataType, Field, Schema, SchemaRef};
 use datafusion::common::Result as DFResult;
 use datafusion::execution::{RecordBatchStream, SendableRecordBatchStream, TaskContext};
 use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties};
 use futures::{Stream, StreamExt};
+use fxhash::FxHashMap;
 use std::any::Any;
 use std::collections::{HashSet, VecDeque};
 use std::fmt;
@@ -77,6 +79,9 @@ pub struct GraphShortestPathExec {
     /// Variable name for the path.
     path_variable: String,
 
+    /// Whether this is allShortestPaths (true) or shortestPath (false).
+    all_shortest: bool,
+
     /// Graph execution context.
     graph_ctx: Arc<GraphExecutionContext>,
 
@@ -98,6 +103,7 @@ impl fmt::Debug for GraphShortestPathExec {
             .field("edge_type_ids", &self.edge_type_ids)
             .field("direction", &self.direction)
             .field("path_variable", &self.path_variable)
+            .field("all_shortest", &self.all_shortest)
             .finish()
     }
 }
@@ -114,6 +120,7 @@ impl GraphShortestPathExec {
     /// * `direction` - Traversal direction
     /// * `path_variable` - Variable name for the path
     /// * `graph_ctx` - Graph execution context
+    #[expect(clippy::too_many_arguments, reason = "Shortest path requires many parameters")]
     pub fn new(
         input: Arc<dyn ExecutionPlan>,
         source_column: impl Into<String>,
@@ -122,6 +129,7 @@ impl GraphShortestPathExec {
         direction: Direction,
         path_variable: impl Into<String>,
         graph_ctx: Arc<GraphExecutionContext>,
+        all_shortest: bool,
     ) -> Self {
         let source_column = source_column.into();
         let target_column = target_column.into();
@@ -137,6 +145,7 @@ impl GraphShortestPathExec {
             edge_type_ids,
             direction,
             path_variable,
+            all_shortest,
             graph_ctx,
             schema,
             properties,
@@ -175,10 +184,11 @@ impl GraphShortestPathExec {
 
 impl DisplayAs for GraphShortestPathExec {
     fn fmt_as(&self, _t: DisplayFormatType, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mode = if self.all_shortest { "all" } else { "any" };
         write!(
             f,
-            "GraphShortestPathExec: {} -> {} via {:?}",
-            self.source_column, self.target_column, self.edge_type_ids
+            "GraphShortestPathExec: {} -> {} via {:?} ({})",
+            self.source_column, self.target_column, self.edge_type_ids, mode
         )
     }
 }
@@ -222,6 +232,7 @@ impl ExecutionPlan for GraphShortestPathExec {
             self.direction,
             self.path_variable.clone(),
             self.graph_ctx.clone(),
+            self.all_shortest,
         )))
     }
 
@@ -244,6 +255,7 @@ impl ExecutionPlan for GraphShortestPathExec {
             target_column: self.target_column.clone(),
             edge_type_ids: self.edge_type_ids.clone(),
             direction: self.direction,
+            all_shortest: self.all_shortest,
             graph_ctx: self.graph_ctx.clone(),
             schema: self.schema.clone(),
             state: ShortestPathStreamState::Warming(warm_fut),
@@ -282,6 +294,9 @@ struct GraphShortestPathStream {
 
     /// Traversal direction.
     direction: Direction,
+
+    /// Whether this is allShortestPaths mode.
+    all_shortest: bool,
 
     /// Graph execution context.
     graph_ctx: Arc<GraphExecutionContext>,
@@ -337,6 +352,86 @@ impl GraphShortestPathStream {
         None // No path found
     }
 
+    /// Compute all shortest paths between two vertices using layer-by-layer BFS
+    /// with predecessor tracking.
+    ///
+    /// Returns all paths of minimum length from source to target.
+    fn compute_all_shortest_paths(&self, source: Vid, target: Vid) -> Vec<Vec<Vid>> {
+        if source == target {
+            return vec![vec![source]];
+        }
+
+        // Layer-by-layer BFS recording ALL predecessors at shortest depth
+        let mut depth: FxHashMap<Vid, u32> = FxHashMap::default();
+        let mut predecessors: FxHashMap<Vid, Vec<Vid>> = FxHashMap::default();
+        depth.insert(source, 0);
+
+        let mut current_layer: Vec<Vid> = vec![source];
+        let mut current_depth = 0u32;
+        let mut target_found = false;
+
+        while !current_layer.is_empty() && !target_found {
+            current_depth += 1;
+            let mut next_layer_set: HashSet<Vid> = HashSet::new();
+
+            for &current in &current_layer {
+                for &edge_type in &self.edge_type_ids {
+                    let neighbors =
+                        self.graph_ctx
+                            .get_neighbors(current, edge_type, self.direction);
+
+                    for (neighbor, _eid) in neighbors {
+                        if let Some(&d) = depth.get(&neighbor) {
+                            // Already discovered: only add predecessor if same depth
+                            if d == current_depth {
+                                predecessors.entry(neighbor).or_default().push(current);
+                            }
+                            continue;
+                        }
+
+                        // First time seeing this vertex at current_depth
+                        depth.insert(neighbor, current_depth);
+                        predecessors.entry(neighbor).or_default().push(current);
+
+                        if neighbor == target {
+                            target_found = true;
+                        } else {
+                            next_layer_set.insert(neighbor);
+                        }
+                    }
+                }
+            }
+
+            current_layer = next_layer_set.into_iter().collect();
+        }
+
+        if !target_found {
+            return vec![];
+        }
+
+        // Enumerate all shortest paths via backward DFS from target to source
+        let mut result: Vec<Vec<Vid>> = Vec::new();
+        let mut stack: Vec<(Vid, Vec<Vid>)> = vec![(target, vec![target])];
+
+        while let Some((node, path)) = stack.pop() {
+            if node == source {
+                let mut full_path = path;
+                full_path.reverse();
+                result.push(full_path);
+                continue;
+            }
+            if let Some(preds) = predecessors.get(&node) {
+                for &pred in preds {
+                    let mut new_path = path.clone();
+                    new_path.push(pred);
+                    stack.push((pred, new_path));
+                }
+            }
+        }
+
+        result
+    }
+
     /// Process a single input batch.
     fn process_batch(&self, batch: RecordBatch) -> DFResult<RecordBatch> {
         // Extract source and target VIDs
@@ -360,21 +455,63 @@ impl GraphShortestPathStream {
         let target_vid_cow = column_as_vid_array(target_col.as_ref())?;
         let target_vids: &UInt64Array = &target_vid_cow;
 
-        // Compute shortest paths
-        let mut paths: Vec<Option<Vec<Vid>>> = Vec::with_capacity(batch.num_rows());
+        if self.all_shortest {
+            // allShortestPaths: each input row can produce multiple output rows
+            let mut row_indices: Vec<u32> = Vec::new();
+            let mut all_paths: Vec<Option<Vec<Vid>>> = Vec::new();
 
-        for i in 0..batch.num_rows() {
-            let path = if source_vids.is_null(i) || target_vids.is_null(i) {
-                None
-            } else {
-                let source = Vid::from(source_vids.value(i));
-                let target = Vid::from(target_vids.value(i));
-                self.compute_shortest_path(source, target)
-            };
-            paths.push(path);
+            for i in 0..batch.num_rows() {
+                if source_vids.is_null(i) || target_vids.is_null(i) {
+                    row_indices.push(i as u32);
+                    all_paths.push(None);
+                } else {
+                    let source = Vid::from(source_vids.value(i));
+                    let target = Vid::from(target_vids.value(i));
+                    let paths = self.compute_all_shortest_paths(source, target);
+                    if paths.is_empty() {
+                        row_indices.push(i as u32);
+                        all_paths.push(None);
+                    } else {
+                        for path in paths {
+                            row_indices.push(i as u32);
+                            all_paths.push(Some(path));
+                        }
+                    }
+                }
+            }
+
+            // Expand input batch rows according to row_indices
+            let indices = UInt32Array::from(row_indices);
+            let expanded_columns: Vec<ArrayRef> = batch
+                .columns()
+                .iter()
+                .map(|col| {
+                    take(col.as_ref(), &indices, None).map_err(|e| {
+                        datafusion::error::DataFusionError::ArrowError(Box::new(e), None)
+                    })
+                })
+                .collect::<DFResult<Vec<_>>>()?;
+            let expanded_batch = RecordBatch::try_new(batch.schema(), expanded_columns)
+                .map_err(|e| datafusion::error::DataFusionError::ArrowError(Box::new(e), None))?;
+
+            self.build_output_batch(&expanded_batch, &all_paths)
+        } else {
+            // shortestPath: one path per input row
+            let mut paths: Vec<Option<Vec<Vid>>> = Vec::with_capacity(batch.num_rows());
+
+            for i in 0..batch.num_rows() {
+                let path = if source_vids.is_null(i) || target_vids.is_null(i) {
+                    None
+                } else {
+                    let source = Vid::from(source_vids.value(i));
+                    let target = Vid::from(target_vids.value(i));
+                    self.compute_shortest_path(source, target)
+                };
+                paths.push(path);
+            }
+
+            self.build_output_batch(&batch, &paths)
         }
-
-        self.build_output_batch(&batch, &paths)
     }
 
     /// Build output batch with path columns.

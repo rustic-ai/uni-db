@@ -38,6 +38,8 @@ parquet = { workspace = true }
 rand = { workspace = true }
 base64 = "0.21"
 datafusion = { workspace = true }
+bitvec = "1"
+fxhash = { workspace = true }
 
 [features]
 default = ["candle-text"]

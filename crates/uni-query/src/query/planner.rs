@@ -1680,6 +1680,15 @@ fn validate_expression(expr: &Expr, vars_in_scope: &[VariableInfo]) -> Result<()
     }
 }
 
+/// One step (hop) in a Quantified Path Pattern sub-pattern.
+/// Used by `LogicalPlan::Traverse` when `qpp_steps` is `Some`.
+#[derive(Debug, Clone)]
+pub struct QppStepInfo {
+    pub edge_type_ids: Vec<u32>,
+    pub direction: Direction,
+    pub target_label: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub enum LogicalPlan {
     Union {
@@ -1751,6 +1760,14 @@ pub enum LogicalPlan {
         /// associated variable is in this set participate in uniqueness filtering.
         /// Variables from previous disconnected MATCH clauses are excluded.
         scope_match_variables: std::collections::HashSet<String>,
+        /// Edge property predicate for VLP inline filtering (instead of post-Filter).
+        edge_filter_expr: Option<Expr>,
+        /// Path traversal semantics (Trail by default for OpenCypher).
+        path_mode: crate::query::df_graph::nfa::PathMode,
+        /// QPP steps for multi-hop quantified path patterns.
+        /// `None` for simple VLP patterns; `Some` for QPP with per-step edge types/constraints.
+        /// When present, `min_hops`/`max_hops` are derived from iterations × steps.len().
+        qpp_steps: Option<Vec<QppStepInfo>>,
     },
     /// Traverse main edges table filtering by type name(s) (MATCH (a)-[:Unknown]->(b)).
     /// Used for edge types not defined in schema (schemaless support).
@@ -1777,6 +1794,10 @@ pub enum LogicalPlan {
         /// Used for relationship uniqueness scoping: only edge columns whose
         /// associated variable is in this set participate in uniqueness filtering.
         scope_match_variables: std::collections::HashSet<String>,
+        /// Edge property predicate for VLP inline filtering (instead of post-Filter).
+        edge_filter_expr: Option<Expr>,
+        /// Path traversal semantics (Trail by default for OpenCypher).
+        path_mode: crate::query::df_graph::nfa::PathMode,
     },
     Filter {
         input: Box<LogicalPlan>,
@@ -3874,6 +3895,26 @@ impl QueryPlanner {
             std::collections::HashSet::new()
         };
 
+        // Pre-scan path elements for bound edge variables from previous MATCH clauses.
+        // These must participate in Trail mode (relationship uniqueness) enforcement
+        // across ALL segments in this path, so that VLP segments like [*0..1] don't
+        // traverse through edges already claimed by a bound relationship [r].
+        let path_bound_edge_vars: std::collections::HashSet<String> = {
+            let mut bound = std::collections::HashSet::new();
+            for element in elements {
+                if let PatternElement::Relationship(rel) = element
+                    && let Some(ref var_name) = rel.variable
+                    && !var_name.is_empty()
+                    && vars_in_scope[..vars_before_pattern]
+                        .iter()
+                        .any(|v| v.name == *var_name)
+                {
+                    bound.insert(var_name.clone());
+                }
+            }
+            bound
+        };
+
         // Track if any traverses were added (for zero-length path detection)
         let mut had_traverses = false;
         // Track the node variable for zero-length path binding
@@ -3881,6 +3922,9 @@ impl QueryPlanner {
         // Collect node/edge variables for BindPath (fixed-length path binding)
         let mut path_node_vars: Vec<String> = Vec::new();
         let mut path_edge_vars: Vec<String> = Vec::new();
+        // Track the last processed outer node variable for QPP source binding.
+        // In `(a)((x)-[:R]->(y)){n}(b)`, the QPP source is `a`, not `x`.
+        let mut last_outer_node_var: Option<String> = None;
 
         // Multi-hop path variables are now supported - path is accumulated across hops
         while i < elements.len() {
@@ -3932,6 +3976,7 @@ impl QueryPlanner {
 
                     // Look ahead for relationships
                     let mut current_source_var = variable;
+                    last_outer_node_var = Some(current_source_var.clone());
                     i += 1;
                     while i < elements.len() {
                         if let PatternElement::Relationship(r) = &elements[i] {
@@ -3982,6 +4027,7 @@ impl QueryPlanner {
                                             },
                                             &current_source_var,
                                             vars_before_pattern,
+                                            &path_bound_edge_vars,
                                         )?;
                                     plan = new_plan;
 
@@ -4002,6 +4048,7 @@ impl QueryPlanner {
                                     }
 
                                     current_source_var = target_var;
+                                    last_outer_node_var = Some(current_source_var.clone());
                                     had_traverses = true;
                                     i += 2;
                                 } else {
@@ -4020,10 +4067,10 @@ impl QueryPlanner {
                 }
                 PatternElement::Parenthesized { pattern, range } => {
                     // Quantified pattern: ((a)-[:REL]->(b)){n,m}
-                    // Validate: must be exactly Node-Relationship-Node
-                    if pattern.elements.len() != 3 {
+                    // Validate: odd number of elements (node-rel-node[-rel-node]*)
+                    if pattern.elements.len() < 3 || pattern.elements.len() % 2 == 0 {
                         return Err(anyhow!(
-                            "Quantified pattern must be (source)-[relationship]->(target)"
+                            "Quantified pattern must have node-relationship-node structure (odd number >= 3 elements)"
                         ));
                     }
 
@@ -4031,40 +4078,71 @@ impl QueryPlanner {
                         PatternElement::Node(n) => n,
                         _ => return Err(anyhow!("Quantified pattern must start with a node")),
                     };
-                    let mut relationship = match &pattern.elements[1] {
-                        PatternElement::Relationship(r) => r.clone(),
-                        _ => {
+
+                    // Extract all relationship-node pairs (QPP steps)
+                    let mut qpp_rels: Vec<(&RelationshipPattern, &NodePattern)> = Vec::new();
+                    for pair_idx in (1..pattern.elements.len()).step_by(2) {
+                        let rel = match &pattern.elements[pair_idx] {
+                            PatternElement::Relationship(r) => r,
+                            _ => {
+                                return Err(anyhow!(
+                                    "Quantified pattern element at position {} must be a relationship",
+                                    pair_idx
+                                ));
+                            }
+                        };
+                        let node = match &pattern.elements[pair_idx + 1] {
+                            PatternElement::Node(n) => n,
+                            _ => {
+                                return Err(anyhow!(
+                                    "Quantified pattern element at position {} must be a node",
+                                    pair_idx + 1
+                                ));
+                            }
+                        };
+                        // Reject nested quantifiers
+                        if rel.range.is_some() {
                             return Err(anyhow!(
-                                "Quantified pattern middle element must be a relationship"
+                                "Nested quantifiers not supported: ((a)-[:REL*n]->(b)){{m}}"
                             ));
                         }
-                    };
-                    let target_node = match &pattern.elements[2] {
-                        PatternElement::Node(n) => n,
-                        _ => return Err(anyhow!("Quantified pattern must end with a node")),
-                    };
-
-                    // Reject nested quantifiers
-                    if relationship.range.is_some() {
-                        return Err(anyhow!(
-                            "Nested quantifiers not supported: ((a)-[:REL*n]->(b)){{m}}"
-                        ));
+                        qpp_rels.push((rel, node));
                     }
 
-                    // Apply quantifier to relationship range
-                    relationship.range = range.clone();
+                    // Check if there's an outer target node after the Parenthesized element.
+                    // In syntax like `(a)((x)-[:LINK]->(y)){2,4}(b)`, the `(b)` is the outer
+                    // target that should receive the traversal result.
+                    let inner_target_node = qpp_rels.last().unwrap().1;
+                    let outer_target_node = if i + 1 < elements.len() {
+                        match &elements[i + 1] {
+                            PatternElement::Node(n) => Some(n),
+                            _ => None,
+                        }
+                    } else {
+                        None
+                    };
+                    // Use the outer target for variable binding and filters; inner target
+                    // labels are used for state constraints within the NFA.
+                    let target_node = outer_target_node.unwrap_or(inner_target_node);
 
-                    // Plan source node
-                    let source_variable = source_node
-                        .variable
-                        .clone()
-                        .filter(|v| !v.is_empty())
-                        .unwrap_or_else(|| self.next_anon_var());
+                    // For simple 3-element single-hop QPP without intermediate label constraints,
+                    // fall back to existing VLP behavior (copy range to relationship).
+                    let use_simple_vlp = qpp_rels.len() == 1
+                        && inner_target_node
+                            .labels
+                            .first()
+                            .and_then(|l| self.schema.get_label_case_insensitive(l))
+                            .is_none();
 
-                    if is_var_in_scope(vars_in_scope, &source_variable) {
-                        // Source is already bound, apply property filter if needed
+                    // Plan source node.
+                    // In `(a)((x)-[:R]->(y)){n}(b)`, the QPP source is the preceding
+                    // outer node `a`, NOT the inner `x`. If there's a preceding outer
+                    // node variable, use it; otherwise fall back to the inner source.
+                    let source_variable = if let Some(ref outer_src) = last_outer_node_var {
+                        // The preceding outer node is already bound and in scope
+                        // Apply any property filters from the inner source node
                         if let Some(prop_filter) =
-                            self.properties_to_expr(&source_variable, &source_node.properties)
+                            self.properties_to_expr(outer_src, &source_node.properties)
                         {
                             plan = LogicalPlan::Filter {
                                 input: Box::new(plan),
@@ -4072,32 +4150,210 @@ impl QueryPlanner {
                                 optional_variables: std::collections::HashSet::new(),
                             };
                         }
+                        outer_src.clone()
                     } else {
-                        // Source is unbound, scan it
-                        plan =
-                            self.plan_unbound_node(source_node, &source_variable, plan, optional)?;
-                        add_var_to_scope(vars_in_scope, &source_variable, VariableType::Node)?;
-                    }
+                        let sv = source_node
+                            .variable
+                            .clone()
+                            .filter(|v| !v.is_empty())
+                            .unwrap_or_else(|| self.next_anon_var());
 
-                    // Plan traverse with quantified relationship
-                    let (new_plan, _target_var, _effective_target) = self
-                        .plan_traverse_with_source(
-                            plan,
-                            vars_in_scope,
-                            TraverseParams {
-                                rel: &relationship,
-                                target_node,
-                                optional,
-                                path_variable: path_variable.clone(),
-                                optional_pattern_vars: optional_pattern_vars.clone(),
-                            },
-                            &source_variable,
-                            vars_before_pattern,
-                        )?;
-                    plan = new_plan;
+                        if is_var_in_scope(vars_in_scope, &sv) {
+                            // Source is already bound, apply property filter if needed
+                            if let Some(prop_filter) =
+                                self.properties_to_expr(&sv, &source_node.properties)
+                            {
+                                plan = LogicalPlan::Filter {
+                                    input: Box::new(plan),
+                                    predicate: prop_filter,
+                                    optional_variables: std::collections::HashSet::new(),
+                                };
+                            }
+                        } else {
+                            // Source is unbound, scan it
+                            plan = self.plan_unbound_node(source_node, &sv, plan, optional)?;
+                            add_var_to_scope(vars_in_scope, &sv, VariableType::Node)?;
+                        }
+                        sv
+                    };
+
+                    if use_simple_vlp {
+                        // Simple single-hop QPP: apply range to relationship and use VLP path
+                        let mut relationship = qpp_rels[0].0.clone();
+                        relationship.range = range.clone();
+
+                        let (new_plan, _target_var, _effective_target) = self
+                            .plan_traverse_with_source(
+                                plan,
+                                vars_in_scope,
+                                TraverseParams {
+                                    rel: &relationship,
+                                    target_node,
+                                    optional,
+                                    path_variable: path_variable.clone(),
+                                    optional_pattern_vars: optional_pattern_vars.clone(),
+                                },
+                                &source_variable,
+                                vars_before_pattern,
+                                &path_bound_edge_vars,
+                            )?;
+                        plan = new_plan;
+                    } else {
+                        // Multi-hop QPP: build QppStepInfo list and create Traverse with qpp_steps
+                        let mut qpp_step_infos = Vec::new();
+                        let mut all_edge_type_ids = Vec::new();
+
+                        for (rel, node) in &qpp_rels {
+                            let mut step_edge_type_ids = Vec::new();
+                            if rel.types.is_empty() {
+                                step_edge_type_ids = self.schema.all_edge_type_ids();
+                            } else {
+                                for type_name in &rel.types {
+                                    if let Some(edge_meta) = self.schema.edge_types.get(type_name) {
+                                        step_edge_type_ids.push(edge_meta.id);
+                                    }
+                                }
+                            }
+                            all_edge_type_ids.extend_from_slice(&step_edge_type_ids);
+
+                            let target_label = node.labels.first().and_then(|l| {
+                                self.schema.get_label_case_insensitive(l).map(|_| l.clone())
+                            });
+
+                            qpp_step_infos.push(QppStepInfo {
+                                edge_type_ids: step_edge_type_ids,
+                                direction: rel.direction.clone(),
+                                target_label,
+                            });
+                        }
+
+                        // Deduplicate edge type IDs for adjacency warming
+                        all_edge_type_ids.sort_unstable();
+                        all_edge_type_ids.dedup();
+
+                        // Compute iteration bounds from range
+                        let hops_per_iter = qpp_step_infos.len();
+                        const QPP_DEFAULT_MAX_HOPS: usize = 100;
+                        let (min_iter, max_iter) = if let Some(range) = range {
+                            let min = range.min.unwrap_or(1) as usize;
+                            let max = range
+                                .max
+                                .map(|m| m as usize)
+                                .unwrap_or(QPP_DEFAULT_MAX_HOPS / hops_per_iter);
+                            (min, max)
+                        } else {
+                            (1, 1)
+                        };
+                        let min_hops = min_iter * hops_per_iter;
+                        let max_hops = max_iter * hops_per_iter;
+
+                        // Target variable from the last node in the QPP sub-pattern
+                        let target_variable = target_node
+                            .variable
+                            .clone()
+                            .filter(|v| !v.is_empty())
+                            .unwrap_or_else(|| self.next_anon_var());
+
+                        let target_is_bound = is_var_in_scope(vars_in_scope, &target_variable);
+
+                        // Determine target label for the final node
+                        let target_label_meta = target_node
+                            .labels
+                            .first()
+                            .and_then(|l| self.schema.get_label_case_insensitive(l));
+
+                        // Collect scope match variables
+                        let mut scope_match_variables: std::collections::HashSet<String> =
+                            vars_in_scope[vars_before_pattern..]
+                                .iter()
+                                .map(|v| v.name.clone())
+                                .collect();
+                        scope_match_variables.insert(target_variable.clone());
+
+                        // Handle bound target: use rebound variable for traverse
+                        let rebound_target_var = if target_is_bound {
+                            Some(target_variable.clone())
+                        } else {
+                            None
+                        };
+                        let effective_target_var = if let Some(ref bv) = rebound_target_var {
+                            format!("__rebound_{}", bv)
+                        } else {
+                            target_variable.clone()
+                        };
+
+                        plan = LogicalPlan::Traverse {
+                            input: Box::new(plan),
+                            edge_type_ids: all_edge_type_ids,
+                            direction: qpp_rels[0].0.direction.clone(),
+                            source_variable: source_variable.to_string(),
+                            target_variable: effective_target_var.clone(),
+                            target_label_id: target_label_meta.map(|m| m.id).unwrap_or(0),
+                            step_variable: None, // QPP doesn't expose intermediate edges
+                            min_hops,
+                            max_hops,
+                            optional,
+                            target_filter: self.node_filter_expr(
+                                &target_variable,
+                                &target_node.labels,
+                                &target_node.properties,
+                            ),
+                            path_variable: path_variable.clone(),
+                            edge_properties: std::collections::HashSet::new(),
+                            is_variable_length: true,
+                            optional_pattern_vars: optional_pattern_vars.clone(),
+                            scope_match_variables,
+                            edge_filter_expr: None,
+                            path_mode: crate::query::df_graph::nfa::PathMode::Trail,
+                            qpp_steps: Some(qpp_step_infos),
+                        };
+
+                        // Handle bound target: filter rebound results against original variable
+                        if let Some(ref btv) = rebound_target_var {
+                            // Filter: __rebound_x._vid = x._vid
+                            let filter_pred = Expr::BinaryOp {
+                                left: Box::new(Expr::Property(
+                                    Box::new(Expr::Variable(effective_target_var.clone())),
+                                    "_vid".to_string(),
+                                )),
+                                op: BinaryOp::Eq,
+                                right: Box::new(Expr::Property(
+                                    Box::new(Expr::Variable(btv.clone())),
+                                    "_vid".to_string(),
+                                )),
+                            };
+                            plan = LogicalPlan::Filter {
+                                input: Box::new(plan),
+                                predicate: filter_pred,
+                                optional_variables: if optional {
+                                    optional_pattern_vars.clone()
+                                } else {
+                                    std::collections::HashSet::new()
+                                },
+                            };
+                        }
+
+                        // Add target variable to scope
+                        if !target_is_bound {
+                            add_var_to_scope(vars_in_scope, &target_variable, VariableType::Node)?;
+                        }
+
+                        // Add path variable to scope
+                        if let Some(ref pv) = path_variable
+                            && !pv.is_empty()
+                            && !is_var_in_scope(vars_in_scope, pv)
+                        {
+                            add_var_to_scope(vars_in_scope, pv, VariableType::Path)?;
+                        }
+                    }
                     had_traverses = true;
 
-                    i += 1;
+                    // Skip the outer target node if we consumed it
+                    if outer_target_node.is_some() {
+                        i += 2; // skip both Parenthesized and the following Node
+                    } else {
+                        i += 1;
+                    }
                 }
             }
         }
@@ -4149,6 +4405,7 @@ impl QueryPlanner {
         params: TraverseParams<'_>,
         source_variable: &str,
         vars_before_pattern: usize,
+        path_bound_edge_vars: &std::collections::HashSet<String>,
     ) -> Result<(LogicalPlan, String, String)> {
         // Check for parameter used as relationship predicate
         if let Some(Expr::Parameter(_)) = &params.rel.properties {
@@ -4305,6 +4562,17 @@ impl QueryPlanner {
                 }
             }
             scope_match_variables.insert(target_variable.clone());
+            // Include bound edge variables from this path for cross-segment Trail mode
+            // enforcement. This ensures VLP segments like [*0..1] don't traverse through
+            // edges already claimed by a bound relationship [r] in the same path.
+            // Exclude the CURRENT segment's bound edge: the schemaless path doesn't use
+            // __rebound_ renaming, so the BFS must be free to match the bound edge itself.
+            scope_match_variables.extend(
+                path_bound_edge_vars
+                    .iter()
+                    .filter(|v| bound_edge_var.as_ref() != Some(*v))
+                    .cloned(),
+            );
 
             let mut plan = LogicalPlan::TraverseMainByType {
                 type_names: unknown_types,
@@ -4325,6 +4593,15 @@ impl QueryPlanner {
                 is_variable_length,
                 optional_pattern_vars: params.optional_pattern_vars.clone(),
                 scope_match_variables,
+                edge_filter_expr: if is_variable_length {
+                    let filter_var = step_var
+                        .clone()
+                        .unwrap_or_else(|| "__anon_edge".to_string());
+                    self.properties_to_expr(&filter_var, &params.rel.properties)
+                } else {
+                    None
+                },
+                path_mode: crate::query::df_graph::nfa::PathMode::Trail,
             };
 
             // Only apply bound target filter for Imported variables (from outer scope/subquery).
@@ -4335,6 +4612,27 @@ impl QueryPlanner {
                 && info.var_type == VariableType::Imported
             {
                 plan = Self::wrap_with_bound_target_filter(plan, &target_variable);
+            }
+
+            // Apply relationship property predicates for fixed-length schemaless
+            // traversals (e.g., [r:KNOWS {name: 'monkey'}]).
+            // For VLP, predicates are stored inline in edge_filter_expr (above).
+            // For fixed-length, wrap as a Filter node for post-traverse evaluation.
+            if !is_variable_length
+                && let Some(edge_var_name) = step_var.as_ref()
+                && let Some(edge_prop_filter) =
+                    self.properties_to_expr(edge_var_name, &params.rel.properties)
+            {
+                let filter_optional_vars = if params.optional {
+                    params.optional_pattern_vars.clone()
+                } else {
+                    std::collections::HashSet::new()
+                };
+                plan = LogicalPlan::Filter {
+                    input: Box::new(plan),
+                    predicate: edge_prop_filter,
+                    optional_variables: filter_optional_vars,
+                };
             }
 
             // Add the bound variables to scope
@@ -4462,6 +4760,9 @@ impl QueryPlanner {
         }
         // Include the target variable (not yet added to vars_in_scope)
         scope_match_variables.insert(effective_target_var.clone());
+        // Include bound edge variables from this path for cross-segment Trail mode
+        // enforcement (same as the schemaless path above).
+        scope_match_variables.extend(path_bound_edge_vars.iter().cloned());
 
         let mut plan = LogicalPlan::Traverse {
             input: Box::new(plan),
@@ -4484,6 +4785,21 @@ impl QueryPlanner {
             is_variable_length,
             optional_pattern_vars: params.optional_pattern_vars.clone(),
             scope_match_variables,
+            edge_filter_expr: if is_variable_length {
+                // Use the step variable name, or a fallback for anonymous edges.
+                // The variable name is used by properties_to_expr to build
+                // `var.prop = value` expressions. For BFS property checking,
+                // only the property name and value matter (the variable name
+                // is stripped during extraction).
+                let filter_var = effective_step_var
+                    .clone()
+                    .unwrap_or_else(|| "__anon_edge".to_string());
+                self.properties_to_expr(&filter_var, &params.rel.properties)
+            } else {
+                None
+            },
+            path_mode: crate::query::df_graph::nfa::PathMode::Trail,
+            qpp_steps: None,
         };
 
         // Pre-compute optional variables set for filter nodes in this traverse.
@@ -4495,9 +4811,10 @@ impl QueryPlanner {
         };
 
         // Apply relationship property predicates (e.g. [r {k: v}]).
-        // Use the effective step variable so rebound-edge patterns are filtered
-        // before being compared against the previously bound relationship.
-        if let Some(edge_var_name) = effective_step_var.as_ref()
+        // For VLP, predicates are stored inline in edge_filter_expr (above).
+        // For fixed-length, wrap as a Filter node for post-traverse evaluation.
+        if !is_variable_length
+            && let Some(edge_var_name) = effective_step_var.as_ref()
             && let Some(edge_prop_filter) =
                 self.properties_to_expr(edge_var_name, &params.rel.properties)
         {
@@ -5234,6 +5551,9 @@ impl QueryPlanner {
                 is_variable_length,
                 optional_pattern_vars,
                 scope_match_variables,
+                edge_filter_expr,
+                path_mode,
+                qpp_steps,
             } => {
                 if target_variable == variable {
                     // Found the traverse producing this variable
@@ -5262,6 +5582,9 @@ impl QueryPlanner {
                         is_variable_length,
                         optional_pattern_vars,
                         scope_match_variables,
+                        edge_filter_expr,
+                        path_mode,
+                        qpp_steps,
                     }
                 } else {
                     // Recurse into input
@@ -5284,6 +5607,9 @@ impl QueryPlanner {
                         is_variable_length,
                         optional_pattern_vars,
                         scope_match_variables,
+                        edge_filter_expr,
+                        path_mode,
+                        qpp_steps,
                     }
                 }
             }
@@ -5796,16 +6122,18 @@ impl QueryPlanner {
     /// Used in EXISTS subquery patterns where the target is already bound.
     /// Compares the target's VID against the parameter value.
     fn wrap_with_bound_target_filter(plan: LogicalPlan, target_variable: &str) -> LogicalPlan {
+        // Compare the traverse-discovered target's VID against the parameter VID.
+        // Left side: column "{var}._vid" from the traverse output.
+        // Right side: parameter "{var}._vid" read directly from sub_params.
+        // We use Parameter("{var}._vid") rather than Property(Parameter("{var}"), "_vid")
+        // because the parameter value is a plain VID integer, not a struct with fields.
         let bound_check = Expr::BinaryOp {
             left: Box::new(Expr::Property(
                 Box::new(Expr::Variable(target_variable.to_string())),
                 "_vid".to_string(),
             )),
             op: BinaryOp::Eq,
-            right: Box::new(Expr::Property(
-                Box::new(Expr::Parameter(target_variable.to_string())),
-                "_vid".to_string(),
-            )),
+            right: Box::new(Expr::Parameter(format!("{}._vid", target_variable))),
         };
         LogicalPlan::Filter {
             input: Box::new(plan),
@@ -6004,6 +6332,9 @@ impl QueryPlanner {
                 is_variable_length,
                 optional_pattern_vars,
                 scope_match_variables,
+                edge_filter_expr,
+                path_mode,
+                qpp_steps,
             } => LogicalPlan::Traverse {
                 input: Box::new(Self::push_predicate_to_scan(*input, variable, predicate)),
                 edge_type_ids,
@@ -6021,6 +6352,9 @@ impl QueryPlanner {
                 is_variable_length,
                 optional_pattern_vars,
                 scope_match_variables,
+                edge_filter_expr,
+                path_mode,
+                qpp_steps,
             },
             other => other,
         }
@@ -6387,6 +6721,9 @@ impl QueryPlanner {
                 is_variable_length,
                 optional_pattern_vars,
                 scope_match_variables,
+                edge_filter_expr,
+                path_mode,
+                qpp_steps,
             } => LogicalPlan::Traverse {
                 input: Box::new(Self::push_predicates_to_apply(*input, current_predicate)),
                 edge_type_ids,
@@ -6404,6 +6741,9 @@ impl QueryPlanner {
                 is_variable_length,
                 optional_pattern_vars,
                 scope_match_variables,
+                edge_filter_expr,
+                path_mode,
+                qpp_steps,
             },
             other => other,
         }
@@ -7392,8 +7732,15 @@ fn collect_properties_from_expr_into(
             collect_properties_from_expr_into(list, properties);
             collect_properties_from_expr_into(expr, properties);
         }
-        Expr::Exists { .. } | Expr::CountSubquery(_) | Expr::CollectSubquery(_) => {
-            // Subqueries have their own scope; no property collection needed
+        Expr::Exists { query, .. } => {
+            // Walk into EXISTS body to collect property references for outer-scope variables.
+            // This ensures correlated properties (e.g., a.city inside EXISTS where a is outer)
+            // are included in the outer scan's property list. Extra properties collected for
+            // inner-only variables are harmless — the outer scan ignores unknown variable names.
+            collect_properties_from_subquery(query, properties);
+        }
+        Expr::CountSubquery(query) | Expr::CollectSubquery(query) => {
+            collect_properties_from_subquery(query, properties);
         }
         Expr::IsNull(expr) | Expr::IsNotNull(expr) | Expr::IsUnique(expr) => {
             collect_properties_from_expr_into(expr, properties);
@@ -7495,6 +7842,53 @@ fn collect_properties_from_expr_into(
         }
         // Literals and wildcard don't reference properties
         Expr::Literal(_) | Expr::Wildcard => {}
+    }
+}
+
+/// Walk a subquery (EXISTS/COUNT/COLLECT body) and collect property references.
+///
+/// This is needed so that correlated property accesses like `a.city` inside
+/// `WHERE EXISTS { (a)-[:KNOWS]->(b) WHERE b.city = a.city }` cause the outer
+/// scan to include `a.city` in its projected columns.
+fn collect_properties_from_subquery(
+    query: &Query,
+    properties: &mut HashMap<String, std::collections::HashSet<String>>,
+) {
+    match query {
+        Query::Single(stmt) => {
+            for clause in &stmt.clauses {
+                match clause {
+                    Clause::Match(m) => {
+                        if let Some(ref wc) = m.where_clause {
+                            collect_properties_from_expr_into(wc, properties);
+                        }
+                    }
+                    Clause::With(w) => {
+                        for item in &w.items {
+                            if let ReturnItem::Expr { expr, .. } = item {
+                                collect_properties_from_expr_into(expr, properties);
+                            }
+                        }
+                        if let Some(ref wc) = w.where_clause {
+                            collect_properties_from_expr_into(wc, properties);
+                        }
+                    }
+                    Clause::Return(r) => {
+                        for item in &r.items {
+                            if let ReturnItem::Expr { expr, .. } = item {
+                                collect_properties_from_expr_into(expr, properties);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Query::Union { left, right, .. } => {
+            collect_properties_from_subquery(left, properties);
+            collect_properties_from_subquery(right, properties);
+        }
+        _ => {}
     }
 }
 

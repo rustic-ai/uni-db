@@ -446,7 +446,8 @@ pub fn cypher_expr_to_df(expr: &Expr, context: Option<&TranslationContext>) -> R
         )),
 
         Expr::Exists { .. } => Err(anyhow!(
-            "EXISTS subqueries not yet supported in DataFusion translation"
+            "EXISTS subqueries are handled by the physical expression compiler, \
+             not the DataFusion logical expression translator"
         )),
 
         Expr::CountSubquery(_) => Err(anyhow!(
