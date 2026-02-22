@@ -1,19 +1,19 @@
 # TCK Compliance Report
 
-**Generated:** 2026-02-22 10:43:34
-**Results:** `results_20260222_104334.json`
-**Compared to:** `results_20260222_011355.json`
+**Generated:** 2026-02-22 14:19:01
+**Results:** `results_20260222_141901.json`
+**Compared to:** `results_20260222_104334.json`
 
 ## Summary
 
 | Metric | Current | Previous | Delta |
 |--------|---------|----------|-------|
 | Scenarios | 3897 | 3897 |  |
-| Passed | 3887 | 3881 | +6 |
-| Failed | 9 | 15 | -6 |
-| Pass Rate | 99.7% | 99.6% | 📈 +0.2pp |
+| Passed | 3896 | 3887 | +9 |
+| Failed | 0 | 9 | -9 |
+| Pass Rate | 100.0% | 99.7% | 📈 +0.2pp |
 
-**🟢 Fixed:** 6 scenarios now passing
+**🟢 Fixed:** 9 scenarios now passing
 
 ## Feature Breakdown
 
@@ -31,7 +31,7 @@
 | ✅ Boolean4 | 52 | 52 | 0 | 100% |  |
 | ✅ Boolean5 | 8 | 8 | 0 | 100% |  |
 | ✅ Call1 | 16 | 16 | 0 | 100% |  |
-| ✅ Call2 | 6 | 6 | 0 | 100% | +17pp |
+| ✅ Call2 | 6 | 6 | 0 | 100% |  |
 | ✅ Call3 | 6 | 6 | 0 | 100% |  |
 | ✅ Call4 | 2 | 2 | 0 | 100% |  |
 | ✅ Call5 | 19 | 19 | 0 | 100% |  |
@@ -61,13 +61,13 @@
 | ✅ Graph3 | 9 | 9 | 0 | 100% |  |
 | ✅ Graph4 | 11 | 11 | 0 | 100% |  |
 | ✅ Graph5 | 9 | 9 | 0 | 100% |  |
-| ✅ Graph6 | 14 | 13 | 1 | 93% |  |
+| ✅ Graph6 | 14 | 14 | 0 | 100% | +7pp |
 | ✅ Graph7 | 3 | 3 | 0 | 100% |  |
 | ✅ Graph8 | 8 | 8 | 0 | 100% |  |
 | ✅ Graph9 | 7 | 7 | 0 | 100% |  |
 | ✅ List1 | 23 | 23 | 0 | 100% |  |
-| ✅ List11 | 67 | 66 | 1 | 99% |  |
-| ✅ List12 | 7 | 6 | 1 | 86% |  |
+| ✅ List11 | 67 | 67 | 0 | 100% | +1pp |
+| ✅ List12 | 7 | 7 | 0 | 100% | +14pp |
 | ✅ List2 | 15 | 15 | 0 | 100% |  |
 | ✅ List3 | 7 | 7 | 0 | 100% |  |
 | ✅ List4 | 2 | 2 | 0 | 100% |  |
@@ -78,8 +78,8 @@
 | ✅ Literals2 | 12 | 12 | 0 | 100% |  |
 | ✅ Literals3 | 16 | 16 | 0 | 100% |  |
 | ✅ Literals4 | 10 | 10 | 0 | 100% |  |
-| ✅ Literals5 | 27 | 27 | 0 | 100% | +4pp |
-| ✅ Literals6 | 13 | 13 | 0 | 100% | +8pp |
+| ✅ Literals5 | 27 | 27 | 0 | 100% |  |
+| ✅ Literals6 | 13 | 13 | 0 | 100% |  |
 | ✅ Literals7 | 20 | 19 | 0 | 95% |  |
 | ✅ Literals8 | 27 | 27 | 0 | 100% |  |
 | ✅ Map1 | 19 | 19 | 0 | 100% |  |
@@ -109,7 +109,7 @@
 | ✅ Merge2 | 6 | 6 | 0 | 100% |  |
 | ✅ Merge3 | 5 | 5 | 0 | 100% |  |
 | ✅ Merge4 | 2 | 2 | 0 | 100% |  |
-| ✅ Merge5 | 29 | 28 | 1 | 97% |  |
+| ✅ Merge5 | 29 | 29 | 0 | 100% | +3pp |
 | ✅ Merge6 | 6 | 6 | 0 | 100% |  |
 | ✅ Merge7 | 5 | 5 | 0 | 100% |  |
 | ✅ Merge8 | 1 | 1 | 0 | 100% |  |
@@ -146,7 +146,7 @@
 | ✅ Return3 | 3 | 3 | 0 | 100% |  |
 | ✅ Return4 | 11 | 11 | 0 | 100% |  |
 | ✅ Return5 | 5 | 5 | 0 | 100% |  |
-| ✅ Return6 | 21 | 21 | 0 | 100% | +5pp |
+| ✅ Return6 | 21 | 21 | 0 | 100% |  |
 | ✅ Return7 | 2 | 2 | 0 | 100% |  |
 | ✅ Return8 | 1 | 1 | 0 | 100% |  |
 | ✅ ReturnOrderBy1 | 12 | 12 | 0 | 100% |  |
@@ -168,17 +168,17 @@
 | ✅ String10 | 9 | 9 | 0 | 100% |  |
 | ✅ String11 | 2 | 2 | 0 | 100% |  |
 | ✅ String3 | 1 | 1 | 0 | 100% |  |
-| ✅ String4 | 1 | 1 | 0 | 100% | +100pp |
+| ✅ String4 | 1 | 1 | 0 | 100% |  |
 | ✅ String8 | 9 | 9 | 0 | 100% |  |
 | ✅ String9 | 9 | 9 | 0 | 100% |  |
 | ✅ Temporal1 | 207 | 207 | 0 | 100% |  |
-| ✅ Temporal10 | 131 | 129 | 2 | 98% |  |
+| ✅ Temporal10 | 131 | 131 | 0 | 100% | +2pp |
 | ✅ Temporal2 | 53 | 53 | 0 | 100% |  |
 | ✅ Temporal3 | 183 | 183 | 0 | 100% |  |
 | ✅ Temporal4 | 39 | 39 | 0 | 100% |  |
-| ✅ Temporal5 | 7 | 6 | 1 | 86% |  |
-| ✅ Temporal6 | 17 | 17 | 0 | 100% | +6pp |
-| ✅ Temporal7 | 18 | 16 | 2 | 89% |  |
+| ✅ Temporal5 | 7 | 7 | 0 | 100% | +14pp |
+| ✅ Temporal6 | 17 | 17 | 0 | 100% |  |
+| ✅ Temporal7 | 18 | 18 | 0 | 100% | +11pp |
 | ✅ Temporal8 | 27 | 27 | 0 | 100% |  |
 | ✅ Temporal9 | 322 | 322 | 0 | 100% |  |
 | ✅ TriadicSelection1 | 19 | 19 | 0 | 100% |  |
@@ -216,114 +216,16 @@
 
 Scenarios that were failing but are now passing:
 
-- **Call2** — [3] Standalone call to procedure with implicit arguments (line 72)
-- **Literals5** — [27] Fail when float value is too large (line 319)
-- **Literals6** — [5] Return a single-quoted string with escaped characters (line 78)
-- **Return6** — [13] Returning the minimum length of paths (line 230)
-- **String4** — [1] `split()` (line 33)
-- **Temporal6** — [6] Should serialize duration (line 117)
+- **Graph6** — [6] Statically access a property of a optional non-null relationship (line 111)
+- **List11** — [3] Create an empty list if range direction and step direction are inconsistent (line 101)
+- **List12** — [6] Using a list comprehension in a WHERE (line 127)
+- **Merge5** — [15] Matching using list property (line 287)
+- **Temporal10** — [10] Should handle large durations in seconds (line 263)
+- **Temporal10** — [9] Should handle large durations (line 252)
+- **Temporal5** — [6] Should provide accessors for date time (line 119)
+- **Temporal7** — [6] Should compare durations for equality (line 134)
+- **Temporal7** — [6] Should compare durations for equality (line 136)
 
 ## Failed Scenarios
 
-### Graph6
-
-- **[6] Statically access a property of a optional non-null relationship** (line 111)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/graph/Graph6.feature:122:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): Row count mismatch: expected 1, got 2
-[Summary]
-1 feature
-1 scenario (1 failed)
-4 steps (3 passed, 1
-  ... (truncated)
-  ```
-
-### List11
-
-- **[3] Create an empty list if range direction and step direction are inconsistent** (line 101)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/list/List11.feature:112:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "DataFusion planning failed: This feature is not implemented: Unsupported
-  ... (truncated)
-  ```
-
-### List12
-
-- **[6] Using a list comprehension in a WHERE** (line 127)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/list/List12.feature:141:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "IN operator with custom expressions not yet supported", query: Some("\nM
-  ... (truncated)
-  ```
-
-### Merge5
-
-- **[15] Matching using list property** (line 287)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/merge/Merge5.feature:303:5
-      Matched: crates/uni-tck/src/steps/and.rs:4:1
-      Step panicked. Captured output: assertion `left == right` failed: Edge count changed: 1 -> 2
-        left: 1
-       right: 2
-[Summary]
-1 feature
-1 scenario (1 failed)
-
-  ... (truncated)
-  ```
-
-### Temporal10
-
-- **[9] Should handle large durations** (line 252)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal10.feature:258:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: date(): Invalid date format: Cannot parse datet
-  ... (truncated)
-  ```
-- **[10] Should handle large durations in seconds** (line 263)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal10.feature:269:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: localdatetime(): Cannot parse datetime: -999999
-  ... (truncated)
-  ```
-
-### Temporal5
-
-- **[6] Should provide accessors for date time** (line 119)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal5.feature:133:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("d.day", Some(Int(11))), ("d.millisecond", S
-  ... (truncated)
-  ```
-
-### Temporal7
-
-- **[6] Should compare durations for equality** (line 134)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal7.feature:125:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Error during planning: Cannot infer common argument type for comp
-  ... (truncated)
-  ```
-- **[6] Should compare durations for equality** (line 136)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal7.feature:125:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Error during planning: Cannot infer common argument type for comp
-  ... (truncated)
-  ```
+🎉 No failed scenarios!

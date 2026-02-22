@@ -3839,7 +3839,7 @@ impl QueryPlanner {
 
         // For OPTIONAL MATCH, extract all variables from this pattern upfront.
         // When any hop fails in a multi-hop pattern, ALL these variables should be NULL.
-        let optional_pattern_vars: std::collections::HashSet<String> = if optional {
+        let mut optional_pattern_vars: std::collections::HashSet<String> = if optional {
             let mut vars = std::collections::HashSet::new();
             for element in elements {
                 match element {
@@ -3942,6 +3942,9 @@ impl QueryPlanner {
                     }
                     let is_bound =
                         !variable.is_empty() && is_var_in_scope(vars_in_scope, &variable);
+                    if optional && !is_bound {
+                        optional_pattern_vars.insert(variable.clone());
+                    }
 
                     if is_bound {
                         // Check for type conflict - can't use an Edge/Path as a Node
@@ -4014,6 +4017,12 @@ impl QueryPlanner {
                                     }
 
                                     // Plan the traverse from the current source node
+                                    let target_was_bound = n_target
+                                        .variable
+                                        .as_ref()
+                                        .is_some_and(|v| {
+                                            !v.is_empty() && is_var_in_scope(vars_in_scope, v)
+                                        });
                                     let (new_plan, target_var, effective_target) = self
                                         .plan_traverse_with_source(
                                             plan,
@@ -4031,6 +4040,9 @@ impl QueryPlanner {
                                             &path_bound_edge_vars,
                                         )?;
                                     plan = new_plan;
+                                    if optional && !target_was_bound {
+                                        optional_pattern_vars.insert(target_var.clone());
+                                    }
 
                                     // Track edge/target node for BindPath
                                     if path_variable.is_some() && !is_vlp {
@@ -4174,6 +4186,9 @@ impl QueryPlanner {
                             // Source is unbound, scan it
                             plan = self.plan_unbound_node(source_node, &sv, plan, optional)?;
                             add_var_to_scope(vars_in_scope, &sv, VariableType::Node)?;
+                            if optional {
+                                optional_pattern_vars.insert(sv.clone());
+                            }
                         }
                         sv
                     };
@@ -4183,7 +4198,10 @@ impl QueryPlanner {
                         let mut relationship = qpp_rels[0].0.clone();
                         relationship.range = range.clone();
 
-                        let (new_plan, _target_var, _effective_target) = self
+                        let target_was_bound = target_node.variable.as_ref().is_some_and(|v| {
+                            !v.is_empty() && is_var_in_scope(vars_in_scope, v)
+                        });
+                        let (new_plan, target_var, _effective_target) = self
                             .plan_traverse_with_source(
                                 plan,
                                 vars_in_scope,
@@ -4199,6 +4217,9 @@ impl QueryPlanner {
                                 &path_bound_edge_vars,
                             )?;
                         plan = new_plan;
+                        if optional && !target_was_bound {
+                            optional_pattern_vars.insert(target_var);
+                        }
                     } else {
                         // Multi-hop QPP: build QppStepInfo list and create Traverse with qpp_steps
                         let mut qpp_step_infos = Vec::new();

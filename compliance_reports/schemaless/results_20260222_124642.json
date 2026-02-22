@@ -270,8 +270,7 @@
             "keyword": "Scenario ",
             "name": "[3] Standalone call to procedure with implicit arguments",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/call/Call2.feature:89:5\n      Matched: crates/uni-tck/src/steps/then.rs:37:1\n      Step panicked. Captured output: Query returned error instead of result: Query { message: \"MissingParameter: Procedure 'test.my.proc' requires 2 implicit argument(s)\", query: Some(\"\\nCALL test.my.proc\\n\") }\n[Summary]\n1 feature\n1 scenario (1 failed)\n5 steps (4 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -6383,7 +6382,8 @@
             "keyword": "Scenario ",
             "name": "[27] Handling mixed relationship patterns and directions 2",
             "result": {
-              "status": "passed"
+              "status": "failed",
+              "error_message": "Step failed:\n      Defined: tck/features/clauses/match/Match5.feature:564:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Result mismatch (any order): Row count mismatch: expected 16, got 20\n[Summary]\n1 feature\n1 scenario (1 failed)\n6 steps (5 passed, 1 failed)\n"
             }
           }
         ]
@@ -9055,8 +9055,7 @@
             "keyword": "Scenario ",
             "name": "[15] Matching using list property",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/merge/Merge5.feature:303:5\n      Matched: crates/uni-tck/src/steps/and.rs:4:1\n      Step panicked. Captured output: assertion `left == right` failed: Edge count changed: 1 -> 2\n        left: 1\n       right: 2\n[Summary]\n1 feature\n1 scenario (1 failed)\n5 steps (4 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -9404,7 +9403,8 @@
             "keyword": "Scenario ",
             "name": "[4] Copying properties from node with ON MATCH",
             "result": {
-              "status": "passed"
+              "status": "failed",
+              "error_message": "Step failed:\n      Defined: tck/features/clauses/merge/Merge7.feature:103:5\n      Matched: crates/uni-tck/src/steps/and.rs:27:1\n      Step panicked. Captured output: assertion `left == right` failed: Expected +properties=1, but got 0 (before=3, after=2, added=0, removed=1)\n        left: 0\n       right: 1\n[Summary]\n1 feature\n1 scenario (1 failed)\n6 steps (5 passed, 1 failed)\n"
             }
           }
         ]
@@ -11722,8 +11722,7 @@
             "keyword": "Scenario ",
             "name": "[13] Returning the minimum length of paths",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/clauses/return/Return6.feature:246:5\n      Matched: crates/uni-tck/src/steps/then.rs:54:1\n      Step panicked. Captured output: Query returned error instead of result: Query { message: \"Schema error: No field named \\\"a.name\\\". Valid fields are a, other, len.\", query: Some(\"\\nMATCH p = (a:T {name: 'a'})-[:R*]->(other:T)\\nWHERE other <> a\\nWITH a, other, min(length(p)) AS len\\nRETURN a.name AS name, collect(other.name) AS others, len\\n\") }\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -11765,7 +11764,8 @@
             "keyword": "Scenario ",
             "name": "[16] Aggregation on complex expressions",
             "result": {
-              "status": "passed"
+              "status": "failed",
+              "error_message": "Step failed:\n      Defined: tck/features/clauses/return/Return6.feature:294:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Query returned error instead of result: Query { message: \"Error during planning: Function 'abs' expects NativeType::Numeric but received NativeType::Binary\", query: Some(\"\\nMATCH (me)-[r1:ATE]->()<-[r2:ATE]-(you)\\nWHERE me.name = 'Michael'\\nWITH me, count(DISTINCT r1) AS H1, count(DISTINCT r2) AS H2, you\\nMATCH (me)-[r1:ATE]->()<-[r2:ATE]-(you)\\nRETURN me, you, sum((1 - abs(r1.times / H1 - r2.times / H2)) * (r1.times + r2.times) / (H1 + H2)) AS sum\\n\") }\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
             }
           }
         ]
@@ -26674,8 +26674,7 @@
             "keyword": "Scenario ",
             "name": "[27] Fail when float value is too large",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/expressions/literals/Literals5.feature:325:5\n      Matched: crates/uni-tck/src/steps/then.rs:114:1\n      Step panicked. Captured output: No error found\n[Summary]\n1 feature\n1 scenario (1 failed)\n3 steps (2 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -26751,8 +26750,7 @@
             "keyword": "Scenario ",
             "name": "[5] Return a single-quoted string with escaped characters",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/expressions/literals/Literals6.feature:85:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [(\"literal\", Some(String(\"a\\\\bcn5t'\\\"\\\\//\\\\\\\"'\")))]. Expected: [{\"literal\": String(\"a\\\\\\\\bcn5t'\\\"\\\\\\\\//\\\\\\\\\\\"'\")}]\n[Summary]\n1 feature\n1 scenario (1 failed)\n3 steps (2 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -40217,8 +40215,7 @@
             "keyword": "Scenario ",
             "name": "[1] `split()`",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/expressions/string/String4.feature:40:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [(\"item\", Some(Int(0)))]. Expected: [{\"item\": Int(2)}]\n[Summary]\n1 feature\n1 scenario (1 failed)\n3 steps (2 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -49187,7 +49184,7 @@
             "name": "[6] Should provide accessors for date time",
             "result": {
               "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/expressions/temporal/Temporal5.feature:133:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [(\"d.day\", Some(Int(11))), (\"d.dayOfQuarter\", Some(Int(42))), (\"d.minute\", Some(Int(31))), (\"d.nanosecond\", Some(Int(645876123))), (\"d.epochSeconds\", Some(Int(469024274))), (\"d.month\", Some(Int(11))), (\"d.weekYear\", Some(Int(1984))), (\"d.ordinalDay\", Some(Int(316))), (\"d.weekDay\", Some(Int(7))), (\"d.millisecond\", Some(Int(645))), (\"d.microsecond\", Some(Int(645876))), (\"d.offset\", Some(String(\"+01:00\"))), (\"d.offsetSeconds\", Some(Int(3600))), (\"d.epochMillis\", Some(Int(469024274645))), (\"d.offsetMinutes\", Some(Int(60))), (\"d.timezone\", Some(String(\"Europe/Stockholm\"))), (\"d.hour\", Some(Int(12))), (\"d.week\", Some(Int(45))), (\"d.second\", Some(Int(14))), (\"d.quarter\", Some(Int(4))), (\"d.year\", Some(Int(1984)))]. Expected: [{\"d.day\": Int(11), \"d.dayOfQuarter\": Int(42), \"d.minute\": Int(31), \"d.nanosecond\": Int(645876123), \"d.epochSeconds\": Int(469020674), \"d.month\": Int(11), \"d.weekYear\": Int(1984), \"d.ordinalDay\": Int(316), \"d.weekDay\": Int(7), \"d.millisecond\": Int(645), \"d.microsecond\": Int(645876), \"d.offset\": String(\"+01:00\"), \"d.offsetSeconds\": Int(3600), \"d.epochMillis\": Int(469020674645), \"d.offsetMinutes\": Int(60), \"d.timezone\": String(\"Europe/Stockholm\"), \"d.hour\": Int(12), \"d.week\": Int(45), \"d.second\": Int(14), \"d.quarter\": Int(4), \"d.year\": Int(1984)}]\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
+              "error_message": "Step failed:\n      Defined: tck/features/expressions/temporal/Temporal5.feature:133:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [(\"d.epochSeconds\", Some(Int(469024274))), (\"d.offset\", Some(String(\"+01:00\"))), (\"d.dayOfQuarter\", Some(Int(42))), (\"d.timezone\", Some(String(\"Europe/Stockholm\"))), (\"d.second\", Some(Int(14))), (\"d.quarter\", Some(Int(4))), (\"d.year\", Some(Int(1984))), (\"d.offsetMinutes\", Some(Int(60))), (\"d.millisecond\", Some(Int(645))), (\"d.microsecond\", Some(Int(645876))), (\"d.weekDay\", Some(Int(7))), (\"d.ordinalDay\", Some(Int(316))), (\"d.weekYear\", Some(Int(1984))), (\"d.offsetSeconds\", Some(Int(3600))), (\"d.day\", Some(Int(11))), (\"d.epochMillis\", Some(Int(469024274645))), (\"d.month\", Some(Int(11))), (\"d.week\", Some(Int(45))), (\"d.minute\", Some(Int(31))), (\"d.nanosecond\", Some(Int(645876123))), (\"d.hour\", Some(Int(12)))]. Expected: [{\"d.epochSeconds\": Int(469020674), \"d.offset\": String(\"+01:00\"), \"d.dayOfQuarter\": Int(42), \"d.timezone\": String(\"Europe/Stockholm\"), \"d.second\": Int(14), \"d.quarter\": Int(4), \"d.year\": Int(1984), \"d.offsetMinutes\": Int(60), \"d.millisecond\": Int(645), \"d.microsecond\": Int(645876), \"d.weekDay\": Int(7), \"d.ordinalDay\": Int(316), \"d.weekYear\": Int(1984), \"d.offsetSeconds\": Int(3600), \"d.day\": Int(11), \"d.epochMillis\": Int(469020674645), \"d.month\": Int(11), \"d.week\": Int(45), \"d.minute\": Int(31), \"d.nanosecond\": Int(645876123), \"d.hour\": Int(12)}]\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
             }
           }
         ]
@@ -49431,8 +49428,7 @@
             "keyword": "Scenario ",
             "name": "[6] Should serialize duration",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/expressions/temporal/Temporal6.feature:100:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Query returned error instead of result: Query { message: \"Execution error: duration(): Invalid date-time style duration date: \", query: Some(\"\\nWITH duration({seconds: -60, milliseconds: -1}) AS d\\nRETURN toString(d) AS ts, duration(toString(d)) = d AS b\\n\") }\n[Summary]\n1 feature\n1 scenario (1 failed)\n3 steps (2 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]

@@ -2196,12 +2196,21 @@ pub(crate) fn build_property_column_static(
                         builder.append_value(&bytes);
                     }
                     Some(Value::List(arr)) if arr.iter().all(|v| v.as_u64().is_some()) => {
-                        // Raw CypherValue bytes stored as list of u8 values from PropertyManager
+                        // Potential raw CypherValue bytes stored as list<u8> from PropertyManager.
+                        // Guard against misclassifying normal integer lists (e.g. [42, 43]) as bytes.
                         let bytes: Vec<u8> = arr
                             .iter()
                             .filter_map(|v| v.as_u64().map(|n| n as u8))
                             .collect();
-                        builder.append_value(&bytes);
+                        if uni_common::cypher_value_codec::decode(&bytes).is_ok() {
+                            builder.append_value(&bytes);
+                        } else {
+                            let json_val: serde_json::Value = Value::List(arr).into();
+                            match encode_cypher_value(&json_val) {
+                                Ok(encoded) => builder.append_value(encoded),
+                                Err(_) => builder.append_null(),
+                            }
+                        }
                     }
                     Some(val) => {
                         // Value from PropertyManager — convert to serde_json and re-encode to CypherValue binary

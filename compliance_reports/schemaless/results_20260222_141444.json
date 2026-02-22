@@ -22621,8 +22621,7 @@
             "keyword": "Scenario ",
             "name": "[6] Statically access a property of a optional non-null relationship",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/expressions/graph/Graph6.feature:122:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Result mismatch (any order): Row count mismatch: expected 1, got 2\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -23912,8 +23911,7 @@
             "keyword": "Scenario ",
             "name": "[3] Create an empty list if range direction and step direction are inconsistent",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/expressions/list/List11.feature:112:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Query returned error instead of result: Query { message: \"DataFusion planning failed: This feature is not implemented: Unsupported CAST from LargeBinary to Float64\", query: Some(\"\\nWITH 0 AS start, [1, 2, 500, 1000, 1500] AS stopList, [-1000, -3, -2, -1, 1, 2, 3, 1000] AS stepList\\nUNWIND stopList AS stop\\nUNWIND stepList AS step\\nWITH start, stop, step, range(start, stop, step) AS list\\nWITH start, stop, step, list, sign(stop-start) <> sign(step) AS empty\\nRETURN ALL(ok IN collect((size(list) = 0) = empty) WHERE ok) AS okay\\n\") }\n[Summary]\n1 feature\n1 scenario (1 failed)\n3 steps (2 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -24367,8 +24365,7 @@
             "keyword": "Scenario ",
             "name": "[6] Using a list comprehension in a WHERE",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/expressions/list/List12.feature:141:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Query returned error instead of result: Query { message: \"IN operator with custom expressions not yet supported\", query: Some(\"\\nMATCH (n)-->(b)\\nWHERE n.name IN [x IN labels(b) | toLower(x)]\\nRETURN b\\n\") }\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -44943,8 +44940,7 @@
             "keyword": "Scenario ",
             "name": "[9] Should handle large durations",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/expressions/temporal/Temporal10.feature:258:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Query returned error instead of result: Query { message: \"Execution error: date(): Invalid date format: Cannot parse datetime: -999999999-01-01\", query: Some(\"\\nRETURN duration.between(date('-999999999-01-01'), date('+999999999-12-31')) AS duration\\n\") }\n[Summary]\n1 feature\n1 scenario (1 failed)\n3 steps (2 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -44958,8 +44954,7 @@
             "keyword": "Scenario ",
             "name": "[10] Should handle large durations in seconds",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/expressions/temporal/Temporal10.feature:269:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Query returned error instead of result: Query { message: \"Execution error: localdatetime(): Cannot parse datetime: -999999999-01-01\", query: Some(\"\\nRETURN duration.inSeconds(localdatetime('-999999999-01-01'), localdatetime('+999999999-12-31T23:59:59')) AS duration\\n\") }\n[Summary]\n1 feature\n1 scenario (1 failed)\n3 steps (2 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -49183,8 +49178,7 @@
             "keyword": "Scenario ",
             "name": "[6] Should provide accessors for date time",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/expressions/temporal/Temporal5.feature:133:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [(\"d.month\", Some(Int(11))), (\"d.week\", Some(Int(45))), (\"d.ordinalDay\", Some(Int(316))), (\"d.year\", Some(Int(1984))), (\"d.microsecond\", Some(Int(645876))), (\"d.epochSeconds\", Some(Int(469024274))), (\"d.dayOfQuarter\", Some(Int(42))), (\"d.weekDay\", Some(Int(7))), (\"d.hour\", Some(Int(12))), (\"d.nanosecond\", Some(Int(645876123))), (\"d.offset\", Some(String(\"+01:00\"))), (\"d.offsetSeconds\", Some(Int(3600))), (\"d.offsetMinutes\", Some(Int(60))), (\"d.quarter\", Some(Int(4))), (\"d.epochMillis\", Some(Int(469024274645))), (\"d.timezone\", Some(String(\"Europe/Stockholm\"))), (\"d.day\", Some(Int(11))), (\"d.weekYear\", Some(Int(1984))), (\"d.minute\", Some(Int(31))), (\"d.second\", Some(Int(14))), (\"d.millisecond\", Some(Int(645)))]. Expected: [{\"d.month\": Int(11), \"d.week\": Int(45), \"d.ordinalDay\": Int(316), \"d.year\": Int(1984), \"d.microsecond\": Int(645876), \"d.epochSeconds\": Int(469020674), \"d.dayOfQuarter\": Int(42), \"d.weekDay\": Int(7), \"d.hour\": Int(12), \"d.nanosecond\": Int(645876123), \"d.offset\": String(\"+01:00\"), \"d.offsetSeconds\": Int(3600), \"d.offsetMinutes\": Int(60), \"d.quarter\": Int(4), \"d.epochMillis\": Int(469020674645), \"d.timezone\": String(\"Europe/Stockholm\"), \"d.day\": Int(11), \"d.weekYear\": Int(1984), \"d.minute\": Int(31), \"d.second\": Int(14), \"d.millisecond\": Int(645)}]\n[Summary]\n1 feature\n1 scenario (1 failed)\n4 steps (3 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -49630,8 +49624,7 @@
             "keyword": "Scenario ",
             "name": "[6] Should compare durations for equality",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/expressions/temporal/Temporal7.feature:125:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Query returned error instead of result: Query { message: \"Error during planning: Cannot infer common argument type for comparison operation Interval(MonthDayNano) = Struct(nanos_since_midnight Time64(Nanosecond), offset_seconds Int32)\", query: Some(\"\\nWITH duration({years: 12, months: 5, days: 14, hours: 16, minutes: 12, seconds: 70}) AS x, time({hour: 9, minute: 35, second: 14, nanosecond: 645876123, timezone: '+00:00'}) AS d\\nRETURN x = d\\n\") }\n[Summary]\n1 feature\n1 scenario (1 failed)\n3 steps (2 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]
@@ -49659,8 +49652,7 @@
             "keyword": "Scenario ",
             "name": "[6] Should compare durations for equality",
             "result": {
-              "status": "failed",
-              "error_message": "Step failed:\n      Defined: tck/features/expressions/temporal/Temporal7.feature:125:5\n      Matched: crates/uni-tck/src/steps/then.rs:20:1\n      Step panicked. Captured output: Query returned error instead of result: Query { message: \"Error during planning: Cannot infer common argument type for comparison operation Interval(MonthDayNano) = Struct(nanos_since_epoch Timestamp(Nanosecond, None), offset_seconds Int32, timezone_name Utf8)\", query: Some(\"\\nWITH duration({years: 12, months: 5, days: 14, hours: 16, minutes: 12, seconds: 70}) AS x, datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, timezone: '+05:00'}) AS d\\nRETURN x = d\\n\") }\n[Summary]\n1 feature\n1 scenario (1 failed)\n3 steps (2 passed, 1 failed)\n"
+              "status": "passed"
             }
           }
         ]

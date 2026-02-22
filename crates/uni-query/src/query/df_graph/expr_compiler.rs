@@ -366,9 +366,18 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
                 list: right,
             } => {
                 if Self::contains_custom_expr(left) || Self::contains_custom_expr(right) {
-                    Err(anyhow!(
-                        "IN operator with custom expressions not yet supported"
-                    ))
+                    let left_phy = self.compile(left, input_schema)?;
+                    let right_phy = self.compile(right, input_schema)?;
+
+                    let left_type = left_phy
+                        .data_type(input_schema)
+                        .unwrap_or(DataType::LargeBinary);
+                    let right_type = right_phy
+                        .data_type(input_schema)
+                        .unwrap_or(DataType::LargeBinary);
+
+                    self.plan_binary_udf("_cypher_in", left_phy, right_phy, left_type, right_type)?
+                        .ok_or_else(|| anyhow!("_cypher_in UDF not found"))
                 } else {
                     self.compile_standard(expr, input_schema)
                 }

@@ -1604,7 +1604,11 @@ fn translate_math_function(name_upper: &str, df_args: &[DfExpr]) -> Option<Resul
             };
             Some(Ok(expr_fn::round(args)))
         }
-        "SIGN" => unary_f64("sign", expr_fn::signum),
+        "SIGN" => {
+            check_args!(1, df_args, "sign");
+            let coerced = crate::query::df_udfs::cypher_to_float64_expr(first_arg(df_args));
+            Some(Ok(expr_fn::signum(coerced)))
+        }
         "SQRT" => unary_f64("sqrt", expr_fn::sqrt),
         "LOG" | "LN" => unary_f64("log", expr_fn::ln),
         "LOG10" => unary_f64("log10", expr_fn::log10),
@@ -2599,6 +2603,7 @@ fn coerce_temporal_comparisons(
     is_comparison: bool,
 ) -> Option<DfExpr> {
     use datafusion::arrow::datatypes::{DataType, TimeUnit};
+    use datafusion::logical_expr::Operator;
 
     if !is_comparison {
         return None;
@@ -2649,6 +2654,42 @@ fn coerce_temporal_comparisons(
             op,
             cast_expr(right_nanos, ts_type),
         ));
+    }
+
+    // Duration vs temporal (date/time/datetime/timestamp) equality should not
+    // require a common physical type. Cypher treats different temporal classes
+    // as non-equal; ordering comparisons return null.
+    let left_is_duration = matches!(left_type, DataType::Interval(_));
+    let right_is_duration = matches!(right_type, DataType::Interval(_));
+    let left_is_temporal_like = uni_common::core::schema::is_datetime_struct(left_type)
+        || uni_common::core::schema::is_time_struct(left_type)
+        || matches!(
+            left_type,
+            DataType::Timestamp(_, _)
+                | DataType::Date32
+                | DataType::Date64
+                | DataType::Time32(_)
+                | DataType::Time64(_)
+        );
+    let right_is_temporal_like = uni_common::core::schema::is_datetime_struct(right_type)
+        || uni_common::core::schema::is_time_struct(right_type)
+        || matches!(
+            right_type,
+            DataType::Timestamp(_, _)
+                | DataType::Date32
+                | DataType::Date64
+                | DataType::Time32(_)
+                | DataType::Time64(_)
+        );
+
+    if (left_is_duration && right_is_temporal_like)
+        || (right_is_duration && left_is_temporal_like)
+    {
+        return Some(match op {
+            Operator::Eq => lit(false),
+            Operator::NotEq => lit(true),
+            _ => lit(ScalarValue::Boolean(None)),
+        });
     }
 
     None

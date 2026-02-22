@@ -1063,7 +1063,7 @@ fn extract_vid(val: &Value) -> Option<u64> {
 
 /// Extract an i64 from a ColumnarValue, coercing from any integer type.
 /// Rejects floats, booleans, strings, lists, and maps with `InvalidArgumentType`.
-fn extract_i64_range_arg(arg: &ColumnarValue, name: &str) -> DFResult<i64> {
+fn extract_i64_range_arg(arg: &ColumnarValue, row_idx: usize, name: &str) -> DFResult<i64> {
     match arg {
         ColumnarValue::Scalar(sv) => match sv {
             ScalarValue::Int8(Some(v)) => Ok(*v as i64),
@@ -1074,42 +1074,99 @@ fn extract_i64_range_arg(arg: &ColumnarValue, name: &str) -> DFResult<i64> {
             ScalarValue::UInt16(Some(v)) => Ok(*v as i64),
             ScalarValue::UInt32(Some(v)) => Ok(*v as i64),
             ScalarValue::UInt64(Some(v)) => Ok(*v as i64),
+            ScalarValue::LargeBinary(Some(bytes)) => scalar_binary_to_value(bytes).as_i64().ok_or_else(|| {
+                datafusion::error::DataFusionError::Execution(format!(
+                    "ArgumentError: InvalidArgumentType - range() {} must be an integer",
+                    name
+                ))
+            }),
             _ => Err(datafusion::error::DataFusionError::Execution(format!(
                 "ArgumentError: InvalidArgumentType - range() {} must be an integer",
                 name
             ))),
         },
         ColumnarValue::Array(arr) => {
-            // Handle single-element arrays from columnar UDF context (e.g. size() output)
-            if !arr.is_empty() && !arr.is_null(0) {
+            if row_idx >= arr.len() || arr.is_null(row_idx) {
+                return Err(datafusion::error::DataFusionError::Execution(format!(
+                    "ArgumentError: InvalidArgumentType - range() {} must be an integer",
+                    name
+                )));
+            }
+            // Handle array inputs row-wise.
+            if !arr.is_empty() {
                 use datafusion::arrow::array::{
                     Int8Array, Int16Array, Int32Array, Int64Array, UInt8Array, UInt16Array,
                     UInt32Array, UInt64Array,
                 };
                 match arr.data_type() {
                     DataType::Int8 => {
-                        Ok(arr.as_any().downcast_ref::<Int8Array>().unwrap().value(0) as i64)
+                        Ok(arr
+                            .as_any()
+                            .downcast_ref::<Int8Array>()
+                            .unwrap()
+                            .value(row_idx) as i64)
                     }
                     DataType::Int16 => {
-                        Ok(arr.as_any().downcast_ref::<Int16Array>().unwrap().value(0) as i64)
+                        Ok(arr
+                            .as_any()
+                            .downcast_ref::<Int16Array>()
+                            .unwrap()
+                            .value(row_idx) as i64)
                     }
                     DataType::Int32 => {
-                        Ok(arr.as_any().downcast_ref::<Int32Array>().unwrap().value(0) as i64)
+                        Ok(arr
+                            .as_any()
+                            .downcast_ref::<Int32Array>()
+                            .unwrap()
+                            .value(row_idx) as i64)
                     }
                     DataType::Int64 => {
-                        Ok(arr.as_any().downcast_ref::<Int64Array>().unwrap().value(0))
+                        Ok(arr
+                            .as_any()
+                            .downcast_ref::<Int64Array>()
+                            .unwrap()
+                            .value(row_idx))
                     }
                     DataType::UInt8 => {
-                        Ok(arr.as_any().downcast_ref::<UInt8Array>().unwrap().value(0) as i64)
+                        Ok(arr
+                            .as_any()
+                            .downcast_ref::<UInt8Array>()
+                            .unwrap()
+                            .value(row_idx) as i64)
                     }
                     DataType::UInt16 => {
-                        Ok(arr.as_any().downcast_ref::<UInt16Array>().unwrap().value(0) as i64)
+                        Ok(arr
+                            .as_any()
+                            .downcast_ref::<UInt16Array>()
+                            .unwrap()
+                            .value(row_idx) as i64)
                     }
                     DataType::UInt32 => {
-                        Ok(arr.as_any().downcast_ref::<UInt32Array>().unwrap().value(0) as i64)
+                        Ok(arr
+                            .as_any()
+                            .downcast_ref::<UInt32Array>()
+                            .unwrap()
+                            .value(row_idx) as i64)
                     }
                     DataType::UInt64 => {
-                        Ok(arr.as_any().downcast_ref::<UInt64Array>().unwrap().value(0) as i64)
+                        Ok(arr
+                            .as_any()
+                            .downcast_ref::<UInt64Array>()
+                            .unwrap()
+                            .value(row_idx) as i64)
+                    }
+                    DataType::LargeBinary => {
+                        let bytes = arr
+                            .as_any()
+                            .downcast_ref::<LargeBinaryArray>()
+                            .unwrap()
+                            .value(row_idx);
+                        scalar_binary_to_value(bytes).as_i64().ok_or_else(|| {
+                            datafusion::error::DataFusionError::Execution(format!(
+                                "ArgumentError: InvalidArgumentType - range() {} must be an integer",
+                                name
+                            ))
+                        })
                     }
                     _ => Err(datafusion::error::DataFusionError::Execution(format!(
                         "ArgumentError: InvalidArgumentType - range() {} must be an integer",
@@ -1175,45 +1232,63 @@ impl ScalarUDFImpl for RangeUdf {
             ));
         }
 
-        // range() handles its own array extraction for now as it's a bit special
-        // but we only support Scalar arguments for range() in practice for now.
+        let len = args
+            .args
+            .iter()
+            .find_map(|arg| match arg {
+                ColumnarValue::Array(arr) => Some(arr.len()),
+                _ => None,
+            })
+            .unwrap_or(1);
 
-        // Extract scalar values with flexible integer coercion
-        let start = extract_i64_range_arg(&args.args[0], "start")?;
-        let end = extract_i64_range_arg(&args.args[1], "end")?;
-        let step = if args.args.len() == 3 {
-            extract_i64_range_arg(&args.args[2], "step")?
+        let mut list_builder =
+            arrow_array::builder::ListBuilder::new(arrow_array::builder::Int64Builder::new());
+
+        for row_idx in 0..len {
+            let start = extract_i64_range_arg(&args.args[0], row_idx, "start")?;
+            let end = extract_i64_range_arg(&args.args[1], row_idx, "end")?;
+            let step = if args.args.len() == 3 {
+                extract_i64_range_arg(&args.args[2], row_idx, "step")?
+            } else {
+                1
+            };
+
+            if step == 0 {
+                return Err(datafusion::error::DataFusionError::Execution(
+                    "range(): step cannot be zero".to_string(),
+                ));
+            }
+
+            if step > 0 && start <= end {
+                let mut current = start;
+                while current <= end {
+                    list_builder.values().append_value(current);
+                    current += step;
+                }
+            } else if step < 0 && start >= end {
+                let mut current = start;
+                while current >= end {
+                    list_builder.values().append_value(current);
+                    current += step;
+                }
+            }
+            // Else: direction and step are inconsistent -> append an empty list row.
+            list_builder.append(true);
+        }
+
+        let list_arr = Arc::new(list_builder.finish()) as ArrayRef;
+        if len == 1
+            && args
+                .args
+                .iter()
+                .all(|arg| matches!(arg, ColumnarValue::Scalar(_)))
+        {
+            Ok(ColumnarValue::Scalar(ScalarValue::try_from_array(
+                &list_arr, 0,
+            )?))
         } else {
-            1
-        };
-
-        if step == 0 {
-            return Err(datafusion::error::DataFusionError::Execution(
-                "range(): step cannot be zero".to_string(),
-            ));
+            Ok(ColumnarValue::Array(list_arr))
         }
-
-        // Generate range — return empty list when direction and step are inconsistent
-        let mut values = Vec::new();
-        if step > 0 && start <= end {
-            let mut current = start;
-            while current <= end {
-                values.push(datafusion::common::ScalarValue::Int64(Some(current)));
-                current += step;
-            }
-        } else if step < 0 && start >= end {
-            let mut current = start;
-            while current >= end {
-                values.push(datafusion::common::ScalarValue::Int64(Some(current)));
-                current += step;
-            }
-        }
-        // else: direction and step are inconsistent → return empty list
-
-        let list = datafusion::common::ScalarValue::List(
-            datafusion::common::ScalarValue::new_list(&values, &DataType::Int64, true),
-        );
-        Ok(ColumnarValue::Scalar(list))
     }
 }
 

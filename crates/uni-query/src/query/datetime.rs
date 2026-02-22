@@ -1057,9 +1057,16 @@ fn extract_offset_seconds(s: &str) -> Result<Value> {
 }
 
 fn parse_as_utc(s: &str) -> Result<DateTime<Utc>> {
-    let (date, time, _) = parse_datetime_with_tz(s)?;
-    let ndt = NaiveDateTime::new(date, time);
-    Ok(DateTime::<Utc>::from_naive_utc_and_offset(ndt, Utc))
+    let (date, time, tz_info) = parse_datetime_with_tz(s)?;
+    let local_ndt = NaiveDateTime::new(date, time);
+
+    if let Some(tz) = tz_info {
+        let offset = tz.offset_for_local(&local_ndt)?;
+        let utc_ndt = local_ndt - Duration::seconds(offset.local_minus_utc() as i64);
+        Ok(DateTime::<Utc>::from_naive_utc_and_offset(utc_ndt, Utc))
+    } else {
+        Ok(DateTime::<Utc>::from_naive_utc_and_offset(local_ndt, Utc))
+    }
 }
 
 fn extract_epoch_seconds(s: &str) -> Result<Value> {
@@ -1164,10 +1171,19 @@ fn eval_date(args: &[Value]) -> Result<Value> {
 
     match &args[0] {
         Value::String(s) => {
-            let date = parse_date_string(s)?;
-            Ok(Value::Temporal(TemporalValue::Date {
-                days_since_epoch: date_to_days_since_epoch(&date),
-            }))
+            match parse_date_string(s) {
+                Ok(date) => Ok(Value::Temporal(TemporalValue::Date {
+                    days_since_epoch: date_to_days_since_epoch(&date),
+                })),
+                Err(e) => {
+                    if parse_extended_date_string(s).is_some() {
+                        // Out-of-range years cannot fit the current TemporalValue Date encoding.
+                        Ok(Value::String(s.clone()))
+                    } else {
+                        Err(e)
+                    }
+                }
+            }
         }
         Value::Temporal(TemporalValue::Date { .. }) => Ok(args[0].clone()),
         // Cross-type: extract date component from any temporal with a date
@@ -1931,9 +1947,20 @@ fn eval_localdatetime(args: &[Value]) -> Result<Value> {
 
     match &args[0] {
         Value::String(s) => {
-            let (date, time, _) = parse_datetime_with_tz(s)?;
-            let ndt = NaiveDateTime::new(date, time);
-            Ok(localdatetime_value_from_naive(&ndt))
+            match parse_datetime_with_tz(s) {
+                Ok((date, time, _)) => {
+                    let ndt = NaiveDateTime::new(date, time);
+                    Ok(localdatetime_value_from_naive(&ndt))
+                }
+                Err(e) => {
+                    if parse_extended_localdatetime_string(s).is_some() {
+                        // Out-of-range years cannot fit the current TemporalValue LocalDateTime encoding.
+                        Ok(Value::String(s.clone()))
+                    } else {
+                        Err(e)
+                    }
+                }
+            }
         }
         Value::Temporal(TemporalValue::LocalDateTime { .. }) => Ok(args[0].clone()),
         // Cross-type: extract date+time, strip timezone
@@ -3806,6 +3833,284 @@ fn apply_datetime_adjustments(
 // Duration Between Functions
 // ============================================================================
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ExtendedDate {
+    year: i64,
+    month: u32,
+    day: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ExtendedLocalDateTime {
+    date: ExtendedDate,
+    hour: u32,
+    minute: u32,
+    second: u32,
+    nanosecond: u32,
+}
+
+fn is_leap_year_i64(year: i64) -> bool {
+    year.rem_euclid(4) == 0 && (year.rem_euclid(100) != 0 || year.rem_euclid(400) == 0)
+}
+
+fn days_in_month_i64(year: i64, month: u32) -> Option<u32> {
+    let days = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 => {
+            if is_leap_year_i64(year) {
+                29
+            } else {
+                28
+            }
+        }
+        _ => return None,
+    };
+    Some(days)
+}
+
+fn parse_extended_date_string(s: &str) -> Option<ExtendedDate> {
+    let bytes = s.as_bytes();
+    if bytes.is_empty() {
+        return None;
+    }
+
+    let mut idx = 0usize;
+    if matches!(bytes[0], b'+' | b'-') {
+        idx += 1;
+    }
+    if idx >= bytes.len() || !bytes[idx].is_ascii_digit() {
+        return None;
+    }
+
+    while idx < bytes.len() && bytes[idx].is_ascii_digit() {
+        idx += 1;
+    }
+    if idx >= bytes.len() || bytes[idx] != b'-' {
+        return None;
+    }
+
+    let year: i64 = s[..idx].parse().ok()?;
+    let rest = &s[idx + 1..];
+    let (month_str, day_str) = rest.split_once('-')?;
+    if month_str.len() != 2 || day_str.len() != 2 {
+        return None;
+    }
+    let month: u32 = month_str.parse().ok()?;
+    let day: u32 = day_str.parse().ok()?;
+    let max_day = days_in_month_i64(year, month)?;
+    if day == 0 || day > max_day {
+        return None;
+    }
+    Some(ExtendedDate { year, month, day })
+}
+
+fn parse_extended_localdatetime_string(s: &str) -> Option<ExtendedLocalDateTime> {
+    let (date_part, time_part) = if let Some((d, t)) = s.split_once('T') {
+        (d, Some(t))
+    } else {
+        (s, None)
+    };
+
+    let date = parse_extended_date_string(date_part)?;
+
+    let Some(time_part) = time_part else {
+        return Some(ExtendedLocalDateTime {
+            date,
+            hour: 0,
+            minute: 0,
+            second: 0,
+            nanosecond: 0,
+        });
+    };
+
+    if time_part.contains('+') || time_part.contains('Z') || time_part.contains('z') {
+        return None;
+    }
+    let (hms_part, frac_part) = if let Some((hms, frac)) = time_part.split_once('.') {
+        (hms, Some(frac))
+    } else {
+        (time_part, None)
+    };
+    let mut parts = hms_part.split(':');
+    let hour: u32 = parts.next()?.parse().ok()?;
+    let minute: u32 = parts.next()?.parse().ok()?;
+    let second: u32 = parts.next().map(|v| v.parse().ok()).unwrap_or(Some(0))?;
+    if parts.next().is_some() {
+        return None;
+    }
+    if hour > 23 || minute > 59 || second > 59 {
+        return None;
+    }
+
+    let nanosecond = if let Some(frac) = frac_part {
+        if frac.is_empty() || !frac.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        let mut frac_buf = frac.to_string();
+        if frac_buf.len() > 9 {
+            frac_buf.truncate(9);
+        }
+        while frac_buf.len() < 9 {
+            frac_buf.push('0');
+        }
+        frac_buf.parse().ok()?
+    } else {
+        0
+    };
+
+    Some(ExtendedLocalDateTime {
+        date,
+        hour,
+        minute,
+        second,
+        nanosecond,
+    })
+}
+
+fn days_from_civil(date: ExtendedDate) -> i128 {
+    // Howard Hinnant's civil-from-days algorithm, adapted for wide i64 year range.
+    let mut y = date.year;
+    let m = date.month as i64;
+    let d = date.day as i64;
+    y -= if m <= 2 { 1 } else { 0 };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let mp = m + if m > 2 { -3 } else { 9 };
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era as i128 * 146_097 + doe as i128 - 719_468
+}
+
+fn calendar_months_between_extended(start: &ExtendedDate, end: &ExtendedDate) -> i64 {
+    let year_diff = end.year - start.year;
+    let month_diff = end.month as i64 - start.month as i64;
+    let total_months = year_diff * 12 + month_diff;
+
+    if total_months > 0 && end.day < start.day {
+        total_months - 1
+    } else if total_months < 0 && end.day > start.day {
+        total_months + 1
+    } else {
+        total_months
+    }
+}
+
+fn add_months_to_extended_date(date: ExtendedDate, months: i64) -> ExtendedDate {
+    if months == 0 {
+        return date;
+    }
+
+    let total_months = date.year as i128 * 12 + (date.month as i128 - 1) + months as i128;
+    let year = total_months.div_euclid(12) as i64;
+    let month = (total_months.rem_euclid(12) + 1) as u32;
+    let max_day = days_in_month_i64(year, month).unwrap_or(31);
+    let day = date.day.min(max_day);
+
+    ExtendedDate { year, month, day }
+}
+
+fn remaining_days_after_months_extended(start: &ExtendedDate, end: &ExtendedDate, months: i64) -> i64 {
+    let after_months = add_months_to_extended_date(*start, months);
+    (days_from_civil(*end) - days_from_civil(after_months)) as i64
+}
+
+fn try_extended_date_from_value(val: &Value) -> Option<ExtendedDate> {
+    match val {
+        Value::String(s) => parse_extended_date_string(s),
+        _ => None,
+    }
+}
+
+fn try_extended_localdatetime_from_value(val: &Value) -> Option<ExtendedLocalDateTime> {
+    match val {
+        Value::String(s) => parse_extended_localdatetime_string(s),
+        _ => None,
+    }
+}
+
+fn try_eval_duration_between_extended(args: &[Value]) -> Result<Option<Value>> {
+    let Some(start) = try_extended_date_from_value(&args[0]) else {
+        return Ok(None);
+    };
+    let Some(end) = try_extended_date_from_value(&args[1]) else {
+        return Ok(None);
+    };
+
+    let months = calendar_months_between_extended(&start, &end);
+    let remaining_days = remaining_days_after_months_extended(&start, &end, months);
+    let dur = CypherDuration::new(months, remaining_days, 0);
+    Ok(Some(Value::String(dur.to_iso8601())))
+}
+
+fn format_time_only_duration_nanos(total_nanos: i128) -> String {
+    if total_nanos == 0 {
+        return "PT0S".to_string();
+    }
+    let total_secs = total_nanos / NANOS_PER_SECOND as i128;
+    let rem_nanos = total_nanos % NANOS_PER_SECOND as i128;
+
+    let hours = total_secs / 3600;
+    let rem_after_hours = total_secs % 3600;
+    let minutes = rem_after_hours / 60;
+    let seconds = rem_after_hours % 60;
+
+    let mut out = String::from("PT");
+    if hours != 0 {
+        out.push_str(&format!("{hours}H"));
+    }
+    if minutes != 0 {
+        out.push_str(&format!("{minutes}M"));
+    }
+    if seconds != 0 || rem_nanos != 0 {
+        if rem_nanos == 0 {
+            out.push_str(&format!("{seconds}S"));
+        } else {
+            let sign = if total_nanos < 0 && seconds == 0 {
+                "-"
+            } else {
+                ""
+            };
+            let secs_abs = seconds.abs();
+            let nanos_abs = rem_nanos.abs();
+            let frac = format!("{nanos_abs:09}");
+            let trimmed = frac.trim_end_matches('0');
+            out.push_str(&format!("{sign}{secs_abs}.{trimmed}S"));
+        }
+    }
+    if out == "PT" {
+        "PT0S".to_string()
+    } else {
+        out
+    }
+}
+
+fn try_eval_duration_in_seconds_extended(args: &[Value]) -> Result<Option<Value>> {
+    let Some(start) = try_extended_localdatetime_from_value(&args[0]) else {
+        return Ok(None);
+    };
+    let Some(end) = try_extended_localdatetime_from_value(&args[1]) else {
+        return Ok(None);
+    };
+
+    let start_days = days_from_civil(start.date);
+    let end_days = days_from_civil(end.date);
+    let start_tod_nanos = (start.hour as i128 * 3600 + start.minute as i128 * 60 + start.second as i128)
+        * NANOS_PER_SECOND as i128
+        + start.nanosecond as i128;
+    let end_tod_nanos = (end.hour as i128 * 3600 + end.minute as i128 * 60 + end.second as i128)
+        * NANOS_PER_SECOND as i128
+        + end.nanosecond as i128;
+    let total_nanos = (end_days - start_days) * NANOS_PER_DAY as i128 + (end_tod_nanos - start_tod_nanos);
+
+    if total_nanos >= i64::MIN as i128 && total_nanos <= i64::MAX as i128 {
+        let dur = CypherDuration::new(0, 0, total_nanos as i64);
+        Ok(Some(dur.to_temporal_value()))
+    } else {
+        Ok(Some(Value::String(format_time_only_duration_nanos(total_nanos))))
+    }
+}
+
 /// Compute calendar months between two dates.
 ///
 /// Returns the number of whole months from `start` to `end`.
@@ -3839,8 +4144,20 @@ fn eval_duration_between(args: &[Value]) -> Result<Value> {
         return Ok(Value::Null);
     }
 
-    let start = parse_temporal_value_typed(&args[0])?;
-    let end = parse_temporal_value_typed(&args[1])?;
+    let start_res = parse_temporal_value_typed(&args[0]);
+    let end_res = parse_temporal_value_typed(&args[1]);
+    let (start, end) = match (start_res, end_res) {
+        (Ok(start), Ok(end)) => (start, end),
+        (start_res, end_res) => {
+            if let Some(value) = try_eval_duration_between_extended(args)? {
+                return Ok(value);
+            }
+            return Err(start_res
+                .err()
+                .or_else(|| end_res.err())
+                .unwrap_or_else(|| anyhow!("duration.between requires two temporal arguments")));
+        }
+    };
 
     let start_has_date = has_date_component(start.ttype);
     let end_has_date = has_date_component(end.ttype);
@@ -4085,8 +4402,20 @@ fn eval_duration_in_seconds(args: &[Value]) -> Result<Value> {
         return Ok(Value::Null);
     }
 
-    let start = parse_temporal_value_typed(&args[0])?;
-    let end = parse_temporal_value_typed(&args[1])?;
+    let start_res = parse_temporal_value_typed(&args[0]);
+    let end_res = parse_temporal_value_typed(&args[1]);
+    let (start, end) = match (start_res, end_res) {
+        (Ok(start), Ok(end)) => (start, end),
+        (start_res, end_res) => {
+            if let Some(value) = try_eval_duration_in_seconds_extended(args)? {
+                return Ok(value);
+            }
+            return Err(start_res
+                .err()
+                .or_else(|| end_res.err())
+                .unwrap_or_else(|| anyhow!("duration.inSeconds requires two temporal arguments")));
+        }
+    };
 
     let start_has_date = has_date_component(start.ttype);
     let end_has_date = has_date_component(end.ttype);

@@ -659,6 +659,7 @@ impl HybridPhysicalPlanner {
                         target_variable,
                         step_variable.as_deref(),
                         *optional,
+                        optional_pattern_vars,
                         all_properties,
                         scope_match_variables,
                     )?;
@@ -2168,6 +2169,7 @@ impl HybridPhysicalPlanner {
         target_variable: &str,
         step_variable: Option<&str>,
         optional: bool,
+        optional_pattern_vars: &HashSet<String>,
         all_properties: &HashMap<String, HashSet<String>>,
         scope_match_variables: &std::collections::HashSet<String>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
@@ -2244,6 +2246,7 @@ impl HybridPhysicalPlanner {
             target_properties,
             self.graph_ctx.clone(),
             optional,
+            optional_pattern_vars.clone(),
             bound_target_column,
             used_edge_columns,
         ));

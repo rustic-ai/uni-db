@@ -1495,6 +1495,9 @@ pub struct GraphTraverseMainExec {
     /// Whether this is an OPTIONAL MATCH (preserve unmatched source rows with NULLs).
     optional: bool,
 
+    /// Variables introduced by the OPTIONAL MATCH pattern.
+    optional_pattern_vars: HashSet<String>,
+
     /// Column name of an already-bound target VID (for patterns where target is in scope).
     /// When set, only traversals reaching this exact VID are included.
     bound_target_column: Option<String>,
@@ -1538,6 +1541,7 @@ impl GraphTraverseMainExec {
         target_properties: Vec<String>,
         graph_ctx: Arc<GraphExecutionContext>,
         optional: bool,
+        optional_pattern_vars: HashSet<String>,
         bound_target_column: Option<String>,
         used_edge_columns: Vec<String>,
     ) -> Self {
@@ -1567,6 +1571,7 @@ impl GraphTraverseMainExec {
             target_properties,
             graph_ctx,
             optional,
+            optional_pattern_vars,
             bound_target_column,
             used_edge_columns,
             schema,
@@ -1703,6 +1708,7 @@ impl ExecutionPlan for GraphTraverseMainExec {
             target_properties: self.target_properties.clone(),
             graph_ctx: self.graph_ctx.clone(),
             optional: self.optional,
+            optional_pattern_vars: self.optional_pattern_vars.clone(),
             bound_target_column: self.bound_target_column.clone(),
             used_edge_columns: self.used_edge_columns.clone(),
             schema: self.schema.clone(),
@@ -1730,6 +1736,7 @@ impl ExecutionPlan for GraphTraverseMainExec {
             self.target_properties.clone(),
             self.graph_ctx.clone(),
             self.optional,
+            self.optional_pattern_vars.clone(),
             self.bound_target_column.clone(),
             self.used_edge_columns.clone(),
             self.schema.clone(),
@@ -1781,6 +1788,9 @@ struct GraphTraverseMainStream {
     /// Whether this is optional (preserve unmatched rows).
     optional: bool,
 
+    /// Variables introduced by OPTIONAL pattern.
+    optional_pattern_vars: HashSet<String>,
+
     /// Column name of an already-bound target VID (for filtering).
     bound_target_column: Option<String>,
 
@@ -1811,6 +1821,7 @@ impl GraphTraverseMainStream {
         target_properties: Vec<String>,
         graph_ctx: Arc<GraphExecutionContext>,
         optional: bool,
+        optional_pattern_vars: HashSet<String>,
         bound_target_column: Option<String>,
         used_edge_columns: Vec<String>,
         schema: SchemaRef,
@@ -1830,6 +1841,7 @@ impl GraphTraverseMainStream {
             target_properties,
             graph_ctx,
             optional,
+            optional_pattern_vars,
             bound_target_column,
             used_edge_columns,
             schema,
@@ -2132,16 +2144,23 @@ impl GraphTraverseMainStream {
 
         // Handle OPTIONAL: append unmatched rows with NULLs
         if self.optional {
-            let unmatched: Vec<usize> = (0..input.num_rows())
-                .filter(|idx| !matched_rows.contains(idx))
-                .collect();
+            let unmatched = collect_unmatched_optional_group_rows(
+                input,
+                &matched_rows,
+                &self.schema,
+                &self.optional_pattern_vars,
+            )?;
 
             if unmatched.is_empty() {
                 return Ok(matched_batch);
             }
 
-            let unmatched_batch =
-                build_optional_null_batch_for_rows(input, &unmatched, &self.schema)?;
+            let unmatched_batch = build_optional_null_batch_for_rows_with_optional_vars(
+                input,
+                &unmatched,
+                &self.schema,
+                &self.optional_pattern_vars,
+            )?;
 
             // Concatenate matched and unmatched batches
             use arrow::compute::concat_batches;

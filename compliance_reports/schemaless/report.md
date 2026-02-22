@@ -1,17 +1,19 @@
 # TCK Compliance Report
 
-**Generated:** 2026-02-22 10:39:14
-**Results:** `results_20260222_103914.json`
-**Compared to:** `results_20260222_102958.json`
+**Generated:** 2026-02-22 14:14:44
+**Results:** `results_20260222_141444.json`
+**Compared to:** `results_20260222_124642.json`
 
 ## Summary
 
 | Metric | Current | Previous | Delta |
 |--------|---------|----------|-------|
 | Scenarios | 3897 | 3897 |  |
-| Passed | 3885 | 3885 |  |
-| Failed | 11 | 11 |  |
-| Pass Rate | 99.7% | 99.7% | ➡️ +0.0pp |
+| Passed | 3893 | 3885 | +8 |
+| Failed | 3 | 11 | -8 |
+| Pass Rate | 99.9% | 99.7% | 📈 +0.2pp |
+
+**🟢 Fixed:** 8 scenarios now passing
 
 ## Feature Breakdown
 
@@ -59,13 +61,13 @@
 | ✅ Graph3 | 9 | 9 | 0 | 100% |  |
 | ✅ Graph4 | 11 | 11 | 0 | 100% |  |
 | ✅ Graph5 | 9 | 9 | 0 | 100% |  |
-| ✅ Graph6 | 14 | 13 | 1 | 93% |  |
+| ✅ Graph6 | 14 | 14 | 0 | 100% | +7pp |
 | ✅ Graph7 | 3 | 3 | 0 | 100% |  |
 | ✅ Graph8 | 8 | 8 | 0 | 100% |  |
 | ✅ Graph9 | 7 | 7 | 0 | 100% |  |
 | ✅ List1 | 23 | 23 | 0 | 100% |  |
-| ✅ List11 | 67 | 66 | 1 | 99% |  |
-| ✅ List12 | 7 | 6 | 1 | 86% |  |
+| ✅ List11 | 67 | 67 | 0 | 100% | +1pp |
+| ✅ List12 | 7 | 7 | 0 | 100% | +14pp |
 | ✅ List2 | 15 | 15 | 0 | 100% |  |
 | ✅ List3 | 7 | 7 | 0 | 100% |  |
 | ✅ List4 | 2 | 2 | 0 | 100% |  |
@@ -170,13 +172,13 @@
 | ✅ String8 | 9 | 9 | 0 | 100% |  |
 | ✅ String9 | 9 | 9 | 0 | 100% |  |
 | ✅ Temporal1 | 207 | 207 | 0 | 100% |  |
-| ✅ Temporal10 | 131 | 129 | 2 | 98% |  |
+| ✅ Temporal10 | 131 | 131 | 0 | 100% | +2pp |
 | ✅ Temporal2 | 53 | 53 | 0 | 100% |  |
 | ✅ Temporal3 | 183 | 183 | 0 | 100% |  |
 | ✅ Temporal4 | 39 | 39 | 0 | 100% |  |
-| ✅ Temporal5 | 7 | 6 | 1 | 86% |  |
+| ✅ Temporal5 | 7 | 7 | 0 | 100% | +14pp |
 | ✅ Temporal6 | 17 | 17 | 0 | 100% |  |
-| ✅ Temporal7 | 18 | 16 | 2 | 89% |  |
+| ✅ Temporal7 | 18 | 18 | 0 | 100% | +11pp |
 | ✅ Temporal8 | 27 | 27 | 0 | 100% |  |
 | ✅ Temporal9 | 322 | 322 | 0 | 100% |  |
 | ✅ TriadicSelection1 | 19 | 19 | 0 | 100% |  |
@@ -210,44 +212,20 @@
 | ✅ WithWhere6 | 1 | 1 | 0 | 100% |  |
 | ✅ WithWhere7 | 3 | 3 | 0 | 100% |  |
 
+## 🟢 Newly Passing
+
+Scenarios that were failing but are now passing:
+
+- **Graph6** — [6] Statically access a property of a optional non-null relationship (line 111)
+- **List11** — [3] Create an empty list if range direction and step direction are inconsistent (line 101)
+- **List12** — [6] Using a list comprehension in a WHERE (line 127)
+- **Temporal10** — [10] Should handle large durations in seconds (line 263)
+- **Temporal10** — [9] Should handle large durations (line 252)
+- **Temporal5** — [6] Should provide accessors for date time (line 119)
+- **Temporal7** — [6] Should compare durations for equality (line 134)
+- **Temporal7** — [6] Should compare durations for equality (line 136)
+
 ## Failed Scenarios
-
-### Graph6
-
-- **[6] Statically access a property of a optional non-null relationship** (line 111)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/graph/Graph6.feature:122:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): Row count mismatch: expected 1, got 2
-[Summary]
-1 feature
-1 scenario (1 failed)
-4 steps (3 passed, 1
-  ... (truncated)
-  ```
-
-### List11
-
-- **[3] Create an empty list if range direction and step direction are inconsistent** (line 101)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/list/List11.feature:112:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "DataFusion planning failed: This feature is not implemented: Unsupported
-  ... (truncated)
-  ```
-
-### List12
-
-- **[6] Using a list comprehension in a WHERE** (line 127)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/list/List12.feature:141:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "IN operator with custom expressions not yet supported", query: Some("\nM
-  ... (truncated)
-  ```
 
 ### Match5
 
@@ -285,54 +263,5 @@
       Defined: tck/features/clauses/return/Return6.feature:294:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
       Step panicked. Captured output: Query returned error instead of result: Query { message: "Error during planning: Function 'abs' expects NativeType::Numeric but rec
-  ... (truncated)
-  ```
-
-### Temporal10
-
-- **[9] Should handle large durations** (line 252)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal10.feature:258:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: date(): Invalid date format: Cannot parse datet
-  ... (truncated)
-  ```
-- **[10] Should handle large durations in seconds** (line 263)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal10.feature:269:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: localdatetime(): Cannot parse datetime: -999999
-  ... (truncated)
-  ```
-
-### Temporal5
-
-- **[6] Should provide accessors for date time** (line 119)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal5.feature:133:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("d.weekDay", Some(Int(7))), ("d.epochSeconds
-  ... (truncated)
-  ```
-
-### Temporal7
-
-- **[6] Should compare durations for equality** (line 134)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal7.feature:125:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Error during planning: Cannot infer common argument type for comp
-  ... (truncated)
-  ```
-- **[6] Should compare durations for equality** (line 136)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal7.feature:125:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Error during planning: Cannot infer common argument type for comp
   ... (truncated)
   ```
