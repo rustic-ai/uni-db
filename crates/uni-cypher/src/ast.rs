@@ -633,6 +633,19 @@ pub enum MapProjectionItem {
     Variable(String),                // variable
 }
 
+impl MapProjectionItem {
+    fn to_string_repr(&self) -> String {
+        match self {
+            MapProjectionItem::Property(prop) => format!(".{prop}"),
+            MapProjectionItem::AllProperties => ".*".to_string(),
+            MapProjectionItem::LiteralEntry(key, expr) => {
+                format!("{key}: {}", expr.to_string_repr())
+            }
+            MapProjectionItem::Variable(v) => v.clone(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum Quantifier {
     All,
@@ -922,6 +935,15 @@ fn apply_suffixes(mut expr: Expr, suffixes: Vec<ExprSuffix>) -> Expr {
     expr
 }
 
+/// Join a slice of expressions with a separator using `to_string_repr`.
+fn join_exprs(exprs: &[Expr], sep: &str) -> String {
+    exprs
+        .iter()
+        .map(|e| e.to_string_repr())
+        .collect::<Vec<_>>()
+        .join(sep)
+}
+
 impl Expr {
     /// Sentinel expression representing a literal `true`.
     ///
@@ -936,10 +958,9 @@ impl Expr {
 
     /// Extract a simple variable name if this expression is just a variable reference
     pub fn extract_variable(&self) -> Option<String> {
-        if let Expr::Variable(v) = self {
-            Some(v.clone())
-        } else {
-            None
+        match self {
+            Expr::Variable(v) => Some(v.clone()),
+            _ => None,
         }
     }
 
@@ -1217,14 +1238,7 @@ impl Expr {
             Expr::Property(base, prop) => {
                 format!("{}.{prop}", base.to_string_repr())
             }
-            Expr::List(exprs) => {
-                let items = exprs
-                    .iter()
-                    .map(|e| e.to_string_repr())
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                format!("[{items}]")
-            }
+            Expr::List(exprs) => format!("[{}]", join_exprs(exprs, ", ")),
             Expr::Map(entries) => {
                 let items = entries
                     .iter()
@@ -1239,11 +1253,7 @@ impl Expr {
                 distinct,
                 window_spec,
             } => {
-                let args_str = args
-                    .iter()
-                    .map(|e| e.to_string_repr())
-                    .collect::<Vec<_>>()
-                    .join(", ");
+                let args_str = join_exprs(args, ", ");
                 let distinct_str = if *distinct { "DISTINCT " } else { "" };
                 let base = format!("{name}({distinct_str}{args_str})");
                 let Some(window) = window_spec else {
@@ -1251,13 +1261,10 @@ impl Expr {
                 };
                 let mut parts = Vec::new();
                 if !window.partition_by.is_empty() {
-                    let cols = window
-                        .partition_by
-                        .iter()
-                        .map(|e| e.to_string_repr())
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                    parts.push(format!("PARTITION BY {cols}"));
+                    parts.push(format!(
+                        "PARTITION BY {}",
+                        join_exprs(&window.partition_by, ", ")
+                    ));
                 }
                 if !window.order_by.is_empty() {
                     let items = window
@@ -1409,14 +1416,7 @@ impl Expr {
             Expr::MapProjection { base, items } => {
                 let items_str = items
                     .iter()
-                    .map(|item| match item {
-                        MapProjectionItem::Property(prop) => format!(".{prop}"),
-                        MapProjectionItem::AllProperties => ".*".to_string(),
-                        MapProjectionItem::LiteralEntry(key, expr) => {
-                            format!("{key}: {}", expr.to_string_repr())
-                        }
-                        MapProjectionItem::Variable(v) => v.clone(),
-                    })
+                    .map(MapProjectionItem::to_string_repr)
                     .collect::<Vec<_>>()
                     .join(", ");
                 format!("{}{{{items_str}}}", base.to_string_repr())

@@ -183,9 +183,7 @@ impl GraphUnwindExec {
 
         let mut field = Field::new(variable, type_info.data_type, true);
         if type_info.is_cv_encoded {
-            let mut metadata = std::collections::HashMap::new();
-            metadata.insert("cv_encoded".to_string(), "true".to_string());
-            field = field.with_metadata(metadata);
+            field = field.with_metadata(HashMap::from([("cv_encoded".into(), "true".into())]));
         }
         fields.push(Arc::new(field));
 
@@ -214,7 +212,7 @@ impl ExecutionPlan for GraphUnwindExec {
     }
 
     fn schema(&self) -> SchemaRef {
-        self.schema.clone()
+        Arc::clone(&self.schema)
     }
 
     fn properties(&self) -> &PlanProperties {
@@ -236,7 +234,7 @@ impl ExecutionPlan for GraphUnwindExec {
         }
 
         Ok(Arc::new(Self::new(
-            children[0].clone(),
+            Arc::clone(&children[0]),
             self.expr.clone(),
             self.variable.clone(),
             self.params.clone(),
@@ -255,7 +253,7 @@ impl ExecutionPlan for GraphUnwindExec {
             input: input_stream,
             expr: self.expr.clone(),
             params: self.params.clone(),
-            schema: self.schema.clone(),
+            schema: Arc::clone(&self.schema),
             metrics,
         }))
     }
@@ -415,7 +413,7 @@ impl GraphUnwindStream {
                                     key_strings.into_iter().map(Value::String).collect();
                                 return Ok(Value::List(keys));
                             }
-                            if let Value::Null = val {
+                            if val.is_null() {
                                 return Ok(Value::Null);
                             }
                         }
@@ -451,8 +449,9 @@ impl GraphUnwindStream {
                         for arg in args {
                             eval_args.push(self.evaluate_expr_impl(arg, batch, row_idx)?);
                         }
-                        crate::query::expr_eval::eval_split(&eval_args)
-                            .map_err(|e| datafusion::error::DataFusionError::Execution(e.to_string()))
+                        crate::query::expr_eval::eval_split(&eval_args).map_err(|e| {
+                            datafusion::error::DataFusionError::Execution(e.to_string())
+                        })
                     }
                     _ => {
                         // Unsupported function - return empty list
@@ -527,7 +526,7 @@ impl GraphUnwindStream {
         expansions: &[(usize, Value)],
     ) -> DFResult<RecordBatch> {
         if expansions.is_empty() {
-            return Ok(RecordBatch::new_empty(self.schema.clone()));
+            return Ok(RecordBatch::new_empty(Arc::clone(&self.schema)));
         }
 
         let num_rows = expansions.len();
@@ -628,7 +627,7 @@ impl GraphUnwindStream {
 
         self.metrics.record_output(num_rows);
 
-        RecordBatch::try_new(self.schema.clone(), columns)
+        RecordBatch::try_new(Arc::clone(&self.schema), columns)
             .map_err(|e| datafusion::error::DataFusionError::ArrowError(Box::new(e), None))
     }
 }
@@ -649,7 +648,7 @@ impl Stream for GraphUnwindStream {
 
 impl RecordBatchStream for GraphUnwindStream {
     fn schema(&self) -> SchemaRef {
-        self.schema.clone()
+        Arc::clone(&self.schema)
     }
 }
 

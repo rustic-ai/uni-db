@@ -120,7 +120,10 @@ impl GraphShortestPathExec {
     /// * `direction` - Traversal direction
     /// * `path_variable` - Variable name for the path
     /// * `graph_ctx` - Graph execution context
-    #[expect(clippy::too_many_arguments, reason = "Shortest path requires many parameters")]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Shortest path requires many parameters"
+    )]
     pub fn new(
         input: Arc<dyn ExecutionPlan>,
         source_column: impl Into<String>,
@@ -203,7 +206,7 @@ impl ExecutionPlan for GraphShortestPathExec {
     }
 
     fn schema(&self) -> SchemaRef {
-        self.schema.clone()
+        Arc::clone(&self.schema)
     }
 
     fn properties(&self) -> &PlanProperties {
@@ -225,13 +228,13 @@ impl ExecutionPlan for GraphShortestPathExec {
         }
 
         Ok(Arc::new(Self::new(
-            children[0].clone(),
+            Arc::clone(&children[0]),
             self.source_column.clone(),
             self.target_column.clone(),
             self.edge_type_ids.clone(),
             self.direction,
             self.path_variable.clone(),
-            self.graph_ctx.clone(),
+            Arc::clone(&self.graph_ctx),
             self.all_shortest,
         )))
     }
@@ -256,8 +259,8 @@ impl ExecutionPlan for GraphShortestPathExec {
             edge_type_ids: self.edge_type_ids.clone(),
             direction: self.direction,
             all_shortest: self.all_shortest,
-            graph_ctx: self.graph_ctx.clone(),
-            schema: self.schema.clone(),
+            graph_ctx: Arc::clone(&self.graph_ctx),
+            schema: Arc::clone(&self.schema),
             state: ShortestPathStreamState::Warming(warm_fut),
             metrics,
         }))
@@ -604,7 +607,7 @@ impl GraphShortestPathStream {
 
         self.metrics.record_output(num_rows);
 
-        RecordBatch::try_new(self.schema.clone(), columns)
+        RecordBatch::try_new(Arc::clone(&self.schema), columns)
             .map_err(|e| datafusion::error::DataFusionError::ArrowError(Box::new(e), None))
     }
 
@@ -686,7 +689,7 @@ impl Stream for GraphShortestPathStream {
 
 impl RecordBatchStream for GraphShortestPathStream {
     fn schema(&self) -> SchemaRef {
-        self.schema.clone()
+        Arc::clone(&self.schema)
     }
 }
 

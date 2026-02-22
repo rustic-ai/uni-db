@@ -69,11 +69,7 @@ fn extract_token_span_at(input: &str, pos: usize) -> Option<(usize, usize)> {
         end += 1;
     }
 
-    if start == end {
-        None
-    } else {
-        Some((start, end))
-    }
+    Some((start, end))
 }
 
 fn is_map_key_like_context(input: &str, start: usize, end: usize) -> bool {
@@ -133,26 +129,21 @@ fn is_invalid_number_literal(input: &str, pos: usize) -> bool {
         return false;
     }
     let token = &input[start..end];
-    if token.is_empty() {
-        return false;
-    }
 
     let t = token.strip_prefix('-').unwrap_or(token);
-    if t.is_empty() || !t.as_bytes()[0].is_ascii_digit() {
+    if !t.as_bytes().first().is_some_and(|b| b.is_ascii_digit()) {
         return false;
     }
 
-    if t.starts_with("0x") || t.starts_with("0X") {
-        let digits = &t[2..];
-        return digits.is_empty() || digits.chars().any(|c| !(c.is_ascii_hexdigit() || c == '_'));
-    }
+    let has_only = |digits: &str, valid: fn(&char) -> bool| {
+        digits.is_empty() || !digits.chars().all(|c| valid(&c) || c == '_')
+    };
 
-    if t.starts_with("0o") || t.starts_with("0O") {
-        let digits = &t[2..];
-        return digits.is_empty()
-            || digits
-                .chars()
-                .any(|c| !(matches!(c, '0'..='7') || c == '_'));
+    if let Some(digits) = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")) {
+        return has_only(digits, char::is_ascii_hexdigit);
+    }
+    if let Some(digits) = t.strip_prefix("0o").or_else(|| t.strip_prefix("0O")) {
+        return has_only(digits, |c| matches!(c, '0'..='7'));
     }
 
     // Decimal-like token with alphabetic suffix/midfix, e.g. 9223372h54775808
@@ -161,11 +152,7 @@ fn is_invalid_number_literal(input: &str, pos: usize) -> bool {
 
 fn invalid_unicode_character(input: &str, pos: usize) -> Option<char> {
     let ch = input.get(pos..)?.chars().next()?;
-    if matches!(ch, '—' | '–' | '−') {
-        Some(ch)
-    } else {
-        None
-    }
+    matches!(ch, '—' | '–' | '−').then_some(ch)
 }
 
 fn map_pest_error(input: &str, e: pest::error::Error<Rule>) -> ParseError {

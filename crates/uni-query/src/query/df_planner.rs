@@ -2171,7 +2171,7 @@ impl HybridPhysicalPlanner {
         optional: bool,
         optional_pattern_vars: &HashSet<String>,
         all_properties: &HashMap<String, HashSet<String>>,
-        scope_match_variables: &std::collections::HashSet<String>,
+        scope_match_variables: &HashSet<String>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
         let input_plan = self.plan_internal(input, all_properties)?;
 
@@ -2674,13 +2674,16 @@ impl HybridPhysicalPlanner {
             // column — only expanded property columns like "other._vid",
             // "other.name", etc. Skip them here; the property expansion loop
             // below adds those columns to the group-by instead.
-            if let Expr::Variable(var_name) = expr {
-                if schema.column_with_name(var_name).is_none() {
-                    let prefix = format!("{}.", var_name);
-                    let has_expanded = schema.fields().iter().any(|f| f.name().starts_with(&prefix));
-                    if has_expanded {
-                        continue;
-                    }
+            if let Expr::Variable(var_name) = expr
+                && schema.column_with_name(var_name).is_none()
+            {
+                let prefix = format!("{}.", var_name);
+                let has_expanded = schema
+                    .fields()
+                    .iter()
+                    .any(|f| f.name().starts_with(&prefix));
+                if has_expanded {
+                    continue;
                 }
             }
 
@@ -2737,13 +2740,9 @@ impl HybridPhysicalPlanner {
                 let prefix = format!("{}.", var_name);
                 for (idx, field) in schema.fields().iter().enumerate() {
                     if field.name().starts_with(&prefix) {
-                        let prop_col: Arc<dyn datafusion::physical_expr::PhysicalExpr> =
-                            Arc::new(
-                                datafusion::physical_expr::expressions::Column::new(
-                                    field.name(),
-                                    idx,
-                                ),
-                            );
+                        let prop_col: Arc<dyn datafusion::physical_expr::PhysicalExpr> = Arc::new(
+                            datafusion::physical_expr::expressions::Column::new(field.name(), idx),
+                        );
                         group_exprs.push((prop_col, field.name().clone()));
                     }
                 }

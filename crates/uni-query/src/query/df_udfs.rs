@@ -102,31 +102,29 @@ pub fn register_cypher_udfs(ctx: &SessionContext) -> DFResult<()> {
     ctx.register_udf(create_shift_left_udf());
     ctx.register_udf(create_shift_right_udf());
 
-    // Temporal constructor UDFs
+    // Temporal UDFs: constructors, dotted functions, and clock functions
     for name in &[
+        // Constructors
         "date",
         "time",
         "localtime",
         "localdatetime",
         "datetime",
         "duration",
-    ] {
-        ctx.register_udf(create_temporal_udf(name));
-    }
-
-    // Temporal dotted function UDFs
-    for name in &[
+        // Dotted functions
         "duration.between",
         "duration.inmonths",
         "duration.indays",
         "duration.inseconds",
         "datetime.fromepoch",
         "datetime.fromepochmillis",
+        // Truncation
         "date.truncate",
         "time.truncate",
         "datetime.truncate",
         "localdatetime.truncate",
         "localtime.truncate",
+        // Clock functions
         "datetime.transaction",
         "datetime.statement",
         "datetime.realtime",
@@ -210,7 +208,7 @@ pub fn register_cypher_udfs(ctx: &SessionContext) -> DFResult<()> {
         ctx.register_udf(create_temporal_udf(name));
     }
 
-    // CypherValue-to-Float64 conversion UDF (for sum/avg on LargeBinary columns)
+    // CypherValue-to-Float64 conversion UDF (for SUM/AVG on LargeBinary columns)
     ctx.register_udf(create_cypher_to_float64_udf());
 
     // Cypher-aware aggregate UDAFs
@@ -1074,12 +1072,14 @@ fn extract_i64_range_arg(arg: &ColumnarValue, row_idx: usize, name: &str) -> DFR
             ScalarValue::UInt16(Some(v)) => Ok(*v as i64),
             ScalarValue::UInt32(Some(v)) => Ok(*v as i64),
             ScalarValue::UInt64(Some(v)) => Ok(*v as i64),
-            ScalarValue::LargeBinary(Some(bytes)) => scalar_binary_to_value(bytes).as_i64().ok_or_else(|| {
-                datafusion::error::DataFusionError::Execution(format!(
-                    "ArgumentError: InvalidArgumentType - range() {} must be an integer",
-                    name
-                ))
-            }),
+            ScalarValue::LargeBinary(Some(bytes)) => {
+                scalar_binary_to_value(bytes).as_i64().ok_or_else(|| {
+                    datafusion::error::DataFusionError::Execution(format!(
+                        "ArgumentError: InvalidArgumentType - range() {} must be an integer",
+                        name
+                    ))
+                })
+            }
             _ => Err(datafusion::error::DataFusionError::Execution(format!(
                 "ArgumentError: InvalidArgumentType - range() {} must be an integer",
                 name
@@ -1099,62 +1099,46 @@ fn extract_i64_range_arg(arg: &ColumnarValue, row_idx: usize, name: &str) -> DFR
                     UInt32Array, UInt64Array,
                 };
                 match arr.data_type() {
-                    DataType::Int8 => {
-                        Ok(arr
-                            .as_any()
-                            .downcast_ref::<Int8Array>()
-                            .unwrap()
-                            .value(row_idx) as i64)
-                    }
-                    DataType::Int16 => {
-                        Ok(arr
-                            .as_any()
-                            .downcast_ref::<Int16Array>()
-                            .unwrap()
-                            .value(row_idx) as i64)
-                    }
-                    DataType::Int32 => {
-                        Ok(arr
-                            .as_any()
-                            .downcast_ref::<Int32Array>()
-                            .unwrap()
-                            .value(row_idx) as i64)
-                    }
-                    DataType::Int64 => {
-                        Ok(arr
-                            .as_any()
-                            .downcast_ref::<Int64Array>()
-                            .unwrap()
-                            .value(row_idx))
-                    }
-                    DataType::UInt8 => {
-                        Ok(arr
-                            .as_any()
-                            .downcast_ref::<UInt8Array>()
-                            .unwrap()
-                            .value(row_idx) as i64)
-                    }
-                    DataType::UInt16 => {
-                        Ok(arr
-                            .as_any()
-                            .downcast_ref::<UInt16Array>()
-                            .unwrap()
-                            .value(row_idx) as i64)
-                    }
-                    DataType::UInt32 => {
-                        Ok(arr
-                            .as_any()
-                            .downcast_ref::<UInt32Array>()
-                            .unwrap()
-                            .value(row_idx) as i64)
-                    }
-                    DataType::UInt64 => {
-                        Ok(arr
-                            .as_any()
-                            .downcast_ref::<UInt64Array>()
-                            .unwrap()
-                            .value(row_idx) as i64)
-                    }
+                    DataType::Int8 => Ok(arr
+                        .as_any()
+                        .downcast_ref::<Int8Array>()
+                        .unwrap()
+                        .value(row_idx) as i64),
+                    DataType::Int16 => Ok(arr
+                        .as_any()
+                        .downcast_ref::<Int16Array>()
+                        .unwrap()
+                        .value(row_idx) as i64),
+                    DataType::Int32 => Ok(arr
+                        .as_any()
+                        .downcast_ref::<Int32Array>()
+                        .unwrap()
+                        .value(row_idx) as i64),
+                    DataType::Int64 => Ok(arr
+                        .as_any()
+                        .downcast_ref::<Int64Array>()
+                        .unwrap()
+                        .value(row_idx)),
+                    DataType::UInt8 => Ok(arr
+                        .as_any()
+                        .downcast_ref::<UInt8Array>()
+                        .unwrap()
+                        .value(row_idx) as i64),
+                    DataType::UInt16 => Ok(arr
+                        .as_any()
+                        .downcast_ref::<UInt16Array>()
+                        .unwrap()
+                        .value(row_idx) as i64),
+                    DataType::UInt32 => Ok(arr
+                        .as_any()
+                        .downcast_ref::<UInt32Array>()
+                        .unwrap()
+                        .value(row_idx) as i64),
+                    DataType::UInt64 => Ok(arr
+                        .as_any()
+                        .downcast_ref::<UInt64Array>()
+                        .unwrap()
+                        .value(row_idx) as i64),
                     DataType::LargeBinary => {
                         let bytes = arr
                             .as_any()
@@ -1581,53 +1565,47 @@ impl ScalarUDFImpl for TemporalUdf {
 
     fn return_type(&self, _arg_types: &[DataType]) -> DFResult<DataType> {
         let name = self.name.to_lowercase();
-        // Extraction functions return Int64
-        if matches!(
-            name.as_str(),
-            "year" | "month" | "day" | "hour" | "minute" | "second"
-        ) {
-            Ok(DataType::Int64)
-        } else {
-            match name.as_str() {
-                // Temporal constructors use LargeBinary (CypherValue codec) to preserve
-                // timezone names, Duration components, and nanosecond precision through
-                // the DataFusion pipeline. Constant-folded calls bypass UDFs entirely.
-                // duration.inMonths/inDays/inSeconds compute durations between two temporal
-                // values and return Duration compound types, not plain integers.
-                "datetime"
-                | "localdatetime"
-                | "date"
-                | "time"
-                | "localtime"
-                | "duration"
-                | "date.truncate"
-                | "time.truncate"
-                | "datetime.truncate"
-                | "localdatetime.truncate"
-                | "localtime.truncate"
-                | "duration.between"
-                | "duration.inmonths"
-                | "duration.indays"
-                | "duration.inseconds"
-                | "datetime.fromepoch"
-                | "datetime.fromepochmillis"
-                | "datetime.transaction"
-                | "datetime.statement"
-                | "datetime.realtime"
-                | "date.transaction"
-                | "date.statement"
-                | "date.realtime"
-                | "time.transaction"
-                | "time.statement"
-                | "time.realtime"
-                | "localtime.transaction"
-                | "localtime.statement"
-                | "localtime.realtime"
-                | "localdatetime.transaction"
-                | "localdatetime.statement"
-                | "localdatetime.realtime" => Ok(DataType::LargeBinary),
-                _ => Ok(DataType::Utf8),
-            }
+        match name.as_str() {
+            // Extraction functions return Int64
+            "year" | "month" | "day" | "hour" | "minute" | "second" => Ok(DataType::Int64),
+            // Temporal constructors use LargeBinary (CypherValue codec) to preserve
+            // timezone names, Duration components, and nanosecond precision through
+            // the DataFusion pipeline. Constant-folded calls bypass UDFs entirely.
+            // duration.inMonths/inDays/inSeconds compute durations between two temporal
+            // values and return Duration compound types, not plain integers.
+            "datetime"
+            | "localdatetime"
+            | "date"
+            | "time"
+            | "localtime"
+            | "duration"
+            | "date.truncate"
+            | "time.truncate"
+            | "datetime.truncate"
+            | "localdatetime.truncate"
+            | "localtime.truncate"
+            | "duration.between"
+            | "duration.inmonths"
+            | "duration.indays"
+            | "duration.inseconds"
+            | "datetime.fromepoch"
+            | "datetime.fromepochmillis"
+            | "datetime.transaction"
+            | "datetime.statement"
+            | "datetime.realtime"
+            | "date.transaction"
+            | "date.statement"
+            | "date.realtime"
+            | "time.transaction"
+            | "time.statement"
+            | "time.realtime"
+            | "localtime.transaction"
+            | "localtime.statement"
+            | "localtime.realtime"
+            | "localdatetime.transaction"
+            | "localdatetime.statement"
+            | "localdatetime.realtime" => Ok(DataType::LargeBinary),
+            _ => Ok(DataType::Utf8),
         }
     }
 
@@ -5858,9 +5836,8 @@ impl DfAccumulator for CypherMinMaxAccumulator {
         match &self.current {
             None => {
                 // Return null of the declared return type
-                ScalarValue::try_from(&self.return_type).map_err(|e| {
-                    datafusion::error::DataFusionError::Execution(e.to_string())
-                })
+                ScalarValue::try_from(&self.return_type)
+                    .map_err(|e| datafusion::error::DataFusionError::Execution(e.to_string()))
             }
             Some(val) => {
                 // For LargeBinary return type, encode as CypherValue bytes

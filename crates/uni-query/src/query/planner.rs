@@ -1166,7 +1166,7 @@ impl ConstNumber {
 
 fn eval_const_numeric_expr(
     expr: &Expr,
-    params: &std::collections::HashMap<String, uni_common::Value>,
+    params: &HashMap<String, uni_common::Value>,
 ) -> Result<ConstNumber> {
     match expr {
         Expr::Literal(CypherLiteral::Integer(n)) => Ok(ConstNumber::Int(*n)),
@@ -1261,7 +1261,7 @@ fn eval_const_numeric_expr(
 fn parse_non_negative_integer(
     expr: &Expr,
     clause_name: &str,
-    params: &std::collections::HashMap<String, uni_common::Value>,
+    params: &HashMap<String, uni_common::Value>,
 ) -> Result<Option<usize>> {
     let referenced_vars = collect_expr_variables(expr);
     if !referenced_vars.is_empty() {
@@ -1323,10 +1323,7 @@ fn validate_no_nested_aggregation(expr: &Expr) -> Result<()> {
 /// Validate that an expression does not access properties or labels of
 /// deleted entities. `type(r)` on a deleted relationship is allowed per
 /// OpenCypher spec, but `n.prop` and `labels(n)` are not.
-fn validate_no_deleted_entity_access(
-    expr: &Expr,
-    deleted_vars: &std::collections::HashSet<String>,
-) -> Result<()> {
+fn validate_no_deleted_entity_access(expr: &Expr, deleted_vars: &HashSet<String>) -> Result<()> {
     // Check n.prop on a deleted variable
     if let Expr::Property(inner, _) = expr
         && let Expr::Variable(name) = inner.as_ref()
@@ -1748,19 +1745,19 @@ pub enum LogicalPlan {
         optional: bool,
         target_filter: Option<Expr>,
         path_variable: Option<String>,
-        edge_properties: std::collections::HashSet<String>,
+        edge_properties: HashSet<String>,
         /// Whether this is a variable-length pattern (has `*` range specifier).
         /// When true, step_variable holds a list of edges (even for *1..1).
         is_variable_length: bool,
         /// All variables from this OPTIONAL MATCH pattern.
         /// When any hop in the pattern fails, ALL these variables should be set to NULL.
         /// This ensures proper multi-hop OPTIONAL MATCH semantics.
-        optional_pattern_vars: std::collections::HashSet<String>,
+        optional_pattern_vars: HashSet<String>,
         /// Variable names (node + edge) from the current MATCH clause scope.
         /// Used for relationship uniqueness scoping: only edge ID columns whose
         /// associated variable is in this set participate in uniqueness filtering.
         /// Variables from previous disconnected MATCH clauses are excluded.
-        scope_match_variables: std::collections::HashSet<String>,
+        scope_match_variables: HashSet<String>,
         /// Edge property predicate for VLP inline filtering (instead of post-Filter).
         edge_filter_expr: Option<Expr>,
         /// Path traversal semantics (Trail by default for OpenCypher).
@@ -1790,11 +1787,11 @@ pub enum LogicalPlan {
         is_variable_length: bool,
         /// All variables from this OPTIONAL MATCH pattern.
         /// When any hop in the pattern fails, ALL these variables should be set to NULL.
-        optional_pattern_vars: std::collections::HashSet<String>,
+        optional_pattern_vars: HashSet<String>,
         /// Variables belonging to the current MATCH clause scope.
         /// Used for relationship uniqueness scoping: only edge columns whose
         /// associated variable is in this set participate in uniqueness filtering.
-        scope_match_variables: std::collections::HashSet<String>,
+        scope_match_variables: HashSet<String>,
         /// Edge property predicate for VLP inline filtering (instead of post-Filter).
         edge_filter_expr: Option<Expr>,
         /// Path traversal semantics (Trail by default for OpenCypher).
@@ -1806,7 +1803,7 @@ pub enum LogicalPlan {
         /// Variables from OPTIONAL MATCH that should preserve NULL rows.
         /// When evaluating the filter, if any of these variables are NULL,
         /// the row is preserved regardless of the predicate result.
-        optional_variables: std::collections::HashSet<String>,
+        optional_variables: HashSet<String>,
     },
     Create {
         input: Box<LogicalPlan>,
@@ -2192,11 +2189,11 @@ fn extract_float_literal(expr: &Expr) -> Option<f32> {
 pub struct QueryPlanner {
     schema: Arc<Schema>,
     /// Cache of parsed generation expressions, keyed by (label_name, gen_col_name).
-    gen_expr_cache: std::collections::HashMap<(String, String), Expr>,
+    gen_expr_cache: HashMap<(String, String), Expr>,
     /// Counter for generating unique anonymous variable names.
     anon_counter: std::cell::Cell<usize>,
     /// Optional query parameters for resolving $param in SKIP/LIMIT.
-    params: std::collections::HashMap<String, uni_common::Value>,
+    params: HashMap<String, uni_common::Value>,
 }
 
 struct TraverseParams<'a> {
@@ -2206,13 +2203,13 @@ struct TraverseParams<'a> {
     path_variable: Option<String>,
     /// All variables from this OPTIONAL MATCH pattern.
     /// Used to ensure multi-hop patterns correctly NULL all vars when any hop fails.
-    optional_pattern_vars: std::collections::HashSet<String>,
+    optional_pattern_vars: HashSet<String>,
 }
 
 impl QueryPlanner {
     pub fn new(schema: Arc<Schema>) -> Self {
         // Pre-parse all generation expressions for caching
-        let mut gen_expr_cache = std::collections::HashMap::new();
+        let mut gen_expr_cache = HashMap::new();
         for (label, props) in &schema.properties {
             for (gen_col, meta) in props {
                 if let Some(expr_str) = &meta.generation_expression
@@ -2226,15 +2223,12 @@ impl QueryPlanner {
             schema,
             gen_expr_cache,
             anon_counter: std::cell::Cell::new(0),
-            params: std::collections::HashMap::new(),
+            params: HashMap::new(),
         }
     }
 
     /// Set query parameters for resolving `$param` references in SKIP/LIMIT.
-    pub fn with_params(
-        mut self,
-        params: std::collections::HashMap<String, uni_common::Value>,
-    ) -> Self {
+    pub fn with_params(mut self, params: HashMap<String, uni_common::Value>) -> Self {
         self.params = params;
         self
     }
@@ -2819,11 +2813,10 @@ impl QueryPlanner {
         // Track variables introduced by CREATE clauses so we can distinguish
         // MATCH-introduced variables (which cannot be re-created as bare nodes)
         // from CREATE-introduced variables (which can be referenced as bare nodes).
-        let mut create_introduced_vars: std::collections::HashSet<String> =
-            std::collections::HashSet::new();
+        let mut create_introduced_vars: HashSet<String> = HashSet::new();
         // Track variables targeted by DELETE so we can reject property/label
         // access on deleted entities in subsequent RETURN clauses.
-        let mut deleted_vars: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut deleted_vars: HashSet<String> = HashSet::new();
 
         let clause_count = query.clauses.len();
         for (clause_idx, clause) in query.clauses.into_iter().enumerate() {
@@ -3608,13 +3601,13 @@ impl QueryPlanner {
         }
 
         // Collect variables introduced by this OPTIONAL MATCH pattern
-        let optional_vars: std::collections::HashSet<String> = if match_clause.optional {
+        let optional_vars: HashSet<String> = if match_clause.optional {
             vars_in_scope[vars_before_pattern..]
                 .iter()
                 .map(|v| v.name.clone())
                 .collect()
         } else {
-            std::collections::HashSet::new()
+            HashSet::new()
         };
 
         // Handle WHERE clause with vector_similarity and predicate pushdown
@@ -3686,7 +3679,7 @@ impl QueryPlanner {
             plan = LogicalPlan::Filter {
                 input: Box::new(plan),
                 predicate: prop_filter,
-                optional_variables: std::collections::HashSet::new(),
+                optional_variables: HashSet::new(),
             };
         }
 
@@ -3718,7 +3711,7 @@ impl QueryPlanner {
                 plan = LogicalPlan::Filter {
                     input: Box::new(plan),
                     predicate: prop_filter,
-                    optional_variables: std::collections::HashSet::new(),
+                    optional_variables: HashSet::new(),
                 };
             }
             0 // Wildcard for already-bound target
@@ -3839,8 +3832,8 @@ impl QueryPlanner {
 
         // For OPTIONAL MATCH, extract all variables from this pattern upfront.
         // When any hop fails in a multi-hop pattern, ALL these variables should be NULL.
-        let mut optional_pattern_vars: std::collections::HashSet<String> = if optional {
-            let mut vars = std::collections::HashSet::new();
+        let mut optional_pattern_vars: HashSet<String> = if optional {
+            let mut vars = HashSet::new();
             for element in elements {
                 match element {
                     PatternElement::Node(n) => {
@@ -3893,15 +3886,15 @@ impl QueryPlanner {
             }
             vars
         } else {
-            std::collections::HashSet::new()
+            HashSet::new()
         };
 
         // Pre-scan path elements for bound edge variables from previous MATCH clauses.
         // These must participate in Trail mode (relationship uniqueness) enforcement
         // across ALL segments in this path, so that VLP segments like [*0..1] don't
         // traverse through edges already claimed by a bound relationship [r].
-        let path_bound_edge_vars: std::collections::HashSet<String> = {
-            let mut bound = std::collections::HashSet::new();
+        let path_bound_edge_vars: HashSet<String> = {
+            let mut bound = HashSet::new();
             for element in elements {
                 if let PatternElement::Relationship(rel) = element
                     && let Some(ref var_name) = rel.variable
@@ -3963,7 +3956,7 @@ impl QueryPlanner {
                             plan = LogicalPlan::Filter {
                                 input: Box::new(plan),
                                 predicate: node_filter,
-                                optional_variables: std::collections::HashSet::new(),
+                                optional_variables: HashSet::new(),
                             };
                         }
                     } else {
@@ -4017,10 +4010,8 @@ impl QueryPlanner {
                                     }
 
                                     // Plan the traverse from the current source node
-                                    let target_was_bound = n_target
-                                        .variable
-                                        .as_ref()
-                                        .is_some_and(|v| {
+                                    let target_was_bound =
+                                        n_target.variable.as_ref().is_some_and(|v| {
                                             !v.is_empty() && is_var_in_scope(vars_in_scope, v)
                                         });
                                     let (new_plan, target_var, effective_target) = self
@@ -4160,7 +4151,7 @@ impl QueryPlanner {
                             plan = LogicalPlan::Filter {
                                 input: Box::new(plan),
                                 predicate: prop_filter,
-                                optional_variables: std::collections::HashSet::new(),
+                                optional_variables: HashSet::new(),
                             };
                         }
                         outer_src.clone()
@@ -4179,7 +4170,7 @@ impl QueryPlanner {
                                 plan = LogicalPlan::Filter {
                                     input: Box::new(plan),
                                     predicate: prop_filter,
-                                    optional_variables: std::collections::HashSet::new(),
+                                    optional_variables: HashSet::new(),
                                 };
                             }
                         } else {
@@ -4198,9 +4189,10 @@ impl QueryPlanner {
                         let mut relationship = qpp_rels[0].0.clone();
                         relationship.range = range.clone();
 
-                        let target_was_bound = target_node.variable.as_ref().is_some_and(|v| {
-                            !v.is_empty() && is_var_in_scope(vars_in_scope, v)
-                        });
+                        let target_was_bound = target_node
+                            .variable
+                            .as_ref()
+                            .is_some_and(|v| !v.is_empty() && is_var_in_scope(vars_in_scope, v));
                         let (new_plan, target_var, _effective_target) = self
                             .plan_traverse_with_source(
                                 plan,
@@ -4285,11 +4277,11 @@ impl QueryPlanner {
                             .and_then(|l| self.schema.get_label_case_insensitive(l));
 
                         // Collect scope match variables
-                        let mut scope_match_variables: std::collections::HashSet<String> =
-                            vars_in_scope[vars_before_pattern..]
-                                .iter()
-                                .map(|v| v.name.clone())
-                                .collect();
+                        let mut scope_match_variables: HashSet<String> = vars_in_scope
+                            [vars_before_pattern..]
+                            .iter()
+                            .map(|v| v.name.clone())
+                            .collect();
                         scope_match_variables.insert(target_variable.clone());
 
                         // Handle bound target: use rebound variable for traverse
@@ -4321,7 +4313,7 @@ impl QueryPlanner {
                                 &target_node.properties,
                             ),
                             path_variable: path_variable.clone(),
-                            edge_properties: std::collections::HashSet::new(),
+                            edge_properties: HashSet::new(),
                             is_variable_length: true,
                             optional_pattern_vars: optional_pattern_vars.clone(),
                             scope_match_variables,
@@ -4350,7 +4342,7 @@ impl QueryPlanner {
                                 optional_variables: if optional {
                                     optional_pattern_vars.clone()
                                 } else {
-                                    std::collections::HashSet::new()
+                                    HashSet::new()
                                 },
                             };
                         }
@@ -4427,7 +4419,7 @@ impl QueryPlanner {
         params: TraverseParams<'_>,
         source_variable: &str,
         vars_before_pattern: usize,
-        path_bound_edge_vars: &std::collections::HashSet<String>,
+        path_bound_edge_vars: &HashSet<String>,
     ) -> Result<(LogicalPlan, String, String)> {
         // Check for parameter used as relationship predicate
         if let Some(Expr::Parameter(_)) = &params.rel.properties {
@@ -4570,8 +4562,7 @@ impl QueryPlanner {
             let path_var = params.path_variable.clone();
 
             // Compute scope_match_variables for relationship uniqueness scoping.
-            let mut scope_match_variables: std::collections::HashSet<String> = vars_in_scope
-                [vars_before_pattern..]
+            let mut scope_match_variables: HashSet<String> = vars_in_scope[vars_before_pattern..]
                 .iter()
                 .map(|v| v.name.clone())
                 .collect();
@@ -4648,7 +4639,7 @@ impl QueryPlanner {
                 let filter_optional_vars = if params.optional {
                     params.optional_pattern_vars.clone()
                 } else {
-                    std::collections::HashSet::new()
+                    HashSet::new()
                 };
                 plan = LogicalPlan::Filter {
                     input: Box::new(plan),
@@ -4695,7 +4686,7 @@ impl QueryPlanner {
             // Infer from edge type(s)
             let unique_dsts: Vec<_> = dst_labels
                 .into_iter()
-                .collect::<std::collections::HashSet<_>>()
+                .collect::<HashSet<_>>()
                 .into_iter()
                 .collect();
             if unique_dsts.len() == 1 {
@@ -4771,8 +4762,7 @@ impl QueryPlanner {
         // and anonymous `__eid_to_target`) are only included in uniqueness filtering
         // if their associated variable is in this set. This prevents relationship
         // uniqueness from being enforced across disconnected MATCH clauses.
-        let mut scope_match_variables: std::collections::HashSet<String> = vars_in_scope
-            [vars_before_pattern..]
+        let mut scope_match_variables: HashSet<String> = vars_in_scope[vars_before_pattern..]
             .iter()
             .map(|v| v.name.clone())
             .collect();
@@ -4803,7 +4793,7 @@ impl QueryPlanner {
                 &params.target_node.properties,
             ),
             path_variable: path_var.clone(),
-            edge_properties: std::collections::HashSet::new(),
+            edge_properties: HashSet::new(),
             is_variable_length,
             optional_pattern_vars: params.optional_pattern_vars.clone(),
             scope_match_variables,
@@ -4829,7 +4819,7 @@ impl QueryPlanner {
         let filter_optional_vars = if params.optional {
             params.optional_pattern_vars.clone()
         } else {
-            std::collections::HashSet::new()
+            HashSet::new()
         };
 
         // Apply relationship property predicates (e.g. [r {k: v}]).
@@ -5070,7 +5060,7 @@ impl QueryPlanner {
                 LogicalPlan::Filter {
                     input: Box::new(input),
                     predicate,
-                    optional_variables: std::collections::HashSet::new(),
+                    optional_variables: HashSet::new(),
                 }
             } else {
                 input
@@ -5175,7 +5165,7 @@ impl QueryPlanner {
         predicate: &Expr,
         plan: LogicalPlan,
         vars_in_scope: &[VariableInfo],
-        optional_vars: std::collections::HashSet<String>,
+        optional_vars: HashSet<String>,
     ) -> Result<LogicalPlan> {
         // Validate no aggregation functions in WHERE clause
         validate_no_aggregation_in_where(predicate)?;
@@ -5786,8 +5776,7 @@ impl QueryPlanner {
 
         // Collect extra variables that need to survive the projection stage
         // for later WHERE / ORDER BY evaluation, then strip them afterwards.
-        let projected_names: std::collections::HashSet<&str> =
-            new_vars.iter().map(|v| v.name.as_str()).collect();
+        let projected_names: HashSet<&str> = new_vars.iter().map(|v| v.name.as_str()).collect();
         let mut passthrough_extras: Vec<String> = Vec::new();
         let mut seen_passthrough: HashSet<String> = HashSet::new();
 
@@ -5886,7 +5875,7 @@ impl QueryPlanner {
             plan = LogicalPlan::Filter {
                 input: Box::new(plan),
                 predicate: predicate.clone(),
-                optional_variables: std::collections::HashSet::new(),
+                optional_variables: HashSet::new(),
             };
         }
 
@@ -6160,7 +6149,7 @@ impl QueryPlanner {
         LogicalPlan::Filter {
             input: Box::new(plan),
             predicate: bound_check,
-            optional_variables: std::collections::HashSet::new(),
+            optional_variables: HashSet::new(),
         }
     }
 
@@ -6201,7 +6190,7 @@ impl QueryPlanner {
                         LogicalPlan::Filter {
                             input: Box::new(knn),
                             predicate: f,
-                            optional_variables: std::collections::HashSet::new(),
+                            optional_variables: HashSet::new(),
                         }
                     } else {
                         knn
@@ -6440,13 +6429,13 @@ impl QueryPlanner {
     }
 
     /// Collect all variable names referenced in an expression.
-    fn collect_expr_variables(expr: &Expr) -> std::collections::HashSet<String> {
-        let mut vars = std::collections::HashSet::new();
+    fn collect_expr_variables(expr: &Expr) -> HashSet<String> {
+        let mut vars = HashSet::new();
         Self::collect_expr_variables_impl(expr, &mut vars);
         vars
     }
 
-    fn collect_expr_variables_impl(expr: &Expr, vars: &mut std::collections::HashSet<String>) {
+    fn collect_expr_variables_impl(expr: &Expr, vars: &mut HashSet<String>) {
         match expr {
             Expr::Variable(name) => {
                 vars.insert(name.clone());
@@ -6498,16 +6487,13 @@ impl QueryPlanner {
     }
 
     /// Collect all variables produced by a logical plan.
-    fn collect_plan_variables(plan: &LogicalPlan) -> std::collections::HashSet<String> {
-        let mut vars = std::collections::HashSet::new();
+    fn collect_plan_variables(plan: &LogicalPlan) -> HashSet<String> {
+        let mut vars = HashSet::new();
         Self::collect_plan_variables_impl(plan, &mut vars);
         vars
     }
 
-    fn collect_plan_variables_impl(
-        plan: &LogicalPlan,
-        vars: &mut std::collections::HashSet<String>,
-    ) {
+    fn collect_plan_variables_impl(plan: &LogicalPlan, vars: &mut HashSet<String>) {
         match plan {
             LogicalPlan::Scan { variable, .. } => {
                 vars.insert(variable.clone());
@@ -6611,8 +6597,8 @@ impl QueryPlanner {
     /// Returns (input_only_predicates, remaining_predicates).
     fn extract_apply_input_predicates(
         predicate: &Expr,
-        input_variables: &std::collections::HashSet<String>,
-        subquery_new_variables: &std::collections::HashSet<String>,
+        input_variables: &HashSet<String>,
+        subquery_new_variables: &HashSet<String>,
     ) -> (Vec<Expr>, Vec<Expr>) {
         let conjuncts = Self::split_and_conjuncts(predicate);
         let mut input_preds = Vec::new();
@@ -6649,7 +6635,7 @@ impl QueryPlanner {
 
                 // Collect NEW variables introduced by subquery (not in input)
                 let subquery_vars = Self::collect_plan_variables(&subquery);
-                let new_subquery_vars: std::collections::HashSet<String> =
+                let new_subquery_vars: HashSet<String> =
                     subquery_vars.difference(&input_vars).cloned().collect();
 
                 // Extract predicates that only reference input variables
@@ -7279,10 +7265,8 @@ impl QueryPlanner {
 /// at the Scan node so they're available for window operations later.
 ///
 /// Returns a mapping of variable name → property names (e.g., "e" → {"dept", "salary"}).
-pub fn collect_properties_from_plan(
-    plan: &LogicalPlan,
-) -> HashMap<String, std::collections::HashSet<String>> {
-    let mut properties: HashMap<String, std::collections::HashSet<String>> = HashMap::new();
+pub fn collect_properties_from_plan(plan: &LogicalPlan) -> HashMap<String, HashSet<String>> {
+    let mut properties: HashMap<String, HashSet<String>> = HashMap::new();
     collect_properties_recursive(plan, &mut properties);
     properties
 }
@@ -7290,7 +7274,7 @@ pub fn collect_properties_from_plan(
 /// Recursively walk the LogicalPlan tree and collect all property references.
 fn collect_properties_recursive(
     plan: &LogicalPlan,
-    properties: &mut HashMap<String, std::collections::HashSet<String>>,
+    properties: &mut HashMap<String, HashSet<String>>,
 ) {
     match plan {
         LogicalPlan::Window {
@@ -7533,10 +7517,7 @@ fn collect_properties_recursive(
 }
 
 /// Mark target variables from SET items with "*" and collect value expressions.
-fn mark_set_item_variables(
-    items: &[SetItem],
-    properties: &mut HashMap<String, std::collections::HashSet<String>>,
-) {
+fn mark_set_item_variables(items: &[SetItem], properties: &mut HashMap<String, HashSet<String>>) {
     for item in items {
         match item {
             SetItem::Property { expr, value } => {
@@ -7577,10 +7558,7 @@ fn mark_set_item_variables(
 /// adds structural projections (bare entity Struct columns) for them.
 /// This is needed so that execute_create_pattern() can find bound variables
 /// in the row HashMap and reuse existing nodes instead of creating new ones.
-fn mark_pattern_variables(
-    pattern: &Pattern,
-    properties: &mut HashMap<String, std::collections::HashSet<String>>,
-) {
+fn mark_pattern_variables(pattern: &Pattern, properties: &mut HashMap<String, HashSet<String>>) {
     for path in &pattern.paths {
         if let Some(ref v) = path.variable {
             properties
@@ -7627,7 +7605,7 @@ fn mark_pattern_variables(
 /// Collect properties from an expression into a HashMap.
 fn collect_properties_from_expr_into(
     expr: &Expr,
-    properties: &mut HashMap<String, std::collections::HashSet<String>>,
+    properties: &mut HashMap<String, HashSet<String>>,
 ) {
     match expr {
         Expr::PatternComprehension {
@@ -7874,7 +7852,7 @@ fn collect_properties_from_expr_into(
 /// scan to include `a.city` in its projected columns.
 fn collect_properties_from_subquery(
     query: &Query,
-    properties: &mut HashMap<String, std::collections::HashSet<String>>,
+    properties: &mut HashMap<String, HashSet<String>>,
 ) {
     match query {
         Query::Single(stmt) => {
@@ -7926,15 +7904,12 @@ fn collect_properties_from_subquery(
 fn analyze_function_property_requirements(
     name: &str,
     args: &[Expr],
-    properties: &mut HashMap<String, std::collections::HashSet<String>>,
+    properties: &mut HashMap<String, HashSet<String>>,
 ) {
     use crate::query::function_props::get_function_spec;
 
     /// Helper to mark a variable as needing all properties.
-    fn mark_wildcard(
-        var: &str,
-        properties: &mut HashMap<String, std::collections::HashSet<String>>,
-    ) {
+    fn mark_wildcard(var: &str, properties: &mut HashMap<String, HashSet<String>>) {
         properties
             .entry(var.to_string())
             .or_default()
@@ -7984,7 +7959,6 @@ fn analyze_function_property_requirements(
 #[cfg(test)]
 mod pushdown_tests {
     use super::*;
-    use std::collections::HashSet;
 
     #[test]
     fn test_validat_extracts_property_names() {

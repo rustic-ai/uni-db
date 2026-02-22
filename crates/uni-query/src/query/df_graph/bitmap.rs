@@ -5,104 +5,92 @@ use uni_common::core::id::{Eid, Vid};
 /// Density threshold: if set bits exceed this fraction of total range, use DenseBitVec.
 const DENSITY_THRESHOLD: f64 = 0.125; // 12.5%
 
-/// Bitmap filter for edge IDs — preselects which edges pass a property predicate.
-#[derive(Debug)]
-pub enum EidFilter {
-    /// No predicate — all edges are allowed.
-    AllAllowed,
-    /// Dense bitvec indexed by raw EID.
-    DenseBitVec(BitVec),
-    /// Sparse hash set for low-cardinality results.
-    Sparse(FxHashSet<u64>),
-}
-
-impl EidFilter {
-    /// Check if an edge passes the filter.
-    pub fn contains(&self, eid: Eid) -> bool {
-        match self {
-            Self::AllAllowed => true,
-            Self::DenseBitVec(bv) => {
-                let idx = eid.as_u64() as usize;
-                if idx < bv.len() { bv[idx] } else { false }
-            }
-            Self::Sparse(set) => set.contains(&eid.as_u64()),
-        }
+/// Build an adaptive filter (dense bitvec or sparse hashset) from raw u64 IDs.
+///
+/// Uses a density heuristic: if more than 12.5% of the range is populated,
+/// a `BitVec` is used for O(1) lookups; otherwise a `FxHashSet` is used.
+///
+/// Returns `(Option<BitVec>, Option<FxHashSet<u64>>)` — exactly one is `Some`.
+fn build_filter(ids: Vec<u64>, max_hint: usize) -> (Option<BitVec>, Option<FxHashSet<u64>>) {
+    if ids.is_empty() {
+        return (None, Some(FxHashSet::default()));
     }
 
-    /// Build an EidFilter from a list of matching EIDs.
-    ///
-    /// Uses a density heuristic to choose between DenseBitVec (>12.5% density)
-    /// and Sparse HashSet.
-    pub fn from_eids(eids: Vec<u64>, max_eid_hint: usize) -> Self {
-        if eids.is_empty() {
-            return Self::Sparse(FxHashSet::default());
+    let range = max_hint.max(ids.iter().copied().max().unwrap_or(0) as usize + 1);
+    let density = ids.len() as f64 / range.max(1) as f64;
+
+    if density > DENSITY_THRESHOLD {
+        let mut bv = BitVec::repeat(false, range);
+        for &id in &ids {
+            let idx = id as usize;
+            if idx < bv.len() {
+                bv.set(idx, true);
+            }
+        }
+        (Some(bv), None)
+    } else {
+        (None, Some(ids.into_iter().collect()))
+    }
+}
+
+/// Check if a raw u64 ID passes a dense bitvec filter.
+fn bitvec_contains(bv: &BitVec, raw: u64) -> bool {
+    let idx = raw as usize;
+    idx < bv.len() && bv[idx]
+}
+
+/// Macro to define an ID filter enum with identical structure but typed `contains` method.
+macro_rules! define_id_filter {
+    (
+        $(#[$meta:meta])*
+        $filter_name:ident, $id_type:ty, $from_fn:ident
+    ) => {
+        $(#[$meta])*
+        #[derive(Debug)]
+        pub enum $filter_name {
+            /// No predicate — all IDs are allowed.
+            AllAllowed,
+            /// Dense bitvec indexed by raw ID.
+            DenseBitVec(BitVec),
+            /// Sparse hash set for low-cardinality results.
+            Sparse(FxHashSet<u64>),
         }
 
-        let range = max_eid_hint.max(eids.iter().copied().max().unwrap_or(0) as usize + 1);
-        let density = eids.len() as f64 / range.max(1) as f64;
-
-        if density > DENSITY_THRESHOLD {
-            let mut bv = BitVec::repeat(false, range);
-            for &eid in &eids {
-                let idx = eid as usize;
-                if idx < bv.len() {
-                    bv.set(idx, true);
+        impl $filter_name {
+            /// Check if an ID passes the filter.
+            pub fn contains(&self, id: $id_type) -> bool {
+                match self {
+                    Self::AllAllowed => true,
+                    Self::DenseBitVec(bv) => bitvec_contains(bv, id.as_u64()),
+                    Self::Sparse(set) => set.contains(&id.as_u64()),
                 }
             }
-            Self::DenseBitVec(bv)
-        } else {
-            Self::Sparse(eids.into_iter().collect())
-        }
-    }
-}
 
-/// Bitmap filter for vertex IDs — preselects which target vertices pass a property predicate.
-#[derive(Debug)]
-pub enum VidFilter {
-    /// No predicate — all vertices are allowed.
-    AllAllowed,
-    /// Dense bitvec indexed by raw VID.
-    DenseBitVec(BitVec),
-    /// Sparse hash set for low-cardinality results.
-    Sparse(FxHashSet<u64>),
-}
-
-impl VidFilter {
-    /// Check if a vertex passes the filter.
-    pub fn contains(&self, vid: Vid) -> bool {
-        match self {
-            Self::AllAllowed => true,
-            Self::DenseBitVec(bv) => {
-                let idx = vid.as_u64() as usize;
-                if idx < bv.len() { bv[idx] } else { false }
-            }
-            Self::Sparse(set) => set.contains(&vid.as_u64()),
-        }
-    }
-
-    /// Build a VidFilter from a list of matching VIDs.
-    pub fn from_vids(vids: Vec<u64>, max_vid_hint: usize) -> Self {
-        if vids.is_empty() {
-            return Self::Sparse(FxHashSet::default());
-        }
-
-        let range = max_vid_hint.max(vids.iter().copied().max().unwrap_or(0) as usize + 1);
-        let density = vids.len() as f64 / range.max(1) as f64;
-
-        if density > DENSITY_THRESHOLD {
-            let mut bv = BitVec::repeat(false, range);
-            for &vid in &vids {
-                let idx = vid as usize;
-                if idx < bv.len() {
-                    bv.set(idx, true);
+            /// Build a filter from a list of raw u64 IDs.
+            ///
+            /// Uses a density heuristic to choose between DenseBitVec (>12.5% density)
+            /// and Sparse HashSet.
+            pub fn $from_fn(ids: Vec<u64>, max_hint: usize) -> Self {
+                let (bv, set) = build_filter(ids, max_hint);
+                if let Some(bv) = bv {
+                    Self::DenseBitVec(bv)
+                } else {
+                    Self::Sparse(set.unwrap_or_default())
                 }
             }
-            Self::DenseBitVec(bv)
-        } else {
-            Self::Sparse(vids.into_iter().collect())
         }
-    }
+    };
 }
+
+define_id_filter!(
+    /// Bitmap filter for edge IDs — preselects which edges pass a property predicate.
+    EidFilter, Eid, from_eids
+);
+
+define_id_filter!(
+    /// Bitmap filter for vertex IDs — preselects which target vertices pass a property predicate.
+    VidFilter, Vid, from_vids
+);
 
 #[cfg(test)]
 mod tests {

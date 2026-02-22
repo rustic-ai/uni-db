@@ -326,13 +326,11 @@ fn build_property_expr_chain(pair: Pair<Rule>) -> Expr {
     } else {
         first_token.as_str().to_string()
     };
-    let mut expr = Expr::Variable(var);
-    for p in p_inner {
-        if p.as_str() != ")" {
-            expr = Expr::Property(Box::new(expr), p.as_str().to_string());
-        }
-    }
-    expr
+    p_inner
+        .filter(|p| p.as_str() != ")")
+        .fold(Expr::Variable(var), |expr, p| {
+            Expr::Property(Box::new(expr), p.as_str().to_string())
+        })
 }
 
 fn build_set_item(pair: Pair<Rule>) -> Result<SetItem, ParseError> {
@@ -593,8 +591,11 @@ fn build_multiplicative_expression(pair: Pair<Rule>) -> Result<Expr, ParseError>
 
 fn build_not_expression(pair: Pair<Rule>) -> Result<Expr, ParseError> {
     let mut inner = pair.into_inner().peekable();
-    let not_count =
-        std::iter::from_fn(|| peek_is(&mut inner, Rule::NOT).then(|| inner.next())).count();
+    let mut not_count = 0;
+    while peek_is(&mut inner, Rule::NOT) {
+        inner.next();
+        not_count += 1;
+    }
     let mut expr = build_expression(inner.next().unwrap())?;
     for _ in 0..not_count {
         expr = Expr::UnaryOp {
@@ -840,11 +841,8 @@ fn build_unary_expression(pair: Pair<Rule>) -> Result<Expr, ParseError> {
 
 fn build_postfix_expression(pair: Pair<Rule>) -> Result<Expr, ParseError> {
     let mut inner = pair.into_inner();
-    let mut expr = build_expression(inner.next().unwrap())?;
-    for suffix in inner {
-        expr = apply_postfix_suffix(expr, suffix)?;
-    }
-    Ok(expr)
+    let base = build_expression(inner.next().unwrap())?;
+    inner.try_fold(base, apply_postfix_suffix)
 }
 
 /// Build a function call expression from the given base expression.
@@ -1124,12 +1122,13 @@ fn parse_integer_safe(s: &str, radix: u32) -> Result<i64, ParseError> {
         return Ok(val);
     }
 
+    // i64 parse failed; try u64 to handle the i64::MIN boundary case.
+    // The magnitude i64::MAX+1 is stored as i64::MIN so that
+    // negate_expression can produce the correct -9223372036854775808.
     let magnitude = u64::from_str_radix(s, radix)
         .map_err(|e| ParseError::new(format!("Invalid integer: {e}")))?;
 
-    if magnitude <= i64::MAX as u64 {
-        Ok(magnitude as i64)
-    } else if magnitude == (i64::MAX as u64 + 1) {
+    if magnitude == i64::MAX as u64 + 1 {
         Ok(i64::MIN)
     } else {
         Err(ParseError::new(
@@ -1142,19 +1141,22 @@ fn build_literal(pair: Pair<Rule>) -> Result<Expr, ParseError> {
     let inner = pair.into_inner().next().unwrap();
     match inner.as_rule() {
         Rule::integer => {
-            let s = inner.as_str();
-            let s_clean = s.replace('_', "");
-            let value = if s_clean.starts_with("0x") || s_clean.starts_with("0X") {
-                parse_integer_safe(&s_clean[2..], 16)?
-            } else if s_clean.starts_with("0o") || s_clean.starts_with("0O") {
-                parse_integer_safe(&s_clean[2..], 8)?
-            } else {
-                parse_integer_safe(&s_clean, 10)?
-            };
+            let s_clean = inner.as_str().replace('_', "");
+            let value =
+                if let Some(hex) = s_clean.strip_prefix("0x").or_else(|| s_clean.strip_prefix("0X"))
+                {
+                    parse_integer_safe(hex, 16)?
+                } else if let Some(oct) =
+                    s_clean.strip_prefix("0o").or_else(|| s_clean.strip_prefix("0O"))
+                {
+                    parse_integer_safe(oct, 8)?
+                } else {
+                    parse_integer_safe(&s_clean, 10)?
+                };
             Ok(Expr::Literal(CypherLiteral::Integer(value)))
         }
         Rule::float => {
-            let s = inner.as_str().replace('_', ""); // Remove underscores
+            let s = inner.as_str().replace('_', "");
             let value = s
                 .parse::<f64>()
                 .map_err(|e| ParseError::new(format!("Invalid float: {e}")))?;
@@ -1503,17 +1505,16 @@ fn build_parenthesized_pattern(pair: Pair<Rule>) -> Result<PatternElement, Parse
 }
 
 fn build_path_quantifier(pair: Pair<Rule>) -> Result<Range, ParseError> {
-    let matched_text = pair.as_str();
-    let inner: Vec<_> = pair.into_inner().collect();
+    let has_comma = pair.as_str().contains(',');
+    let mut inner = pair.into_inner().peekable();
 
-    if inner.is_empty() {
+    let Some(first) = inner.next() else {
         return Ok(Range {
             min: Some(0),
             max: None,
         });
-    }
+    };
 
-    let first = &inner[0];
     match first.as_rule() {
         Rule::plus => Ok(Range {
             min: Some(1),
@@ -1523,35 +1524,28 @@ fn build_path_quantifier(pair: Pair<Rule>) -> Result<Range, ParseError> {
             min: Some(0),
             max: None,
         }),
-        Rule::integer if inner.len() == 1 && !matched_text.contains(',') => {
-            // {n} - exactly n (no comma means exact count)
+        Rule::integer => {
             let n: u32 = first.as_str().parse().unwrap();
+            if !has_comma {
+                // {n} - exactly n
+                return Ok(Range {
+                    min: Some(n),
+                    max: Some(n),
+                });
+            }
+            // {n,m} or {n,}
+            let max = inner
+                .next()
+                .filter(|p| p.as_rule() == Rule::integer)
+                .map(|p| p.as_str().parse::<u32>().unwrap());
             Ok(Range {
                 min: Some(n),
-                max: Some(n),
+                max,
             })
         }
-        Rule::integer => {
-            // {n,m} or {n,}
-            let n: u32 = first.as_str().parse().unwrap();
-            // Check if there's a second integer
-            if inner.len() > 1 && inner[1].as_rule() == Rule::integer {
-                let max: u32 = inner[1].as_str().parse().unwrap();
-                Ok(Range {
-                    min: Some(n),
-                    max: Some(max),
-                })
-            } else {
-                // {n,}
-                Ok(Range {
-                    min: Some(n),
-                    max: None,
-                })
-            }
-        }
         _ => {
-            // {,m}
-            let max: u32 = inner[0].as_str().parse().unwrap();
+            // {,m} - first token is not an integer, so it's the max
+            let max: u32 = first.as_str().parse().unwrap();
             Ok(Range {
                 min: Some(0),
                 max: Some(max),
@@ -1623,56 +1617,59 @@ fn build_node_pattern(pair: Pair<Rule>) -> Result<NodePattern, ParseError> {
 }
 
 fn build_relationship_pattern(pair: Pair<Rule>) -> Result<RelationshipPattern, ParseError> {
-    let children: Vec<_> = pair.into_inner().collect();
-
-    let direction = {
-        let has_left = children.iter().any(|p| p.as_rule() == Rule::arrow_left);
-        let has_right = children.iter().any(|p| p.as_rule() == Rule::arrow_right);
-        let has_bidir = children
-            .iter()
-            .any(|p| p.as_rule() == Rule::arrow_bidirectional);
-        match (has_bidir, has_left, has_right) {
-            (false, true, false) => Direction::Incoming,
-            (false, false, true) => Direction::Outgoing,
-            _ => Direction::Both,
-        }
-    };
-
+    let mut has_left = false;
+    let mut has_right = false;
     let mut variable = None;
     let mut types = vec![];
     let mut range = None;
     let mut properties = None;
     let mut where_clause = None;
 
-    for p in children {
-        if p.as_rule() == Rule::relationship_detail {
-            for detail in p.into_inner() {
-                match detail.as_rule() {
-                    Rule::identifier => variable = Some(detail.as_str().to_string()),
-                    Rule::relationship_types => {
-                        types = detail
-                            .into_inner()
-                            .filter(|p| {
-                                matches!(
-                                    p.as_rule(),
-                                    Rule::identifier | Rule::identifier_or_keyword
-                                )
-                            })
-                            .map(|t| normalize_identifier(t.as_str()))
-                            .collect();
+    for p in pair.into_inner() {
+        match p.as_rule() {
+            Rule::arrow_left => has_left = true,
+            Rule::arrow_right => has_right = true,
+            Rule::arrow_bidirectional => {
+                has_left = true;
+                has_right = true;
+            }
+            Rule::relationship_detail => {
+                for detail in p.into_inner() {
+                    match detail.as_rule() {
+                        Rule::identifier => variable = Some(detail.as_str().to_string()),
+                        Rule::relationship_types => {
+                            types = detail
+                                .into_inner()
+                                .filter(|p| {
+                                    matches!(
+                                        p.as_rule(),
+                                        Rule::identifier | Rule::identifier_or_keyword
+                                    )
+                                })
+                                .map(|t| normalize_identifier(t.as_str()))
+                                .collect();
+                        }
+                        Rule::range_literal => range = Some(build_range(detail)?),
+                        Rule::rel_predicate => {
+                            let (props, wc) = parse_predicate(detail)?;
+                            properties = props;
+                            where_clause = wc;
+                        }
+                        Rule::properties => properties = Some(build_properties(detail)?),
+                        _ => {}
                     }
-                    Rule::range_literal => range = Some(build_range(detail)?),
-                    Rule::rel_predicate => {
-                        let (props, wc) = parse_predicate(detail)?;
-                        properties = props;
-                        where_clause = wc;
-                    }
-                    Rule::properties => properties = Some(build_properties(detail)?),
-                    _ => {}
                 }
             }
+            _ => {}
         }
     }
+
+    let direction = match (has_left, has_right) {
+        (true, false) => Direction::Incoming,
+        (false, true) => Direction::Outgoing,
+        _ => Direction::Both,
+    };
+
     Ok(RelationshipPattern {
         variable,
         types,

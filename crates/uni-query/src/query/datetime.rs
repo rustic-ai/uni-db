@@ -40,7 +40,7 @@ pub fn classify_temporal(s: &str) -> Option<TemporalType> {
     };
 
     // Duration: starts with P (case insensitive)
-    if base.starts_with('P') || base.starts_with('p') {
+    if base.starts_with(['P', 'p']) {
         return Some(TemporalType::Duration);
     }
 
@@ -86,7 +86,7 @@ pub fn classify_temporal(s: &str) -> Option<TemporalType> {
 
 /// Check if a temporal string suffix contains timezone information.
 fn has_timezone_suffix(s: &str) -> bool {
-    if s.ends_with('Z') || s.ends_with('z') {
+    if s.ends_with(['Z', 'z']) {
         return true;
     }
     // Look for +HH:MM or -HH:MM at the end, accounting for possible [timezone]
@@ -468,7 +468,7 @@ pub fn parse_duration_to_micros(s: &str) -> Result<i64> {
     let s = s.trim();
 
     // ISO 8601 format: P[n]Y[n]M[n]DT[n]H[n]M[n]S
-    if s.starts_with('P') || s.starts_with('p') {
+    if s.starts_with(['P', 'p']) {
         return parse_iso8601_duration(s);
     }
 
@@ -481,7 +481,7 @@ pub fn parse_duration_to_cypher(s: &str) -> Result<CypherDuration> {
     let s = s.trim();
 
     // ISO 8601 format: P[n]Y[n]M[n]DT[n]H[n]M[n]S
-    if s.starts_with('P') || s.starts_with('p') {
+    if s.starts_with(['P', 'p']) {
         return parse_iso8601_duration_cypher(s);
     }
 
@@ -916,12 +916,12 @@ pub fn is_temporal_string(s: &str) -> bool {
     // Time pattern: HH:MM:SS
     || (bytes[2] == b':' && bytes[5] == b':')
     // Duration pattern: starts with P
-    || bytes[0] == b'P' || bytes[0] == b'p'
+    || (bytes[0] == b'P' || bytes[0] == b'p')
 }
 
 /// Check if a string looks like a duration value.
 pub fn is_duration_string(s: &str) -> bool {
-    s.starts_with('P') || s.starts_with('p')
+    s.starts_with(['P', 'p'])
 }
 
 // Individual component extractors
@@ -4010,7 +4010,11 @@ fn add_months_to_extended_date(date: ExtendedDate, months: i64) -> ExtendedDate 
     ExtendedDate { year, month, day }
 }
 
-fn remaining_days_after_months_extended(start: &ExtendedDate, end: &ExtendedDate, months: i64) -> i64 {
+fn remaining_days_after_months_extended(
+    start: &ExtendedDate,
+    end: &ExtendedDate,
+    months: i64,
+) -> i64 {
     let after_months = add_months_to_extended_date(*start, months);
     (days_from_civil(*end) - days_from_civil(after_months)) as i64
 }
@@ -4078,11 +4082,7 @@ fn format_time_only_duration_nanos(total_nanos: i128) -> String {
             out.push_str(&format!("{sign}{secs_abs}.{trimmed}S"));
         }
     }
-    if out == "PT" {
-        "PT0S".to_string()
-    } else {
-        out
-    }
+    if out == "PT" { "PT0S".to_string() } else { out }
 }
 
 fn try_eval_duration_in_seconds_extended(args: &[Value]) -> Result<Option<Value>> {
@@ -4095,19 +4095,23 @@ fn try_eval_duration_in_seconds_extended(args: &[Value]) -> Result<Option<Value>
 
     let start_days = days_from_civil(start.date);
     let end_days = days_from_civil(end.date);
-    let start_tod_nanos = (start.hour as i128 * 3600 + start.minute as i128 * 60 + start.second as i128)
-        * NANOS_PER_SECOND as i128
-        + start.nanosecond as i128;
+    let start_tod_nanos =
+        (start.hour as i128 * 3600 + start.minute as i128 * 60 + start.second as i128)
+            * NANOS_PER_SECOND as i128
+            + start.nanosecond as i128;
     let end_tod_nanos = (end.hour as i128 * 3600 + end.minute as i128 * 60 + end.second as i128)
         * NANOS_PER_SECOND as i128
         + end.nanosecond as i128;
-    let total_nanos = (end_days - start_days) * NANOS_PER_DAY as i128 + (end_tod_nanos - start_tod_nanos);
+    let total_nanos =
+        (end_days - start_days) * NANOS_PER_DAY as i128 + (end_tod_nanos - start_tod_nanos);
 
     if total_nanos >= i64::MIN as i128 && total_nanos <= i64::MAX as i128 {
         let dur = CypherDuration::new(0, 0, total_nanos as i64);
         Ok(Some(dur.to_temporal_value()))
     } else {
-        Ok(Some(Value::String(format_time_only_duration_nanos(total_nanos))))
+        Ok(Some(Value::String(format_time_only_duration_nanos(
+            total_nanos,
+        ))))
     }
 }
 

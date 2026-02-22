@@ -2682,8 +2682,7 @@ fn coerce_temporal_comparisons(
                 | DataType::Time64(_)
         );
 
-    if (left_is_duration && right_is_temporal_like)
-        || (right_is_duration && left_is_temporal_like)
+    if (left_is_duration && right_is_temporal_like) || (right_is_duration && left_is_temporal_like)
     {
         return Some(match op {
             Operator::Eq => lit(false),

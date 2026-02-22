@@ -210,33 +210,32 @@ impl Executor {
                         .collect();
                 }
             }
-            Some(ref edge_val)
-                if matches!(edge_val, Value::Map(m)
-                    if m.contains_key("_eid") && m.contains_key("_src") && m.contains_key("_dst")) =>
+            Some(Value::Map(ref map))
+                if map.contains_key("_eid")
+                    && map.contains_key("_src")
+                    && map.contains_key("_dst") =>
             {
-                if let Value::Map(map) = edge_val {
-                    let ei = self.extract_edge_identity(map)?;
-                    let current = prop_manager
-                        .get_all_edge_props_with_ctx(ei.eid, ctx)
-                        .await?
-                        .unwrap_or_default();
-                    let write_props = Self::merge_props(current, new_props, replace);
-                    writer
-                        .insert_edge(ei.src, ei.dst, ei.edge_type_id, ei.eid, write_props.clone())
-                        .await?;
-                    // Update the in-memory map-encoded edge binding
-                    if let Some(Value::Map(edge_map)) = row.get_mut(variable) {
-                        edge_map.retain(|k, _| k.starts_with('_'));
-                        let effective: HashMap<String, Value> = write_props
-                            .into_iter()
-                            .filter(|(_, v)| !v.is_null())
-                            .collect();
-                        for (k, v) in &effective {
-                            edge_map.insert(k.clone(), v.clone());
-                        }
-                        // Replace _all_props to reflect the complete property set
-                        edge_map.insert("_all_props".to_string(), Value::Map(effective));
+                let ei = self.extract_edge_identity(map)?;
+                let current = prop_manager
+                    .get_all_edge_props_with_ctx(ei.eid, ctx)
+                    .await?
+                    .unwrap_or_default();
+                let write_props = Self::merge_props(current, new_props, replace);
+                writer
+                    .insert_edge(ei.src, ei.dst, ei.edge_type_id, ei.eid, write_props.clone())
+                    .await?;
+                // Update the in-memory map-encoded edge binding
+                if let Some(Value::Map(edge_map)) = row.get_mut(variable) {
+                    edge_map.retain(|k, _| k.starts_with('_'));
+                    let effective: HashMap<String, Value> = write_props
+                        .into_iter()
+                        .filter(|(_, v)| !v.is_null())
+                        .collect();
+                    for (k, v) in &effective {
+                        edge_map.insert(k.clone(), v.clone());
                     }
+                    // Replace _all_props to reflect the complete property set
+                    edge_map.insert("_all_props".to_string(), Value::Map(effective));
                 }
             }
             _ => {
@@ -2171,7 +2170,7 @@ impl Executor {
             Value::Bool(b) => Expr::Literal(CypherLiteral::Bool(*b)),
             Value::Null => Expr::Literal(CypherLiteral::Null),
             Value::List(items) => {
-                Expr::List(items.iter().map(|v| Self::value_to_literal_expr(v)).collect())
+                Expr::List(items.iter().map(Self::value_to_literal_expr).collect())
             }
             Value::Map(entries) => Expr::Map(
                 entries
@@ -2444,9 +2443,17 @@ impl Executor {
                                             source_variable,
                                             target_variable: target_variable.clone(),
                                             step_variable: r.variable.clone(),
-                                            min_hops: r.range.as_ref().and_then(|r| r.min).unwrap_or(1)
+                                            min_hops: r
+                                                .range
+                                                .as_ref()
+                                                .and_then(|r| r.min)
+                                                .unwrap_or(1)
                                                 as usize,
-                                            max_hops: r.range.as_ref().and_then(|r| r.max).unwrap_or(1)
+                                            max_hops: r
+                                                .range
+                                                .as_ref()
+                                                .and_then(|r| r.max)
+                                                .unwrap_or(1)
                                                 as usize,
                                             optional: false,
                                             target_filter: None,
@@ -2473,9 +2480,17 @@ impl Executor {
                                             target_variable: target_variable.clone(),
                                             target_label_id,
                                             step_variable: r.variable.clone(),
-                                            min_hops: r.range.as_ref().and_then(|r| r.min).unwrap_or(1)
+                                            min_hops: r
+                                                .range
+                                                .as_ref()
+                                                .and_then(|r| r.min)
+                                                .unwrap_or(1)
                                                 as usize,
-                                            max_hops: r.range.as_ref().and_then(|r| r.max).unwrap_or(1)
+                                            max_hops: r
+                                                .range
+                                                .as_ref()
+                                                .and_then(|r| r.max)
+                                                .unwrap_or(1)
                                                 as usize,
                                             optional: false,
                                             target_filter: None,

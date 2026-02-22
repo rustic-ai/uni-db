@@ -105,12 +105,13 @@ impl OptionalFilterExec {
     /// Check whether a column belongs to an optional variable.
     fn is_optional_column_name(optional_variables: &HashSet<String>, col_name: &str) -> bool {
         optional_variables.iter().any(|var| {
-            // Match "m._vid", "m.name", etc.
-            col_name.starts_with(var.as_str()) && col_name[var.len()..].starts_with('.')
+            let var = var.as_str();
             // Match the bare variable column itself (struct column)
-            || col_name == var.as_str()
+            col_name == var
+            // Match "m._vid", "m.name", etc.
+            || col_name.strip_prefix(var).is_some_and(|rest| rest.starts_with('.'))
             // Match internal EID tracking columns like "__eid_to_m"
-            || (col_name.starts_with("__eid_to_") && col_name.ends_with(var.as_str()))
+            || (col_name.starts_with("__eid_to_") && col_name.ends_with(var))
         })
     }
 
@@ -218,15 +219,12 @@ impl OptionalFilterExec {
 
 impl DisplayAs for OptionalFilterExec {
     fn fmt_as(&self, _t: DisplayFormatType, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let vars: Vec<&str> = self.optional_variables.iter().map(|s| s.as_str()).collect();
         write!(
             f,
             "OptionalFilterExec: predicate={}, optional_vars=[{}]",
             self.predicate,
-            self.optional_variables
-                .iter()
-                .cloned()
-                .collect::<Vec<_>>()
-                .join(", ")
+            vars.join(", ")
         )
     }
 }
@@ -279,12 +277,14 @@ impl ExecutionPlan for OptionalFilterExec {
 
         // Pre-compute which column indices are optional vs source.
         let source_key_columns = self.compute_source_key_columns();
-        let mut optional_col_indices = Vec::new();
-        for (idx, field) in self.schema.fields().iter().enumerate() {
-            if self.is_optional_column(field.name()) {
-                optional_col_indices.push(idx);
-            }
-        }
+        let optional_col_indices: Vec<usize> = self
+            .schema
+            .fields()
+            .iter()
+            .enumerate()
+            .filter(|(_, field)| self.is_optional_column(field.name()))
+            .map(|(idx, _)| idx)
+            .collect();
 
         // Debug: log schema and source key columns
         tracing::debug!(
@@ -440,42 +440,36 @@ impl OptionalFilterStream {
     fn compute_source_key(&self, batch: &RecordBatch, row_idx: usize) -> Vec<u8> {
         use arrow_array::{LargeBinaryArray, StructArray};
 
+        /// Append a u64 value (or NULL sentinel) to the key buffer.
+        fn append_u64_key(key: &mut Vec<u8>, val: Option<u64>) {
+            key.extend_from_slice(&val.unwrap_or(u64::MAX).to_le_bytes());
+        }
+
         let mut key = Vec::with_capacity(self.source_key_columns.len() * 8);
         for skc in &self.source_key_columns {
             match skc {
                 SourceKeyColumn::FlatVid(col_idx) => {
-                    let vid = extract_u64_value(batch.column(*col_idx), row_idx);
-                    match vid {
-                        Some(v) => key.extend_from_slice(&v.to_le_bytes()),
-                        None => key.extend_from_slice(&u64::MAX.to_le_bytes()),
-                    }
+                    append_u64_key(&mut key, extract_u64_value(batch.column(*col_idx), row_idx));
                 }
                 SourceKeyColumn::StructVid(col_idx, field_idx) => {
-                    let col = batch.column(*col_idx);
-                    let vid = if let Some(sa) = col.as_any().downcast_ref::<StructArray>() {
-                        extract_u64_value(sa.column(*field_idx), row_idx)
-                    } else {
-                        None
-                    };
-                    match vid {
-                        Some(v) => key.extend_from_slice(&v.to_le_bytes()),
-                        None => key.extend_from_slice(&u64::MAX.to_le_bytes()),
-                    }
+                    let vid = batch
+                        .column(*col_idx)
+                        .as_any()
+                        .downcast_ref::<StructArray>()
+                        .and_then(|sa| extract_u64_value(sa.column(*field_idx), row_idx));
+                    append_u64_key(&mut key, vid);
                 }
                 SourceKeyColumn::CypherValueBlob(col_idx) => {
                     let col = batch.column(*col_idx);
-                    if let Some(ba) = col.as_any().downcast_ref::<LargeBinaryArray>() {
-                        if ba.is_valid(row_idx) {
-                            let bytes = ba.value(row_idx);
-                            // Length-prefix for unambiguous concatenation
-                            key.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
-                            key.extend_from_slice(bytes);
-                        } else {
-                            // NULL sentinel
-                            key.extend_from_slice(&u64::MAX.to_le_bytes());
-                        }
+                    if let Some(ba) = col.as_any().downcast_ref::<LargeBinaryArray>()
+                        && ba.is_valid(row_idx)
+                    {
+                        let bytes = ba.value(row_idx);
+                        // Length-prefix for unambiguous concatenation
+                        key.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+                        key.extend_from_slice(bytes);
                     } else {
-                        key.extend_from_slice(&u64::MAX.to_le_bytes());
+                        append_u64_key(&mut key, None);
                     }
                 }
             }
@@ -488,11 +482,7 @@ impl OptionalFilterStream {
 fn extract_u64_value(col: &dyn Array, row_idx: usize) -> Option<u64> {
     use arrow_array::UInt64Array;
     let vid_array = col.as_any().downcast_ref::<UInt64Array>()?;
-    if vid_array.is_valid(row_idx) {
-        Some(vid_array.value(row_idx))
-    } else {
-        None
-    }
+    vid_array.is_valid(row_idx).then(|| vid_array.value(row_idx))
 }
 
 /// Take elements from an array at the given indices.
