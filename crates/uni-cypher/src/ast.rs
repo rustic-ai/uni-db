@@ -459,6 +459,10 @@ pub enum CypherLiteral {
     Integer(i64),
     Float(f64),
     String(String),
+    /// Pre-encoded CypherValue bytes (LargeBinary).
+    /// Used when a runtime Value (e.g. list or map) must round-trip through the
+    /// AST while preserving its CypherValue-encoded storage format.
+    Bytes(Vec<u8>),
 }
 
 impl CypherLiteral {
@@ -470,6 +474,9 @@ impl CypherLiteral {
             CypherLiteral::Integer(i) => Value::Int(*i),
             CypherLiteral::Float(f) => Value::Float(*f),
             CypherLiteral::String(s) => Value::String(s.clone()),
+            CypherLiteral::Bytes(b) => {
+                uni_common::cypher_value_codec::decode(b).unwrap_or(Value::Null)
+            }
         }
     }
 }
@@ -482,6 +489,7 @@ impl std::fmt::Display for CypherLiteral {
             CypherLiteral::Integer(i) => write!(f, "{i}"),
             CypherLiteral::Float(v) => write!(f, "{v}"),
             CypherLiteral::String(s) => write!(f, "\"{s}\""),
+            CypherLiteral::Bytes(b) => write!(f, "<bytes:{}>", b.len()),
         }
     }
 }

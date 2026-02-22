@@ -1158,7 +1158,11 @@ fn build_literal(pair: Pair<Rule>) -> Result<Expr, ParseError> {
             let value = s
                 .parse::<f64>()
                 .map_err(|e| ParseError::new(format!("Invalid float: {e}")))?;
-            // Allow overflow to infinity at parse time — overflow is a runtime concern
+            if value.is_infinite() {
+                return Err(ParseError::new(
+                    "FloatingPointOverflow: value too large".to_string(),
+                ));
+            }
             Ok(Expr::Literal(CypherLiteral::Float(value)))
         }
         Rule::infinity => {

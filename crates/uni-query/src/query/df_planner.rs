@@ -2666,6 +2666,21 @@ impl HybridPhysicalPlanner {
             Vec::new();
         for expr in group_by {
             let name = expr.to_string_repr();
+
+            // Entity variables (Node/Edge) from traversals may not have a direct
+            // column — only expanded property columns like "other._vid",
+            // "other.name", etc. Skip them here; the property expansion loop
+            // below adds those columns to the group-by instead.
+            if let Expr::Variable(var_name) = expr {
+                if schema.column_with_name(var_name).is_none() {
+                    let prefix = format!("{}.", var_name);
+                    let has_expanded = schema.fields().iter().any(|f| f.name().starts_with(&prefix));
+                    if has_expanded {
+                        continue;
+                    }
+                }
+            }
+
             let physical_expr = if CypherPhysicalExprCompiler::contains_custom_expr(expr) {
                 // Custom expressions (quantifiers, list comprehensions, reduce, etc.)
                 // cannot be translated via cypher_expr_to_df; compile them directly.
@@ -2704,6 +2719,34 @@ impl HybridPhysicalPlanner {
             group_exprs.push((physical_expr, name));
         }
 
+        // For entity variables (Node/Edge) in group_by, also include their
+        // property columns. Properties are functionally dependent on the entity,
+        // so grouping by them is semantically correct and ensures they survive
+        // the aggregation for downstream property access (e.g. RETURN a.name
+        // after WITH a, min(...) AS m).
+        for expr in group_by {
+            if let Expr::Variable(var_name) = expr
+                && matches!(
+                    ctx.variable_kinds.get(var_name),
+                    Some(VariableKind::Node) | Some(VariableKind::Edge)
+                )
+            {
+                let prefix = format!("{}.", var_name);
+                for (idx, field) in schema.fields().iter().enumerate() {
+                    if field.name().starts_with(&prefix) {
+                        let prop_col: Arc<dyn datafusion::physical_expr::PhysicalExpr> =
+                            Arc::new(
+                                datafusion::physical_expr::expressions::Column::new(
+                                    field.name(),
+                                    idx,
+                                ),
+                            );
+                        group_exprs.push((prop_col, field.name().clone()));
+                    }
+                }
+            }
+        }
+
         let physical_group_by = PhysicalGroupBy::new_single(group_exprs);
 
         // Pre-compute pattern comprehensions in aggregate arguments
@@ -2716,6 +2759,7 @@ impl HybridPhysicalPlanner {
             .translate_aggregates(&rewritten_aggregates, &schema, &state, &ctx)?
             .into_iter()
             .unzip();
+        let num_aggregates = aggr_exprs.len();
 
         let agg_exec = Arc::new(AggregateExec::try_new(
             AggregateMode::Single,
@@ -2730,7 +2774,9 @@ impl HybridPhysicalPlanner {
         // expressions (e.g. `count(Int32(1))`), but the logical plan's projection
         // expects names like `COUNT(n)`. Add a renaming projection to bridge this.
         let agg_schema = agg_exec.schema();
-        let num_group_by = group_by.len();
+        // Use actual expanded group-by count (includes entity property columns)
+        // rather than logical group_by.len() which doesn't account for expansion.
+        let num_group_by = agg_schema.fields().len() - num_aggregates;
         let mut proj_exprs: Vec<(Arc<dyn datafusion::physical_expr::PhysicalExpr>, String)> =
             Vec::new();
 

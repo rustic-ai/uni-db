@@ -446,6 +446,14 @@ impl GraphUnwindStream {
                         )
                         .map_err(|e| datafusion::error::DataFusionError::Execution(e.to_string()))
                     }
+                    "split" => {
+                        let mut eval_args = Vec::with_capacity(args.len());
+                        for arg in args {
+                            eval_args.push(self.evaluate_expr_impl(arg, batch, row_idx)?);
+                        }
+                        crate::query::expr_eval::eval_split(&eval_args)
+                            .map_err(|e| datafusion::error::DataFusionError::Execution(e.to_string()))
+                    }
                     _ => {
                         // Unsupported function - return empty list
                         Ok(Value::List(vec![]))

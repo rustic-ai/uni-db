@@ -455,26 +455,37 @@ impl Executor {
         // Validate argument count
         if evaluated_args.len() != proc_def.params.len() {
             if evaluated_args.is_empty() && !proc_def.params.is_empty() {
-                // Standalone CALL with no YIELD is treated as missing implicit parameter(s).
                 if yield_items.is_empty() {
+                    // Standalone CALL — resolve implicit arguments from query parameters
+                    let mut resolved = Vec::with_capacity(proc_def.params.len());
+                    for param in &proc_def.params {
+                        if let Some(val) = params.get(&param.name) {
+                            resolved.push(val.clone());
+                        } else {
+                            return Err(anyhow!(
+                                "MissingParameter: Procedure '{}' requires implicit argument '{}' \
+                                 but it was not provided as a query parameter",
+                                proc_def.name,
+                                param.name
+                            ));
+                        }
+                    }
+                    evaluated_args = resolved;
+                } else {
+                    // In-query CALL with YIELD cannot use implicit arguments
                     return Err(anyhow!(
-                        "MissingParameter: Procedure '{}' requires {} implicit argument(s)",
-                        proc_def.name,
-                        proc_def.params.len()
+                        "InvalidArgumentPassingMode: Procedure '{}' requires explicit argument passing in in-query CALL",
+                        proc_def.name
                     ));
                 }
-                // In-query CALL with YIELD cannot pass implicit arguments.
+            } else {
                 return Err(anyhow!(
-                    "InvalidArgumentPassingMode: Procedure '{}' requires explicit argument passing in in-query CALL",
-                    proc_def.name
+                    "InvalidNumberOfArguments: Procedure '{}' expects {} argument(s), got {}",
+                    proc_def.name,
+                    proc_def.params.len(),
+                    evaluated_args.len()
                 ));
             }
-            return Err(anyhow!(
-                "InvalidNumberOfArguments: Procedure '{}' expects {} argument(s), got {}",
-                proc_def.name,
-                proc_def.params.len(),
-                evaluated_args.len()
-            ));
         }
 
         // Validate argument types

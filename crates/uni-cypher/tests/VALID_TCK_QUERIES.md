@@ -10445,7 +10445,8 @@ RETURN 1e308 AS literal
 RETURN 123456789e300 AS literal
 
 // ../../cypher-tck/tck-M23/tck/features/expressions/literals/Literals5.feature
-RETURN 1.34E999
+// REMOVED: RETURN 1.34E999
+// TCK expects: SyntaxError at compile time: FloatingPointOverflow
 
 // ../../cypher-tck/tck-M23/tck/features/expressions/literals/Literals6.feature
 RETURN '' AS literal

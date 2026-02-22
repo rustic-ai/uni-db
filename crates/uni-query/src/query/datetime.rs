@@ -551,7 +551,10 @@ fn parse_datetime_style_duration(s: &str) -> Result<CypherDuration> {
 fn parse_iso8601_duration_cypher(s: &str) -> Result<CypherDuration> {
     // Detect date-time style duration: after 'P', if char at position 4 is '-' and length >= 10
     // e.g., P2012-02-02T14:37:21.545
-    if s.len() >= 11 && s.as_bytes().get(5) == Some(&b'-') {
+    if s.len() >= 11
+        && s.as_bytes().get(5) == Some(&b'-')
+        && s.as_bytes().get(1).is_some_and(|b| b.is_ascii_digit())
+    {
         return parse_datetime_style_duration(s);
     }
 

@@ -1480,7 +1480,7 @@ fn eval_replace(args: &[Value]) -> Result<Value> {
     }
 }
 
-fn eval_split(args: &[Value]) -> Result<Value> {
+pub(crate) fn eval_split(args: &[Value]) -> Result<Value> {
     if args.len() != 2 {
         return Err(anyhow!("split() requires 2 arguments"));
     }

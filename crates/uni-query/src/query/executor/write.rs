@@ -2171,8 +2171,14 @@ impl Executor {
             Value::Bool(b) => Expr::Literal(CypherLiteral::Bool(*b)),
             Value::Null => Expr::Literal(CypherLiteral::Null),
             Value::List(items) => {
-                Expr::List(items.iter().map(Self::value_to_literal_expr).collect())
+                Expr::List(items.iter().map(|v| Self::value_to_literal_expr(v)).collect())
             }
+            Value::Map(entries) => Expr::Map(
+                entries
+                    .iter()
+                    .map(|(k, v)| (k.clone(), Self::value_to_literal_expr(v)))
+                    .collect(),
+            ),
             _ => Expr::Literal(CypherLiteral::Null),
         }
     }
@@ -2419,29 +2425,70 @@ impl Executor {
                                     };
 
                                     let is_variable_length = r.range.is_some();
-                                    plan = LogicalPlan::Traverse {
-                                        input: Box::new(plan),
-                                        edge_type_ids,
-                                        direction: r.direction.clone(),
-                                        source_variable,
-                                        target_variable: target_variable.clone(),
-                                        target_label_id,
-                                        step_variable: r.variable.clone(),
-                                        min_hops: r.range.as_ref().and_then(|r| r.min).unwrap_or(1)
-                                            as usize,
-                                        max_hops: r.range.as_ref().and_then(|r| r.max).unwrap_or(1)
-                                            as usize,
-                                        optional: false,
-                                        target_filter: None,
-                                        path_variable: None,
-                                        edge_properties: std::collections::HashSet::new(),
-                                        is_variable_length,
-                                        optional_pattern_vars: std::collections::HashSet::new(),
-                                        scope_match_variables: std::collections::HashSet::new(),
-                                        edge_filter_expr: None,
-                                        path_mode: crate::query::df_graph::nfa::PathMode::Trail,
-                                        qpp_steps: None,
-                                    };
+                                    let type_name = &r.types[0];
+
+                                    // Use TraverseMainByType for schemaless edge types
+                                    // (same as MATCH planner) so edge properties are loaded
+                                    // correctly from storage + L0 via the adjacency map.
+                                    // Regular Traverse only loads properties via
+                                    // property_manager which doesn't handle schemaless types.
+                                    let is_schemaless = edge_type_ids.iter().all(|id| {
+                                        uni_common::core::edge_type::is_schemaless_edge_type(*id)
+                                    });
+
+                                    if is_schemaless {
+                                        plan = LogicalPlan::TraverseMainByType {
+                                            type_names: vec![type_name.clone()],
+                                            input: Box::new(plan),
+                                            direction: r.direction.clone(),
+                                            source_variable,
+                                            target_variable: target_variable.clone(),
+                                            step_variable: r.variable.clone(),
+                                            min_hops: r.range.as_ref().and_then(|r| r.min).unwrap_or(1)
+                                                as usize,
+                                            max_hops: r.range.as_ref().and_then(|r| r.max).unwrap_or(1)
+                                                as usize,
+                                            optional: false,
+                                            target_filter: None,
+                                            path_variable: None,
+                                            is_variable_length,
+                                            optional_pattern_vars: std::collections::HashSet::new(),
+                                            scope_match_variables: std::collections::HashSet::new(),
+                                            edge_filter_expr: None,
+                                            path_mode: crate::query::df_graph::nfa::PathMode::Trail,
+                                        };
+                                    } else {
+                                        // Collect edge property names needed for MERGE filter
+                                        let mut edge_props = std::collections::HashSet::new();
+                                        if let Some(Expr::Map(entries)) = &r.properties {
+                                            for (key, _) in entries {
+                                                edge_props.insert(key.clone());
+                                            }
+                                        }
+                                        plan = LogicalPlan::Traverse {
+                                            input: Box::new(plan),
+                                            edge_type_ids: edge_type_ids.clone(),
+                                            direction: r.direction.clone(),
+                                            source_variable,
+                                            target_variable: target_variable.clone(),
+                                            target_label_id,
+                                            step_variable: r.variable.clone(),
+                                            min_hops: r.range.as_ref().and_then(|r| r.min).unwrap_or(1)
+                                                as usize,
+                                            max_hops: r.range.as_ref().and_then(|r| r.max).unwrap_or(1)
+                                                as usize,
+                                            optional: false,
+                                            target_filter: None,
+                                            path_variable: None,
+                                            edge_properties: edge_props,
+                                            is_variable_length,
+                                            optional_pattern_vars: std::collections::HashSet::new(),
+                                            scope_match_variables: std::collections::HashSet::new(),
+                                            edge_filter_expr: None,
+                                            path_mode: crate::query::df_graph::nfa::PathMode::Trail,
+                                            qpp_steps: None,
+                                        };
+                                    }
 
                                     // Apply property filters for relationship
                                     if r.properties.is_some()

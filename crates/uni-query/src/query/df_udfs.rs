@@ -5692,11 +5692,12 @@ impl AggregateUDFImpl for CypherMinMaxUdaf {
     }
     fn accumulator(
         &self,
-        _acc_args: datafusion::logical_expr::function::AccumulatorArgs,
+        acc_args: datafusion::logical_expr::function::AccumulatorArgs,
     ) -> DFResult<Box<dyn DfAccumulator>> {
         Ok(Box::new(CypherMinMaxAccumulator {
             current: None,
             is_max: self.is_max,
+            return_type: acc_args.return_field.data_type().clone(),
         }))
     }
     fn state_fields(
@@ -5715,6 +5716,7 @@ impl AggregateUDFImpl for CypherMinMaxUdaf {
 struct CypherMinMaxAccumulator {
     current: Option<Value>,
     is_max: bool,
+    return_type: DataType,
 }
 
 impl DfAccumulator for CypherMinMaxAccumulator {
@@ -5779,10 +5781,56 @@ impl DfAccumulator for CypherMinMaxAccumulator {
     }
     fn evaluate(&mut self) -> DFResult<ScalarValue> {
         match &self.current {
-            None => Ok(ScalarValue::LargeBinary(None)),
+            None => {
+                // Return null of the declared return type
+                ScalarValue::try_from(&self.return_type).map_err(|e| {
+                    datafusion::error::DataFusionError::Execution(e.to_string())
+                })
+            }
             Some(val) => {
-                let bytes = uni_common::cypher_value_codec::encode(val);
-                Ok(ScalarValue::LargeBinary(Some(bytes)))
+                // For LargeBinary return type, encode as CypherValue bytes
+                if matches!(self.return_type, DataType::LargeBinary) {
+                    let bytes = uni_common::cypher_value_codec::encode(val);
+                    return Ok(ScalarValue::LargeBinary(Some(bytes)));
+                }
+                // For concrete types, convert the Value to the matching ScalarValue
+                match val {
+                    Value::Int(i) => match &self.return_type {
+                        DataType::Int64 => Ok(ScalarValue::Int64(Some(*i))),
+                        DataType::UInt64 => Ok(ScalarValue::UInt64(Some(*i as u64))),
+                        _ => {
+                            let bytes = uni_common::cypher_value_codec::encode(val);
+                            Ok(ScalarValue::LargeBinary(Some(bytes)))
+                        }
+                    },
+                    Value::Float(f) => match &self.return_type {
+                        DataType::Float64 => Ok(ScalarValue::Float64(Some(*f))),
+                        _ => {
+                            let bytes = uni_common::cypher_value_codec::encode(val);
+                            Ok(ScalarValue::LargeBinary(Some(bytes)))
+                        }
+                    },
+                    Value::String(s) => match &self.return_type {
+                        DataType::Utf8 => Ok(ScalarValue::Utf8(Some(s.clone()))),
+                        DataType::LargeUtf8 => Ok(ScalarValue::LargeUtf8(Some(s.clone()))),
+                        _ => {
+                            let bytes = uni_common::cypher_value_codec::encode(val);
+                            Ok(ScalarValue::LargeBinary(Some(bytes)))
+                        }
+                    },
+                    Value::Bool(b) => match &self.return_type {
+                        DataType::Boolean => Ok(ScalarValue::Boolean(Some(*b))),
+                        _ => {
+                            let bytes = uni_common::cypher_value_codec::encode(val);
+                            Ok(ScalarValue::LargeBinary(Some(bytes)))
+                        }
+                    },
+                    _ => {
+                        // For complex types (List, Map, etc.), always encode as CypherValue
+                        let bytes = uni_common::cypher_value_codec::encode(val);
+                        Ok(ScalarValue::LargeBinary(Some(bytes)))
+                    }
+                }
             }
         }
     }

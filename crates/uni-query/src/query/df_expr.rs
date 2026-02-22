@@ -1032,6 +1032,7 @@ fn cypher_literal_to_scalar(lit: &CypherLiteral) -> Result<ScalarValue> {
         CypherLiteral::Integer(i) => Ok(ScalarValue::Int64(Some(*i))),
         CypherLiteral::Float(f) => Ok(ScalarValue::Float64(Some(*f))),
         CypherLiteral::String(s) => Ok(ScalarValue::Utf8(Some(s.clone()))),
+        CypherLiteral::Bytes(b) => Ok(ScalarValue::LargeBinary(Some(b.clone()))),
     }
 }
 

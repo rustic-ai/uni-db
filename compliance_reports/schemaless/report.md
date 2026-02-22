@@ -1,17 +1,17 @@
 # TCK Compliance Report
 
-**Generated:** 2026-02-22 01:09:38
-**Results:** `results_20260222_010938.json`
-**Compared to:** `results_20260222_001742.json`
+**Generated:** 2026-02-22 10:39:14
+**Results:** `results_20260222_103914.json`
+**Compared to:** `results_20260222_102958.json`
 
 ## Summary
 
 | Metric | Current | Previous | Delta |
 |--------|---------|----------|-------|
 | Scenarios | 3897 | 3897 |  |
-| Passed | 3878 | 3878 |  |
-| Failed | 18 | 18 |  |
-| Pass Rate | 99.5% | 99.5% | ➡️ +0.0pp |
+| Passed | 3885 | 3885 |  |
+| Failed | 11 | 11 |  |
+| Pass Rate | 99.7% | 99.7% | ➡️ +0.0pp |
 
 ## Feature Breakdown
 
@@ -29,7 +29,7 @@
 | ✅ Boolean4 | 52 | 52 | 0 | 100% |  |
 | ✅ Boolean5 | 8 | 8 | 0 | 100% |  |
 | ✅ Call1 | 16 | 16 | 0 | 100% |  |
-| ✅ Call2 | 6 | 5 | 1 | 83% |  |
+| ✅ Call2 | 6 | 6 | 0 | 100% |  |
 | ✅ Call3 | 6 | 6 | 0 | 100% |  |
 | ✅ Call4 | 2 | 2 | 0 | 100% |  |
 | ✅ Call5 | 19 | 19 | 0 | 100% |  |
@@ -76,8 +76,8 @@
 | ✅ Literals2 | 12 | 12 | 0 | 100% |  |
 | ✅ Literals3 | 16 | 16 | 0 | 100% |  |
 | ✅ Literals4 | 10 | 10 | 0 | 100% |  |
-| ✅ Literals5 | 27 | 26 | 1 | 96% |  |
-| ✅ Literals6 | 13 | 12 | 1 | 92% |  |
+| ✅ Literals5 | 27 | 27 | 0 | 100% |  |
+| ✅ Literals6 | 13 | 13 | 0 | 100% |  |
 | ✅ Literals7 | 20 | 19 | 0 | 95% |  |
 | ✅ Literals8 | 27 | 27 | 0 | 100% |  |
 | ✅ Map1 | 19 | 19 | 0 | 100% |  |
@@ -107,7 +107,7 @@
 | ✅ Merge2 | 6 | 6 | 0 | 100% |  |
 | ✅ Merge3 | 5 | 5 | 0 | 100% |  |
 | ✅ Merge4 | 2 | 2 | 0 | 100% |  |
-| ✅ Merge5 | 29 | 28 | 1 | 97% |  |
+| ✅ Merge5 | 29 | 29 | 0 | 100% |  |
 | ✅ Merge6 | 6 | 6 | 0 | 100% |  |
 | ✅ Merge7 | 5 | 4 | 1 | 80% |  |
 | ✅ Merge8 | 1 | 1 | 0 | 100% |  |
@@ -144,7 +144,7 @@
 | ✅ Return3 | 3 | 3 | 0 | 100% |  |
 | ✅ Return4 | 11 | 11 | 0 | 100% |  |
 | ✅ Return5 | 5 | 5 | 0 | 100% |  |
-| ✅ Return6 | 21 | 19 | 2 | 90% |  |
+| ✅ Return6 | 21 | 20 | 1 | 95% |  |
 | ✅ Return7 | 2 | 2 | 0 | 100% |  |
 | ✅ Return8 | 1 | 1 | 0 | 100% |  |
 | ✅ ReturnOrderBy1 | 12 | 12 | 0 | 100% |  |
@@ -166,7 +166,7 @@
 | ✅ String10 | 9 | 9 | 0 | 100% |  |
 | ✅ String11 | 2 | 2 | 0 | 100% |  |
 | ✅ String3 | 1 | 1 | 0 | 100% |  |
-| ❌ String4 | 1 | 0 | 1 | 0% |  |
+| ✅ String4 | 1 | 1 | 0 | 100% |  |
 | ✅ String8 | 9 | 9 | 0 | 100% |  |
 | ✅ String9 | 9 | 9 | 0 | 100% |  |
 | ✅ Temporal1 | 207 | 207 | 0 | 100% |  |
@@ -175,7 +175,7 @@
 | ✅ Temporal3 | 183 | 183 | 0 | 100% |  |
 | ✅ Temporal4 | 39 | 39 | 0 | 100% |  |
 | ✅ Temporal5 | 7 | 6 | 1 | 86% |  |
-| ✅ Temporal6 | 17 | 16 | 1 | 94% |  |
+| ✅ Temporal6 | 17 | 17 | 0 | 100% |  |
 | ✅ Temporal7 | 18 | 16 | 2 | 89% |  |
 | ✅ Temporal8 | 27 | 27 | 0 | 100% |  |
 | ✅ Temporal9 | 322 | 322 | 0 | 100% |  |
@@ -211,17 +211,6 @@
 | ✅ WithWhere7 | 3 | 3 | 0 | 100% |  |
 
 ## Failed Scenarios
-
-### Call2
-
-- **[3] Standalone call to procedure with implicit arguments** (line 72)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/call/Call2.feature:89:5
-      Matched: crates/uni-tck/src/steps/then.rs:37:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "MissingParameter: Procedure 'test.my.proc' requires 2 implicit argument(s)", q
-  ... (truncated)
-  ```
 
 ### Graph6
 
@@ -260,32 +249,6 @@
   ... (truncated)
   ```
 
-### Literals5
-
-- **[27] Fail when float value is too large** (line 319)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/literals/Literals5.feature:325:5
-      Matched: crates/uni-tck/src/steps/then.rs:114:1
-      Step panicked. Captured output: No error found
-[Summary]
-1 feature
-1 scenario (1 failed)
-3 steps (2 passed, 1 failed)
-
-  ```
-
-### Literals6
-
-- **[5] Return a single-quoted string with escaped characters** (line 78)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/literals/Literals6.feature:85:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("literal", Some(String("a\\bcn5t'\"\\//\\\"'"
-  ... (truncated)
-  ```
-
 ### Match5
 
 - **[27] Handling mixed relationship patterns and directions 2** (line 541)
@@ -298,23 +261,6 @@
 1 feature
 1 scenario (1 failed)
 6 steps (5 passed, 1 f
-  ... (truncated)
-  ```
-
-### Merge5
-
-- **[15] Matching using list property** (line 287)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/merge/Merge5.feature:303:5
-      Matched: crates/uni-tck/src/steps/and.rs:4:1
-      Step panicked. Captured output: assertion `left == right` failed: Edge count changed: 1 -> 2
-        left: 1
-       right: 2
-[Summary]
-1 feature
-1 scenario (1 failed)
-
   ... (truncated)
   ```
 
@@ -333,31 +279,12 @@
 
 ### Return6
 
-- **[13] Returning the minimum length of paths** (line 230)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/return/Return6.feature:246:5
-      Matched: crates/uni-tck/src/steps/then.rs:54:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Schema error: No field named other. Did you mean 'other._vid'?.", query: 
-  ... (truncated)
-  ```
 - **[16] Aggregation on complex expressions** (line 267)
   ```
   Step failed:
       Defined: tck/features/clauses/return/Return6.feature:294:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
       Step panicked. Captured output: Query returned error instead of result: Query { message: "Error during planning: Function 'abs' expects NativeType::Numeric but rec
-  ... (truncated)
-  ```
-
-### String4
-
-- **[1] `split()`** (line 33)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/string/String4.feature:40:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("item", Some(Int(0)))]. Expected: [{"item": Int(2
   ... (truncated)
   ```
 
@@ -387,18 +314,7 @@
   Step failed:
       Defined: tck/features/expressions/temporal/Temporal5.feature:133:5
       Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("d.second", Some(Int(14))), ("d.week", Some(
-  ... (truncated)
-  ```
-
-### Temporal6
-
-- **[6] Should serialize duration** (line 117)
-  ```
-  Step failed:
-      Defined: tck/features/expressions/temporal/Temporal6.feature:100:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Execution error: duration(): Invalid date-time style duration dat
+      Step panicked. Captured output: Result mismatch (any order): No match found for actual row 0. Actual values: [("d.weekDay", Some(Int(7))), ("d.epochSeconds
   ... (truncated)
   ```
 

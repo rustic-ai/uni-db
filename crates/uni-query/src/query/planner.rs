@@ -156,7 +156,8 @@ fn infer_with_output_type(expr: &Expr, vars_in_scope: &[VariableInfo]) -> Variab
         Expr::Literal(CypherLiteral::Integer(_))
         | Expr::Literal(CypherLiteral::Float(_))
         | Expr::Literal(CypherLiteral::String(_))
-        | Expr::Literal(CypherLiteral::Bool(_)) => VariableType::ScalarLiteral,
+        | Expr::Literal(CypherLiteral::Bool(_))
+        | Expr::Literal(CypherLiteral::Bytes(_)) => VariableType::ScalarLiteral,
         Expr::FunctionCall { name, args, .. } => {
             let lower = name.to_lowercase();
             if lower == "coalesce" {

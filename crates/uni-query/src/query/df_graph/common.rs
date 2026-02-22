@@ -1058,6 +1058,7 @@ fn infer_expr_type(expr: &Expr, schema_info: &UniSchema) -> DataType {
             CypherLiteral::String(_) => DataType::Utf8,
             CypherLiteral::Bool(_) => DataType::Boolean,
             CypherLiteral::Null => DataType::Null,
+            CypherLiteral::Bytes(_) => DataType::LargeBinary,
         },
         Expr::Variable(_) => DataType::LargeBinary,
         Expr::FunctionCall { name, args, .. } => match name.to_lowercase().as_str() {
