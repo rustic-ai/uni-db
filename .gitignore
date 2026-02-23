@@ -31,6 +31,7 @@ demos/demo01/schema.json
 tarpaulin-report.html
 .coverage/
 .playwright-mcp/
+.cache/
 
 # Website build output
 website/site/
