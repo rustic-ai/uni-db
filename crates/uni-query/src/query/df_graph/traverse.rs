@@ -3393,8 +3393,7 @@ impl GraphVariableLengthTraverseStream {
         // For named paths, we output a Path struct with nodes and relationships arrays.
         // If a path column already exists in input (from a prior BindFixedPath), extend it
         // rather than building from scratch.
-        if self.exec.path_variable.is_some() {
-            let path_var_name = self.exec.path_variable.as_ref().unwrap();
+        if let Some(path_var_name) = &self.exec.path_variable {
             let existing_path_col_idx = input
                 .schema()
                 .column_with_name(path_var_name)
@@ -4290,8 +4289,7 @@ impl GraphVariableLengthTraverseMainStream {
         // Add path variable column if bound.
         // If a path column already exists in input (from a prior BindFixedPath), extend it
         // rather than building from scratch.
-        if self.path_variable.is_some() {
-            let path_var_name = self.path_variable.as_ref().unwrap();
+        if let Some(path_var_name) = &self.path_variable {
             let existing_path_col_idx = batch
                 .schema()
                 .column_with_name(path_var_name)

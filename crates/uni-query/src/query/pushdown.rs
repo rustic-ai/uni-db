@@ -296,7 +296,6 @@ impl PredicateAnalyzer {
     }
 
     /// Check if a predicate can be pushed to Lance
-    #[expect(clippy::only_used_in_recursion)]
     pub fn is_pushable(&self, expr: &Expr, variable: &str) -> bool {
         match expr {
             Expr::In {

@@ -397,6 +397,9 @@ impl Executor {
         if let Some(ref registry) = self.procedure_registry {
             planner = planner.with_procedure_registry(registry.clone());
         }
+        if let Some(ref xervo_runtime) = self.xervo_runtime {
+            planner = planner.with_xervo_runtime(xervo_runtime.clone());
+        }
 
         // Build MutationContext when the plan contains write operations
         if Self::contains_write_operations(&plan) {
@@ -474,7 +477,7 @@ impl Executor {
         crate::query::df_udfs::register_cypher_udfs(&session)?;
         let session_ctx = Arc::new(SyncRwLock::new(session));
 
-        let planner = HybridPhysicalPlanner::with_l0_context(
+        let mut planner = HybridPhysicalPlanner::with_l0_context(
             session_ctx.clone(),
             self.storage.clone(),
             l0_context,
@@ -482,6 +485,9 @@ impl Executor {
             Arc::new(self.storage.schema_manager().schema()),
             params.clone(),
         );
+        if let Some(ref xervo_runtime) = self.xervo_runtime {
+            planner = planner.with_xervo_runtime(xervo_runtime.clone());
+        }
 
         // Plan with full property access ("*") for all merge variables so that
         // ON MATCH SET / ON CREATE SET have complete entity Maps to work with.
@@ -3515,7 +3521,6 @@ impl Executor {
     ///
     /// Uses `&self` for consistency with other evaluation methods, though it only
     /// recurses for property access.
-    #[expect(clippy::only_used_in_recursion)]
     fn evaluate_simple_expr(&self, expr: &Expr, row: &HashMap<String, Value>) -> Result<Value> {
         match expr {
             Expr::Variable(name) => row
