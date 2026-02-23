@@ -16,6 +16,7 @@ use arrow_array::RecordBatchIterator;
 use arrow_schema::Schema as ArrowSchema;
 use lancedb::Table;
 use lancedb::connection::Connection;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 /// Wrapper around LanceDB connection for Uni storage.
@@ -35,7 +36,19 @@ impl LanceDbStore {
     /// - `s3://bucket/path` - AWS S3
     /// - `gs://bucket/path` - Google Cloud Storage
     pub async fn connect(uri: &str) -> Result<Self> {
-        let connection = lancedb::connect(uri)
+        Self::connect_with_storage_options(uri, None).await
+    }
+
+    /// Connect to a LanceDB database with explicit storage options.
+    pub async fn connect_with_storage_options(
+        uri: &str,
+        storage_options: Option<HashMap<String, String>>,
+    ) -> Result<Self> {
+        let mut builder = lancedb::connect(uri);
+        if let Some(opts) = storage_options {
+            builder = builder.storage_options(opts);
+        }
+        let connection = builder
             .execute()
             .await
             .map_err(|e| anyhow!("Failed to connect to LanceDB at {}: {}", uri, e))?;

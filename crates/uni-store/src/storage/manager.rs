@@ -115,19 +115,33 @@ impl StorageManager {
         schema_manager: Arc<SchemaManager>,
         config: UniConfig,
     ) -> Result<Self> {
-        let store: Arc<dyn ObjectStore> = if base_uri.contains("://") {
-            let (store, _path) =
-                object_store::parse_url(&url::Url::parse(base_uri).expect("Invalid base URI"))
-                    .expect("Failed to parse object store URL");
-            Arc::from(store)
-        } else {
-            // If local path, ensure it exists
-            std::fs::create_dir_all(base_uri).ok();
-            Arc::new(
-                LocalFileSystem::new_with_prefix(base_uri).expect("Failed to create local storage"),
-            )
-        };
+        let store = Self::build_store_from_uri(base_uri)?;
+        Self::new_with_store_and_config(base_uri, store, schema_manager, config).await
+    }
 
+    /// Create a new StorageManager using an already-constructed object store.
+    ///
+    /// This is used by higher layers that need explicit store configuration
+    /// (for example custom S3 endpoints in hybrid/cloud modes).
+    pub async fn new_with_store_and_config(
+        base_uri: &str,
+        store: Arc<dyn ObjectStore>,
+        schema_manager: Arc<SchemaManager>,
+        config: UniConfig,
+    ) -> Result<Self> {
+        Self::new_with_store_and_storage_options(base_uri, store, schema_manager, config, None)
+            .await
+    }
+
+    /// Create a new StorageManager using an already-constructed object store
+    /// and explicit LanceDB storage options.
+    pub async fn new_with_store_and_storage_options(
+        base_uri: &str,
+        store: Arc<dyn ObjectStore>,
+        schema_manager: Arc<SchemaManager>,
+        config: UniConfig,
+        lancedb_storage_options: Option<HashMap<String, String>>,
+    ) -> Result<Self> {
         let resilient_store: Arc<dyn ObjectStore> = Arc::new(ResilientObjectStore::new(
             store,
             config.object_store.clone(),
@@ -136,7 +150,8 @@ impl StorageManager {
         let snapshot_manager = Arc::new(SnapshotManager::new(resilient_store.clone()));
 
         // Connect to LanceDB
-        let lancedb_store = LanceDbStore::connect(base_uri).await?;
+        let lancedb_store =
+            LanceDbStore::connect_with_storage_options(base_uri, lancedb_storage_options).await?;
 
         Ok(Self {
             base_uri: base_uri.to_string(),
@@ -150,6 +165,19 @@ impl StorageManager {
             pinned_snapshot: None,
             lancedb_store: Arc::new(lancedb_store),
         })
+    }
+
+    fn build_store_from_uri(base_uri: &str) -> Result<Arc<dyn ObjectStore>> {
+        if base_uri.contains("://") {
+            let parsed = url::Url::parse(base_uri).map_err(|e| anyhow!("Invalid base URI: {e}"))?;
+            let (store, _path) = object_store::parse_url(&parsed)
+                .map_err(|e| anyhow!("Failed to parse object store URL: {e}"))?;
+            Ok(Arc::from(store))
+        } else {
+            // If local path, ensure it exists.
+            std::fs::create_dir_all(base_uri)?;
+            Ok(Arc::new(LocalFileSystem::new_with_prefix(base_uri)?))
+        }
     }
 
     pub fn pinned(&self, snapshot: SnapshotManifest) -> Self {

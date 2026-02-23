@@ -679,6 +679,19 @@ async fn create_localstack_bucket(bucket: &str) -> Result<()> {
     use object_store::ObjectStore;
     use object_store::aws::AmazonS3Builder;
 
+    // LocalStack accepts unsigned PUT /{bucket} for bucket creation in test env.
+    let status = std::process::Command::new("curl")
+        .args([
+            "-sSf",
+            "-X",
+            "PUT",
+            &format!("http://localhost:4566/{bucket}"),
+        ])
+        .status()?;
+    if !status.success() {
+        anyhow::bail!("failed to create localstack bucket: {bucket}");
+    }
+
     let store = AmazonS3Builder::new()
         .with_bucket_name(bucket)
         .with_region("us-east-1")
@@ -689,13 +702,13 @@ async fn create_localstack_bucket(bucket: &str) -> Result<()> {
         .with_virtual_hosted_style_request(false)
         .build()?;
 
-    // Try to put a marker file - this creates the bucket implicitly in LocalStack
-    let _ = store
+    // Put marker to verify the bucket is usable.
+    store
         .put(
             &object_store::path::Path::from(".marker"),
             Bytes::from("").into(),
         )
-        .await;
+        .await?;
 
     Ok(())
 }

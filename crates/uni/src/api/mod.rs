@@ -13,6 +13,7 @@ pub mod schema;
 pub mod session;
 pub mod sync;
 pub mod transaction;
+pub mod xervo;
 
 use object_store::ObjectStore;
 use object_store::local::LocalFileSystem;
@@ -21,6 +22,8 @@ use uni_common::core::snapshot::SnapshotManifest;
 use uni_common::{CloudStorageConfig, UniConfig};
 use uni_common::{Result, UniError};
 use uni_store::cloud::build_cloud_store;
+use uni_xervo::api::{ModelAliasSpec, ModelTask};
+use uni_xervo::runtime::ModelRuntime;
 
 use uni_common::core::schema::SchemaManager;
 use uni_store::runtime::id_allocator::IdAllocator;
@@ -78,6 +81,7 @@ pub struct Uni {
     pub(crate) schema: Arc<SchemaManager>,
     pub(crate) properties: Arc<PropertyManager>,
     pub(crate) writer: Option<Arc<RwLock<Writer>>>,
+    pub(crate) xervo_runtime: Option<Arc<ModelRuntime>>,
     pub(crate) config: UniConfig,
     pub(crate) procedure_registry: Arc<uni_query::ProcedureRegistry>,
     pub(crate) shutdown_handle: Arc<ShutdownHandle>,
@@ -156,6 +160,7 @@ impl Uni {
             schema: self.schema.clone(),
             properties: prop_manager,
             writer: None,
+            xervo_runtime: self.xervo_runtime.clone(),
             config: self.config.clone(),
             procedure_registry: self.procedure_registry.clone(),
             shutdown_handle,
@@ -734,6 +739,7 @@ pub struct UniBuilder {
     uri: String,
     config: UniConfig,
     schema_file: Option<PathBuf>,
+    xervo_catalog: Option<Vec<ModelAliasSpec>>,
     hybrid_remote_url: Option<String>,
     cloud_config: Option<CloudStorageConfig>,
     create_if_missing: bool,
@@ -747,6 +753,7 @@ impl UniBuilder {
             uri,
             config: UniConfig::default(),
             schema_file: None,
+            xervo_catalog: None,
             hybrid_remote_url: None,
             cloud_config: None,
             create_if_missing: true,
@@ -758,6 +765,28 @@ impl UniBuilder {
     pub fn schema_file(mut self, path: impl AsRef<Path>) -> Self {
         self.schema_file = Some(path.as_ref().to_path_buf());
         self
+    }
+
+    /// Set Uni-Xervo catalog explicitly.
+    pub fn xervo_catalog(mut self, catalog: Vec<ModelAliasSpec>) -> Self {
+        self.xervo_catalog = Some(catalog);
+        self
+    }
+
+    /// Parse Uni-Xervo catalog from JSON string.
+    pub fn xervo_catalog_from_str(mut self, json: &str) -> Result<Self> {
+        let catalog = uni_xervo::api::catalog_from_str(json)
+            .map_err(|e| UniError::Internal(anyhow::anyhow!(e.to_string())))?;
+        self.xervo_catalog = Some(catalog);
+        Ok(self)
+    }
+
+    /// Parse Uni-Xervo catalog from a JSON file.
+    pub fn xervo_catalog_from_file(mut self, path: impl AsRef<Path>) -> Result<Self> {
+        let catalog = uni_xervo::api::catalog_from_file(path)
+            .map_err(|e| UniError::Internal(anyhow::anyhow!(e.to_string())))?;
+        self.xervo_catalog = Some(catalog);
+        Ok(self)
     }
 
     /// Configure hybrid storage with a local path for WAL/IDs and a remote URL for data.
@@ -980,17 +1009,33 @@ impl UniBuilder {
                 .map_err(UniError::Internal)?,
         );
 
-        // Initialize storage
-        // Note: StorageManager re-creates the store from `storage_uri` internally.
-        // For Hybrid/Remote, this works because `storage_uri` is a URL.
-        // For Local, `storage_uri` is a path.
-        let storage = StorageManager::new_with_config(
-            &storage_uri,
-            schema_manager.clone(),
-            self.config.clone(),
-        )
-        .await
-        .map_err(UniError::Internal)?;
+        let lancedb_storage_options = self
+            .cloud_config
+            .as_ref()
+            .map(Self::cloud_config_to_lancedb_storage_options);
+
+        let storage = if is_hybrid || is_remote_uri {
+            // Preserve explicit cloud settings (endpoint, credentials, path style)
+            // by reusing the constructed remote store.
+            StorageManager::new_with_store_and_storage_options(
+                &storage_uri,
+                data_store.clone(),
+                schema_manager.clone(),
+                self.config.clone(),
+                lancedb_storage_options.clone(),
+            )
+            .await
+            .map_err(UniError::Internal)?
+        } else {
+            // Local mode keeps using a storage-path-scoped local store.
+            StorageManager::new_with_config(
+                &storage_uri,
+                schema_manager.clone(),
+                self.config.clone(),
+            )
+            .await
+            .map_err(UniError::Internal)?
+        };
 
         let storage = Arc::new(storage);
 
@@ -1080,6 +1125,113 @@ impl UniBuilder {
             .map_err(UniError::Internal)?,
         ));
 
+        let required_embed_aliases: std::collections::BTreeSet<String> = schema_manager
+            .schema()
+            .indexes
+            .iter()
+            .filter_map(|idx| {
+                if let uni_common::core::schema::IndexDefinition::Vector(cfg) = idx {
+                    cfg.embedding_config.as_ref().map(|emb| emb.alias.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        if !required_embed_aliases.is_empty() && self.xervo_catalog.is_none() {
+            return Err(UniError::Internal(anyhow::anyhow!(
+                "Uni-Xervo catalog is required because schema has vector indexes with embedding aliases"
+            )));
+        }
+
+        let xervo_runtime = if let Some(catalog) = self.xervo_catalog {
+            for alias in &required_embed_aliases {
+                let spec = catalog.iter().find(|s| &s.alias == alias).ok_or_else(|| {
+                    UniError::Internal(anyhow::anyhow!(
+                        "Missing Uni-Xervo alias '{}' referenced by vector index embedding config",
+                        alias
+                    ))
+                })?;
+                if spec.task != ModelTask::Embed {
+                    return Err(UniError::Internal(anyhow::anyhow!(
+                        "Uni-Xervo alias '{}' must be an embed task",
+                        alias
+                    )));
+                }
+            }
+
+            let mut runtime_builder = ModelRuntime::builder().catalog(catalog);
+            #[cfg(feature = "provider-candle")]
+            {
+                runtime_builder = runtime_builder
+                    .register_provider(uni_xervo::provider::LocalCandleProvider::new());
+            }
+            #[cfg(feature = "provider-fastembed")]
+            {
+                runtime_builder = runtime_builder
+                    .register_provider(uni_xervo::provider::LocalFastEmbedProvider::new());
+            }
+            #[cfg(feature = "provider-openai")]
+            {
+                runtime_builder = runtime_builder
+                    .register_provider(uni_xervo::provider::RemoteOpenAIProvider::new());
+            }
+            #[cfg(feature = "provider-gemini")]
+            {
+                runtime_builder = runtime_builder
+                    .register_provider(uni_xervo::provider::RemoteGeminiProvider::new());
+            }
+            #[cfg(feature = "provider-vertexai")]
+            {
+                runtime_builder = runtime_builder
+                    .register_provider(uni_xervo::provider::RemoteVertexAIProvider::new());
+            }
+            #[cfg(feature = "provider-mistral")]
+            {
+                runtime_builder = runtime_builder
+                    .register_provider(uni_xervo::provider::RemoteMistralProvider::new());
+            }
+            #[cfg(feature = "provider-anthropic")]
+            {
+                runtime_builder = runtime_builder
+                    .register_provider(uni_xervo::provider::RemoteAnthropicProvider::new());
+            }
+            #[cfg(feature = "provider-voyageai")]
+            {
+                runtime_builder = runtime_builder
+                    .register_provider(uni_xervo::provider::RemoteVoyageAIProvider::new());
+            }
+            #[cfg(feature = "provider-cohere")]
+            {
+                runtime_builder = runtime_builder
+                    .register_provider(uni_xervo::provider::RemoteCohereProvider::new());
+            }
+            #[cfg(feature = "provider-azure-openai")]
+            {
+                runtime_builder = runtime_builder
+                    .register_provider(uni_xervo::provider::RemoteAzureOpenAIProvider::new());
+            }
+            #[cfg(feature = "provider-mistralrs")]
+            {
+                runtime_builder = runtime_builder
+                    .register_provider(uni_xervo::provider::LocalMistralRsProvider::new());
+            }
+
+            Some(
+                runtime_builder
+                    .build()
+                    .await
+                    .map_err(|e| UniError::Internal(anyhow::anyhow!(e.to_string())))?,
+            )
+        } else {
+            None
+        };
+
+        if let Some(ref runtime) = xervo_runtime {
+            let mut writer_guard = writer.write().await;
+            writer_guard.set_xervo_runtime(runtime.clone());
+        }
+
         // Replay WAL to restore any uncommitted mutations from previous session
         // Only replay mutations with LSN > wal_high_water_mark to avoid double-applying
         {
@@ -1126,6 +1278,7 @@ impl UniBuilder {
             schema: schema_manager,
             properties: prop_manager,
             writer: Some(writer),
+            xervo_runtime,
             config: self.config,
             procedure_registry: Arc::new(uni_query::ProcedureRegistry::new()),
             shutdown_handle,
@@ -1136,5 +1289,79 @@ impl UniBuilder {
     pub fn build_sync(self) -> Result<Uni> {
         let rt = tokio::runtime::Runtime::new().map_err(UniError::Io)?;
         rt.block_on(self.build())
+    }
+
+    fn cloud_config_to_lancedb_storage_options(
+        config: &CloudStorageConfig,
+    ) -> std::collections::HashMap<String, String> {
+        let mut opts = std::collections::HashMap::new();
+
+        match config {
+            CloudStorageConfig::S3 {
+                bucket,
+                region,
+                endpoint,
+                access_key_id,
+                secret_access_key,
+                session_token,
+                virtual_hosted_style,
+            } => {
+                opts.insert("bucket".to_string(), bucket.clone());
+                opts.insert(
+                    "virtual_hosted_style_request".to_string(),
+                    virtual_hosted_style.to_string(),
+                );
+
+                if let Some(r) = region {
+                    opts.insert("region".to_string(), r.clone());
+                }
+                if let Some(ep) = endpoint {
+                    opts.insert("endpoint".to_string(), ep.clone());
+                    if ep.starts_with("http://") {
+                        opts.insert("allow_http".to_string(), "true".to_string());
+                    }
+                }
+                if let Some(v) = access_key_id {
+                    opts.insert("access_key_id".to_string(), v.clone());
+                }
+                if let Some(v) = secret_access_key {
+                    opts.insert("secret_access_key".to_string(), v.clone());
+                }
+                if let Some(v) = session_token {
+                    opts.insert("session_token".to_string(), v.clone());
+                }
+            }
+            CloudStorageConfig::Gcs {
+                bucket,
+                service_account_path,
+                service_account_key,
+            } => {
+                opts.insert("bucket".to_string(), bucket.clone());
+                if let Some(v) = service_account_path {
+                    opts.insert("service_account".to_string(), v.clone());
+                    opts.insert("application_credentials".to_string(), v.clone());
+                }
+                if let Some(v) = service_account_key {
+                    opts.insert("service_account_key".to_string(), v.clone());
+                }
+            }
+            CloudStorageConfig::Azure {
+                container,
+                account,
+                access_key,
+                sas_token,
+            } => {
+                opts.insert("account_name".to_string(), account.clone());
+                opts.insert("container_name".to_string(), container.clone());
+                if let Some(v) = access_key {
+                    opts.insert("access_key".to_string(), v.clone());
+                }
+                if let Some(v) = sas_token {
+                    opts.insert("sas_token".to_string(), v.clone());
+                }
+            }
+        }
+
+        opts
     }
 }

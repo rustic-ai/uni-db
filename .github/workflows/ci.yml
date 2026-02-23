@@ -113,6 +113,7 @@ jobs:
           AWS_ENDPOINT_URL: http://localhost:4566
         run: |
           cargo nextest run --test cloud_integration_test --run-ignored all
+          cargo nextest run -p uni-db --test hybrid_localstack_e2e --run-ignored all
 
   # Python bindings tests
   # Runs after test job to reuse cached dependencies
