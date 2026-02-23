@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2024-2026 Dragonscale Team
 
+#![recursion_limit = "256"]
+
 pub mod query;
 pub mod types;
 
