@@ -245,36 +245,40 @@ class TestUniToPythonType:
 class TestPythonToDbValue:
     """Tests for python_to_db_value conversion."""
 
-    def test_datetime_to_micros(self):
-        """Test datetime → microseconds since epoch."""
+    def test_datetime_passthrough(self):
+        """Test datetime passes through to Rust layer."""
         dt = datetime(2020, 1, 1, 0, 0, 0)
         result = python_to_db_value(dt, datetime)
-        assert isinstance(result, int)
-        # Verify round-trip
+        assert isinstance(result, datetime)
+        assert result == dt
+        # db_to_python_value passes through datetime objects
         rt = db_to_python_value(result, datetime)
         assert rt == dt
 
-    def test_date_to_days(self):
-        """Test date → days since epoch."""
+    def test_date_passthrough(self):
+        """Test date passes through to Rust layer."""
         d = date(2020, 1, 1)
         result = python_to_db_value(d, date)
-        assert isinstance(result, int)
+        assert isinstance(result, date)
+        assert result == d
         rt = db_to_python_value(result, date)
         assert rt == d
 
-    def test_time_to_micros(self):
-        """Test time → microseconds since midnight."""
+    def test_time_passthrough(self):
+        """Test time passes through to Rust layer."""
         t = time(12, 30, 45, 123456)
         result = python_to_db_value(t, time)
-        assert isinstance(result, int)
+        assert isinstance(result, time)
+        assert result == t
         rt = db_to_python_value(result, time)
         assert rt == t
 
-    def test_timedelta_to_micros(self):
-        """Test timedelta → microseconds."""
+    def test_timedelta_passthrough(self):
+        """Test timedelta passes through to Rust layer."""
         td = timedelta(days=1, hours=2, minutes=3)
         result = python_to_db_value(td, timedelta)
-        assert isinstance(result, int)
+        assert isinstance(result, timedelta)
+        assert result == td
         rt = db_to_python_value(result, timedelta)
         assert rt == td
 

@@ -654,6 +654,15 @@ fn eval_div(left: &Value, right: &Value) -> Result<Value> {
         return Ok(duration_to_value(dur.divide(divisor), is_temporal));
     }
 
+    // OpenCypher: integer / integer = integer (truncated toward zero)
+    if let (Value::Int(l), Value::Int(r)) = (left, right) {
+        return if *r == 0 {
+            Err(anyhow!("Division by zero"))
+        } else {
+            Ok(Value::Int(l / r))
+        };
+    }
+
     eval_numeric_op(left, right, |a, b| a / b)
 }
 

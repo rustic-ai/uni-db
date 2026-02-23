@@ -73,8 +73,8 @@ pub async fn execute_with_params_core(
     for (k, v) in params {
         builder = builder.param(&k, v);
     }
-    let result = builder.fetch_all().await.map_err(|e| e.to_string())?;
-    Ok(result.len())
+    let result = builder.execute().await.map_err(|e| e.to_string())?;
+    Ok(result.affected_rows)
 }
 
 /// Explain a query plan without executing.

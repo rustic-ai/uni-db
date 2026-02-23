@@ -1,19 +1,17 @@
 # TCK Compliance Report
 
-**Generated:** 2026-02-22 14:14:44
-**Results:** `results_20260222_141444.json`
-**Compared to:** `results_20260222_124642.json`
+**Generated:** 2026-02-22 23:06:58
+**Results:** `results_20260222_230658.json`
+**Compared to:** `results_20260222_204011.json`
 
 ## Summary
 
 | Metric | Current | Previous | Delta |
 |--------|---------|----------|-------|
 | Scenarios | 3897 | 3897 |  |
-| Passed | 3893 | 3885 | +8 |
-| Failed | 3 | 11 | -8 |
-| Pass Rate | 99.9% | 99.7% | 📈 +0.2pp |
-
-**🟢 Fixed:** 8 scenarios now passing
+| Passed | 3896 | 3896 |  |
+| Failed | 0 | 0 |  |
+| Pass Rate | 100.0% | 100.0% | ➡️ +0.0pp |
 
 ## Feature Breakdown
 
@@ -61,13 +59,13 @@
 | ✅ Graph3 | 9 | 9 | 0 | 100% |  |
 | ✅ Graph4 | 11 | 11 | 0 | 100% |  |
 | ✅ Graph5 | 9 | 9 | 0 | 100% |  |
-| ✅ Graph6 | 14 | 14 | 0 | 100% | +7pp |
+| ✅ Graph6 | 14 | 14 | 0 | 100% |  |
 | ✅ Graph7 | 3 | 3 | 0 | 100% |  |
 | ✅ Graph8 | 8 | 8 | 0 | 100% |  |
 | ✅ Graph9 | 7 | 7 | 0 | 100% |  |
 | ✅ List1 | 23 | 23 | 0 | 100% |  |
-| ✅ List11 | 67 | 67 | 0 | 100% | +1pp |
-| ✅ List12 | 7 | 7 | 0 | 100% | +14pp |
+| ✅ List11 | 67 | 67 | 0 | 100% |  |
+| ✅ List12 | 7 | 7 | 0 | 100% |  |
 | ✅ List2 | 15 | 15 | 0 | 100% |  |
 | ✅ List3 | 7 | 7 | 0 | 100% |  |
 | ✅ List4 | 2 | 2 | 0 | 100% |  |
@@ -89,7 +87,7 @@
 | ✅ Match2 | 86 | 86 | 0 | 100% |  |
 | ✅ Match3 | 30 | 30 | 0 | 100% |  |
 | ✅ Match4 | 10 | 10 | 0 | 100% |  |
-| ✅ Match5 | 29 | 28 | 1 | 97% |  |
+| ✅ Match5 | 29 | 29 | 0 | 100% |  |
 | ✅ Match6 | 97 | 97 | 0 | 100% |  |
 | ✅ Match7 | 31 | 31 | 0 | 100% |  |
 | ✅ Match8 | 3 | 3 | 0 | 100% |  |
@@ -111,7 +109,7 @@
 | ✅ Merge4 | 2 | 2 | 0 | 100% |  |
 | ✅ Merge5 | 29 | 29 | 0 | 100% |  |
 | ✅ Merge6 | 6 | 6 | 0 | 100% |  |
-| ✅ Merge7 | 5 | 4 | 1 | 80% |  |
+| ✅ Merge7 | 5 | 5 | 0 | 100% |  |
 | ✅ Merge8 | 1 | 1 | 0 | 100% |  |
 | ✅ Merge9 | 4 | 4 | 0 | 100% |  |
 | ✅ Null1 | 17 | 17 | 0 | 100% |  |
@@ -146,7 +144,7 @@
 | ✅ Return3 | 3 | 3 | 0 | 100% |  |
 | ✅ Return4 | 11 | 11 | 0 | 100% |  |
 | ✅ Return5 | 5 | 5 | 0 | 100% |  |
-| ✅ Return6 | 21 | 20 | 1 | 95% |  |
+| ✅ Return6 | 21 | 21 | 0 | 100% |  |
 | ✅ Return7 | 2 | 2 | 0 | 100% |  |
 | ✅ Return8 | 1 | 1 | 0 | 100% |  |
 | ✅ ReturnOrderBy1 | 12 | 12 | 0 | 100% |  |
@@ -172,13 +170,13 @@
 | ✅ String8 | 9 | 9 | 0 | 100% |  |
 | ✅ String9 | 9 | 9 | 0 | 100% |  |
 | ✅ Temporal1 | 207 | 207 | 0 | 100% |  |
-| ✅ Temporal10 | 131 | 131 | 0 | 100% | +2pp |
+| ✅ Temporal10 | 131 | 131 | 0 | 100% |  |
 | ✅ Temporal2 | 53 | 53 | 0 | 100% |  |
 | ✅ Temporal3 | 183 | 183 | 0 | 100% |  |
 | ✅ Temporal4 | 39 | 39 | 0 | 100% |  |
-| ✅ Temporal5 | 7 | 7 | 0 | 100% | +14pp |
+| ✅ Temporal5 | 7 | 7 | 0 | 100% |  |
 | ✅ Temporal6 | 17 | 17 | 0 | 100% |  |
-| ✅ Temporal7 | 18 | 18 | 0 | 100% | +11pp |
+| ✅ Temporal7 | 18 | 18 | 0 | 100% |  |
 | ✅ Temporal8 | 27 | 27 | 0 | 100% |  |
 | ✅ Temporal9 | 322 | 322 | 0 | 100% |  |
 | ✅ TriadicSelection1 | 19 | 19 | 0 | 100% |  |
@@ -212,56 +210,6 @@
 | ✅ WithWhere6 | 1 | 1 | 0 | 100% |  |
 | ✅ WithWhere7 | 3 | 3 | 0 | 100% |  |
 
-## 🟢 Newly Passing
-
-Scenarios that were failing but are now passing:
-
-- **Graph6** — [6] Statically access a property of a optional non-null relationship (line 111)
-- **List11** — [3] Create an empty list if range direction and step direction are inconsistent (line 101)
-- **List12** — [6] Using a list comprehension in a WHERE (line 127)
-- **Temporal10** — [10] Should handle large durations in seconds (line 263)
-- **Temporal10** — [9] Should handle large durations (line 252)
-- **Temporal5** — [6] Should provide accessors for date time (line 119)
-- **Temporal7** — [6] Should compare durations for equality (line 134)
-- **Temporal7** — [6] Should compare durations for equality (line 136)
-
 ## Failed Scenarios
 
-### Match5
-
-- **[27] Handling mixed relationship patterns and directions 2** (line 541)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/match/Match5.feature:564:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Result mismatch (any order): Row count mismatch: expected 16, got 20
-[Summary]
-1 feature
-1 scenario (1 failed)
-6 steps (5 passed, 1 f
-  ... (truncated)
-  ```
-
-### Merge7
-
-- **[4] Copying properties from node with ON MATCH** (line 85)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/merge/Merge7.feature:103:5
-      Matched: crates/uni-tck/src/steps/and.rs:27:1
-      Step panicked. Captured output: assertion `left == right` failed: Expected +properties=1, but got 0 (before=3, after=2, added=0, removed=1)
-        left: 0
-       rig
-  ... (truncated)
-  ```
-
-### Return6
-
-- **[16] Aggregation on complex expressions** (line 267)
-  ```
-  Step failed:
-      Defined: tck/features/clauses/return/Return6.feature:294:5
-      Matched: crates/uni-tck/src/steps/then.rs:20:1
-      Step panicked. Captured output: Query returned error instead of result: Query { message: "Error during planning: Function 'abs' expects NativeType::Numeric but rec
-  ... (truncated)
-  ```
+🎉 No failed scenarios!

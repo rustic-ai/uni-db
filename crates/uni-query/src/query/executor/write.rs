@@ -77,12 +77,20 @@ impl Executor {
 
                 if is_node_map || is_edge_map {
                     // Filter out internal bookkeeping keys
-                    Some(
-                        map.iter()
-                            .filter(|(k, _)| !k.starts_with('_') && k.as_str() != "ext_id")
-                            .map(|(k, v)| (k.clone(), v.clone()))
-                            .collect(),
-                    )
+                    let user_props: HashMap<String, Value> = map
+                        .iter()
+                        .filter(|(k, _)| !k.starts_with('_') && k.as_str() != "ext_id")
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect();
+                    // When mutation output omits dotted property columns, user
+                    // properties live inside `_all_props` rather than at the
+                    // top level of the entity map.
+                    if user_props.is_empty()
+                        && let Some(Value::Map(all_props)) = map.get("_all_props")
+                    {
+                        return Some(all_props.clone());
+                    }
+                    Some(user_props)
                 } else {
                     // Plain map literal — return as-is
                     Some(map.clone())

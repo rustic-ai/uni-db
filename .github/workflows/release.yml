@@ -17,6 +17,9 @@ on:
         type: boolean
         default: true
 
+permissions:
+  contents: read
+
 jobs:
   validate:
     name: Validate versions
@@ -29,9 +32,9 @@ jobs:
 
       - name: Check version consistency
         id: check
+        env:
+          VERSION: ${{ inputs.version }}
         run: |
-          VERSION="${{ inputs.version }}"
-
           # Get version from workspace Cargo.toml
           CARGO_VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
 
@@ -77,8 +80,9 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Create and push tag
+        env:
+          VERSION: v${{ needs.validate.outputs.version }}
         run: |
-          VERSION="v${{ needs.validate.outputs.version }}"
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git tag -a "$VERSION" -m "Release $VERSION"
@@ -96,7 +100,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ needs.validate.outputs.version }}
           name: Release v${{ needs.validate.outputs.version }}

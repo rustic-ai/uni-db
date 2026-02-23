@@ -90,10 +90,15 @@ impl<'a> QueryBuilder<'a> {
 
     /// Execute a mutation (CREATE, SET, DELETE, etc.) and return affected row count.
     pub async fn execute(self) -> Result<ExecuteResult> {
+        let db = self.db;
+        let before = db.get_mutation_count().await;
         let result = self.fetch_all().await?;
-        Ok(ExecuteResult {
-            affected_rows: result.len(),
-        })
+        let affected_rows = if result.is_empty() {
+            db.get_mutation_count().await.saturating_sub(before)
+        } else {
+            result.len()
+        };
+        Ok(ExecuteResult { affected_rows })
     }
 
     /// Execute the query and return a cursor for streaming results.

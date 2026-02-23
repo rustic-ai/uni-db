@@ -788,7 +788,11 @@ class UniSession:
         data = run_class_hooks(model, _BEFORE_LOAD, data) or data
 
         # Extract _id → vid (uni-db returns _id as string or int)
-        vid = data.pop("_id", None) or data.pop("_vid", None) or data.pop("vid", None)
+        vid = data.pop("_id", None)
+        if vid is None:
+            vid = data.pop("_vid", None)
+        if vid is None:
+            vid = data.pop("vid", None)
         if vid is not None and not isinstance(vid, int):
             vid = int(vid)
 

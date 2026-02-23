@@ -74,10 +74,14 @@ impl<'a> Transaction<'a> {
     ///
     /// An [`ExecuteResult`] with statistics on affected rows.
     pub async fn execute(&self, cypher: &str) -> Result<ExecuteResult> {
+        let before = self.db.get_mutation_count().await;
         let result = self.query(cypher).await?;
-        Ok(ExecuteResult {
-            affected_rows: result.len(),
-        })
+        let affected_rows = if result.is_empty() {
+            self.db.get_mutation_count().await.saturating_sub(before)
+        } else {
+            result.len()
+        };
+        Ok(ExecuteResult { affected_rows })
     }
 
     /// Execute a mutation with parameters using a builder.
@@ -162,14 +166,18 @@ impl<'a> TransactionQueryBuilder<'a> {
 
     /// Execute the mutation and return affected row count.
     pub async fn execute(self) -> Result<ExecuteResult> {
+        let before = self.tx.db.get_mutation_count().await;
         let result = self
             .tx
             .db
             .execute_internal(&self.cypher, self.params)
             .await?;
-        Ok(ExecuteResult {
-            affected_rows: result.len(),
-        })
+        let affected_rows = if result.is_empty() {
+            self.tx.db.get_mutation_count().await.saturating_sub(before)
+        } else {
+            result.len()
+        };
+        Ok(ExecuteResult { affected_rows })
     }
 }
 

@@ -2723,6 +2723,63 @@ fn build_list_of_structs_column(
     Ok(Arc::new(list_array))
 }
 
+/// Convert a TemporalValue into a HashMap matching the Arrow struct field names,
+/// so that `build_struct_property_column` can extract fields uniformly.
+fn temporal_to_struct_map(tv: &uni_common::value::TemporalValue) -> HashMap<String, Value> {
+    use uni_common::value::TemporalValue;
+    let mut m = HashMap::new();
+    match tv {
+        TemporalValue::DateTime {
+            nanos_since_epoch,
+            offset_seconds,
+            timezone_name,
+        } => {
+            m.insert("nanos_since_epoch".into(), Value::Int(*nanos_since_epoch));
+            m.insert("offset_seconds".into(), Value::Int(*offset_seconds as i64));
+            if let Some(tz) = timezone_name {
+                m.insert("timezone_name".into(), Value::String(tz.clone()));
+            }
+        }
+        TemporalValue::LocalDateTime { nanos_since_epoch } => {
+            m.insert("nanos_since_epoch".into(), Value::Int(*nanos_since_epoch));
+        }
+        TemporalValue::Time {
+            nanos_since_midnight,
+            offset_seconds,
+        } => {
+            m.insert(
+                "nanos_since_midnight".into(),
+                Value::Int(*nanos_since_midnight),
+            );
+            m.insert("offset_seconds".into(), Value::Int(*offset_seconds as i64));
+        }
+        TemporalValue::LocalTime {
+            nanos_since_midnight,
+        } => {
+            m.insert(
+                "nanos_since_midnight".into(),
+                Value::Int(*nanos_since_midnight),
+            );
+        }
+        TemporalValue::Date { days_since_epoch } => {
+            m.insert(
+                "days_since_epoch".into(),
+                Value::Int(*days_since_epoch as i64),
+            );
+        }
+        TemporalValue::Duration {
+            months,
+            days,
+            nanos,
+        } => {
+            m.insert("months".into(), Value::Int(*months));
+            m.insert("days".into(), Value::Int(*days));
+            m.insert("nanos".into(), Value::Int(*nanos));
+        }
+    }
+    m
+}
+
 /// Build a Struct-typed Arrow column from Map property values (e.g. Point types).
 fn build_struct_property_column(
     vids: &[Vid],
@@ -2732,9 +2789,17 @@ fn build_struct_property_column(
 ) -> DFResult<ArrayRef> {
     use arrow_array::StructArray;
 
+    // Convert raw values, expanding Temporal values into Map representation
+    // so the struct field extraction below works uniformly.
     let values: Vec<Option<Value>> = vids
         .iter()
-        .map(|vid| get_property_value(vid, props_map, prop_name))
+        .map(|vid| {
+            let val = get_property_value(vid, props_map, prop_name);
+            match val {
+                Some(Value::Temporal(ref tv)) => Some(Value::Map(temporal_to_struct_map(tv))),
+                other => other,
+            }
+        })
         .collect();
 
     let child_arrays: Vec<ArrayRef> = fields
@@ -2773,6 +2838,51 @@ fn build_struct_property_column(
                 }
                 DataType::Int64 => {
                     let mut builder = Int64Builder::with_capacity(vids.len());
+                    for val in &values {
+                        match val {
+                            Some(Value::Map(obj)) => {
+                                match obj.get(field_name).and_then(|v| v.as_i64()) {
+                                    Some(n) => builder.append_value(n),
+                                    None => builder.append_null(),
+                                }
+                            }
+                            _ => builder.append_null(),
+                        }
+                    }
+                    Arc::new(builder.finish()) as ArrayRef
+                }
+                DataType::Timestamp(_, _) => {
+                    let mut builder = TimestampNanosecondBuilder::with_capacity(vids.len());
+                    for val in &values {
+                        match val {
+                            Some(Value::Map(obj)) => {
+                                match obj.get(field_name).and_then(|v| v.as_i64()) {
+                                    Some(n) => builder.append_value(n),
+                                    None => builder.append_null(),
+                                }
+                            }
+                            _ => builder.append_null(),
+                        }
+                    }
+                    Arc::new(builder.finish()) as ArrayRef
+                }
+                DataType::Int32 => {
+                    let mut builder = Int32Builder::with_capacity(vids.len());
+                    for val in &values {
+                        match val {
+                            Some(Value::Map(obj)) => {
+                                match obj.get(field_name).and_then(|v| v.as_i64()) {
+                                    Some(n) => builder.append_value(n as i32),
+                                    None => builder.append_null(),
+                                }
+                            }
+                            _ => builder.append_null(),
+                        }
+                    }
+                    Arc::new(builder.finish()) as ArrayRef
+                }
+                DataType::Time64(_) => {
+                    let mut builder = Time64NanosecondBuilder::with_capacity(vids.len());
                     for val in &values {
                         match val {
                             Some(Value::Map(obj)) => {

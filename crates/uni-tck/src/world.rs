@@ -344,9 +344,25 @@ impl UniWorld {
         ids
     }
 
+    /// Get labels present in data (not schema metadata) for side-effect tracking.
+    ///
+    /// TCK side effects track data-level label presence: a label is "+created"
+    /// when the first vertex with that label appears, and "-removed" when the
+    /// last vertex with that label is deleted. This must NOT include
+    /// schema-registered labels that have no data yet, otherwise the
+    /// before/after diff is always zero in schema-aware mode.
     async fn get_labels(&self) -> anyhow::Result<HashSet<String>> {
-        let labels = self.db().list_labels().await?;
-        Ok(labels.into_iter().collect())
+        let query = "MATCH (n) RETURN DISTINCT labels(n) AS labels";
+        let result = self.db().query(query).await?;
+        let mut all_labels = HashSet::new();
+        for row in &result.rows {
+            if let Ok(labels_list) = row.get::<Vec<String>>("labels") {
+                for label in labels_list {
+                    all_labels.insert(label);
+                }
+            }
+        }
+        Ok(all_labels)
     }
 
     pub fn set_result(&mut self, result: QueryResult) {

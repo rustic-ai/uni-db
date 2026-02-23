@@ -482,7 +482,9 @@ impl OptionalFilterStream {
 fn extract_u64_value(col: &dyn Array, row_idx: usize) -> Option<u64> {
     use arrow_array::UInt64Array;
     let vid_array = col.as_any().downcast_ref::<UInt64Array>()?;
-    vid_array.is_valid(row_idx).then(|| vid_array.value(row_idx))
+    vid_array
+        .is_valid(row_idx)
+        .then(|| vid_array.value(row_idx))
 }
 
 /// Take elements from an array at the given indices.

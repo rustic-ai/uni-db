@@ -220,12 +220,18 @@ pub fn value_from_column(
                     offset_col.as_any().downcast_ref::<Int32Array>(),
                 )
             {
-                if nanos_arr.is_null(row) || offset_arr.is_null(row) {
+                if nanos_arr.is_null(row) {
                     return Ok(Value::Null);
                 }
-                let tv = TemporalValue::Time {
-                    nanos_since_midnight: nanos_arr.value(row),
-                    offset_seconds: offset_arr.value(row),
+                let tv = if offset_arr.is_null(row) {
+                    TemporalValue::LocalTime {
+                        nanos_since_midnight: nanos_arr.value(row),
+                    }
+                } else {
+                    TemporalValue::Time {
+                        nanos_since_midnight: nanos_arr.value(row),
+                        offset_seconds: offset_arr.value(row),
+                    }
                 };
                 return Ok(Value::String(tv.to_string()));
             }
@@ -289,14 +295,21 @@ pub fn value_from_column(
                     tz_col.as_any().downcast_ref::<StringArray>(),
                 )
             {
-                if nanos_arr.is_null(row) || offset_arr.is_null(row) {
+                if nanos_arr.is_null(row) {
                     return Ok(Value::Null);
                 }
-                let timezone_name = (!tz_arr.is_null(row)).then(|| tz_arr.value(row).to_string());
-                let tv = TemporalValue::DateTime {
-                    nanos_since_epoch: nanos_arr.value(row),
-                    offset_seconds: offset_arr.value(row),
-                    timezone_name,
+                let tv = if offset_arr.is_null(row) {
+                    TemporalValue::LocalDateTime {
+                        nanos_since_epoch: nanos_arr.value(row),
+                    }
+                } else {
+                    let timezone_name =
+                        (!tz_arr.is_null(row)).then(|| tz_arr.value(row).to_string());
+                    TemporalValue::DateTime {
+                        nanos_since_epoch: nanos_arr.value(row),
+                        offset_seconds: offset_arr.value(row),
+                        timezone_name,
+                    }
                 };
                 return Ok(Value::String(tv.to_string()));
             }

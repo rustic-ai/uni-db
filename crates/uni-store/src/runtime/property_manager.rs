@@ -1640,7 +1640,21 @@ impl PropertyManager {
 
     /// Decode an Arrow column value with strict CRDT error handling.
     pub fn value_from_column(col: &dyn Array, data_type: &DataType, row: usize) -> Result<Value> {
-        value_codec::value_from_column(col, data_type, row, CrdtDecodeMode::Strict).map(Value::from)
+        // Temporal types must go through arrow_convert to preserve Value::Temporal
+        // variants. The value_codec path converts them to strings, which breaks
+        // round-trip writes (e.g. SET re-writes all properties and
+        // values_to_datetime_struct_array only matches Value::Temporal).
+        match data_type {
+            DataType::DateTime | DataType::Timestamp | DataType::Date | DataType::Time => {
+                Ok(crate::storage::arrow_convert::arrow_to_value(
+                    col,
+                    row,
+                    Some(data_type),
+                ))
+            }
+            _ => value_codec::value_from_column(col, data_type, row, CrdtDecodeMode::Strict)
+                .map(Value::from),
+        }
     }
 
     pub(crate) fn merge_crdt_values(&self, a: &Value, b: &Value) -> Result<Value> {

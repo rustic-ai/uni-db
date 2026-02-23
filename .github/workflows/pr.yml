@@ -13,6 +13,9 @@ env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
 
+permissions:
+  contents: read
+
 jobs:
   # Format and lint checks
   lint:
@@ -34,7 +37,7 @@ jobs:
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: "lint"
+          shared-key: "ci"
           cache-on-failure: true
 
       - name: Check formatting
@@ -64,7 +67,7 @@ jobs:
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: "rust-tests"
+          shared-key: "ci"
           cache-on-failure: true
 
       - name: Run tests
@@ -93,7 +96,7 @@ jobs:
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: "python-tests"
+          shared-key: "ci"
           cache-on-failure: true
 
       - name: Install Poetry

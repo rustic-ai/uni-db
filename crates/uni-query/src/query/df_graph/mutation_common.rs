@@ -795,13 +795,19 @@ fn normalize_mutation_schema(schema: &SchemaRef) -> SchemaRef {
 
 /// Compute an extended output schema that includes columns for newly created variables.
 ///
-/// For each variable name in `new_vars` that is not already in `input_schema`,
-/// adds a LargeBinary field with `cv_encoded=true` metadata. This lets downstream
-/// operators (RETURN, WITH) see the created entities.
+/// Extracts variables from CREATE/MERGE patterns and adds:
+/// - Bare cv_encoded LargeBinary column for each variable
+/// - System dotted columns based on element type:
+///   - Node → `{var}._vid` (UInt64), `{var}._labels` (LargeBinary cv_encoded)
+///   - Edge → `{var}._eid` (UInt64), `{var}._type` (LargeBinary cv_encoded)
+///   - Path → bare column only (no system columns)
+///
+/// Property access on mutation variables uses dynamic `index()` UDF extraction,
+/// so property columns are NOT added here.
 ///
 /// Also normalizes existing Struct entity columns to cv_encoded LargeBinary,
 /// since after mutation processing, entities are stored as Maps in row HashMaps.
-pub fn extended_schema_for_new_vars(input_schema: &SchemaRef, new_vars: &[String]) -> SchemaRef {
+pub fn extended_schema_for_new_vars(input_schema: &SchemaRef, patterns: &[Pattern]) -> SchemaRef {
     use arrow_schema::{Field, Schema};
 
     // First normalize existing columns
@@ -814,13 +820,90 @@ pub fn extended_schema_for_new_vars(input_schema: &SchemaRef, new_vars: &[String
         .collect();
 
     let mut fields: Vec<Arc<arrow_schema::Field>> = normalized.fields().to_vec();
+    let mut added: HashSet<String> = HashSet::new();
 
-    for var_name in new_vars {
-        if !existing_names.contains(var_name.as_str()) {
-            let mut metadata = std::collections::HashMap::new();
-            metadata.insert("cv_encoded".to_string(), "true".to_string());
-            let field = Field::new(var_name, DataType::LargeBinary, true).with_metadata(metadata);
-            fields.push(Arc::new(field));
+    fn cv_metadata() -> std::collections::HashMap<String, String> {
+        let mut m = std::collections::HashMap::new();
+        m.insert("cv_encoded".to_string(), "true".to_string());
+        m
+    }
+
+    fn add_bare_column(
+        var: &str,
+        fields: &mut Vec<Arc<arrow_schema::Field>>,
+        existing: &HashSet<&str>,
+        added: &mut HashSet<String>,
+    ) -> bool {
+        if existing.contains(var) || added.contains(var) {
+            return false;
+        }
+        added.insert(var.to_string());
+        fields.push(Arc::new(
+            Field::new(var, DataType::LargeBinary, true).with_metadata(cv_metadata()),
+        ));
+        true
+    }
+
+    for pattern in patterns {
+        for path in &pattern.paths {
+            // Path variable (e.g., `p` in `MERGE p = (a)-[r]->(b)`)
+            if let Some(ref var) = path.variable {
+                add_bare_column(var, &mut fields, &existing_names, &mut added);
+            }
+            for element in &path.elements {
+                match element {
+                    PatternElement::Node(n) => {
+                        if let Some(ref var) = n.variable
+                            && add_bare_column(var, &mut fields, &existing_names, &mut added)
+                        {
+                            // Node system columns for id()/labels()
+                            fields.push(Arc::new(Field::new(
+                                format!("{var}._vid"),
+                                DataType::UInt64,
+                                true,
+                            )));
+                            fields.push(Arc::new(
+                                Field::new(format!("{var}._labels"), DataType::LargeBinary, true)
+                                    .with_metadata(cv_metadata()),
+                            ));
+                        }
+                    }
+                    PatternElement::Relationship(r) => {
+                        if let Some(ref var) = r.variable
+                            && add_bare_column(var, &mut fields, &existing_names, &mut added)
+                        {
+                            // Edge system columns for id()/type()
+                            fields.push(Arc::new(Field::new(
+                                format!("{var}._eid"),
+                                DataType::UInt64,
+                                true,
+                            )));
+                            fields.push(Arc::new(
+                                Field::new(format!("{var}._type"), DataType::LargeBinary, true)
+                                    .with_metadata(cv_metadata()),
+                            ));
+                        }
+                    }
+                    PatternElement::Parenthesized { pattern, .. } => {
+                        // Recurse into sub-patterns. Pass current fields as
+                        // input so the recursive call's `existing_names` check
+                        // prevents duplicates for variables already added.
+                        let sub = Pattern {
+                            paths: vec![pattern.as_ref().clone()],
+                        };
+                        let sub_schema = extended_schema_for_new_vars(
+                            &Arc::new(Schema::new(fields.clone())),
+                            &[sub],
+                        );
+                        // Sync `added` from new fields to prevent duplicates
+                        // if a later pattern element reuses a variable.
+                        for field in sub_schema.fields() {
+                            added.insert(field.name().clone());
+                        }
+                        fields = sub_schema.fields().to_vec();
+                    }
+                }
+            }
         }
     }
 
@@ -1004,8 +1087,8 @@ pub fn new_create_exec(
     pattern: Pattern,
     mutation_ctx: Arc<MutationContext>,
 ) -> MutationExec {
-    let new_vars = pattern_variable_names(&pattern);
-    let output_schema = extended_schema_for_new_vars(&input.schema(), &new_vars);
+    let output_schema =
+        extended_schema_for_new_vars(&input.schema(), std::slice::from_ref(&pattern));
     MutationExec::new_with_schema(
         input,
         MutationKind::Create { pattern },
@@ -1027,8 +1110,8 @@ pub fn new_merge_exec(
     on_create: Option<SetClause>,
     mutation_ctx: Arc<MutationContext>,
 ) -> MutationExec {
-    let new_vars = pattern_variable_names(&pattern);
-    let output_schema = extended_schema_for_new_vars(&input.schema(), &new_vars);
+    let output_schema =
+        extended_schema_for_new_vars(&input.schema(), std::slice::from_ref(&pattern));
     MutationExec::new_with_schema(
         input,
         MutationKind::Merge {

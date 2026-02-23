@@ -35,9 +35,7 @@
 use crate::query::df_expr::{TranslationContext, VariableKind, cypher_expr_to_df};
 use crate::query::df_graph::bind_fixed_path::BindFixedPathExec;
 use crate::query::df_graph::bind_zero_length_path::BindZeroLengthPathExec;
-use crate::query::df_graph::mutation_common::{
-    MutationKind, extended_schema_for_new_vars, pattern_variable_names,
-};
+use crate::query::df_graph::mutation_common::{MutationKind, extended_schema_for_new_vars};
 use crate::query::df_graph::mutation_create::new_create_exec;
 use crate::query::df_graph::mutation_delete::new_delete_exec;
 use crate::query::df_graph::mutation_merge::new_merge_exec;
@@ -331,14 +329,17 @@ impl HybridPhysicalPlanner {
         let mut variable_kinds = HashMap::new();
         let mut variable_labels = HashMap::new();
         let mut node_variable_hints = Vec::new();
+        let mut mutation_edge_hints = Vec::new();
         collect_variable_kinds(plan, &mut variable_kinds);
         collect_mutation_node_hints(plan, &mut node_variable_hints);
+        collect_mutation_edge_hints(plan, &mut mutation_edge_hints);
         self.collect_variable_labels(plan, &mut variable_labels);
         TranslationContext {
             parameters: self.params.clone(),
             variable_labels,
             variable_kinds,
             node_variable_hints,
+            mutation_edge_hints,
             ..Default::default()
         }
     }
@@ -871,9 +872,7 @@ impl HybridPhysicalPlanner {
                 let mutation_ctx = self.require_mutation_ctx()?;
                 // Use a single MutationExec with CreateBatch to avoid N nested
                 // operators (which cause stack overflow for large N).
-                let all_vars: Vec<String> =
-                    patterns.iter().flat_map(pattern_variable_names).collect();
-                let output_schema = extended_schema_for_new_vars(&child.schema(), &all_vars);
+                let output_schema = extended_schema_for_new_vars(&child.schema(), patterns);
                 Ok(Arc::new(MutationExec::new_with_schema(
                     child,
                     MutationKind::CreateBatch {
@@ -4275,9 +4274,8 @@ fn collect_variable_kinds(plan: &LogicalPlan, kinds: &mut HashMap<String, Variab
 
 /// Collect node variable names from CREATE/MERGE patterns for startNode/endNode UDFs.
 ///
-/// These hints are stored separately from `variable_kinds` because registering
-/// CREATE/MERGE variables in `variable_kinds` would cause ID/TYPE/HASLABEL to use
-/// dotted column references (e.g., `n._vid`) that don't exist in mutation output schemas.
+/// These hints are used alongside `variable_kinds` to identify node variables
+/// in mutation contexts for startNode/endNode resolution.
 fn collect_mutation_node_hints(plan: &LogicalPlan, hints: &mut Vec<String>) {
     match plan {
         LogicalPlan::Create { input, pattern } => {
@@ -4358,6 +4356,91 @@ fn collect_node_names_from_pattern(pattern: &Pattern, hints: &mut Vec<String>) {
                         paths: vec![pattern.as_ref().clone()],
                     };
                     collect_node_names_from_pattern(&sub, hints);
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+/// Collect edge (relationship) variable names from CREATE/MERGE patterns.
+///
+/// Used by `id()` to resolve edge identity as `_eid` instead of `_vid`.
+fn collect_mutation_edge_hints(plan: &LogicalPlan, hints: &mut Vec<String>) {
+    match plan {
+        LogicalPlan::Create { input, pattern } | LogicalPlan::Merge { input, pattern, .. } => {
+            collect_edge_names_from_pattern(pattern, hints);
+            collect_mutation_edge_hints(input, hints);
+        }
+        LogicalPlan::CreateBatch { input, patterns } => {
+            for pattern in patterns {
+                collect_edge_names_from_pattern(pattern, hints);
+            }
+            collect_mutation_edge_hints(input, hints);
+        }
+        // For all other nodes, recurse into inputs
+        LogicalPlan::Traverse { input, .. }
+        | LogicalPlan::TraverseMainByType { input, .. }
+        | LogicalPlan::Filter { input, .. }
+        | LogicalPlan::Project { input, .. }
+        | LogicalPlan::Sort { input, .. }
+        | LogicalPlan::Limit { input, .. }
+        | LogicalPlan::Aggregate { input, .. }
+        | LogicalPlan::Distinct { input, .. }
+        | LogicalPlan::Window { input, .. }
+        | LogicalPlan::Unwind { input, .. }
+        | LogicalPlan::Set { input, .. }
+        | LogicalPlan::Remove { input, .. }
+        | LogicalPlan::Delete { input, .. }
+        | LogicalPlan::Foreach { input, .. }
+        | LogicalPlan::SubqueryCall { input, .. }
+        | LogicalPlan::ShortestPath { input, .. }
+        | LogicalPlan::AllShortestPaths { input, .. }
+        | LogicalPlan::QuantifiedPattern { input, .. }
+        | LogicalPlan::BindZeroLengthPath { input, .. }
+        | LogicalPlan::BindPath { input, .. } => {
+            collect_mutation_edge_hints(input, hints);
+        }
+        LogicalPlan::Union { left, right, .. } | LogicalPlan::CrossJoin { left, right, .. } => {
+            collect_mutation_edge_hints(left, hints);
+            collect_mutation_edge_hints(right, hints);
+        }
+        LogicalPlan::Apply {
+            input, subquery, ..
+        } => {
+            collect_mutation_edge_hints(input, hints);
+            collect_mutation_edge_hints(subquery, hints);
+        }
+        LogicalPlan::RecursiveCTE {
+            initial, recursive, ..
+        } => {
+            collect_mutation_edge_hints(initial, hints);
+            collect_mutation_edge_hints(recursive, hints);
+        }
+        LogicalPlan::Explain { plan } => {
+            collect_mutation_edge_hints(plan, hints);
+        }
+        _ => {}
+    }
+}
+
+/// Extract edge (relationship) variable names from a single Cypher pattern.
+fn collect_edge_names_from_pattern(pattern: &Pattern, hints: &mut Vec<String>) {
+    for path in &pattern.paths {
+        for element in &path.elements {
+            match element {
+                PatternElement::Relationship(r) => {
+                    if let Some(ref v) = r.variable
+                        && !hints.contains(v)
+                    {
+                        hints.push(v.clone());
+                    }
+                }
+                PatternElement::Parenthesized { pattern, .. } => {
+                    let sub = Pattern {
+                        paths: vec![pattern.as_ref().clone()],
+                    };
+                    collect_edge_names_from_pattern(&sub, hints);
                 }
                 _ => {}
             }

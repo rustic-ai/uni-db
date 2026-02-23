@@ -17,6 +17,9 @@ env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
 
+permissions:
+  contents: read
+
 jobs:
   # Basic tests and lints
   # Uses xlarge runner for faster builds (8 cores, 32GB RAM)
@@ -42,7 +45,7 @@ jobs:
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: "test"
+          shared-key: "ci"
           cache-on-failure: true
 
       - name: Check formatting
@@ -90,7 +93,7 @@ jobs:
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: "test"
+          shared-key: "ci"
           cache-on-failure: true
           save-if: false
 
@@ -99,6 +102,9 @@ jobs:
           timeout 120 bash -c 'until curl -sf http://localhost:4566/_localstack/health > /dev/null 2>&1; do echo "Waiting for LocalStack..."; sleep 2; done'
           echo "LocalStack is ready!"
 
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
       - name: Run cloud integration tests
         env:
           AWS_ACCESS_KEY_ID: test
@@ -106,7 +112,7 @@ jobs:
           AWS_REGION: us-east-1
           AWS_ENDPOINT_URL: http://localhost:4566
         run: |
-          cargo test --test cloud_integration_test -- --ignored
+          cargo nextest run --test cloud_integration_test --run-ignored all
 
   # Python bindings tests
   # Runs after test job to reuse cached dependencies
@@ -133,7 +139,7 @@ jobs:
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: "test"
+          shared-key: "ci"
           cache-on-failure: true
           save-if: false
 
@@ -192,7 +198,7 @@ jobs:
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: "test"
+          shared-key: "ci"
           cache-on-failure: true
           save-if: false
 

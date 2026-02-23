@@ -94,14 +94,22 @@ impl<'a, 'b> SessionQueryBuilder<'a, 'b> {
 
     pub async fn execute_mutation(self) -> Result<ExecuteResult> {
         let params = Self::merge_params_internal(self.params, &self.session.variables);
+        let before = self.session.db.get_mutation_count().await;
         let result = self
             .session
             .db
             .execute_internal(&self.cypher, params)
             .await?;
-        Ok(ExecuteResult {
-            affected_rows: result.len(),
-        })
+        let affected_rows = if result.is_empty() {
+            self.session
+                .db
+                .get_mutation_count()
+                .await
+                .saturating_sub(before)
+        } else {
+            result.len()
+        };
+        Ok(ExecuteResult { affected_rows })
     }
 
     fn merge_params_internal(

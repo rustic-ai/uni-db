@@ -571,8 +571,12 @@ pub struct TranslationContext {
     pub variable_kinds: std::collections::HashMap<String, VariableKind>,
 
     /// Node variable names from CREATE/MERGE patterns (separate from variable_kinds
-    /// to avoid affecting ID/TYPE/HASLABEL translation). Used only by startNode/endNode UDFs.
+    /// to avoid affecting property access translation). Used by startNode/endNode UDFs.
     pub node_variable_hints: Vec<String>,
+
+    /// Edge variable names from CREATE/MERGE patterns. Used by `id()` to resolve
+    /// edge identity as `_eid` instead of the default `_vid`.
+    pub mutation_edge_hints: Vec<String>,
 
     /// Frozen statement clock for consistent temporal function evaluation.
     /// All bare temporal constructors (`time()`, `datetime()`, etc.) and their
@@ -588,6 +592,7 @@ impl Default for TranslationContext {
             variable_labels: std::collections::HashMap::new(),
             variable_kinds: std::collections::HashMap::new(),
             node_variable_hints: Vec::new(),
+            mutation_edge_hints: Vec::new(),
             statement_time: chrono::Utc::now(),
         }
     }
@@ -1585,7 +1590,12 @@ fn translate_math_function(name_upper: &str, df_args: &[DfExpr]) -> Option<Resul
     match name_upper {
         "ABS" => {
             check_args!(1, df_args, "abs");
-            Some(Ok(expr_fn::abs(first_arg(df_args))))
+            // Use Cypher-aware abs to handle cv_encoded (LargeBinary)
+            // arguments from schemaless property arithmetic while
+            // preserving integer/float type semantics.
+            Some(Ok(crate::query::df_udfs::cypher_abs_expr(first_arg(
+                df_args,
+            ))))
         }
         "CEIL" | "CEILING" => {
             check_args!(1, df_args, "ceil");
@@ -1848,13 +1858,11 @@ fn translate_graph_function(
             // When called with a bare variable (ID(n)), rewrite to the internal
             // identity column reference (_vid for nodes, _eid for edges).
             if let Some(Expr::Variable(var)) = args.first() {
-                let id_suffix = if let Some(ctx) = context
-                    && ctx.variable_kinds.get(var) == Some(&VariableKind::Edge)
-                {
-                    COL_EID
-                } else {
-                    COL_VID
-                };
+                let is_edge = context.is_some_and(|ctx| {
+                    ctx.variable_kinds.get(var) == Some(&VariableKind::Edge)
+                        || ctx.mutation_edge_hints.iter().any(|h| h == var)
+                });
+                let id_suffix = if is_edge { COL_EID } else { COL_VID };
                 Some(Ok(DfExpr::Column(Column::from_name(format!(
                     "{}.{}",
                     var, id_suffix

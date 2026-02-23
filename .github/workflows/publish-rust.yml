@@ -19,6 +19,9 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+permissions:
+  contents: read
+
 jobs:
   publish:
     name: Publish to crates.io
@@ -52,8 +55,11 @@ jobs:
           fi
           echo "Version validated: $TAG_VERSION"
 
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
       - name: Run tests
-        run: cargo test --workspace --exclude uni-tck
+        run: cargo nextest run --workspace --exclude uni-tck
 
       - name: Package crate (dry run)
         run: cargo package -p uni-db --allow-dirty

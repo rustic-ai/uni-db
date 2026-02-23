@@ -3781,20 +3781,88 @@ pub fn create_cypher_mod_udf() -> ScalarUDF {
     ScalarUDF::new_from_impl(CypherArithmeticUdf::new("_cypher_mod", BinaryOp::Mod))
 }
 
+/// Cypher-aware `abs()` that preserves integer/float type through cv_encoded values.
+pub fn create_cypher_abs_udf() -> ScalarUDF {
+    ScalarUDF::new_from_impl(CypherAbsUdf::new())
+}
+
+/// Wrap a DataFusion expression with `_cypher_abs()` UDF.
+pub(crate) fn cypher_abs_expr(
+    arg: datafusion::logical_expr::Expr,
+) -> datafusion::logical_expr::Expr {
+    datafusion::logical_expr::Expr::ScalarFunction(
+        datafusion::logical_expr::expr::ScalarFunction::new_udf(
+            Arc::new(create_cypher_abs_udf()),
+            vec![arg],
+        ),
+    )
+}
+
+#[derive(Debug)]
+struct CypherAbsUdf {
+    signature: Signature,
+}
+
+impl CypherAbsUdf {
+    fn new() -> Self {
+        Self {
+            signature: Signature::any(1, Volatility::Immutable),
+        }
+    }
+}
+
+impl_udf_eq_hash!(CypherAbsUdf);
+
+impl ScalarUDFImpl for CypherAbsUdf {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+    fn name(&self) -> &str {
+        "_cypher_abs"
+    }
+    fn signature(&self) -> &Signature {
+        &self.signature
+    }
+    fn return_type(&self, _args: &[DataType]) -> DFResult<DataType> {
+        Ok(DataType::LargeBinary)
+    }
+    fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DFResult<ColumnarValue> {
+        if args.args.len() != 1 {
+            return Err(datafusion::error::DataFusionError::Execution(
+                "_cypher_abs requires exactly 1 argument".into(),
+            ));
+        }
+        invoke_cypher_udf(args, &DataType::LargeBinary, |val_args| {
+            match &val_args[0] {
+                Value::Int(i) => i.checked_abs().map(Value::Int).ok_or_else(|| {
+                    datafusion::error::DataFusionError::Execution(
+                        "integer overflow in abs()".into(),
+                    )
+                }),
+                Value::Float(f) => Ok(Value::Float(f.abs())),
+                Value::Null => Ok(Value::Null),
+                other => Err(datafusion::error::DataFusionError::Execution(format!(
+                    "abs() requires a numeric argument, got {other:?}"
+                ))),
+            }
+        })
+    }
+}
+
 /// Apply an integer arithmetic operator, returning CypherValue-encoded bytes.
 /// Returns `None` on overflow or division by zero.
 fn apply_int_arithmetic(lhs: i64, rhs: i64, op: &BinaryOp) -> Option<Vec<u8>> {
-    use uni_common::cypher_value_codec::{encode_float, encode_int};
+    use uni_common::cypher_value_codec::encode_int;
     match op {
         BinaryOp::Add => lhs.checked_add(rhs).map(encode_int),
         BinaryOp::Sub => lhs.checked_sub(rhs).map(encode_int),
         BinaryOp::Mul => lhs.checked_mul(rhs).map(encode_int),
         BinaryOp::Div => {
-            // Division always produces float in Cypher
+            // OpenCypher: integer / integer = integer (truncated toward zero)
             if rhs == 0 {
                 None
             } else {
-                Some(encode_float(lhs as f64 / rhs as f64))
+                lhs.checked_div(rhs).map(encode_int)
             }
         }
         BinaryOp::Mod => {

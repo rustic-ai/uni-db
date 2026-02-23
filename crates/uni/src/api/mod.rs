@@ -304,17 +304,27 @@ impl Uni {
         }))
     }
 
-    /// Get all distinct labels that have at least one active vertex.
-    /// This is done by querying the database directly for all distinct labels,
-    /// rather than relying on the schema which may not be updated yet in a
-    /// schemaless database.
-    async fn get_distinct_labels(&self) -> Result<Vec<String>> {
-        // Query: MATCH (n) RETURN DISTINCT labels(n) AS labels
-        // This returns all unique label combinations on vertices
+    /// Get all label names.
+    /// Returns the union of schema-registered labels (Active state) and labels
+    /// discovered from data (for schemaless mode where labels may not be in the
+    /// schema). This is consistent with `list_edge_types()` for schema labels
+    /// while also supporting schemaless workflows.
+    pub async fn list_labels(&self) -> Result<Vec<String>> {
+        let mut all_labels = std::collections::HashSet::new();
+
+        // Schema labels (covers schema-defined labels that may not have data yet)
+        for (name, label) in self.schema.schema().labels.iter() {
+            if matches!(
+                label.state,
+                uni_common::core::schema::SchemaElementState::Active
+            ) {
+                all_labels.insert(name.clone());
+            }
+        }
+
+        // Data labels (covers schemaless labels that aren't in the schema)
         let query = "MATCH (n) RETURN DISTINCT labels(n) AS labels";
         let result = self.query(query).await?;
-
-        let mut all_labels = std::collections::HashSet::new();
         for row in &result.rows {
             if let Ok(labels_list) = row.get::<Vec<String>>("labels") {
                 for label in labels_list {
@@ -324,15 +334,6 @@ impl Uni {
         }
 
         Ok(all_labels.into_iter().collect())
-    }
-
-    /// Get all label names.
-    /// Returns only labels that have at least one active vertex.
-    /// This aligns with OpenCypher semantics where labels are implicitly managed
-    /// by vertex lifecycle - labels appear when first vertex is created and
-    /// disappear when last vertex is deleted.
-    pub async fn list_labels(&self) -> Result<Vec<String>> {
-        self.get_distinct_labels().await
     }
 
     /// Get all edge type names.

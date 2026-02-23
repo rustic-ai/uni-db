@@ -200,47 +200,27 @@ DATETIME_TYPES: set[type] = {datetime, date, time, timedelta}
 def python_to_db_value(value: Any, type_hint: Any) -> Any:
     """Convert a Python value to a database-compatible value.
 
-    Handles datetime→micros, date→days, time→micros, timedelta→micros,
-    Vector→list[float], and passes through everything else.
+    Passes datetime/date/time/timedelta through to the Rust layer which
+    converts them to proper Value::Temporal types. Converts Vector to
+    list[float] and passes through everything else.
     """
     if value is None:
         return None
-
-    # Unwrap Optional
-    _, inner = is_optional(type_hint)
-    if inner is not type_hint:
-        type_hint = inner
-
-    # Unwrap Annotated
-    type_hint, _ = unwrap_annotated(type_hint)
-
-    if isinstance(value, datetime):
-        return int(value.timestamp() * 1_000_000)
-    if isinstance(value, date):
-        epoch = date(1970, 1, 1)
-        return (value - epoch).days
-    if isinstance(value, time):
-        return (
-            value.hour * 3_600_000_000
-            + value.minute * 60_000_000
-            + value.second * 1_000_000
-            + value.microsecond
-        )
-    if isinstance(value, timedelta):
-        return int(value.total_seconds() * 1_000_000)
 
     # Vector → list[float]
     if isinstance(value, Vector):
         return value.values
 
+    # datetime/date/time/timedelta pass through — the Rust py_object_to_value
+    # handles conversion to Value::Temporal with proper type information.
     return value
 
 
 def db_to_python_value(value: Any, type_hint: Any) -> Any:
     """Convert a database value back to a Python value.
 
-    Converts int back to datetime/date/time/timedelta based on the model
-    field's type annotation.
+    The Rust layer now returns proper Python datetime/date/time objects
+    via Value::Temporal, so in most cases values pass through directly.
     """
     if value is None:
         return None
@@ -253,29 +233,22 @@ def db_to_python_value(value: Any, type_hint: Any) -> Any:
     # Unwrap Annotated
     type_hint, _ = unwrap_annotated(type_hint)
 
-    if type_hint is datetime and isinstance(value, (int, float)):
-        # Microseconds since epoch → datetime
-        return datetime.fromtimestamp(value / 1_000_000)
-    elif type_hint is date and isinstance(value, (int, float)):
-        # Days since epoch → date
-        from datetime import date as date_cls
-        from datetime import timedelta as td_cls
+    # If value is already the right Python type, pass through
+    if type_hint is datetime and isinstance(value, datetime):
+        return value
+    if type_hint is date and isinstance(value, date):
+        return value
+    if type_hint is time and isinstance(value, time):
+        return value
+    if type_hint is timedelta and isinstance(value, timedelta):
+        return value
 
-        epoch = date_cls(1970, 1, 1)
-        return epoch + td_cls(days=int(value))
-    elif type_hint is time and isinstance(value, (int, float)):
-        # Microseconds since midnight → time
-        total_us = int(value)
-        hours = total_us // 3_600_000_000
-        total_us %= 3_600_000_000
-        minutes = total_us // 60_000_000
-        total_us %= 60_000_000
-        seconds = total_us // 1_000_000
-        microseconds = total_us % 1_000_000
-        return time(hours, minutes, seconds, microseconds)
-    elif type_hint is timedelta and isinstance(value, (int, float)):
-        # Microseconds → timedelta
-        return timedelta(microseconds=int(value))
+    # Handle struct dict from Arrow deserialization (e.g. datetime struct)
+    if type_hint is datetime and isinstance(value, dict):
+        nanos = value.get("nanos_since_epoch")
+        if nanos is not None:
+            return datetime.fromtimestamp(nanos / 1_000_000_000)
+        return None
 
     # Vector fields: list[float] → Vector
     dims = get_vector_dimensions(type_hint)

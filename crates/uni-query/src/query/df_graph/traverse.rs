@@ -4020,7 +4020,16 @@ type MainBfsResult = (Vid, usize, Vec<Vid>, Vec<Eid>);
 
 impl GraphVariableLengthTraverseMainStream {
     /// Perform BFS from a source vertex using the adjacency map.
-    fn bfs(&self, source: Vid, adjacency: &EdgeAdjacencyMap) -> Vec<MainBfsResult> {
+    ///
+    /// `used_eids` contains edge IDs already bound by earlier pattern elements
+    /// in the same MATCH clause, enforcing cross-pattern relationship uniqueness
+    /// (Cypher semantics require all relationships in a MATCH to be distinct).
+    fn bfs(
+        &self,
+        source: Vid,
+        adjacency: &EdgeAdjacencyMap,
+        used_eids: &FxHashSet<u64>,
+    ) -> Vec<MainBfsResult> {
         let mut results = Vec::new();
         let mut queue: VecDeque<MainBfsResult> = VecDeque::new();
 
@@ -4050,6 +4059,12 @@ impl GraphVariableLengthTraverseMainStream {
 
                     // Enforce relationship uniqueness per-path (Cypher semantics).
                     if edge_path.contains(eid) {
+                        continue;
+                    }
+
+                    // Enforce cross-pattern relationship uniqueness: skip edges
+                    // already bound by earlier pattern elements in the same MATCH.
+                    if used_eids.contains(&eid.as_u64()) {
                         continue;
                     }
 
@@ -4103,6 +4118,18 @@ impl GraphVariableLengthTraverseMainStream {
             .transpose()?;
         let expected_targets: Option<&UInt64Array> = bound_target_cow.as_deref();
 
+        // Extract used edge columns for cross-pattern relationship uniqueness
+        let used_edge_arrays: Vec<&UInt64Array> = self
+            .used_edge_columns
+            .iter()
+            .filter_map(|col| {
+                batch
+                    .column_by_name(col)?
+                    .as_any()
+                    .downcast_ref::<UInt64Array>()
+            })
+            .collect();
+
         // Collect BFS results: (original_row_idx, target_vid, hop_count, node_path, edge_path)
         let mut expansions: Vec<ExpansionRecord> = Vec::new();
 
@@ -4111,7 +4138,20 @@ impl GraphVariableLengthTraverseMainStream {
 
             if let Some(source_u64) = source_opt {
                 let source = Vid::from(source_u64);
-                let bfs_results = self.bfs(source, adjacency);
+
+                // Collect used edge IDs from previous hops for this row
+                let used_eids: FxHashSet<u64> = used_edge_arrays
+                    .iter()
+                    .filter_map(|arr| {
+                        if arr.is_null(row_idx) {
+                            None
+                        } else {
+                            Some(arr.value(row_idx))
+                        }
+                    })
+                    .collect();
+
+                let bfs_results = self.bfs(source, adjacency, &used_eids);
 
                 for (target, hops, node_path, edge_path) in bfs_results {
                     // Filter by bound target VID if set (for patterns where target is in scope).

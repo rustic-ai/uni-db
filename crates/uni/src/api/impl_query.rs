@@ -146,6 +146,18 @@ fn extract_projection_order(plan: &LogicalPlan) -> Option<Vec<String>> {
 }
 
 impl Uni {
+    /// Get the current L0Buffer mutation count (cumulative mutations since last flush).
+    /// Used to compute affected_rows for mutation queries that return no result rows.
+    pub(crate) async fn get_mutation_count(&self) -> usize {
+        match self.writer.as_ref() {
+            Some(w) => {
+                let writer = w.read().await;
+                writer.l0_manager.get_current().read().mutation_count
+            }
+            None => 0,
+        }
+    }
+
     /// Explain a Cypher query plan without executing it.
     pub async fn explain(&self, cypher: &str) -> Result<ExplainOutput> {
         let ast = uni_query::parse_cypher(cypher).map_err(into_parse_error)?;
@@ -260,10 +272,14 @@ impl Uni {
     /// Execute a modification query (CREATE, SET, DELETE, etc.)
     /// Returns the number of affected rows/elements
     pub async fn execute(&self, cypher: &str) -> Result<ExecuteResult> {
+        let before = self.get_mutation_count().await;
         let result = self.execute_internal(cypher, HashMap::new()).await?;
-        Ok(ExecuteResult {
-            affected_rows: result.len(),
-        })
+        let affected_rows = if result.is_empty() {
+            self.get_mutation_count().await.saturating_sub(before)
+        } else {
+            result.len()
+        };
+        Ok(ExecuteResult { affected_rows })
     }
 
     pub(crate) async fn execute_cursor_internal(

@@ -1142,17 +1142,19 @@ fn build_literal(pair: Pair<Rule>) -> Result<Expr, ParseError> {
     match inner.as_rule() {
         Rule::integer => {
             let s_clean = inner.as_str().replace('_', "");
-            let value =
-                if let Some(hex) = s_clean.strip_prefix("0x").or_else(|| s_clean.strip_prefix("0X"))
-                {
-                    parse_integer_safe(hex, 16)?
-                } else if let Some(oct) =
-                    s_clean.strip_prefix("0o").or_else(|| s_clean.strip_prefix("0O"))
-                {
-                    parse_integer_safe(oct, 8)?
-                } else {
-                    parse_integer_safe(&s_clean, 10)?
-                };
+            let value = if let Some(hex) = s_clean
+                .strip_prefix("0x")
+                .or_else(|| s_clean.strip_prefix("0X"))
+            {
+                parse_integer_safe(hex, 16)?
+            } else if let Some(oct) = s_clean
+                .strip_prefix("0o")
+                .or_else(|| s_clean.strip_prefix("0O"))
+            {
+                parse_integer_safe(oct, 8)?
+            } else {
+                parse_integer_safe(&s_clean, 10)?
+            };
             Ok(Expr::Literal(CypherLiteral::Integer(value)))
         }
         Rule::float => {
@@ -1538,10 +1540,7 @@ fn build_path_quantifier(pair: Pair<Rule>) -> Result<Range, ParseError> {
                 .next()
                 .filter(|p| p.as_rule() == Rule::integer)
                 .map(|p| p.as_str().parse::<u32>().unwrap());
-            Ok(Range {
-                min: Some(n),
-                max,
-            })
+            Ok(Range { min: Some(n), max })
         }
         _ => {
             // {,m} - first token is not an integer, so it's the max

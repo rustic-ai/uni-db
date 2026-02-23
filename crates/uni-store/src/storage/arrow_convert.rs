@@ -197,10 +197,16 @@ pub fn arrow_to_value(col: &dyn Array, row: usize, data_type: Option<&DataType>)
                         tz_col.as_any().downcast_ref::<StringArray>(),
                     )
                 {
-                    if nanos_arr.is_null(row) || offset_arr.is_null(row) {
+                    if nanos_arr.is_null(row) {
                         return Value::Null;
                     }
                     let nanos = nanos_arr.value(row);
+                    if offset_arr.is_null(row) {
+                        // No offset → LocalDateTime
+                        return Value::Temporal(uni_common::TemporalValue::LocalDateTime {
+                            nanos_since_epoch: nanos,
+                        });
+                    }
                     let offset = offset_arr.value(row);
                     let tz_name = (!tz_arr.is_null(row)).then(|| tz_arr.value(row).to_string());
                     return Value::Temporal(uni_common::TemporalValue::DateTime {
@@ -349,19 +355,30 @@ pub fn arrow_to_value(col: &dyn Array, row: usize, data_type: Option<&DataType>)
                 }
             });
 
-            if let (Some(Some(nanos)), Some(Some(offset))) = (nanos_opt, offset_opt) {
-                let tz_name = tz_col.as_any().downcast_ref::<StringArray>().and_then(|a| {
-                    if a.is_null(row) {
-                        None
-                    } else {
-                        Some(a.value(row).to_string())
+            if let Some(Some(nanos)) = nanos_opt {
+                match offset_opt {
+                    Some(Some(offset)) => {
+                        let tz_name =
+                            tz_col.as_any().downcast_ref::<StringArray>().and_then(|a| {
+                                if a.is_null(row) {
+                                    None
+                                } else {
+                                    Some(a.value(row).to_string())
+                                }
+                            });
+                        return Value::Temporal(uni_common::TemporalValue::DateTime {
+                            nanos_since_epoch: nanos,
+                            offset_seconds: offset,
+                            timezone_name: tz_name,
+                        });
                     }
-                });
-                return Value::Temporal(uni_common::TemporalValue::DateTime {
-                    nanos_since_epoch: nanos,
-                    offset_seconds: offset,
-                    timezone_name: tz_name,
-                });
+                    _ => {
+                        // No offset → LocalDateTime
+                        return Value::Temporal(uni_common::TemporalValue::LocalDateTime {
+                            nanos_since_epoch: nanos,
+                        });
+                    }
+                }
             }
         }
 
@@ -687,21 +704,31 @@ fn values_to_datetime_struct_array(values: &[Value]) -> ArrayRef {
     let mut null_buffer = BooleanBufferBuilder::new(values.len());
 
     for v in values {
-        if let Value::Temporal(uni_common::TemporalValue::DateTime {
-            nanos_since_epoch,
-            offset_seconds,
-            timezone_name,
-        }) = v
-        {
-            nanos_builder.append_value(*nanos_since_epoch);
-            offset_builder.append_value(*offset_seconds);
-            tz_builder.append_option(timezone_name.as_deref());
-            null_buffer.append(true);
-        } else {
-            nanos_builder.append_null();
-            offset_builder.append_null();
-            tz_builder.append_null();
-            null_buffer.append(false);
+        match v {
+            Value::Temporal(uni_common::TemporalValue::DateTime {
+                nanos_since_epoch,
+                offset_seconds,
+                timezone_name,
+            }) => {
+                nanos_builder.append_value(*nanos_since_epoch);
+                offset_builder.append_value(*offset_seconds);
+                tz_builder.append_option(timezone_name.as_deref());
+                null_buffer.append(true);
+            }
+            Value::Temporal(uni_common::TemporalValue::LocalDateTime {
+                nanos_since_epoch,
+            }) => {
+                nanos_builder.append_value(*nanos_since_epoch);
+                offset_builder.append_null();
+                tz_builder.append_null();
+                null_buffer.append(true);
+            }
+            _ => {
+                nanos_builder.append_null();
+                offset_builder.append_null();
+                tz_builder.append_null();
+                null_buffer.append(false);
+            }
         }
     }
 
@@ -727,18 +754,27 @@ fn values_to_time_struct_array(values: &[Value]) -> ArrayRef {
     let mut null_buffer = BooleanBufferBuilder::new(values.len());
 
     for v in values {
-        if let Value::Temporal(uni_common::TemporalValue::Time {
-            nanos_since_midnight,
-            offset_seconds,
-        }) = v
-        {
-            nanos_builder.append_value(*nanos_since_midnight);
-            offset_builder.append_value(*offset_seconds);
-            null_buffer.append(true);
-        } else {
-            nanos_builder.append_null();
-            offset_builder.append_null();
-            null_buffer.append(false);
+        match v {
+            Value::Temporal(uni_common::TemporalValue::Time {
+                nanos_since_midnight,
+                offset_seconds,
+            }) => {
+                nanos_builder.append_value(*nanos_since_midnight);
+                offset_builder.append_value(*offset_seconds);
+                null_buffer.append(true);
+            }
+            Value::Temporal(uni_common::TemporalValue::LocalTime {
+                nanos_since_midnight,
+            }) => {
+                nanos_builder.append_value(*nanos_since_midnight);
+                offset_builder.append_null();
+                null_buffer.append(true);
+            }
+            _ => {
+                nanos_builder.append_null();
+                offset_builder.append_null();
+                null_buffer.append(false);
+            }
         }
     }
 
