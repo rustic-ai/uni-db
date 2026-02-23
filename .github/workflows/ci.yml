@@ -116,10 +116,9 @@ jobs:
           cargo nextest run -p uni-db --test hybrid_localstack_e2e --run-ignored all
 
   # Python bindings tests
-  # Runs after test job to reuse cached dependencies
+  # Runs in parallel with test job (builds its own Rust extension via maturin)
   python-tests:
     name: Python Tests
-    needs: test
     runs-on: ubuntu-xlarge
     steps:
       - uses: actions/checkout@v4
