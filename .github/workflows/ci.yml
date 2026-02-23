@@ -155,9 +155,13 @@ jobs:
         working-directory: bindings/uni-db
         run: poetry install --with dev
 
-      - name: Build Python bindings (uni-db)
+      - name: Build Python wheel (uni-db)
         working-directory: bindings/uni-db
-        run: poetry run maturin develop
+        run: poetry run maturin build --out dist --interpreter .venv/bin/python
+
+      - name: Install built wheel (uni-db)
+        working-directory: bindings/uni-db
+        run: poetry run pip install --force-reinstall dist/*.whl
 
       - name: Lint Python code (uni-db)
         working-directory: bindings/uni-db
@@ -169,7 +173,11 @@ jobs:
 
       - name: Install Python dependencies (uni-pydantic)
         working-directory: bindings/uni-pydantic
-        run: poetry install --with dev
+        run: poetry install --with dev --no-directory
+
+      - name: Install built wheel dependency (uni-db for uni-pydantic)
+        working-directory: bindings/uni-pydantic
+        run: poetry run pip install --force-reinstall ../uni-db/dist/*.whl
 
       - name: Lint Python code (uni-pydantic)
         working-directory: bindings/uni-pydantic
