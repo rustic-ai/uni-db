@@ -460,7 +460,7 @@ impl L0Buffer {
 
     /// Returns all edge EIDs in the L0 buffer (non-tombstoned).
     ///
-    /// Used for schemaless scanning (MATCH ()-[r]->() without type).
+    /// Used for schemaless scanning (`MATCH ()-[r]->()`) without type.
     pub fn all_edge_eids(&self) -> Vec<Eid> {
         self.edge_endpoints
             .keys()

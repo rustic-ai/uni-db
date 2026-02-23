@@ -37,7 +37,7 @@ pub enum TemporalType {
 ///
 /// Stores temporal values in their native numeric form for O(1) comparisons
 /// and direct Arrow column construction, with Cypher formatting applied only
-/// at the output boundary via [`Display`].
+/// at the output boundary via [`std::fmt::Display`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum TemporalValue {
     /// Date: days since Unix epoch (1970-01-01). Arrow: Date32.

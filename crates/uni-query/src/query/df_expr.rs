@@ -223,7 +223,7 @@ pub enum VariableKind {
     Node,
     /// Edge/relationship variable - identity is `_eid`
     Edge,
-    /// Edge list variable (r in `[r*]`) - List<Edge>
+    /// Edge list variable (r in `[r*]`) - `List<Edge>`
     EdgeList,
     /// Path variable - kept as-is (struct with nodes/relationships)
     Path,

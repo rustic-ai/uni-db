@@ -7,7 +7,7 @@
 //! - [`MutationContext`]: Shared context for mutation operators containing executor, writer, etc.
 //! - [`batches_to_rows`]: Convert RecordBatches to row-based HashMaps (batch→row direction).
 //! - [`rows_to_batches`]: Convert row-based HashMaps back to RecordBatches (row→batch direction).
-//! - [`MutationStream`]: Eager-barrier RecordBatchStream that collects all input, applies
+//! - [`MutationExec`]: Eager-barrier RecordBatchStream that collects all input, applies
 //!   mutations via Writer, and yields output batches.
 
 use anyhow::Result;
@@ -963,7 +963,7 @@ impl MutationExec {
     ///
     /// The output schema is derived from the input schema with Struct entity
     /// columns normalized to cv_encoded LargeBinary. For mutations that
-    /// introduce new variables (CREATE, MERGE), use [`new_with_schema`] instead.
+    /// introduce new variables (CREATE, MERGE), use [`Self::new_with_schema`] instead.
     pub fn new(
         input: Arc<dyn ExecutionPlan>,
         kind: MutationKind,

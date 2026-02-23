@@ -25,9 +25,9 @@ use uni_cypher::ast::{
 pub enum VariableType {
     /// Node variable (from MATCH (n), CREATE (n), etc.)
     Node,
-    /// Edge/relationship variable (from MATCH ()-[r]->(), etc.)
+    /// Edge/relationship variable (from `MATCH ()-[r]->()`, etc.)
     Edge,
-    /// Path variable (from MATCH p = (a)-[*]->(b), etc.)
+    /// Path variable (from `MATCH p = (a)-[*]->(b)`, etc.)
     Path,
     /// Scalar variable (from WITH expr AS x, UNWIND list AS item, etc.)
     /// Could hold a map or dynamic value — property access is allowed.
@@ -1767,7 +1767,7 @@ pub enum LogicalPlan {
         /// When present, `min_hops`/`max_hops` are derived from iterations × steps.len().
         qpp_steps: Option<Vec<QppStepInfo>>,
     },
-    /// Traverse main edges table filtering by type name(s) (MATCH (a)-[:Unknown]->(b)).
+    /// Traverse main edges table filtering by type name(s) (`MATCH (a)-[:Unknown]->(b)`).
     /// Used for edge types not defined in schema (schemaless support).
     /// Supports OR relationship types like `[:KNOWS|HATES]` via multiple type_names.
     TraverseMainByType {

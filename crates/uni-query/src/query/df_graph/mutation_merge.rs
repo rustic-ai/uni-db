@@ -3,7 +3,7 @@
 
 //! DataFusion ExecutionPlan for Cypher MERGE clauses.
 //!
-//! Re-exports [`new_merge_exec`] from [`mutation_common`] and provides a type
+//! Re-exports [`new_merge_exec`] from `mutation_common` and provides a type
 //! alias for backward compatibility.
 
 pub use super::mutation_common::{MutationExec as MutationMergeExec, new_merge_exec};
