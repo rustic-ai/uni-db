@@ -3961,13 +3961,13 @@ impl Executor {
         };
         copy_store_prefix(&src_store, &dest_store, &storage_src, &storage_dst).await?;
 
-        // Copy schema.json
+        // Ensure schema is present at canonical catalog location.
         let schema_manager = self.storage.schema_manager();
         let schema_content = serde_json::to_string_pretty(&schema_manager.schema())?;
         let schema_path = if dest_prefix.as_ref().is_empty() {
-            ObjPath::from("schema.json")
+            ObjPath::from("catalog/schema.json")
         } else {
-            ObjPath::from(format!("{}/schema.json", dest_prefix.as_ref()))
+            ObjPath::from(format!("{}/catalog/schema.json", dest_prefix.as_ref()))
         };
         dest_store
             .put(&schema_path, bytes::Bytes::from(schema_content).into())

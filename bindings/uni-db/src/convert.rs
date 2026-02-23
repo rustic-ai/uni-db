@@ -75,10 +75,13 @@ pub fn value_to_py(py: Python, value: &Value) -> PyResult<Py<PyAny>> {
                 TemporalValue::Date { days_since_epoch } => {
                     let date_class = datetime_module.getattr("date")?;
                     let epoch_ordinal: i64 = 719163; // date(1970,1,1).toordinal()
-                    let result = date_class.call_method1("fromordinal", (epoch_ordinal + *days_since_epoch as i64,))?;
+                    let result = date_class
+                        .call_method1("fromordinal", (epoch_ordinal + *days_since_epoch as i64,))?;
                     Ok(result.into_py_any(py)?)
                 }
-                TemporalValue::LocalTime { nanos_since_midnight } => {
+                TemporalValue::LocalTime {
+                    nanos_since_midnight,
+                } => {
                     let total_micros = nanos_since_midnight / 1_000;
                     let hour = total_micros / 3_600_000_000;
                     let minute = (total_micros % 3_600_000_000) / 60_000_000;
@@ -88,7 +91,10 @@ pub fn value_to_py(py: Python, value: &Value) -> PyResult<Py<PyAny>> {
                     let result = time_class.call1((hour, minute, second, microsecond))?;
                     Ok(result.into_py_any(py)?)
                 }
-                TemporalValue::Time { nanos_since_midnight, offset_seconds } => {
+                TemporalValue::Time {
+                    nanos_since_midnight,
+                    offset_seconds,
+                } => {
                     let total_micros = nanos_since_midnight / 1_000;
                     let hour = total_micros / 3_600_000_000;
                     let minute = (total_micros % 3_600_000_000) / 60_000_000;
@@ -96,7 +102,13 @@ pub fn value_to_py(py: Python, value: &Value) -> PyResult<Py<PyAny>> {
                     let microsecond = total_micros % 1_000_000;
                     let tz_class = datetime_module.getattr("timezone")?;
                     let td_class = datetime_module.getattr("timedelta")?;
-                    let td = td_class.call1(pyo3::types::PyTuple::new(py, &[0i32.into_pyobject(py)?.into_any(), offset_seconds.into_pyobject(py)?.into_any()])?)?;
+                    let td = td_class.call1(pyo3::types::PyTuple::new(
+                        py,
+                        &[
+                            0i32.into_pyobject(py)?.into_any(),
+                            offset_seconds.into_pyobject(py)?.into_any(),
+                        ],
+                    )?)?;
                     let tz = tz_class.call1((td,))?;
                     let time_class = datetime_module.getattr("time")?;
                     let result = time_class.call1((hour, minute, second, microsecond, tz))?;
@@ -106,21 +118,41 @@ pub fn value_to_py(py: Python, value: &Value) -> PyResult<Py<PyAny>> {
                     let secs = nanos_since_epoch / 1_000_000_000;
                     let micros = (nanos_since_epoch % 1_000_000_000) / 1_000;
                     let dt_class = datetime_module.getattr("datetime")?;
-                    let result = dt_class.call_method1("fromtimestamp", (secs as f64 + micros as f64 / 1_000_000.0,))?;
+                    let result = dt_class.call_method1(
+                        "fromtimestamp",
+                        (secs as f64 + micros as f64 / 1_000_000.0,),
+                    )?;
                     Ok(result.into_py_any(py)?)
                 }
-                TemporalValue::DateTime { nanos_since_epoch, offset_seconds, .. } => {
+                TemporalValue::DateTime {
+                    nanos_since_epoch,
+                    offset_seconds,
+                    ..
+                } => {
                     let secs = nanos_since_epoch / 1_000_000_000;
                     let micros = (nanos_since_epoch % 1_000_000_000) / 1_000;
                     let tz_class = datetime_module.getattr("timezone")?;
                     let td_class = datetime_module.getattr("timedelta")?;
-                    let td = td_class.call1(pyo3::types::PyTuple::new(py, &[0i32.into_pyobject(py)?.into_any(), offset_seconds.into_pyobject(py)?.into_any()])?)?;
+                    let td = td_class.call1(pyo3::types::PyTuple::new(
+                        py,
+                        &[
+                            0i32.into_pyobject(py)?.into_any(),
+                            offset_seconds.into_pyobject(py)?.into_any(),
+                        ],
+                    )?)?;
                     let tz = tz_class.call1((td,))?;
                     let dt_class = datetime_module.getattr("datetime")?;
-                    let result = dt_class.call_method1("fromtimestamp", (secs as f64 + micros as f64 / 1_000_000.0, tz))?;
+                    let result = dt_class.call_method1(
+                        "fromtimestamp",
+                        (secs as f64 + micros as f64 / 1_000_000.0, tz),
+                    )?;
                     Ok(result.into_py_any(py)?)
                 }
-                TemporalValue::Duration { months, days, nanos } => {
+                TemporalValue::Duration {
+                    months,
+                    days,
+                    nanos,
+                } => {
                     let total_days = months * 30 + days;
                     let total_secs = nanos / 1_000_000_000;
                     let remaining_micros = (nanos % 1_000_000_000) / 1_000;
@@ -232,10 +264,10 @@ pub fn py_object_to_value(py: Python, obj: &Py<PyAny>) -> PyResult<Value> {
             }));
         } else {
             let utcoffset = bound.call_method0("utcoffset")?;
-            let offset_seconds: i32 = utcoffset.call_method0("total_seconds")?.extract::<f64>()? as i32;
-            let tz_name: Option<String> = bound
-                .call_method0("tzname")?
-                .extract::<Option<String>>()?;
+            let offset_seconds: i32 =
+                utcoffset.call_method0("total_seconds")?.extract::<f64>()? as i32;
+            let tz_name: Option<String> =
+                bound.call_method0("tzname")?.extract::<Option<String>>()?;
             return Ok(Value::Temporal(TemporalValue::DateTime {
                 nanos_since_epoch: nanos,
                 offset_seconds,
@@ -249,7 +281,9 @@ pub fn py_object_to_value(py: Python, obj: &Py<PyAny>) -> PyResult<Value> {
         let ordinal: i64 = bound.call_method0("toordinal")?.extract()?;
         let epoch_ordinal: i64 = 719163; // date(1970,1,1).toordinal()
         let days = (ordinal - epoch_ordinal) as i32;
-        return Ok(Value::Temporal(TemporalValue::Date { days_since_epoch: days }));
+        return Ok(Value::Temporal(TemporalValue::Date {
+            days_since_epoch: days,
+        }));
     }
 
     if bound.is_instance(&time_class)? {
@@ -257,7 +291,10 @@ pub fn py_object_to_value(py: Python, obj: &Py<PyAny>) -> PyResult<Value> {
         let minute: i64 = bound.getattr("minute")?.extract()?;
         let second: i64 = bound.getattr("second")?.extract()?;
         let microsecond: i64 = bound.getattr("microsecond")?.extract()?;
-        let nanos = hour * 3_600_000_000_000 + minute * 60_000_000_000 + second * 1_000_000_000 + microsecond * 1_000;
+        let nanos = hour * 3_600_000_000_000
+            + minute * 60_000_000_000
+            + second * 1_000_000_000
+            + microsecond * 1_000;
         let tzinfo = bound.getattr("tzinfo")?;
         if tzinfo.is_none() {
             return Ok(Value::Temporal(TemporalValue::LocalTime {
@@ -265,7 +302,8 @@ pub fn py_object_to_value(py: Python, obj: &Py<PyAny>) -> PyResult<Value> {
             }));
         } else {
             let utcoffset = bound.call_method1("utcoffset", (py.None(),))?;
-            let offset_seconds: i32 = utcoffset.call_method0("total_seconds")?.extract::<f64>()? as i32;
+            let offset_seconds: i32 =
+                utcoffset.call_method0("total_seconds")?.extract::<f64>()? as i32;
             return Ok(Value::Temporal(TemporalValue::Time {
                 nanos_since_midnight: nanos,
                 offset_seconds,

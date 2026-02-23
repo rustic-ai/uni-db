@@ -58,7 +58,7 @@ use crate::shutdown::ShutdownHandle;
 /// ```
 ///
 /// ## Hybrid Storage (S3 + Local)
-/// Store bulk data in S3 (or GCS/Azure) but keep WAL and Metadata local for low latency.
+/// Store bulk data and catalog metadata in S3 (or GCS/Azure) while keeping WAL/ID allocation local.
 ///
 /// ```no_run
 /// use uni_db::Uni;
@@ -937,7 +937,40 @@ impl UniBuilder {
             )
         };
 
-        let schema_obj_path = object_store::path::Path::from("schema.json");
+        // Canonical schema location in metadata catalog.
+        let schema_obj_path = object_store::path::Path::from("catalog/schema.json");
+        // Legacy schema location used by older builds.
+        let legacy_schema_obj_path = object_store::path::Path::from("schema.json");
+
+        // Backward-compatible schema path migration:
+        // if catalog/schema.json is missing but root schema.json exists,
+        // copy root schema.json to catalog/schema.json.
+        let has_catalog_schema = match data_store.get(&schema_obj_path).await {
+            Ok(_) => true,
+            Err(object_store::Error::NotFound { .. }) => false,
+            Err(e) => return Err(UniError::Internal(e.into())),
+        };
+        if !has_catalog_schema {
+            match data_store.get(&legacy_schema_obj_path).await {
+                Ok(result) => {
+                    let bytes = result
+                        .bytes()
+                        .await
+                        .map_err(|e| UniError::Internal(e.into()))?;
+                    data_store
+                        .put(&schema_obj_path, bytes.into())
+                        .await
+                        .map_err(|e| UniError::Internal(e.into()))?;
+                    info!(
+                        legacy = %legacy_schema_obj_path,
+                        target = %schema_obj_path,
+                        "Migrated legacy schema path to catalog path"
+                    );
+                }
+                Err(object_store::Error::NotFound { .. }) => {}
+                Err(e) => return Err(UniError::Internal(e.into())),
+            }
+        }
 
         // Load schema (SchemaManager::load creates a default if missing)
         // Schema is always in data_store (Remote or Local)

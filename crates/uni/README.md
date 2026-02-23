@@ -14,7 +14,7 @@ Part of [The Rustic Initiative](https://www.rustic.ai) by [Dragonscale Industrie
 - **Multimodal**: Graph + Vector + Columnar in one engine.
 - **OpenCypher**: Execute complex graph pattern matching queries.
 - **Vector Search**: Native support for vector embeddings and KNN search.
-- **Hybrid Storage**: Fast local metadata/WAL with bulk data in S3/GCS.
+- **Hybrid Storage**: Fast local WAL/ID allocation with bulk data + catalog metadata in S3/GCS.
 - **Graph Algorithms**: Built-in PageRank, WCC, ShortestPath, and more.
 
 ## Installation
@@ -97,7 +97,7 @@ Uni supports local filesystem and object storage (S3, GCS, Azure).
 
 ### Hybrid Mode (Recommended for Cloud)
 
-Keep WAL and Metadata on fast local disk (SSD), but store bulk columnar data in S3.
+Keep WAL and ID allocation on fast local disk (SSD), while storing bulk data and catalog metadata in S3.
 
 ```rust
 let db = Uni::open("./local_meta")

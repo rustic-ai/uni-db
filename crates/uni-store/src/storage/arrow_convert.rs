@@ -358,14 +358,13 @@ pub fn arrow_to_value(col: &dyn Array, row: usize, data_type: Option<&DataType>)
             if let Some(Some(nanos)) = nanos_opt {
                 match offset_opt {
                     Some(Some(offset)) => {
-                        let tz_name =
-                            tz_col.as_any().downcast_ref::<StringArray>().and_then(|a| {
-                                if a.is_null(row) {
-                                    None
-                                } else {
-                                    Some(a.value(row).to_string())
-                                }
-                            });
+                        let tz_name = tz_col.as_any().downcast_ref::<StringArray>().and_then(|a| {
+                            if a.is_null(row) {
+                                None
+                            } else {
+                                Some(a.value(row).to_string())
+                            }
+                        });
                         return Value::Temporal(uni_common::TemporalValue::DateTime {
                             nanos_since_epoch: nanos,
                             offset_seconds: offset,
@@ -715,9 +714,7 @@ fn values_to_datetime_struct_array(values: &[Value]) -> ArrayRef {
                 tz_builder.append_option(timezone_name.as_deref());
                 null_buffer.append(true);
             }
-            Value::Temporal(uni_common::TemporalValue::LocalDateTime {
-                nanos_since_epoch,
-            }) => {
+            Value::Temporal(uni_common::TemporalValue::LocalDateTime { nanos_since_epoch }) => {
                 nanos_builder.append_value(*nanos_since_epoch);
                 offset_builder.append_null();
                 tz_builder.append_null();
