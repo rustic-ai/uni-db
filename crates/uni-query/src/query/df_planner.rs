@@ -82,6 +82,7 @@ use uni_store::runtime::l0::L0Buffer;
 use uni_store::runtime::property_manager::PropertyManager;
 use uni_store::storage::direction::Direction;
 use uni_store::storage::manager::StorageManager;
+use uni_xervo::runtime::ModelRuntime;
 
 /// An aggregate function expression paired with its optional filter.
 type PhysicalAggregate = (
@@ -269,17 +270,24 @@ impl HybridPhysicalPlanner {
     ///
     /// Rebuilds the inner `GraphExecutionContext` with the registry attached.
     pub fn with_algo_registry(mut self, registry: Arc<AlgorithmRegistry>) -> Self {
+        let procedure_registry = self.graph_ctx.procedure_registry().cloned();
+        let xervo_runtime = self.graph_ctx.xervo_runtime().cloned();
         // Unwrap the Arc (or clone the inner value if other refs exist)
-        let ctx = Arc::try_unwrap(self.graph_ctx)
-            .unwrap_or_else(|arc| {
-                // Safety: all fields are cheap to clone (Arc-wrapped)
-                GraphExecutionContext::with_l0_context(
-                    arc.storage().clone(),
-                    arc.l0_context().clone(),
-                    arc.property_manager().clone(),
-                )
-            })
-            .with_algo_registry(registry);
+        let mut ctx = Arc::try_unwrap(self.graph_ctx).unwrap_or_else(|arc| {
+            // Safety: all fields are cheap to clone (Arc-wrapped)
+            GraphExecutionContext::with_l0_context(
+                arc.storage().clone(),
+                arc.l0_context().clone(),
+                arc.property_manager().clone(),
+            )
+        });
+        if let Some(proc_registry) = procedure_registry {
+            ctx = ctx.with_procedure_registry(proc_registry);
+        }
+        if let Some(xervo) = xervo_runtime {
+            ctx = ctx.with_xervo_runtime(xervo);
+        }
+        ctx = ctx.with_algo_registry(registry);
         self.graph_ctx = Arc::new(ctx);
         self
     }
@@ -291,15 +299,44 @@ impl HybridPhysicalPlanner {
         mut self,
         registry: Arc<crate::query::executor::procedure::ProcedureRegistry>,
     ) -> Self {
-        let ctx = Arc::try_unwrap(self.graph_ctx)
-            .unwrap_or_else(|arc| {
-                GraphExecutionContext::with_l0_context(
-                    arc.storage().clone(),
-                    arc.l0_context().clone(),
-                    arc.property_manager().clone(),
-                )
-            })
-            .with_procedure_registry(registry);
+        let algo_registry = self.graph_ctx.algo_registry().cloned();
+        let xervo_runtime = self.graph_ctx.xervo_runtime().cloned();
+        let mut ctx = Arc::try_unwrap(self.graph_ctx).unwrap_or_else(|arc| {
+            GraphExecutionContext::with_l0_context(
+                arc.storage().clone(),
+                arc.l0_context().clone(),
+                arc.property_manager().clone(),
+            )
+        });
+        if let Some(algo_registry) = algo_registry {
+            ctx = ctx.with_algo_registry(algo_registry);
+        }
+        if let Some(xervo) = xervo_runtime {
+            ctx = ctx.with_xervo_runtime(xervo);
+        }
+        ctx = ctx.with_procedure_registry(registry);
+        self.graph_ctx = Arc::new(ctx);
+        self
+    }
+
+    /// Set Uni-Xervo runtime used by query-time vector auto-embedding.
+    pub fn with_xervo_runtime(mut self, runtime: Arc<ModelRuntime>) -> Self {
+        let algo_registry = self.graph_ctx.algo_registry().cloned();
+        let procedure_registry = self.graph_ctx.procedure_registry().cloned();
+        let mut ctx = Arc::try_unwrap(self.graph_ctx).unwrap_or_else(|arc| {
+            GraphExecutionContext::with_l0_context(
+                arc.storage().clone(),
+                arc.l0_context().clone(),
+                arc.property_manager().clone(),
+            )
+        });
+        if let Some(algo_registry) = algo_registry {
+            ctx = ctx.with_algo_registry(algo_registry);
+        }
+        if let Some(procedure_registry) = procedure_registry {
+            ctx = ctx.with_procedure_registry(procedure_registry);
+        }
+        ctx = ctx.with_xervo_runtime(runtime);
         self.graph_ctx = Arc::new(ctx);
         self
     }

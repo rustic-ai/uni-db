@@ -13,6 +13,7 @@ use uni_store::QueryContext;
 use uni_store::runtime::l0_manager::L0Manager;
 use uni_store::runtime::writer::Writer;
 use uni_store::storage::manager::StorageManager;
+use uni_xervo::runtime::ModelRuntime;
 
 use crate::query::datetime::{classify_temporal, eval_datetime_function};
 use crate::query::expr_eval::eval_binary_op;
@@ -220,6 +221,8 @@ pub struct Executor {
     pub(crate) gen_expr_cache: Arc<RwLock<HashMap<GenExprCacheKey, Expr>>>,
     /// External procedure registry for test/user-defined procedures.
     pub(crate) procedure_registry: Option<Arc<ProcedureRegistry>>,
+    /// Uni-Xervo runtime used by vector auto-embedding paths.
+    pub(crate) xervo_runtime: Option<Arc<ModelRuntime>>,
 }
 
 impl Executor {
@@ -234,6 +237,7 @@ impl Executor {
             config: uni_common::config::UniConfig::default(),
             gen_expr_cache: Arc::new(RwLock::new(HashMap::new())),
             procedure_registry: None,
+            xervo_runtime: None,
         }
     }
 
@@ -246,6 +250,10 @@ impl Executor {
     /// Sets the external procedure registry for user-defined procedures.
     pub fn set_procedure_registry(&mut self, registry: Arc<ProcedureRegistry>) {
         self.procedure_registry = Some(registry);
+    }
+
+    pub fn set_xervo_runtime(&mut self, runtime: Option<Arc<ModelRuntime>>) {
+        self.xervo_runtime = runtime;
     }
 
     /// Set the file sandbox configuration for BACKUP/COPY/EXPORT commands.

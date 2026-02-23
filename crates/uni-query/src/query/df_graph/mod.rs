@@ -76,6 +76,7 @@ use uni_store::runtime::property_manager::PropertyManager;
 use uni_store::storage::adjacency_manager::AdjacencyManager;
 use uni_store::storage::direction::Direction;
 use uni_store::storage::manager::StorageManager;
+use uni_xervo::runtime::ModelRuntime;
 
 pub use apply::GraphApplyExec;
 pub use ext_id_lookup::GraphExtIdLookupExec;
@@ -132,6 +133,8 @@ pub struct GraphExecutionContext {
 
     /// External procedure registry for test/user-defined procedures.
     procedure_registry: Option<Arc<ProcedureRegistry>>,
+    /// Uni-Xervo runtime used by vector auto-embedding paths.
+    xervo_runtime: Option<Arc<ModelRuntime>>,
 }
 
 impl std::fmt::Debug for GraphExecutionContext {
@@ -227,6 +230,7 @@ impl GraphExecutionContext {
             deadline: None,
             algo_registry: None,
             procedure_registry: None,
+            xervo_runtime: None,
         }
     }
 
@@ -249,6 +253,7 @@ impl GraphExecutionContext {
             deadline: None,
             algo_registry: None,
             procedure_registry: None,
+            xervo_runtime: None,
         }
     }
 
@@ -265,6 +270,7 @@ impl GraphExecutionContext {
             deadline: query_ctx.deadline,
             algo_registry: None,
             procedure_registry: None,
+            xervo_runtime: None,
         }
     }
 
@@ -291,9 +297,19 @@ impl GraphExecutionContext {
         self
     }
 
+    /// Set Uni-Xervo runtime for query-time auto-embedding.
+    pub fn with_xervo_runtime(mut self, runtime: Arc<ModelRuntime>) -> Self {
+        self.xervo_runtime = Some(runtime);
+        self
+    }
+
     /// Get a reference to the procedure registry, if set.
     pub fn procedure_registry(&self) -> Option<&Arc<ProcedureRegistry>> {
         self.procedure_registry.as_ref()
+    }
+
+    pub fn xervo_runtime(&self) -> Option<&Arc<ModelRuntime>> {
+        self.xervo_runtime.as_ref()
     }
 
     /// Check if the query has timed out.
