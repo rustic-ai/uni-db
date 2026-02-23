@@ -65,7 +65,7 @@ jobs:
     runs-on: ubuntu-latest
     services:
       localstack:
-        image: localstack/localstack:latest
+        image: localstack/localstack:4.13.1
         ports:
           - 4566:4566
         env:
