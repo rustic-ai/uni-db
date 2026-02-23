@@ -4,9 +4,8 @@
 use crate::api::Uni;
 use std::path::Path;
 use uni_common::core::schema::{
-    DataType, DistanceMetric, EmbeddingConfig, EmbeddingModel, FullTextIndexConfig,
-    IndexDefinition, ScalarIndexConfig, ScalarIndexType, TokenizerConfig, VectorIndexConfig,
-    VectorIndexType,
+    DataType, DistanceMetric, EmbeddingConfig, FullTextIndexConfig, IndexDefinition,
+    ScalarIndexConfig, ScalarIndexType, TokenizerConfig, VectorIndexConfig, VectorIndexType,
 };
 use uni_common::{Result, UniError};
 
@@ -391,40 +390,16 @@ pub struct VectorIndexCfg {
 
 /// Embedding configuration for auto-embedding during index writes.
 pub struct EmbeddingCfg {
-    pub provider: EmbeddingProvider,
-    pub model: String,
+    /// Model alias from the Uni-Xervo catalog (for example: "embed/default").
+    pub alias: String,
     pub source_properties: Vec<String>,
     pub batch_size: usize,
 }
 
-/// Supported embedding providers.
-#[non_exhaustive]
-pub enum EmbeddingProvider {
-    FastEmbed,
-    OpenAI { api_key_env: String },
-    Ollama { host: String },
-}
-
 impl EmbeddingCfg {
     fn into_internal(self) -> EmbeddingConfig {
-        let model = match self.provider {
-            EmbeddingProvider::FastEmbed => EmbeddingModel::FastEmbed {
-                model_name: self.model,
-                cache_dir: None,
-                max_length: None,
-            },
-            EmbeddingProvider::OpenAI { api_key_env } => EmbeddingModel::OpenAI {
-                model: self.model,
-                api_key_env,
-                dimensions: None,
-            },
-            EmbeddingProvider::Ollama { host } => EmbeddingModel::Ollama {
-                model: self.model,
-                host,
-            },
-        };
         EmbeddingConfig {
-            model,
+            alias: self.alias,
             source_properties: self.source_properties,
             batch_size: self.batch_size,
         }

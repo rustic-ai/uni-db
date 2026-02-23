@@ -27,13 +27,16 @@ tracing-subscriber = { workspace = true }
 serde_json = { workspace = true }
 
 [features]
-default = ["candle-text"]
-
-# Text embeddings using Candle (default)
-candle-text = ["uni-db/candle-text"]
-
-# GPU acceleration via CUDA (optional)
-candle-cuda = ["uni-db/candle-cuda"]
-
-# Legacy ONNX-based embeddings (optional)
-fastembed = ["uni-db/fastembed"]
+default = ["provider-mistralrs", "provider-gemini", "provider-openai"]
+provider-candle = ["uni-db/provider-candle"]
+provider-fastembed = ["uni-db/provider-fastembed"]
+provider-openai = ["uni-db/provider-openai"]
+provider-gemini = ["uni-db/provider-gemini"]
+provider-vertexai = ["uni-db/provider-vertexai"]
+provider-mistral = ["uni-db/provider-mistral"]
+provider-anthropic = ["uni-db/provider-anthropic"]
+provider-voyageai = ["uni-db/provider-voyageai"]
+provider-cohere = ["uni-db/provider-cohere"]
+provider-azure-openai = ["uni-db/provider-azure-openai"]
+provider-mistralrs = ["uni-db/provider-mistralrs"]
+gpu-cuda = ["uni-db/gpu-cuda"]

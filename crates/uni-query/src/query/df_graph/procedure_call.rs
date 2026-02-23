@@ -1199,11 +1199,12 @@ fn require_int_arg(args: &[Value], index: usize, description: &str) -> DFResult<
 /// Looks up the embedding config from the index on `label.property` and uses
 /// it to embed the provided text query into a vector.
 async fn auto_embed_text(
-    storage: &Arc<uni_store::storage::manager::StorageManager>,
+    graph_ctx: &GraphExecutionContext,
     label: &str,
     property: &str,
     query_text: &str,
 ) -> DFResult<Vec<f32>> {
+    let storage = graph_ctx.storage();
     let uni_schema = storage.schema_manager().schema();
     let index_config = uni_schema.vector_index_for_property(label, property);
 
@@ -1216,10 +1217,18 @@ async fn auto_embed_text(
             ))
         })?;
 
-    let service = uni_store::embedding::create_embedding_service(&embedding_config.model)
+    let runtime = graph_ctx.xervo_runtime().ok_or_else(|| {
+        datafusion::error::DataFusionError::Execution(
+            "Cannot auto-embed: Uni-Xervo runtime not configured".to_string(),
+        )
+    })?;
+
+    let embedder = runtime
+        .embedding(&embedding_config.alias)
+        .await
         .map_err(|e| datafusion::error::DataFusionError::Execution(e.to_string()))?;
-    let embeddings = service
-        .embed(&[query_text])
+    let embeddings = embedder
+        .embed(vec![query_text])
         .await
         .map_err(|e| datafusion::error::DataFusionError::Execution(e.to_string()))?;
     embeddings.into_iter().next().ok_or_else(|| {
@@ -1248,7 +1257,7 @@ async fn execute_vector_query(
     let storage = graph_ctx.storage();
 
     let query_vector: Vec<f32> = if let Some(query_text) = query_val.as_str() {
-        auto_embed_text(storage, &label, &property, query_text).await?
+        auto_embed_text(graph_ctx, &label, &property, query_text).await?
     } else {
         extract_vector(query_val)?
     };
@@ -1444,7 +1453,7 @@ async fn execute_hybrid_search(
             v.clone()
         } else {
             // Auto-embed the query text if embedding config exists
-            auto_embed_text(storage, &label, vec_prop, &query_text)
+            auto_embed_text(graph_ctx, &label, vec_prop, &query_text)
                 .await
                 .unwrap_or_default()
         };

@@ -32,6 +32,7 @@ uuid = { workspace = true }
 object_store = { workspace = true }
 url = { workspace = true }
 chrono = { workspace = true }
+uni-xervo = { workspace = true }
 
 [dev-dependencies]
 criterion = "0.5"
@@ -62,15 +63,18 @@ name = "mutation_benchmarks"
 harness = false
 
 [features]
-default = ["candle-text"]
+default = ["provider-mistralrs", "provider-gemini", "provider-openai"]
 snapshot-internals = []
 storage-internals = []
-
-# Text embeddings using Candle (default)
-candle-text = ["uni-store/candle-text", "uni-query/candle-text"]
-
-# GPU acceleration via CUDA (optional)
-candle-cuda = ["uni-store/candle-cuda", "uni-query/candle-cuda"]
-
-# Legacy ONNX-based embeddings (optional)
-fastembed = ["uni-store/fastembed", "uni-query/fastembed"]
+provider-candle = ["uni-xervo/provider-candle"]
+provider-fastembed = ["uni-xervo/provider-fastembed"]
+provider-openai = ["uni-xervo/provider-openai"]
+provider-gemini = ["uni-xervo/provider-gemini"]
+provider-vertexai = ["uni-xervo/provider-vertexai"]
+provider-mistral = ["uni-xervo/provider-mistral"]
+provider-anthropic = ["uni-xervo/provider-anthropic"]
+provider-voyageai = ["uni-xervo/provider-voyageai"]
+provider-cohere = ["uni-xervo/provider-cohere"]
+provider-azure-openai = ["uni-xervo/provider-azure-openai"]
+provider-mistralrs = ["uni-xervo/provider-mistralrs"]
+gpu-cuda = ["uni-xervo/gpu-cuda"]

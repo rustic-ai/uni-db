@@ -1,6 +1,8 @@
 import os
 import shutil
 import sys
+import tempfile
+import time
 import unittest
 
 # Ensure we can import the module from the current directory
@@ -11,9 +13,7 @@ import uni_db
 
 class TestUni(unittest.TestCase):
     def setUp(self):
-        self.test_dir = "./test_db_python"
-        if os.path.exists(self.test_dir):
-            shutil.rmtree(self.test_dir)
+        self.test_dir = tempfile.mkdtemp(prefix="test_db_python_")
         self.db = uni_db.Database(self.test_dir)
 
     def tearDown(self):
@@ -21,8 +21,19 @@ class TestUni(unittest.TestCase):
         # so we might fail to clean up if the DB holds locks.
         # But Uni is embedded, so it should drop when the object is collected.
         del self.db
-        if os.path.exists(self.test_dir):
-            shutil.rmtree(self.test_dir)
+        self._rmtree_with_retries(self.test_dir)
+
+    def _rmtree_with_retries(self, path, attempts=8, delay=0.05):
+        for attempt in range(attempts):
+            try:
+                shutil.rmtree(path)
+                return
+            except FileNotFoundError:
+                return
+            except OSError:
+                if attempt == attempts - 1:
+                    raise
+                time.sleep(delay)
 
     def test_basic_query(self):
         # Create schema

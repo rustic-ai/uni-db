@@ -7,9 +7,9 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use uni_common::Value;
 use uni_common::core::schema::{
-    DistanceMetric, EmbeddingConfig, EmbeddingModel, FullTextIndexConfig, IndexDefinition,
-    JsonFtsIndexConfig, ScalarIndexConfig, ScalarIndexType, Schema, TokenizerConfig,
-    VectorIndexConfig, VectorIndexType,
+    DistanceMetric, EmbeddingConfig, FullTextIndexConfig, IndexDefinition, JsonFtsIndexConfig,
+    ScalarIndexConfig, ScalarIndexType, Schema, TokenizerConfig, VectorIndexConfig,
+    VectorIndexType,
 };
 use uni_cypher::ast::{
     AlterEdgeType, AlterLabel, BinaryOp, CallKind, Clause, CreateConstraint, CreateEdgeType,
@@ -7205,17 +7205,11 @@ impl QueryPlanner {
             .as_object()
             .ok_or_else(|| anyhow!("embedding option must be an object"))?;
 
-        // Parse provider (required)
-        let provider = obj
-            .get("provider")
+        // Parse alias (required)
+        let alias = obj
+            .get("alias")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow!("embedding.provider is required"))?;
-
-        // Parse model (required)
-        let model_name = obj
-            .get("model")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow!("embedding.model is required"))?;
+            .ok_or_else(|| anyhow!("embedding.alias is required"))?;
 
         // Parse source properties (required)
         let source_properties = obj
@@ -7232,29 +7226,16 @@ impl QueryPlanner {
             ));
         }
 
-        // Create embedding model based on provider
-        let model = match provider {
-            "fastembed" => EmbeddingModel::FastEmbed {
-                model_name: model_name.to_string(),
-                cache_dir: None,
-                max_length: None,
-            },
-            "openai" => EmbeddingModel::OpenAI {
-                model: model_name.to_string(),
-                api_key_env: "OPENAI_API_KEY".to_string(),
-                dimensions: None,
-            },
-            "ollama" => EmbeddingModel::Ollama {
-                model: model_name.to_string(),
-                host: "http://localhost:11434".to_string(),
-            },
-            _ => return Err(anyhow!("Unsupported embedding provider: {}", provider)),
-        };
+        let batch_size = obj
+            .get("batch_size")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as usize)
+            .unwrap_or(32);
 
         Ok(Some(EmbeddingConfig {
-            model,
+            alias: alias.to_string(),
             source_properties,
-            batch_size: 32,
+            batch_size,
         }))
     }
 }

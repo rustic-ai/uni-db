@@ -1,6 +1,8 @@
 import os
 import shutil
 import sys
+import tempfile
+import time
 import unittest
 
 # Ensure we can import the module from the current directory
@@ -13,14 +15,26 @@ import uni_db
 
 class TestUseCases(unittest.TestCase):
     def setUp(self):
-        self.test_dir_base = "./test_db_use_cases"
-        if os.path.exists(self.test_dir_base):
-            shutil.rmtree(self.test_dir_base)
-        os.makedirs(self.test_dir_base, exist_ok=True)
+        self.test_dir_base = tempfile.mkdtemp(prefix="test_db_use_cases_")
 
     def get_db(self, name):
         path = os.path.join(self.test_dir_base, name)
         return uni_db.Database(path)
+
+    def tearDown(self):
+        self._rmtree_with_retries(self.test_dir_base)
+
+    def _rmtree_with_retries(self, path, attempts=8, delay=0.05):
+        for attempt in range(attempts):
+            try:
+                shutil.rmtree(path)
+                return
+            except FileNotFoundError:
+                return
+            except OSError:
+                if attempt == attempts - 1:
+                    raise
+                time.sleep(delay)
 
     def test_supply_chain(self):
         db = self.get_db("supply_chain")

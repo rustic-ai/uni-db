@@ -12,6 +12,7 @@ publish = false
 uni-common = { workspace = true }
 uni-store = { workspace = true }
 uni-algo = { workspace = true }
+uni-xervo = { workspace = true }
 uni-crdt = { workspace = true }
 uni-cypher = { workspace = true }
 tokio = { workspace = true }
@@ -42,16 +43,7 @@ bitvec = "1"
 fxhash = { workspace = true }
 
 [features]
-default = ["candle-text"]
-
-# Text embeddings using Candle (default)
-candle-text = ["uni-store/candle-text"]
-
-# GPU acceleration via CUDA (optional)
-candle-cuda = ["uni-store/candle-cuda"]
-
-# Legacy ONNX-based embeddings (optional)
-fastembed = ["uni-store/fastembed"]
+default = []
 
 [dev-dependencies]
 tempfile = { workspace = true }

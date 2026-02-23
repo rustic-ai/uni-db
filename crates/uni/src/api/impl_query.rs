@@ -177,6 +177,7 @@ impl Uni {
 
         let mut executor = uni_query::Executor::new(self.storage.clone());
         executor.set_config(self.config.clone());
+        executor.set_xervo_runtime(self.xervo_runtime.clone());
         executor.set_procedure_registry(self.procedure_registry.clone());
         if let Some(w) = &self.writer {
             executor.set_writer(w.clone());
@@ -305,6 +306,7 @@ impl Uni {
 
         let mut executor = uni_query::Executor::new(self.storage.clone());
         executor.set_config(config.clone());
+        executor.set_xervo_runtime(self.xervo_runtime.clone());
         executor.set_procedure_registry(self.procedure_registry.clone());
         if let Some(w) = &self.writer {
             executor.set_writer(w.clone());
@@ -427,6 +429,7 @@ impl Uni {
 
         let mut executor = uni_query::Executor::new(self.storage.clone());
         executor.set_config(config.clone());
+        executor.set_xervo_runtime(self.xervo_runtime.clone());
         executor.set_procedure_registry(self.procedure_registry.clone());
         if let Some(w) = &self.writer {
             executor.set_writer(w.clone());

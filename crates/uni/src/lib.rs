@@ -13,6 +13,7 @@ pub use api::builder::PropertiesBuilder;
 pub use api::schema::{IndexType, ScalarType, VectorAlgo, VectorIndexCfg, VectorMetric};
 pub use api::sync::UniSync;
 pub use api::transaction::Transaction;
+pub use api::xervo::UniXervo;
 pub use api::{Uni, UniBuilder};
 
 // Re-exports from internal crates
@@ -62,4 +63,8 @@ pub mod algo {
     // Tests use uni_db::algo::* (from src/algo).
     // uni-algo has `algo` module.
     pub use crate::algo_crate::algo::*;
+}
+
+pub mod xervo {
+    pub use crate::api::xervo::*;
 }

@@ -9,8 +9,8 @@ use uni_common::{
     UniError,
     core::schema::{
         Constraint, ConstraintTarget, ConstraintType, DataType, DistanceMetric, EmbeddingConfig,
-        EmbeddingModel, IndexDefinition, ScalarIndexConfig, ScalarIndexType, VectorIndexConfig,
-        VectorIndexType, validate_identifier,
+        IndexDefinition, ScalarIndexConfig, ScalarIndexType, VectorIndexConfig, VectorIndexType,
+        validate_identifier,
     },
 };
 use uni_store::storage::{IndexManager, StorageManager};
@@ -53,8 +53,7 @@ struct IndexConfig {
 /// Embedding configuration for vector indexes via procedure API.
 #[derive(Deserialize)]
 struct EmbeddingOptions {
-    provider: String,
-    model: String,
+    alias: String,
     source: Vec<String>,
     #[serde(default = "default_batch_size")]
     batch_size: usize,
@@ -266,33 +265,10 @@ async fn create_index_internal(
             };
 
             // Parse embedding config from procedure options
-            let embedding_config = config.embedding.as_ref().map(|emb| {
-                let model = match emb.provider.to_lowercase().as_str() {
-                    "fastembed" => EmbeddingModel::FastEmbed {
-                        model_name: emb.model.clone(),
-                        cache_dir: None,
-                        max_length: None,
-                    },
-                    "openai" => EmbeddingModel::OpenAI {
-                        model: emb.model.clone(),
-                        api_key_env: "OPENAI_API_KEY".to_string(),
-                        dimensions: None,
-                    },
-                    "ollama" => EmbeddingModel::Ollama {
-                        model: emb.model.clone(),
-                        host: "http://localhost:11434".to_string(),
-                    },
-                    _ => EmbeddingModel::FastEmbed {
-                        model_name: emb.model.clone(),
-                        cache_dir: None,
-                        max_length: None,
-                    },
-                };
-                EmbeddingConfig {
-                    model,
-                    source_properties: emb.source.clone(),
-                    batch_size: emb.batch_size,
-                }
+            let embedding_config = config.embedding.as_ref().map(|emb| EmbeddingConfig {
+                alias: emb.alias.clone(),
+                source_properties: emb.source.clone(),
+                batch_size: emb.batch_size,
             });
 
             IndexDefinition::Vector(VectorIndexConfig {

@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2024-2026 Dragonscale Team
 
-use crate::embedding::{EmbeddingService, create_embedding_service, embedding_service_key};
 use crate::runtime::context::QueryContext;
 use crate::runtime::id_allocator::IdAllocator;
 use crate::runtime::l0::L0Buffer;
@@ -19,15 +18,15 @@ use futures::TryStreamExt;
 use metrics;
 use parking_lot::RwLock;
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use tracing::{debug, info, instrument};
 use uni_common::Properties;
 use uni_common::Value;
 use uni_common::config::UniConfig;
 use uni_common::core::id::{Eid, Vid};
-use uni_common::core::schema::{ConstraintTarget, ConstraintType, EmbeddingModel, IndexDefinition};
+use uni_common::core::schema::{ConstraintTarget, ConstraintType, IndexDefinition};
 use uni_common::core::snapshot::{EdgeSnapshot, LabelSnapshot, SnapshotManifest};
-use uni_common::sync::acquire_mutex;
+use uni_xervo::runtime::ModelRuntime;
 use uuid::Uuid;
 
 #[derive(Clone, Debug)]
@@ -49,7 +48,7 @@ pub struct Writer {
     pub schema_manager: Arc<uni_common::core::schema::SchemaManager>,
     pub allocator: Arc<IdAllocator>,
     pub config: UniConfig,
-    pub embedding_services: Arc<Mutex<HashMap<String, Arc<dyn EmbeddingService>>>>,
+    pub xervo_runtime: Option<Arc<ModelRuntime>>,
     pub transaction_l0: Option<Arc<RwLock<L0Buffer>>>,
     /// Property manager for cache invalidation after flush
     pub property_manager: Option<Arc<PropertyManager>>,
@@ -108,7 +107,7 @@ impl Writer {
             schema_manager,
             allocator,
             config,
-            embedding_services: Arc::new(Mutex::new(HashMap::new())),
+            xervo_runtime: None,
             transaction_l0: None,
             property_manager,
             adjacency_manager,
@@ -156,6 +155,14 @@ impl Writer {
     /// Allocates the next EID (pure auto-increment).
     pub async fn next_eid(&self, _type_id: u32) -> Result<Eid> {
         self.allocator.allocate_eid().await
+    }
+
+    pub fn set_xervo_runtime(&mut self, runtime: Arc<ModelRuntime>) {
+        self.xervo_runtime = Some(runtime);
+    }
+
+    pub fn xervo_runtime(&self) -> Option<Arc<ModelRuntime>> {
+        self.xervo_runtime.clone()
     }
 
     pub fn begin_transaction(&mut self) -> Result<()> {
@@ -1633,12 +1640,14 @@ impl Writer {
                     continue;
                 }
 
-                // Get embedding service
-                let service = self.get_embedding_service(&emb_config.model).await?;
+                let runtime = self.xervo_runtime.as_ref().ok_or_else(|| {
+                    anyhow!("Uni-Xervo runtime not configured for auto-embedding")
+                })?;
+                let embedder = runtime.embedding(&emb_config.alias).await?;
 
                 // Batch generate embeddings (single API call)
                 let input_refs: Vec<&str> = input_texts.iter().map(|s| s.as_str()).collect();
-                let embeddings = service.embed(&input_refs).await?;
+                let embeddings = embedder.embed(input_refs).await?;
 
                 // Distribute results back to properties
                 for (embedding_idx, &prop_idx) in needs_embedding.iter().enumerate() {
@@ -1699,11 +1708,13 @@ impl Writer {
 
                 let input_text = inputs.join(" "); // Simple concatenation
 
-                // Get or create service
-                let service = self.get_embedding_service(&emb_config.model).await?;
+                let runtime = self.xervo_runtime.as_ref().ok_or_else(|| {
+                    anyhow!("Uni-Xervo runtime not configured for auto-embedding")
+                })?;
+                let embedder = runtime.embedding(&emb_config.alias).await?;
 
                 // Generate
-                let embeddings = service.embed(&[&input_text]).await?;
+                let embeddings = embedder.embed(vec![input_text.as_str()]).await?;
                 if let Some(vec) = embeddings.first() {
                     // Store as array of floats
                     let vals: Vec<Value> = vec.iter().map(|f| Value::Float(*f as f64)).collect();
@@ -1712,28 +1723,6 @@ impl Writer {
             }
         }
         Ok(())
-    }
-
-    /// Gets or creates a cached embedding service for the given model.
-    async fn get_embedding_service(
-        &self,
-        model: &EmbeddingModel,
-    ) -> Result<Arc<dyn EmbeddingService>> {
-        let key = embedding_service_key(model)?;
-
-        // Check cache first
-        {
-            let services = acquire_mutex(&self.embedding_services, "embedding_services")?;
-            if let Some(service) = services.get(&key) {
-                return Ok(service.clone());
-            }
-        }
-
-        // Create and cache new service
-        let service = create_embedding_service(model)?;
-        let mut services = acquire_mutex(&self.embedding_services, "embedding_services")?;
-        services.insert(key, service.clone());
-        Ok(service)
     }
 
     /// Flushes the current in-memory L0 buffer to L1 storage.

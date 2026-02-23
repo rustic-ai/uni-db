@@ -112,7 +112,7 @@ async fn test_candle_multiple_embeddings() -> Result<()> {
 }
 
 // FastEmbed tests (only compiled when fastembed feature is enabled)
-#[cfg(feature = "fastembed")]
+#[cfg(feature = "provider-fastembed")]
 mod fastembed_tests {
     use super::*;
 
