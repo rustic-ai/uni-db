@@ -15,7 +15,6 @@ Thumbs.db
 # Rust / Cargo
 /target/
 **/*.rs.bk
-Cargo.lock
 
 # Storage and Data
 /storage/
