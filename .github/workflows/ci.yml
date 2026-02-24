@@ -57,6 +57,14 @@ jobs:
       - name: Run tests
         run: cargo nextest run --workspace --exclude uni-tck
 
+      - name: Setup Python (for TCK analysis scripts)
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Run TCK (schemaless + schema)
+        run: scripts/run_tck_with_report.sh --both
+
   # Cloud storage integration tests with LocalStack
   # Runs after test job to reuse cached dependencies
   cloud-tests:
