@@ -180,7 +180,7 @@ jobs:
   build-linux:
     name: Build uni-db Linux wheels (${{ matrix.target }})
     needs: [validate]
-    runs-on: ubuntu-latest
+    runs-on: linux-xlarge-32
     strategy:
       matrix:
         target: [x86_64, aarch64]
@@ -211,7 +211,7 @@ jobs:
   build-macos:
     name: Build uni-db macOS wheels (${{ matrix.target }})
     needs: [validate]
-    runs-on: macos-latest
+    runs-on: macos-latest-large
     strategy:
       matrix:
         target: [x86_64, aarch64]
@@ -241,7 +241,7 @@ jobs:
   build-windows:
     name: Build uni-db Windows wheels (x86_64)
     needs: [validate]
-    runs-on: windows-latest
+    runs-on: windows-latest-l
     steps:
       - uses: actions/checkout@v4
 
@@ -291,7 +291,7 @@ jobs:
     environment: testpypi
     permissions:
       id-token: write
-    if: inputs.dry_run != true && github.event_name == 'workflow_dispatch' && inputs.target == 'testpypi'
+    if: github.event_name == 'workflow_dispatch' && inputs.target == 'testpypi'
     steps:
       - name: Download all wheels
         uses: actions/download-artifact@v4
@@ -300,10 +300,16 @@ jobs:
           path: dist
           merge-multiple: true
 
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v6
+
+      - name: Publish to TestPyPI (dry run)
+        if: inputs.dry_run == true
+        run: uv publish --dry-run --publish-url https://test.pypi.org/legacy/ dist/*
+
       - name: Publish to TestPyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
-        with:
-          repository-url: https://test.pypi.org/legacy/
+        if: inputs.dry_run != true
+        run: uv publish --trusted-publishing always --publish-url https://test.pypi.org/legacy/ dist/*
 
   publish-pypi:
     name: Publish uni-db to PyPI
@@ -312,7 +318,7 @@ jobs:
     environment: pypi
     permissions:
       id-token: write
-    if: inputs.dry_run != true && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.target == 'pypi'))
+    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.target == 'pypi')
     steps:
       - name: Download all wheels
         uses: actions/download-artifact@v4
@@ -321,8 +327,16 @@ jobs:
           path: dist
           merge-multiple: true
 
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v6
+
+      - name: Publish to PyPI (dry run)
+        if: inputs.dry_run == true
+        run: uv publish --dry-run dist/*
+
       - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
+        if: inputs.dry_run != true
+        run: uv publish --trusted-publishing always dist/*
 
   build-pydantic:
     name: Build uni-pydantic
@@ -393,10 +407,11 @@ jobs:
           name: pydantic-dist
           path: dist
 
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v6
+
       - name: Publish to TestPyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
-        with:
-          repository-url: https://test.pypi.org/legacy/
+        run: uv publish --trusted-publishing always --publish-url https://test.pypi.org/legacy/ dist/*
 
   publish-pydantic-pypi:
     name: Publish uni-pydantic to PyPI
@@ -413,5 +428,8 @@ jobs:
           name: pydantic-dist
           path: dist
 
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v6
+
       - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
+        run: uv publish --trusted-publishing always dist/*

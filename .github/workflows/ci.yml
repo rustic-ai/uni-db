@@ -25,7 +25,7 @@ jobs:
   # Uses xlarge runner for faster builds (8 cores, 32GB RAM)
   test:
     name: Test
-    runs-on: linux-xlarge-32
+    runs-on: linux-xlarge-64
     steps:
       - uses: actions/checkout@v4
 
@@ -124,7 +124,7 @@ jobs:
   # Runs in parallel with test job (builds its own Rust extension via maturin)
   python-tests:
     name: Python Tests
-    runs-on: ubuntu-xlarge
+    runs-on: linux-xlarge-32
     steps:
       - uses: actions/checkout@v4
 
