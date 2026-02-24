@@ -1,39 +1,61 @@
-# Release Workflow
-#
-# Orchestrates the release process: validates versions, creates tags,
-# and triggers publishing workflows for both Rust and Python.
-
 name: Release
 
 on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Version to release (e.g., 0.1.0)'
+        description: 'Version to release (e.g. 0.1.0). Required for manual dispatch.'
         required: true
         type: string
+      dry_run:
+        description: 'Build and validate without publishing, creating tags, or GitHub releases'
+        type: boolean
+        default: false
+      target:
+        description: 'Publish target (ignored for dry_run)'
+        type: choice
+        options: [pypi, testpypi]
+        default: testpypi
       create_tag:
-        description: 'Create git tag'
+        description: 'Create and push git tag (manual dispatch only)'
         type: boolean
         default: true
+  push:
+    tags: ['v*.*.*']
 
 permissions:
   contents: read
 
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
 jobs:
   validate:
-    name: Validate versions
+    name: Validate
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      checks: read
     outputs:
-      version: ${{ steps.check.outputs.version }}
-
+      version: ${{ steps.set-version.outputs.version }}
     steps:
       - uses: actions/checkout@v4
 
+      - name: Set version
+        id: set-version
+        run: |
+          if [ "${{ github.event_name }}" == "push" ]; then
+            VERSION="${GITHUB_REF#refs/tags/v}"
+          else
+            VERSION="${{ inputs.version }}"
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Version: $VERSION"
+
       - name: Check version consistency
-        id: check
         env:
-          VERSION: ${{ inputs.version }}
+          VERSION: ${{ steps.set-version.outputs.version }}
         run: |
           # Get version from workspace Cargo.toml
           CARGO_VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
@@ -49,7 +71,6 @@ jobs:
           echo "uni-db pyproject.toml version: $PYPI_VERSION"
           echo "uni-pydantic pyproject.toml version: $PYDANTIC_VERSION"
 
-          # Validate versions match
           if [ "$VERSION" != "$CARGO_VERSION" ]; then
             echo "Error: Input version ($VERSION) does not match Cargo.toml ($CARGO_VERSION)"
             exit 1
@@ -66,16 +87,29 @@ jobs:
           fi
 
           echo "All versions match: $VERSION"
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Assert CI passed
+        if: inputs.dry_run != true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          SHA="${{ github.sha }}"
+          echo "Checking CI status for commit $SHA"
+          CONCLUSION=$(gh api "repos/${{ github.repository }}/commits/$SHA/check-runs" \
+            --jq '[.check_runs[] | select(.name == "Test")] | .[0].conclusion // "not_found"')
+          echo "CI 'Test' conclusion: $CONCLUSION"
+          if [ "$CONCLUSION" != "success" ]; then
+            echo "ERROR: CI check 'Test' did not pass (conclusion: $CONCLUSION). Aborting release."
+            exit 1
+          fi
 
   create-tag:
-    name: Create git tag
+    name: Create Tag
+    needs: [validate]
     runs-on: ubuntu-latest
-    needs: validate
-    if: inputs.create_tag == true
     permissions:
       contents: write
-
+    if: github.event_name == 'workflow_dispatch' && inputs.create_tag == true && inputs.dry_run != true
     steps:
       - uses: actions/checkout@v4
 
@@ -90,12 +124,11 @@ jobs:
 
   create-release:
     name: Create GitHub Release
-    runs-on: ubuntu-latest
     needs: [validate, create-tag]
-    if: always() && needs.validate.result == 'success' && (needs.create-tag.result == 'success' || needs.create-tag.result == 'skipped')
+    runs-on: ubuntu-latest
     permissions:
       contents: write
-
+    if: always() && inputs.dry_run != true && needs.validate.result == 'success' && (needs.create-tag.result == 'success' || needs.create-tag.result == 'skipped')
     steps:
       - uses: actions/checkout@v4
 
@@ -107,3 +140,296 @@ jobs:
           generate_release_notes: true
           draft: false
           prerelease: ${{ contains(needs.validate.outputs.version, '-') }}
+
+  publish-rust:
+    name: Publish to crates.io
+    needs: [validate]
+    runs-on: linux-xlarge-32
+    environment: crates-io
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mold protobuf-compiler
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: Package crate (validation)
+        run: cargo package -p uni-db --allow-dirty
+
+      - name: Publish to crates.io (dry run)
+        if: inputs.dry_run == true
+        run: cargo publish -p uni-db --dry-run
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+      - name: Publish to crates.io
+        if: inputs.dry_run != true
+        run: cargo publish -p uni-db
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+  build-linux:
+    name: Build uni-db Linux wheels (${{ matrix.target }})
+    needs: [validate]
+    runs-on: linux-xlarge-32
+    strategy:
+      matrix:
+        target: [x86_64, aarch64]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Build wheels
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          args: --release --out dist -m bindings/uni-db/Cargo.toml
+          manylinux: 2_28
+          before-script-linux: |
+            apt-get update
+            apt-get install -y protobuf-compiler
+
+      - name: Upload wheels
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-linux-${{ matrix.target }}
+          path: dist
+
+  build-macos:
+    name: Build uni-db macOS wheels (${{ matrix.target }})
+    needs: [validate]
+    runs-on: macos-latest-large
+    strategy:
+      matrix:
+        target: [x86_64, aarch64]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install protobuf
+        run: brew install protobuf
+
+      - name: Build wheels
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}-apple-darwin
+          args: --release --out dist -m bindings/uni-db/Cargo.toml
+
+      - name: Upload wheels
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-macos-${{ matrix.target }}
+          path: dist
+
+  build-windows:
+    name: Build uni-db Windows wheels (x86_64)
+    needs: [validate]
+    runs-on: windows-latest-l
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install protobuf
+        run: choco install protoc
+
+      - name: Build wheels
+        uses: PyO3/maturin-action@v1
+        with:
+          target: x86_64-pc-windows-msvc
+          args: --release --out dist -m bindings/uni-db/Cargo.toml
+
+      - name: Upload wheels
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-windows-x86_64
+          path: dist
+
+  build-sdist:
+    name: Build uni-db source distribution
+    needs: [validate]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build sdist
+        uses: PyO3/maturin-action@v1
+        with:
+          command: sdist
+          args: --out dist -m bindings/uni-db/Cargo.toml
+
+      - name: Upload sdist
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-sdist
+          path: dist
+
+  publish-testpypi:
+    name: Publish uni-db to TestPyPI
+    needs: [build-linux, build-macos, build-windows, build-sdist]
+    runs-on: ubuntu-latest
+    environment: testpypi
+    permissions:
+      id-token: write
+    if: github.event_name == 'workflow_dispatch' && inputs.target == 'testpypi'
+    steps:
+      - name: Download all wheels
+        uses: actions/download-artifact@v4
+        with:
+          pattern: wheels-*
+          path: dist
+          merge-multiple: true
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v6
+
+      - name: Publish to TestPyPI (dry run)
+        if: inputs.dry_run == true
+        run: uv publish --dry-run --publish-url https://test.pypi.org/legacy/ dist/*
+
+      - name: Publish to TestPyPI
+        if: inputs.dry_run != true
+        run: uv publish --trusted-publishing always --publish-url https://test.pypi.org/legacy/ dist/*
+
+  publish-pypi:
+    name: Publish uni-db to PyPI
+    needs: [build-linux, build-macos, build-windows, build-sdist]
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.target == 'pypi')
+    steps:
+      - name: Download all wheels
+        uses: actions/download-artifact@v4
+        with:
+          pattern: wheels-*
+          path: dist
+          merge-multiple: true
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v6
+
+      - name: Publish to PyPI (dry run)
+        if: inputs.dry_run == true
+        run: uv publish --dry-run dist/*
+
+      - name: Publish to PyPI
+        if: inputs.dry_run != true
+        run: uv publish --trusted-publishing always dist/*
+
+  build-pydantic:
+    name: Build uni-pydantic
+    needs: [validate, publish-testpypi, publish-pypi]
+    runs-on: ubuntu-latest
+    if: always() && inputs.dry_run != true && (needs.publish-testpypi.result == 'success' || needs.publish-pypi.result == 'success')
+    env:
+      REGISTRY: ${{ needs.publish-testpypi.result == 'success' && 'testpypi' || 'pypi' }}
+      UV_SYSTEM_PYTHON: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          python-version: '3.11'
+
+      - name: Install published uni-db (with retry)
+        env:
+          VERSION: ${{ needs.validate.outputs.version }}
+        run: |
+          if [ "$REGISTRY" == "testpypi" ]; then
+            INDEX_ARGS="--index-url https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple/"
+          else
+            INDEX_ARGS=""
+          fi
+          for i in 1 2 3 4 5; do
+            uv pip install $INDEX_ARGS "uni-db==${VERSION}" && break
+            if [ "$i" -eq 5 ]; then
+              echo "Failed to install uni-db==${VERSION} from ${REGISTRY} after retries"
+              exit 1
+            fi
+            echo "uni-db not yet available on ${REGISTRY}, retrying in 30s..."
+            sleep 30
+          done
+
+      - name: Build uni-pydantic package
+        run: uv build bindings/uni-pydantic
+
+      - name: Smoke test with published uni-db
+        run: |
+          uv pip install --force-reinstall bindings/uni-pydantic/dist/*.whl
+          uv run python - <<'PY'
+          import uni_db
+          import uni_pydantic
+          print('uni_db:', getattr(uni_db, '__version__', 'unknown'))
+          print('uni_pydantic:', getattr(uni_pydantic, '__version__', 'unknown'))
+          PY
+
+      - name: Upload pydantic dist
+        uses: actions/upload-artifact@v4
+        with:
+          name: pydantic-dist
+          path: bindings/uni-pydantic/dist
+
+  publish-pydantic-testpypi:
+    name: Publish uni-pydantic to TestPyPI
+    needs: [build-pydantic, publish-testpypi]
+    runs-on: ubuntu-latest
+    environment: testpypi
+    permissions:
+      id-token: write
+    if: always() && needs.build-pydantic.result == 'success' && needs.publish-testpypi.result == 'success'
+    steps:
+      - name: Download pydantic dist
+        uses: actions/download-artifact@v4
+        with:
+          name: pydantic-dist
+          path: dist
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v6
+
+      - name: Publish to TestPyPI
+        run: uv publish --trusted-publishing always --publish-url https://test.pypi.org/legacy/ dist/*
+
+  publish-pydantic-pypi:
+    name: Publish uni-pydantic to PyPI
+    needs: [build-pydantic, publish-pypi]
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    if: always() && needs.build-pydantic.result == 'success' && needs.publish-pypi.result == 'success'
+    steps:
+      - name: Download pydantic dist
+        uses: actions/download-artifact@v4
+        with:
+          name: pydantic-dist
+          path: dist
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v6
+
+      - name: Publish to PyPI
+        run: uv publish --trusted-publishing always dist/*

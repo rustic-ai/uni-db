@@ -2,8 +2,8 @@
 # Copyright 2024-2026 Dragonscale Team
 
 [build-system]
-requires = ["poetry-core>=1.0.0"]
-build-backend = "poetry.core.masonry.api"
+requires = ["hatchling"]
+build-backend = "hatchling.build"
 
 [project]
 name = "uni-pydantic"
@@ -29,42 +29,25 @@ dependencies = [
     "uni-db>=0.1.0",
 ]
 
-[project.optional-dependencies]
-dev = [
-    "ruff>=0.1.0",
-    "mypy>=1.0.0",
-    "pytest>=7.0.0",
-    "pytest-xdist>=3.5.0",
-]
-
 [project.urls]
 Homepage = "https://www.rustic.ai"
 Documentation = "https://rustic-ai.github.io/uni"
 Repository = "https://github.com/rustic-ai/uni"
 
-[tool.poetry]
-name = "uni-pydantic"
-version = "0.1.0"
-description = "Pydantic-based OGM (Object-Graph Mapping) for Uni Graph Database"
-authors = ["Dragonscale Industries Inc. <dev@dragonscale.ai>"]
-license = "Apache-2.0"
-readme = "README.md"
-packages = [{ include = "uni_pydantic", from = "src" }]
+[dependency-groups]
+dev = [
+    "ruff>=0.1.0",
+    "mypy>=1.0.0",
+    "pytest>=7.0.0",
+    "pytest-asyncio>=1.3.0",
+    "pytest-xdist>=3.5.0",
+]
 
-[tool.poetry.dependencies]
-python = ">=3.10,<4.0"
-pydantic = ">=2.0.0,<3.0.0"
-uni-db = { path = "../uni-db", develop = true }
+[tool.uv.sources]
+uni-db = { path = "../uni-db", editable = true }
 
-[tool.poetry-monorepo.deps]
-enabled = true
-
-[tool.poetry.group.dev.dependencies]
-ruff = ">=0.1.0"
-mypy = ">=1.0.0"
-pytest = ">=7.0.0"
-pytest-asyncio = "^1.3.0"
-pytest-xdist = "^3.5.0"
+[tool.hatch.build.targets.wheel]
+packages = ["src/uni_pydantic"]
 
 [tool.ruff]
 line-length = 88

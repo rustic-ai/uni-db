@@ -83,8 +83,8 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v6
         with:
           python-version: '3.11'
 
@@ -99,37 +99,30 @@ jobs:
           shared-key: "ci"
           cache-on-failure: true
 
-      - name: Install Poetry
-        uses: snok/install-poetry@v1
-        with:
-          version: latest
-          virtualenvs-create: true
-          virtualenvs-in-project: true
-
       - name: Install Python dependencies (uni-db)
         working-directory: bindings/uni-db
-        run: poetry install --with dev
+        run: uv sync --group dev
 
       - name: Build Python bindings (uni-db)
         working-directory: bindings/uni-db
-        run: poetry run maturin develop
+        run: uv run maturin develop
 
       - name: Lint Python code (uni-db)
         working-directory: bindings/uni-db
-        run: poetry run ruff check .
+        run: uv run ruff check .
 
       - name: Run Python tests (uni-db)
         working-directory: bindings/uni-db
-        run: poetry run pytest tests/ -v -n auto
+        run: uv run pytest tests/ -v -n auto
 
       - name: Install Python dependencies (uni-pydantic)
         working-directory: bindings/uni-pydantic
-        run: poetry install --with dev
+        run: uv sync --group dev
 
       - name: Lint Python code (uni-pydantic)
         working-directory: bindings/uni-pydantic
-        run: poetry run ruff check .
+        run: uv run ruff check .
 
       - name: Run Python tests (uni-pydantic)
         working-directory: bindings/uni-pydantic
-        run: poetry run pytest tests/ -v -n auto
+        run: uv run pytest tests/ -v -n auto
