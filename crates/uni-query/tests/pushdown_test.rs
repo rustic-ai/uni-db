@@ -581,3 +581,265 @@ fn test_btree_prefix_scan_skips_non_online_index() {
     assert_eq!(strategy.btree_prefix_scans[0].0, "name");
     assert!(strategy.lance_predicates.is_empty());
 }
+
+// =====================================================================
+// Scalar Equality Lookup Tests (Issue #57 — Hash index support)
+// =====================================================================
+
+fn create_test_schema_with_hash_index(label: &str, label_id: u16, index_property: &str) -> Schema {
+    let mut schema = create_test_schema_with_label(label, label_id);
+    schema
+        .indexes
+        .push(IndexDefinition::Scalar(ScalarIndexConfig {
+            name: format!("idx_{}_{}", label, index_property),
+            label: label.to_string(),
+            properties: vec![index_property.to_string()],
+            index_type: ScalarIndexType::Hash,
+            where_clause: None,
+            metadata: Default::default(),
+        }));
+    schema
+}
+
+#[test]
+fn test_hash_index_equality_lookup_string_literal() {
+    let schema = create_test_schema_with_hash_index("Entity", 1, "entity_id");
+
+    // MATCH (n:Entity {entity_id: "abc"})  →  n.entity_id = "abc"
+    let expr = Expr::BinaryOp {
+        left: Box::new(Expr::Property(
+            Box::new(Expr::Variable("n".to_string())),
+            "entity_id".to_string(),
+        )),
+        op: BinaryOp::Eq,
+        right: Box::new(Expr::Literal(CypherLiteral::String("abc".to_string()))),
+    };
+
+    let analyzer = IndexAwareAnalyzer::new(&schema);
+    let strategy = analyzer.analyze(&expr, "n", 1);
+
+    // Hash index SHOULD be used for equality lookup
+    assert_eq!(strategy.scalar_equality_lookups.len(), 1);
+    assert_eq!(strategy.scalar_equality_lookups[0].0, "entity_id");
+
+    // Should NOT fall through to lance
+    assert!(strategy.lance_predicates.is_empty());
+}
+
+#[test]
+fn test_hash_index_equality_lookup_parameter() {
+    let schema = create_test_schema_with_hash_index("Entity", 1, "entity_id");
+
+    // MATCH (n:Entity) WHERE n.entity_id = $eid
+    let expr = Expr::BinaryOp {
+        left: Box::new(Expr::Property(
+            Box::new(Expr::Variable("n".to_string())),
+            "entity_id".to_string(),
+        )),
+        op: BinaryOp::Eq,
+        right: Box::new(Expr::Parameter("eid".to_string())),
+    };
+
+    let analyzer = IndexAwareAnalyzer::new(&schema);
+    let strategy = analyzer.analyze(&expr, "n", 1);
+
+    assert_eq!(strategy.scalar_equality_lookups.len(), 1);
+    assert_eq!(strategy.scalar_equality_lookups[0].0, "entity_id");
+    assert!(strategy.lance_predicates.is_empty());
+}
+
+#[test]
+fn test_btree_index_also_used_for_equality_lookup() {
+    // BTree indexes also support equality lookups (O(log N))
+    let schema = create_test_schema_with_btree_index("Person", 1, "name");
+
+    // n.name = "John"
+    let expr = Expr::BinaryOp {
+        left: Box::new(Expr::Property(
+            Box::new(Expr::Variable("n".to_string())),
+            "name".to_string(),
+        )),
+        op: BinaryOp::Eq,
+        right: Box::new(Expr::Literal(CypherLiteral::String("John".to_string()))),
+    };
+
+    let analyzer = IndexAwareAnalyzer::new(&schema);
+    let strategy = analyzer.analyze(&expr, "n", 1);
+
+    assert_eq!(strategy.scalar_equality_lookups.len(), 1);
+    assert_eq!(strategy.scalar_equality_lookups[0].0, "name");
+    assert!(strategy.lance_predicates.is_empty());
+}
+
+#[test]
+fn test_scalar_equality_reversed_operand_order() {
+    let schema = create_test_schema_with_hash_index("Entity", 1, "entity_id");
+
+    // "abc" = n.entity_id  (reversed order — should still match)
+    let expr = Expr::BinaryOp {
+        left: Box::new(Expr::Literal(CypherLiteral::String("abc".to_string()))),
+        op: BinaryOp::Eq,
+        right: Box::new(Expr::Property(
+            Box::new(Expr::Variable("n".to_string())),
+            "entity_id".to_string(),
+        )),
+    };
+
+    let analyzer = IndexAwareAnalyzer::new(&schema);
+    let strategy = analyzer.analyze(&expr, "n", 1);
+
+    assert_eq!(strategy.scalar_equality_lookups.len(), 1);
+    assert_eq!(strategy.scalar_equality_lookups[0].0, "entity_id");
+}
+
+#[test]
+fn test_scalar_equality_non_indexed_property_not_extracted() {
+    let schema = create_test_schema_with_hash_index("Entity", 1, "entity_id");
+
+    // n.name = "John" — name has NO index, should fall through to lance
+    let expr = Expr::BinaryOp {
+        left: Box::new(Expr::Property(
+            Box::new(Expr::Variable("n".to_string())),
+            "name".to_string(),
+        )),
+        op: BinaryOp::Eq,
+        right: Box::new(Expr::Literal(CypherLiteral::String("John".to_string()))),
+    };
+
+    let analyzer = IndexAwareAnalyzer::new(&schema);
+    let strategy = analyzer.analyze(&expr, "n", 1);
+
+    assert!(strategy.scalar_equality_lookups.is_empty());
+    assert_eq!(strategy.lance_predicates.len(), 1);
+}
+
+#[test]
+fn test_hash_index_not_used_for_starts_with() {
+    // Hash index should NOT be used for STARTS WITH (only BTree supports range scans)
+    let schema = create_test_schema_with_hash_index("Entity", 1, "entity_id");
+
+    let expr = Expr::BinaryOp {
+        left: Box::new(Expr::Property(
+            Box::new(Expr::Variable("n".to_string())),
+            "entity_id".to_string(),
+        )),
+        op: BinaryOp::StartsWith,
+        right: Box::new(Expr::Literal(CypherLiteral::String("abc".to_string()))),
+    };
+
+    let analyzer = IndexAwareAnalyzer::new(&schema);
+    let strategy = analyzer.analyze(&expr, "n", 1);
+
+    // STARTS WITH should NOT use hash index for prefix scan
+    assert!(strategy.btree_prefix_scans.is_empty());
+    // Should NOT use scalar equality either (different op)
+    assert!(strategy.scalar_equality_lookups.is_empty());
+    // Falls through to lance
+    assert_eq!(strategy.lance_predicates.len(), 1);
+}
+
+#[test]
+fn test_scalar_equality_skips_building_index() {
+    let mut schema = create_test_schema_with_hash_index("Entity", 1, "entity_id");
+    // Set index status to Building
+    if let IndexDefinition::Scalar(cfg) = &mut schema.indexes[0] {
+        cfg.metadata.status = IndexStatus::Building;
+    }
+
+    let expr = Expr::BinaryOp {
+        left: Box::new(Expr::Property(
+            Box::new(Expr::Variable("n".to_string())),
+            "entity_id".to_string(),
+        )),
+        op: BinaryOp::Eq,
+        right: Box::new(Expr::Literal(CypherLiteral::String("abc".to_string()))),
+    };
+
+    let analyzer = IndexAwareAnalyzer::new(&schema);
+    let strategy = analyzer.analyze(&expr, "n", 1);
+
+    // Building index should NOT be used
+    assert!(strategy.scalar_equality_lookups.is_empty());
+    // Falls through to lance
+    assert_eq!(strategy.lance_predicates.len(), 1);
+}
+
+#[test]
+fn test_scalar_equality_combined_with_other_predicates() {
+    let schema = create_test_schema_with_hash_index("Entity", 1, "entity_id");
+
+    // n.entity_id = "abc" AND n.status = "active"
+    // entity_id is hash-indexed, status is not
+    let expr = Expr::BinaryOp {
+        left: Box::new(Expr::BinaryOp {
+            left: Box::new(Expr::Property(
+                Box::new(Expr::Variable("n".to_string())),
+                "entity_id".to_string(),
+            )),
+            op: BinaryOp::Eq,
+            right: Box::new(Expr::Literal(CypherLiteral::String("abc".to_string()))),
+        }),
+        op: BinaryOp::And,
+        right: Box::new(Expr::BinaryOp {
+            left: Box::new(Expr::Property(
+                Box::new(Expr::Variable("n".to_string())),
+                "status".to_string(),
+            )),
+            op: BinaryOp::Eq,
+            right: Box::new(Expr::Literal(CypherLiteral::String("active".to_string()))),
+        }),
+    };
+
+    let analyzer = IndexAwareAnalyzer::new(&schema);
+    let strategy = analyzer.analyze(&expr, "n", 1);
+
+    // entity_id goes to scalar_equality_lookups
+    assert_eq!(strategy.scalar_equality_lookups.len(), 1);
+    assert_eq!(strategy.scalar_equality_lookups[0].0, "entity_id");
+
+    // status goes to lance_predicates (no index)
+    assert_eq!(strategy.lance_predicates.len(), 1);
+}
+
+#[test]
+fn test_scalar_equality_integer_literal() {
+    let schema = create_test_schema_with_hash_index("Person", 1, "age");
+
+    // n.age = 30
+    let expr = Expr::BinaryOp {
+        left: Box::new(Expr::Property(
+            Box::new(Expr::Variable("n".to_string())),
+            "age".to_string(),
+        )),
+        op: BinaryOp::Eq,
+        right: Box::new(Expr::Literal(CypherLiteral::Integer(30))),
+    };
+
+    let analyzer = IndexAwareAnalyzer::new(&schema);
+    let strategy = analyzer.analyze(&expr, "n", 1);
+
+    assert_eq!(strategy.scalar_equality_lookups.len(), 1);
+    assert_eq!(strategy.scalar_equality_lookups[0].0, "age");
+}
+
+#[test]
+fn test_scalar_equality_system_column_not_extracted() {
+    // _vid, _uid etc. should NOT go through scalar_equality_lookups
+    // They have their own dedicated paths (UID lookup, VID short-circuit)
+    let schema = create_test_schema_with_hash_index("Entity", 1, "_vid");
+
+    let expr = Expr::BinaryOp {
+        left: Box::new(Expr::Property(
+            Box::new(Expr::Variable("n".to_string())),
+            "_vid".to_string(),
+        )),
+        op: BinaryOp::Eq,
+        right: Box::new(Expr::Literal(CypherLiteral::Integer(42))),
+    };
+
+    let analyzer = IndexAwareAnalyzer::new(&schema);
+    let strategy = analyzer.analyze(&expr, "n", 1);
+
+    // System columns should NOT be extracted via scalar equality
+    assert!(strategy.scalar_equality_lookups.is_empty());
+}

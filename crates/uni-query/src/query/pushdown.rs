@@ -4,7 +4,7 @@
 //! Predicate pushdown and index-aware query routing.
 //!
 //! Routes WHERE predicates to the most selective execution path:
-//! UID index lookup → BTree prefix scan → JSON FTS → Lance columnar filter → residual.
+//! UID index lookup → BTree prefix scan → Scalar equality lookup → JSON FTS → Lance columnar filter → residual.
 //! Includes SQL injection prevention for LIKE patterns (CWE-89) and UID validation (CWE-345).
 
 use std::collections::{HashMap, HashSet};
@@ -30,6 +30,13 @@ pub struct PushdownStrategy {
     /// converted to a range scan: column >= 'prefix' AND column < 'prefix_next'.
     /// Vec of: (column_name, lower_bound, upper_bound)
     pub btree_prefix_scans: Vec<(String, String, String)>,
+
+    /// Scalar index equality lookups for Hash or BTree indexed properties.
+    /// When a property has a scalar index (Hash or BTree) and the predicate is
+    /// `property = literal/parameter`, the lookup can use the index for O(1)
+    /// point access instead of a full label scan.
+    /// Vec of: (column_name, value_expr)
+    pub scalar_equality_lookups: Vec<(String, Expr)>,
 
     /// JSON FTS predicates for full-text search on JSON columns.
     /// Vec of: (column_name, search_term, optional_path_filter)
@@ -68,8 +75,9 @@ impl<'a> IndexAwareAnalyzer<'a> {
     /// Predicates are categorized in order of selectivity:
     /// 1. `_uid = 'xxx'` -> UID index lookup
     /// 2. BTree prefix scans for STARTS WITH predicates
-    /// 3. Pushable to Lance -> Lance filter
-    /// 4. Everything else -> Residual
+    /// 3. Scalar equality lookups on Hash/BTree indexed properties
+    /// 4. Pushable to Lance -> Lance filter
+    /// 5. Everything else -> Residual
     pub fn analyze(&self, predicate: &Expr, variable: &str, label_id: u16) -> PushdownStrategy {
         let mut strategy = PushdownStrategy::default();
         let conjuncts = Self::split_conjuncts(predicate);
@@ -90,7 +98,15 @@ impl<'a> IndexAwareAnalyzer<'a> {
                 continue;
             }
 
-            // 3. Check for JSON FTS predicates (CONTAINS on FTS-indexed columns)
+            // 3. Check for scalar equality lookups on indexed properties
+            if let Some((column, value_expr)) =
+                self.extract_scalar_equality_lookup(&conj, variable, label_id)
+            {
+                strategy.scalar_equality_lookups.push((column, value_expr));
+                continue;
+            }
+
+            // 4. Check for JSON FTS predicates (CONTAINS on FTS-indexed columns)
             if let Some((column, term, path)) =
                 self.extract_json_fts_predicate(&conj, variable, label_id)
             {
@@ -98,7 +114,7 @@ impl<'a> IndexAwareAnalyzer<'a> {
                 continue;
             }
 
-            // 4. Check if pushable to Lance
+            // 5. Check if pushable to Lance
             if lance_analyzer.is_pushable(&conj, variable) {
                 strategy.lance_predicates.push(conj);
             } else {
@@ -219,6 +235,72 @@ impl<'a> IndexAwareAnalyzer<'a> {
                     return Some((prop.clone(), term.clone(), None));
                 }
             }
+        }
+        None
+    }
+
+    /// Extract scalar equality lookup for indexed properties.
+    ///
+    /// Returns `Some((column, value_expr))` if:
+    /// - The predicate is `variable.property = literal/parameter`
+    /// - The property has a scalar index (Hash or BTree) that is Online
+    ///
+    /// Hash indexes support O(1) point lookups; BTree indexes support O(log N)
+    /// equality lookups. Both are vastly more efficient than a full label scan.
+    fn extract_scalar_equality_lookup(
+        &self,
+        expr: &Expr,
+        variable: &str,
+        label_id: u16,
+    ) -> Option<(String, Expr)> {
+        if let Expr::BinaryOp {
+            left,
+            op: BinaryOp::Eq,
+            right,
+        } = expr
+        {
+            // Check both orientations: prop = val and val = prop
+            if let Some((prop, value)) =
+                Self::extract_property_eq_pair(left, right, variable)
+                    .or_else(|| Self::extract_property_eq_pair(right, left, variable))
+            {
+                let label_name = self.schema.label_name_by_id(label_id)?;
+
+                for idx in &self.schema.indexes {
+                    if let IndexDefinition::Scalar(cfg) = idx
+                        && cfg.label == *label_name
+                        && cfg.properties.contains(&prop)
+                        && matches!(
+                            cfg.index_type,
+                            ScalarIndexType::Hash | ScalarIndexType::BTree
+                        )
+                        && cfg.metadata.status == IndexStatus::Online
+                    {
+                        return Some((prop, value));
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Helper: check if one side is `variable.property` and the other is a
+    /// literal or parameter. Returns `(property_name, value_expr)` if matched.
+    fn extract_property_eq_pair(
+        prop_side: &Expr,
+        value_side: &Expr,
+        variable: &str,
+    ) -> Option<(String, Expr)> {
+        if let Expr::Property(var_expr, prop) = prop_side
+            && let Expr::Variable(v) = var_expr.as_ref()
+            && v == variable
+            && !prop.starts_with('_') // Skip system columns (handled by UID/VID paths)
+            && matches!(
+                value_side,
+                Expr::Literal(_) | Expr::Parameter(_)
+            )
+        {
+            return Some((prop.clone(), value_side.clone()));
         }
         None
     }
