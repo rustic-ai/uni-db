@@ -32,7 +32,7 @@ semver = "1.0"
 # embedders that only want the trait surface (e.g., for compile-time
 # Rust-only plugins via uni-plugin-builtin) can opt out.
 wasmtime = { version = "43", default-features = false, features = ["runtime", "cranelift", "component-model"], optional = true }
-wasmtime-wasi = { version = "43", optional = true }
+wasmtime-wasi = { version = "44", optional = true }
 datafusion = { workspace = true, optional = true }
 
 [features]
