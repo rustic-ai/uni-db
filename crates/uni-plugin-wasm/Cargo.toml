@@ -36,7 +36,7 @@ semver = "1.0"
 # pulled in by `extism` (crates/uni-plugin-extism) — a mismatch links two
 # wasmtime copies into every uni-db binary. Bump all three together.
 wasmtime = { version = "43", default-features = false, features = ["runtime", "cranelift", "component-model"], optional = true }
-wasmtime-wasi = { version = "43", optional = true }
+wasmtime-wasi = { version = "44", optional = true }
 datafusion = { workspace = true, optional = true }
 
 [features]

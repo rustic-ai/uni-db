@@ -26,7 +26,7 @@ path = "src/main.rs"
 uni-db = { path = "../../crates/uni", features = ["pyo3-plugins"] }
 uni-plugin = { path = "../../crates/uni-plugin" }
 uni-plugin-pyo3 = { path = "../../crates/uni-plugin-pyo3", features = ["pyo3"] }
-pyo3 = { version = "0.27", features = ["abi3-py310", "auto-initialize"] }
+pyo3 = { version = "0.29", features = ["abi3-py310", "auto-initialize"] }
 arrow-array = "57"
 datafusion = "52"
 tokio = { version = "1", features = ["full"] }
