@@ -1400,23 +1400,18 @@ fn build_traverse_output_batch_sync(
         .collect();
     columns.push(Arc::new(UInt64Array::from(target_vids)));
 
-    // Add target ._labels column (from L0 buffers)
+    // Add target ._labels column. Resolve from the L0 chain and then the
+    // persisted VidLabelsIndex, matching the async path's
+    // `build_target_labels_column`, so labels that live only in Lance storage
+    // are not silently dropped in this sync fast-path.
     {
         use arrow_array::builder::{ListBuilder, StringBuilder};
-        let l0_ctx = graph_ctx.l0_context();
         let mut labels_builder = ListBuilder::new(StringBuilder::new());
+        let query_ctx = graph_ctx.query_context();
         for (_, vid, _, _) in expansions {
-            let mut row_labels: Vec<String> = Vec::new();
-            for l0 in l0_ctx.iter_l0_buffers() {
-                let guard = l0.read();
-                if let Some(l0_labels) = guard.vertex_labels.get(vid) {
-                    for lbl in l0_labels {
-                        if !row_labels.contains(lbl) {
-                            row_labels.push(lbl.clone());
-                        }
-                    }
-                }
-            }
+            let row_labels = graph_ctx
+                .resolve_vertex_labels(*vid, &query_ctx)
+                .unwrap_or_default();
             let values = labels_builder.values();
             for lbl in &row_labels {
                 values.append_value(lbl);
@@ -5039,5 +5034,109 @@ mod tests {
         assert_eq!(output_schema.field(5).data_type(), &DataType::LargeBinary);
         assert_eq!(output_schema.field(6).name(), "m.age");
         assert_eq!(output_schema.field(6).data_type(), &DataType::LargeBinary);
+    }
+
+    /// Protects: a relationship scan's synchronous fast-path must report a
+    /// target vertex's labels even when they live only in the persisted
+    /// VidLabelsIndex (e.g. after a flush to Lance), matching the async path.
+    #[tokio::test]
+    async fn test_sync_path_resolves_labels_from_persisted_index() {
+        use arrow_array::{ListArray, StringArray};
+        use uni_common::core::schema::{DataType as UniDataType, SchemaManager};
+        use uni_store::runtime::l0::L0Buffer;
+        use uni_store::runtime::property_manager::PropertyManager;
+        use uni_store::runtime::writer::Writer;
+        use uni_store::storage::manager::StorageManager;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path();
+
+        let schema_manager = SchemaManager::load(&path.join("schema.json"))
+            .await
+            .unwrap();
+        schema_manager.add_label("Person").unwrap();
+        schema_manager
+            .add_property("Person", "name", UniDataType::String, true)
+            .unwrap();
+        schema_manager.save().await.unwrap();
+        let schema_manager = Arc::new(schema_manager);
+
+        let storage = Arc::new(
+            StorageManager::new(
+                path.join("storage").to_str().unwrap(),
+                schema_manager.clone(),
+            )
+            .await
+            .unwrap(),
+        );
+
+        let writer = Writer::new(storage.clone(), schema_manager.clone(), 0)
+            .await
+            .unwrap();
+        let target_vid = writer.next_vid().await.unwrap();
+        let mut props = HashMap::new();
+        props.insert("name".to_string(), UniValue::from("Alice"));
+        writer
+            .insert_vertex_with_labels(target_vid, props, &["Person".to_string()], None)
+            .await
+            .unwrap();
+        // Flush to Lance so the label lives only in the persisted index, not L0.
+        writer.flush_to_l1(None).await.unwrap();
+
+        let property_manager = Arc::new(PropertyManager::new(
+            storage.clone(),
+            schema_manager.clone(),
+            100,
+        ));
+        // Fresh empty L0 chain => the label is reachable only via the index.
+        let empty_l0 = Arc::new(parking_lot::RwLock::new(L0Buffer::new(0, None)));
+        let graph_ctx = GraphExecutionContext::new(storage.clone(), empty_l0, property_manager);
+
+        let input_schema = Arc::new(Schema::new(vec![Field::new(
+            "a._vid",
+            DataType::UInt64,
+            false,
+        )]));
+        let input = RecordBatch::try_new(
+            input_schema.clone(),
+            vec![Arc::new(UInt64Array::from(vec![1u64]))],
+        )
+        .unwrap();
+        let output_schema = GraphTraverseExec::build_schema(
+            input_schema,
+            "m",
+            None,
+            &[],
+            &[],
+            None,
+            None,
+            false,
+        );
+        let expansions = vec![(0usize, target_vid, 0u64, 0u32)];
+
+        let out = build_traverse_output_batch_sync(
+            &input,
+            &expansions,
+            &output_schema,
+            None,
+            &graph_ctx,
+            false,
+            &HashSet::new(),
+        )
+        .unwrap();
+
+        let labels_col = out
+            .column(2)
+            .as_any()
+            .downcast_ref::<ListArray>()
+            .unwrap();
+        let row0 = labels_col.value(0);
+        let strs = row0.as_any().downcast_ref::<StringArray>().unwrap();
+        let got: Vec<String> = strs.iter().flatten().map(|s| s.to_string()).collect();
+        assert_eq!(
+            got,
+            vec!["Person".to_string()],
+            "sync path must resolve labels from the persisted VidLabelsIndex"
+        );
     }
 }
