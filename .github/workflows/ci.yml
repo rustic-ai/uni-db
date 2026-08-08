@@ -443,8 +443,11 @@ jobs:
       - name: Check Python version consistency
         run: python3 scripts/ci/check_version_consistency.py
 
-      # Documented counts must match the counts source already asserts
-      # (e.g. `assert_eq!(kinds.len(), 22)` in uni_plugin::surfaces).
+      # Documented counts must match what source or the filesystem already
+      # asserts — plugin surfaces (`assert_eq!(kinds.len(), 22)` in
+      # uni_plugin::surfaces), graph algorithms (`DISTINCT_ALGORITHMS` in
+      # uni-plugin-builtin's builtin_register test), both TCK suites' feature
+      # files and scenario totals, and the skill reference pages.
       - name: Check documented counts
         run: python3 scripts/ci/check_documented_counts.py
 

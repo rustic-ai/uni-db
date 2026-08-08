@@ -91,7 +91,7 @@ In structured, relational domains, "physics" means the rules governing how the w
 
 Locy — Logic + Cypher — encodes this physics as formal, executable rules with recursive evaluation to guaranteed fixed points. Rules are:
 
-**Predefined and versioned.** Authored, reviewed, tested against Uni's TCK (117/117 scenarios passing at 100%), deployed, and updated as the domain evolves.
+**Predefined and versioned.** Authored, reviewed, tested against Uni's TCK (519/519 scenarios passing at 100%), deployed, and updated as the domain evolves.
 
 **Composable.** The module system (`MODULE acme.compliance; USE acme.common`) lets different teams own different domains of physics. They compose cleanly via stratified evaluation with guaranteed convergence.
 
@@ -269,7 +269,7 @@ Apache 2.0 embedded library drives adoption. Commercial value captured via: mana
 | **Object-Store-First** | S3/GCS/Azure native backends | Cloud durability without managing infrastructure. |
 | **OpenCypher (100% TCK)** | Standard graph query language | Existing Cypher knowledge transfers. Migration path from Neo4j. |
 | **Columnar Analytics** | Arrow/DataFusion engine | Analytical performance without a separate warehouse. |
-| **36 Graph Algorithms** | `CALL algo.pageRank(...)` | Centrality, community, pathfinding, flow — built in. |
+| **42 Graph Algorithms** | `CALL algo.pageRank(...)` | Centrality, community, pathfinding, flow — built in. |
 | **Hybrid Search** | Vector + FTS with RRF fusion | Semantic and lexical retrieval unified in `uni.search`. |
 | **Locy (100% TCK)** | Logic + Cypher programming | Recursive rules, stratified fixpoint, semi-naive evaluation. |
 | **ASSUME** | Hypothetical what-if with rollback | Simulate future states without mutation. |

@@ -94,20 +94,24 @@ then find communities using Louvain with a minimum size of 5.
 
 ## Architecture
 
-The skill is organized as a single `SKILL.md` entry point (~450 lines) with 8 reference files in a `references/` directory:
+The skill is organized as a single `SKILL.md` entry point with 12 reference files in a `references/` directory:
 
 ```
 skills/uni-db/
 ├── SKILL.md                      ← always loaded (routing + quick reference)
 └── references/
+    ├── btic.md                   ← loaded for temporal-interval tasks
     ├── cypher.md                 ← loaded for Cypher tasks
+    ├── forks.md                  ← loaded for fork tasks
+    ├── graph-algorithms.md       ← loaded for algorithm tasks
+    ├── locy.md                   ← loaded for Locy tasks
+    ├── neural-predicates.md      ← loaded for neural-predicate tasks
+    ├── pydantic-ogm.md           ← loaded for Pydantic OGM tasks
     ├── python-api.md             ← loaded for Python API tasks
     ├── rust-api.md               ← loaded for Rust API tasks
-    ├── pydantic-ogm.md           ← loaded for Pydantic OGM tasks
-    ├── vector-hybrid-search.md   ← loaded for search tasks
-    ├── locy.md                   ← loaded for Locy tasks
     ├── schema-indexing.md        ← loaded for schema/index tasks
-    └── graph-algorithms.md       ← loaded for algorithm tasks
+    ├── vector-hybrid-search.md   ← loaded for search tasks
+    └── xervo.md                  ← loaded for embedding/model tasks
 ```
 
 The agent reads `SKILL.md` first, which contains a routing table that maps your task to the right reference file. Only the relevant reference is loaded into context, keeping token usage efficient.

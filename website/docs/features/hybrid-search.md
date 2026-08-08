@@ -77,21 +77,24 @@ Uni provides hybrid search that combines vector similarity and full-text search 
 
 <!-- doctest: skip -->
 ```cypher
-CALL uni.search(label, properties, query_text [, query_vector] [, k] [, filter] [, options])
+CALL uni.search(label, properties, query_text, query_vector, k [, filter] [, options])
 YIELD vid, score, node [, vector_score] [, fts_score] [, sparse_score] [, distance]
 ```
 
+Arguments are positional. `k` is the fifth, so `query_vector` cannot be dropped to reach it —
+pass `null` to auto-embed `query_text` instead.
+
 **Parameters:**
 
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `label` | String | Node label to search |
-| `properties` | Map | `{vector: 'prop', fts: 'prop', sparse: 'prop'}` — a bare string means same prop for vector + fts, sparse off |
-| `query_text` | String | Text for FTS and auto-embedding |
-| `query_vector` | List or null | Pre-computed dense vector (optional) |
-| `k` | Integer | Number of results (default: 10) |
-| `filter` | String | WHERE clause for pre-filtering |
-| `options` | Map | Fusion options |
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `label` | String | Yes | Node label to search |
+| `properties` | Map | Yes | `{vector: 'prop', fts: 'prop', sparse: 'prop'}` — a bare string means same prop for vector + fts, sparse off |
+| `query_text` | String | Yes | Text for FTS and auto-embedding |
+| `query_vector` | List or null | Yes | Pre-computed dense vector; `null` auto-embeds `query_text` |
+| `k` | Integer | Yes | Number of results. **No default** — omitting it is an error |
+| `filter` | String | No | WHERE clause for pre-filtering |
+| `options` | Map | No | Fusion options |
 
 **Fusion Options:**
 

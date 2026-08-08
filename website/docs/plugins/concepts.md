@@ -30,7 +30,7 @@ A **surface** is a single extension point — one trait in `crates/uni-plugin/sr
 | | Optimizer rule | `OptimizerRuleProvider` | pushdown negotiation |
 | | Index kind | `IndexKindProvider` | vector index |
 | **Engine** | Label storage | `LabelStorageProvider` | Lance backend |
-| | Algorithm | `AlgorithmProvider` + `AlgorithmHost` | label propagation + 36 via adapter |
+| | Algorithm | `AlgorithmProvider` + `AlgorithmHost` | 42 graph algorithms (43 qnames — `algo.pageRank` and `algo.pagerank` both resolve to PageRank) |
 | | CRDT kind | `CrdtKindProvider` + `CrdtState` | 5 (LWW / OR-Set / G-Counter / MV-Register / RGA) |
 | | Logical type | `LogicalTypeProvider` | 5 (uri / geo.point / email / ipv4 / ipv6) |
 | | Collation | `CollationProvider` | 5 (ascii ×2, unicode ×2, natural) |
@@ -46,7 +46,7 @@ A **surface** is a single extension point — one trait in `crates/uni-plugin/sr
 The authoritative count is the **22** registrable surfaces asserted in
 `uni_plugin::surfaces` (`assert_eq!(kinds.len(), 22)`). `OperatorProvider`,
 `StorageBackend`, `PregelProgramProvider` and `Connector` were removed in 3.0.
-Registering a surface requires holding its capability — registering a surface requires holding its capability. (Neural predicates register through the `LocyPredicate` surface; rerankers are *not* a plugin surface — they are a separate subsystem.)
+Registering a surface requires holding its capability. (Neural predicates register through the `LocyPredicate` surface; rerankers are *not* a plugin surface — they are a separate subsystem.)
 
 **Rust-only vs. loader-portable.** Only the native Rust loader can author all 22 surfaces today. The sandboxed and scripted loaders (WASM Component Model, Extism, Rhai, PyO3) author exactly three: **scalar function, aggregate, and procedure**. The remaining nineteen surfaces are deep in-process contracts — `&Expr` trees, async streams, trait objects — that are Rust-only in v1. So "what can a Python plugin do?" has a crisp answer: scalar fns, aggregates, and procedures.
 

@@ -1,6 +1,13 @@
 # Documentation remediation — audit findings and sequenced execution plan
 
-**Status:** Audit complete, evidence-verified · remediation **not started**. · **Date:** 2026-08-06
+> **Status: RESOLVED — historical snapshot as of 2026-08-06.**
+> The findings below describe the tree *at that date*. Remediation is complete; see
+> `documentation_remediation_plan_2026-08-07.md` §6 for the per-workstream landing
+> commits and the four decisions that closed the open questions. The counts, line
+> numbers and severities here are preserved as written and are no longer accurate —
+> `search_procedures.rs` line numbers in particular have drifted by ~40-60.
+
+**Status:** Audit complete, evidence-verified · remediation **complete** (see banner). · **Date:** 2026-08-06
 · **Trigger:** full-surface documentation evaluation, 10 parallel evaluators over ~190 markdown
 files. · **Baseline:** local `main` `d8f6f3abc` (v3.3.0). · **Supersedes:** nothing — additive.
 · **Lineage:** the drift class named in `python_plugin_abi_gaps_2026-07-16.md` (#150) and

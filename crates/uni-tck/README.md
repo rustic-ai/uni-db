@@ -4,7 +4,7 @@ Complete Technology Compatibility Kit (TCK) test harness for validating Uni's op
 
 ## Overview
 
-This crate implements a comprehensive test harness that runs all 1,339 TCK scenarios across 220 feature files to verify Uni's compliance with the openCypher specification.
+This crate implements a comprehensive test harness that runs all 3,926 TCK scenarios across 221 feature files to verify Uni's compliance with the openCypher specification.
 
 ## Structure
 
@@ -95,8 +95,8 @@ cargo test -p uni-tck --test cucumber -- "Return a boolean true"
    - Extensible design
 
 8. **Feature Files**
-   - All 220 TCK M23 feature files copied
-   - 1,339 scenarios available
+   - All 221 TCK M23 feature files copied
+   - 3,926 scenarios available
 
 9. **Test Runner**
    - Cucumber integration
@@ -141,7 +141,7 @@ Scenario: Return a boolean true lower case
 
 ## Success Criteria
 
-- ✅ All 220 feature files load without parse errors
+- ✅ All 221 feature files load without parse errors
 - ✅ Test runner executes scenarios
 - ⏳ Clear pass/fail reporting per scenario
 - ⏳ No crashes (only expected test failures)

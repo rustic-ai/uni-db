@@ -190,7 +190,7 @@ crates/
 ├── uni/            # Main library crate — public API, Session, Transaction, UniBuilder
 ├── uni-common/     # Identity (Vid/Eid/UniId), Schema, DataType, Config, Snapshots, SimpleGraph
 ├── uni-store/      # Lance datasets, CSR adjacency, L0Buffer, Writer, WAL, Indexes
-├── uni-algo/       # 35 graph algorithms, GraphProjection
+├── uni-algo/       # 42 graph algorithms, GraphProjection
 ├── uni-query/      # Query executor, DataFusion integration, pushdown, UDFs
 ├── uni-cypher/     # Cypher parser (pest-based), Locy parser
 ├── uni-crdt/       # 8 CRDT types with merge semantics
@@ -252,7 +252,7 @@ graph TB
 
 | Crate | Purpose |
 |---|---|
-| `lancedb` / `lance` | Columnar storage with versioning, vector indexes, full-text search |
+| `lance` | Columnar storage with versioning, vector indexes, full-text search. Pinned at `7.0.0` in the root `Cargo.toml`. **`lancedb` is not a dependency** — it was dropped; only the `lance` core crate is used |
 | `arrow` / `arrow-array` | In-memory columnar data format (RecordBatch, Array types) |
 | `datafusion` | Query engine — physical planning, expression evaluation, aggregation |
 | `pest` / `pest_derive` | PEG parser generator powering `uni-cypher`'s Cypher and Locy grammars |
@@ -3077,7 +3077,7 @@ EXPLAIN MATCH (n:Person)-[:KNOWS]->(m:Person) RETURN n, m
 
 # Part IX: Graph Algorithms
 
-Uni includes **35 graph algorithms** organized by category, accessible as procedures via `CALL algo.*`.
+Uni includes **42 graph algorithms** organized by category, accessible as procedures via `CALL algo.*`.
 
 ## Algorithm Catalog
 

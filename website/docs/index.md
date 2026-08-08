@@ -26,7 +26,7 @@ The workaround is stitching together four or five systems — a graph database, 
 
 Uni is organized around five cognitive capabilities that intelligent systems need:
 
-1. **Structured Memory** — a typed property graph for entities and relationships (OpenCypher + 36 graph algorithms)
+1. **Structured Memory** — a typed property graph for entities and relationships (OpenCypher + 42 graph algorithms)
 2. **Associative Recall** — hybrid retrieval that fuses semantic and lexical search (8 ANN index algorithms with RaBitQ/SQ/PQ quantization + BM25 full-text + `uni.search` fusion)
 3. **Domain Physics** — declarative rules that encode how a domain actually works (Locy recursive rules with stratified negation)
 4. **Mental Simulation** — hypothetical reasoning that explores consequences before committing (ASSUME … THEN in a rollback boundary)

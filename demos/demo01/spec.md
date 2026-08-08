@@ -189,11 +189,17 @@ The optimizer chooses execution order based on estimated selectivity:
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 
-### Dataset Statistics (Demo Size)
+### Dataset Statistics (Design Target)
+
+!!! warning "Design target, not the shipped dataset"
+    Every count and storage figure below describes the **design target** corpus.
+    The generator that ships with this demo is three orders of magnitude smaller:
+    `generate_data.py` sets `NUM_PAPERS = 5000`. Nothing here was measured — the
+    storage column in particular is an estimate, not an observed footprint.
 
 | Entity | Count | Storage |
 |--------|-------|---------|
-| Papers | 2.3M *(design target; the shipped generator makes 5,000)* | ~4GB (with embeddings) |
+| Papers | 2.3M | ~4GB (with embeddings) |
 | Authors | 1.8M | ~200MB |
 | Institutions | 45K | ~5MB |
 | CITES edges | 28M | ~1.2GB |
@@ -218,7 +224,7 @@ uni import semantic-scholar \
 
 # 2. Verify graph is accessible
 uni info s3://uni-demos/semantic-scholar/
-# Output:
+# Output (design-target corpus; the shipped generator makes 5,000 papers):
 #   Vertices: 4,145,000 (Paper: 2.3M, Author: 1.8M, Institution: 45K)
 #   Edges: 38,500,000 (CITES: 28M, AUTHORED_BY: 8M, AFFILIATED: 2.5M)
 #   Snapshots: 1
@@ -281,7 +287,7 @@ UniGraph: semantic-scholar
 graph.schema()
 ```
 
-**Output:**
+**Output** (against the design-target corpus; the shipped generator makes 5,000 papers):
 ```
 Vertex Labels:
   :Paper (2,300,000 vertices)

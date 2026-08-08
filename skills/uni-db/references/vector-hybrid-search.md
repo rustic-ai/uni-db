@@ -283,8 +283,8 @@ YIELD vid, score, rerank_score, vector_score, fts_score, sparse_score, distance
 | `label` | String | Yes | Node label |
 | `properties` | Map or String | Yes | `{vector, fts, sparse}` map. A bare string = same prop for vector + fts (sparse off) |
 | `query_text` | String | Yes | Text for FTS and auto-embedding |
-| `query_vector` | List or null | No | Pre-computed vector; null = auto-embed `query_text` |
-| `k` | Integer | No | Number of results (default: 10) |
+| `query_vector` | List or null | Yes | Pre-computed vector; `null` = auto-embed `query_text` |
+| `k` | Integer | Yes | Number of results. No default — omitting it is an error |
 | `filter` | String | No | WHERE clause for pre-filtering |
 | `options` | Map | No | Fusion options (see below) |
 

@@ -532,7 +532,7 @@ BM25-based. Scores normalized to 0-1 relative to top match.
 
 <!-- doctest: skip -->
 ```cypher
-CALL uni.search(label, properties, query_text [, query_vector] [, k] [, filter] [, options])
+CALL uni.search(label, properties, query_text, query_vector, k [, filter] [, options])
 YIELD node, score, vector_score, fts_score, vid
 ```
 

@@ -1,6 +1,11 @@
 # Documentation remediation — plan of action
 
-**Status:** proposed, not started · **Date:** 2026-08-07
+> **Status: RESOLVED — historical snapshot as of 2026-08-07.**
+> All five workstreams shipped. §6 below records what landed, the four decisions
+> from §5, and the residuals that a follow-up sweep closed on 2026-08-07. The
+> workstream text is preserved as written; line numbers have drifted.
+
+**Status:** complete (see §6) · **Date:** 2026-08-07
 · **Input:** `documentation_remediation_2026-08-06.md` (audit, evidence-verified)
 · **Baseline:** local `main` `e8c548eaf` (v3.3.0) — one commit ahead of the audit's `d8f6f3abc`.
 
@@ -220,3 +225,74 @@ proceed incrementally after.
    on the answer.
 4. **W2/R4: recover the migration doc from the worktree, or drop the 5 links?** Recovery is
    better if the content is sound — it is currently unread.
+
+---
+
+## 6. Outcome — decisions taken and what landed
+
+Added 2026-08-07, after the fact. §5's gate ("decision recorded in this file before F1 work
+starts") was not honored at the time: all four questions were answered in code and none was
+written down here. Recorded now so the record matches the tree.
+
+### 6.1 The four decisions
+
+| §5 | Decision | Commit |
+|---|---|---|
+| 1. Reference: generate vs pick-one | **Generate** from `__init__.pyi` — 190 classes vs the 76%/87% the hand-written pages reached. The three `docs/complete_*.md` were retired to stubs (6368 → 52 lines) rather than merged, since merging two drifting sources propagates the fiction in each | `0d591ca20` |
+| 2. B1 `threshold`: rename vs normalize | **Normalize**, shipped as breaking (`fix(query)!: make search scores and thresholds monotone in relevance`) with the Python threshold tests updated in `0597a7a0e` | `ed965c716` |
+| 3. R3 `verify_hash_pin`: wire in vs delete | **Wired in** — an artifact hash-pin allowlist enforced at load sites, which also settled D2's prose | `bf4d50bad` |
+| 4. R4 migration doc: recover vs drop links | **Recovered** — `docs/migrations/` is tracked; the 5 wheel-README links resolve | `97d2a0b05` |
+
+### 6.2 Workstreams
+
+W0 harness `7bfff4abb` (grammar) + `0d591ca20` (version/count/symbol gates) · W1 `ed965c716`,
+`bf4d50bad` · W2 `f39ae75c7`, `97d2a0b05`, `f4474c819` · W3 `0d591ca20` · W4 `f39ae75c7`,
+`639eeab24`.
+
+### 6.3 Corrections to this document
+
+- **§0's R2 row misattributes the fix.** `autotests = false` is real, but the tck consolidation
+  landed in `639eeab24`, *after* the stated `e8c548eaf` baseline — not in it.
+- **§2/W4's C4 line over-reads its grep.** `grep sqlparser **/Cargo.toml` → 0 is accurate and the
+  "parser built on sqlparser" doc claim is genuinely false, but sqlparser *is* in `Cargo.lock`
+  transitively via DataFusion (~9.4 MiB of the shipped wheel). The correct phrasing is "the Cypher
+  parser is pest; sqlparser enters only through DataFusion."
+
+### 6.4 Residuals closed 2026-08-07
+
+A verification sweep against `main` found six items the workstreams left open:
+
+- **B5** — `k` documented with a default it does not have. `uni.search` reads it via
+  `require_int_arg(args, 4, …)`; omitting it is a hard error. Fixed in `hybrid-search.md`, the
+  skill's `vector-hybrid-search.md` and `cypher.md`, including the signature lines that bracketed
+  `k` as optional. The RRF `k` (genuinely `default 60`) was left alone.
+- **S6** — the count gate was surface-only. Generalized to seven families with path scoping, since
+  "N scenarios" means different totals for the openCypher and Locy suites. This surfaced **more
+  drift than the audit found**: `uni-tck/README.md` contradicted itself (220 vs 221 files; 1,339 vs
+  3,926 scenarios, both in the same file); `complete_locy.md` claimed 37/273 for a Locy suite that
+  is 70/519; the Black Book, the landing page and the pitch claimed 35, 36 and 36 graph algorithms,
+  none of which was 42. A new `builtin_algorithm_count_is_pinned` test pins the algorithm count,
+  because no source assertion existed to read.
+- **S5** — `demos/demo01/spec.md` retitled to "Design Target" with one admonition covering the
+  table, plus notes on the two transcript blocks. `internals/benchmarks.md` keeps its provenance
+  disclosure; regenerating the numbers is filed as follow-up, not done here.
+- **S8** — the Black Book's dependency table listed `lancedb`, which is not a dependency. The
+  other `LanceDbStore` hits in that file are a real type and were left alone.
+- **D1 remainder** — not a defect: `plugins/concepts.md` already lists both live surfaces in its
+  table. Two other defects in that section were fixed instead — a duplicated clause, and an
+  Algorithm built-ins count of "label propagation + 36 via adapter".
+
+**Guardrail note.** The generalized gate was verified by falsification, not by observing it pass:
+reverting one corrected number makes it exit 1 naming the file and line. An earlier version of the
+algorithm-count test passed vacuously with zero, because `BuiltinPlugin::register` deliberately
+does not register `uni.algo.*` — the host does, under the `uni` plugin id. A gate only ever seen
+green has not been tested.
+
+**Scenario counts are computed, not read from the compliance reports.** The first version of the
+gate took its TCK totals from `compliance_reports/*/last_run_report.md`. Running the TCK lanes
+falsified that: the Locy harness runs **519** scenarios while its report — generated 2026-06-12 —
+says 501. Anchoring a gate to a hand-regenerated artifact would have "corrected" the docs *to a
+stale number*, which is the same drift class this whole remediation exists to close. The gate now
+expands the `.feature` files directly (a `Scenario:` is one; a `Scenario Outline:` is one per
+Examples data row), verified exact against both live harnesses: openCypher 3926, Locy 519. The
+openCypher report happened to be current, so checking only that suite would have hidden the flaw.
