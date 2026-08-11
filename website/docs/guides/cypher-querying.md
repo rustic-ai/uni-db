@@ -135,6 +135,77 @@ WHERE a.title = 'Attention Is All You Need'
 RETURN path, length(path) AS hops
 ```
 
+The relationship variable of a variable-length pattern holds a **list** of
+relationships, so list functions and comprehensions apply to it:
+
+<!-- doctest: skip -->
+```cypher
+MATCH (a:Paper)-[r:CITES*1..3]->(b:Paper)
+RETURN size(r) AS hops, [e IN r | e.year] AS years
+```
+
+The same is true of `shortestPath` and `allShortestPaths`:
+
+<!-- doctest: skip -->
+```cypher
+MATCH p = shortestPath((a:Author {name: 'Alice'})-[r:COAUTHOR*]-(b:Author {name: 'Bob'}))
+RETURN size(r) AS hops, [e IN r | e.paper] AS papers
+```
+
+### Quantified Path Patterns
+
+A quantified path pattern repeats a whole sub-pattern, rather than a single
+relationship:
+
+<!-- doctest: skip -->
+```cypher
+// Alice, then two rounds of "co-authored a paper that cites another paper"
+MATCH (a:Author {name: 'Alice'})((x)-[:AUTHORED]->(p:Paper)-[:CITES]->(y)){2}(b)
+RETURN b.title
+```
+
+#### Endpoints
+
+The pattern's start and end are the **outer** nodes on either side — `(a)` and
+`(b)` above. Variables declared *inside* the quantifier are group variables (see
+below), not the pattern's endpoints, so name the endpoints explicitly when you
+need them.
+
+#### Group variables
+
+Every variable declared inside a quantified pattern binds a **list** with one
+element per iteration of the quantifier — a *group variable*, following GQL:
+
+<!-- doctest: skip -->
+```cypher
+MATCH (a:Author {name: 'Alice'})((x)-[r:AUTHORED]->(p:Paper)){3}(b)
+RETURN [n IN p | n.title] AS papers, size(r) AS steps
+```
+
+Because consecutive iterations share a boundary node, the sub-pattern's first
+and last node variables overlap by one element: in
+`((x)-[:E]->(y)-[:L]->(z)){2}`, `z[0]` and `x[1]` are the same node.
+
+A group variable is a list, not a node or relationship. Use it as one:
+
+| Use | Example |
+|---|---|
+| Whole list | `RETURN p` |
+| Length | `size(p)` |
+| Per-element property | `[n IN p \| n.title]` |
+| Indexing | `p[0]`, `head(p)`, `last(p)` |
+| Predicate | `WHERE all(n IN p WHERE n.year > 2020)` |
+| Flatten to rows | `UNWIND p AS n RETURN n.title` |
+
+Writing `p.title` is an error, because `p` holds many nodes. The message names
+the replacement: `[n IN p | n.title]` for all of them, or `last(p).title` for
+the final one.
+
+**Restrictions.** A quantified pattern is compiled against declared
+relationship types, so an undeclared type is refused — either declare it, or
+write the sub-pattern without inner variable names so it is planned as an
+ordinary variable-length pattern. Nested quantifiers are not supported.
+
 ---
 
 ## WHERE Clause
@@ -1925,6 +1996,8 @@ For detailed CRDT semantics and merge behavior, see [CRDT Types](../concepts/crd
 | Multi-label Nodes | Stable |
 | Regular Expression Matching (`=~`) | Stable |
 | shortestPath with Hop Constraints (`*1..5`) | Stable |
+| Quantified Path Patterns (`(( … )){n,m}`) | Stable |
+| Group Variables in Quantified Patterns | Stable |
 | BTree Index STARTS WITH Optimization | Stable |
 
 ---

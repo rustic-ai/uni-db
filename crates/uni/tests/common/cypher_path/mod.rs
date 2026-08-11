@@ -7,6 +7,7 @@ pub mod path_functions_test;
 pub mod path_variable_test;
 pub mod pattern_comprehension_test;
 pub mod pattern_two_nodes_debug;
+pub mod qpp_group_variables;
 pub mod quantified_pattern_integration;
 pub mod quantifier_e2e_test;
 pub mod vlp_debug_simple;

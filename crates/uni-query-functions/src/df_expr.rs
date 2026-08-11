@@ -228,6 +228,9 @@ pub enum VariableKind {
     Edge,
     /// Edge list variable (r in `[r*]`) - `List<Edge>`
     EdgeList,
+    /// Node list variable — a GQL group variable bound by a quantified path
+    /// pattern - `List<Node>`. Resolved as a bare column like [`Self::EdgeList`].
+    NodeList,
     /// Path variable - kept as-is (struct with nodes/relationships)
     Path,
 }
@@ -678,7 +681,7 @@ fn translate_null_check(
         let col_name = match kind {
             VariableKind::Node => format!("{}.{}", var, COL_VID),
             VariableKind::Edge => format!("{}.{}", var, COL_EID),
-            VariableKind::Path | VariableKind::EdgeList => var.clone(),
+            VariableKind::Path | VariableKind::EdgeList | VariableKind::NodeList => var.clone(),
         };
         let col_expr = DfExpr::Column(Column::from_name(col_name));
         return Ok(if is_null {

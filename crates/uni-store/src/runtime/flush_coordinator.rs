@@ -269,6 +269,20 @@ impl FlushCoordinator {
         }
     }
 
+    /// Close the submit channel so the finalizer task exits, without awaiting.
+    ///
+    /// Step 2 of [`Self::shutdown`], usable from a synchronous context such as
+    /// `Drop`. The finalizer blocks on `submit_rx.recv()` and so never observes
+    /// the shutdown broadcast — closing the channel is the only thing that ends
+    /// it. A teardown path that signals and then waits for the task to exit
+    /// waits forever (or to its deadline) without this.
+    ///
+    /// Idempotent: the sender is taken out of the `Option`, so a later
+    /// [`Self::shutdown`] is unaffected.
+    pub fn close_submit_channel(&self) {
+        drop(self.submit_tx.lock().take());
+    }
+
     /// Hand off the finalizer task's JoinHandle for tracking by
     /// `ShutdownHandle`. Returns `None` if already taken.
     pub fn take_finalizer_handle(&self) -> Option<tokio::task::JoinHandle<()>> {

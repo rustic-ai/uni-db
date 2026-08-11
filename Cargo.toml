@@ -77,7 +77,7 @@ default-members = [
 resolver = "2"
 
 [workspace.package]
-version = "3.3.0"
+version = "3.4.0"
 edition = "2024"
 # edition 2024 requires 1.85+; pin it so a stale toolchain fails fast and
 # cargo can report an actionable error instead of a parse failure.
@@ -91,32 +91,32 @@ keywords = ["graph", "database", "cypher", "vector", "embedded"]
 categories = ["database", "data-structures"]
 
 [workspace.dependencies]
-uni-common = { path = "crates/uni-common", version = "3.3.0" }
-uni-store = { path = "crates/uni-store", version = "3.3.0" }
-uni-algo = { path = "crates/uni-algo", version = "3.3.0" }
-uni-query = { path = "crates/uni-query", version = "3.3.0" }
-uni-query-functions = { path = "crates/uni-query-functions", version = "3.3.0" }
-uni-cli = { path = "crates/uni-cli", version = "3.3.0" }
-uni-db = { path = "crates/uni", version = "3.3.0", default-features = false }
-uni-crdt = { path = "crates/uni-crdt", version = "3.3.0" }
-uni-cypher = { path = "crates/uni-cypher", version = "3.3.0" }
-uni-locy = { path = "crates/uni-locy", version = "3.3.0" }
-uni-btic = { path = "crates/uni-btic", version = "3.3.0" }
-uni-sparse-vector = { path = "crates/uni-sparse-vector", version = "3.3.0" }
-uni-plugin = { path = "crates/uni-plugin", version = "3.3.0" }
-uni-plugin-builtin = { path = "crates/uni-plugin-builtin", version = "3.3.0" }
-uni-plugin-apoc-core = { path = "crates/uni-plugin-apoc-core", version = "3.3.0" }
-uni-plugin-wasm = { path = "crates/uni-plugin-wasm", version = "3.3.0" }
-uni-plugin-wasm-rt = { path = "crates/uni-plugin-wasm-rt", version = "3.3.0" }
-uni-plugin-extism = { path = "crates/uni-plugin-extism", version = "3.3.0" }
-uni-plugin-rhai = { path = "crates/uni-plugin-rhai", version = "3.3.0" }
-uni-plugin-pyo3 = { path = "crates/uni-plugin-pyo3", version = "3.3.0" }
-uni-plugin-custom = { path = "crates/uni-plugin-custom", version = "3.3.0" }
-uni-plugin-conformance = { path = "crates/uni-plugin-conformance", version = "3.3.0" }
-uni-plugin-host = { path = "crates/uni-plugin-host", version = "3.3.0" }
-uni-sidecar = { path = "crates/uni-sidecar", version = "3.3.0" }
-uni-bulk = { path = "crates/uni-bulk", version = "3.3.0" }
-uni-fork = { path = "crates/uni-fork", version = "3.3.0" }
+uni-common = { path = "crates/uni-common", version = "3.4.0" }
+uni-store = { path = "crates/uni-store", version = "3.4.0" }
+uni-algo = { path = "crates/uni-algo", version = "3.4.0" }
+uni-query = { path = "crates/uni-query", version = "3.4.0" }
+uni-query-functions = { path = "crates/uni-query-functions", version = "3.4.0" }
+uni-cli = { path = "crates/uni-cli", version = "3.4.0" }
+uni-db = { path = "crates/uni", version = "3.4.0", default-features = false }
+uni-crdt = { path = "crates/uni-crdt", version = "3.4.0" }
+uni-cypher = { path = "crates/uni-cypher", version = "3.4.0" }
+uni-locy = { path = "crates/uni-locy", version = "3.4.0" }
+uni-btic = { path = "crates/uni-btic", version = "3.4.0" }
+uni-sparse-vector = { path = "crates/uni-sparse-vector", version = "3.4.0" }
+uni-plugin = { path = "crates/uni-plugin", version = "3.4.0" }
+uni-plugin-builtin = { path = "crates/uni-plugin-builtin", version = "3.4.0" }
+uni-plugin-apoc-core = { path = "crates/uni-plugin-apoc-core", version = "3.4.0" }
+uni-plugin-wasm = { path = "crates/uni-plugin-wasm", version = "3.4.0" }
+uni-plugin-wasm-rt = { path = "crates/uni-plugin-wasm-rt", version = "3.4.0" }
+uni-plugin-extism = { path = "crates/uni-plugin-extism", version = "3.4.0" }
+uni-plugin-rhai = { path = "crates/uni-plugin-rhai", version = "3.4.0" }
+uni-plugin-pyo3 = { path = "crates/uni-plugin-pyo3", version = "3.4.0" }
+uni-plugin-custom = { path = "crates/uni-plugin-custom", version = "3.4.0" }
+uni-plugin-conformance = { path = "crates/uni-plugin-conformance", version = "3.4.0" }
+uni-plugin-host = { path = "crates/uni-plugin-host", version = "3.4.0" }
+uni-sidecar = { path = "crates/uni-sidecar", version = "3.4.0" }
+uni-bulk = { path = "crates/uni-bulk", version = "3.4.0" }
+uni-fork = { path = "crates/uni-fork", version = "3.4.0" }
 
 # LOCK PIN (transitive, not listed here): `time` is held at =0.3.47 in
 # Cargo.lock — time 0.3.48 adds `impl From<X> for <X as ModifierValue>::Type`

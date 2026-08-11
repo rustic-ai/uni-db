@@ -75,6 +75,19 @@ pub enum VariableType {
     Edge,
     /// Path variable (from `MATCH p = (a)-[*]->(b)`, etc.)
     Path,
+    /// A list of nodes: a GQL group variable bound by a quantified path
+    /// pattern, or the result of `nodes(p)`.
+    ///
+    /// Deliberately a distinct variant rather than a `List(Box<VariableType>)`
+    /// payload: `VariableType` is `Copy` and is compared by equality at ~90
+    /// sites, so every one of those comparisons excludes a list *by
+    /// construction* — using a group variable where a node is expected fails
+    /// without a bespoke check at each site.
+    NodeList,
+    /// A list of relationships: a group variable bound by a quantified path
+    /// pattern, a variable-length pattern's step variable, `shortestPath`'s
+    /// bound relationship, or the result of `relationships(p)`.
+    EdgeList,
     /// Scalar variable (from WITH expr AS x, UNWIND list AS item, etc.)
     /// Could hold a map or dynamic value — property access is allowed.
     Scalar,
@@ -105,19 +118,11 @@ pub struct VariableInfo {
     pub name: String,
     /// Semantic type of the variable.
     pub var_type: VariableType,
-    /// True if this is a variable-length path (VLP) step variable.
-    ///
-    /// VLP step variables are typed as Edge but semantically hold edge lists.
-    pub is_vlp: bool,
 }
 
 impl VariableInfo {
     pub fn new(name: String, var_type: VariableType) -> Self {
-        Self {
-            name,
-            var_type,
-            is_vlp: false,
-        }
+        Self { name, var_type }
     }
 }
 
@@ -190,7 +195,32 @@ fn add_var_to_scope(
     Ok(())
 }
 
+/// The element noun for a list-typed binding, or `None` if not a list.
+///
+/// Used by diagnostics to name what the variable actually holds.
+fn list_element_noun(t: VariableType) -> Option<&'static str> {
+    match t {
+        VariableType::NodeList => Some("node"),
+        VariableType::EdgeList => Some("relationship"),
+        _ => None,
+    }
+}
+
+/// The binding type for a relationship variable: a single edge for a
+/// fixed-length pattern, a list of edges for a variable-length one.
+fn edge_binding_type(is_variable_length: bool) -> VariableType {
+    if is_variable_length {
+        VariableType::EdgeList
+    } else {
+        VariableType::Edge
+    }
+}
+
 /// Convert VariableInfo vec to String vec for backward compatibility
+///
+/// Lossy: the name survives, the type does not. Callers that round-trip scope
+/// through this re-import variables as `Imported`, which is compatible with
+/// everything — including, deliberately, the list types.
 fn vars_to_strings(vars: &[VariableInfo]) -> Vec<String> {
     vars.iter().map(|v| v.name.clone()).collect()
 }
@@ -211,6 +241,10 @@ fn infer_with_output_type(expr: &Expr, vars_in_scope: &[VariableInfo]) -> Variab
             let lower = name.to_lowercase();
             if lower == "coalesce" {
                 infer_coalesce_type(args, vars_in_scope)
+            } else if lower == "nodes" {
+                VariableType::NodeList
+            } else if lower == "relationships" {
+                VariableType::EdgeList
             } else if lower == "collect" && !args.is_empty() {
                 let collected = infer_with_output_type(&args[0], vars_in_scope);
                 if matches!(
@@ -243,7 +277,11 @@ fn infer_coalesce_type(args: &[Expr], vars_in_scope: &[VariableInfo]) -> Variabl
     for arg in args {
         let t = infer_with_output_type(arg, vars_in_scope);
         match t {
-            VariableType::Node | VariableType::Edge | VariableType::Path => {
+            VariableType::Node
+            | VariableType::Edge
+            | VariableType::Path
+            | VariableType::NodeList
+            | VariableType::EdgeList => {
                 if let Some(existing) = resolved {
                     if existing != t {
                         return VariableType::Scalar;
@@ -265,10 +303,23 @@ fn infer_coalesce_type(args: &[Expr], vars_in_scope: &[VariableInfo]) -> Variabl
     }
 }
 
+/// The element type produced by unwrapping one level of list-ness.
+///
+/// `UNWIND` over a list of graph elements yields the elements themselves — this
+/// is the inverse of the list binding and the supported way to consume a group
+/// variable as individual nodes or relationships.
+fn unwrap_list_type(t: VariableType) -> VariableType {
+    match t {
+        VariableType::NodeList => VariableType::Node,
+        VariableType::EdgeList => VariableType::Edge,
+        other => other,
+    }
+}
+
 fn infer_unwind_output_type(expr: &Expr, vars_in_scope: &[VariableInfo]) -> VariableType {
     match expr {
         Expr::Variable(v) => find_var_in_scope(vars_in_scope, v)
-            .map(|info| info.var_type)
+            .map(|info| unwrap_list_type(info.var_type))
             .unwrap_or(VariableType::Scalar),
         Expr::FunctionCall { name, args, .. }
             if name.eq_ignore_ascii_case("collect") && !args.is_empty() =>
@@ -573,14 +624,14 @@ fn validate_function_call(name: &str, args: &[Expr], vars_in_scope: &[VariableIn
         ));
     }
 
-    // length()/size() do NOT accept Node or single-Edge arguments.
-    // VLP step variables (e.g. `r` in `-[r*1..2]->`) are typed as Edge
-    // but are actually edge lists — size()/length() is valid on those.
+    // length()/size() do NOT accept a single Node or Edge. They are valid on
+    // the list types — a VLP/shortestPath step variable, a group variable, or
+    // a `nodes(p)`/`relationships(p)` result — which are separate variants and
+    // so are not caught here.
     if (name_lower == "length" || name_lower == "size")
         && let Some(Expr::Variable(var_name)) = args.first()
         && let Some(info) = find_var_in_scope(vars_in_scope, var_name)
-        && (info.var_type == VariableType::Node
-            || (info.var_type == VariableType::Edge && !info.is_vlp))
+        && matches!(info.var_type, VariableType::Node | VariableType::Edge)
     {
         return Err(anyhow!(
             "SyntaxError: InvalidArgumentType - {}() requires a string, list, or path argument",
@@ -1406,6 +1457,26 @@ fn validate_expression(expr: &Expr, vars_in_scope: &[VariableInfo]) -> Result<()
             if let Expr::Variable(var_name) = base.as_ref()
                 && let Some(var_info) = find_var_in_scope(vars_in_scope, var_name)
             {
+                // A list of graph elements has no properties of its own. Say
+                // so here rather than letting it reach the `index` UDF, which
+                // reports "list index must be an integer" and points at the
+                // wrong thing.
+                if let Some(kind) = list_element_noun(var_info.var_type) {
+                    return Err(anyhow!(
+                        "TypeError: InvalidArgumentType - Type mismatch: expected Node or \
+                         Relationship but was a list of {kind}s for property access '{}.{}'; \
+                         '{}' is a group variable bound by a quantified path pattern — use \
+                         [item IN {} | item.{}] to read the property of each element, or \
+                         last({}).{} for the final one",
+                        var_name,
+                        prop,
+                        var_name,
+                        var_name,
+                        prop,
+                        var_name,
+                        prop
+                    ));
+                }
                 // Paths don't have properties
                 if var_info.var_type == VariableType::Path {
                     return Err(anyhow!(
@@ -1501,6 +1572,19 @@ pub struct QppStepInfo {
     pub direction: Direction,
     /// Optional label constraint on the target node.
     pub target_label: Option<String>,
+    /// Predicate from an inline property map on this hop's relationship.
+    /// Per-hop, because a quantified pattern can constrain each hop
+    /// differently — one predicate for the whole traversal is not enough.
+    pub edge_filter_expr: Option<Expr>,
+    /// Predicate from an inline property map on this hop's *target node*.
+    /// Read alongside `target_label`, which only ever carried the label.
+    pub target_property_expr: Option<Expr>,
+    /// This hop's relationship variable, when the user named it. Bound as a
+    /// GQL group variable — a list with one relationship per iteration.
+    pub edge_variable: Option<String>,
+    /// This hop's target node variable, when the user named it. Bound as a
+    /// group variable — a list with one node per iteration.
+    pub target_variable: Option<String>,
 }
 
 /// Phase 5a-impl: per-type fusion strategy for `LogicalPlan::FusedIndexScan`.
@@ -1662,6 +1746,10 @@ pub enum LogicalPlan {
         /// `None` for simple VLP patterns; `Some` for QPP with per-step edge types/constraints.
         /// When present, `min_hops`/`max_hops` are derived from iterations × steps.len().
         qpp_steps: Option<Vec<QppStepInfo>>,
+        /// The quantified pattern's inner *source* node variable, when named.
+        /// It has no owning step — it is node position 0 of each iteration —
+        /// so it cannot live on `qpp_steps`. Bound as a group variable.
+        qpp_inner_source: Option<String>,
     },
     /// Traverse main edges table filtering by type name(s) (`MATCH (a)-[:Unknown]->(b)`).
     /// Used for edge types not defined in schema (schemaless support).
@@ -1809,10 +1897,20 @@ pub enum LogicalPlan {
         target_variable: String,
         target_label_id: u16,
         path_variable: String,
+        /// Relationship variable bound by the pattern, e.g. `r` in
+        /// `shortestPath((a)-[r:E*]->(b))`. Holds the path's relationships as a
+        /// list, exactly as an ordinary variable-length pattern's step variable
+        /// does. `None` when the relationship is anonymous.
+        step_variable: Option<String>,
         /// Minimum number of hops (edges) in the path. Default is 1.
         min_hops: u32,
         /// Maximum number of hops (edges) in the path. Default is u32::MAX (unlimited).
         max_hops: u32,
+        /// Predicate from an inline property map on the relationship, e.g.
+        /// `-[:E {tag: 'keep'}]->`. Evaluated *during* expansion, not after:
+        /// the shortest path among permitted edges is not the unconstrained
+        /// shortest path filtered. `None` when the pattern carries no map.
+        edge_filter_expr: Option<Expr>,
     },
     /// allShortestPaths() - Returns all paths with minimum length
     AllShortestPaths {
@@ -1823,10 +1921,20 @@ pub enum LogicalPlan {
         target_variable: String,
         target_label_id: u16,
         path_variable: String,
+        /// Relationship variable bound by the pattern, e.g. `r` in
+        /// `shortestPath((a)-[r:E*]->(b))`. Holds the path's relationships as a
+        /// list, exactly as an ordinary variable-length pattern's step variable
+        /// does. `None` when the relationship is anonymous.
+        step_variable: Option<String>,
         /// Minimum number of hops (edges) in the path. Default is 1.
         min_hops: u32,
         /// Maximum number of hops (edges) in the path. Default is u32::MAX (unlimited).
         max_hops: u32,
+        /// Predicate from an inline property map on the relationship, e.g.
+        /// `-[:E {tag: 'keep'}]->`. Evaluated *during* expansion, not after:
+        /// the shortest path among permitted edges is not the unconstrained
+        /// shortest path filtered. `None` when the pattern carries no map.
+        edge_filter_expr: Option<Expr>,
     },
     QuantifiedPattern {
         input: Box<LogicalPlan>,
@@ -2685,7 +2793,7 @@ impl QueryPlanner {
         modes.len() > 1
     }
 
-    fn next_anon_var(&self) -> String {
+    pub(crate) fn next_anon_var(&self) -> String {
         let id = self
             .anon_counter
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -4191,6 +4299,22 @@ impl QueryPlanner {
                 ));
             }
         };
+        // An inline property map on the relationship is a filter, and it must
+        // gate expansion rather than the result set: the shortest path among
+        // permitted edges is not the unconstrained shortest path filtered.
+        // `properties_to_expr` only uses the variable name as the expression's
+        // prefix, and the predicate is consumed by a storage scan rather than a
+        // projected column, so the `"__anon_edge"` sentinel used by the
+        // variable-length path (see `plan_traverse_with_source`) is sufficient
+        // when the relationship binds no variable of its own. Issue #166.
+        let step_var = rel.variable.clone().filter(|v| !v.is_empty());
+        let edge_filter_expr = {
+            let edge_var = step_var
+                .clone()
+                .unwrap_or_else(|| "__anon_edge".to_string());
+            self.properties_to_expr(&edge_var, &rel.properties)
+        };
+
         let target_node = match &elements[2] {
             PatternElement::Node(n) => n,
             _ => return Err(anyhow!("ShortestPath must end with a node")),
@@ -4289,6 +4413,17 @@ impl QueryPlanner {
         // Extract hop constraints from relationship pattern
         let min_hops = rel.range.as_ref().and_then(|r| r.min).unwrap_or(1);
         let max_hops = rel.range.as_ref().and_then(|r| r.max).unwrap_or(u32::MAX);
+        // A lower bound above 1 would require the search to keep going past the
+        // first sighting of the target, and to relax the visited-set semantics
+        // that make the walk terminate. Refuse it rather than return a path
+        // that quietly violates the bound the user wrote.
+        if min_hops > 1 {
+            return Err(anyhow!(
+                "shortestPath does not support a minimum hop count above 1 \
+                 (got *{min_hops}..); it always returns the shortest match, so \
+                 a higher lower bound would need a different search"
+            ));
+        }
 
         let sp_plan = match mode {
             ShortestPathMode::Shortest => LogicalPlan::ShortestPath {
@@ -4299,8 +4434,10 @@ impl QueryPlanner {
                 target_variable: target_var.clone(),
                 target_label_id,
                 path_variable: path_var.clone(),
+                step_variable: step_var.clone(),
                 min_hops,
                 max_hops,
+                edge_filter_expr: edge_filter_expr.clone(),
             },
             ShortestPathMode::AllShortest => LogicalPlan::AllShortestPaths {
                 input: Box::new(plan),
@@ -4310,8 +4447,10 @@ impl QueryPlanner {
                 target_variable: target_var.clone(),
                 target_label_id,
                 path_variable: path_var.clone(),
+                step_variable: step_var.clone(),
                 min_hops,
                 max_hops,
+                edge_filter_expr: edge_filter_expr.clone(),
             },
         };
 
@@ -4322,6 +4461,10 @@ impl QueryPlanner {
             add_var_to_scope(vars_in_scope, &target_var, VariableType::Node)?;
         }
         add_var_to_scope(vars_in_scope, &path_var, VariableType::Path)?;
+        if let Some(sv) = &step_var {
+            // Variable-length by construction, so always a list.
+            add_var_to_scope(vars_in_scope, sv, VariableType::EdgeList)?;
+        }
 
         Ok(sp_plan)
     }
@@ -4695,13 +4838,39 @@ impl QueryPlanner {
                     } else {
                         None
                     };
-                    // Use the outer target for variable binding and filters; inner target
-                    // labels are used for state constraints within the NFA.
+                    // Use the outer target for filters and labels; the inner
+                    // target's label is also used for NFA state constraints.
                     let target_node = outer_target_node.unwrap_or(inner_target_node);
+
+                    // GQL grouping follows *quantification*, not parentheses: a
+                    // parenthesized pattern with no quantifier binds ordinary
+                    // singletons, exactly as it does today.
+                    let is_quantified = range.is_some();
+
+                    // The inner variables of a quantified pattern are group
+                    // variables, so they never name an endpoint. When no outer
+                    // node is adjacent, the endpoint gets an anonymous column —
+                    // the inner node's labels and property map still constrain
+                    // it, only its *name* stops leaking out. Issue: GQL says
+                    // `((a)-[:E]->(b)){2} RETURN a.id` is a type error, not the
+                    // start node.
+                    let binds_group_vars = is_quantified;
 
                     // For simple 3-element single-hop QPP without intermediate label constraints,
                     // fall back to existing VLP behavior (copy range to relationship).
+                    // Delegating to the ordinary VLP path binds the inner node
+                    // and relationship as *singletons*, so it is only valid
+                    // when nothing inside the pattern is named — otherwise a
+                    // one-hop quantified pattern would silently disagree with
+                    // a two-hop one about what its inner variables mean.
+                    let inner_is_anonymous = !binds_group_vars
+                        || (source_node.variable.as_ref().is_none_or(|v| v.is_empty())
+                            && qpp_rels.iter().all(|(rel, node)| {
+                                rel.variable.as_ref().is_none_or(|v| v.is_empty())
+                                    && node.variable.as_ref().is_none_or(|v| v.is_empty())
+                            }));
                     let use_simple_vlp = qpp_rels.len() == 1
+                        && inner_is_anonymous
                         && inner_target_node
                             .labels
                             .first()
@@ -4729,7 +4898,7 @@ impl QueryPlanner {
                         let sv = source_node
                             .variable
                             .clone()
-                            .filter(|v| !v.is_empty())
+                            .filter(|v| !v.is_empty() && !binds_group_vars)
                             .unwrap_or_else(|| self.next_anon_var());
 
                         if is_var_in_scope(vars_in_scope, &sv) {
@@ -4797,6 +4966,27 @@ impl QueryPlanner {
                                         step_edge_type_ids.push(edge_meta.id);
                                     }
                                 }
+                                // A quantified pattern is planned against edge
+                                // type *ids*; there is no schemaless main-table
+                                // equivalent of the QPP operator. Leaving the
+                                // list empty would make the traversal match
+                                // nothing — a planner limitation reported as an
+                                // empty result, which is exactly the silent
+                                // failure worth refusing instead.
+                                if step_edge_type_ids.is_empty() {
+                                    return Err(anyhow!(
+                                        "Quantified path patterns require schema-declared \
+                                         relationship types, but {} {} not declared. Declare the \
+                                         type, or write the sub-pattern without inner variable \
+                                         names so it can be planned as a variable-length pattern.",
+                                        rel.types
+                                            .iter()
+                                            .map(|t| format!("'{t}'"))
+                                            .collect::<Vec<_>>()
+                                            .join(", "),
+                                        if rel.types.len() == 1 { "is" } else { "are" }
+                                    ));
+                                }
                             }
                             all_edge_type_ids.extend_from_slice(&step_edge_type_ids);
 
@@ -4804,16 +4994,80 @@ impl QueryPlanner {
                                 self.schema.get_label_case_insensitive(l).map(|_| l.clone())
                             });
 
+                            // Both maps are filters and both were dropped: the
+                            // relationship's was refused outright, the target
+                            // node's was silently ignored because only
+                            // `labels.first()` was ever read. Issue #166 family.
+                            let edge_filter_expr = {
+                                let edge_var = rel
+                                    .variable
+                                    .clone()
+                                    .unwrap_or_else(|| "__anon_edge".to_string());
+                                self.properties_to_expr(&edge_var, &rel.properties)
+                            };
+                            let target_property_expr = {
+                                let node_var = node
+                                    .variable
+                                    .clone()
+                                    .filter(|v| !v.is_empty())
+                                    .unwrap_or_else(|| "__anon_node".to_string());
+                                self.properties_to_expr(&node_var, &node.properties)
+                            };
+
                             qpp_step_infos.push(QppStepInfo {
                                 edge_type_ids: step_edge_type_ids,
                                 direction: rel.direction.clone(),
                                 target_label,
+                                edge_filter_expr,
+                                target_property_expr,
+                                edge_variable: rel.variable.clone().filter(|v| !v.is_empty()),
+                                target_variable: node.variable.clone().filter(|v| !v.is_empty()),
                             });
                         }
 
                         // Deduplicate edge type IDs for adjacency warming
                         all_edge_type_ids.sort_unstable();
                         all_edge_type_ids.dedup();
+
+                        let inner_source_var = binds_group_vars
+                            .then(|| source_node.variable.clone())
+                            .flatten()
+                            .filter(|v| !v.is_empty());
+                        let group_bindings = if binds_group_vars {
+                            let step_names: Vec<(Option<String>, Option<String>)> = qpp_step_infos
+                                .iter()
+                                .map(|s| (s.edge_variable.clone(), s.target_variable.clone()))
+                                .collect();
+                            crate::query::df_graph::nfa::qpp_group_bindings(
+                                inner_source_var.as_deref(),
+                                &step_names,
+                            )
+                        } else {
+                            Vec::new()
+                        };
+
+                        // Two positions sharing a name would need two columns
+                        // with one name, which is unrepresentable — and under
+                        // GQL they are distinct group variables anyway.
+                        let mut seen_group_names: HashSet<&str> = HashSet::new();
+                        for b in &group_bindings {
+                            if !seen_group_names.insert(b.name.as_str()) {
+                                return Err(anyhow!(
+                                    "SyntaxError: VariableTypeConflict - Variable '{}' is bound at \
+                                     more than one position inside the same quantified pattern; \
+                                     each position is a separate group variable and needs its own name",
+                                    b.name
+                                ));
+                            }
+                            if is_var_in_scope(vars_in_scope, &b.name) {
+                                return Err(anyhow!(
+                                    "SyntaxError: VariableAlreadyBound - Variable '{}' is already \
+                                     bound outside the quantified pattern and cannot be re-bound \
+                                     as a group variable inside it",
+                                    b.name
+                                ));
+                            }
+                        }
 
                         // Compute iteration bounds from range
                         let hops_per_iter = qpp_step_infos.len();
@@ -4831,11 +5085,19 @@ impl QueryPlanner {
                         let min_hops = min_iter * hops_per_iter;
                         let max_hops = max_iter * hops_per_iter;
 
-                        // Target variable from the last node in the QPP sub-pattern
-                        let target_variable = target_node
-                            .variable
-                            .clone()
+                        // The endpoint's name comes from the adjacent *outer*
+                        // node. Falling back to the inner node's name is only
+                        // correct for an unquantified pattern; under a
+                        // quantifier that name belongs to a group variable.
+                        let target_variable = outer_target_node
+                            .and_then(|n| n.variable.clone())
                             .filter(|v| !v.is_empty())
+                            .or_else(|| {
+                                (!binds_group_vars)
+                                    .then(|| inner_target_node.variable.clone())
+                                    .flatten()
+                                    .filter(|v| !v.is_empty())
+                            })
                             .unwrap_or_else(|| self.next_anon_var());
 
                         let target_is_bound = is_var_in_scope(vars_in_scope, &target_variable);
@@ -4890,6 +5152,7 @@ impl QueryPlanner {
                             edge_filter_expr: None,
                             path_mode: crate::query::df_graph::nfa::PathMode::Trail,
                             qpp_steps: Some(qpp_step_infos),
+                            qpp_inner_source: inner_source_var.clone(),
                         };
 
                         // Handle bound target: filter rebound results against original variable
@@ -4920,6 +5183,20 @@ impl QueryPlanner {
                         // Add target variable to scope
                         if !target_is_bound {
                             add_var_to_scope(vars_in_scope, &target_variable, VariableType::Node)?;
+                        }
+
+                        // Register the inner variables as GQL group variables:
+                        // each holds one element per iteration of the quantifier.
+                        for b in &group_bindings {
+                            let ty = match b.kind {
+                                crate::query::df_graph::nfa::QppGroupKind::Node => {
+                                    VariableType::NodeList
+                                }
+                                crate::query::df_graph::nfa::QppGroupKind::Edge => {
+                                    VariableType::EdgeList
+                                }
+                            };
+                            add_var_to_scope(vars_in_scope, &b.name, ty)?;
                         }
 
                         // Add path variable to scope
@@ -5144,7 +5421,20 @@ impl QueryPlanner {
             //   Single-hop: step_var holds a single edge object
             //   VLP: step_var holds a list of edge objects
             // - path_var is the named path variable (p in `p = (a)-[r*]->(b)`)
-            let step_var = params.rel.variable.clone();
+            let step_var = params.rel.variable.clone().or_else(|| {
+                // An anonymous relationship carrying an inline property map still
+                // needs a name. `properties_to_expr` builds `var.prop = value`, and
+                // the physical planner materializes edge property columns keyed by
+                // the step variable — so with no name there is nothing to filter on
+                // and nothing to filter with. Nodes already synthesize an anonymous
+                // variable for exactly this reason (see `target_variable` above);
+                // relationships did not, so the map was parsed and then silently
+                // discarded and `-[:E {k: v}]->` matched every E edge. Issue #166.
+                // Variable-length patterns are excluded: they carry the predicate
+                // inline via `edge_filter_expr`, where the name is stripped anyway.
+                (params.rel.properties.is_some() && params.rel.range.is_none())
+                    .then(|| self.next_anon_var())
+            });
             let path_var = params.path_variable.clone();
 
             // Compute scope_match_variables for relationship uniqueness scoping.
@@ -5236,12 +5526,7 @@ impl QueryPlanner {
 
             // Add the bound variables to scope
             if let Some(sv) = &step_var {
-                add_var_to_scope(vars_in_scope, sv, VariableType::Edge)?;
-                if is_variable_length
-                    && let Some(info) = vars_in_scope.iter_mut().find(|v| v.name == *sv)
-                {
-                    info.is_vlp = true;
-                }
+                add_var_to_scope(vars_in_scope, sv, edge_binding_type(is_variable_length))?;
             }
             if let Some(pv) = &path_var
                 && !is_var_in_scope(vars_in_scope, pv)
@@ -5321,7 +5606,20 @@ impl QueryPlanner {
         //   Single-hop: step_var holds a single edge object
         //   VLP: step_var holds a list of edge objects
         // path_var is the named path variable (p in `p = (a)-[r*]->(b)`)
-        let step_var = params.rel.variable.clone();
+        let step_var = params.rel.variable.clone().or_else(|| {
+            // An anonymous relationship carrying an inline property map still
+            // needs a name. `properties_to_expr` builds `var.prop = value`, and
+            // the physical planner materializes edge property columns keyed by
+            // the step variable — so with no name there is nothing to filter on
+            // and nothing to filter with. Nodes already synthesize an anonymous
+            // variable for exactly this reason (see `target_variable` above);
+            // relationships did not, so the map was parsed and then silently
+            // discarded and `-[:E {k: v}]->` matched every E edge. Issue #166.
+            // Variable-length patterns are excluded: they carry the predicate
+            // inline via `edge_filter_expr`, where the name is stripped anyway.
+            (params.rel.properties.is_some() && params.rel.range.is_none())
+                .then(|| self.next_anon_var())
+        });
         let path_var = params.path_variable.clone();
 
         // If we have a bound edge variable from a previous clause, use a temp variable
@@ -5416,6 +5714,7 @@ impl QueryPlanner {
             },
             path_mode: crate::query::df_graph::nfa::PathMode::Trail,
             qpp_steps: None,
+            qpp_inner_source: None,
         };
 
         // Pre-compute optional variables set for filter nodes in this traverse.
@@ -5554,12 +5853,7 @@ impl QueryPlanner {
             && bound_edge_var.is_none()
             && bound_edge_list_var.is_none()
         {
-            add_var_to_scope(vars_in_scope, sv, VariableType::Edge)?;
-            if is_variable_length
-                && let Some(info) = vars_in_scope.iter_mut().find(|v| v.name == *sv)
-            {
-                info.is_vlp = true;
-            }
+            add_var_to_scope(vars_in_scope, sv, edge_binding_type(is_variable_length))?;
         }
         if let Some(pv) = &path_var
             && !is_var_in_scope(vars_in_scope, pv)
@@ -6533,6 +6827,7 @@ impl QueryPlanner {
                 edge_filter_expr,
                 path_mode,
                 qpp_steps,
+                qpp_inner_source,
             } => {
                 let matches_var = step_variable.as_deref() == Some(edge_var);
                 let recursed_input = if matches_var {
@@ -6564,6 +6859,7 @@ impl QueryPlanner {
                     edge_filter_expr,
                     path_mode,
                     qpp_steps,
+                    qpp_inner_source,
                 }
             }
             LogicalPlan::Filter {
@@ -6640,6 +6936,7 @@ impl QueryPlanner {
                 edge_filter_expr,
                 path_mode,
                 qpp_steps,
+                qpp_inner_source,
             } => {
                 if target_variable == variable {
                     // Found the traverse producing this variable
@@ -6671,6 +6968,7 @@ impl QueryPlanner {
                         edge_filter_expr,
                         path_mode,
                         qpp_steps,
+                        qpp_inner_source,
                     }
                 } else {
                     // Recurse into input
@@ -6696,6 +6994,7 @@ impl QueryPlanner {
                         edge_filter_expr,
                         path_mode,
                         qpp_steps,
+                        qpp_inner_source,
                     }
                 }
             }
@@ -7746,17 +8045,19 @@ impl QueryPlanner {
             LogicalPlan::ShortestPath {
                 input,
                 path_variable,
+                step_variable,
                 ..
-            } => {
-                vars.insert(path_variable.clone());
-                Self::collect_plan_variables_impl(input, vars);
             }
-            LogicalPlan::AllShortestPaths {
+            | LogicalPlan::AllShortestPaths {
                 input,
                 path_variable,
+                step_variable,
                 ..
             } => {
                 vars.insert(path_variable.clone());
+                if let Some(sv) = step_variable {
+                    vars.insert(sv.clone());
+                }
                 Self::collect_plan_variables_impl(input, vars);
             }
             LogicalPlan::RecursiveCTE {

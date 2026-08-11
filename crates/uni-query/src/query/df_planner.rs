@@ -43,6 +43,7 @@ use crate::query::df_graph::mutation_delete::new_delete_exec;
 use crate::query::df_graph::mutation_remove::new_remove_exec;
 use crate::query::df_graph::mutation_set::new_set_exec;
 use crate::query::df_graph::recursive_cte::RecursiveCTEExec;
+use crate::query::df_graph::traverse::QppStepFilterSpec;
 use crate::query::df_graph::traverse::{
     GraphVariableLengthTraverseExec, GraphVariableLengthTraverseMainExec,
 };
@@ -955,6 +956,7 @@ impl HybridPhysicalPlanner {
                 edge_filter_expr,
                 path_mode,
                 qpp_steps,
+                qpp_inner_source,
                 ..
             } => self.plan_traverse(
                 input,
@@ -976,6 +978,7 @@ impl HybridPhysicalPlanner {
                 edge_filter_expr.as_ref(),
                 path_mode,
                 qpp_steps.as_deref(),
+                qpp_inner_source.as_deref(),
             ),
 
             LogicalPlan::ShortestPath {
@@ -986,8 +989,10 @@ impl HybridPhysicalPlanner {
                 target_variable,
                 target_label_id: _,
                 path_variable,
-                min_hops: _,
-                max_hops: _,
+                step_variable,
+                min_hops,
+                max_hops,
+                edge_filter_expr,
             } => self.plan_shortest_path(
                 input,
                 edge_type_ids,
@@ -995,7 +1000,11 @@ impl HybridPhysicalPlanner {
                 source_variable,
                 target_variable,
                 path_variable,
+                step_variable.as_deref(),
                 false,
+                *min_hops,
+                *max_hops,
+                edge_filter_expr.as_ref(),
                 all_properties,
             ),
 
@@ -1258,8 +1267,10 @@ impl HybridPhysicalPlanner {
                 target_variable,
                 target_label_id: _,
                 path_variable,
-                min_hops: _,
-                max_hops: _,
+                step_variable,
+                min_hops,
+                max_hops,
+                edge_filter_expr,
             } => self.plan_shortest_path(
                 input,
                 edge_type_ids,
@@ -1267,7 +1278,11 @@ impl HybridPhysicalPlanner {
                 source_variable,
                 target_variable,
                 path_variable,
+                step_variable.as_deref(),
                 true,
+                *min_hops,
+                *max_hops,
+                edge_filter_expr.as_ref(),
                 all_properties,
             ),
 
@@ -3167,6 +3182,7 @@ impl HybridPhysicalPlanner {
         edge_filter_expr: Option<&Expr>,
         path_mode: &crate::query::df_graph::nfa::PathMode,
         qpp_steps: Option<&[crate::query::planner::QppStepInfo]>,
+        qpp_inner_source: Option<&str>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
         let input_plan = self.plan_internal(input, all_properties)?;
 
@@ -3498,8 +3514,36 @@ impl HybridPhysicalPlanner {
                     None,
                 );
 
+                // Group variables, derived from the SAME `steps` slice the NFA
+                // and the per-hop filters come from, so their offsets cannot
+                // drift from the slots the executor is handed.
+                //
+                // Pruned against the properties actually referenced by the
+                // rest of the plan: a pattern may name its inner positions
+                // without reading them, and materializing a group column
+                // forces full path enumeration where endpoint-only BFS would
+                // otherwise do.
+                let qpp_group_bindings: Vec<crate::query::df_graph::nfa::QppGroupBinding> =
+                    qpp_steps
+                        .map(|steps| {
+                            let step_names: Vec<(Option<String>, Option<String>)> = steps
+                                .iter()
+                                .map(|s| (s.edge_variable.clone(), s.target_variable.clone()))
+                                .collect();
+                            crate::query::df_graph::nfa::qpp_group_bindings(
+                                qpp_inner_source,
+                                &step_names,
+                            )
+                        })
+                        .unwrap_or_default()
+                        .into_iter()
+                        .filter(|b| all_properties.contains_key(&b.name))
+                        .collect();
+
                 // VLP: determine output mode based on bound variables
-                let output_mode = if step_variable.is_some() {
+                let output_mode = if !qpp_group_bindings.is_empty() {
+                    crate::query::df_graph::nfa::VlpOutputMode::GroupVariables
+                } else if step_variable.is_some() {
                     crate::query::df_graph::nfa::VlpOutputMode::StepVariable
                 } else if path_variable.is_some() {
                     crate::query::df_graph::nfa::VlpOutputMode::FullPath
@@ -3508,6 +3552,32 @@ impl HybridPhysicalPlanner {
                 };
 
                 // Compile QPP NFA if multi-step pattern, otherwise let exec compile VLP NFA
+                // Per-hop filter specs, derived from the SAME `steps` slice
+                // the NFA is built from, so the slot indices the NFA hands the
+                // executor always line up with this list.
+                let qpp_step_filters: Vec<QppStepFilterSpec> = qpp_steps
+                    .map(|steps| {
+                        steps
+                            .iter()
+                            .map(|s| QppStepFilterSpec {
+                                edge_type_ids: s.edge_type_ids.clone(),
+                                direction: convert_direction(s.direction.clone()),
+                                target_label: s.target_label.clone(),
+                                edge_conditions: s
+                                    .edge_filter_expr
+                                    .as_ref()
+                                    .map(Self::extract_edge_property_conditions)
+                                    .unwrap_or_default(),
+                                target_conditions: s
+                                    .target_property_expr
+                                    .as_ref()
+                                    .map(Self::extract_edge_property_conditions)
+                                    .unwrap_or_default(),
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+
                 let qpp_nfa = qpp_steps.map(|steps| {
                     use crate::query::df_graph::nfa::{QppStep, VertexConstraint};
                     let hops_per_iter = steps.len();
@@ -3548,6 +3618,8 @@ impl HybridPhysicalPlanner {
                     path_mode.clone(),
                     output_mode,
                     qpp_nfa,
+                    qpp_step_filters,
+                    qpp_group_bindings,
                 ))
             }
         };
@@ -3877,7 +3949,11 @@ impl HybridPhysicalPlanner {
         source_variable: &str,
         target_variable: &str,
         path_variable: &str,
+        step_variable: Option<&str>,
         all_shortest: bool,
+        min_hops: u32,
+        max_hops: u32,
+        edge_filter_expr: Option<&Expr>,
         all_properties: &HashMap<String, HashSet<String>>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
         let input_plan = self.plan_internal(input, all_properties)?;
@@ -3886,6 +3962,13 @@ impl HybridPhysicalPlanner {
         let source_col = format!("{}._vid", source_variable);
         let target_col = format!("{}._vid", target_variable);
 
+        // An inline property map is always a conjunction of equalities, which
+        // is exactly what this extractor supports — the same conversion the
+        // variable-length path performs before building its `EidFilter`.
+        let edge_property_conditions = edge_filter_expr
+            .map(Self::extract_edge_property_conditions)
+            .unwrap_or_default();
+
         Ok(Arc::new(GraphShortestPathExec::new(
             input_plan,
             source_col,
@@ -3893,8 +3976,12 @@ impl HybridPhysicalPlanner {
             edge_type_ids.to_vec(),
             adj_direction,
             path_variable.to_string(),
+            step_variable.map(str::to_string),
             self.graph_ctx.clone(),
             all_shortest,
+            min_hops,
+            max_hops,
+            edge_property_conditions,
         )))
     }
 
@@ -6595,12 +6682,42 @@ fn collect_variable_kinds(plan: &LogicalPlan, kinds: &mut HashMap<String, Variab
             if let Some(pv) = path_variable {
                 kinds.insert(pv.clone(), VariableKind::Path);
             }
+            // A quantified pattern's inner variables are group variables: list
+            // columns, resolved as bare columns rather than `_vid` / `_eid`.
+            if let LogicalPlan::Traverse {
+                qpp_steps: Some(steps),
+                qpp_inner_source,
+                ..
+            } = plan
+            {
+                let step_names: Vec<(Option<String>, Option<String>)> = steps
+                    .iter()
+                    .map(|s| (s.edge_variable.clone(), s.target_variable.clone()))
+                    .collect();
+                for b in crate::query::df_graph::nfa::qpp_group_bindings(
+                    qpp_inner_source.as_deref(),
+                    &step_names,
+                ) {
+                    kinds.insert(
+                        b.name,
+                        match b.kind {
+                            crate::query::df_graph::nfa::QppGroupKind::Node => {
+                                VariableKind::NodeList
+                            }
+                            crate::query::df_graph::nfa::QppGroupKind::Edge => {
+                                VariableKind::EdgeList
+                            }
+                        },
+                    );
+                }
+            }
         }
         LogicalPlan::ShortestPath {
             input,
             source_variable,
             target_variable,
             path_variable,
+            step_variable,
             ..
         }
         | LogicalPlan::AllShortestPaths {
@@ -6608,12 +6725,17 @@ fn collect_variable_kinds(plan: &LogicalPlan, kinds: &mut HashMap<String, Variab
             source_variable,
             target_variable,
             path_variable,
+            step_variable,
             ..
         } => {
             collect_variable_kinds(input, kinds);
             kinds.insert(source_variable.clone(), VariableKind::Node);
             kinds.insert(target_variable.clone(), VariableKind::Node);
             kinds.insert(path_variable.clone(), VariableKind::Path);
+            if let Some(sv) = step_variable {
+                // Always a list: the pattern is variable-length by construction.
+                kinds.insert(sv.clone(), VariableKind::EdgeList);
+            }
         }
         LogicalPlan::QuantifiedPattern {
             input,

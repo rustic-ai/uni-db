@@ -909,8 +909,14 @@ async fn repro_21_consecutive_qpp() {
         .await;
     h.run_ok("MATCH (n3:V {id:3}) CREATE (n3)-[:S]->(:V {id:4})-[:S]->(:V {id:5})")
         .await;
+    // The sub-patterns are written without inner variable names. This harness
+    // is schemaless, and a quantified pattern is planned against edge type ids,
+    // so a named-inner-variable form would be refused (see
+    // `qpp_over_undeclared_relationship_type_is_refused`). Anonymous
+    // sub-patterns plan as variable-length patterns, which is what this repro
+    // is about: the second one must anchor at `b`, not the stale source `a`.
     let res = h
-        .run("MATCH (a:V {id:1})((x)-[:R]->(y)){1,2}(b)((w)-[:S]->(z)){1,2}(c) RETURN a.id AS a, b.id AS b, c.id AS c")
+        .run("MATCH (a:V {id:1})(()-[:R]->()){1,2}(b)(()-[:S]->()){1,2}(c) RETURN a.id AS a, b.id AS b, c.id AS c")
         .await;
     let rows = res.expect("two-QPP chain should plan and execute");
     println!("[21] two-QPP chain -> rows={}: {rows:?}", rows.len());
@@ -1768,4 +1774,33 @@ async fn repro_find10_abduce_multihop_target_var() {
         }
         Err(e) => println!("[10] ABDUCE program not planned in harness: {e}"),
     }
+}
+
+/// A quantified pattern over an undeclared relationship type cannot be planned
+/// — it is compiled to edge type ids and there is no schemaless equivalent of
+/// the QPP operator. Refusing beats returning no rows, which reads as "no such
+/// data" when it actually means "the planner could not express this".
+#[tokio::test]
+async fn qpp_over_undeclared_relationship_type_is_refused() {
+    let h = Harness::new_schemaless().await;
+    h.run_ok("CREATE (n1:V {id:1})-[:R]->(n2:V {id:2})-[:R]->(n3:V {id:3})")
+        .await;
+
+    let err = h
+        .run("MATCH (a:V {id:1})((x)-[:R]->(y)){1,2}(b) RETURN b.id AS b")
+        .await
+        .expect_err("a QPP over an undeclared type must be refused, not silently empty");
+    let msg = err.to_string();
+    assert!(msg.contains("'R'"), "the message must name the type: {msg}");
+    assert!(
+        msg.contains("schema-declared"),
+        "the message must say why: {msg}"
+    );
+
+    // The anonymous form is the documented alternative and still works.
+    let rows = h
+        .run("MATCH (a:V {id:1})(()-[:R]->()){1,2}(b) RETURN b.id AS b")
+        .await
+        .expect("the anonymous sub-pattern plans as a variable-length pattern");
+    assert_eq!(rows.len(), 2);
 }

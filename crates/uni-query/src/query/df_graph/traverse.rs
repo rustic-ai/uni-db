@@ -32,11 +32,14 @@
 use crate::query::df_graph::GraphExecutionContext;
 use crate::query::df_graph::bitmap::{EidFilter, VidFilter};
 use crate::query::df_graph::common::{
-    append_edge_to_struct, append_node_to_struct, arrow_err, build_edge_list_field,
+    EdgeAppendCtx, EntityPropertyCache, append_edge_to_struct_with, append_node_to_struct_with,
+    append_traversed_edge, arrow_err, build_edge_list_field, build_node_list_field,
     build_path_struct_field, column_as_vid_array, compute_plan_properties, exec_err,
     labels_data_type, new_edge_list_builder, new_node_list_builder,
 };
-use crate::query::df_graph::nfa::{NfaStateId, PathNfa, PathSelector, VlpOutputMode};
+use crate::query::df_graph::nfa::{
+    NfaStateId, PathNfa, PathSelector, QppGroupBinding, QppGroupKind, VlpOutputMode,
+};
 use crate::query::df_graph::pred_dag::PredecessorDag;
 use crate::query::df_graph::scan::{
     build_property_column_static, property_field, resolve_property_type,
@@ -58,7 +61,6 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 use uni_common::Value as UniValue;
 use uni_common::core::id::{Eid, Vid};
-use uni_store::runtime::l0_visibility;
 use uni_store::storage::direction::Direction;
 
 /// BFS result: (target_vid, hop_count, node_path, edge_path)
@@ -67,18 +69,35 @@ type BfsResult = (Vid, usize, Vec<Vid>, Vec<Eid>);
 /// Expansion record: (original_row_idx, target_vid, hop_count, node_path, edge_path)
 type ExpansionRecord = (usize, Vid, usize, Vec<Vid>, Vec<Eid>);
 
+/// Collect the entities appearing on a batch's paths, for
+/// [`EntityPropertyCache::prefetch`]. Duplicates are fine — the prefetch
+/// de-duplicates before issuing its storage reads.
+fn path_entities(expansions: &[ExpansionRecord]) -> (Vec<Vid>, Vec<Eid>) {
+    let mut vids = Vec::new();
+    let mut eids = Vec::new();
+    for (_, _, _, node_path, edge_path) in expansions {
+        vids.extend_from_slice(node_path);
+        eids.extend_from_slice(edge_path);
+    }
+    (vids, eids)
+}
+
 /// Prepend nodes and edges from an existing path struct column into builders.
 ///
 /// Used when a VLP extends a path that was partially built by a prior `BindFixedPath`.
 /// Reads the nodes and relationships from the existing path at `row_idx` and appends
 /// them to the provided builders. The caller should then skip the first VLP node
 /// (which is the junction point already present in the existing path).
+/// Deliberately does not use `append_traversed_edge`: the endpoints here are
+/// already stored in the source path's Arrow columns, so re-deriving them
+/// through the adjacency probe would be strictly more work for the same answer.
 fn prepend_existing_path(
     existing_path: &arrow_array::StructArray,
     row_idx: usize,
     nodes_builder: &mut arrow_array::builder::ListBuilder<arrow_array::builder::StructBuilder>,
     rels_builder: &mut arrow_array::builder::ListBuilder<arrow_array::builder::StructBuilder>,
     query_ctx: &uni_store::runtime::context::QueryContext,
+    prop_cache: Option<&EntityPropertyCache>,
 ) {
     // Read existing nodes
     let nodes_list = existing_path
@@ -97,10 +116,11 @@ fn prepend_existing_path(
         .downcast_ref::<UInt64Array>()
         .unwrap();
     for i in 0..vid_col.len() {
-        append_node_to_struct(
+        append_node_to_struct_with(
             nodes_builder.values(),
             Vid::from(vid_col.value(i)),
             query_ctx,
+            prop_cache,
         );
     }
 
@@ -136,13 +156,14 @@ fn prepend_existing_path(
         .downcast_ref::<UInt64Array>()
         .unwrap();
     for i in 0..eid_col.len() {
-        append_edge_to_struct(
+        append_edge_to_struct_with(
             rels_builder.values(),
             Eid::from(eid_col.value(i)),
             type_col.value(i),
             src_col.value(i),
             dst_col.value(i),
             query_ctx,
+            prop_cache,
         );
     }
 }
@@ -193,10 +214,18 @@ fn build_vlp_path_column(
     graph_ctx: &GraphExecutionContext,
     edge_type_ids: &[u32],
     fixed_type_name: Option<&str>,
+    prop_cache: Option<&EntityPropertyCache>,
 ) -> DFResult<ArrayRef> {
     let mut nodes_builder = new_node_list_builder();
     let mut rels_builder = new_edge_list_builder();
     let query_ctx = graph_ctx.query_context();
+    let edge_ctx = EdgeAppendCtx {
+        graph_ctx,
+        query_ctx: &query_ctx,
+        edge_type_ids,
+        prop_cache,
+        fixed_type_name,
+    };
     let mut path_validity = Vec::with_capacity(expansions.len());
 
     for (row_out_idx, (_, _, _, node_path, edge_path)) in expansions.iter().enumerate() {
@@ -216,6 +245,7 @@ fn build_vlp_path_column(
                     &mut nodes_builder,
                     &mut rels_builder,
                     &query_ctx,
+                    prop_cache,
                 );
                 true
             } else {
@@ -228,31 +258,18 @@ fn build_vlp_path_column(
         // Append VLP nodes (skip first if extending — it's the junction point)
         let start_idx = if skip_first_vlp_node { 1 } else { 0 };
         for vid in &node_path[start_idx..] {
-            append_node_to_struct(nodes_builder.values(), *vid, &query_ctx);
+            append_node_to_struct_with(nodes_builder.values(), *vid, &query_ctx, prop_cache);
         }
         nodes_builder.append(true);
 
         for (i, eid) in edge_path.iter().enumerate() {
-            let resolved_type_name;
-            let type_name: &str = match fixed_type_name {
-                Some(name) => name,
-                None => {
-                    resolved_type_name = l0_visibility::get_edge_type(*eid, &query_ctx)
-                        .unwrap_or_else(|| "UNKNOWN".to_string());
-                    &resolved_type_name
-                }
-            };
-            // Report the relationship's STORED direction, not the traversal
-            // order (`node_path[i]` -> `node_path[i + 1]`). Resolves flushed
-            // (L1-resident) edges too, where the L0 chain no longer holds
-            // the stored endpoints.
-            let (src, dst) = graph_ctx.resolve_stored_edge_endpoints(
+            append_traversed_edge(
+                rels_builder.values(),
+                &edge_ctx,
                 *eid,
                 node_path[i],
                 node_path[i + 1],
-                edge_type_ids,
             );
-            append_edge_to_struct(rels_builder.values(), *eid, type_name, src, dst, &query_ctx);
         }
         rels_builder.append(true);
         path_validity.push(true);
@@ -2675,7 +2692,132 @@ async fn build_edge_adjacency_and_target_props(
 /// filter) or when no edge type id resolves to a name (cannot pre-scan —
 /// degrade to the prior, less-restrictive behaviour rather than drop every
 /// edge).
-async fn build_edge_property_filter(
+/// Visible to sibling modules under `df_graph`: `shortest_path` reuses this
+/// to build the same precomputed `EidFilter` (issue #166 family).
+/// Result of the warming phase: one entry per hop slot.
+///
+/// Both vectors are indexed by the slots the NFA stamps onto its transitions
+/// and states, and are built from the same step list the NFA was compiled
+/// from, so the indices cannot drift apart.
+pub(super) struct WarmedFilters {
+    pub edges: Vec<EidFilter>,
+    pub vertices: Vec<VidFilter>,
+}
+
+/// One quantified-path-pattern hop's filter inputs.
+///
+/// A QPP can constrain each hop differently, so the executor builds one filter
+/// per hop and the NFA hands out the matching slot index. Carries the hop's own
+/// edge types and direction because those scope the scan that the predicate is
+/// evaluated against.
+#[derive(Debug, Clone)]
+pub struct QppStepFilterSpec {
+    pub edge_type_ids: Vec<u32>,
+    pub direction: Direction,
+    /// Needed to resolve the target node's property columns; `None` when the
+    /// hop's target node has no property map.
+    pub target_label: Option<String>,
+    /// Equality conditions from the relationship's inline property map.
+    pub edge_conditions: Vec<(String, UniValue)>,
+    /// Equality conditions from the target node's inline property map.
+    pub target_conditions: Vec<(String, UniValue)>,
+}
+
+/// Builds a `VidFilter` of the vertices reachable by one QPP hop that satisfy
+/// that hop's target-node property map.
+///
+/// Precomputed during warming rather than checked at the gate because the gate
+/// is synchronous: the only synchronous per-vertex accessor is the **L0-only**
+/// visibility chain, which reports a flushed vertex as property-less and would
+/// admit it (the trap behind #135 and #141). Candidates are just the vertices
+/// this hop's edges can reach, so the batch read stays bounded by the hop
+/// rather than by the label's cardinality, and it is projected to the map's own
+/// property names so heavy columns are never decoded (#134).
+///
+/// Returns `AllAllowed` when there is nothing to constrain — no conditions or
+/// no reachable candidates.
+///
+/// Known cost: a hop carrying *both* an edge map and a node map scans the same
+/// edges twice, once here and once in `build_edge_property_filter`. Left as-is
+/// rather than fused, because the scan only happens for hops that actually
+/// carry a map and the fused version would duplicate the evaluation logic;
+/// revisit if a profile shows it.
+pub(super) async fn build_vertex_property_filter(
+    graph_ctx: &Arc<GraphExecutionContext>,
+    edge_type_ids: &[u32],
+    direction: Direction,
+    target_label: Option<&str>,
+    conditions: &[(String, UniValue)],
+) -> DFResult<VidFilter> {
+    if conditions.is_empty() {
+        return Ok(VidFilter::AllAllowed);
+    }
+
+    let uni_schema = graph_ctx.storage().schema_manager().schema();
+    let type_names: Vec<String> = edge_type_ids
+        .iter()
+        .filter_map(|id| uni_schema.edge_type_name_by_id_unified(*id))
+        .collect();
+    if type_names.is_empty() {
+        return Ok(VidFilter::AllAllowed);
+    }
+
+    let adjacency = build_edge_adjacency_map(graph_ctx, &type_names, direction, None).await?;
+    let mut candidates: Vec<Vid> = Vec::new();
+    let mut seen: FxHashSet<u64> = FxHashSet::default();
+    for entries in adjacency.values() {
+        for (neighbor, _eid, _etype, _props) in entries {
+            if seen.insert(neighbor.as_u64()) {
+                candidates.push(*neighbor);
+            }
+        }
+    }
+    if candidates.is_empty() {
+        return Ok(VidFilter::AllAllowed);
+    }
+
+    let query_ctx = graph_ctx.query_context();
+    let wanted: Vec<String> = conditions.iter().map(|(name, _)| name.clone()).collect();
+    // A label lets the read target that label's table and project to just the
+    // map's columns (#134). Without one, fall back to the label-free batch
+    // read, which resolves per-label and then the schemaless main table — so an
+    // unlabelled intermediate node still filters rather than being refused.
+    let props_by_vid = if let Some(label) = target_label {
+        graph_ctx
+            .property_manager()
+            .get_batch_vertex_props_for_label_projected(
+                &candidates,
+                label,
+                Some(&query_ctx),
+                Some(&wanted),
+            )
+            .await
+    } else {
+        let wanted_refs: Vec<&str> = wanted.iter().map(String::as_str).collect();
+        graph_ctx
+            .property_manager()
+            .get_batch_vertex_props(&candidates, &wanted_refs, Some(&query_ctx))
+            .await
+    }
+    .map_err(exec_err)?;
+
+    let mut passing: Vec<u64> = Vec::new();
+    let mut max_vid: u64 = 0;
+    for vid in &candidates {
+        let raw = vid.as_u64();
+        max_vid = max_vid.max(raw);
+        if let Some(props) = props_by_vid.get(vid)
+            && conditions
+                .iter()
+                .all(|(name, expected)| props.get(name).is_some_and(|actual| actual == expected))
+        {
+            passing.push(raw);
+        }
+    }
+    Ok(VidFilter::from_vids(passing, max_vid as usize + 1))
+}
+
+pub(super) async fn build_edge_property_filter(
     graph_ctx: &Arc<GraphExecutionContext>,
     edge_type_ids: &[u32],
     direction: Direction,
@@ -2925,6 +3067,22 @@ pub struct GraphVariableLengthTraverseExec {
     /// Output mode determining BFS strategy.
     output_mode: super::nfa::VlpOutputMode,
 
+    /// Per-hop filter inputs for a quantified path pattern; empty for a simple
+    /// variable-length pattern, which uses the single `edge_property_conditions`
+    /// above. Indexed by the slots the NFA stamps onto transitions and states.
+    qpp_step_filters: Vec<QppStepFilterSpec>,
+
+    /// GQL group variables bound inside a quantified path pattern, each
+    /// emitted as a list column striding the matched path. Empty for a simple
+    /// variable-length pattern, and for a quantified one whose inner variables
+    /// are never referenced — the planner prunes those so the traversal can
+    /// stay on the endpoint-only fast path.
+    ///
+    /// Iterated in this order by *both* `build_schema` and `build_output_batch`;
+    /// the columns are positional, so a divergence would silently transpose two
+    /// same-typed group columns rather than fail.
+    qpp_group_bindings: Vec<QppGroupBinding>,
+
     /// Compiled NFA for path pattern matching.
     nfa: Arc<PathNfa>,
 
@@ -2982,6 +3140,8 @@ impl GraphVariableLengthTraverseExec {
         path_mode: super::nfa::PathMode,
         output_mode: super::nfa::VlpOutputMode,
         qpp_nfa: Option<PathNfa>,
+        qpp_step_filters: Vec<QppStepFilterSpec>,
+        qpp_group_bindings: Vec<QppGroupBinding>,
     ) -> Self {
         let source_column = source_column.into();
         let target_variable = target_variable.into();
@@ -3000,6 +3160,7 @@ impl GraphVariableLengthTraverseExec {
             path_variable.as_deref(),
             &target_properties,
             label_props,
+            &qpp_group_bindings,
         );
         let properties = compute_plan_properties(schema.clone());
 
@@ -3027,6 +3188,8 @@ impl GraphVariableLengthTraverseExec {
             used_edge_columns,
             path_mode,
             output_mode,
+            qpp_step_filters,
+            qpp_group_bindings,
             nfa,
             graph_ctx,
             schema,
@@ -3045,6 +3208,7 @@ impl GraphVariableLengthTraverseExec {
         label_props: Option<
             &std::collections::HashMap<String, uni_common::core::schema::PropertyMeta>,
         >,
+        qpp_group_bindings: &[QppGroupBinding],
     ) -> SchemaRef {
         let mut fields: Vec<Field> = input_schema
             .fields()
@@ -3091,6 +3255,19 @@ impl GraphVariableLengthTraverseExec {
             fields.push(build_path_struct_field(path_var));
         }
 
+        // Group variable columns are appended LAST, and in binding order, so
+        // the positions of everything above are untouched and
+        // `build_output_batch` can push in the same order. Two group columns of
+        // the same kind are structurally identical, so a transposition here
+        // would be a wrong answer rather than an error — see the name assertion
+        // at the push site.
+        for binding in qpp_group_bindings {
+            fields.push(match binding.kind {
+                QppGroupKind::Node => build_node_list_field(&binding.name),
+                QppGroupKind::Edge => build_edge_list_field(&binding.name),
+            });
+        }
+
         Arc::new(Schema::new(fields))
     }
 }
@@ -3099,8 +3276,24 @@ impl DisplayAs for GraphVariableLengthTraverseExec {
     fn fmt_as(&self, _t: DisplayFormatType, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "GraphVariableLengthTraverseExec: {} --[{:?}*{}..{}]--> target",
-            self.source_column, self.edge_type_ids, self.min_hops, self.max_hops
+            "GraphVariableLengthTraverseExec: {} --[{:?}*{}..{}]--> target, mode={:?}{}",
+            self.source_column,
+            self.edge_type_ids,
+            self.min_hops,
+            self.max_hops,
+            self.output_mode,
+            if self.qpp_group_bindings.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    ", groups=[{}]",
+                    self.qpp_group_bindings
+                        .iter()
+                        .map(|b| b.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            }
         )
     }
 }
@@ -3158,6 +3351,8 @@ impl ExecutionPlan for GraphVariableLengthTraverseExec {
             self.path_mode.clone(),
             self.output_mode.clone(),
             Some((*self.nfa).clone()),
+            self.qpp_step_filters.clone(),
+            self.qpp_group_bindings.clone(),
         )))
     }
 
@@ -3178,19 +3373,56 @@ impl ExecutionPlan for GraphVariableLengthTraverseExec {
         let edge_type_ids = self.edge_type_ids.clone();
         let direction = self.direction;
         let edge_property_conditions = self.edge_property_conditions.clone();
-        let warm_fut: Pin<Box<dyn std::future::Future<Output = DFResult<EidFilter>> + Send>> =
+        let qpp_step_filters = self.qpp_step_filters.clone();
+        let warm_fut: Pin<Box<dyn std::future::Future<Output = DFResult<WarmedFilters>> + Send>> =
             Box::pin(async move {
                 graph_ctx
                     .ensure_adjacency_warmed(&edge_type_ids, direction)
                     .await
                     .map_err(exec_err)?;
-                build_edge_property_filter(
-                    &graph_ctx,
-                    &edge_type_ids,
-                    direction,
-                    &edge_property_conditions,
-                )
-                .await
+
+                if qpp_step_filters.is_empty() {
+                    // Simple VLP: one step, one slot. Same single filter as before.
+                    let edges = build_edge_property_filter(
+                        &graph_ctx,
+                        &edge_type_ids,
+                        direction,
+                        &edge_property_conditions,
+                    )
+                    .await?;
+                    return Ok(WarmedFilters {
+                        edges: vec![edges],
+                        vertices: vec![VidFilter::AllAllowed],
+                    });
+                }
+
+                // One filter per hop, in the same order the NFA's slots index.
+                // A hop with no map costs no scan — both builders short-circuit
+                // on empty conditions.
+                let mut edges = Vec::with_capacity(qpp_step_filters.len());
+                let mut vertices = Vec::with_capacity(qpp_step_filters.len());
+                for step in &qpp_step_filters {
+                    edges.push(
+                        build_edge_property_filter(
+                            &graph_ctx,
+                            &step.edge_type_ids,
+                            step.direction,
+                            &step.edge_conditions,
+                        )
+                        .await?,
+                    );
+                    vertices.push(
+                        build_vertex_property_filter(
+                            &graph_ctx,
+                            &step.edge_type_ids,
+                            step.direction,
+                            step.target_label.as_deref(),
+                            &step.target_conditions,
+                        )
+                        .await?,
+                    );
+                }
+                Ok(WarmedFilters { edges, vertices })
             });
 
         Ok(Box::pin(GraphVariableLengthTraverseStream {
@@ -3198,7 +3430,9 @@ impl ExecutionPlan for GraphVariableLengthTraverseExec {
             exec: Arc::new(self.clone_for_stream()),
             schema: self.schema.clone(),
             state: VarLengthStreamState::Warming(warm_fut),
-            edge_property_filter: EidFilter::AllAllowed,
+            // Replaced by the warming result before any batch is read.
+            edge_property_filters: vec![EidFilter::AllAllowed],
+            vertex_property_filters: vec![VidFilter::AllAllowed],
             metrics,
         }))
     }
@@ -3229,6 +3463,8 @@ impl GraphVariableLengthTraverseExec {
             used_edge_columns: self.used_edge_columns.clone(),
             path_mode: self.path_mode.clone(),
             output_mode: self.output_mode.clone(),
+            qpp_group_bindings: self.qpp_group_bindings.clone(),
+            hops_per_iter: self.qpp_step_filters.len().max(1),
             nfa: self.nfa.clone(),
             graph_ctx: self.graph_ctx.clone(),
         }
@@ -3260,6 +3496,12 @@ struct GraphVariableLengthTraverseExecData {
     used_edge_columns: Vec<String>,
     path_mode: super::nfa::PathMode,
     output_mode: super::nfa::VlpOutputMode,
+    /// Group variables to materialize, in schema order. See the exec's field.
+    qpp_group_bindings: Vec<QppGroupBinding>,
+    /// Steps per quantifier iteration — the stride between successive elements
+    /// of a group variable. Taken from the per-hop filter list rather than
+    /// recomputed from `min_hops`, which is already the multiplied value.
+    hops_per_iter: usize,
     nfa: Arc<PathNfa>,
     graph_ctx: Arc<GraphExecutionContext>,
 }
@@ -3270,6 +3512,18 @@ const MAX_FRONTIER_SIZE: usize = 500_000;
 const MAX_PRED_POOL_SIZE: usize = 2_000_000;
 
 impl GraphVariableLengthTraverseExecData {
+    /// Report that the variable-length search hit a safety cap and stopped
+    /// early, so the results below are incomplete.
+    fn warn_search_truncated(&self, depth: u32, frontier: usize, pool: usize) {
+        self.graph_ctx
+            .push_warning(crate::types::QueryWarning::Other(format!(
+                "Variable-length traversal stopped at depth {depth} after hitting a safety cap \
+                 (frontier {frontier}/{MAX_FRONTIER_SIZE}, predecessor pool \
+                 {pool}/{MAX_PRED_POOL_SIZE}); results are incomplete. Narrow the pattern with a \
+                 smaller upper bound, a relationship type, or a label on the target."
+            )));
+    }
+
     /// Check if a vertex passes the target label filter.
     fn check_target_label(&self, vid: Vid) -> bool {
         if let Some(ref label_name) = self.target_label_name {
@@ -3310,7 +3564,8 @@ impl GraphVariableLengthTraverseExecData {
         &self,
         vid: Vid,
         state: NfaStateId,
-        eid_filter: &EidFilter,
+        eid_filters: &[EidFilter],
+        vertex_filters: &[VidFilter],
         used_eids: &FxHashSet<u64>,
     ) -> Vec<(Vid, Eid, NfaStateId)> {
         let is_undirected = matches!(self.direction, Direction::Both);
@@ -3336,7 +3591,20 @@ impl GraphVariableLengthTraverseExecData {
                     // there are no conditions it is `AllAllowed`. This replaces
                     // the old bifurcated check that filtered only L0 edges and
                     // let every flushed CSR/Lance edge through (H4).
-                    if !eid_filter.contains(eid) {
+                    // Per-hop gate. Fail closed on an out-of-range slot: it can
+                    // only be a programmer error in the slot/filter lockstep,
+                    // and failing open would re-create exactly the
+                    // over-matching this change exists to remove.
+                    debug_assert!(
+                        transition.edge_filter_slot < eid_filters.len(),
+                        "edge filter slot {} out of range ({} filters)",
+                        transition.edge_filter_slot,
+                        eid_filters.len()
+                    );
+                    if !eid_filters
+                        .get(transition.edge_filter_slot)
+                        .is_some_and(|f| f.contains(eid))
+                    {
                         continue;
                     }
 
@@ -3350,6 +3618,25 @@ impl GraphVariableLengthTraverseExecData {
                         && !self.check_state_constraint(neighbor, constraint)
                     {
                         continue;
+                    }
+
+                    // …and the destination's property map, if that hop had one.
+                    // Precomputed during warming rather than read here: the
+                    // only synchronous accessor is the L0-only chain, which
+                    // reports a flushed vertex as property-less (#135/#141).
+                    // Fails closed on a bad slot, as above.
+                    if let Some(slot) = self.nfa.vertex_filter_slot(transition.to) {
+                        debug_assert!(
+                            slot < vertex_filters.len(),
+                            "vertex filter slot {slot} out of range ({} filters)",
+                            vertex_filters.len()
+                        );
+                        if !vertex_filters
+                            .get(slot)
+                            .is_some_and(|f| f.contains(neighbor))
+                        {
+                            continue;
+                        }
                     }
 
                     results.push((neighbor, eid, transition.to));
@@ -3367,7 +3654,8 @@ impl GraphVariableLengthTraverseExecData {
     fn bfs_with_dag(
         &self,
         source: Vid,
-        eid_filter: &EidFilter,
+        eid_filters: &[EidFilter],
+        vertex_filters: &[VidFilter],
         used_eids: &FxHashSet<u64>,
         vid_filter: &VidFilter,
     ) -> Vec<BfsResult> {
@@ -3395,7 +3683,7 @@ impl GraphVariableLengthTraverseExecData {
 
             for &(vid, state) in &frontier {
                 for (neighbor, eid, dst_state) in
-                    self.expand_neighbors(vid, state, eid_filter, used_eids)
+                    self.expand_neighbors(vid, state, eid_filters, vertex_filters, used_eids)
                 {
                     // Record in predecessor DAG
                     dag.add_predecessor(neighbor, dst_state, vid, state, eid, depth);
@@ -3415,8 +3703,12 @@ impl GraphVariableLengthTraverseExecData {
                 }
             }
 
-            // Safety cap
+            // Safety cap. Abandoning the search mid-way makes the result
+            // incomplete, and with a step or group variable bound that means
+            // *missing rows*, not merely a missed endpoint — so say so rather
+            // than returning a short answer that looks complete.
             if next_frontier.len() > MAX_FRONTIER_SIZE || dag.pool_len() > MAX_PRED_POOL_SIZE {
+                self.warn_search_truncated(depth, next_frontier.len(), dag.pool_len());
                 break;
             }
 
@@ -3450,7 +3742,8 @@ impl GraphVariableLengthTraverseExecData {
     fn bfs_endpoints_only(
         &self,
         source: Vid,
-        eid_filter: &EidFilter,
+        eid_filters: &[EidFilter],
+        vertex_filters: &[VidFilter],
         used_eids: &FxHashSet<u64>,
         vid_filter: &VidFilter,
     ) -> Vec<(Vid, u32)> {
@@ -3478,7 +3771,7 @@ impl GraphVariableLengthTraverseExecData {
 
             for &(vid, state) in &frontier {
                 for (neighbor, eid, dst_state) in
-                    self.expand_neighbors(vid, state, eid_filter, used_eids)
+                    self.expand_neighbors(vid, state, eid_filters, vertex_filters, used_eids)
                 {
                     dag.add_predecessor(neighbor, dst_state, vid, state, eid, depth);
 
@@ -3497,7 +3790,12 @@ impl GraphVariableLengthTraverseExecData {
                 }
             }
 
+            // Safety cap. Abandoning the search mid-way makes the result
+            // incomplete, and with a step or group variable bound that means
+            // *missing rows*, not merely a missed endpoint — so say so rather
+            // than returning a short answer that looks complete.
             if next_frontier.len() > MAX_FRONTIER_SIZE || dag.pool_len() > MAX_PRED_POOL_SIZE {
+                self.warn_search_truncated(depth, next_frontier.len(), dag.pool_len());
                 break;
             }
 
@@ -3514,9 +3812,17 @@ enum VarLengthStreamState {
     /// edge-property `EidFilter` (the allow-set of edges — flushed *and* L0 —
     /// that satisfy the inline `{prop: value}` conditions), or
     /// `EidFilter::AllAllowed` when there are no conditions.
-    Warming(Pin<Box<dyn std::future::Future<Output = DFResult<EidFilter>> + Send>>),
+    Warming(Pin<Box<dyn std::future::Future<Output = DFResult<WarmedFilters>> + Send>>),
     /// Processing input batches.
     Reading,
+    /// Fetching storage-backed properties for the entities on this batch's
+    /// paths, before the (synchronous) column builders run. Only entered when
+    /// the plan materializes entity structs.
+    PrefetchingProperties {
+        fut: Pin<Box<dyn std::future::Future<Output = DFResult<EntityPropertyCache>> + Send>>,
+        input: RecordBatch,
+        expansions: Vec<VarLengthExpansion>,
+    },
     /// Materializing target vertex properties asynchronously.
     Materializing(Pin<Box<dyn std::future::Future<Output = DFResult<RecordBatch>> + Send>>),
     /// Stream is done.
@@ -3532,7 +3838,8 @@ struct GraphVariableLengthTraverseStream {
     /// Edge-property allow-set built during warming (see [`VarLengthStreamState::Warming`]).
     /// `AllAllowed` until warming completes (or when there are no edge-property
     /// conditions).
-    edge_property_filter: EidFilter,
+    edge_property_filters: Vec<EidFilter>,
+    vertex_property_filters: Vec<VidFilter>,
     metrics: BaselineMetrics,
 }
 
@@ -3547,8 +3854,9 @@ impl Stream for GraphVariableLengthTraverseStream {
 
             match state {
                 VarLengthStreamState::Warming(mut fut) => match fut.as_mut().poll(cx) {
-                    Poll::Ready(Ok(filter)) => {
-                        self.edge_property_filter = filter;
+                    Poll::Ready(Ok(warmed)) => {
+                        self.edge_property_filters = warmed.edges;
+                        self.vertex_property_filters = warmed.vertices;
                         self.state = VarLengthStreamState::Reading;
                         // Continue loop to start reading
                     }
@@ -3570,47 +3878,56 @@ impl Stream for GraphVariableLengthTraverseStream {
                     match self.input.poll_next_unpin(cx) {
                         Poll::Ready(Some(Ok(batch))) => {
                             // Build base batch synchronously (BFS + expand).
-                            // `edge_property_filter` was built during warming and
-                            // gates flushed edges by their properties; VidFilter
-                            // is still unconstrained (TODO: source pre-scan).
-                            let vid_filter = VidFilter::AllAllowed;
-                            let base_result = self.process_batch_base(
+                            // The per-hop filters were built during warming and
+                            // gate flushed edges/vertices by their properties.
+                            // `accepting_vid_filter` is a different thing — it
+                            // constrains the *final* vertex and is still
+                            // unconstrained (TODO: source pre-scan).
+                            let accepting_vid_filter = VidFilter::AllAllowed;
+                            let expanded = self.expand_batch(
                                 batch,
-                                &self.edge_property_filter,
-                                &vid_filter,
+                                &self.edge_property_filters,
+                                &self.vertex_property_filters,
+                                &accepting_vid_filter,
                             );
-                            let base_batch = match base_result {
-                                Ok(b) => b,
+                            let (input, expansions) = match expanded {
+                                Ok(pair) => pair,
                                 Err(e) => {
                                     self.state = VarLengthStreamState::Reading;
                                     return Poll::Ready(Some(Err(e)));
                                 }
                             };
 
-                            // If no properties need async hydration, return directly
-                            if self.exec.target_properties.is_empty() {
-                                self.state = VarLengthStreamState::Reading;
-                                return Poll::Ready(Some(Ok(base_batch)));
+                            if self.materializes_entity_structs() && !expansions.is_empty() {
+                                let (vids, eids) = path_entities(&expansions);
+                                let graph_ctx = self.exec.graph_ctx.clone();
+                                let fut = Box::pin(async move {
+                                    let query_ctx = graph_ctx.query_context();
+                                    EntityPropertyCache::prefetch(
+                                        &graph_ctx, &query_ctx, &vids, &eids,
+                                    )
+                                    .await
+                                });
+                                self.state = VarLengthStreamState::PrefetchingProperties {
+                                    fut,
+                                    input,
+                                    expansions,
+                                };
+                                continue;
                             }
 
-                            // Properties needed — create async future for hydration
-                            let schema = self.schema.clone();
-                            let target_variable = self.exec.target_variable.clone();
-                            let target_properties = self.exec.target_properties.clone();
-                            let target_label_name = self.exec.target_label_name.clone();
-                            let graph_ctx = self.exec.graph_ctx.clone();
-
-                            let fut = hydrate_vlp_target_properties(
-                                base_batch,
-                                schema,
-                                target_variable,
-                                target_properties,
-                                target_label_name,
-                                graph_ctx,
-                            );
-
-                            self.state = VarLengthStreamState::Materializing(Box::pin(fut));
-                            // Continue loop to poll the future
+                            let base_batch =
+                                match self.build_output_batch(&input, &expansions, None) {
+                                    Ok(b) => b,
+                                    Err(e) => {
+                                        self.state = VarLengthStreamState::Reading;
+                                        return Poll::Ready(Some(Err(e)));
+                                    }
+                                };
+                            if let Some(batch) = self.dispatch_base_batch(base_batch) {
+                                return Poll::Ready(Some(Ok(batch)));
+                            }
+                            // Continue loop to poll the hydration future
                         }
                         Poll::Ready(Some(Err(e))) => {
                             self.state = VarLengthStreamState::Done;
@@ -3626,6 +3943,38 @@ impl Stream for GraphVariableLengthTraverseStream {
                         }
                     }
                 }
+                VarLengthStreamState::PrefetchingProperties {
+                    mut fut,
+                    input,
+                    expansions,
+                } => match fut.as_mut().poll(cx) {
+                    Poll::Ready(Ok(cache)) => {
+                        let base_batch =
+                            match self.build_output_batch(&input, &expansions, Some(&cache)) {
+                                Ok(b) => b,
+                                Err(e) => {
+                                    self.state = VarLengthStreamState::Reading;
+                                    return Poll::Ready(Some(Err(e)));
+                                }
+                            };
+                        if let Some(batch) = self.dispatch_base_batch(base_batch) {
+                            return Poll::Ready(Some(Ok(batch)));
+                        }
+                        // Continue loop to poll the hydration future
+                    }
+                    Poll::Ready(Err(e)) => {
+                        self.state = VarLengthStreamState::Done;
+                        return Poll::Ready(Some(Err(e)));
+                    }
+                    Poll::Pending => {
+                        self.state = VarLengthStreamState::PrefetchingProperties {
+                            fut,
+                            input,
+                            expansions,
+                        };
+                        return Poll::Pending;
+                    }
+                },
                 VarLengthStreamState::Materializing(mut fut) => match fut.as_mut().poll(cx) {
                     Poll::Ready(Ok(batch)) => {
                         self.state = VarLengthStreamState::Reading;
@@ -3650,12 +3999,19 @@ impl Stream for GraphVariableLengthTraverseStream {
 }
 
 impl GraphVariableLengthTraverseStream {
-    fn process_batch_base(
+    /// Run the BFS for one input batch and return it alongside the expansions.
+    ///
+    /// Column materialization is deliberately *not* done here: entity structs
+    /// need an async property pre-fetch keyed on the vids and eids this BFS
+    /// discovers, so the caller decides whether to prefetch before calling
+    /// [`Self::build_output_batch`].
+    fn expand_batch(
         &self,
         batch: RecordBatch,
-        eid_filter: &EidFilter,
+        eid_filters: &[EidFilter],
+        vertex_filters: &[VidFilter],
         vid_filter: &VidFilter,
-    ) -> DFResult<RecordBatch> {
+    ) -> DFResult<(RecordBatch, Vec<VarLengthExpansion>)> {
         let source_col = batch
             .column_by_name(&self.exec.source_column)
             .ok_or_else(|| {
@@ -3706,9 +4062,13 @@ impl GraphVariableLengthTraverseStream {
                 // Dispatch to appropriate BFS mode based on output_mode
                 match &self.exec.output_mode {
                     VlpOutputMode::EndpointsOnly => {
-                        let endpoints = self
-                            .exec
-                            .bfs_endpoints_only(vid, eid_filter, &used_eids, vid_filter);
+                        let endpoints = self.exec.bfs_endpoints_only(
+                            vid,
+                            eid_filters,
+                            vertex_filters,
+                            &used_eids,
+                            vid_filter,
+                        );
                         for (target, depth) in endpoints {
                             // Filter by bound target VID
                             if let Some(targets) = expected_targets {
@@ -3725,9 +4085,13 @@ impl GraphVariableLengthTraverseStream {
                     }
                     _ => {
                         // FullPath, StepVariable, CountOnly, etc.
-                        let bfs_results = self
-                            .exec
-                            .bfs_with_dag(vid, eid_filter, &used_eids, vid_filter);
+                        let bfs_results = self.exec.bfs_with_dag(
+                            vid,
+                            eid_filters,
+                            vertex_filters,
+                            &used_eids,
+                            vid_filter,
+                        );
                         for (target, hop_count, node_path, edge_path) in bfs_results {
                             // Filter by bound target VID
                             if let Some(targets) = expected_targets {
@@ -3752,13 +4116,48 @@ impl GraphVariableLengthTraverseStream {
             }
         }
 
-        self.build_output_batch(&batch, &expansions)
+        Ok((batch, expansions))
+    }
+
+    /// Whether this batch materializes entity structs (path or step-variable
+    /// columns), whose `properties` blobs need a storage-backed pre-fetch —
+    /// the sync L0 chain alone loses every property once a vertex or edge has
+    /// been flushed. Endpoint-only traversals build no such column and so keep
+    /// the fully synchronous fast path.
+    fn materializes_entity_structs(&self) -> bool {
+        self.exec.step_variable.is_some()
+            || self.exec.path_variable.is_some()
+            || !self.exec.qpp_group_bindings.is_empty()
+    }
+
+    /// Decide what happens to a freshly built base batch.
+    ///
+    /// Returns `Some(batch)` to emit it immediately, or `None` having moved the
+    /// stream into [`VarLengthStreamState::Materializing`] so the caller's loop
+    /// polls the target-property hydration future.
+    fn dispatch_base_batch(&mut self, base_batch: RecordBatch) -> Option<RecordBatch> {
+        if self.exec.target_properties.is_empty() {
+            self.state = VarLengthStreamState::Reading;
+            return Some(base_batch);
+        }
+
+        let fut = hydrate_vlp_target_properties(
+            base_batch,
+            self.schema.clone(),
+            self.exec.target_variable.clone(),
+            self.exec.target_properties.clone(),
+            self.exec.target_label_name.clone(),
+            self.exec.graph_ctx.clone(),
+        );
+        self.state = VarLengthStreamState::Materializing(Box::pin(fut));
+        None
     }
 
     fn build_output_batch(
         &self,
         input: &RecordBatch,
         expansions: &[VarLengthExpansion],
+        prop_cache: Option<&EntityPropertyCache>,
     ) -> DFResult<RecordBatch> {
         if expansions.is_empty() {
             return Ok(RecordBatch::new_empty(self.schema.clone()));
@@ -3845,6 +4244,13 @@ impl GraphVariableLengthTraverseStream {
         if self.exec.step_variable.is_some() {
             let mut edges_builder = new_edge_list_builder();
             let query_ctx = self.exec.graph_ctx.query_context();
+            let edge_ctx = EdgeAppendCtx {
+                graph_ctx: &self.exec.graph_ctx,
+                query_ctx: &query_ctx,
+                edge_type_ids: &self.exec.edge_type_ids,
+                prop_cache,
+                fixed_type_name: None,
+            };
 
             for (_, _, _, node_path, edge_path) in expansions {
                 if node_path.is_empty() && edge_path.is_empty() {
@@ -3855,25 +4261,12 @@ impl GraphVariableLengthTraverseStream {
                     edges_builder.append(true);
                 } else {
                     for (i, eid) in edge_path.iter().enumerate() {
-                        let type_name = l0_visibility::get_edge_type(*eid, &query_ctx)
-                            .unwrap_or_else(|| "UNKNOWN".to_string());
-                        // Report the relationship's STORED direction, not the
-                        // traversal order (`node_path[i]` -> `node_path[i + 1]`).
-                        // Resolves flushed (L1-resident) edges too, where the L0
-                        // chain no longer holds the stored endpoints.
-                        let (src, dst) = self.exec.graph_ctx.resolve_stored_edge_endpoints(
+                        append_traversed_edge(
+                            edges_builder.values(),
+                            &edge_ctx,
                             *eid,
                             node_path[i],
                             node_path[i + 1],
-                            &self.exec.edge_type_ids,
-                        );
-                        append_edge_to_struct(
-                            edges_builder.values(),
-                            *eid,
-                            &type_name,
-                            src,
-                            dst,
-                            &query_ctx,
                         );
                     }
                     edges_builder.append(true);
@@ -3904,6 +4297,7 @@ impl GraphVariableLengthTraverseStream {
                 &self.exec.graph_ctx,
                 &self.exec.edge_type_ids,
                 None,
+                prop_cache,
             )?;
 
             if let Some(idx) = existing_path_col_idx {
@@ -3913,9 +4307,83 @@ impl GraphVariableLengthTraverseStream {
             }
         }
 
+        // Group variable columns, appended last and in binding order to match
+        // `build_schema`. Two group columns of the same kind have identical
+        // types, so a positional mismatch here would surface as a wrong answer
+        // rather than an Arrow error — hence the name assertion per push.
+        for binding in &self.exec.qpp_group_bindings {
+            debug_assert_eq!(
+                self.schema.field(columns.len()).name(),
+                &binding.name,
+                "group variable columns must be pushed in build_schema's order"
+            );
+            columns.push(self.build_group_column(binding, expansions, prop_cache)?);
+        }
+        debug_assert_eq!(columns.len(), self.schema.fields().len());
+
         self.metrics.record_output(num_rows);
 
         RecordBatch::try_new(self.schema.clone(), columns).map_err(arrow_err)
+    }
+
+    /// Materialize one group variable: the strided slice of each matched path
+    /// at this binding's offset, one element per quantifier iteration.
+    fn build_group_column(
+        &self,
+        binding: &QppGroupBinding,
+        expansions: &[VarLengthExpansion],
+        prop_cache: Option<&EntityPropertyCache>,
+    ) -> DFResult<ArrayRef> {
+        let query_ctx = self.exec.graph_ctx.query_context();
+        let edge_ctx = EdgeAppendCtx {
+            graph_ctx: &self.exec.graph_ctx,
+            query_ctx: &query_ctx,
+            edge_type_ids: &self.exec.edge_type_ids,
+            prop_cache,
+            fixed_type_name: None,
+        };
+        let stride = self.exec.hops_per_iter.max(1);
+        let mut builder = match binding.kind {
+            QppGroupKind::Node => new_node_list_builder(),
+            QppGroupKind::Edge => new_edge_list_builder(),
+        };
+
+        for (_, target, _, node_path, edge_path) in expansions {
+            // OPTIONAL MATCH with no match: null, distinct from the empty list
+            // a zero-iteration match produces.
+            if target.as_u64() == u64::MAX {
+                builder.append_null();
+                continue;
+            }
+
+            let iterations = edge_path.len() / stride;
+            for i in 0..iterations {
+                let idx = binding.offset + i * stride;
+                match binding.kind {
+                    QppGroupKind::Node => {
+                        let Some(vid) = node_path.get(idx) else {
+                            continue;
+                        };
+                        append_node_to_struct_with(builder.values(), *vid, &query_ctx, prop_cache);
+                    }
+                    QppGroupKind::Edge => {
+                        let Some(eid) = edge_path.get(idx) else {
+                            continue;
+                        };
+                        append_traversed_edge(
+                            builder.values(),
+                            &edge_ctx,
+                            *eid,
+                            node_path[idx],
+                            node_path[idx + 1],
+                        );
+                    }
+                }
+            }
+            builder.append(true);
+        }
+
+        Ok(Arc::new(builder.finish()))
     }
 }
 
@@ -4407,6 +4875,15 @@ enum VarLengthMainStreamState {
     Loading(Pin<Box<dyn std::future::Future<Output = DFResult<EdgeAdjacencyMap>> + Send>>),
     /// Processing input batches with loaded adjacency.
     Processing(EdgeAdjacencyMap),
+    /// Fetching storage-backed properties for this batch's path entities before
+    /// the synchronous column builders run. Mirrors the schema'd exec's state
+    /// of the same purpose.
+    PrefetchingProperties {
+        adjacency: EdgeAdjacencyMap,
+        fut: Pin<Box<dyn std::future::Future<Output = DFResult<EntityPropertyCache>> + Send>>,
+        input: RecordBatch,
+        expansions: Vec<ExpansionRecord>,
+    },
     /// Materializing properties for a batch.
     Materializing {
         adjacency: EdgeAdjacencyMap,
@@ -4522,12 +4999,16 @@ impl GraphVariableLengthTraverseMainStream {
         results
     }
 
-    /// Process a batch using the adjacency map.
-    fn process_batch(
+    /// Run the BFS for one input batch and return it alongside the expansions.
+    ///
+    /// Split from column materialization so entity-struct columns can have
+    /// their properties pre-fetched from storage first — see
+    /// [`EntityPropertyCache`].
+    fn expand_batch(
         &self,
         batch: RecordBatch,
         adjacency: &EdgeAdjacencyMap,
-    ) -> DFResult<RecordBatch> {
+    ) -> DFResult<(RecordBatch, Vec<ExpansionRecord>)> {
         let source_col = batch.column_by_name(&self.source_column).ok_or_else(|| {
             datafusion::error::DataFusionError::Execution(format!(
                 "Source column '{}' not found in input batch",
@@ -4598,10 +5079,52 @@ impl GraphVariableLengthTraverseMainStream {
             }
         }
 
+        Ok((batch, expansions))
+    }
+
+    /// Whether this batch materializes entity structs whose `properties` blobs
+    /// need a storage-backed pre-fetch. See the schema'd exec's twin.
+    fn materializes_entity_structs(&self) -> bool {
+        self.step_variable.is_some() || self.path_variable.is_some()
+    }
+
+    /// Emit the base batch directly, or move into target-property hydration.
+    /// See the schema'd exec's twin.
+    fn dispatch_base_batch(
+        &mut self,
+        adjacency: EdgeAdjacencyMap,
+        base_batch: RecordBatch,
+    ) -> Option<RecordBatch> {
+        if self.target_properties.is_empty() {
+            self.state = VarLengthMainStreamState::Processing(adjacency);
+            return Some(base_batch);
+        }
+
+        let fut = hydrate_vlp_target_properties(
+            base_batch,
+            self.schema.clone(),
+            self.target_variable.clone(),
+            self.target_properties.clone(),
+            None, // schemaless — no label name
+            self.graph_ctx.clone(),
+        );
+        self.state = VarLengthMainStreamState::Materializing {
+            adjacency,
+            fut: Box::pin(fut),
+        };
+        None
+    }
+
+    fn build_output_batch(
+        &self,
+        batch: &RecordBatch,
+        expansions: &[ExpansionRecord],
+        prop_cache: Option<&EntityPropertyCache>,
+    ) -> DFResult<RecordBatch> {
         if expansions.is_empty() {
             if self.is_optional {
                 let all_indices: Vec<usize> = (0..batch.num_rows()).collect();
-                return build_optional_null_batch_for_rows(&batch, &all_indices, &self.schema);
+                return build_optional_null_batch_for_rows(batch, &all_indices, &self.schema);
             }
             return Ok(RecordBatch::new_empty(self.schema.clone()));
         }
@@ -4691,7 +5214,17 @@ impl GraphVariableLengthTraverseMainStream {
         if self.step_variable.is_some() {
             let mut edges_builder = new_edge_list_builder();
             let query_ctx = self.graph_ctx.query_context();
+            // Only a fallback now: the pattern's type list cannot say which
+            // type each individual edge is, so `[:A|B]` used to label every
+            // edge "A|B". The probe resolves it per edge.
             let type_names_str = self.type_names.join("|");
+            let edge_ctx = EdgeAppendCtx {
+                graph_ctx: &self.graph_ctx,
+                query_ctx: &query_ctx,
+                edge_type_ids: &edge_type_ids,
+                prop_cache,
+                fixed_type_name: Some(&type_names_str),
+            };
 
             for (_, _, _, node_path, edge_path) in expansions.iter() {
                 if node_path.is_empty() && edge_path.is_empty() {
@@ -4701,23 +5234,12 @@ impl GraphVariableLengthTraverseMainStream {
                     edges_builder.append(true);
                 } else {
                     for (i, eid) in edge_path.iter().enumerate() {
-                        // Report the relationship's STORED direction, not the
-                        // traversal order (`node_path[i]` -> `node_path[i + 1]`).
-                        // Resolves flushed (L1-resident) edges too, where the L0
-                        // chain no longer holds the stored endpoints.
-                        let (src, dst) = self.graph_ctx.resolve_stored_edge_endpoints(
+                        append_traversed_edge(
+                            edges_builder.values(),
+                            &edge_ctx,
                             *eid,
                             node_path[i],
                             node_path[i + 1],
-                            &edge_type_ids,
-                        );
-                        append_edge_to_struct(
-                            edges_builder.values(),
-                            *eid,
-                            &type_names_str,
-                            src,
-                            dst,
-                            &query_ctx,
                         );
                     }
                     edges_builder.append(true);
@@ -4742,11 +5264,12 @@ impl GraphVariableLengthTraverseMainStream {
 
             let type_names_str = self.type_names.join("|");
             let path_struct = build_vlp_path_column(
-                &expansions,
+                expansions,
                 existing_path,
                 &self.graph_ctx,
                 &edge_type_ids,
                 Some(&type_names_str),
+                prop_cache,
             )?;
 
             if let Some(idx) = existing_path_col_idx {
@@ -4799,40 +5322,46 @@ impl Stream for GraphVariableLengthTraverseMainStream {
                 VarLengthMainStreamState::Processing(adjacency) => {
                     match self.input.poll_next_unpin(cx) {
                         Poll::Ready(Some(Ok(batch))) => {
-                            let base_batch = match self.process_batch(batch, &adjacency) {
-                                Ok(b) => b,
+                            let (input, expansions) = match self.expand_batch(batch, &adjacency) {
+                                Ok(pair) => pair,
                                 Err(e) => {
                                     self.state = VarLengthMainStreamState::Processing(adjacency);
                                     return Poll::Ready(Some(Err(e)));
                                 }
                             };
 
-                            // If no properties need async hydration, return directly
-                            if self.target_properties.is_empty() {
-                                self.state = VarLengthMainStreamState::Processing(adjacency);
-                                return Poll::Ready(Some(Ok(base_batch)));
+                            if self.materializes_entity_structs() && !expansions.is_empty() {
+                                let (vids, eids) = path_entities(&expansions);
+                                let graph_ctx = self.graph_ctx.clone();
+                                let fut = Box::pin(async move {
+                                    let query_ctx = graph_ctx.query_context();
+                                    EntityPropertyCache::prefetch(
+                                        &graph_ctx, &query_ctx, &vids, &eids,
+                                    )
+                                    .await
+                                });
+                                self.state = VarLengthMainStreamState::PrefetchingProperties {
+                                    adjacency,
+                                    fut,
+                                    input,
+                                    expansions,
+                                };
+                                continue;
                             }
 
-                            // Create async hydration future
-                            let schema = self.schema.clone();
-                            let target_variable = self.target_variable.clone();
-                            let target_properties = self.target_properties.clone();
-                            let graph_ctx = self.graph_ctx.clone();
-
-                            let fut = hydrate_vlp_target_properties(
-                                base_batch,
-                                schema,
-                                target_variable,
-                                target_properties,
-                                None, // schemaless — no label name
-                                graph_ctx,
-                            );
-
-                            self.state = VarLengthMainStreamState::Materializing {
-                                adjacency,
-                                fut: Box::pin(fut),
-                            };
-                            // Continue loop to poll the future
+                            let base_batch =
+                                match self.build_output_batch(&input, &expansions, None) {
+                                    Ok(b) => b,
+                                    Err(e) => {
+                                        self.state =
+                                            VarLengthMainStreamState::Processing(adjacency);
+                                        return Poll::Ready(Some(Err(e)));
+                                    }
+                                };
+                            if let Some(batch) = self.dispatch_base_batch(adjacency, base_batch) {
+                                return Poll::Ready(Some(Ok(batch)));
+                            }
+                            // Continue loop to poll the hydration future
                         }
                         Poll::Ready(Some(Err(e))) => {
                             self.state = VarLengthMainStreamState::Done;
@@ -4848,6 +5377,40 @@ impl Stream for GraphVariableLengthTraverseMainStream {
                         }
                     }
                 }
+                VarLengthMainStreamState::PrefetchingProperties {
+                    adjacency,
+                    mut fut,
+                    input,
+                    expansions,
+                } => match fut.as_mut().poll(cx) {
+                    Poll::Ready(Ok(cache)) => {
+                        let base_batch =
+                            match self.build_output_batch(&input, &expansions, Some(&cache)) {
+                                Ok(b) => b,
+                                Err(e) => {
+                                    self.state = VarLengthMainStreamState::Processing(adjacency);
+                                    return Poll::Ready(Some(Err(e)));
+                                }
+                            };
+                        if let Some(batch) = self.dispatch_base_batch(adjacency, base_batch) {
+                            return Poll::Ready(Some(Ok(batch)));
+                        }
+                        // Continue loop to poll the hydration future
+                    }
+                    Poll::Ready(Err(e)) => {
+                        self.state = VarLengthMainStreamState::Done;
+                        return Poll::Ready(Some(Err(e)));
+                    }
+                    Poll::Pending => {
+                        self.state = VarLengthMainStreamState::PrefetchingProperties {
+                            adjacency,
+                            fut,
+                            input,
+                            expansions,
+                        };
+                        return Poll::Pending;
+                    }
+                },
                 VarLengthMainStreamState::Materializing { adjacency, mut fut } => {
                     match fut.as_mut().poll(cx) {
                         Poll::Ready(Ok(batch)) => {
@@ -5148,6 +5711,7 @@ mod tests {
             Some("p"),
             &[],
             None,
+            &[],
         );
 
         assert_eq!(output_schema.fields().len(), 5);

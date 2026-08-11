@@ -100,4 +100,21 @@ pub mod repro_tx_check_int_float;
 // Tier 1.5: the compile-time monotonicity oracle never consulted the registry.
 pub mod repro_issue_157_command_forms;
 pub mod repro_issue_157_registry_rule_leak;
+// #166: an inline property map on an *anonymous* relationship pattern is
+// parsed and then discarded — the filter is gated on a bound edge variable.
+pub mod repro_issue_166_rel_property_map_ignored;
+// #166 family: the same dropped-edge-predicate shape in MERGE, QPP and
+// shortestPath, found by asking where else the #166 gate occurs.
+pub mod repro_issue_166_family_dropped_edge_predicates;
+// #167: dropping a temporary database without `shutdown()` usually strands
+// its `uni_mem_*` directory; `Drop` signals and awaits nothing.
+pub mod repro_issue_167_temporary_leaks_on_drop;
+// #168: a read-only handle warmed on an edge query never re-warms its CSR, so
+// it serves stale edges (while nodes, which reopen the dataset, stay fresh).
+pub mod repro_issue_168_readonly_stale_edges;
+// #168 family: other caches a second handle warms once and never revalidates.
+pub mod repro_issue_168_family_stale_second_handle;
+// #169: a fork of a read-only parent captures a zeroed `ForkPoint`, so its
+// version floor and VID allocator start at 0 and the two languages disagree.
+pub mod repro_issue_169_readonly_fork_incoherent;
 pub mod repro_registry_monotonicity_oracle;

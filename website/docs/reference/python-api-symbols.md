@@ -4,7 +4,7 @@
 
 # Python API — Symbol Reference
 
-Complete symbol surface of the `uni_db` Python bindings, **generated from `bindings/uni-db/uni_db/__init__.pyi`** at version 3.3.0.
+Complete symbol surface of the `uni_db` Python bindings, **generated from `bindings/uni-db/uni_db/__init__.pyi`** at version 3.4.0.
 
 This page is exhaustive and always in sync with the type stubs — it is regenerated in CI. For narrative documentation, worked examples and the recommended patterns, start at the [Python API guide](python-api.md).
 
@@ -532,6 +532,7 @@ The main asynchronous Uni database interface.
 | `xervo() -> AsyncXervo` | — |
 | `compaction() -> AsyncCompaction` | — |
 | `indexes() -> AsyncIndexes` | — |
+| `uri() -> str` *(property)* | — |
 | `async flush() -> None` | — |
 | `async create_snapshot(name: str) -> str` | — |
 | `async list_snapshots() -> list[SnapshotInfo]` | — |
@@ -2219,6 +2220,7 @@ The main synchronous Uni database interface.
 | `xervo() -> Xervo` | — |
 | `compaction() -> Compaction` | — |
 | `indexes() -> Indexes` | — |
+| `uri() -> str` *(property)* | — |
 | `flush() -> None` | — |
 | `create_snapshot(name: str) -> str` | — |
 | `list_snapshots() -> list[SnapshotInfo]` | — |

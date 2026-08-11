@@ -636,8 +636,33 @@ impl PatternComprehensionExecExpr {
             ],
         ));
 
-        let uni_schema = self.graph_ctx.storage().schema_manager().schema();
         let num_steps = self.traversal_steps.len();
+
+        // Path element structs carry user properties in a `properties` blob, and
+        // the only synchronous accessor reads the L0 write buffers alone — a
+        // flushed entity would come back with no properties at all. Pre-fetch
+        // them from storage, using the same blocking bridge the property
+        // columns above already use inside this physical expression.
+        let mut prefetch_vids: Vec<Vid> = Vec::with_capacity(num_expanded * (num_steps + 1));
+        let mut prefetch_eids: Vec<Eid> = Vec::with_capacity(num_expanded * num_steps);
+        for row_idx in 0..num_expanded {
+            prefetch_vids.push(Vid::from(expansion.anchor_vids[row_idx]));
+            for step_idx in 0..num_steps {
+                prefetch_vids.push(Vid::from(expansion.step_target_vids[step_idx][row_idx]));
+                prefetch_eids.push(Eid::from(expansion.step_edge_ids[step_idx][row_idx]));
+            }
+        }
+        let prop_cache = block_on_scoped("Path element prop load", async {
+            super::common::EntityPropertyCache::prefetch(
+                &self.graph_ctx,
+                query_ctx,
+                &prefetch_vids,
+                &prefetch_eids,
+            )
+            .await
+            .map_err(anyhow::Error::from)
+        })?;
+        let prop_cache = Some(&prop_cache);
 
         for row_idx in 0..num_expanded {
             // Build node list: anchor + each step's target
@@ -645,12 +670,22 @@ impl PatternComprehensionExecExpr {
             let anchor_vid = Vid::from(anchor_vid_u64);
 
             // Append anchor node
-            super::common::append_node_to_struct(nodes_builder.values(), anchor_vid, query_ctx);
+            super::common::append_node_to_struct_with(
+                nodes_builder.values(),
+                anchor_vid,
+                query_ctx,
+                prop_cache,
+            );
 
             // Append target node for each step
             for step_idx in 0..num_steps {
                 let target_vid = Vid::from(expansion.step_target_vids[step_idx][row_idx]);
-                super::common::append_node_to_struct(nodes_builder.values(), target_vid, query_ctx);
+                super::common::append_node_to_struct_with(
+                    nodes_builder.values(),
+                    target_vid,
+                    query_ctx,
+                    prop_cache,
+                );
             }
             nodes_builder.append(true);
 
@@ -658,9 +693,6 @@ impl PatternComprehensionExecExpr {
             for step_idx in 0..num_steps {
                 let eid = Eid::from(expansion.step_edge_ids[step_idx][row_idx]);
                 let edge_type_id = expansion.step_edge_type_ids[step_idx][row_idx];
-                let edge_type_name = uni_schema
-                    .edge_type_name_by_id_unified(edge_type_id)
-                    .unwrap_or_default();
 
                 // Determine src and dst: for the path struct, src is the node
                 // *before* this edge and dst is the node *after* this edge.
@@ -671,23 +703,20 @@ impl PatternComprehensionExecExpr {
                 };
                 let dst_vid = expansion.step_target_vids[step_idx][row_idx];
 
-                // Report the relationship's STORED direction, not the traversal
-                // order (`src_vid` -> `dst_vid` along the expansion). Resolves
-                // flushed (L1-resident) edges too, where the L0 chain no longer
-                // holds the stored endpoints.
-                let (stored_src, stored_dst) = self.graph_ctx.resolve_stored_edge_endpoints(
+                super::common::append_traversed_edge(
+                    rels_builder.values(),
+                    &super::common::EdgeAppendCtx {
+                        graph_ctx: &self.graph_ctx,
+                        query_ctx,
+                        // This step's type is known exactly, so the probe has
+                        // only one candidate to test.
+                        edge_type_ids: &[edge_type_id],
+                        prop_cache,
+                        fixed_type_name: None,
+                    },
                     eid,
                     Vid::from(src_vid),
                     Vid::from(dst_vid),
-                    &[edge_type_id],
-                );
-                super::common::append_edge_to_struct(
-                    rels_builder.values(),
-                    eid,
-                    &edge_type_name,
-                    stored_src,
-                    stored_dst,
-                    query_ctx,
                 );
             }
             rels_builder.append(true);

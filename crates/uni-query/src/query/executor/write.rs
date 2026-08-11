@@ -4525,6 +4525,20 @@ impl Executor {
                                     };
 
                                     let is_variable_length = r.range.is_some();
+                                    // An anonymous relationship carrying a
+                                    // property map still needs a name: the
+                                    // filter below builds `var.prop = value`
+                                    // and the edge property columns are
+                                    // materialized under the step variable.
+                                    // Without one, MERGE's match phase ignored
+                                    // the map and treated any edge of the type
+                                    // as a match — so it skipped the write it
+                                    // exists to perform. Same defect as #166 in
+                                    // `plan_traverse_with_source`.
+                                    let step_variable = r.variable.clone().or_else(|| {
+                                        (r.properties.is_some() && !is_variable_length)
+                                            .then(|| planner.next_anon_var())
+                                    });
                                     let type_name = &r.types[0];
 
                                     // Use TraverseMainByType for schemaless edge types
@@ -4543,7 +4557,7 @@ impl Executor {
                                             direction: r.direction.clone(),
                                             source_variable,
                                             target_variable: target_variable.clone(),
-                                            step_variable: r.variable.clone(),
+                                            step_variable: step_variable.clone(),
                                             min_hops: r
                                                 .range
                                                 .as_ref()
@@ -4580,7 +4594,7 @@ impl Executor {
                                             source_variable,
                                             target_variable: target_variable.clone(),
                                             target_label_id,
-                                            step_variable: r.variable.clone(),
+                                            step_variable: step_variable.clone(),
                                             min_hops: r
                                                 .range
                                                 .as_ref()
@@ -4603,12 +4617,13 @@ impl Executor {
                                             edge_filter_expr: None,
                                             path_mode: crate::query::df_graph::nfa::PathMode::Trail,
                                             qpp_steps: None,
+                                            qpp_inner_source: None,
                                         };
                                     }
 
                                     // Apply property filters for relationship
                                     if r.properties.is_some()
-                                        && let Some(r_var) = &r.variable
+                                        && let Some(r_var) = &step_variable
                                     {
                                         let resolved_rel_props = self
                                             .resolve_merge_properties(

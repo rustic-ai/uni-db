@@ -48,6 +48,10 @@ pub enum VlpOutputMode {
     FullPath,
     /// Step variable is bound (e.g., `[r*1..3]`).
     StepVariable,
+    /// One or more GQL group variables are bound by a quantified path pattern.
+    /// Like [`Self::StepVariable`] this needs the full matched path, since the
+    /// group columns are strided slices of it.
+    GroupVariables,
     /// `shortestPath()` or `allShortestPaths()`.
     ShortestPath { selector: PathSelector },
     /// EXISTS pattern with VLP.
@@ -72,6 +76,73 @@ pub struct QppStep {
     pub target_constraint: Option<VertexConstraint>,
 }
 
+/// Whether a group variable collects nodes or relationships.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum QppGroupKind {
+    Node,
+    Edge,
+}
+
+/// A GQL group variable bound inside a quantified path pattern.
+///
+/// Each inner variable holds one element per iteration of the quantifier, so
+/// its values are a strided slice of the matched path: element `i` sits at
+/// `offset + i * hops_per_iter` in the path's node list (`Node`) or edge list
+/// (`Edge`).
+///
+/// Note that the last node position of one iteration is the first node
+/// position of the next, so two node group variables legitimately overlap —
+/// in `((x)-[r]->(y)-[s]->(z)){2}`, `z[0]` and `x[1]` are the same node.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct QppGroupBinding {
+    pub name: String,
+    pub kind: QppGroupKind,
+    /// Index of this variable's element in the first iteration.
+    pub offset: usize,
+}
+
+/// Derive the group-variable bindings for a quantified path pattern.
+///
+/// This is the *only* place offsets are assigned. It sits beside
+/// [`PathNfa::from_qpp`] because it mirrors that function's
+/// `hop % hops_per_iter` cycling: hop `j` of every iteration is step `j`, so
+/// step `j`'s relationship is at edge offset `j` and its target node is at node
+/// offset `j + 1`, with the pattern's inner source node at node offset 0.
+/// Deriving both from the same step list is what keeps the executor's columns
+/// and the NFA's slots in lockstep.
+///
+/// Anonymous positions contribute no binding.
+pub fn qpp_group_bindings(
+    inner_source: Option<&str>,
+    steps: &[(Option<String>, Option<String>)],
+) -> Vec<QppGroupBinding> {
+    let mut bindings = Vec::new();
+    if let Some(name) = inner_source.filter(|n| !n.is_empty()) {
+        bindings.push(QppGroupBinding {
+            name: name.to_string(),
+            kind: QppGroupKind::Node,
+            offset: 0,
+        });
+    }
+    for (step_idx, (edge_var, target_var)) in steps.iter().enumerate() {
+        if let Some(name) = edge_var.as_deref().filter(|n| !n.is_empty()) {
+            bindings.push(QppGroupBinding {
+                name: name.to_string(),
+                kind: QppGroupKind::Edge,
+                offset: step_idx,
+            });
+        }
+        if let Some(name) = target_var.as_deref().filter(|n| !n.is_empty()) {
+            bindings.push(QppGroupBinding {
+                name: name.to_string(),
+                kind: QppGroupKind::Node,
+                offset: step_idx + 1,
+            });
+        }
+    }
+    bindings
+}
+
 /// A single NFA transition between states.
 #[derive(Clone, Debug)]
 pub struct NfaTransition {
@@ -79,6 +150,15 @@ pub struct NfaTransition {
     pub to: NfaStateId,
     pub edge_type_ids: Vec<u32>,
     pub direction: Direction,
+    /// Which per-hop edge filter admits this transition, as an index into the
+    /// executor's filter list.
+    ///
+    /// A quantified path pattern can put a different property map on each hop,
+    /// so one filter for the whole traversal is not enough. `from_qpp` cycles
+    /// the step index here; `from_vlp` has a single step and always uses 0.
+    /// Held as an index rather than the filter itself because the NFA is built
+    /// during planning and the filters only exist after warming.
+    pub edge_filter_slot: usize,
 }
 
 /// Non-deterministic finite automaton for variable-length path matching.
@@ -108,6 +188,12 @@ pub struct PathNfa {
     /// Per-state vertex constraint. `state_constraints[i]` is the constraint
     /// that must hold on a vertex reaching NFA state `i`. `None` = no constraint.
     state_constraints: Vec<Option<VertexConstraint>>,
+    /// Per-state vertex *property* filter slot, keyed the same way as
+    /// `state_constraints` (by destination state): which per-hop filter a
+    /// vertex reaching state `i` must pass. `None` = no property map on that
+    /// hop's target node. Separate from `state_constraints` so label handling
+    /// is untouched.
+    state_vertex_filter_slot: Vec<Option<usize>>,
 }
 
 impl PathNfa {
@@ -131,6 +217,7 @@ impl PathNfa {
                 num_states: 1,
                 transitions_by_state: vec![(0, 0)],
                 state_constraints: vec![None],
+                state_vertex_filter_slot: vec![None],
             };
         }
 
@@ -144,6 +231,8 @@ impl PathNfa {
                 to: (i + 1) as NfaStateId,
                 edge_type_ids: edge_type_ids.clone(),
                 direction,
+                // A simple VLP is one step repeated, so every hop shares slot 0.
+                edge_filter_slot: 0,
             });
         }
 
@@ -166,6 +255,7 @@ impl PathNfa {
 
         // No state constraints for simple VLP patterns.
         let state_constraints = vec![None; num_states as usize];
+        let state_vertex_filter_slot = vec![None; num_states as usize];
 
         Self {
             transitions,
@@ -174,6 +264,7 @@ impl PathNfa {
             num_states,
             transitions_by_state,
             state_constraints,
+            state_vertex_filter_slot,
         }
     }
 
@@ -238,6 +329,7 @@ impl PathNfa {
                 num_states: 1,
                 transitions_by_state: vec![(0, 0)],
                 state_constraints: vec![None],
+                state_vertex_filter_slot: vec![None],
             };
         }
 
@@ -248,23 +340,31 @@ impl PathNfa {
         // Build transitions: one per hop, cycling through steps
         let mut transitions = Vec::with_capacity(total_hops);
         let mut state_constraints = vec![None; num_states as usize];
+        let mut state_vertex_filter_slot: Vec<Option<usize>> = vec![None; num_states as usize];
 
         for hop in 0..total_hops {
             let step = &steps[hop % hops_per_iter];
             let from = hop as NfaStateId;
             let to = (hop + 1) as NfaStateId;
 
+            let slot = hop % hops_per_iter;
+
             transitions.push(NfaTransition {
                 from,
                 to,
                 edge_type_ids: step.edge_type_ids.clone(),
                 direction: step.direction,
+                edge_filter_slot: slot,
             });
 
             // Apply the step's target constraint to the destination state
             if let Some(ref constraint) = step.target_constraint {
                 state_constraints[to as usize] = Some(constraint.clone());
             }
+            // …and the step's target *property* filter, keyed the same way.
+            // Always set: the executor decides whether that slot's filter
+            // actually constrains anything.
+            state_vertex_filter_slot[to as usize] = Some(slot);
         }
 
         // Accepting states at iteration boundaries >= min_iterations
@@ -291,12 +391,100 @@ impl PathNfa {
             num_states,
             transitions_by_state,
             state_constraints,
+            state_vertex_filter_slot,
         }
+    }
+
+    /// Which per-hop vertex-property filter a vertex reaching `state` must
+    /// pass, if that hop's target node carried a property map.
+    pub fn vertex_filter_slot(&self, state: NfaStateId) -> Option<usize> {
+        self.state_vertex_filter_slot
+            .get(state as usize)
+            .copied()
+            .flatten()
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::{QppGroupBinding, QppGroupKind, qpp_group_bindings};
+
+    /// `((x)-[r]->(y)-[s]->(z)){n}` — every one of the five inner positions
+    /// named, so an off-by-one in any offset is visible.
+    #[test]
+    fn qpp_group_bindings_stride_by_position() {
+        let steps = vec![
+            (Some("r".to_string()), Some("y".to_string())),
+            (Some("s".to_string()), Some("z".to_string())),
+        ];
+        let got = qpp_group_bindings(Some("x"), &steps);
+
+        assert_eq!(
+            got,
+            vec![
+                QppGroupBinding {
+                    name: "x".into(),
+                    kind: QppGroupKind::Node,
+                    offset: 0
+                },
+                QppGroupBinding {
+                    name: "r".into(),
+                    kind: QppGroupKind::Edge,
+                    offset: 0
+                },
+                QppGroupBinding {
+                    name: "y".into(),
+                    kind: QppGroupKind::Node,
+                    offset: 1
+                },
+                QppGroupBinding {
+                    name: "s".into(),
+                    kind: QppGroupKind::Edge,
+                    offset: 1
+                },
+                QppGroupBinding {
+                    name: "z".into(),
+                    kind: QppGroupKind::Node,
+                    offset: 2
+                },
+            ]
+        );
+    }
+
+    /// The last node of an iteration is the first node of the next, so with
+    /// `hops_per_iter = 2` the `z` and `x` strides interleave: z[i] == x[i+1].
+    #[test]
+    fn qpp_group_bindings_boundary_positions_overlap() {
+        let steps = vec![(None, Some("y".to_string())), (None, Some("z".to_string()))];
+        let got = qpp_group_bindings(Some("x"), &steps);
+        let hops_per_iter = steps.len();
+
+        let offset_of = |n: &str| got.iter().find(|b| b.name == n).unwrap().offset;
+        assert_eq!(offset_of("z"), offset_of("x") + hops_per_iter);
+    }
+
+    #[test]
+    fn qpp_group_bindings_skip_anonymous_positions() {
+        let steps = vec![(None, Some("y".to_string())), (Some("s".to_string()), None)];
+        let got = qpp_group_bindings(None, &steps);
+
+        assert_eq!(
+            got,
+            vec![
+                QppGroupBinding {
+                    name: "y".into(),
+                    kind: QppGroupKind::Node,
+                    offset: 1
+                },
+                QppGroupBinding {
+                    name: "s".into(),
+                    kind: QppGroupKind::Edge,
+                    offset: 1
+                },
+            ]
+        );
+    }
+
     use super::*;
 
     #[test]

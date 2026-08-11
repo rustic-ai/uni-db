@@ -113,7 +113,7 @@ METAMORPHIC_CASES=64 cargo nextest run -p uni-db --test integration \
 # The trace is off by default and its assertions follow the env var, so this job
 # is the only place the real `UNI_GC_TRACE` read is exercised. It must pass in
 # BOTH states — the ordinary workspace run above covers the off case.
-UNI_GC_TRACE=1 cargo nextest run -p uni-plugin-builtin -E 'test(graph_compute)'
+UNI_GC_TRACE=1 cargo nextest run -p uni-plugin-builtin -p uni-plugin-rhai -E 'test(graph_compute)'
 ```
 
 ### openCypher TCK (schemaless)
