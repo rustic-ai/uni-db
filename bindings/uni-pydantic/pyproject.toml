@@ -12,7 +12,7 @@ name = "uni-pydantic"
 # reliably read the workspace version. Keep this in lock-step with
 # [workspace.package] version in the root Cargo.toml (the release validate step
 # asserts they match).
-version = "3.3.0"
+version = "3.4.0"
 description = "Pydantic-based OGM (Object-Graph Mapping) for Uni Graph Database"
 authors = [
     { name = "Dragonscale Industries Inc.", email = "dev@dragonscale.ai" }
@@ -31,7 +31,7 @@ classifiers = [
 ]
 dependencies = [
     "pydantic>=2.0.0,<3.0.0",
-    "uni-db>=3.3.0",
+    "uni-db>=3.4.0",
 ]
 
 [project.urls]

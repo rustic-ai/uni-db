@@ -24,6 +24,7 @@ field, so the tag, this field, and every synced literal below must all agree.
 | --- | --- |
 | Every workspace crate (`crates/*`, incl. `uni-sparse-vector`) | `version.workspace = true` in its `Cargo.toml` |
 | The `uni-db` maturin wheel + 5 accelerator variants (`bindings/uni-db*/pyproject.toml`) | `dynamic = ["version"]` — maturin reads the crate `Cargo.toml` at build time |
+| `uni_pydantic.__version__` | derived via `_package_version()` from installed package metadata |
 
 The release workflow actively **forbids** reintroducing a hardcoded literal in the 6 maturin
 `pyproject.toml` files (it greps for `^version = ` and fails if present), so these stay correct by
@@ -32,18 +33,23 @@ construction.
 ## What you MUST bump by hand (the synced literals)
 
 `uni-pydantic` is pure-Python (hatchling, no Cargo manifest), so its isolated build cannot read the
-Rust workspace version. It therefore carries the version literal in **three** places that all have
+Rust workspace version. It therefore carries the version literal in **two** places that both have
 to match `Cargo.toml`:
 
 | # | File | Line | Enforced by CI? |
 | --- | --- | --- | --- |
-| 1 | `bindings/uni-pydantic/pyproject.toml` | `version = "X.Y.Z"` | ✅ `release.yml` validate-versions (`PYDANTIC_VERSION` must equal workspace) |
-| 2 | `bindings/uni-pydantic/uv.lock` | the `version` line under `name = "uni-pydantic"` | ⚠️ indirectly — a stale lock fails `uv lock --locked` / `uv sync` checks |
-| 3 | `bindings/uni-pydantic/src/uni_pydantic/__init__.py` | `__version__ = "X.Y.Z"` | ❌ **not currently checked** — easy to forget (it had drifted to `2.2.3` while the package was `2.4.x`) |
+| 1 | `bindings/uni-pydantic/pyproject.toml` | `version = "X.Y.Z"` (and the `uni-db>=X.Y.Z` floor) | ✅ `release.yml` validate-versions **and** `scripts/ci/check_version_consistency.py` in `release-guards`, per-PR |
+| 2 | `bindings/uni-pydantic/uv.lock` | the `version` line under `name = "uni-pydantic"` | ⚠️ indirectly — a stale lock fails `uv lock --check` / `uv sync` checks |
 
-> ⚠️ Item 3 is a known gap: nothing fails CI if `__version__` drifts. Until a check exists, treat it
-> as part of this checklist. (A good follow-up is to extend the `release.yml` validate-versions step
-> to also assert `__version__` and the `uv.lock` entry equal the workspace version.)
+> **`__version__` is no longer one of them.** It used to be a hand-written literal (the known gap
+> this document warned about, which had drifted to `2.5.0` against a `3.3.0` package). It is now
+> *derived* from installed package metadata by `_package_version()`, and
+> `scripts/ci/check_version_consistency.py` actively **fails** if a literal `__version__ = "..."`
+> reappears. Do not set it by hand — doing so now breaks `release-guards`.
+
+Also bump the internal `[workspace.dependencies]` requirements in the root `Cargo.toml` (the
+`uni-* = { path = ..., version = "X.Y.Z" }` lines), which crates.io publishing resolves against.
+Third-party crates that happen to sit on a nearby version are left alone.
 
 ## Bump procedure
 
@@ -55,9 +61,9 @@ For a release `X.Y.Z` (e.g. `2.4.1`):
    version = "X.Y.Z"
    ```
 
-2. **uni-pydantic literals** — set all three to the same `X.Y.Z`:
-   - `bindings/uni-pydantic/pyproject.toml` → `version = "X.Y.Z"`
-   - `bindings/uni-pydantic/src/uni_pydantic/__init__.py` → `__version__ = "X.Y.Z"`
+2. **uni-pydantic literals** — set both to the same `X.Y.Z` (do NOT touch `__init__.py`; its
+   `__version__` is derived and a literal there fails `release-guards`):
+   - `bindings/uni-pydantic/pyproject.toml` → `version = "X.Y.Z"` and the `uni-db>=X.Y.Z` floor
    - `bindings/uni-pydantic/uv.lock` → regenerate it rather than hand-editing if you can:
      ```bash
      cd bindings/uni-pydantic && uv lock
@@ -70,9 +76,12 @@ For a release `X.Y.Z` (e.g. `2.4.1`):
    VERSION=$(grep -m1 '^version = ' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')
    echo "workspace:   $VERSION"
    echo "pyproject:   $(grep -m1 '^version = ' bindings/uni-pydantic/pyproject.toml | sed 's/.*"\(.*\)".*/\1/')"
-   echo "__version__: $(grep -m1 '__version__' bindings/uni-pydantic/src/uni_pydantic/__init__.py | sed 's/.*"\(.*\)".*/\1/')"
    echo "uv.lock:     $(grep -A1 'name = "uni-pydantic"' bindings/uni-pydantic/uv.lock | grep version | sed 's/.*"\(.*\)".*/\1/')"
-   # All four lines must print the same value.
+   # All three lines must print the same value.
+
+   # And the generated Python symbol reference embeds the version, so it goes stale on a bump:
+   python3 scripts/gen_python_api_reference.py        # regenerate, never hand-edit
+   python3 scripts/ci/check_version_consistency.py
 
    # And the 6 maturin bindings must NOT carry a literal:
    for p in bindings/uni-db/pyproject.toml bindings/uni-db-onnx/pyproject.toml \
@@ -113,9 +122,13 @@ artifacts. Two options:
 | File | What to set | Auto? |
 | --- | --- | --- |
 | `Cargo.toml` `[workspace.package] version` | `X.Y.Z` | source of truth |
+| `Cargo.toml` `[workspace.dependencies]` `uni-*` | `X.Y.Z` | ❌ manual |
 | `crates/*/Cargo.toml` | — | ✅ `version.workspace = true` |
 | `bindings/uni-db*/pyproject.toml` (×6) | — | ✅ `dynamic = ["version"]` |
-| `bindings/uni-pydantic/pyproject.toml` | `X.Y.Z` | ❌ manual (CI-enforced) |
+| `bindings/uni-pydantic/pyproject.toml` | `X.Y.Z` + `uni-db>=X.Y.Z` | ❌ manual (CI-enforced) |
 | `bindings/uni-pydantic/uv.lock` | `X.Y.Z` | ❌ manual / `uv lock` |
-| `bindings/uni-pydantic/src/uni_pydantic/__init__.py` | `X.Y.Z` | ❌ manual (not CI-enforced) |
+| `bindings/uni-pydantic/src/uni_pydantic/__init__.py` | — | ✅ derived; a literal **fails** CI |
+| `Cargo.lock` | `X.Y.Z` | ✅ regenerated by any cargo command |
+| `website/docs/reference/python-api-symbols.md` | — | ✅ regenerate via `gen_python_api_reference.py` (CI-gated) |
+| `website/docs/reference/python-api.md` | `vX.Y.Z` in the header line | ❌ manual (not CI-enforced) |
 | git tag | `vX.Y.Z` | ❌ manual, must match workspace |
