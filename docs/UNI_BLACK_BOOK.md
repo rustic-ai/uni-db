@@ -1012,6 +1012,54 @@ Inverted:       storage/indexes/{label}_{property}_inverted
 
 In hybrid mode, the local path contains `wal/` and ID allocation state, while `storage/` tables are in the remote object store.
 
+### Temporary Databases and Teardown Ordering
+
+`Uni::temporary()` / `Uni::in_memory()` are only in-memory from the caller's
+side: both are backed by a `uni_mem_*` scratch directory under `$TMPDIR`, with
+the full on-disk layout inside. `Uni::uri()` returns that root (not the
+`storage/` subdirectory) and is exposed through the Python bindings as
+`Uni.uri` / `AsyncUni.uri`, so a caller can account for the directory without
+globbing `$TMPDIR` — which is unsafe when another process owns one.
+
+Removal is ordered by **ownership**, not timing. The guard (`ScratchDir`) is
+held as an `Arc` by `UniInner` *and* by every task registered through
+`track_task_with_scratch_claim`, so the directory cannot be removed while a
+task that might write to it is still running. This is not a theoretical
+concern: several tasks write precisely *because* shutdown was signalled — the
+auto-flush task performs a final flush on its way out. With the guard owned
+solely by `UniInner`, teardown removed the directory *successfully* and that
+final flush then recreated the tree, leaving a directory containing exactly
+`storage/catalog/latest` plus one manifest. Measured at 39/40 bare drops.
+
+Two teardown paths, deliberately different:
+
+- **`shutdown()` / `shutdown_in_place()`** awaits every tracked task via
+  `shutdown_async`, then reaps the directory eagerly. Eager because deferring
+  to the guard's `Drop` would keep the directory alive for the lifetime of the
+  handle — for a Python `with Uni.temporary() as db:` block, past the end of
+  the block until garbage collection.
+- **Bare `Drop`** (no explicit shutdown — `db = Uni.temporary()` from Python)
+  signals, closes the flush coordinator's submit channel, and then waits, up to
+  two seconds, for the outstanding claims to drain. The wait exists because
+  ownership ordering assumes *something still runs the tasks*: at process exit
+  the embedder's runtime is abandoned, the tasks never wake, the `Arc` is never
+  released, and the directory is then removed by nothing at all. Closing the
+  submit channel is required rather than optional — the flush-coordinator
+  finalizer blocks on `submit_rx.recv()` and never observes the shutdown
+  broadcast, so without it every exit paid the full two-second deadline.
+
+The wait is skipped when a tokio runtime is already current: those tasks are
+being driven, and on a `current_thread` runtime blocking there would deadlock
+the very tasks being waited on.
+
+A leak here is worth more than the kilobytes suggest. The survivors never
+expire, so a suite opening thousands of databases strands many per run; on a
+tmpfs `$TMPDIR` that exhausts *inodes* rather than space, and surfaces as
+unrelated "failed to create temporary directory" or `No space left on device`
+errors while `df -h` shows the disk nearly empty. Filesystem speed changes the
+rate — a disk-backed `$TMPDIR` leaked where tmpfs did not — so a quick local
+check is not evidence of correctness.
+
 ## LSM-Style 3-Tier Architecture
 
 Uni's storage engine uses an **LSM-tree-inspired** design optimized for graph data. Writes go to an in-memory buffer (L0), flush to sorted runs in Lance (L1), and compact into base tables (L2).
@@ -1223,6 +1271,41 @@ An entry is alive at `version` when `created_version <= version < deleted_versio
 The bound is that narrow for a specific reason: `StorageManager::pinned()` and `at_fork` each build a **fresh** `AdjacencyManager` with its own empty `ShadowCsr`, so those readers never consult the live one. `pinned_at_version` — the path a read-write transaction takes whenever it pins at all (`ssi_enabled`, or any ephemeral/scratch transaction) — is the only one that shares it. `SnapshotManager` cannot supply the floor because it is a manifest reader-writer and tracks no live readers.
 
 **Observability.** `AdjacencyManager::memory_usage` adds `ShadowCsr::approx_bytes` to the main-CSR byte counter, so shadow retention is visible to the cache budget; `shadow_entry_count()` / `ShadowCsr::entry_count()` expose the raw count for retention tests and diagnostics.
+
+### CSR Cache Freshness (Second-Handle Revalidation)
+
+The Main CSR is warmed lazily on first traversal of an `(edge_type, direction)`
+and, historically, never rebuilt: a flush did not invalidate it. That holds for
+the handle that **owns the writer**, whose commits are applied to the manager's
+`active_overlay` directly via `insert_edge` — its CSR plus overlay is complete
+by construction, so re-reading storage would find nothing new.
+
+It does not hold for a second, independent handle on the same store. A
+read-only reader opened alongside a writer receives no `insert_edge` calls, so
+its only route to newly committed edges is a re-warm — and a presence-only gate
+(`has_csr`) blocks that forever. Such a reader was pinned to whatever edge set
+it first traversed, while **node** reads from the same session stayed fresh,
+because every scan reopens the Lance dataset and picks up the newest manifest.
+The CSR is the one place that materialises a *derived* structure, and so has to
+re-implement the invalidation that a plain scan inherits for free.
+
+Each cached CSR now carries a `csr_source_stamp`: the summed Lance versions of
+the tables that warm reads for that `(edge_type, direction)` — the L2 adjacency
+dataset per participating label, plus the L1 delta dataset. Summed rather than
+maxed, so an advance in any contributing table changes the stamp. The stamp is
+taken **before** the read, so a write landing mid-warm leaves the CSR looking
+stale (a redundant re-warm) rather than falsely fresh (missed edges), and a
+missing or unreadable stamp is treated as stale for the same reason.
+
+Revalidation is gated on `StorageManager::requires_adjacency_revalidation`, set
+only for a handle opened `read_only`. Checking costs a Lance manifest read per
+source table per query — measured at ~0.33 ms on a small traversal, about 5–6%
+— and the writer-owning handle provably does not need it.
+
+> **Multi-handle caveat.** This makes *edge reads* coherent for a second
+> handle. It does not make the engine generally multi-handle safe: the fork
+> registry, for one, still caches `catalog/fork_registry.json` in memory and a
+> reader will not see a fork another handle created.
 
 ### AdjacencyDataset (Persistent CSR)
 
@@ -2269,6 +2352,185 @@ RETURN btic_span_agg(e.period) AS total_span
 | `shift_left(x, n)` | Integer | Left shift |
 | `shift_right(x, n)` | Integer | Right shift |
 
+## Relationship Property Maps
+
+An inline property map on a relationship — `-[:E {tag: "keep"}]->` — is a
+filter, exactly as it is on a node. Both are honoured in `MATCH` (fixed-length
+and variable-length) and in `MERGE`'s match phase, whether or not the
+relationship binds a variable.
+
+The "whether or not it binds a variable" clause is load-bearing. Node patterns
+have always been fine because an anonymous node is given a synthesized variable
+(`next_anon_var`) before its filter is built. Relationships were not, and the
+edge filter was gated on that binding — so an anonymous relationship's property
+map was parsed and then silently discarded, and `-[:E {tag: "keep"}]->` matched
+*every* `E` edge. The name is not cosmetic: the physical planner materializes
+edge property columns keyed by the step variable, so substituting a placeholder
+at the filter site alone yields a predicate over a column that was never
+produced. Anonymous relationships that carry a property map are therefore given
+a synthesized variable at the point `step_var` is derived, in both the
+schema'd (`Traverse`) and schemaless (`TraverseMainByType`) branches.
+
+Cypher and Locy share this path — `locy_planner` calls the same
+`QueryPlanner::plan_pattern` — so the two front-ends cannot diverge here.
+
+`shortestPath` / `allShortestPaths` apply the map **during** expansion rather
+than to the result set — the shortest path over permitted edges is not the
+unconstrained shortest path filtered afterwards, so a post-filter would report
+"no path" whenever a longer permitted route exists. The predicate is compiled
+once during warming into an `EidFilter` of admissible edge IDs
+(`build_edge_property_filter`, shared with the variable-length path) and checked
+at each expansion, and again when the concrete relationship is resolved for the
+returned path — with parallel edges between the same pair, the walk can be
+admitted via one edge while the materialized relationship comes back as another.
+
+Multi-hop **quantified path patterns** apply the map **per hop**, and so do
+inline property maps on their intermediate *nodes* — the step loop previously
+read only the node's label, so `((x)-[:E]->(y:B {k:'v'})){1,3}` silently matched
+every `B`.
+
+Each hop gets its own filter, built once during warming and selected at
+expansion by a slot index the NFA stamps onto its transitions (edges) and
+states (target nodes). That is what lets the two hops of
+`((x)-[:E {a:1}]->(y)-[:L {b:2}]->(z)){1,3}` constrain different things; a
+single filter shared across the pattern cannot express it. A hop with no map
+costs no scan — the builders short-circuit on empty conditions.
+
+Both gates **fail closed** on an out-of-range slot. An out-of-range slot can
+only be a programmer error in the slot↔filter lockstep, and failing open would
+reproduce the exact over-matching the whole change removes.
+
+Vertex predicates are precomputed during warming rather than evaluated at the
+gate for a correctness reason, not a performance one: the gate is synchronous,
+and the only synchronous per-vertex accessor is the **L0-only** visibility
+chain, which reports a flushed vertex as property-less and would admit it —
+the trap behind #135 and #141.
+
+An intermediate node needs no label for its map to work: with one, the read
+targets that label's table and projects to the map's columns (#134); without
+one, the label-free batch read resolves per-label and then the schemaless main
+table.
+
+### Group variables
+
+Inner variables *are* exposed, following openCypher and GQL.
+
+`shortestPath` and `allShortestPaths` bind their relationship as a list, exactly
+as an ordinary variable-length pattern does:
+
+```cypher
+MATCH p = shortestPath((a:A)-[r:T*]->(b:B)) RETURN size(r), [e IN r | e.tag]
+```
+
+A **quantified path pattern** binds every variable declared inside it as a GQL
+**group variable** — a list holding one element per iteration of the
+quantifier. With `h = hops_per_iter` steps in the sub-pattern, over a matched
+path's node and edge lists:
+
+- a relationship at step `j` takes `edge_path[j + i*h]` for iteration `i`
+- a node at inner position `p` (`0..=h`) takes `node_path[p + i*h]`
+- the list length is the iteration count; zero iterations gives an **empty
+  list**, and NULL is reserved for an unmatched OPTIONAL
+
+So in `((x)-[r:E]->(y)-[s:L]->(z)){2}`, `z[0]` and `x[1]` are the same node —
+consecutive iterations share a boundary node, and the two lists overlap by
+construction. `qpp_group_bindings` in `df_graph/nfa.rs` is the single place
+those offsets are assigned; it sits beside `PathNfa::from_qpp` because it
+mirrors that function's `hop % hops_per_iter` cycling, which is what keeps the
+executor's columns and the NFA's per-hop filter slots from drifting apart.
+
+**A quantified pattern's endpoints are the adjacent outer nodes, never its
+inner variables.** With no adjacent outer node the endpoint gets an anonymous
+column; the inner node's labels and property map still constrain it, only its
+name stops leaking out. This is a **breaking change** — `MATCH ((a)-[:E]->(b)){2}
+RETURN a.id` used to mean the start node and is now a type error, because `a`
+is a list. Write the endpoint explicitly:
+
+```cypher
+// The endpoints:
+MATCH (s)((a)-[:E]->(b)){2}(e) RETURN s.id, e.id
+```
+
+```cypher
+// The group variable:
+MATCH (s)((a)-[:E]->(b)){2}(e) RETURN [n IN a | n.id]
+```
+
+`last(a).id` reproduces the old value exactly, and the diagnostic for property
+access on a group variable names both replacements.
+
+Grouping follows **quantification**, not parentheses: a parenthesized pattern
+with no quantifier binds ordinary singletons.
+
+A group variable is not a node or a relationship, so `y.name`, `nodes(y)`,
+reusing `y` as a pattern element, and mutating it are planner errors. Supported:
+`RETURN y`, `size(y)`, `y[0]`, `head`/`last(y)`, `[n IN y | n.prop]`,
+`all(n IN y WHERE …)`, `UNWIND y AS n`, and `WITH y AS ys`. Those work without
+per-site special cases because `VariableType::NodeList` / `EdgeList` are
+distinct variants: every existing `== VariableType::Node` comparison excludes a
+list by construction, so misuse is rejected without a bespoke check at each
+site.
+
+Materializing a group column forces full path enumeration where an
+endpoint-only BFS would otherwise do, so bindings the rest of the plan never
+reads are **pruned** in `df_planner` before the output mode is chosen. That
+keeps merely naming a position free, and keeps `RETURN t.id` answering exactly
+as the anonymous form does. `EXPLAIN` shows the chosen mode and any live group
+bindings on the `GraphVariableLengthTraverseExec` line.
+
+Known gap, pre-existing and not introduced here: the endpoint-only plan
+collapses distinct paths that share endpoints, so a quantified pattern over a
+diamond reports one row where GQL specifies one row per binding. Projecting a
+group variable enumerates paths and gives the conformant count.
+
+A quantified pattern is compiled to edge type **ids** and has no schemaless
+main-table operator, so a QPP over an undeclared relationship type is
+**refused** rather than silently matching nothing. Write the sub-pattern
+without inner variable names to have it planned as a variable-length pattern
+instead, or declare the type.
+
+In Locy, a DERIVE head that references a group variable derives **one fact per
+iteration** — an implicit `UNWIND`. `expand_group_bindings` in
+`df_graph/locy_derive.rs` binds the i-th element of every referenced group
+variable before the head is built.
+
+### Path element properties
+
+Node and relationship structs inside a path, a step variable, or a group
+variable carry their user properties in a `properties` CypherValue blob. That
+blob is filled from a **storage-backed batch pre-fetch**
+(`EntityPropertyCache`), not the synchronous L0 chain: L0 alone reports a
+flushed entity as property-less, which silently emptied `nodes(p)` and
+`relationships(p)` after a flush — the #135 / #141 shape, in all six
+path-materializing executors. `PropertyManager::get_batch_vertex_props`
+already overlays the whole L0 chain with correct MVCC precedence, so a cache
+hit is authoritative and needs no further L0 consultation.
+
+Reading a property *off* such an element (`[e IN r | e.tag]`) resolves through
+the same blob: a name that is not a literal struct field is looked up inside
+`properties` via the `index` UDF. Before that, the miss compiled to an untyped
+`ScalarValue::Null`, which the list encoder cannot encode — so the query failed
+outright rather than returning nulls.
+
+### shortestPath hop bounds
+
+`min_hops` / `max_hops` were parsed and then discarded before reaching the exec,
+so `shortestPath((a)-[:T*1..2]->(b))` searched without any bound and could
+return a path of any length. Both are now enforced:
+
+- **`max_hops`** bounds the search depth in both the single-path and
+  all-shortest-paths loops.
+- **`min_hops == 0`** is what admits the zero-length self path. Without an
+  explicit `0` the lower bound defaults to 1, so `[:T]` and `[:T*1..n]` no
+  longer report a vertex as reaching itself for free.
+- **`min_hops > 1`** is refused. Honouring it means not returning on the first
+  sighting of the target and relaxing the visited-set semantics that make the
+  walk terminate — a different search, not a bound on this one.
+
+A pair with no path is **not** dropped: `shortestPath` emits the row with a NULL
+path (pinned by `cypher_shortest_path::test_all_shortest_paths_no_path`). Filter
+on `length(p) IS NOT NULL` when the distinction matters.
+
 ## Cypher Best Practices
 
 | Practice | Details |
@@ -2280,6 +2542,9 @@ RETURN btic_span_agg(e.period) AS total_span
 | **Index MERGE keys** | A scalar index on the MERGE key turns the batched-MERGE lookup into an index point-lookup (vs a full label scan) |
 | **Bulk upsert with `UNWIND ... MERGE`** | One single-node MERGE statement per batch beats one statement per row |
 | **Named paths** | Use `p = (a)-->(b)` when you need path functions |
+| **Label intermediate QPP nodes you filter** | Optional, but a labelled node projects to that label's table instead of falling back to a schemaless read |
+| **Name a QPP's endpoints explicitly** | `(s)((x)-[:E]->(y)){2}(e)` — inner variables are group variables (lists), not the pattern's start and end |
+| **Leave QPP inner positions anonymous unless you read them** | A named-but-unread position is pruned, but anonymity also keeps a schemaless pattern planable as a variable-length path |
 
 ## Cypher Anti-Patterns
 
@@ -5501,6 +5766,34 @@ Both create and drop run as durable two-phase commits so a crash anywhere in the
 4. `ForkRegistryHandle::finish_create(name, datasets)` flips status to `Active` and persists the dataset→branch map.
 
 If step 3 fails part-way, the registry entry stays in `Pending` and a best-effort `rollback_create` runs. On next process boot, `recover_forks` (`crates/uni-store/src/fork/recovery.rs`) walks all `Pending` entries and rolls them back idempotently.
+
+**Capturing the fork point.** Steps 1–2 need the parent's VID/EID allocator
+high-water marks, its MVCC version HWM, and each dataset's Lance version.
+`Writer::flush_and_capture_fork_point` takes all of them under `flush_lock`,
+after flushing the parent's L0, so nothing can interleave between capture and
+branch creation.
+
+A **read-only parent has no writer**, and that path used to substitute
+`ForkPoint::default()` — every HWM zeroed against a perfectly non-empty
+parent. There is genuinely no L0 to flush, but the marks are not zero, and the
+consequences compounded: the fork's MVCC floor started at 0 (its first commit
+reported version 1 instead of parent-HWM + 1), and its allocator bootstrapped
+from VID 0, colliding with the parent's pre-existing rows so that Lance's
+read-merge shadowed the fork's own writes — the exact failure the per-fork
+allocator exists to prevent.
+
+`capture_fork_point_without_writer` covers that case. Everything it needs is
+reachable without a writer, provided the handle keeps it: the L0 tier and the
+id allocator are both **lifted out of the writer before it is dropped on a
+read-only open** (`UniInner::l0_manager`, `UniInner::id_allocator`), and
+dataset versions come from the branching backend. No `flush_lock` is taken —
+the handle cannot write, and a *different* handle writing concurrently is
+outside the single-writer model regardless.
+
+Note that a fork of a read-only parent is still **writable**: `at_fork` builds
+the child its own writer, and `can_write` is computed on the fork's own inner.
+That is by design — a fork is a sandbox, and read-only parents are exactly the
+"give the model a reasoning handle plus a simulation fork" shape.
 
 **Drop (5 steps).**
 

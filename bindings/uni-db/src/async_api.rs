@@ -360,6 +360,21 @@ impl AsyncDatabase {
         "AsyncUni(open)".to_string()
     }
 
+    /// The filesystem path or URI backing this database.
+    ///
+    /// For a `temporary()` / `in_memory()` database this is the `uni_mem_*`
+    /// scratch directory. Exposed so a caller who never reaches the
+    /// context-manager teardown can still account for the directory — without
+    /// it there is no way to discover the path short of globbing `$TMPDIR`,
+    /// which is unsafe when another process owns one.
+    ///
+    /// Synchronous, like the Rust getter: reading a path needs no runtime, and
+    /// making it awaitable would only obscure that.
+    #[getter]
+    fn uri(&self) -> String {
+        self.inner.uri().to_string()
+    }
+
     /// Flush all uncommitted changes to persistent storage.
     fn flush<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();

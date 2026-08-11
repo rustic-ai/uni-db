@@ -209,6 +209,69 @@ fn validate_fork_name(name: &str) -> Result<()> {
 }
 
 /// Run the 4-step create 2PC and return the now-`Active` ForkInfo.
+/// Capture a fork point from a parent that has no writer (a read-only handle).
+///
+/// The writer-backed path ([`uni_store::Writer::flush_and_capture_fork_point`])
+/// flushes L0 and then reads three things under `flush_lock`: the allocator
+/// HWM, the MVCC version HWM, and each dataset's Lance version. A read-only
+/// parent has no L0 to flush, and all three are still available to it:
+///
+/// * the id allocator is lifted out of the writer before it is dropped on a
+///   read-only open, for exactly this purpose (`UniInner::id_allocator`);
+/// * so is the L0 tier, which carries the MVCC version HWM;
+/// * dataset versions come from the branching backend, which needs no writer.
+///
+/// No `flush_lock` is taken because there is nothing to serialise against on
+/// this handle — it cannot write. A *different* handle writing concurrently is
+/// outside the single-writer model either way.
+async fn capture_fork_point_without_writer(
+    parent: &Session,
+    candidate_datasets: &[String],
+    parent_branches: &BTreeMap<String, String>,
+) -> Result<uni_store::ForkPoint> {
+    let mut fork_point = uni_store::ForkPoint::default();
+
+    if let Some(allocator) = parent.db.id_allocator.as_ref() {
+        let (vid_hwm, eid_hwm) = allocator.current_hwm().await;
+        fork_point.vid_hwm = vid_hwm;
+        fork_point.eid_hwm = eid_hwm;
+    }
+
+    if let Some(l0) = parent.db.l0_manager.as_ref() {
+        fork_point.version_hwm = l0.get_current().read().current_version;
+    }
+
+    let backend = parent.db.storage.backend();
+    if let Some(branching) = backend.branching() {
+        for name in candidate_datasets {
+            if !branching
+                .table_exists(name)
+                .await
+                .map_err(UniError::Internal)?
+            {
+                continue;
+            }
+            let version = branching
+                .current_version(name)
+                .await
+                .map_err(UniError::Internal)?;
+            fork_point.dataset_versions.insert(name.clone(), version);
+
+            if let Some(parent_branch) = parent_branches.get(name) {
+                let branch_version = branching
+                    .current_version_on_branch(name, parent_branch)
+                    .await
+                    .map_err(UniError::Internal)?;
+                fork_point
+                    .parent_branch_versions
+                    .insert(name.clone(), branch_version);
+            }
+        }
+    }
+
+    Ok(fork_point)
+}
+
 async fn create_fork_2pc(
     parent: &Session,
     registry: &Arc<ForkRegistryHandle>,
@@ -285,7 +348,18 @@ async fn create_fork_2pc(
             .await
             .map_err(UniError::Internal)?
     } else {
-        uni_store::ForkPoint::default()
+        // A read-only parent has no writer, but a fork point is still fully
+        // determined: there is no L0 to flush, and every high-water mark the
+        // fork needs is readable from state the handle already holds.
+        //
+        // Defaulting here instead — which is what this branch used to do —
+        // handed the fork `version_hwm = vid_hwm = eid_hwm = 0` against a
+        // perfectly non-empty parent. The fork's MVCC floor then started at 0
+        // (its first commit reported version 1 rather than parent-HWM + 1) and
+        // its allocator bootstrapped from VID 0, colliding with the parent's
+        // pre-existing rows so that Lance's read-merge shadowed the fork's own
+        // writes. Issue #169.
+        capture_fork_point_without_writer(parent, &candidate_datasets, &parent_branches).await?
     };
 
     // Capture parent state at fork-point: snapshot id and schema version.

@@ -657,6 +657,14 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
     ///
     /// Returns `Some(expr)` if the variable is a Struct column and can be accessed,
     /// `None` if fallback to standard compilation is needed.
+    ///
+    /// Entity structs (`node_struct_fields` / `edge_struct_fields`) expose only
+    /// their internal fields — `_vid`/`_eid`, `_labels`/`_type_name`, endpoints —
+    /// as real struct fields; user properties live inside the `properties`
+    /// CypherValue blob. A name that is not a struct field is therefore looked up
+    /// in that blob before falling back to Cypher's missing-key null, so
+    /// `[e IN r | e.tag]` over a native `List<Struct(edge)>` agrees with
+    /// `[e IN relationships(p) | e.tag]` over the CypherValue-encoded list.
     fn try_compile_struct_field(
         &self,
         var_name: &str,
@@ -667,25 +675,67 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
         let DataType::Struct(struct_fields) = input_schema.field(col_idx).data_type() else {
             return None;
         };
+        let col_expr: Arc<dyn PhysicalExpr> = Arc::new(
+            datafusion::physical_expr::expressions::Column::new(var_name, col_idx),
+        );
 
-        // Cypher semantics: accessing a missing key returns null
         if let Some(field_idx) = struct_fields.iter().position(|f| f.name() == field_name) {
             let output_type = struct_fields[field_idx].data_type().clone();
-            let col_expr: Arc<dyn PhysicalExpr> = Arc::new(
-                datafusion::physical_expr::expressions::Column::new(var_name, col_idx),
-            );
-            Some(Arc::new(StructFieldAccessExpr::new(
+            return Some(Arc::new(StructFieldAccessExpr::new(
                 col_expr,
                 field_idx,
                 output_type,
-            )))
-        } else {
-            Some(Arc::new(
-                datafusion::physical_expr::expressions::Literal::new(
-                    datafusion::common::ScalarValue::Null,
-                ),
-            ))
+            )));
         }
+
+        if let Some(expr) = self.try_compile_struct_property(&col_expr, struct_fields, field_name) {
+            return Some(expr);
+        }
+
+        // Cypher semantics: accessing a missing key returns null. Type it as
+        // LargeBinary (an encoded CypherValue null) rather than `ScalarValue::Null`
+        // so the value composes with the CypherValue list/comparison machinery —
+        // an untyped null cannot be encoded into a result list.
+        Some(Arc::new(
+            datafusion::physical_expr::expressions::Literal::new(
+                datafusion::common::ScalarValue::LargeBinary(None),
+            ),
+        ))
+    }
+
+    /// Look a name up inside an entity struct's `properties` CypherValue blob.
+    ///
+    /// Returns `None` when the struct has no such blob (an ordinary struct, where
+    /// a missing field really is a missing key).
+    fn try_compile_struct_property(
+        &self,
+        col_expr: &Arc<dyn PhysicalExpr>,
+        struct_fields: &arrow_schema::Fields,
+        field_name: &str,
+    ) -> Option<Arc<dyn PhysicalExpr>> {
+        let props_idx = struct_fields
+            .iter()
+            .position(|f| f.name() == "properties" && *f.data_type() == DataType::LargeBinary)?;
+
+        let props_expr: Arc<dyn PhysicalExpr> = Arc::new(StructFieldAccessExpr::new(
+            col_expr.clone(),
+            props_idx,
+            DataType::LargeBinary,
+        ));
+        let key_expr: Arc<dyn PhysicalExpr> =
+            Arc::new(datafusion::physical_expr::expressions::Literal::new(
+                datafusion::common::ScalarValue::Utf8(Some(field_name.to_string())),
+            ));
+
+        self.plan_binary_udf(
+            "index",
+            props_expr,
+            key_expr,
+            DataType::LargeBinary,
+            DataType::Utf8,
+        )
+        .ok()
+        .flatten()
     }
 
     /// Compile property access on a struct column (e.g. `x.a` where `x` is Struct).

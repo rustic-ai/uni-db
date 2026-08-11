@@ -317,3 +317,122 @@ async fn test_vlp_with_filter_on_step_variable() -> Result<()> {
 
     Ok(())
 }
+
+// =============================================================================
+// User properties on native edge-list elements
+//
+// The step variable `r` is a native `List<Struct(edge)>`, whose user properties
+// live inside a `properties` CypherValue blob rather than as struct fields.
+// `r[0].since` resolves through the index UDF and has always worked; these
+// cover the list-comprehension and quantifier paths, which bind the loop
+// variable to the struct element directly.
+// =============================================================================
+
+#[tokio::test]
+async fn test_vlp_list_comprehension_reads_edge_properties() -> Result<()> {
+    let db = setup_multi_path_graph().await?;
+
+    // Each 2-hop path has a distinct pair of `since` values, so a uniform or
+    // null answer is distinguishable from the correct one.
+    let result = db
+        .session()
+        .query(
+            r#"
+            MATCH (a:A {num: 1})-[r*2..2]->(c:C)
+            RETURN c.name AS name, [e IN r | e.since] AS sinces
+            ORDER BY name
+        "#,
+        )
+        .await?;
+
+    assert_eq!(result.rows().len(), 3);
+    let expected = [[2020i64, 2023], [2021, 2024], [2022, 2025]];
+    for (row, want) in result.rows().iter().zip(expected.iter()) {
+        let got = row.value("sinces").unwrap().as_array().unwrap();
+        let got: Vec<i64> = got.iter().map(|v| v.as_i64().unwrap()).collect();
+        assert_eq!(got, want.to_vec(), "row {:?}", row.get::<String>("name")?);
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_vlp_quantifier_reads_edge_properties() -> Result<()> {
+    let db = setup_multi_path_graph().await?;
+
+    // The three 2-hop paths carry (2020,2023), (2021,2024), (2022,2025); the
+    // threshold admits exactly two of them, so neither an all-null nor an
+    // all-pass implementation produces this answer.
+    let result = db
+        .session()
+        .query(
+            r#"
+            MATCH (a:A {num: 1})-[r*2..2]->(c:C)
+            WHERE all(e IN r WHERE e.since >= 2021)
+            RETURN c.name AS name ORDER BY name
+        "#,
+        )
+        .await?;
+
+    assert_eq!(result.rows().len(), 2);
+    assert_eq!(result.rows()[0].get::<String>("name")?, "c2");
+    assert_eq!(result.rows()[1].get::<String>("name")?, "c3");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_vlp_edge_list_and_relationships_agree() -> Result<()> {
+    let db = setup_multi_path_graph().await?;
+
+    // `relationships(p)` goes through the CypherValue-encoded list path while
+    // `r` is a native Arrow list; on the same match they must agree.
+    let result = db
+        .session()
+        .query(
+            r#"
+            MATCH p = (a:A {num: 1})-[r*2..2]->(c:C)
+            RETURN [e IN r | e.since] AS native,
+                   [e IN relationships(p) | e.since] AS encoded
+            ORDER BY c.name
+        "#,
+        )
+        .await?;
+
+    assert_eq!(result.rows().len(), 3);
+    for row in result.rows() {
+        let native = row.value("native").unwrap().as_array().unwrap();
+        let encoded = row.value("encoded").unwrap().as_array().unwrap();
+        assert_eq!(native, encoded);
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_vlp_missing_edge_property_is_null() -> Result<()> {
+    let db = setup_multi_path_graph().await?;
+
+    // Cypher map semantics: an absent key is null, not an error. Guards the
+    // fallback arm so the properties lookup does not swallow genuine misses.
+    let result = db
+        .session()
+        .query(
+            r#"
+            MATCH (a:A {num: 1})-[r*1..1]->(b)
+            RETURN [e IN r | e.no_such_property] AS missing LIMIT 1
+        "#,
+        )
+        .await?;
+
+    assert_eq!(result.rows().len(), 1);
+    let missing = result.rows()[0]
+        .value("missing")
+        .unwrap()
+        .as_array()
+        .unwrap();
+    assert_eq!(missing.len(), 1);
+    assert!(missing[0].is_null(), "expected null, got {:?}", missing[0]);
+
+    Ok(())
+}

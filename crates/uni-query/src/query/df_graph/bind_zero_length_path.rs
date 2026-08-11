@@ -160,6 +160,7 @@ impl ExecutionPlan for BindZeroLengthPathExec {
             schema: self.schema.clone(),
             graph_ctx: self.graph_ctx.clone(),
             metrics,
+            pending: None,
         }))
     }
 
@@ -167,6 +168,12 @@ impl ExecutionPlan for BindZeroLengthPathExec {
         Some(self.metrics.clone_inner())
     }
 }
+
+/// An in-flight [`EntityPropertyCache`] fetch and the batch waiting on it.
+type PendingPrefetch = (
+    Pin<Box<dyn std::future::Future<Output = DFResult<EntityPropertyCache>> + Send>>,
+    RecordBatch,
+);
 
 /// Stream that performs the zero-length path binding.
 struct BindZeroLengthPathStream {
@@ -184,13 +191,42 @@ struct BindZeroLengthPathStream {
 
     /// Metrics.
     metrics: BaselineMetrics,
+
+    /// In-flight property pre-fetch for the batch being materialized.
+    ///
+    /// Node structs carry user properties in a `properties` blob, and the only
+    /// synchronous accessor reads the L0 write buffers alone — a flushed vertex
+    /// would come back with no properties at all. See
+    /// [`super::common::EntityPropertyCache`].
+    pending: Option<PendingPrefetch>,
 }
 
-use super::common::extract_column_value;
+use super::common::{EntityPropertyCache, extract_column_value};
 
 impl BindZeroLengthPathStream {
+    /// The vertices this batch will materialize into node structs.
+    fn batch_vids(&self, batch: &RecordBatch) -> Vec<uni_common::core::id::Vid> {
+        let vid_col_name = format!("{}._vid", self.node_variable);
+        (0..batch.num_rows())
+            .filter_map(|row_idx| {
+                extract_column_value(
+                    batch,
+                    &vid_col_name,
+                    row_idx,
+                    |arr: &arrow_array::UInt64Array, i| {
+                        uni_common::core::id::Vid::from(arr.value(i))
+                    },
+                )
+            })
+            .collect()
+    }
+
     /// Process a single input batch.
-    fn process_batch(&self, batch: RecordBatch) -> DFResult<RecordBatch> {
+    fn process_batch(
+        &self,
+        batch: RecordBatch,
+        prop_cache: Option<&EntityPropertyCache>,
+    ) -> DFResult<RecordBatch> {
         let num_rows = batch.num_rows();
         let query_ctx = self.graph_ctx.query_context();
 
@@ -226,7 +262,12 @@ impl BindZeroLengthPathStream {
                 continue;
             }
 
-            super::common::append_node_to_struct_optional(nodes_builder.values(), vid, &query_ctx);
+            super::common::append_node_to_struct_optional_with(
+                nodes_builder.values(),
+                vid,
+                &query_ctx,
+                prop_cache,
+            );
             nodes_builder.append(true);
             rels_builder.append(true);
             path_validity.push(true);
@@ -249,16 +290,38 @@ impl Stream for BindZeroLengthPathStream {
     type Item = DFResult<RecordBatch>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        match self.input.poll_next_unpin(cx) {
-            Poll::Ready(Some(Ok(batch))) => {
-                let _timer = self.metrics.elapsed_compute().timer();
-                let result = self.process_batch(batch);
-                if let Ok(ref b) = result {
-                    self.metrics.record_output(b.num_rows());
+        loop {
+            if let Some((mut fut, batch)) = self.pending.take() {
+                match fut.as_mut().poll(cx) {
+                    Poll::Ready(Ok(cache)) => {
+                        let _timer = self.metrics.elapsed_compute().timer();
+                        let result = self.process_batch(batch, Some(&cache));
+                        if let Ok(ref b) = result {
+                            self.metrics.record_output(b.num_rows());
+                        }
+                        return Poll::Ready(Some(result));
+                    }
+                    Poll::Ready(Err(e)) => return Poll::Ready(Some(Err(e))),
+                    Poll::Pending => {
+                        self.pending = Some((fut, batch));
+                        return Poll::Pending;
+                    }
                 }
-                Poll::Ready(Some(result))
             }
-            other => other,
+
+            match self.input.poll_next_unpin(cx) {
+                Poll::Ready(Some(Ok(batch))) => {
+                    let vids = self.batch_vids(&batch);
+                    let graph_ctx = self.graph_ctx.clone();
+                    let fut = Box::pin(async move {
+                        let query_ctx = graph_ctx.query_context();
+                        EntityPropertyCache::prefetch(&graph_ctx, &query_ctx, &vids, &[]).await
+                    });
+                    self.pending = Some((fut, batch));
+                    // Continue the loop to poll the freshly created future.
+                }
+                other => return other,
+            }
         }
     }
 }

@@ -121,7 +121,16 @@ pub struct UniInner {
     ///
     /// `None` means *deliberately L0-free*: a pinned snapshot view
     /// ([`UniInner::at_snapshot`]), whose rows are entirely in L1.
+    /// The database root as the caller named it: the path or URI passed to
+    /// `open`/`create`, or the `uni_mem_*` scratch root for a temporary
+    /// database. Deliberately not `storage.base_path()`, which points at the
+    /// `storage/` subdirectory — a caller cleaning up after a temporary
+    /// database needs the root, not a child of it.
+    pub(crate) uri: String,
     pub(crate) l0_manager: Option<Arc<uni_store::runtime::l0_manager::L0Manager>>,
+    /// The parent's id allocator, kept even on a read-only open so a fork can
+    /// bootstrap its own allocator above the parent's HWM. See issue #169.
+    pub(crate) id_allocator: Option<Arc<uni_store::runtime::id_allocator::IdAllocator>>,
     pub(crate) xervo_runtime: Option<Arc<ModelRuntime>>,
     pub(crate) config: UniConfig,
     pub(crate) procedure_registry: Arc<uni_query::ProcedureRegistry>,
@@ -240,7 +249,16 @@ pub struct UniInner {
     /// Cached WAL log sequence number (updated after every commit).
     pub(crate) cached_wal_lsn: AtomicU64,
     /// Temp directory guard — auto-deletes on drop. Only set for `Uni::temporary()`.
-    pub(crate) _temp_dir: Option<TempDir>,
+    /// Scratch-directory guard for `Uni::temporary()`, removed when the last
+    /// holder drops.
+    ///
+    /// Shared as an `Arc` with every background task that can write into the
+    /// directory, so removal is ordered by *ownership* rather than by timing.
+    /// Previously this was a bare `TempDir` on `UniInner`: teardown removed the
+    /// directory successfully and the auto-flush task, waking on the very same
+    /// shutdown broadcast, then wrote its final-flush manifest and recreated
+    /// the tree. See `ScratchDir`. Issue #167.
+    pub(crate) _temp_dir: Option<Arc<ScratchDir>>,
     /// Transparent plan cache for the transaction write path.
     ///
     /// Caches the pre-rewrite logical plan keyed by query-text hash + schema
@@ -430,7 +448,11 @@ impl UniInner {
             schema,
             properties,
             writer,
+            uri: self.uri.clone(),
             l0_manager,
+            // A derived (snapshot/fork) inner keeps the parent's allocator
+            // handle so a nested fork can still read its HWM (#169).
+            id_allocator: self.id_allocator.clone(),
             xervo_runtime: self.xervo_runtime.clone(),
             config: self.config.clone(),
             procedure_registry: self.procedure_registry.clone(),
@@ -1090,42 +1112,65 @@ impl Uni {
         Ok(())
     }
 
-    /// Removes an `in_memory()` database's scratch directory, loudly.
+    /// Drops this handle's claim on an `in_memory()` database's scratch
+    /// directory; the directory is removed once the last claim is released.
     ///
     /// A temporary database is only in-memory from the caller's side: it is
-    /// backed by a `uni_mem_*` directory whose removal is otherwise left to
-    /// `TempDir`'s `Drop`, which calls `remove_dir_all` and **discards the
-    /// error**. `remove_dir_all` is not atomic — it walks and unlinks, so a
-    /// background manifest write landing between the walk and the final `rmdir`
-    /// fails with `ENOTEMPTY` and the directory survives silently. Measured at
-    /// ~3% of shutdowns, and the survivors never expire: a suite opening
-    /// thousands of databases strands tens per run, and on a tmpfs `/tmp` that
-    /// exhausts *inodes* rather than space — which presents as unrelated
+    /// backed by a `uni_mem_*` directory. Removal used to be left to `TempDir`'s
+    /// `Drop`, which calls `remove_dir_all` once and **discards the error**, so
+    /// a leak was silent — and the survivors never expire. A suite opening
+    /// thousands of databases strands tens per run; on a tmpfs `TMPDIR` that
+    /// exhausts *inodes* rather than space, which presents as unrelated
     /// "failed to create temporary directory" errors while `df -h` looks fine.
     ///
-    /// Retries briefly to close the race, then warns rather than passing over
-    /// it, because a leak nobody is told about is the part that actually costs
-    /// time. `TempDir`'s own `Drop` remains as the backstop for callers that
-    /// never call `shutdown()`.
+    /// Ordering is by ownership: `ScratchDir` is shared with the background
+    /// tasks that can write into the directory, so the removal cannot be
+    /// undone by a task that is still running. See `ScratchDir`.
     fn reap_scratch_dir(&self) {
-        let Some(dir) = self.inner._temp_dir.as_ref() else {
-            return;
-        };
-        let path = dir.path().to_path_buf();
-        for attempt in 0..5 {
-            match std::fs::remove_dir_all(&path) {
-                Ok(()) => return,
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
-                Err(e) if attempt == 4 => {
-                    tracing::warn!(
-                        path = %path.display(),
-                        error = %e,
-                        "shutdown could not remove the temporary database directory; it will \
-                         be left behind. Repeated leaks exhaust inodes on a tmpfs TMPDIR."
-                    );
-                }
-                Err(_) => std::thread::sleep(std::time::Duration::from_millis(20 * (attempt + 1))),
+        // Safe to remove eagerly here, and only here: the caller
+        // (`shutdown_in_place`) has already awaited every tracked task via
+        // `shutdown_async`, so nothing is left that could recreate the
+        // directory. Deferring to `ScratchDir::drop` instead would leave the
+        // directory alive for as long as the handle is — which for a Python
+        // `with Uni.temporary() as db:` block means past the block's end, until
+        // garbage collection. `ScratchDir::drop` remains the backstop for the
+        // bare-drop path, where nothing has been awaited.
+        if let Some(dir) = self.inner._temp_dir.as_ref() {
+            reap_dir(dir.path());
+        }
+    }
+
+    /// The filesystem location backing this database.
+    ///
+    /// For a `temporary()` / `in_memory()` database this is the `uni_mem_*`
+    /// scratch directory. Exposed so a caller who never calls [`Uni::shutdown`]
+    /// can still account for the directory — without it there is no way to
+    /// discover the path short of globbing `$TMPDIR`, which is unsafe when
+    /// another process owns one.
+    #[must_use]
+    pub fn uri(&self) -> &str {
+        &self.inner.uri
+    }
+}
+
+/// Removes a temporary database's scratch directory, retrying briefly.
+///
+/// Shared by [`Uni::shutdown_in_place`] and `UniInner`'s `Drop` so that both
+/// the explicit and the implicit teardown path get the same retried removal.
+fn reap_dir(path: &std::path::Path) {
+    for attempt in 0..5 {
+        match std::fs::remove_dir_all(path) {
+            Ok(()) => return,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
+            Err(e) if attempt == 4 => {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %e,
+                    "could not remove the temporary database directory; it will \
+                     be left behind. Repeated leaks exhaust inodes on a tmpfs TMPDIR."
+                );
             }
+            Err(_) => std::thread::sleep(std::time::Duration::from_millis(20 * (attempt + 1))),
         }
     }
 }
@@ -1133,7 +1178,125 @@ impl Uni {
 impl Drop for Uni {
     fn drop(&mut self) {
         self.inner.shutdown_handle.shutdown_blocking();
+        self.await_scratch_claims();
         tracing::debug!("Uni dropped, shutdown signal sent");
+    }
+}
+
+impl Uni {
+    /// Give the background tasks a bounded chance to release their scratch-dir
+    /// claims before this handle goes away.
+    ///
+    /// Ordering removal by ownership (see `ScratchDir`) is correct only while
+    /// something still runs the tasks that release the claims. At process exit
+    /// it may not: the embedder's runtime is abandoned, the tasks never wake,
+    /// the `Arc` is never released, and the directory is then removed by
+    /// *nothing at all* — strictly worse than the racy removal it replaced.
+    /// Measured at ~15% of exits with a disk-backed `TMPDIR`; a tmpfs `/tmp`
+    /// drains fast enough to hide it, which is why the first Python probe of
+    /// this read 0/200.
+    ///
+    /// Only runs off a runtime thread — the embedder-teardown case. Inside a
+    /// runtime the tasks are being driven already, and on a `current_thread`
+    /// runtime blocking here would deadlock the very tasks being waited on.
+    fn await_scratch_claims(&self) {
+        let Some(scratch) = self.inner._temp_dir.as_ref() else {
+            return;
+        };
+        if tokio::runtime::Handle::try_current().is_ok() {
+            return;
+        }
+        // The flush-coordinator finalizer blocks on its submit channel and
+        // never sees the shutdown broadcast, so it would hold its claim until
+        // the deadline every single time — turning this bounded wait into an
+        // unconditional one. `shutdown_in_place` closes the channel for the
+        // same reason; this is the synchronous half of that.
+        if let Some(writer) = self.inner.writer.as_ref()
+            && let Some(coord) = writer.flush_coordinator()
+        {
+            coord.close_submit_channel();
+        }
+        // One claim is `UniInner`'s own; any excess belongs to a live task.
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while Arc::strong_count(scratch) > 1 && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+}
+
+/// Tracks a background task, holding a claim on the scratch directory until it
+/// exits.
+///
+/// Every tracked task is a potential writer, and several of them write
+/// precisely *because* shutdown was signalled — the auto-flush task performs a
+/// final flush on its way out. Teardown removes the directory as soon as the
+/// last claim is released, so wrapping each handle in a claim is what orders
+/// the removal after the last writer instead of racing it. Issue #167.
+fn track_task_with_scratch_claim(
+    shutdown_handle: &ShutdownHandle,
+    scratch: Option<&Arc<ScratchDir>>,
+    handle: tokio::task::JoinHandle<()>,
+) {
+    let Some(claim) = scratch.map(Arc::clone) else {
+        shutdown_handle.track_task(handle);
+        return;
+    };
+    shutdown_handle.track_task(tokio::spawn(async move {
+        let _claim = claim;
+        let _ = handle.await;
+    }));
+}
+
+/// Owns a temporary database's scratch directory and removes it when the last
+/// holder drops.
+///
+/// Held as an `Arc` by `UniInner` **and** by every background task that can
+/// write into the directory. That is the whole point: on the bare-drop path
+/// (`db = Uni.temporary()` with no `with` block, from Python) `Drop for Uni`
+/// only calls `shutdown_blocking`, which sends a broadcast and awaits nothing.
+/// With the guard owned solely by `UniInner`, teardown removed the directory
+/// *successfully* and the auto-flush task — waking on that very same broadcast
+/// to perform its final flush — then wrote a catalog manifest and recreated the
+/// tree. Measured at 39/40 drops. Sharing the guard orders the removal after
+/// the last writer instead of racing it. Issue #167.
+pub(crate) struct ScratchDir {
+    dir: TempDir,
+}
+
+impl ScratchDir {
+    pub(crate) fn new(dir: TempDir) -> Self {
+        Self { dir }
+    }
+
+    pub(crate) fn path(&self) -> &std::path::Path {
+        self.dir.path()
+    }
+}
+
+impl Drop for ScratchDir {
+    fn drop(&mut self) {
+        reap_dir(self.dir.path());
+    }
+}
+
+impl Drop for UniInner {
+    /// Reap the scratch directory on the implicit teardown path.
+    ///
+    /// A caller who never calls [`Uni::shutdown`] — `db = Uni.temporary()` with
+    /// no `with` block, from Python — reached only `Drop for Uni`, whose
+    /// `shutdown_blocking` sends a broadcast and awaits nothing. Cleanup then
+    /// fell through to `TempDir`'s own `Drop`: one un-retried `remove_dir_all`
+    /// whose error is discarded. That call walks and then unlinks, so a
+    /// background flush landing mid-walk yields `ENOTEMPTY` and the directory
+    /// survives silently — measured at ~39/40 drops before this ran. Issue #167.
+    ///
+    /// This sits on `UniInner` rather than on `Uni` deliberately: it must run
+    /// when the *last* `Arc` dies, not when one handle goes out of scope while
+    /// a `Session` still holds a reference to the data underneath it.
+    fn drop(&mut self) {
+        // Releasing the `Arc` is the whole teardown: `ScratchDir::drop` removes
+        // the directory once no background task still holds a claim.
+        drop(self._temp_dir.take());
     }
 }
 
@@ -1284,8 +1447,13 @@ impl UniBuilder {
     }
 
     /// Open the database (async).
-    pub async fn build(self) -> Result<Uni> {
+    pub async fn build(mut self) -> Result<Uni> {
         let uri = self.uri.clone();
+        // Share one guard between `UniInner` and every background task that can
+        // write into the scratch directory, so removal is ordered after the
+        // last writer rather than racing it. See `ScratchDir` (issue #167).
+        let scratch_dir: Option<Arc<ScratchDir>> =
+            self.temp_dir.take().map(|d| Arc::new(ScratchDir::new(d)));
         let is_remote_uri = uri.contains("://");
         let is_hybrid = self.hybrid_remote_url.is_some();
 
@@ -1517,6 +1685,13 @@ impl UniBuilder {
         // it, matching the `PropertyManager` wiring below.
         storage.set_plugin_registry(Arc::clone(&plugin_registry));
 
+        // A read-only handle does not own the writer, so its adjacency CSR is
+        // not kept current by `insert_edge` and must be revalidated per read.
+        // Confined to this case because revalidation costs a Lance manifest
+        // read per source table per query (~0.9ms on a small traversal), and
+        // the writer-owning handle provably does not need it. Issue #168.
+        storage.set_requires_adjacency_revalidation(self.read_only);
+
         let storage = Arc::new(storage);
 
         // Create shutdown handle
@@ -1526,7 +1701,7 @@ impl UniBuilder {
         let compaction_handle = storage
             .clone()
             .start_background_compaction(shutdown_handle.subscribe());
-        shutdown_handle.track_task(compaction_handle);
+        track_task_with_scratch_claim(&shutdown_handle, scratch_dir.as_ref(), compaction_handle);
 
         // Initialize property manager
         let prop_cache_capacity = self.config.cache_size / 1024;
@@ -1772,7 +1947,7 @@ impl UniBuilder {
             let handle = rebuild_manager
                 .clone()
                 .start_background_worker(shutdown_handle.subscribe());
-            shutdown_handle.track_task(handle);
+            track_task_with_scratch_claim(&shutdown_handle, scratch_dir.as_ref(), handle);
 
             writer
                 .set_index_rebuild_manager(rebuild_manager)
@@ -1787,7 +1962,6 @@ impl UniBuilder {
         {
             let writer_clone = writer.clone();
             let mut shutdown_rx = shutdown_handle.subscribe();
-
             let handle = tokio::spawn(async move {
                 let mut ticker = tokio::time::interval(interval);
                 loop {
@@ -1806,7 +1980,7 @@ impl UniBuilder {
                 }
             });
 
-            shutdown_handle.track_task(handle);
+            track_task_with_scratch_claim(&shutdown_handle, scratch_dir.as_ref(), handle);
         }
 
         // Track the FlushCoordinator's single-task finalizer (if async
@@ -1819,7 +1993,7 @@ impl UniBuilder {
         if let Some(coord) = writer.flush_coordinator()
             && let Some(handle) = coord.take_finalizer_handle()
         {
-            shutdown_handle.track_task(handle);
+            track_task_with_scratch_claim(&shutdown_handle, scratch_dir.as_ref(), handle);
         }
 
         let (commit_tx, _) = tokio::sync::broadcast::channel(256);
@@ -1829,6 +2003,14 @@ impl UniBuilder {
         // silently miss them — a partially-flushed database would answer from
         // its flushed half alone, with no error.
         let l0_manager_field = Some(Arc::clone(&writer.l0_manager));
+        // Lift the id allocator out for the same reason as the L0 tier above.
+        // Forking a read-only handle still needs the parent's VID/EID
+        // high-water marks to bootstrap the fork's allocator above them;
+        // without them the fork started allocating at 0 and its first writes
+        // were shadowed by the parent's pre-existing rows at the same VID
+        // (issue #169, and exactly the collision `fork::id_alloc`'s rustdoc
+        // warns about).
+        let id_allocator_field = Some(Arc::clone(&writer.allocator));
         let writer_field = if self.read_only { None } else { Some(writer) };
 
         // Build the fork registry from the metadata store (the same
@@ -1959,7 +2141,7 @@ impl UniBuilder {
                     }
                 }
             });
-            shutdown_handle.track_task(handle);
+            track_task_with_scratch_claim(&shutdown_handle, scratch_dir.as_ref(), handle);
         }
 
         // M11: spawn the background-job scheduler driver. The driver
@@ -2055,7 +2237,9 @@ impl UniBuilder {
                 schema: schema_manager,
                 properties: prop_manager,
                 writer: writer_field,
+                uri: uri.clone(),
                 l0_manager: l0_manager_field,
+                id_allocator: id_allocator_field,
                 xervo_runtime,
                 config: self.config,
                 procedure_registry,
@@ -2085,7 +2269,7 @@ impl UniBuilder {
                 cached_l0_mutation_count: AtomicUsize::new(0),
                 cached_l0_estimated_size: AtomicUsize::new(0),
                 cached_wal_lsn: AtomicU64::new(0),
-                _temp_dir: self.temp_dir,
+                _temp_dir: scratch_dir.clone(),
                 plan_cache: Arc::new(std::sync::Mutex::new(crate::api::session::PlanCache::new(
                     TX_PLAN_CACHE_CAPACITY,
                 ))),
@@ -2134,7 +2318,7 @@ impl UniBuilder {
             sweeper_disabled,
             sweeper_shutdown_rx,
         ) {
-            db.inner.shutdown_handle.track_task(handle);
+            track_task_with_scratch_claim(&db.inner.shutdown_handle, scratch_dir.as_ref(), handle);
         }
 
         // Phase 5a-impl Step 7: spawn the fork index builder (no-op
@@ -2149,7 +2333,7 @@ impl UniBuilder {
             index_builder_disabled,
             index_builder_shutdown_rx,
         ) {
-            db.inner.shutdown_handle.track_task(handle);
+            track_task_with_scratch_claim(&db.inner.shutdown_handle, scratch_dir.as_ref(), handle);
         }
 
         Ok(db)

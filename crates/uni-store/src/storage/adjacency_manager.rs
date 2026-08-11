@@ -146,6 +146,20 @@ pub struct AdjacencyManager {
     /// Edge type is u32 with bit 31 = 0 for schema'd, 1 for schemaless.
     main_csr: DashMap<(u32, Direction), Arc<MainCsr>>,
 
+    /// Freshness stamp for each cached Main CSR: the summed Lance versions of
+    /// the L2 adjacency and L1 delta tables it was built from.
+    ///
+    /// The CSR is complete-by-construction only for the handle that owns the
+    /// writer, whose own commits land in `active_overlay` and so never need a
+    /// re-read. A second, independent handle — a read-only reader alongside a
+    /// writer — receives no `insert_edge` calls, so a presence-only cache gate
+    /// pinned it to whatever the edge set was on first traversal, forever.
+    /// Node reads never had this problem because every scan reopens the Lance
+    /// dataset and picks up the newest manifest; the CSR is the one place that
+    /// materialises a *derived* structure and so has to re-implement the
+    /// invalidation it would otherwise inherit. Issue #168.
+    csr_source_stamp: DashMap<(u32, Direction), u64>,
+
     /// Active L0-csr segment (current writes go here).
     active_overlay: Arc<RwLock<L0CsrSegment>>,
 
@@ -178,6 +192,7 @@ impl AdjacencyManager {
     pub fn new(max_bytes: usize) -> Self {
         Self {
             main_csr: DashMap::new(),
+            csr_source_stamp: DashMap::new(),
             active_overlay: Arc::new(RwLock::new(L0CsrSegment::new())),
             frozen_segments: RwLock::new(Vec::new()),
             shadow: ShadowCsr::new(),
@@ -369,6 +384,94 @@ impl AdjacencyManager {
     /// Checks whether a Main CSR exists for the given edge type and direction.
     pub fn has_csr(&self, edge_type: u32, direction: Direction) -> bool {
         self.main_csr.contains_key(&(edge_type, direction))
+    }
+
+    /// Checks whether the cached Main CSR is still current.
+    ///
+    /// `true` when there is no CSR (nothing to be stale) or when its stamp
+    /// still matches the source tables. See `csr_source_stamp` for why a
+    /// presence-only check was not enough (issue #168).
+    pub async fn csr_is_fresh(
+        &self,
+        storage: &StorageManager,
+        edge_type: u32,
+        direction: Direction,
+    ) -> bool {
+        let key = (edge_type, direction);
+        if !self.main_csr.contains_key(&key) {
+            return true;
+        }
+        let Some(stamped) = self.csr_source_stamp.get(&key).map(|v| *v) else {
+            // Warmed before stamping existed, or the stamp could not be taken.
+            // Treat as stale rather than trusting it: a needless re-warm costs
+            // a scan, a missed one silently drops edges from every later read.
+            return false;
+        };
+        match Self::source_version(storage, edge_type, direction).await {
+            Some(current) => current == stamped,
+            // The source version is unavailable (a transient manifest read
+            // failure). Fail towards a re-warm for the same reason as above.
+            None => false,
+        }
+    }
+
+    /// Drops the cached Main CSR so the next warm re-reads from storage.
+    pub fn invalidate_csr(&self, edge_type: u32, direction: Direction) {
+        let key = (edge_type, direction);
+        self.main_csr.remove(&key);
+        self.csr_source_stamp.remove(&key);
+        self.warm_guards.remove(&key);
+    }
+
+    /// Sums the Lance versions of every table a warm for this
+    /// `(edge_type, direction)` reads: the L2 adjacency dataset per
+    /// participating label, plus the L1 delta dataset.
+    ///
+    /// Summed rather than maxed so that an advance in *any* contributing table
+    /// changes the stamp — a max would miss a bump in one table masked by a
+    /// higher version in another. Returns `None` if the edge type is unknown or
+    /// a version read fails, which callers treat as "assume stale".
+    async fn source_version(
+        storage: &StorageManager,
+        edge_type: u32,
+        direction: Direction,
+    ) -> Option<u64> {
+        let schema = storage.schema_manager().schema();
+        let edge_type_name = schema.edge_type_name_by_id_unified(edge_type)?;
+        let labels: Vec<String> = {
+            let meta = schema.edge_types.get(&edge_type_name);
+            match (direction, meta) {
+                (Direction::Outgoing, Some(m)) => m.src_labels.clone(),
+                (Direction::Incoming, Some(m)) => m.dst_labels.clone(),
+                (Direction::Both, Some(m)) => {
+                    let mut l = m.src_labels.clone();
+                    l.extend(m.dst_labels.iter().cloned());
+                    l.sort();
+                    l.dedup();
+                    l
+                }
+                _ => Vec::new(),
+            }
+        };
+
+        let backend = storage.backend();
+        let mut total: u64 = 0;
+        for &read_dir in direction.expand() {
+            let dir_str = read_dir.as_str();
+            for label in &labels {
+                if let Ok(ds) = storage.adjacency_dataset(&edge_type_name, label, dir_str)
+                    && let Ok(Some(v)) = backend.get_table_version(&ds.table_name()).await
+                {
+                    total = total.wrapping_add(v);
+                }
+            }
+            if let Ok(ds) = storage.delta_dataset(&edge_type_name, dir_str)
+                && let Ok(Some(v)) = backend.get_table_version(&ds.table_name()).await
+            {
+                total = total.wrapping_add(v);
+            }
+        }
+        Some(total)
     }
 
     /// Checks whether this manager has been activated for the given edge type.
@@ -575,6 +678,12 @@ impl AdjacencyManager {
         direction: Direction,
         version: Option<u64>,
     ) -> anyhow::Result<()> {
+        // Stamp *before* reading. A write landing mid-warm then leaves the CSR
+        // looking stale and it is re-read on the next query; stamping after the
+        // read would record the post-write version against a pre-write CSR and
+        // the new edges would be missed for good. Issue #168.
+        let source_stamp = Self::source_version(storage, edge_type_id, direction).await;
+
         let schema = storage.schema_manager().schema();
 
         // Use unified lookup to support both schema'd and schemaless edge types
@@ -782,6 +891,16 @@ impl AdjacencyManager {
         let max_offset = entries.iter().map(|(o, _, _, _)| *o).max().unwrap_or(0);
         let csr = MainCsr::from_edge_entries(max_offset as usize, entries);
         self.set_main_csr(edge_type_id, direction, csr);
+        match source_stamp {
+            Some(v) => {
+                self.csr_source_stamp.insert((edge_type_id, direction), v);
+            }
+            // No stamp means no freshness claim: leave the entry absent so
+            // `csr_is_fresh` reports stale and the next query re-warms.
+            None => {
+                self.csr_source_stamp.remove(&(edge_type_id, direction));
+            }
+        }
 
         Ok(())
     }

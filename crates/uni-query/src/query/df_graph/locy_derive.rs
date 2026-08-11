@@ -21,6 +21,7 @@ use uni_locy::{CompiledProgram, FactRow, LocyError, LocyStats};
 use super::locy_ast_builder::build_derive_create;
 use super::locy_eval::eval_expr;
 use super::locy_traits::LocyExecutionContext;
+use crate::query::executor::result_normalizer::ResultNormalizer;
 
 /// Output of `collect_derive_facts()` — collected but not yet executed.
 pub struct CollectedDeriveOutput {
@@ -99,13 +100,20 @@ async fn collect_derive_facts_inner(
     for clause in &rule.clauses {
         if let RuleOutput::Derive(derive_clause) = &clause.output {
             for row in &filtered {
-                let queries = build_derive_create(derive_clause, row)?;
-                affected += queries.len();
+                for row in expand_group_bindings(derive_clause, row) {
+                    let queries = build_derive_create(derive_clause, &row)?;
+                    affected += queries.len();
 
-                // Extract vertex/edge data for inspection
-                extract_vertex_edge_data(derive_clause, row, &mut all_vertices, &mut all_edges);
+                    // Extract vertex/edge data for inspection
+                    extract_vertex_edge_data(
+                        derive_clause,
+                        &row,
+                        &mut all_vertices,
+                        &mut all_edges,
+                    );
 
-                all_queries.extend(queries);
+                    all_queries.extend(queries);
+                }
             }
         }
     }
@@ -116,6 +124,79 @@ async fn collect_derive_facts_inner(
         edges: all_edges,
         affected,
     })
+}
+
+/// Expand a bindings row over any group variables the DERIVE head references.
+///
+/// A variable bound inside a quantified path pattern is a GQL group variable —
+/// a list with one element per iteration of the quantifier — so a head that
+/// references one is asking to derive a fact *per iteration*. Rather than
+/// giving the head a list where it expects a node (which produced a derived
+/// edge with an empty target), bind the i-th element of every referenced group
+/// variable and emit one row per iteration. This is the implicit `UNWIND` a
+/// user would otherwise have to write by hand.
+///
+/// Rows that reference no group variable are returned unchanged, so the common
+/// case allocates nothing beyond the clone.
+fn expand_group_bindings(derive_clause: &DeriveClause, row: &FactRow) -> Vec<FactRow> {
+    use uni_common::Value;
+
+    // Group variables all have one element per iteration, so they are the same
+    // length and are zipped by index — not crossed. Position i of every list is
+    // iteration i of the same match.
+    // Locy's fact rows come from the raw read path, so a list element arrives
+    // as a node-shaped map rather than a `Value::Node`. Normalize it to the
+    // same shape a singleton binding has, or the head sees a map where it
+    // expects a node.
+    let as_nodes = |items: &[Value]| -> Option<Vec<Value>> {
+        items
+            .iter()
+            .map(|v| match ResultNormalizer::normalize_value(v.clone()) {
+                Ok(node @ Value::Node(_)) => Some(node),
+                _ => None,
+            })
+            .collect()
+    };
+
+    let grouped: Vec<(String, Vec<Value>)> = derive_head_variables(derive_clause)
+        .into_iter()
+        .filter_map(|var| match row.get(var.as_str()) {
+            Some(Value::List(items)) => as_nodes(items).map(|nodes| (var, nodes)),
+            _ => None,
+        })
+        .collect();
+
+    if grouped.is_empty() {
+        return vec![row.clone()];
+    }
+
+    let iterations = grouped
+        .iter()
+        .map(|(_, items)| items.len())
+        .min()
+        .unwrap_or(0);
+    (0..iterations)
+        .map(|i| {
+            let mut expanded = row.clone();
+            for (name, items) in &grouped {
+                expanded.insert(name.clone(), items[i].clone());
+            }
+            expanded
+        })
+        .collect()
+}
+
+/// The node variables a DERIVE head references, so `expand_group_bindings` only
+/// expands what the head actually uses.
+fn derive_head_variables(derive_clause: &DeriveClause) -> Vec<String> {
+    match derive_clause {
+        DeriveClause::Patterns(patterns) => patterns
+            .iter()
+            .flat_map(|p| [p.source.variable.clone(), p.target.variable.clone()])
+            .filter(|v| !v.is_empty())
+            .collect(),
+        DeriveClause::Merge(a, b) => vec![a.clone(), b.clone()],
+    }
 }
 
 /// Extract vertex and edge inspection data from a DeriveClause + bindings row.

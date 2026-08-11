@@ -64,6 +64,9 @@ pub struct StorageManager {
     schema_manager: Arc<SchemaManager>,
     snapshot_manager: Arc<SnapshotManager>,
     adjacency_manager: Arc<AdjacencyManager>,
+    /// See `set_requires_adjacency_revalidation`. Defaults to `false`: the
+    /// common case is the single handle that owns the writer.
+    requires_adjacency_revalidation: bool,
     pub config: UniConfig,
     pub compaction_status: Arc<Mutex<CompactionStatus>>,
     /// Counter of in-flight `flush_to_l1` operations. Compaction skips
@@ -380,6 +383,7 @@ impl StorageManager {
         Self::recover_all_staging_tables(backend.as_ref(), &schema_manager).await?;
 
         let mut sm = Self {
+            requires_adjacency_revalidation: false,
             base_uri: base_uri.to_string(),
             store: resilient_store,
             schema_manager,
@@ -546,6 +550,7 @@ impl StorageManager {
         // the session-level `is_pinned` check (`Session::tx` rejects
         // them via `UniError::ReadOnly`).
         Self {
+            requires_adjacency_revalidation: self.requires_adjacency_revalidation,
             base_uri: self.base_uri.clone(),
             store: self.store.clone(),
             schema_manager: self.schema_manager.clone(),
@@ -597,6 +602,7 @@ impl StorageManager {
         // reclaim entries this reader still resolves. Dropped with the view.
         let pin_guard = Some(self.adjacency_manager.pinned_versions().pin(hwm));
         Self {
+            requires_adjacency_revalidation: self.requires_adjacency_revalidation,
             base_uri: self.base_uri.clone(),
             store: self.store.clone(),
             schema_manager: self.schema_manager.clone(),
@@ -668,6 +674,7 @@ impl StorageManager {
             scope.fork_id(),
         ));
         Self {
+            requires_adjacency_revalidation: self.requires_adjacency_revalidation,
             base_uri: self.base_uri.clone(),
             store: self.store.clone(),
             schema_manager: merged_schema,
@@ -1207,6 +1214,49 @@ impl StorageManager {
         self.adjacency_manager
             .warm_coalesced(self, edge_type_id, direction, version)
             .await
+    }
+
+    /// Marks this handle as one that does not own the database's writer.
+    ///
+    /// The adjacency CSR is complete-by-construction only for the handle whose
+    /// writer produced the edges — its commits land in the manager's
+    /// `active_overlay` directly. A handle without a writer receives no such
+    /// updates, so it must revalidate the CSR against its source tables before
+    /// each traversal (issue #168). Revalidation costs a Lance manifest read
+    /// per source table per query — measured at ~0.9ms on a small traversal —
+    /// so it is confined to the handles that actually need it.
+    pub fn set_requires_adjacency_revalidation(&mut self, yes: bool) {
+        self.requires_adjacency_revalidation = yes;
+    }
+
+    /// Whether this handle must revalidate the adjacency CSR before reads.
+    #[must_use]
+    pub fn requires_adjacency_revalidation(&self) -> bool {
+        self.requires_adjacency_revalidation
+    }
+
+    /// Whether the cached adjacency CSR still matches its source tables.
+    ///
+    /// See `AdjacencyManager::csr_source_stamp` — a presence-only gate pinned a
+    /// second, writer-less handle to the edge set it first traversed (#168).
+    pub async fn adjacency_csr_is_fresh(
+        &self,
+        edge_type_id: u32,
+        direction: crate::storage::direction::Direction,
+    ) -> bool {
+        self.adjacency_manager
+            .csr_is_fresh(self, edge_type_id, direction)
+            .await
+    }
+
+    /// Drops the cached adjacency CSR for this edge type and direction.
+    pub fn invalidate_adjacency_csr(
+        &self,
+        edge_type_id: u32,
+        direction: crate::storage::direction::Direction,
+    ) {
+        self.adjacency_manager
+            .invalidate_csr(edge_type_id, direction);
     }
 
     /// Check whether the adjacency manager has a CSR for the given edge type and direction.

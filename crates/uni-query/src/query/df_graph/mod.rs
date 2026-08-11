@@ -565,6 +565,17 @@ impl GraphExecutionContext {
                 // CSR (executor `apply_compaction` → `AdjacencyManager::warm`).
                 // `warm_adjacency_coalesced` fast-paths on `has_csr`, keeping
                 // this idempotent (warm-once) and stampede-safe (Issue #13).
+                // Revalidate before trusting the cache. Presence alone was the
+                // gate, and the CSR is never invalidated by a flush — sound for
+                // the handle that owns the writer, whose commits go straight
+                // into the overlay, but a second handle (a read-only reader
+                // beside a writer) gets no such updates and was pinned to the
+                // edge set it first traversed, permanently. Issue #168.
+                if self.storage.requires_adjacency_revalidation()
+                    && !self.storage.adjacency_csr_is_fresh(etype_id, dir).await
+                {
+                    self.storage.invalidate_adjacency_csr(etype_id, dir);
+                }
                 if !am.has_csr(etype_id, dir) {
                     self.storage
                         .warm_adjacency_coalesced(etype_id, dir, version)

@@ -16,10 +16,12 @@
 //! Falls back to single-direction BFS when bidirectional is not applicable.
 
 use crate::query::df_graph::GraphExecutionContext;
+use crate::query::df_graph::bitmap::EidFilter;
 use crate::query::df_graph::common::{
-    arrow_err, column_as_vid_array, compute_plan_properties, edge_struct_fields, exec_err,
-    new_node_list_builder,
+    EntityPropertyCache, arrow_err, column_as_vid_array, compute_plan_properties,
+    edge_struct_fields, exec_err, new_node_list_builder,
 };
+use crate::query::df_graph::traverse::build_edge_property_filter;
 use arrow::compute::take;
 use arrow_array::builder::{ListBuilder, StructBuilder, UInt64Builder};
 use arrow_array::{Array, ArrayRef, RecordBatch, UInt32Array, UInt64Array};
@@ -36,7 +38,8 @@ use std::fmt;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
-use uni_common::core::id::Vid;
+use uni_common::Value as UniValue;
+use uni_common::core::id::{Eid, Vid};
 use uni_store::runtime::l0_visibility;
 use uni_store::storage::direction::Direction;
 
@@ -80,8 +83,25 @@ pub struct GraphShortestPathExec {
     /// Variable name for the path.
     path_variable: String,
 
+    /// Relationship variable bound by the pattern, e.g. `r` in
+    /// `shortestPath((a)-[r:E*]->(b))`. Emitted as a `List<Struct(edge)>`
+    /// column holding the path's relationships in path order.
+    step_variable: Option<String>,
+
     /// Whether this is allShortestPaths (true) or shortestPath (false).
     all_shortest: bool,
+
+    /// Minimum hops. Only 0 and 1 are reachable here — the planner refuses
+    /// anything higher, which would need the search to continue past the first
+    /// sighting of the target. 0 is what admits the zero-length self path.
+    min_hops: u32,
+
+    /// Maximum hops. `u32::MAX` when the pattern set no upper bound.
+    max_hops: u32,
+
+    /// Equality conditions from the relationship's inline property map, used to
+    /// precompute an `EidFilter` during warming. Empty when there is no map.
+    edge_property_conditions: Vec<(String, UniValue)>,
 
     /// Graph execution context.
     graph_ctx: Arc<GraphExecutionContext>,
@@ -104,7 +124,11 @@ impl fmt::Debug for GraphShortestPathExec {
             .field("edge_type_ids", &self.edge_type_ids)
             .field("direction", &self.direction)
             .field("path_variable", &self.path_variable)
+            .field("step_variable", &self.step_variable)
             .field("all_shortest", &self.all_shortest)
+            .field("min_hops", &self.min_hops)
+            .field("max_hops", &self.max_hops)
+            .field("edge_property_conditions", &self.edge_property_conditions)
             .finish()
     }
 }
@@ -132,14 +156,18 @@ impl GraphShortestPathExec {
         edge_type_ids: Vec<u32>,
         direction: Direction,
         path_variable: impl Into<String>,
+        step_variable: Option<String>,
         graph_ctx: Arc<GraphExecutionContext>,
         all_shortest: bool,
+        min_hops: u32,
+        max_hops: u32,
+        edge_property_conditions: Vec<(String, UniValue)>,
     ) -> Self {
         let source_column = source_column.into();
         let target_column = target_column.into();
         let path_variable = path_variable.into();
 
-        let schema = Self::build_schema(input.schema(), &path_variable);
+        let schema = Self::build_schema(input.schema(), &path_variable, step_variable.as_deref());
         let properties = compute_plan_properties(schema.clone());
 
         Self {
@@ -149,7 +177,11 @@ impl GraphShortestPathExec {
             edge_type_ids,
             direction,
             path_variable,
+            step_variable,
             all_shortest,
+            min_hops,
+            max_hops,
+            edge_property_conditions,
             graph_ctx,
             schema,
             properties,
@@ -158,7 +190,11 @@ impl GraphShortestPathExec {
     }
 
     /// Build output schema.
-    fn build_schema(input_schema: SchemaRef, path_variable: &str) -> SchemaRef {
+    fn build_schema(
+        input_schema: SchemaRef,
+        path_variable: &str,
+        step_variable: Option<&str>,
+    ) -> SchemaRef {
         let mut fields: Vec<Field> = input_schema
             .fields()
             .iter()
@@ -181,6 +217,11 @@ impl GraphShortestPathExec {
         // Add path length column
         let len_col_name = format!("{}._length", path_variable);
         fields.push(Field::new(&len_col_name, DataType::UInt64, true));
+
+        // Appended last, so the existing column positions are untouched.
+        if let Some(sv) = step_variable {
+            fields.push(crate::query::df_graph::common::build_edge_list_field(sv));
+        }
 
         Arc::new(Schema::new(fields))
     }
@@ -235,8 +276,12 @@ impl ExecutionPlan for GraphShortestPathExec {
             self.edge_type_ids.clone(),
             self.direction,
             self.path_variable.clone(),
+            self.step_variable.clone(),
             Arc::clone(&self.graph_ctx),
             self.all_shortest,
+            self.min_hops,
+            self.max_hops,
+            self.edge_property_conditions.clone(),
         )))
     }
 
@@ -249,9 +294,23 @@ impl ExecutionPlan for GraphShortestPathExec {
 
         let metrics = BaselineMetrics::new(&self.metrics, partition);
 
-        let warm_fut = self
-            .graph_ctx
-            .warming_future(self.edge_type_ids.clone(), self.direction);
+        // Warm the CSR and precompute the edge filter in one future. The two
+        // are independent scans — `build_edge_property_filter` reads edge
+        // properties from storage, not the CSR — but both must finish before
+        // the first batch is read. Mirrors the variable-length path.
+        let warm_ctx = Arc::clone(&self.graph_ctx);
+        let warm_types = self.edge_type_ids.clone();
+        let warm_direction = self.direction;
+        let warm_conditions = self.edge_property_conditions.clone();
+        let warm_fut: Pin<Box<dyn std::future::Future<Output = DFResult<EidFilter>> + Send>> =
+            Box::pin(async move {
+                warm_ctx
+                    .ensure_adjacency_warmed(&warm_types, warm_direction)
+                    .await
+                    .map_err(exec_err)?;
+                build_edge_property_filter(&warm_ctx, &warm_types, warm_direction, &warm_conditions)
+                    .await
+            });
 
         Ok(Box::pin(GraphShortestPathStream {
             input: input_stream,
@@ -260,6 +319,12 @@ impl ExecutionPlan for GraphShortestPathExec {
             edge_type_ids: self.edge_type_ids.clone(),
             direction: self.direction,
             all_shortest: self.all_shortest,
+            step_variable: self.step_variable.clone(),
+            min_hops: self.min_hops,
+            max_hops: self.max_hops,
+            // Replaced by the warming future's result before any batch is read;
+            // `AllAllowed` admits everything, so an absent map costs nothing.
+            edge_property_filter: EidFilter::AllAllowed,
             graph_ctx: Arc::clone(&self.graph_ctx),
             schema: Arc::clone(&self.schema),
             state: ShortestPathStreamState::Warming(warm_fut),
@@ -274,10 +339,20 @@ impl ExecutionPlan for GraphShortestPathExec {
 
 /// State machine for shortest path stream execution.
 enum ShortestPathStreamState {
-    /// Warming adjacency CSRs before first batch.
-    Warming(Pin<Box<dyn std::future::Future<Output = DFResult<()>> + Send>>),
+    /// Warming adjacency CSRs and building the edge filter before first batch.
+    Warming(Pin<Box<dyn std::future::Future<Output = DFResult<EidFilter>> + Send>>),
     /// Processing input batches.
     Reading,
+    /// Fetching storage-backed properties for this batch's path entities before
+    /// the synchronous column builders run. Path element structs carry user
+    /// properties in a `properties` blob whose only synchronous accessor reads
+    /// the L0 write buffers alone, so a flushed entity would come back with no
+    /// properties. See [`EntityPropertyCache`].
+    PrefetchingProperties {
+        fut: Pin<Box<dyn std::future::Future<Output = DFResult<EntityPropertyCache>> + Send>>,
+        input: RecordBatch,
+        paths: Vec<Option<Vec<Vid>>>,
+    },
     /// Stream is done.
     Done,
 }
@@ -286,6 +361,9 @@ enum ShortestPathStreamState {
 struct GraphShortestPathStream {
     /// Input stream.
     input: SendableRecordBatchStream,
+
+    /// Relationship variable bound by the pattern, if any. See the exec's field.
+    step_variable: Option<String>,
 
     /// Column name containing source VIDs.
     source_column: String,
@@ -301,6 +379,16 @@ struct GraphShortestPathStream {
 
     /// Whether this is allShortestPaths mode.
     all_shortest: bool,
+
+    /// Minimum hops (0 or 1; higher is refused by the planner).
+    min_hops: u32,
+
+    /// Maximum hops; `u32::MAX` when unbounded.
+    max_hops: u32,
+
+    /// Edges permitted by the relationship's inline property map. Precomputed
+    /// during warming; `AllAllowed` when the pattern carried no map.
+    edge_property_filter: EidFilter,
 
     /// Graph execution context.
     graph_ctx: Arc<GraphExecutionContext>,
@@ -318,8 +406,14 @@ struct GraphShortestPathStream {
 impl GraphShortestPathStream {
     /// Compute shortest path between two vertices using BFS.
     fn compute_shortest_path(&self, source: Vid, target: Vid) -> Option<Vec<Vid>> {
+        // A zero-length path is only a match when the pattern allows zero hops.
+        // `min_hops` defaults to 1, so `[:T]` and `[:T*1..n]` must not report
+        // the source as reaching itself for free.
         if source == target {
-            return Some(vec![source]);
+            return (self.min_hops == 0).then(|| vec![source]);
+        }
+        if self.max_hops == 0 {
+            return None;
         }
 
         let mut visited: HashSet<Vid> = HashSet::new();
@@ -329,13 +423,24 @@ impl GraphShortestPathStream {
         queue.push_back((source, vec![source]));
 
         while let Some((current, path)) = queue.pop_front() {
+            // `path` holds vertices, so hops taken is one less than its length.
+            let hops_taken = (path.len() - 1) as u32;
+            if hops_taken >= self.max_hops {
+                continue;
+            }
             // Get neighbors for all edge types
             for &edge_type in &self.edge_type_ids {
                 let neighbors = self
                     .graph_ctx
                     .get_neighbors(current, edge_type, self.direction);
 
-                for (neighbor, _eid) in neighbors {
+                for (neighbor, eid) in neighbors {
+                    // The property map gates expansion, not the result set: the
+                    // shortest path over permitted edges is not the shortest
+                    // path filtered afterwards.
+                    if !self.edge_property_filter.contains(eid) {
+                        continue;
+                    }
                     if neighbor == target {
                         // Found the target
                         let mut result = path.clone();
@@ -361,8 +466,16 @@ impl GraphShortestPathStream {
     ///
     /// Returns all paths of minimum length from source to target.
     fn compute_all_shortest_paths(&self, source: Vid, target: Vid) -> Vec<Vec<Vid>> {
+        // See `compute_shortest_path`: zero hops is a match only under `*0..`.
         if source == target {
-            return vec![vec![source]];
+            return if self.min_hops == 0 {
+                vec![vec![source]]
+            } else {
+                vec![]
+            };
+        }
+        if self.max_hops == 0 {
+            return vec![];
         }
 
         // Layer-by-layer BFS recording ALL predecessors at shortest depth
@@ -376,6 +489,9 @@ impl GraphShortestPathStream {
 
         while !current_layer.is_empty() && !target_found {
             current_depth += 1;
+            if current_depth > self.max_hops {
+                break;
+            }
             let mut next_layer_set: HashSet<Vid> = HashSet::new();
 
             for &current in &current_layer {
@@ -384,7 +500,13 @@ impl GraphShortestPathStream {
                         self.graph_ctx
                             .get_neighbors(current, edge_type, self.direction);
 
-                    for (neighbor, _eid) in neighbors {
+                    for (neighbor, eid) in neighbors {
+                        // Gating the forward pass is sufficient for the backward
+                        // reconstruction too: it walks `predecessors`, which is
+                        // built only from edges admitted here.
+                        if !self.edge_property_filter.contains(eid) {
+                            continue;
+                        }
                         if let Some(&d) = depth.get(&neighbor) {
                             // Already discovered: only add predecessor if same depth
                             if d == current_depth {
@@ -436,8 +558,28 @@ impl GraphShortestPathStream {
         result
     }
 
-    /// Process a single input batch.
-    fn process_batch(&self, batch: RecordBatch) -> DFResult<RecordBatch> {
+    /// The entities the batch's paths will materialize into path element
+    /// structs, for [`EntityPropertyCache::prefetch`]. Edges are resolved the
+    /// same way [`Self::build_output_batch`] resolves them.
+    fn path_entities(&self, paths: &[Option<Vec<Vid>>]) -> (Vec<Vid>, Vec<Eid>) {
+        let mut vids = Vec::new();
+        let mut eids = Vec::new();
+        for path in paths.iter().flatten() {
+            vids.extend_from_slice(path);
+            for window in path.windows(2) {
+                let (eid, _) = self.find_edge(window[0], window[1]);
+                eids.push(eid);
+            }
+        }
+        (vids, eids)
+    }
+
+    /// Compute the shortest path(s) for a batch, returning the (possibly
+    /// row-expanded) input alongside them.
+    ///
+    /// Split from column materialization so path element properties can be
+    /// pre-fetched from storage first — see [`EntityPropertyCache`].
+    fn compute_paths(&self, batch: RecordBatch) -> DFResult<(RecordBatch, Vec<Option<Vec<Vid>>>)> {
         // Extract source and target VIDs
         let source_col = batch.column_by_name(&self.source_column).ok_or_else(|| {
             datafusion::error::DataFusionError::Execution(format!(
@@ -498,7 +640,7 @@ impl GraphShortestPathStream {
             let expanded_batch =
                 RecordBatch::try_new(batch.schema(), expanded_columns).map_err(arrow_err)?;
 
-            self.build_output_batch(&expanded_batch, &all_paths)
+            Ok((expanded_batch, all_paths))
         } else {
             // shortestPath: one path per input row
             let mut paths: Vec<Option<Vec<Vid>>> = Vec::with_capacity(batch.num_rows());
@@ -514,7 +656,7 @@ impl GraphShortestPathStream {
                 paths.push(path);
             }
 
-            self.build_output_batch(&batch, &paths)
+            Ok((batch, paths))
         }
     }
 
@@ -523,6 +665,7 @@ impl GraphShortestPathStream {
         &self,
         input: &RecordBatch,
         paths: &[Option<Vec<Vid>>],
+        prop_cache: Option<&EntityPropertyCache>,
     ) -> DFResult<RecordBatch> {
         let num_rows = paths.len();
         let query_ctx = self.graph_ctx.query_context();
@@ -541,10 +684,11 @@ impl GraphShortestPathStream {
                 Some(vids) => {
                     // Add all nodes
                     for &vid in vids {
-                        super::common::append_node_to_struct(
+                        super::common::append_node_to_struct_with(
                             nodes_builder.values(),
                             vid,
                             &query_ctx,
+                            prop_cache,
                         );
                     }
                     nodes_builder.append(true);
@@ -562,13 +706,14 @@ impl GraphShortestPathStream {
                         let (stored_src, stored_dst) = self
                             .graph_ctx
                             .resolve_stored_edge_endpoints(eid, src, dst, &self.edge_type_ids);
-                        super::common::append_edge_to_struct(
+                        super::common::append_edge_to_struct_with(
                             rels_builder.values(),
                             eid,
                             &type_name,
                             stored_src,
                             stored_dst,
                             &query_ctx,
+                            prop_cache,
                         );
                     }
                     rels_builder.append(true);
@@ -585,6 +730,15 @@ impl GraphShortestPathStream {
 
         let nodes_array = Arc::new(nodes_builder.finish()) as ArrayRef;
         let rels_array = Arc::new(rels_builder.finish()) as ArrayRef;
+
+        // The bound relationship variable is the path's relationship list, so
+        // it is the very array about to become the path struct's child — take a
+        // second reference rather than rebuilding it. It already carries a null
+        // for each unmatched row, matching the path column's validity.
+        let step_array = self
+            .step_variable
+            .is_some()
+            .then(|| Arc::clone(&rels_array));
 
         let path_struct =
             super::common::build_path_struct_array(nodes_array, rels_array, path_validity)?;
@@ -613,6 +767,11 @@ impl GraphShortestPathStream {
             .collect();
         columns.push(Arc::new(UInt64Array::from(lengths)));
 
+        // Appended last, matching `build_schema`.
+        if let Some(step_array) = step_array {
+            columns.push(step_array);
+        }
+
         self.metrics.record_output(num_rows);
 
         RecordBatch::try_new(Arc::clone(&self.schema), columns).map_err(arrow_err)
@@ -625,7 +784,12 @@ impl GraphShortestPathStream {
         for &edge_type in &self.edge_type_ids {
             let neighbors = self.graph_ctx.get_neighbors(src, edge_type, self.direction);
             for (neighbor, eid) in neighbors {
-                if neighbor == dst {
+                // Must re-apply the filter. The BFS admitted this *pair* via a
+                // permitted edge, but with parallel edges the first neighbour
+                // match can be a different edge that fails the map — the
+                // returned path would then carry a relationship contradicting
+                // the query that produced it.
+                if neighbor == dst && self.edge_property_filter.contains(eid) {
                     let type_name =
                         l0_visibility::get_edge_type(eid, &query_ctx).unwrap_or_default();
                     return (eid, type_name);
@@ -647,7 +811,8 @@ impl Stream for GraphShortestPathStream {
 
             match state {
                 ShortestPathStreamState::Warming(mut fut) => match fut.as_mut().poll(cx) {
-                    Poll::Ready(Ok(())) => {
+                    Poll::Ready(Ok(filter)) => {
+                        self.edge_property_filter = filter;
                         self.state = ShortestPathStreamState::Reading;
                         // Continue loop to start reading
                     }
@@ -668,9 +833,26 @@ impl Stream for GraphShortestPathStream {
 
                     match self.input.poll_next_unpin(cx) {
                         Poll::Ready(Some(Ok(batch))) => {
-                            let result = self.process_batch(batch);
-                            self.state = ShortestPathStreamState::Reading;
-                            return Poll::Ready(Some(result));
+                            let (input, paths) = match self.compute_paths(batch) {
+                                Ok(pair) => pair,
+                                Err(e) => {
+                                    self.state = ShortestPathStreamState::Reading;
+                                    return Poll::Ready(Some(Err(e)));
+                                }
+                            };
+                            let (vids, eids) = self.path_entities(&paths);
+                            let graph_ctx = self.graph_ctx.clone();
+                            let fut = Box::pin(async move {
+                                let query_ctx = graph_ctx.query_context();
+                                EntityPropertyCache::prefetch(&graph_ctx, &query_ctx, &vids, &eids)
+                                    .await
+                            });
+                            self.state = ShortestPathStreamState::PrefetchingProperties {
+                                fut,
+                                input,
+                                paths,
+                            };
+                            // Continue loop to poll the freshly created future.
                         }
                         Poll::Ready(Some(Err(e))) => {
                             self.state = ShortestPathStreamState::Done;
@@ -686,6 +868,29 @@ impl Stream for GraphShortestPathStream {
                         }
                     }
                 }
+                ShortestPathStreamState::PrefetchingProperties {
+                    mut fut,
+                    input,
+                    paths,
+                } => match fut.as_mut().poll(cx) {
+                    Poll::Ready(Ok(cache)) => {
+                        self.state = ShortestPathStreamState::Reading;
+                        return Poll::Ready(Some(self.build_output_batch(
+                            &input,
+                            &paths,
+                            Some(&cache),
+                        )));
+                    }
+                    Poll::Ready(Err(e)) => {
+                        self.state = ShortestPathStreamState::Done;
+                        return Poll::Ready(Some(Err(e)));
+                    }
+                    Poll::Pending => {
+                        self.state =
+                            ShortestPathStreamState::PrefetchingProperties { fut, input, paths };
+                        return Poll::Pending;
+                    }
+                },
                 ShortestPathStreamState::Done => {
                     return Poll::Ready(None);
                 }
@@ -711,7 +916,7 @@ mod tests {
             Field::new("_target_vid", DataType::UInt64, false),
         ]));
 
-        let output_schema = GraphShortestPathExec::build_schema(input_schema, "p");
+        let output_schema = GraphShortestPathExec::build_schema(input_schema, "p", None);
 
         assert_eq!(output_schema.fields().len(), 5);
         assert_eq!(output_schema.field(0).name(), "_source_vid");
@@ -729,7 +934,7 @@ mod tests {
             Field::new("extra_col", DataType::Utf8, true),
         ]));
 
-        let output_schema = GraphShortestPathExec::build_schema(input_schema, "route");
+        let output_schema = GraphShortestPathExec::build_schema(input_schema, "route", None);
         // Extra input fields should be preserved in output
         assert!(
             output_schema.field_with_name("extra_col").is_ok(),
@@ -753,7 +958,31 @@ mod tests {
         ]));
 
         // Empty string path variable name should still work
-        let output_schema = GraphShortestPathExec::build_schema(input_schema, "");
+        let output_schema = GraphShortestPathExec::build_schema(input_schema, "", None);
         assert!(output_schema.fields().len() >= 4);
+    }
+
+    #[test]
+    fn test_shortest_path_schema_appends_step_variable_last() {
+        let input_schema = Arc::new(Schema::new(vec![
+            Field::new("_source_vid", DataType::UInt64, false),
+            Field::new("_target_vid", DataType::UInt64, false),
+        ]));
+
+        let output_schema = GraphShortestPathExec::build_schema(input_schema, "p", Some("r"));
+
+        // The bound relationship column is appended after the existing three,
+        // so their positions — which `build_output_batch` pushes to by index —
+        // are unchanged.
+        assert_eq!(output_schema.fields().len(), 6);
+        assert_eq!(output_schema.field(2).name(), "p");
+        assert_eq!(output_schema.field(3).name(), "p._path");
+        assert_eq!(output_schema.field(4).name(), "p._length");
+        assert_eq!(output_schema.field(5).name(), "r");
+        assert!(
+            matches!(output_schema.field(5).data_type(), DataType::List(_)),
+            "the relationship variable is a list of edge structs, got {:?}",
+            output_schema.field(5).data_type()
+        );
     }
 }

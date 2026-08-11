@@ -389,6 +389,18 @@ pub fn build_edge_list_field(step_var: &str) -> Field {
     Field::new(step_var, DataType::List(Arc::new(edge_item)), true)
 }
 
+/// Build node list field for schema with given variable name.
+///
+/// Creates a list of node structs for a GQL group variable bound inside a
+/// quantified path pattern — the node counterpart of [`build_edge_list_field`].
+/// The element layout is [`node_struct_fields`], which is what lets the result
+/// normalizer recognise the elements as nodes.
+pub fn build_node_list_field(var: &str) -> Field {
+    let node_item = Field::new("item", DataType::Struct(node_struct_fields()), true);
+    // Nullable to support OPTIONAL MATCH with no match.
+    Field::new(var, DataType::List(Arc::new(node_item)), true)
+}
+
 /// Build path struct field for schema with given path variable name.
 ///
 /// Creates a struct field with `nodes` and `relationships` lists.
@@ -483,11 +495,96 @@ pub fn new_node_list_builder()
     ))
 }
 
+/// Storage-backed properties for the entities of a batch, fetched up front.
+///
+/// The struct appenders below run inside synchronous Arrow builder loops, and
+/// the only synchronous property accessor is `l0_visibility`, which reads the
+/// write buffers alone — a vertex or edge that has been flushed to Lance reads
+/// back as having no properties at all. Resolving that lazily is not an option
+/// from a sync loop, so callers materializing entity structs pre-fetch the
+/// batch's entities here and hand the result to the `_with` appenders.
+///
+/// [`PropertyManager::get_batch_vertex_props`] and its edge twin already overlay
+/// the full L0 chain (pending flush buffers, then the live buffer, then the
+/// transaction buffer) on top of storage with the correct MVCC precedence, so a
+/// cache hit is authoritative and needs no further L0 consultation. When no
+/// cache is supplied the appenders keep the historical L0-only behaviour.
+#[derive(Debug, Default)]
+pub struct EntityPropertyCache {
+    vertices: HashMap<uni_common::core::id::Vid, uni_common::Properties>,
+    edges: HashMap<uni_common::core::id::Eid, uni_common::Properties>,
+}
+
+impl EntityPropertyCache {
+    /// Fetch properties for every distinct vertex and edge in one round trip each.
+    ///
+    /// `_all_props` is the wildcard sentinel: path structs serialize whatever the
+    /// entity has, so there is no narrower projection to request.
+    pub async fn prefetch(
+        graph_ctx: &GraphExecutionContext,
+        query_ctx: &uni_store::runtime::context::QueryContext,
+        vids: &[uni_common::core::id::Vid],
+        eids: &[uni_common::core::id::Eid],
+    ) -> DFResult<Self> {
+        use std::collections::HashSet;
+
+        let pm = graph_ctx.property_manager();
+        let to_df = |e: anyhow::Error| {
+            datafusion::error::DataFusionError::Execution(format!(
+                "Failed to pre-fetch path element properties: {e}"
+            ))
+        };
+
+        let mut cache = Self::default();
+
+        if !vids.is_empty() {
+            let distinct: Vec<_> = vids
+                .iter()
+                .copied()
+                .collect::<HashSet<_>>()
+                .into_iter()
+                .collect();
+            cache.vertices = pm
+                .get_batch_vertex_props(&distinct, &["_all_props"], Some(query_ctx))
+                .await
+                .map_err(to_df)?;
+        }
+
+        if !eids.is_empty() {
+            let distinct: Vec<_> = eids
+                .iter()
+                .copied()
+                .collect::<HashSet<_>>()
+                .into_iter()
+                .collect();
+            // The edge accessor keys its result by the eid reinterpreted as a Vid.
+            cache.edges = pm
+                .get_batch_edge_props(&distinct, &["_all_props"], Some(query_ctx))
+                .await
+                .map_err(to_df)?
+                .into_iter()
+                .map(|(k, v)| (uni_common::core::id::Eid::from(k.as_u64()), v))
+                .collect();
+        }
+
+        Ok(cache)
+    }
+
+    fn vertex(&self, vid: uni_common::core::id::Vid) -> Option<&uni_common::Properties> {
+        self.vertices.get(&vid)
+    }
+
+    fn edge(&self, eid: uni_common::core::id::Eid) -> Option<&uni_common::Properties> {
+        self.edges.get(&eid)
+    }
+}
+
 /// Append a single edge to an edge struct builder.
 ///
 /// Writes `_eid`, `_type_name`, `_src`, `_dst`, and `properties` fields,
-/// then appends the struct row. The `query_ctx` is used to look up edge
-/// properties from the L0 visibility chain.
+/// then appends the struct row. Equivalent to
+/// [`append_edge_to_struct_with`] with no cache — see that function for why
+/// callers that materialize whole batches should supply one.
 pub fn append_edge_to_struct(
     struct_builder: &mut arrow_array::builder::StructBuilder,
     eid: uni_common::core::id::Eid,
@@ -495,6 +592,28 @@ pub fn append_edge_to_struct(
     src_vid: u64,
     dst_vid: u64,
     query_ctx: &uni_store::runtime::context::QueryContext,
+) {
+    append_edge_to_struct_with(
+        struct_builder,
+        eid,
+        type_name,
+        src_vid,
+        dst_vid,
+        query_ctx,
+        None,
+    )
+}
+
+/// Append a single edge to an edge struct builder, resolving properties from
+/// `cache` when one is supplied and falling back to the L0 chain otherwise.
+pub fn append_edge_to_struct_with(
+    struct_builder: &mut arrow_array::builder::StructBuilder,
+    eid: uni_common::core::id::Eid,
+    type_name: &str,
+    src_vid: u64,
+    dst_vid: u64,
+    query_ctx: &uni_store::runtime::context::QueryContext,
+    cache: Option<&EntityPropertyCache>,
 ) {
     use arrow_array::builder::{LargeBinaryBuilder, StringBuilder, UInt64Builder};
     use uni_store::runtime::l0_visibility;
@@ -518,7 +637,12 @@ pub fn append_edge_to_struct(
     let props_builder = struct_builder
         .field_builder::<LargeBinaryBuilder>(4)
         .unwrap();
-    if let Some(props) = l0_visibility::get_edge_properties(eid, query_ctx) {
+    let cached = cache.and_then(|c| c.edge(eid));
+    let resolved = match cached {
+        Some(props) => Some(std::borrow::Cow::Borrowed(props)),
+        None => l0_visibility::get_edge_properties(eid, query_ctx).map(std::borrow::Cow::Owned),
+    };
+    if let Some(props) = resolved {
         let cv_bytes = encode_props_to_cv(&props);
         props_builder.append_value(&cv_bytes);
     } else {
@@ -570,13 +694,42 @@ pub fn append_edge_to_struct_optional(
     batch_type_name: Option<String>,
     query_ctx: &uni_store::runtime::context::QueryContext,
 ) {
+    append_edge_to_struct_optional_with(
+        struct_builder,
+        eid,
+        src_vid,
+        dst_vid,
+        batch_type_name,
+        query_ctx,
+        None,
+    )
+}
+
+/// [`append_edge_to_struct_optional`] with an optional pre-fetched property cache.
+pub fn append_edge_to_struct_optional_with(
+    struct_builder: &mut arrow_array::builder::StructBuilder,
+    eid: Option<uni_common::core::id::Eid>,
+    src_vid: u64,
+    dst_vid: u64,
+    batch_type_name: Option<String>,
+    query_ctx: &uni_store::runtime::context::QueryContext,
+    cache: Option<&EntityPropertyCache>,
+) {
     match eid {
         Some(e) => {
             use uni_store::runtime::l0_visibility;
             let type_name = batch_type_name
                 .or_else(|| l0_visibility::get_edge_type(e, query_ctx))
                 .unwrap_or_default();
-            append_edge_to_struct(struct_builder, e, &type_name, src_vid, dst_vid, query_ctx);
+            append_edge_to_struct_with(
+                struct_builder,
+                e,
+                &type_name,
+                src_vid,
+                dst_vid,
+                query_ctx,
+                cache,
+            );
         }
         None => append_null_edge_struct(struct_builder),
     }
@@ -584,13 +737,25 @@ pub fn append_edge_to_struct_optional(
 
 /// Append a single node to a node struct builder.
 ///
-/// Writes `_vid`, `_labels`, and `properties` fields, then appends the struct
-/// row. The `query_ctx` is used to look up labels and properties from the L0
-/// visibility chain.
+/// Equivalent to [`append_node_to_struct_with`] with no cache — see that
+/// function for why callers that materialize whole batches should supply one.
 pub fn append_node_to_struct(
     struct_builder: &mut arrow_array::builder::StructBuilder,
     vid: uni_common::core::id::Vid,
     query_ctx: &uni_store::runtime::context::QueryContext,
+) {
+    append_node_to_struct_with(struct_builder, vid, query_ctx, None)
+}
+
+/// Append a single node to a node struct builder, resolving properties from
+/// `cache` when one is supplied and falling back to the L0 chain otherwise.
+///
+/// Writes `_vid`, `_labels`, and `properties` fields, then appends the struct row.
+pub fn append_node_to_struct_with(
+    struct_builder: &mut arrow_array::builder::StructBuilder,
+    vid: uni_common::core::id::Vid,
+    query_ctx: &uni_store::runtime::context::QueryContext,
+    cache: Option<&EntityPropertyCache>,
 ) {
     use arrow_array::builder::{LargeBinaryBuilder, ListBuilder, StringBuilder, UInt64Builder};
     use uni_store::runtime::l0_visibility;
@@ -611,7 +776,12 @@ pub fn append_node_to_struct(
     let props_builder = struct_builder
         .field_builder::<LargeBinaryBuilder>(2)
         .unwrap();
-    if let Some(props) = l0_visibility::get_vertex_properties(vid, query_ctx) {
+    let cached = cache.and_then(|c| c.vertex(vid));
+    let resolved = match cached {
+        Some(props) => Some(std::borrow::Cow::Borrowed(props)),
+        None => l0_visibility::get_vertex_properties(vid, query_ctx).map(std::borrow::Cow::Owned),
+    };
+    if let Some(props) = resolved {
         let cv_bytes = encode_props_to_cv(&props);
         props_builder.append_value(&cv_bytes);
     } else {
@@ -651,8 +821,18 @@ pub fn append_node_to_struct_optional(
     vid: Option<uni_common::core::id::Vid>,
     query_ctx: &uni_store::runtime::context::QueryContext,
 ) {
+    append_node_to_struct_optional_with(struct_builder, vid, query_ctx, None)
+}
+
+/// [`append_node_to_struct_optional`] with an optional pre-fetched property cache.
+pub fn append_node_to_struct_optional_with(
+    struct_builder: &mut arrow_array::builder::StructBuilder,
+    vid: Option<uni_common::core::id::Vid>,
+    query_ctx: &uni_store::runtime::context::QueryContext,
+    cache: Option<&EntityPropertyCache>,
+) {
     match vid {
-        Some(v) => append_node_to_struct(struct_builder, v, query_ctx),
+        Some(v) => append_node_to_struct_with(struct_builder, v, query_ctx, cache),
         None => append_null_node_struct(struct_builder),
     }
 }

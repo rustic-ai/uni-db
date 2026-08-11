@@ -10,7 +10,9 @@
 //! where the traversals are single-hop and the path variable needs to be materialized.
 
 use super::GraphExecutionContext;
-use super::common::{arrow_err, compute_plan_properties, extract_column_value};
+use super::common::{
+    EntityPropertyCache, arrow_err, compute_plan_properties, extract_column_value,
+};
 use arrow_array::builder::{
     LargeBinaryBuilder, ListBuilder, StringBuilder, StructBuilder, UInt64Builder,
 };
@@ -160,6 +162,7 @@ impl ExecutionPlan for BindFixedPathExec {
             schema: self.schema.clone(),
             graph_ctx: self.graph_ctx.clone(),
             metrics,
+            pending: None,
         }))
     }
 
@@ -167,6 +170,12 @@ impl ExecutionPlan for BindFixedPathExec {
         Some(self.metrics.clone_inner())
     }
 }
+
+/// An in-flight [`EntityPropertyCache`] fetch and the batch waiting on it.
+type PendingPrefetch = (
+    Pin<Box<dyn std::future::Future<Output = DFResult<EntityPropertyCache>> + Send>>,
+    RecordBatch,
+);
 
 /// Stream that synthesizes path structs from existing node/edge columns.
 struct BindFixedPathStream {
@@ -176,10 +185,60 @@ struct BindFixedPathStream {
     schema: SchemaRef,
     graph_ctx: Arc<GraphExecutionContext>,
     metrics: BaselineMetrics,
+
+    /// In-flight property pre-fetch for the batch being materialized. Path
+    /// element structs carry user properties in a `properties` blob whose only
+    /// synchronous accessor reads the L0 write buffers alone, so a flushed
+    /// entity would come back with no properties. See
+    /// [`super::common::EntityPropertyCache`].
+    pending: Option<PendingPrefetch>,
 }
 
 impl BindFixedPathStream {
-    fn process_batch(&self, batch: RecordBatch) -> DFResult<RecordBatch> {
+    /// The column holding `edge_var`'s eid. Internal tracking columns are named
+    /// directly; user-named edge variables use the `{var}._eid` form.
+    fn eid_column_name(edge_var: &str) -> String {
+        if edge_var.starts_with("__eid_to_") {
+            edge_var.to_string()
+        } else {
+            format!("{}._eid", edge_var)
+        }
+    }
+
+    /// The entities this batch will materialize into path element structs.
+    fn batch_entities(&self, batch: &RecordBatch) -> (Vec<Vid>, Vec<Eid>) {
+        let mut vids = Vec::new();
+        let mut eids = Vec::new();
+        for row_idx in 0..batch.num_rows() {
+            for node_var in &self.node_variables {
+                if let Some(vid) = extract_column_value(
+                    batch,
+                    &format!("{}._vid", node_var),
+                    row_idx,
+                    |arr: &arrow_array::UInt64Array, i| Vid::from(arr.value(i)),
+                ) {
+                    vids.push(vid);
+                }
+            }
+            for edge_var in &self.edge_variables {
+                if let Some(eid) = extract_column_value(
+                    batch,
+                    &Self::eid_column_name(edge_var),
+                    row_idx,
+                    |arr: &arrow_array::UInt64Array, i| Eid::from(arr.value(i)),
+                ) {
+                    eids.push(eid);
+                }
+            }
+        }
+        (vids, eids)
+    }
+
+    fn process_batch(
+        &self,
+        batch: RecordBatch,
+        prop_cache: Option<&EntityPropertyCache>,
+    ) -> DFResult<RecordBatch> {
         let num_rows = batch.num_rows();
         let query_ctx = self.graph_ctx.query_context();
 
@@ -214,11 +273,7 @@ impl BindFixedPathStream {
                 .is_none()
             });
             let row_has_missing_edge = self.edge_variables.iter().any(|edge_var| {
-                let eid_col_name = if edge_var.starts_with("__eid_to_") {
-                    edge_var.clone()
-                } else {
-                    format!("{}._eid", edge_var)
-                };
+                let eid_col_name = Self::eid_column_name(edge_var);
                 extract_column_value::<arrow_array::UInt64Array, u64>(
                     &batch,
                     &eid_col_name,
@@ -246,10 +301,11 @@ impl BindFixedPathStream {
                     |arr: &arrow_array::UInt64Array, i| Vid::from(arr.value(i)),
                 );
 
-                super::common::append_node_to_struct_optional(
+                super::common::append_node_to_struct_optional_with(
                     nodes_builder.values(),
                     vid,
                     &query_ctx,
+                    prop_cache,
                 );
             }
             nodes_builder.append(true);
@@ -259,11 +315,7 @@ impl BindFixedPathStream {
             for (edge_idx, edge_var) in self.edge_variables.iter().enumerate() {
                 // Internal tracking columns like __eid_to_b are the column name directly;
                 // named edge variables use {var}._eid format
-                let eid_col_name = if edge_var.starts_with("__eid_to_") {
-                    edge_var.clone()
-                } else {
-                    format!("{}._eid", edge_var)
-                };
+                let eid_col_name = Self::eid_column_name(edge_var);
 
                 let eid: Option<Eid> = extract_column_value(
                     &batch,
@@ -347,13 +399,14 @@ impl BindFixedPathStream {
                     None => (traversal_src, traversal_dst),
                 };
 
-                super::common::append_edge_to_struct_optional(
+                super::common::append_edge_to_struct_optional_with(
                     rels_builder.values(),
                     eid,
                     src_vid,
                     dst_vid,
                     batch_type_name,
                     &query_ctx,
+                    prop_cache,
                 );
             }
             rels_builder.append(true);
@@ -377,16 +430,38 @@ impl Stream for BindFixedPathStream {
     type Item = DFResult<RecordBatch>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        match self.input.poll_next_unpin(cx) {
-            Poll::Ready(Some(Ok(batch))) => {
-                let _timer = self.metrics.elapsed_compute().timer();
-                let result = self.process_batch(batch);
-                if let Ok(ref b) = result {
-                    self.metrics.record_output(b.num_rows());
+        loop {
+            if let Some((mut fut, batch)) = self.pending.take() {
+                match fut.as_mut().poll(cx) {
+                    Poll::Ready(Ok(cache)) => {
+                        let _timer = self.metrics.elapsed_compute().timer();
+                        let result = self.process_batch(batch, Some(&cache));
+                        if let Ok(ref b) = result {
+                            self.metrics.record_output(b.num_rows());
+                        }
+                        return Poll::Ready(Some(result));
+                    }
+                    Poll::Ready(Err(e)) => return Poll::Ready(Some(Err(e))),
+                    Poll::Pending => {
+                        self.pending = Some((fut, batch));
+                        return Poll::Pending;
+                    }
                 }
-                Poll::Ready(Some(result))
             }
-            other => other,
+
+            match self.input.poll_next_unpin(cx) {
+                Poll::Ready(Some(Ok(batch))) => {
+                    let (vids, eids) = self.batch_entities(&batch);
+                    let graph_ctx = self.graph_ctx.clone();
+                    let fut = Box::pin(async move {
+                        let query_ctx = graph_ctx.query_context();
+                        EntityPropertyCache::prefetch(&graph_ctx, &query_ctx, &vids, &eids).await
+                    });
+                    self.pending = Some((fut, batch));
+                    // Continue the loop to poll the freshly created future.
+                }
+                other => return other,
+            }
         }
     }
 }
