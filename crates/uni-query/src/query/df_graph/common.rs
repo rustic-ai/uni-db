@@ -505,7 +505,7 @@ pub fn new_node_list_builder()
 /// from a sync loop, so callers materializing entity structs pre-fetch the
 /// batch's entities here and hand the result to the `_with` appenders.
 ///
-/// [`PropertyManager::get_batch_vertex_props`] and its edge twin already overlay
+/// [`uni_store::PropertyManager::get_batch_vertex_props`] and its edge twin already overlay
 /// the full L0 chain (pending flush buffers, then the live buffer, then the
 /// transaction buffer) on top of storage with the correct MVCC precedence, so a
 /// cache hit is authoritative and needs no further L0 consultation. When no

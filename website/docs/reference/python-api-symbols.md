@@ -532,6 +532,7 @@ The main asynchronous Uni database interface.
 | `xervo() -> AsyncXervo` | — |
 | `compaction() -> AsyncCompaction` | — |
 | `indexes() -> AsyncIndexes` | — |
+| `uri() -> str` *(property)* | — |
 | `async flush() -> None` | — |
 | `async create_snapshot(name: str) -> str` | — |
 | `async list_snapshots() -> list[SnapshotInfo]` | — |
@@ -2219,6 +2220,7 @@ The main synchronous Uni database interface.
 | `xervo() -> Xervo` | — |
 | `compaction() -> Compaction` | — |
 | `indexes() -> Indexes` | — |
+| `uri() -> str` *(property)* | — |
 | `flush() -> None` | — |
 | `create_snapshot(name: str) -> str` | — |
 | `list_snapshots() -> list[SnapshotInfo]` | — |
