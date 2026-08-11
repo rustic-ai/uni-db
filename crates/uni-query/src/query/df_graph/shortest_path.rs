@@ -18,8 +18,8 @@
 use crate::query::df_graph::GraphExecutionContext;
 use crate::query::df_graph::bitmap::EidFilter;
 use crate::query::df_graph::common::{
-    EntityPropertyCache, arrow_err, column_as_vid_array, compute_plan_properties,
-    edge_struct_fields, exec_err, new_node_list_builder,
+    EdgeAppendCtx, EntityPropertyCache, append_traversed_edge, arrow_err, column_as_vid_array,
+    compute_plan_properties, edge_struct_fields, exec_err, new_node_list_builder,
 };
 use crate::query::df_graph::traverse::build_edge_property_filter;
 use arrow::compute::take;
@@ -40,7 +40,6 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 use uni_common::Value as UniValue;
 use uni_common::core::id::{Eid, Vid};
-use uni_store::runtime::l0_visibility;
 use uni_store::storage::direction::Direction;
 
 /// Shortest path execution plan.
@@ -567,7 +566,7 @@ impl GraphShortestPathStream {
         for path in paths.iter().flatten() {
             vids.extend_from_slice(path);
             for window in path.windows(2) {
-                let (eid, _) = self.find_edge(window[0], window[1]);
+                let eid = self.find_edge(window[0], window[1]);
                 eids.push(eid);
             }
         }
@@ -669,6 +668,13 @@ impl GraphShortestPathStream {
     ) -> DFResult<RecordBatch> {
         let num_rows = paths.len();
         let query_ctx = self.graph_ctx.query_context();
+        let edge_ctx = EdgeAppendCtx {
+            graph_ctx: &self.graph_ctx,
+            query_ctx: &query_ctx,
+            edge_type_ids: &self.edge_type_ids,
+            prop_cache,
+            fixed_type_name: None,
+        };
 
         // Copy input columns
         let mut columns: Vec<ArrayRef> = input.columns().to_vec();
@@ -698,23 +704,8 @@ impl GraphShortestPathStream {
                     for window in vids.windows(2) {
                         let src = window[0];
                         let dst = window[1];
-                        let (eid, type_name) = self.find_edge(src, dst);
-                        // Report the relationship's STORED direction, not the
-                        // traversal order (`src` -> `dst` along the BFS path).
-                        // Resolves flushed (L1-resident) edges too, where the L0
-                        // chain no longer holds the stored endpoints.
-                        let (stored_src, stored_dst) = self
-                            .graph_ctx
-                            .resolve_stored_edge_endpoints(eid, src, dst, &self.edge_type_ids);
-                        super::common::append_edge_to_struct_with(
-                            rels_builder.values(),
-                            eid,
-                            &type_name,
-                            stored_src,
-                            stored_dst,
-                            &query_ctx,
-                            prop_cache,
-                        );
+                        let eid = self.find_edge(src, dst);
+                        append_traversed_edge(rels_builder.values(), &edge_ctx, eid, src, dst);
                     }
                     rels_builder.append(true);
                     path_validity.push(true);
@@ -778,9 +769,10 @@ impl GraphShortestPathStream {
     }
 
     /// Find an edge connecting src to dst.
-    /// Returns (eid, type_name). Property lookup is handled by `append_edge_to_struct`.
-    fn find_edge(&self, src: Vid, dst: Vid) -> (uni_common::core::id::Eid, String) {
-        let query_ctx = self.graph_ctx.query_context();
+    ///
+    /// Returns the eid only; the type name and stored orientation are resolved
+    /// by `append_traversed_edge`, which can recover both for a flushed edge.
+    fn find_edge(&self, src: Vid, dst: Vid) -> Eid {
         for &edge_type in &self.edge_type_ids {
             let neighbors = self.graph_ctx.get_neighbors(src, edge_type, self.direction);
             for (neighbor, eid) in neighbors {
@@ -790,13 +782,11 @@ impl GraphShortestPathStream {
                 // returned path would then carry a relationship contradicting
                 // the query that produced it.
                 if neighbor == dst && self.edge_property_filter.contains(eid) {
-                    let type_name =
-                        l0_visibility::get_edge_type(eid, &query_ctx).unwrap_or_default();
-                    return (eid, type_name);
+                    return eid;
                 }
             }
         }
-        (uni_common::core::id::Eid::from(0u64), String::new())
+        Eid::from(0u64)
     }
 }
 

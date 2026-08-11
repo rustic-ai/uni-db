@@ -276,6 +276,20 @@ impl L0Context {
     }
 }
 
+/// An edge's stored orientation, plus the type the probe identified on the way.
+///
+/// See [`GraphExecutionContext::resolve_stored_edge`] for when `type_id` is
+/// populated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResolvedEdge {
+    /// Stored start vertex.
+    pub src: u64,
+    /// Stored end vertex.
+    pub dst: u64,
+    /// The edge's type, when the adjacency probe identified it.
+    pub type_id: Option<u32>,
+}
+
 impl GraphExecutionContext {
     /// Shared constructor for the public entry points. The three public
     /// constructors differ only in the L0 visibility context, deadline,
@@ -716,12 +730,41 @@ impl GraphExecutionContext {
         traversal_dst: Vid,
         edge_type_ids: &[u32],
     ) -> (u64, u64) {
+        let resolved = self.resolve_stored_edge(eid, traversal_src, traversal_dst, edge_type_ids);
+        (resolved.src, resolved.dst)
+    }
+
+    /// [`Self::resolve_stored_edge_endpoints`], additionally reporting the edge
+    /// type the probe identified.
+    ///
+    /// `type_id` is `Some` only when the adjacency probe ran and succeeded —
+    /// that is, for a flushed edge. An L0-resident edge resolves from the
+    /// visibility chain without ever asking which type it is, and an
+    /// inconclusive probe identifies nothing. Callers that need a type name
+    /// should therefore consult the L0 chain *and* this, in either order:
+    /// exactly one of the two has the answer for any given edge.
+    ///
+    /// This exists because the probe already determines the type in order to
+    /// find the edge, and discarding it left flushed relationships reporting a
+    /// placeholder type name.
+    #[must_use]
+    pub fn resolve_stored_edge(
+        &self,
+        eid: Eid,
+        traversal_src: Vid,
+        traversal_dst: Vid,
+        edge_type_ids: &[u32],
+    ) -> ResolvedEdge {
         // 1. L0 visibility chain — exact stored endpoints for in-memory edges.
         let query_ctx = self.query_context();
         if let Some((src, dst)) =
             uni_store::runtime::l0_visibility::get_edge_endpoints(eid, &query_ctx)
         {
-            return (src.as_u64(), dst.as_u64());
+            return ResolvedEdge {
+                src: src.as_u64(),
+                dst: dst.as_u64(),
+                type_id: None,
+            };
         }
 
         // 2. Flushed (L1-resident) edge: recover orientation via a directed
@@ -741,8 +784,10 @@ impl GraphExecutionContext {
             edge_type_ids
         };
         let version_hwm = self.storage.snapshot_version_hwm();
-        let outgoing_contains = |vid: Vid| -> bool {
-            probe_types.iter().any(|&etype| {
+        // Returns the edge type that places `eid` on `vid`'s outgoing side.
+        // The type is a by-product of the search, not extra work.
+        let outgoing_type = |vid: Vid| -> Option<u32> {
+            probe_types.iter().copied().find(|&etype| {
                 let neighbors = match version_hwm {
                     Some(hwm) => {
                         self.storage
@@ -754,14 +799,26 @@ impl GraphExecutionContext {
             })
         };
 
-        if outgoing_contains(traversal_src) {
-            (traversal_src.as_u64(), traversal_dst.as_u64())
-        } else if outgoing_contains(traversal_dst) {
-            (traversal_dst.as_u64(), traversal_src.as_u64())
+        if let Some(type_id) = outgoing_type(traversal_src) {
+            ResolvedEdge {
+                src: traversal_src.as_u64(),
+                dst: traversal_dst.as_u64(),
+                type_id: Some(type_id),
+            }
+        } else if let Some(type_id) = outgoing_type(traversal_dst) {
+            ResolvedEdge {
+                src: traversal_dst.as_u64(),
+                dst: traversal_src.as_u64(),
+                type_id: Some(type_id),
+            }
         } else {
             // 3. Inconclusive (no CSR adjacency for this type): preserve the
             //    long-standing traversal-order behaviour.
-            (traversal_src.as_u64(), traversal_dst.as_u64())
+            ResolvedEdge {
+                src: traversal_src.as_u64(),
+                dst: traversal_dst.as_u64(),
+                type_id: None,
+            }
         }
     }
 

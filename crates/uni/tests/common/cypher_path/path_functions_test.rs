@@ -444,3 +444,208 @@ async fn test_unwind_unwraps_a_node_list() {
         .collect();
     assert_eq!(names, vec!["n1", "n2", "n3"]);
 }
+
+// ---------------------------------------------------------------------------
+// A relationship's `_type_name` must survive a flush.
+//
+// `l0_visibility::get_edge_type` reads the write buffers alone and has no
+// storage fallback, unlike its sibling `get_edge_endpoints` whose rustdoc says
+// callers must fall back to storage. So a flushed edge reported a made-up type
+// name — the #135 / #141 shape again, this time on the type rather than the
+// properties.
+// ---------------------------------------------------------------------------
+
+/// Read the `_type_name` of every element of a step variable.
+async fn step_variable_type_names(db: &Uni, query: &str) -> Vec<String> {
+    let result = db.session().query(query).await.unwrap();
+    assert_eq!(result.rows().len(), 1, "query: {query}");
+    let Value::List(items) = result.rows()[0].value("types").unwrap() else {
+        panic!("expected a list of type names");
+    };
+    items
+        .iter()
+        .map(|v| match v {
+            Value::String(s) => s.clone(),
+            other => panic!("expected a string type name, got {other:?}"),
+        })
+        .collect()
+}
+
+const CHAIN_TYPES: &str = "MATCH (a:N {name: 'n1'})-[r:R*2..2]->(c:N) \
+                           RETURN [e IN r | e._type_name] AS types";
+
+#[tokio::test]
+async fn test_edge_type_name_before_flush() {
+    // Guards L0 precedence: the resident edge's type must still resolve.
+    let db = setup_named_chain_with_schema().await;
+    assert_eq!(step_variable_type_names(&db, CHAIN_TYPES).await, ["R", "R"]);
+}
+
+#[tokio::test]
+async fn test_edge_type_name_after_flush() {
+    let db = setup_named_chain_with_schema().await;
+    db.flush().await.unwrap();
+    assert_eq!(step_variable_type_names(&db, CHAIN_TYPES).await, ["R", "R"]);
+}
+
+/// Two different edge types traversed by one pattern. The schemaless path names
+/// every edge with the pattern's whole type list joined by `|`, so this is the
+/// case that distinguishes a per-edge resolution from a per-pattern one.
+async fn setup_mixed_type_chain() -> Uni {
+    let db = Uni::in_memory().build().await.unwrap();
+    let tx = db.session().tx().await.unwrap();
+    tx.execute("CREATE (a:N {name: 'n1'})-[:A]->(b:N {name: 'n2'})-[:B]->(c:N {name: 'n3'})")
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    db
+}
+
+const MIXED_TYPES: &str = "MATCH (a:N {name: 'n1'})-[r:A|B*2..2]->(c:N) \
+                           RETURN [e IN r | e._type_name] AS types";
+
+#[tokio::test]
+async fn test_mixed_edge_type_names_before_flush() {
+    let db = setup_mixed_type_chain().await;
+    assert_eq!(
+        step_variable_type_names(&db, MIXED_TYPES).await,
+        ["A", "B"],
+        "each edge must report its own type, not the pattern's type list"
+    );
+}
+
+#[tokio::test]
+async fn test_mixed_edge_type_names_after_flush() {
+    let db = setup_mixed_type_chain().await;
+    db.flush().await.unwrap();
+    assert_eq!(step_variable_type_names(&db, MIXED_TYPES).await, ["A", "B"]);
+}
+
+#[tokio::test]
+async fn test_shortest_path_edge_type_name_after_flush() {
+    let db = setup_named_chain_with_schema().await;
+    db.flush().await.unwrap();
+    let types = step_variable_type_names(
+        &db,
+        "MATCH p = shortestPath((a:N {name: 'n1'})-[:R*]->(c:N {name: 'n3'})) \
+         RETURN [e IN relationships(p) | e._type_name] AS types",
+    )
+    .await;
+    assert_eq!(types, ["R", "R"]);
+}
+
+/// A relationship must report its STORED orientation even when the query walked
+/// it backwards. This is the property a bundled-context refactor could silently
+/// break — `_src` and `_dst` are both UInt64, so a transposition is a wrong
+/// answer rather than a type error. Asserted after a flush, where the
+/// orientation comes from the adjacency probe rather than the write buffer.
+#[tokio::test]
+async fn test_reverse_traversal_reports_stored_orientation() {
+    let db = setup_named_chain_with_schema().await;
+    db.flush().await.unwrap();
+
+    let forward = db
+        .session()
+        .query(
+            "MATCH (a:N {name: 'n1'})-[r:R*1..1]->(b:N) \
+             RETURN r[0]._src AS src, r[0]._dst AS dst",
+        )
+        .await
+        .unwrap();
+    let backward = db
+        .session()
+        .query(
+            "MATCH (b:N {name: 'n2'})<-[r:R*1..1]-(a:N) \
+             RETURN r[0]._src AS src, r[0]._dst AS dst",
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(forward.rows().len(), 1);
+    assert_eq!(backward.rows().len(), 1);
+    let pair = |r: &uni_db::QueryResult| {
+        (
+            r.rows()[0].get::<i64>("src").unwrap(),
+            r.rows()[0].get::<i64>("dst").unwrap(),
+        )
+    };
+    assert_eq!(
+        pair(&forward),
+        pair(&backward),
+        "walking the edge backwards must not flip the reported endpoints"
+    );
+}
+
+/// The same edge, reached five different ways, must report the same type name.
+/// Each way is a separate call site of the shared appender, so this catches one
+/// site wired wrong — the characteristic failure of this kind of refactor.
+#[tokio::test]
+async fn test_edge_type_name_agrees_across_call_sites() {
+    let db = setup_named_chain_with_schema().await;
+    db.flush().await.unwrap();
+
+    let single = |val: &Value, what: &str| -> String {
+        let Value::List(items) = val else {
+            panic!("expected a list for {what}, got {val:?}");
+        };
+        match items.first() {
+            Some(Value::String(s)) => s.clone(),
+            other => panic!("expected a string in {what}, got {other:?}"),
+        }
+    };
+
+    let result = db
+        .session()
+        .query(
+            "MATCH p = (a:N {name: 'n1'})-[r:R*1..1]->(b:N) \
+             RETURN [e IN relationships(p) | e._type_name] AS via_path, \
+                    [e IN r | e._type_name] AS via_step",
+        )
+        .await
+        .unwrap();
+    let via_path = single(result.rows()[0].value("via_path").unwrap(), "via_path");
+    let via_step = single(result.rows()[0].value("via_step").unwrap(), "via_step");
+
+    let sp = db
+        .session()
+        .query(
+            "MATCH p = shortestPath((a:N {name: 'n1'})-[:R*]->(b:N {name: 'n2'})) \
+             RETURN [e IN relationships(p) | e._type_name] AS types",
+        )
+        .await
+        .unwrap();
+    let via_shortest = single(sp.rows()[0].value("types").unwrap(), "shortestPath");
+
+    let group = db
+        .session()
+        .query(
+            "MATCH (s:N {name: 'n1'})((x)-[q:R]->(y)){1}(t:N) \
+             RETURN [e IN q | e._type_name] AS types",
+        )
+        .await
+        .unwrap();
+    let via_group = single(group.rows()[0].value("types").unwrap(), "group variable");
+
+    let pc = db
+        .session()
+        .query(
+            "MATCH (a:N {name: 'n1'}) \
+             RETURN [p = (a)-[:R]->(b) | [e IN relationships(p) | e._type_name]] AS paths",
+        )
+        .await
+        .unwrap();
+    let Value::List(pc_items) = pc.rows()[0].value("paths").unwrap() else {
+        panic!("expected a list of paths");
+    };
+    let via_comprehension = single(&pc_items[0], "pattern comprehension");
+
+    for (what, got) in [
+        ("path variable", &via_path),
+        ("step variable", &via_step),
+        ("shortestPath", &via_shortest),
+        ("group variable", &via_group),
+        ("pattern comprehension", &via_comprehension),
+    ] {
+        assert_eq!(got, "R", "{what} reported the wrong type name");
+    }
+}

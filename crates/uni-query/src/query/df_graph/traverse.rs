@@ -32,10 +32,10 @@
 use crate::query::df_graph::GraphExecutionContext;
 use crate::query::df_graph::bitmap::{EidFilter, VidFilter};
 use crate::query::df_graph::common::{
-    EntityPropertyCache, append_edge_to_struct_with, append_node_to_struct_with, arrow_err,
-    build_edge_list_field, build_node_list_field, build_path_struct_field, column_as_vid_array,
-    compute_plan_properties, exec_err, labels_data_type, new_edge_list_builder,
-    new_node_list_builder,
+    EdgeAppendCtx, EntityPropertyCache, append_edge_to_struct_with, append_node_to_struct_with,
+    append_traversed_edge, arrow_err, build_edge_list_field, build_node_list_field,
+    build_path_struct_field, column_as_vid_array, compute_plan_properties, exec_err,
+    labels_data_type, new_edge_list_builder, new_node_list_builder,
 };
 use crate::query::df_graph::nfa::{
     NfaStateId, PathNfa, PathSelector, QppGroupBinding, QppGroupKind, VlpOutputMode,
@@ -61,7 +61,6 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 use uni_common::Value as UniValue;
 use uni_common::core::id::{Eid, Vid};
-use uni_store::runtime::l0_visibility;
 use uni_store::storage::direction::Direction;
 
 /// BFS result: (target_vid, hop_count, node_path, edge_path)
@@ -89,6 +88,9 @@ fn path_entities(expansions: &[ExpansionRecord]) -> (Vec<Vid>, Vec<Eid>) {
 /// Reads the nodes and relationships from the existing path at `row_idx` and appends
 /// them to the provided builders. The caller should then skip the first VLP node
 /// (which is the junction point already present in the existing path).
+/// Deliberately does not use `append_traversed_edge`: the endpoints here are
+/// already stored in the source path's Arrow columns, so re-deriving them
+/// through the adjacency probe would be strictly more work for the same answer.
 fn prepend_existing_path(
     existing_path: &arrow_array::StructArray,
     row_idx: usize,
@@ -217,6 +219,13 @@ fn build_vlp_path_column(
     let mut nodes_builder = new_node_list_builder();
     let mut rels_builder = new_edge_list_builder();
     let query_ctx = graph_ctx.query_context();
+    let edge_ctx = EdgeAppendCtx {
+        graph_ctx,
+        query_ctx: &query_ctx,
+        edge_type_ids,
+        prop_cache,
+        fixed_type_name,
+    };
     let mut path_validity = Vec::with_capacity(expansions.len());
 
     for (row_out_idx, (_, _, _, node_path, edge_path)) in expansions.iter().enumerate() {
@@ -254,33 +263,12 @@ fn build_vlp_path_column(
         nodes_builder.append(true);
 
         for (i, eid) in edge_path.iter().enumerate() {
-            let resolved_type_name;
-            let type_name: &str = match fixed_type_name {
-                Some(name) => name,
-                None => {
-                    resolved_type_name = l0_visibility::get_edge_type(*eid, &query_ctx)
-                        .unwrap_or_else(|| "UNKNOWN".to_string());
-                    &resolved_type_name
-                }
-            };
-            // Report the relationship's STORED direction, not the traversal
-            // order (`node_path[i]` -> `node_path[i + 1]`). Resolves flushed
-            // (L1-resident) edges too, where the L0 chain no longer holds
-            // the stored endpoints.
-            let (src, dst) = graph_ctx.resolve_stored_edge_endpoints(
+            append_traversed_edge(
+                rels_builder.values(),
+                &edge_ctx,
                 *eid,
                 node_path[i],
                 node_path[i + 1],
-                edge_type_ids,
-            );
-            append_edge_to_struct_with(
-                rels_builder.values(),
-                *eid,
-                type_name,
-                src,
-                dst,
-                &query_ctx,
-                prop_cache,
             );
         }
         rels_builder.append(true);
@@ -4256,6 +4244,13 @@ impl GraphVariableLengthTraverseStream {
         if self.exec.step_variable.is_some() {
             let mut edges_builder = new_edge_list_builder();
             let query_ctx = self.exec.graph_ctx.query_context();
+            let edge_ctx = EdgeAppendCtx {
+                graph_ctx: &self.exec.graph_ctx,
+                query_ctx: &query_ctx,
+                edge_type_ids: &self.exec.edge_type_ids,
+                prop_cache,
+                fixed_type_name: None,
+            };
 
             for (_, _, _, node_path, edge_path) in expansions {
                 if node_path.is_empty() && edge_path.is_empty() {
@@ -4266,26 +4261,12 @@ impl GraphVariableLengthTraverseStream {
                     edges_builder.append(true);
                 } else {
                     for (i, eid) in edge_path.iter().enumerate() {
-                        let type_name = l0_visibility::get_edge_type(*eid, &query_ctx)
-                            .unwrap_or_else(|| "UNKNOWN".to_string());
-                        // Report the relationship's STORED direction, not the
-                        // traversal order (`node_path[i]` -> `node_path[i + 1]`).
-                        // Resolves flushed (L1-resident) edges too, where the L0
-                        // chain no longer holds the stored endpoints.
-                        let (src, dst) = self.exec.graph_ctx.resolve_stored_edge_endpoints(
+                        append_traversed_edge(
+                            edges_builder.values(),
+                            &edge_ctx,
                             *eid,
                             node_path[i],
                             node_path[i + 1],
-                            &self.exec.edge_type_ids,
-                        );
-                        append_edge_to_struct_with(
-                            edges_builder.values(),
-                            *eid,
-                            &type_name,
-                            src,
-                            dst,
-                            &query_ctx,
-                            prop_cache,
                         );
                     }
                     edges_builder.append(true);
@@ -4354,6 +4335,13 @@ impl GraphVariableLengthTraverseStream {
         prop_cache: Option<&EntityPropertyCache>,
     ) -> DFResult<ArrayRef> {
         let query_ctx = self.exec.graph_ctx.query_context();
+        let edge_ctx = EdgeAppendCtx {
+            graph_ctx: &self.exec.graph_ctx,
+            query_ctx: &query_ctx,
+            edge_type_ids: &self.exec.edge_type_ids,
+            prop_cache,
+            fixed_type_name: None,
+        };
         let stride = self.exec.hops_per_iter.max(1);
         let mut builder = match binding.kind {
             QppGroupKind::Node => new_node_list_builder(),
@@ -4382,24 +4370,12 @@ impl GraphVariableLengthTraverseStream {
                         let Some(eid) = edge_path.get(idx) else {
                             continue;
                         };
-                        let type_name = l0_visibility::get_edge_type(*eid, &query_ctx)
-                            .unwrap_or_else(|| "UNKNOWN".to_string());
-                        // Report the relationship's STORED direction, as the
-                        // path and step-variable columns do.
-                        let (src, dst) = self.exec.graph_ctx.resolve_stored_edge_endpoints(
+                        append_traversed_edge(
+                            builder.values(),
+                            &edge_ctx,
                             *eid,
                             node_path[idx],
                             node_path[idx + 1],
-                            &self.exec.edge_type_ids,
-                        );
-                        append_edge_to_struct_with(
-                            builder.values(),
-                            *eid,
-                            &type_name,
-                            src,
-                            dst,
-                            &query_ctx,
-                            prop_cache,
                         );
                     }
                 }
@@ -5238,7 +5214,17 @@ impl GraphVariableLengthTraverseMainStream {
         if self.step_variable.is_some() {
             let mut edges_builder = new_edge_list_builder();
             let query_ctx = self.graph_ctx.query_context();
+            // Only a fallback now: the pattern's type list cannot say which
+            // type each individual edge is, so `[:A|B]` used to label every
+            // edge "A|B". The probe resolves it per edge.
             let type_names_str = self.type_names.join("|");
+            let edge_ctx = EdgeAppendCtx {
+                graph_ctx: &self.graph_ctx,
+                query_ctx: &query_ctx,
+                edge_type_ids: &edge_type_ids,
+                prop_cache,
+                fixed_type_name: Some(&type_names_str),
+            };
 
             for (_, _, _, node_path, edge_path) in expansions.iter() {
                 if node_path.is_empty() && edge_path.is_empty() {
@@ -5248,24 +5234,12 @@ impl GraphVariableLengthTraverseMainStream {
                     edges_builder.append(true);
                 } else {
                     for (i, eid) in edge_path.iter().enumerate() {
-                        // Report the relationship's STORED direction, not the
-                        // traversal order (`node_path[i]` -> `node_path[i + 1]`).
-                        // Resolves flushed (L1-resident) edges too, where the L0
-                        // chain no longer holds the stored endpoints.
-                        let (src, dst) = self.graph_ctx.resolve_stored_edge_endpoints(
+                        append_traversed_edge(
+                            edges_builder.values(),
+                            &edge_ctx,
                             *eid,
                             node_path[i],
                             node_path[i + 1],
-                            &edge_type_ids,
-                        );
-                        append_edge_to_struct_with(
-                            edges_builder.values(),
-                            *eid,
-                            &type_names_str,
-                            src,
-                            dst,
-                            &query_ctx,
-                            prop_cache,
                         );
                     }
                     edges_builder.append(true);

@@ -349,6 +349,16 @@ impl BindFixedPathStream {
                 // type). The adjacent path-node columns supply the traversal
                 // order, which is also the final fallback when the probe is
                 // inconclusive.
+                //
+                // Deliberately not routed through `common::append_traversed_edge`
+                // like the traversal operators are: this is a fixed-length path,
+                // so the eid is an `Option` (an unmatched OPTIONAL binding), the
+                // candidate type ids are derived from a *name* rather than given,
+                // and the traversal endpoints may legitimately be 0 when a
+                // `_vid` column is absent. Nothing but the shape is shared. The
+                // type name here comes from the batch `_type` column, which is
+                // storage-backed, so it has none of the flushed-edge problem the
+                // shared helper exists to solve.
                 let adjacent = |idx: usize| {
                     self.node_variables
                         .get(idx)

@@ -18,6 +18,7 @@ use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
 use uni_common::Value;
+use uni_common::core::id::{Eid, Vid};
 use uni_common::core::schema::Schema as UniSchema;
 use uni_cypher::ast::{BinaryOp, CypherLiteral, Expr};
 use uni_store::storage::manager::StorageManager;
@@ -577,6 +578,84 @@ impl EntityPropertyCache {
     fn edge(&self, eid: uni_common::core::id::Eid) -> Option<&uni_common::Properties> {
         self.edges.get(&eid)
     }
+}
+
+/// Everything [`append_traversed_edge`] needs that does not vary per edge.
+///
+/// Bundled rather than passed positionally because the call sites are spread
+/// across free functions and four different `self` types, and because six
+/// same-typed positional arguments is exactly the transposition hazard the
+/// helper exists to remove.
+pub struct EdgeAppendCtx<'a> {
+    pub graph_ctx: &'a GraphExecutionContext,
+    pub query_ctx: &'a uni_store::runtime::context::QueryContext,
+    /// Candidate types for the stored-direction probe. Empty is allowed — the
+    /// probe then falls back to the adjacency manager's warmed types.
+    pub edge_type_ids: &'a [u32],
+    pub prop_cache: Option<&'a EntityPropertyCache>,
+    /// Last-resort type name, for a caller that knows the pattern's types but
+    /// not which one each edge matched. Consulted only after both authoritative
+    /// sources have failed.
+    pub fixed_type_name: Option<&'a str>,
+}
+
+impl EdgeAppendCtx<'_> {
+    /// Resolve an edge's type name.
+    ///
+    /// Two authoritative sources, exactly one of which applies to any given
+    /// edge: the L0 visibility chain knows a resident edge's type but returns
+    /// `None` once it is flushed (it has no storage fallback, unlike its
+    /// endpoint sibling), and the adjacency probe identifies a flushed edge's
+    /// type as a by-product of locating it but never runs for a resident one.
+    /// Consulting both is what keeps `_type_name` correct across a flush.
+    fn type_name(&self, eid: Eid, probed_type_id: Option<u32>) -> String {
+        if let Some(name) = uni_store::runtime::l0_visibility::get_edge_type(eid, self.query_ctx) {
+            return name;
+        }
+        if let Some(name) = probed_type_id.and_then(|id| {
+            self.graph_ctx
+                .storage()
+                .schema_manager()
+                .schema()
+                .edge_type_name_by_id_unified(id)
+        }) {
+            return name;
+        }
+        // Neither resident nor located by the probe. The empty string is used
+        // rather than a word like "UNKNOWN" because no real edge type can be
+        // named it, so an unresolvable type stays distinguishable from data.
+        self.fixed_type_name.unwrap_or_default().to_string()
+    }
+}
+
+/// Append one traversed edge to a struct builder in its **stored** orientation.
+///
+/// `traversal_src` / `traversal_dst` are the order the query walked the hop,
+/// which is not necessarily the order the edge is stored in — an undirected or
+/// incoming pattern walks it backwards, and a relationship in a result must
+/// still report `(start -> end)`. Both the orientation and the type name are
+/// resolved through [`GraphExecutionContext::resolve_stored_edge`], so they
+/// survive the edge being flushed out of the write buffers.
+pub fn append_traversed_edge(
+    builder: &mut arrow_array::builder::StructBuilder,
+    ctx: &EdgeAppendCtx<'_>,
+    eid: Eid,
+    traversal_src: Vid,
+    traversal_dst: Vid,
+) {
+    let resolved =
+        ctx.graph_ctx
+            .resolve_stored_edge(eid, traversal_src, traversal_dst, ctx.edge_type_ids);
+    let type_name = ctx.type_name(eid, resolved.type_id);
+    append_edge_to_struct_with(
+        builder,
+        eid,
+        &type_name,
+        resolved.src,
+        resolved.dst,
+        ctx.query_ctx,
+        ctx.prop_cache,
+    );
 }
 
 /// Append a single edge to an edge struct builder.
