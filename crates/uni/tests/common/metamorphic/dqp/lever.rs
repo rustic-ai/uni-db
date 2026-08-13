@@ -57,6 +57,19 @@ pub struct Witness {
     pub branch_scans: u64,
     /// Reads that executed against a pinned time-travel snapshot.
     pub snapshot_reads: u64,
+    /// Plan-cache hits attributable to this query.
+    ///
+    /// **Not** from `QueryMetrics`. `QueryResult::plan_cache_hit` is set at
+    /// exactly one site — `impl_query.rs:808`, on the *write* path — so it is
+    /// permanently `false` for a read and cannot witness anything; a test in
+    /// `feasibility.rs` pins that. The observable that does work is a delta on
+    /// `SessionMetrics::plan_cache_hits`, which only [`observe_cached`] can take
+    /// because it needs the session on both sides of the call.
+    ///
+    /// So this field is `0` under plain [`observe`], and non-zero only where a
+    /// lever has deliberately measured it. A lever must not read it unless it
+    /// produced its own sides with [`observe_cached`].
+    pub plan_cache_hits: u64,
 }
 
 /// One side's result: the bag to compare, and the evidence of how it was
@@ -78,6 +91,7 @@ pub fn witness_of(r: &QueryResult) -> Witness {
         rows_scanned: m.rows_scanned,
         branch_scans: m.branch_scans,
         snapshot_reads: m.snapshot_reads,
+        plan_cache_hits: 0,
     }
 }
 
@@ -96,6 +110,33 @@ pub async fn observe(session: &Session, q: &Query) -> anyhow::Result<Observed> {
     let result = session.query(&cypher).await?;
     Ok(Observed {
         witness: witness_of(&result),
+        bag: bag(&result),
+    })
+}
+
+/// [`observe`], additionally measuring the query's plan-cache hits.
+///
+/// Takes a `SessionMetrics` snapshot either side of the query and records the
+/// difference, which is the only way to attribute a cache hit to one execution:
+/// `SessionMetrics` counters are cumulative over the session's life, and the
+/// per-result flag is write-path-only.
+///
+/// Costs two extra metric reads per call, so it is a separate function rather
+/// than folded into [`observe`] — only the plan-cache lever needs it, and every
+/// other lever runs 20 000 cases.
+///
+/// # Errors
+///
+/// Returns any error from query execution.
+pub async fn observe_cached(session: &Session, q: &Query) -> anyhow::Result<Observed> {
+    let cypher = render(q);
+    let before = session.metrics().plan_cache_hits;
+    let result = session.query(&cypher).await?;
+    let after = session.metrics().plan_cache_hits;
+    let mut witness = witness_of(&result);
+    witness.plan_cache_hits = after.saturating_sub(before);
+    Ok(Observed {
+        witness,
         bag: bag(&result),
     })
 }

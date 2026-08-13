@@ -205,6 +205,24 @@ impl CaseKind {
     }
 }
 
+/// The generator a `(kind, tier)` pair draws from.
+///
+/// Shared by both drivers so the two cannot diverge: a case that is admissible
+/// under `drive_prepared` must be the same case `drive_stateful` would draw, or
+/// the two oracles would be testing different query populations while reporting
+/// under the same names.
+///
+/// Above ~10k vertices every unfiltered case scans the whole fixture, so larger
+/// tiers draw from generators that always carry a base `WHERE`.
+pub fn strategy_for(kind: CaseKind, tier: Tier) -> proptest::strategy::BoxedStrategy<Case> {
+    match (kind, tier.needs_selectivity_floor()) {
+        (CaseKind::Plain, false) => arb_case().boxed(),
+        (CaseKind::Plain, true) => arb_case_selective().boxed(),
+        (CaseKind::IntAggregate, false) => arb_agg_case_int().boxed(),
+        (CaseKind::IntAggregate, true) => arb_agg_case_int_selective().boxed(),
+    }
+}
+
 /// A boxed future borrowing the db for `'a` — the same shape
 /// `metamorphic::drive` uses, for the same reason.
 pub type PrepareFut<'a, L> = Pin<Box<dyn Future<Output = anyhow::Result<L>> + 'a>>;
@@ -316,15 +334,7 @@ pub fn drive_prepared_with<L, P>(
         ..Config::default()
     });
 
-    // Above ~10k vertices every unfiltered case scans the whole fixture, so
-    // larger tiers draw from generators that always carry a base WHERE.
-    let strategy: proptest::strategy::BoxedStrategy<Case> =
-        match (kind, tier.needs_selectivity_floor()) {
-            (CaseKind::Plain, false) => arb_case().boxed(),
-            (CaseKind::Plain, true) => arb_case_selective().boxed(),
-            (CaseKind::IntAggregate, false) => arb_agg_case_int().boxed(),
-            (CaseKind::IntAggregate, true) => arb_agg_case_int_selective().boxed(),
-        };
+    let strategy = strategy_for(kind, tier);
 
     let outcome = runner.run(&strategy, |case: Case| {
         // Admissibility is checked *before* the case runs, so an inadmissible

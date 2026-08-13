@@ -183,10 +183,26 @@ impl Rng {
 ///   200 cases and the remaining 300 exercise different machinery, and nothing
 ///   in the output would say so. It also registers its own fork holder, which
 ///   makes teardown timing nondeterministic.
+///
+/// - `auto_flush_interval: None` — **required for the Tier-1 flush lever, and
+///   measured rather than anticipated.** The default is
+///   `Some(Duration::from_secs(5))` with `auto_flush_min_mutations: 1`
+///   (`uni-common/src/config.rs:431,443`), so a background timer drains L0 five
+///   seconds after any write. `drive_stateful`'s pass 1 over 500 cases takes ~34
+///   s, so the timer fired a quarter of the way through and every case after it
+///   compared a flushed state against a flushed state. The first run measured
+///   **25.8% activation** for a witness that scored 60/60 when checked directly —
+///   the activation floor catching a background task, which is the same hazard
+///   `disable_fork_index_builder` exists for.
+///
+///   This is not merely a flush-lever concern: any lever whose side A depends on
+///   L0 residency is exposed, which is why it is pinned here for every DQP
+///   fixture rather than in one lever's `prepare`.
 fn dqp_config() -> uni_db::UniConfig {
     uni_db::UniConfig {
         disable_fork_sweeper: true,
         disable_fork_index_builder: true,
+        auto_flush_interval: None,
         ..Default::default()
     }
 }
@@ -354,7 +370,31 @@ pub async fn build_dqp_seed_with(tier: Tier, seed: u64) -> anyhow::Result<Uni> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Tier, build_dqp_seed};
+    use super::{Tier, build_dqp_seed, dqp_config};
+
+    /// The background flush timer must stay off for every DQP fixture.
+    ///
+    /// This one is worth an assertion rather than a comment because it is a
+    /// `..Default::default()` away from coming back, and its return would not
+    /// break anything visibly: the Tier-2 levers would carry on passing, and the
+    /// flush lever would report a degraded activation rate that reads like
+    /// witness drift rather than a background task. It cost a full debugging
+    /// cycle to find the first time — 25.8% activation for a witness that
+    /// measured 60/60 correct in isolation.
+    ///
+    /// Asserted on the config rather than behaviourally, i.e. rather than
+    /// inserting a delta and waiting out the 5-second timer: the wait would put
+    /// six idle seconds in the PR lane to observe a fact the config states
+    /// outright.
+    #[test]
+    fn dqp_fixtures_disable_the_background_flush_timer() {
+        assert!(
+            dqp_config().auto_flush_interval.is_none(),
+            "the time-based L0 flush is enabled for DQP fixtures. Any lever whose \
+             side A depends on L0 residency will silently compare a flushed state \
+             against a flushed state once the timer fires mid-run."
+        );
+    }
 
     async fn count(db: &uni_db::Uni, q: &str) -> anyhow::Result<i64> {
         let r = db.session().query(q).await?;

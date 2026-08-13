@@ -477,15 +477,137 @@ returned and are not transferable.
    smoke at 2 000 cases and 0.788 s, `k = 500` costs 4 rebuilds ≈ 3 s. Both fine;
    the constraint binds only on large, which is excluded above.
 
+### Results — **phase complete (4A), 2026-08-12**
+
+The phase opened by measuring whether the four proposed transitions can be
+witnessed at all, in `dqp/transition_probe.rs`. The answer split them in half and
+that split is the phase's main finding.
+
+| transition | witness | verdict |
+|---|---|---|
+| flush (L0→L1) | `l0_reads` / `storage_reads` | **built** — Tier 1 |
+| plan cache cold→warm | `SessionMetrics::plan_cache_hits` delta | **built** — but Tier **2**, not Tier 1 |
+| index absent→present | none exists | **deferred** |
+| pre→post compaction | none exists | **deferred** |
+
+**The plan-cache lever is Tier-2, and that is a correction rather than a
+shortcut.** The plan grouped it with flush and compaction as a transition on the
+database. It is not: the plan cache belongs to the `Session` (`session.rs:202`,
+constructed at `:257`), and a fresh `db.session()` measures `hits=0 misses=0
+size=0`. Cold and warm are two sessions held open at once, so the lever runs
+under `drive_prepared` with no new driver. Side B runs each query twice — the
+first execution of a generated text is necessarily a miss — and observes the
+second.
+
+**Two levers are deferred, with the measurement as the reason.**
+
+- **Index.** No counter in `QueryMetrics` moves when a scalar index is created,
+  and the logical plan is *byte-identical* before `apply()`, after it, and after
+  an explicit `indexes().rebuild()` — which also returned `None` with an empty
+  `rebuild_status()`. The one place index usage is modelled,
+  `OperatorStats::index_hits`, is hardcoded `None` at all three construction
+  sites (`executor/core.rs:1068,1102`), so it is a dead field behind the PROFILE
+  path rather than a witness. Lance may well be using the index below the plan
+  layer — the fork lever's premise is that `use_scalar_index(false)` on branch
+  scans *matters* — but the narrow claim is all the deferral needs: at the
+  observability this repo offers, index-absent and index-present are
+  indistinguishable, so a lever between them cannot prove it activated.
+- **Compaction.** No per-query counter moves, and the run-level observable that
+  should have rescued it does not exist either: `compact_label` returns a
+  **hardcoded literal** (`uni-store/src/storage/manager.rs:876`) with
+  `files_compacted: 1` regardless of what was merged and `bytes_before` /
+  `bytes_after` at `0` — as do all six construction sites in that file. Only
+  `duration` is real. Five deliberately separate fragments and an immediate
+  no-op re-compact all reported identically. **This is a user-facing defect worth
+  its own ticket**, independent of the oracle: `db.compaction().compact(...)`
+  returns a struct whose every field but `duration` is a constant.
+
+Both probes stay in the suite as **tripwires** rather than comments: they assert
+the unobservability that justified the deferral, and their failure messages open
+with "good news" and point at 4B. A deferral backed by an executing test does not
+quietly become false.
+
+**A background timer nearly made the flush lever vacuous, and the activation
+floor caught it.** The first `flush_smoke` run reported **25.8% activation** for a
+witness that scored 60/60 when checked directly against generated cases. Root
+cause: `auto_flush_interval` defaults to `Some(5s)` with
+`auto_flush_min_mutations: 1` (`uni-common/src/config.rs:431,443`), so the
+background writer drained L0 five seconds into a ~34-second pass 1 — every case
+after that compared a flushed state against a flushed state. `dqp_config()` now
+pins `auto_flush_interval: None`, with a test asserting it, because the failure
+mode is a `..Default::default()` away from returning and would read as witness
+drift rather than as a background task. Same species as
+`disable_fork_index_builder`. With the timer off: **100% activation.**
+
+**Reproduction by seed works and discriminates.** `drive_stateful` gives up
+proptest's shrinker — it would re-run every shrink candidate against side B's
+state and conclude no failure reproduces — in exchange for `replay_stateful` and
+a printed `DQP_SEED` / `DQP_BATCH` / `DQP_CASE`. That trade is tested rather than
+asserted: a fault injected at a known case fails the driver, the coordinates it
+prints reproduce the identical query and the identical bag difference, **and
+replay one case over reports "bags AGREE"**. Without that third check, a replay
+that panicked wherever it was pointed would have passed the first two.
+
+The cost is real and stated: a failure reports the generated query, not a
+minimized one.
+
+**The nightly volume was re-measured rather than assumed to still fit.** Phase 4
+takes the nightly job from four soaks to eight, so the whole configuration was
+run as CI runs it — all eight concurrently at `DQP_CASES=10000` on a 22-core box:
+
+| soak | time | | soak | time |
+|---|---|---|---|---|
+| `fork_agg_soak` | 8.8 min | | `fork_soak` | 21.7 min |
+| `pinned_agg_soak` | 9.7 min | | `pinned_soak` | 22.0 min |
+| `flush_agg_soak` | 10.2 min | | `flush_soak` | 23.9 min |
+| `plan_cache_agg_soak` | 12.3 min | | `plan_cache_soak` | 29.9 min |
+
+**29.9 minutes wall-clock**, all eight passing, against a 60-minute job timeout
+and a 54-minute per-test ceiling. So `DQP_CASES: 10000` stands unchanged — and
+the measurement is pessimistic for CI, since eight heavy tests contending over 22
+cores is more contention than the 64-core runner sees. 160 000 queries a night
+across the eight.
+
+One limit on what that run proves: it did not use `--no-capture`, which forces
+serial execution, so nextest swallowed the per-run activation lines. The eight
+passes do establish that **each cleared the 80% floor** — that assertion lives
+inside the test — but the exact rates are not quotable from this run. The 100%
+figures above are from the captured smoke runs.
+
+**A pre-existing CI defect surfaced while wiring this up.** The nightly `soak`
+job filters on `test(/soak/) | test(/stress/)`, which matches every DQP soak by
+name — so since Phase 2 they have been running a *second* time each night under
+that job, at the default 20 000 cases rather than the 10 000 the `dqp` job sets,
+inside a timeout sized for a different workload. The `metamorphic` job already
+excluded `dqp::`; the `soak` job did not. Fixed, and verified by count: the old
+filter matched 8 DQP tests, the new one matches 0.
+
 ### Exit criteria
 
-- [ ] All four Tier-1 levers green, each with ≥80% activation.
-- [ ] `dqp_replay` reproduces a deliberately injected failure from its printed
-      seed alone.
-- [ ] Plan-cache lever demonstrably registers a hit on side B — via a
+- [x] ~~All four~~ **Both witnessable** Tier-1 levers green, each with ≥80%
+      activation — `flush_smoke` and `plan_cache_smoke` at **100%**. The index and
+      compaction levers are deferred to 4B with the measurement above as the
+      reason; the original criterion was not achievable, and the probes that show
+      why now run in the suite.
+- [x] `dqp_replay` reproduces a deliberately injected failure from its printed
+      seed alone — `a_failure_reproduces_from_its_printed_coordinates`, which also
+      asserts it does *not* fire one case over.
+- [x] Plan-cache lever demonstrably registers a hit on side B — via a
       **`SessionMetrics::plan_cache_hits` delta**, not `QueryResult.plan_cache_hit`,
       which Phase 0A showed is a write-path-only field and permanently `false` on
       the read path.
+
+### Phase 4B — deferred, and what unblocks it
+
+Not scheduled. Each needs observability that does not exist today:
+
+1. A scan-level counter recording whether a scalar index was consulted, in
+   `uni-store`'s Lance scan path — enough to witness index-absent vs
+   index-present.
+2. `CompactionStats` reporting real numbers, which is worth doing regardless of
+   whether the lever follows.
+
+The tripwire tests fail the moment either lands.
 
 ---
 
