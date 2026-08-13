@@ -79,3 +79,25 @@ inherits = "release"
 lto = "thin"
 codegen-units = 1
 
+# Benchmark profile — release optimization, but with symbols kept.
+#
+# `bench` inherits from `release`, which sets `strip = "symbols"` above for wheel
+# size. That is right for shipped artifacts and wrong for benchmarks: a stripped
+# binary has no symbol table, so any profiler that resolves functions by name
+# cannot find them.
+#
+# This is not a theoretical concern. Under `iai-callgrind`, Callgrind collects
+# with `--collect-atstart=no` and toggles collection on entry to the benchmark
+# function *by name*. With symbols stripped the toggle never matches, Callgrind
+# reports `Collected: 0`, and iai-callgrind prints `Ok. 7 without regressions` —
+# a green run that measured nothing at all. Discovered in Phase 0B; see
+# docs/perf/iai-qualification-2026-08-12.md.
+#
+# `debug = 1` (line tables) is enough for symbolication and costs far less than
+# full debug info. Applies to every bench target, so `perf`/`valgrind` on the
+# Criterion benches get readable stacks too.
+[profile.bench]
+inherits = "release"
+strip = "none"
+debug = 1
+
