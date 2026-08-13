@@ -12,10 +12,10 @@
 //!   index is registered.
 //! - Fork sessions start with a cold plan cache.
 //!
-//! Per the fork contract in `CLAUDE.md`, a pristine fork disagreeing with its
-//! parent is unambiguously a bug — the fork is supposed to be a transparent view
-//! of the parent until something is written to it. Issues #99, #103, #97, #110
-//! and #135 all lived in exactly this gap.
+//! Per the fork contract, a pristine fork disagreeing with its parent is
+//! unambiguously a bug — the fork is supposed to be a transparent view of the
+//! parent until something is written to it. Issues #99, #103, #97, #110 and #135
+//! all lived in exactly this gap.
 //!
 //! The fork here writes **nothing**. That is not a limitation: `create_fork_2pc`
 //! materializes one Lance branch per dataset at fork time, so a pristine fork
@@ -23,9 +23,9 @@
 //! witness, which fires on every case.
 
 use uni_cypher::ast::Query;
-use uni_db::{Session, Uni};
+use uni_db::Session;
 
-use super::driver::{PrepareFut, drive_prepared, smoke_cases, soak_cases};
+use super::driver::{CaseKind, Db, PrepareFut, drive_prepared, smoke_cases, soak_cases};
 use super::lever::{Lever, Observed, Witness, observe};
 use super::seed::Tier;
 
@@ -48,14 +48,14 @@ impl ForkLever {
     /// # Errors
     ///
     /// Returns any error from fork creation.
-    pub async fn prepare(db: &Uni) -> anyhow::Result<Self> {
+    pub async fn prepare(db: &Db) -> anyhow::Result<Self> {
         let primary = db.session();
         let fork = db.session().fork(FORK_NAME).await?;
         Ok(Self { primary, fork })
     }
 
     /// Boxed constructor in the shape [`drive_prepared`] expects.
-    pub fn prepared(db: &Uni) -> PrepareFut<'_, Self> {
+    pub fn prepared(db: &Db) -> PrepareFut<'_, Self> {
         Box::pin(Self::prepare(db))
     }
 }
@@ -93,7 +93,12 @@ impl Lever for ForkLever {
 /// `use_scalar_index(false)` on the branch scan buys.
 #[test]
 fn fork_smoke() {
-    drive_prepared(smoke_cases(), Tier::Tiny, ForkLever::prepared);
+    drive_prepared(
+        smoke_cases(),
+        Tier::Tiny,
+        CaseKind::Plain,
+        ForkLever::prepared,
+    );
 }
 
 /// Nightly volume, ~32 min. Runs in its own job (see `nightly.yml`) because a
@@ -103,5 +108,26 @@ fn fork_smoke() {
 #[test]
 #[ignore = "soak: DQP primary-vs-fork at nightly volume"]
 fn fork_soak() {
-    drive_prepared(soak_cases(), Tier::Tiny, ForkLever::prepared);
+    drive_prepared(
+        soak_cases(),
+        Tier::Tiny,
+        CaseKind::Plain,
+        ForkLever::prepared,
+    );
+}
+
+/// Nightly: the same lever over integer aggregate projections.
+///
+/// Aggregation is a different execution path from a plain projection — a
+/// different set of physical operators, different accumulation — so it is worth
+/// a differential run of its own. Integer-only: see [`CaseKind`].
+#[test]
+#[ignore = "soak: DQP primary-vs-fork over integer aggregates"]
+fn fork_agg_soak() {
+    drive_prepared(
+        soak_cases(),
+        Tier::Tiny,
+        CaseKind::IntAggregate,
+        ForkLever::prepared,
+    );
 }

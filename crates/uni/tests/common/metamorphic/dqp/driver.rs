@@ -30,13 +30,17 @@
 use std::cell::Cell;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 
+use proptest::strategy::Strategy;
 use proptest::test_runner::{Config, TestCaseError, TestRunner};
 
 use super::lever::Lever;
 use super::seed::{Tier, build_dqp_seed};
 use crate::diff::bag_eq;
-use crate::querygen::{Case, arb_case};
+use crate::querygen::{
+    Case, arb_agg_case_int, arb_agg_case_int_selective, arb_case, arb_case_selective,
+};
 
 /// Default case count for the PR lane.
 ///
@@ -110,6 +114,14 @@ fn per_case_budget(tier: Tier) -> usize {
 
 /// Ceiling on rows materialized into `RowBag`s across a whole run.
 ///
+/// **Inert for [`CaseKind::IntAggregate`] by construction**: an aggregate returns
+/// one row per case regardless of how much it scanned, so a budget over rows
+/// *returned* cannot catch a runaway aggregate. For that kind the meaningful
+/// guards are the activation floor and the job timeout. Phase 1 populated
+/// `rows_scanned`, which would cover both kinds — recalibrating the ceilings
+/// against it is a worthwhile follow-up, but the numbers here were measured
+/// against rows returned and are not transferable.
+///
 /// Checked **after** the run and only when it otherwise passed, for the reason
 /// above. Set from the Phase-0A mean with a 1.5x allowance, doubled because the
 /// driver runs two sides per case — a factor the first version of this function
@@ -122,9 +134,89 @@ fn run_budget(tier: Tier, cases: u32) -> usize {
     (mean_rows_per_side(tier) * 2 * cases as usize * 3) / 2
 }
 
+/// Which family of generated queries a run compares, and the admissibility rule
+/// that goes with it.
+///
+/// Strategy and rule are bound together in one enum so they cannot drift apart.
+/// A differential oracle must not compare every construct a generator can
+/// produce — some are nondeterministic across execution paths *by definition*,
+/// and comparing them yields failures with no bug behind them.
+///
+/// Excluded from every kind:
+///
+/// - **Float aggregates.** `f64` addition is not associative, `bag_eq` is exact
+///   (`diff/mod.rs:37-38`, leniency limited to `0.0 == -0.0` and `NaN == NaN`),
+///   and the premise of this oracle is that the two sides execute *differently*
+///   — potentially including accumulation order.
+/// - **`LIMIT`.** `Case::limited_query` emits `LIMIT n` with no `ORDER BY`, so
+///   which rows come back is plan-dependent. `ordered_query` cannot rescue it:
+///   the two are never combined, and the only sort key (`a.name`) repeats once
+///   per edge under the `Edge` shape, so ties would break arbitrarily anyway.
+///   DQP renders `base_query()` only, which carries no `LIMIT`; the assertion
+///   below makes that deliberate rather than incidental.
+/// - **Nondeterministic functions** — `rand`-family, wall-clock, and ANN recall
+///   knobs. The generator cannot currently emit any of these; the check exists
+///   so that adding one is caught here rather than in a diff.
+///
+/// `bag_eq` itself is **not** loosened to accommodate any of this. TLP and NoREC
+/// depend on its exactness.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CaseKind {
+    /// Plain projections of variables and properties — no aggregation.
+    Plain,
+    /// `count(*)` and `sum` over integer properties only.
+    IntAggregate,
+}
+
+impl CaseKind {
+    /// Short name for failure messages.
+    pub fn name(self) -> &'static str {
+        match self {
+            CaseKind::Plain => "plain",
+            CaseKind::IntAggregate => "int-aggregate",
+        }
+    }
+
+    /// Why `case` is inadmissible for this kind, or `None` if it is fine.
+    ///
+    /// Checked before a case is ever executed, so a violation is reported as the
+    /// generator bug it is rather than as a mysterious bag difference.
+    pub fn inadmissible(self, case: &Case) -> Option<String> {
+        if case.has_float_aggregate() {
+            return Some(
+                "aggregates a Float property; f64 sum is not associative, so two \
+                 execution paths may legitimately disagree and `bag_eq` is exact"
+                    .to_string(),
+            );
+        }
+        match self {
+            CaseKind::Plain if case.is_aggregate() => Some(
+                "carries an aggregate projection, but this run was configured for \
+                 plain projections"
+                    .to_string(),
+            ),
+            CaseKind::IntAggregate if !case.is_aggregate() => Some(
+                "carries no aggregate, but this run was configured for integer \
+                 aggregates — the generator is not producing what the lever expects"
+                    .to_string(),
+            ),
+            _ => None,
+        }
+    }
+}
+
 /// A boxed future borrowing the db for `'a` — the same shape
 /// `metamorphic::drive` uses, for the same reason.
 pub type PrepareFut<'a, L> = Pin<Box<dyn Future<Output = anyhow::Result<L>> + 'a>>;
+
+/// The database handle a lever is prepared against.
+///
+/// `Arc<Uni>` rather than `&Uni` because `Uni` is not `Clone` and a lever cannot
+/// borrow from the driver's local — `L: Lever` is a single type with no
+/// lifetime. The pinned lever needs an owned handle to take snapshots during
+/// `check_invariants`; levers that only need sessions can ignore the `Arc` and
+/// call straight through the `Deref`.
+pub type Db = Arc<uni_db::Uni>;
 
 /// The run-level floors a driven lever is held to.
 ///
@@ -170,12 +262,12 @@ impl Budgets {
 ///
 /// Panics (failing the test) if the seed cannot be built, the lever cannot be
 /// prepared, any case violates the law, or the run-level floors are breached.
-pub fn drive_prepared<L, P>(cases: u32, tier: Tier, prepare: P)
+pub fn drive_prepared<L, P>(cases: u32, tier: Tier, kind: CaseKind, prepare: P)
 where
     L: Lever,
-    P: for<'a> FnOnce(&'a uni_db::Uni) -> PrepareFut<'a, L>,
+    P: for<'a> FnOnce(&'a Db) -> PrepareFut<'a, L>,
 {
-    drive_prepared_with(cases, tier, Budgets::for_tier(tier, cases), prepare);
+    drive_prepared_with(cases, tier, kind, Budgets::for_tier(tier, cases), prepare);
 }
 
 /// [`drive_prepared`] with explicit budgets.
@@ -183,17 +275,22 @@ where
 /// # Panics
 ///
 /// As [`drive_prepared`].
-pub fn drive_prepared_with<L, P>(cases: u32, tier: Tier, budgets: Budgets, prepare: P)
-where
+pub fn drive_prepared_with<L, P>(
+    cases: u32,
+    tier: Tier,
+    kind: CaseKind,
+    budgets: Budgets,
+    prepare: P,
+) where
     L: Lever,
-    P: for<'a> FnOnce(&'a uni_db::Uni) -> PrepareFut<'a, L>,
+    P: for<'a> FnOnce(&'a Db) -> PrepareFut<'a, L>,
 {
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .expect("tokio runtime");
 
-    let db = rt.block_on(build_dqp_seed(tier)).expect("build dqp seed");
+    let db: Db = Arc::new(rt.block_on(build_dqp_seed(tier)).expect("build dqp seed"));
     // Explicit, though `create_fork_2pc` flushes too: doing it here makes the
     // fork point a stated precondition of the run rather than a side effect of
     // the lever, so a future change to the fork path cannot silently move it.
@@ -201,6 +298,8 @@ where
 
     let lever = rt.block_on(prepare(&db)).expect("prepare lever");
     let name = lever.name();
+    rt.block_on(lever.check_invariants())
+        .expect("lever invariants violated before the run");
 
     let total = Cell::new(0u64);
     let activated = Cell::new(0u64);
@@ -217,7 +316,27 @@ where
         ..Config::default()
     });
 
-    let outcome = runner.run(&arb_case(), |case: Case| {
+    // Above ~10k vertices every unfiltered case scans the whole fixture, so
+    // larger tiers draw from generators that always carry a base WHERE.
+    let strategy: proptest::strategy::BoxedStrategy<Case> =
+        match (kind, tier.needs_selectivity_floor()) {
+            (CaseKind::Plain, false) => arb_case().boxed(),
+            (CaseKind::Plain, true) => arb_case_selective().boxed(),
+            (CaseKind::IntAggregate, false) => arb_agg_case_int().boxed(),
+            (CaseKind::IntAggregate, true) => arb_agg_case_int_selective().boxed(),
+        };
+
+    let outcome = runner.run(&strategy, |case: Case| {
+        // Admissibility is checked *before* the case runs, so an inadmissible
+        // construct is reported as a generator bug rather than surfacing later
+        // as a bag difference with no bug behind it.
+        if let Some(why) = kind.inadmissible(&case) {
+            return Err(TestCaseError::fail(format!(
+                "[{name}] generated an inadmissible case for the {} kind: {why}.\n  {}",
+                kind.name(),
+                crate::querygen::render::render(&case.base_query()),
+            )));
+        }
         let q = case.base_query();
         let (a, b) = rt
             .block_on(async {
@@ -275,6 +394,12 @@ where
 
     outcome.expect("DQP lever found a divergence");
 
+    // After the run: if an invariant broke mid-run the comparisons above were
+    // made against shifting ground, so the result is rejected rather than
+    // reported either way.
+    rt.block_on(lever.check_invariants())
+        .expect("lever invariants violated during the run — results discarded");
+
     assert!(
         total.get() > 0,
         "[{name}] ran zero cases — the generator produced nothing, so this run \
@@ -303,12 +428,12 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{Budgets, PrepareFut, drive_prepared_with};
+    use super::{Budgets, CaseKind, Db, PrepareFut, drive_prepared_with};
     use crate::metamorphic::dqp::fork_lever::ForkLever;
     use crate::metamorphic::dqp::lever::{Lever, Observed, Witness, observe};
     use crate::metamorphic::dqp::seed::Tier;
     use uni_cypher::ast::Query;
-    use uni_db::{Session, Uni};
+    use uni_db::Session;
 
     /// A lever whose two sides are the *same* session and which admits it never
     /// activates — the shape of a vacuous differential test.
@@ -317,7 +442,7 @@ mod tests {
     }
 
     impl StubLever {
-        fn prepared(db: &Uni) -> PrepareFut<'_, Self> {
+        fn prepared(db: &Db) -> PrepareFut<'_, Self> {
             let session = db.session();
             Box::pin(async move { Ok(Self { session }) })
         }
@@ -353,7 +478,13 @@ mod tests {
     #[test]
     #[should_panic(expected = "activation rate")]
     fn activation_floor_rejects_a_vacuous_lever() {
-        drive_prepared_with(8, Tier::Tiny, GENEROUS, StubLever::prepared);
+        drive_prepared_with(
+            8,
+            Tier::Tiny,
+            CaseKind::Plain,
+            GENEROUS,
+            StubLever::prepared,
+        );
     }
 
     /// The per-case ceiling must fire mid-run, naming the offending query.
@@ -364,7 +495,7 @@ mod tests {
             per_case: 1,
             ..GENEROUS
         };
-        drive_prepared_with(8, Tier::Tiny, budgets, ForkLever::prepared);
+        drive_prepared_with(8, Tier::Tiny, CaseKind::Plain, budgets, ForkLever::prepared);
     }
 
     /// The run total must fire after a run that was otherwise clean — a healthy
@@ -376,6 +507,6 @@ mod tests {
             run_total: 1,
             ..GENEROUS
         };
-        drive_prepared_with(8, Tier::Tiny, budgets, ForkLever::prepared);
+        drive_prepared_with(8, Tier::Tiny, CaseKind::Plain, budgets, ForkLever::prepared);
     }
 }

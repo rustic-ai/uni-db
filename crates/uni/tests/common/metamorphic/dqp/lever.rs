@@ -125,4 +125,25 @@ pub trait Lever {
     /// answer this is indistinguishable from one that compares a path against
     /// itself.
     fn activated(&self, a: &Witness, b: &Witness) -> bool;
+
+    /// Anything else that must hold for this lever's comparisons to mean
+    /// something. Called before and after the case loop.
+    ///
+    /// The pinned lever uses it to confirm no write advanced the live version
+    /// mid-run: if one did, the two sides legitimately saw different data and
+    /// the run must be **rejected rather than reported** — a passing comparison
+    /// would be luck and a failing one would be a false alarm.
+    ///
+    /// A default body is right here, unlike [`Self::activated`], which
+    /// deliberately has none. Having no extra precondition is a legitimate and
+    /// common case, and the default means "nothing further to check" rather than
+    /// "skip the thing that makes this valid" — the activation witness still
+    /// governs vacuity either way.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error describing the violated invariant.
+    async fn check_invariants(&self) -> anyhow::Result<()> {
+        Ok(())
+    }
 }

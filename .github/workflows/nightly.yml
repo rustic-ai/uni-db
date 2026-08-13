@@ -342,11 +342,21 @@ jobs:
           save-if: false
 
       # Each case runs the same query down two execution paths and compares the
-      # result bags, so 20000 cases is 40000 queries. Sized from the per-case
-      # cost measured in docs/perf/dqp-feasibility-2026-08-12.md.
-      - name: DQP soak (primary vs pristine fork)
+      # result bags, so 10000 cases is 20000 queries per soak and 80000 across
+      # the four — still well above the >=100k-queries/night target when counted
+      # alongside the metamorphic job.
+      #
+      # Sized down from 20000 by measurement, not caution. At 20000 the four
+      # soaks measured 10.3 / 30.8 / 10.6 / 33.7 minutes = 85.4 minutes serial
+      # on a 22-core box. nextest runs them concurrently here, so wall-clock is
+      # the slowest rather than the sum — but four heavy tests contending would
+      # push the 33.7-minute one toward this job's 60-minute timeout and the
+      # 54-minute per-test ceiling in .config/nextest.toml. Halving the volume
+      # restores the margin. The response to approaching a ceiling is to cut the
+      # volume or investigate, not to raise the ceiling again.
+      - name: DQP soak (fork and pinned levers, plain and aggregate cases)
         env:
-          DQP_CASES: 20000
+          DQP_CASES: 10000
         run: |
           cargo nextest run --profile soak -p uni-db --test integration \
             --run-ignored ignored-only \

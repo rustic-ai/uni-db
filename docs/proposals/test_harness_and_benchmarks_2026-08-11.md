@@ -215,8 +215,8 @@ result-neutral ways:
   fork-local index is registered.
 - Fork sessions start with a fresh empty plan cache (`session.rs:298`).
 
-A pristine fork differing from its parent is, per the fork contract in
-`CLAUDE.md`, unambiguously a bug. #99, #103, #97, #110, #135 are all in range.
+A pristine fork differing from its parent is, per the fork contract,
+unambiguously a bug. #99, #103, #97, #110, #135 are all in range.
 **This lever ships first** — not because it is free of setup, but because its
 setup is paid exactly once per run (§3.4.1) rather than once per case.
 
@@ -743,7 +743,7 @@ asserted.
   regression lands and surfaces a day later. Add a 30 s/target corpus-seeded run
   (~2 min total); keep the long nightly run.
 - **Hypothesis for the Python bindings.** All 1,073 pytest functions are
-  example-based. The sync/async API-symmetry contract asserted in `CLAUDE.md`
+  example-based. The sync/async API-symmetry contract in the contributor guide
   is exactly what a `RuleBasedStateMachine` checks well.
 
 ---

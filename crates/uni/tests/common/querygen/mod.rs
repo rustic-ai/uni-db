@@ -163,6 +163,26 @@ impl Shape {
         out
     }
 
+    /// Numeric targets restricted to **integer** properties.
+    ///
+    /// `sum` over an `f64` is not associative, so two execution paths that
+    /// accumulate in different orders can legitimately return
+    /// `1.0000000000000002` and `1.0`. The bag comparator is exact by design
+    /// (TLP and NoREC depend on that), so a differential oracle must not compare
+    /// float aggregates at all. Integer `sum`/`count` are reassociation-invariant
+    /// and safe.
+    fn integer_targets(&self) -> Vec<(&'static str, Prop)> {
+        self.bounds()
+            .iter()
+            .flat_map(|b| {
+                b.props
+                    .iter()
+                    .filter(|p| matches!(p.ty, PropTy::Int))
+                    .map(move |p| (b.var, *p))
+            })
+            .collect()
+    }
+
     /// Expressions a projection may return: each bound variable plus each of its
     /// properties.
     fn projection_choices(&self) -> Vec<Expr> {
@@ -346,6 +366,50 @@ pub struct Case {
 }
 
 impl Case {
+    /// Does this case aggregate over a property the schema declares `Float`?
+    ///
+    /// Exists so a differential oracle can *enforce* its admissibility contract
+    /// rather than merely document it. `Case`'s fields are private, so without
+    /// this nothing outside the module can tell a safe `sum(a.age)` from an
+    /// unsafe `sum(a.score)` — and an unsafe one reaching a comparison surfaces
+    /// as a mysterious bag diff rather than as the generator bug it is.
+    ///
+    /// See [`Shape::integer_targets`] for why float aggregates are unsafe.
+    pub fn has_float_aggregate(&self) -> bool {
+        let float_props: Vec<&str> = self
+            .shape
+            .bounds()
+            .iter()
+            .flat_map(|b| {
+                b.props
+                    .iter()
+                    .filter(|p| matches!(p.ty, PropTy::Float))
+                    .map(|p| p.name)
+            })
+            .collect();
+        self.projection.iter().any(|item| match item {
+            ReturnItem::Expr { expr, .. } => expr_aggregates_float(expr, &float_props),
+            _ => false,
+        })
+    }
+
+    /// Does this case carry a base `WHERE`?
+    ///
+    /// Exposed so a caller can assert a *selectivity floor*: two thirds of
+    /// ordinary draws have no base filter and scan the fixture end to end, which
+    /// is affordable at 1k rows and not at 50k.
+    pub fn has_base_filter(&self) -> bool {
+        self.base_where.is_some()
+    }
+
+    /// Is this case an aggregate at all (`count(*)` or `sum(...)`)?
+    pub fn is_aggregate(&self) -> bool {
+        self.projection.iter().any(|item| match item {
+            ReturnItem::Expr { expr, .. } => matches!(expr, Expr::FunctionCall { .. }),
+            _ => false,
+        })
+    }
+
     /// The base query `MATCH <shape> [WHERE base] RETURN <projection>`.
     pub fn base_query(&self) -> Query {
         build_query(vec![
@@ -588,6 +652,17 @@ pub fn arb_case() -> impl Strategy<Value = Case> {
     })
 }
 
+/// Does `expr` apply an aggregate function to one of `float_props`?
+fn expr_aggregates_float(expr: &Expr, float_props: &[&str]) -> bool {
+    let Expr::FunctionCall { args, .. } = expr else {
+        return false;
+    };
+    args.iter().any(|a| match a {
+        Expr::Property(_, name) => float_props.contains(&name.as_str()),
+        _ => false,
+    })
+}
+
 /// A case with an aggregate projection — for the aggregate-TLP oracle.
 pub fn arb_agg_case() -> impl Strategy<Value = Case> {
     arb_shape().prop_flat_map(|shape| {
@@ -596,6 +671,78 @@ pub fn arb_agg_case() -> impl Strategy<Value = Case> {
             Just(shape.clone()),
             arb_base_where(targets.clone()),
             arb_agg_projection(shape.numeric_targets()),
+            arb_pred(targets),
+        )
+            .prop_map(|(shape, base_where, projection, predicate)| Case {
+                shape,
+                base_where,
+                projection,
+                predicate,
+            })
+    })
+}
+
+/// [`arb_case`] with a base `WHERE` on every draw.
+///
+/// `arb_base_where` is weighted `2 => None, 1 => Some`, so two thirds of ordinary
+/// cases carry no filter and scan the whole fixture. Phase 0A measured the
+/// consequence exactly: median rows returned equalled the fixture's vertex count
+/// at every tier. That is fine on a 1k-row fixture and ruinous on a 50k-row one,
+/// so larger fixtures draw from this instead.
+pub fn arb_case_selective() -> impl Strategy<Value = Case> {
+    arb_shape().prop_flat_map(|shape| {
+        let targets = shape.nullable_targets();
+        (
+            Just(shape.clone()),
+            arb_pred(targets.clone()).prop_map(Some),
+            arb_projection(shape.projection_choices()),
+            arb_pred(targets),
+        )
+            .prop_map(|(shape, base_where, projection, predicate)| Case {
+                shape,
+                base_where,
+                projection,
+                predicate,
+            })
+    })
+}
+
+/// [`arb_agg_case_int`] with a base `WHERE` on every draw. See
+/// [`arb_case_selective`].
+pub fn arb_agg_case_int_selective() -> impl Strategy<Value = Case> {
+    arb_shape().prop_flat_map(|shape| {
+        let targets = shape.nullable_targets();
+        (
+            Just(shape.clone()),
+            arb_pred(targets.clone()).prop_map(Some),
+            arb_agg_projection(shape.integer_targets()),
+            arb_pred(targets),
+        )
+            .prop_map(|(shape, base_where, projection, predicate)| Case {
+                shape,
+                base_where,
+                projection,
+                predicate,
+            })
+    })
+}
+
+/// A case with an aggregate projection over **integer** properties only.
+///
+/// Identical to [`arb_agg_case`] except that `sum` targets are drawn from
+/// [`Shape::integer_targets`] rather than every numeric property. `count(*)` is
+/// exact regardless and stays in the mix.
+///
+/// This is the generator a differential oracle must use: `arb_agg_case` draws
+/// `sum` targets from a set that includes `score: Float`, so roughly one draw in
+/// four aggregates a float and is unsafe to compare across two execution paths.
+pub fn arb_agg_case_int() -> impl Strategy<Value = Case> {
+    arb_shape().prop_flat_map(|shape| {
+        let targets = shape.nullable_targets();
+        (
+            Just(shape.clone()),
+            arb_base_where(targets.clone()),
+            arb_agg_projection(shape.integer_targets()),
             arb_pred(targets),
         )
             .prop_map(|(shape, base_where, projection, predicate)| Case {

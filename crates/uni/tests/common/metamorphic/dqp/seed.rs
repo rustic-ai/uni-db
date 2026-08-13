@@ -121,6 +121,15 @@ impl Tier {
         }
     }
 
+    /// Does this tier need a guaranteed base `WHERE` on every generated case?
+    ///
+    /// Above roughly 10k vertices an unfiltered case scans the whole fixture,
+    /// and Phase 0A measured that two thirds of ordinary draws are unfiltered.
+    /// See `querygen::arb_case_selective`.
+    pub fn needs_selectivity_floor(self) -> bool {
+        matches!(self, Tier::Smoke | Tier::Large)
+    }
+
     /// Number of `WORKS_AT` edges (~4 per non-edgeless Person).
     pub fn edges(self) -> usize {
         match self {

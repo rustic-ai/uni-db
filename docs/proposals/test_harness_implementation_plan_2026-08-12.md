@@ -385,12 +385,70 @@ DQP_CASES=20000 cargo nextest run --profile soak -p uni-db --test integration \
    fixture's vertex count *exactly* at all three tiers, and `rows p95` equal to
    its edge count exactly — every unfiltered case scans the whole fixture.
 
+### Results — **phase complete, 2026-08-12**
+
+Both Tier-2 levers now run, at **100% activation** with zero divergences. The PR
+lane is 52.6 s for both (they run concurrently under nextest, so it is the slower
+of the two rather than the sum), and the full suite is 3932/3932.
+
+All four soaks were run at full volume rather than extrapolated. 20 000 cases
+each, 100% activation, zero divergences:
+
+| soak | rows | time |
+|---|---|---|
+| `fork_agg_soak` | 40 000 | 10.3 min |
+| `fork_soak` | 79 689 216 | 30.8 min |
+| `pinned_agg_soak` | 40 000 | 10.6 min |
+| `pinned_soak` | 80 257 298 | 33.7 min |
+
+**That measurement changed the nightly volume.** 85.4 minutes serial on a
+22-core box; nextest runs the four concurrently in CI, so wall-clock is the
+slowest rather than the sum, but four heavy tests contending would push the
+33.7-minute one toward both the job's 60-minute timeout and the 54-minute
+per-test ceiling. The nightly job now runs **10 000** cases, halving all four and
+restoring the margin — 80 000 queries a night across the four soaks. The response
+to approaching a ceiling is to cut the volume, not raise the ceiling.
+
+Two of this phase's own specifications did not survive contact with the source:
+
+- **The version-equality witness is not directly assertable.** There is no public
+  way to read the live version — `DatabaseMetrics` has no such field, `Session`
+  exposes no `pinned_version()`, and on an unpinned `StorageManager`
+  `version_high_water_mark()` returns `None` *by construction*, since it is
+  `Some` only when a pin is in force. The claim is still checkable by a detour:
+  `create_snapshot` flushes before recording its manifest, so the manifest's
+  `version_high_water_mark` **is** the live version at that instant, and
+  `list_snapshots()` is public. Taking one snapshot at prepare and another after
+  the run turns "did a write move the live version?" into a comparison of two
+  public numbers. Implemented as a new `Lever::check_invariants` hook, and its
+  rejection path is tested by writing to the database mid-run.
+- **`LIMIT` is excluded rather than supported.** The plan said to admit it "via
+  the existing `ordered_query()` + `limited_query(n)` pair" — but those cannot
+  combine: one emits `ORDER BY` with no `LIMIT`, the other `LIMIT` with no
+  `ORDER BY`, and no method on `Case` produces a deterministic ordered-`LIMIT`.
+  Adding one would not help either: the only sort key is `a.name`, which the
+  `Edge` shape repeats once per `WORKS_AT` edge, so ties break arbitrarily. DQP
+  takes the proposal's other branch and excludes `LIMIT` — which is the status
+  quo, since it renders `base_query()` only, now made deliberate by assertion.
+
+Also worth recording: **the row budget is inert for the aggregate kind.** An
+aggregate returns one row per case regardless of how much it scanned, so a
+ceiling over rows *returned* cannot catch a runaway aggregate. Phase 1 populated
+`rows_scanned`, which would cover both kinds; recalibrating against it is a
+worthwhile follow-up, but the current ceilings were measured against rows
+returned and are not transferable.
+
 ### Exit criteria
 
-- [ ] Both Tier-2 levers green at their tier's case count.
-- [ ] Row budget fires on a deliberately over-budget configuration.
-- [ ] Admissibility violation (inject a float aggregate into an integer-only
-      lever) fails at generation time, not at comparison time.
+- [x] Both Tier-2 levers green — `fork_smoke` and `pinned_smoke` on the PR lane,
+      four soaks at nightly volume.
+- [x] Row budget fires on a deliberately over-budget configuration — already
+      delivered in Phase 2 (`driver::tests`), for both the per-case and run
+      ceilings.
+- [x] Admissibility violation fails at generation time. Seven tests in
+      `dqp::admissibility`, including that the classifier **discriminates** (a
+      constant would silently disable the contract) and that the two kinds
+      reject each other's output.
 
 ---
 
@@ -598,7 +656,7 @@ Four unrelated items, any order, no dependency on tracks A/B:
    and surfaces a day later.
 5. **Hypothesis `RuleBasedStateMachine`** for the Python bindings. All 1,073
    pytest functions are example-based, and the sync/async API-symmetry contract
-   asserted in `CLAUDE.md` is exactly what a state machine checks well.
+   in the contributor guide is exactly what a state machine checks well.
 
 ---
 
