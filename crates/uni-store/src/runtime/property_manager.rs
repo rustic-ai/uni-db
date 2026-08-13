@@ -652,15 +652,16 @@ impl PropertyManager {
 
         // 3. Overlay L0 buffers in age order: pending (oldest to newest) -> current -> transaction
         if let Some(ctx) = ctx {
+            let mut l0_served = 0usize;
             // First, overlay pending flush L0s in order (oldest first, so iterate forward)
             for pending_l0_arc in &ctx.pending_flush_l0s {
                 let pending_l0 = pending_l0_arc.read();
-                self.overlay_l0_batch(vids, &pending_l0, properties, &mut result);
+                l0_served += self.overlay_l0_batch(vids, &pending_l0, properties, &mut result);
             }
 
             // Then overlay current L0 (newer than pending)
             let l0 = ctx.l0.read();
-            self.overlay_l0_batch(vids, &l0, properties, &mut result);
+            l0_served += self.overlay_l0_batch(vids, &l0, properties, &mut result);
 
             // Finally overlay transaction L0 (newest)
             // Skip transaction L0 if querying a snapshot
@@ -669,20 +670,30 @@ impl PropertyManager {
                 && let Some(tx_l0_arc) = &ctx.transaction_l0
             {
                 let tx_l0 = tx_l0_arc.read();
-                self.overlay_l0_batch(vids, &tx_l0, properties, &mut result);
+                l0_served += self.overlay_l0_batch(vids, &tx_l0, properties, &mut result);
             }
+            ctx.count_l0_rows(l0_served);
         }
 
         Ok(result)
     }
 
+    /// Overlays one L0 buffer onto `result`, returning the number of vids it
+    /// actually served.
+    ///
+    /// The return value is the property path's "rows served from L0" count. It
+    /// counts vids whose properties were *taken* from this buffer — not vids
+    /// merely asked about, and not tombstones or version-gated entries that were
+    /// skipped — so a caller can distinguish an L0 that contributed from one that
+    /// was consulted and had nothing to give.
     fn overlay_l0_batch(
         &self,
         vids: &[Vid],
         l0: &L0Buffer,
         properties: &[&str],
         result: &mut HashMap<Vid, Properties>,
-    ) {
+    ) -> usize {
+        let mut served = 0usize;
         let schema = self.schema_manager.schema();
         // `_all_props` is a wildcard sentinel: overlay every L0 property, not just
         // the named ones. Schemaless projections (`RETURN n`) request it because
@@ -747,8 +758,10 @@ impl PropertyManager {
                         }
                     }
                 }
+                served += 1;
             }
         }
+        served
     }
 
     /// Load properties as Arrow columns for vectorized processing

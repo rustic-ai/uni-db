@@ -357,6 +357,12 @@ pub struct Executor {
     pub(crate) xervo_runtime: Option<Arc<ModelRuntime>>,
     /// Warnings collected during the last execution.
     pub(crate) warnings: Arc<std::sync::Mutex<Vec<QueryWarning>>>,
+    /// Per-query execution counters for the last execution.
+    ///
+    /// Fresh per clone for the same reason `warnings` is: the write path clones
+    /// a cached executor template, and a shared handle would accumulate one
+    /// query's counts into the next one's result.
+    pub(crate) counters: Arc<uni_store::QueryCounters>,
     /// Private transaction L0 buffer for query context and mutations.
     /// Used by Transaction to route reads and writes through a private L0 buffer
     /// without requiring the writer lock at transaction-creation time.
@@ -421,6 +427,8 @@ impl Clone for Executor {
             xervo_runtime: self.xervo_runtime.clone(),
             // Fresh warnings per clone — see struct doc.
             warnings: Arc::new(std::sync::Mutex::new(Vec::new())),
+            // Fresh counters per clone, same reason.
+            counters: Arc::new(uni_store::QueryCounters::new()),
             transaction_l0_override: self.transaction_l0_override.clone(),
             id_reservoir: self.id_reservoir.clone(),
             custom_function_registry: self.custom_function_registry.clone(),
@@ -453,6 +461,7 @@ impl Executor {
             procedure_registry: Some(proc_registry),
             xervo_runtime: None,
             warnings: Arc::new(std::sync::Mutex::new(Vec::new())),
+            counters: Arc::new(uni_store::QueryCounters::new()),
             transaction_l0_override: None,
             id_reservoir: None,
             custom_function_registry: None,
@@ -539,6 +548,30 @@ impl Executor {
     /// post-snapshot writes that must stay invisible.
     pub fn set_l0_manager(&mut self, manager: Arc<L0Manager>) {
         self.l0_manager = Some(manager);
+    }
+
+    /// The per-query counters for the last execution.
+    ///
+    /// Unlike [`Self::take_warnings`] this does not drain: the counters are an
+    /// `Arc` of atomics shared with the query context and every physical
+    /// operator, so the executor simply reads its own handle. Call after
+    /// `execute` returns.
+    pub fn counters(&self) -> &Arc<uni_store::QueryCounters> {
+        &self.counters
+    }
+
+    /// Snapshot the counters into the shape `QueryMetrics` wants.
+    ///
+    /// Returns `(l0_reads, storage_reads, rows_scanned, branch_scans, snapshot_reads)`.
+    pub fn take_counters(&self) -> (usize, usize, usize, u64, u64) {
+        let c = &self.counters;
+        (
+            c.l0_rows() as usize,
+            c.storage_rows() as usize,
+            c.rows_scanned() as usize,
+            c.branch_scans(),
+            c.snapshot_reads(),
+        )
     }
 
     /// Take all collected warnings from the last execution, leaving the collector empty.
@@ -630,6 +663,7 @@ impl Executor {
             if let Some(ref token) = self.cancellation_token {
                 ctx.set_cancellation_token(token.clone());
             }
+            ctx.set_counters(self.counters.clone());
             Some(ctx)
         } else {
             self.l0_manager.as_ref().map(|m| {
@@ -648,6 +682,7 @@ impl Executor {
                 if let Some(ref token) = self.cancellation_token {
                     ctx.set_cancellation_token(token.clone());
                 }
+                ctx.set_counters(self.counters.clone());
                 ctx
             })
         }

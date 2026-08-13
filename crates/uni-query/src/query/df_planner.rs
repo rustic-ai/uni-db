@@ -368,6 +368,10 @@ impl HybridPhysicalPlanner {
         let xervo_runtime = self.graph_ctx.xervo_runtime().cloned();
         let plugin_registry = self.graph_ctx.plugin_registry().cloned();
         let writer = self.graph_ctx.writer().cloned();
+        // Must be preserved like every other attachment: `take_graph_ctx`
+        // rebuilds from the *base* constructor, so anything not re-attached here
+        // is silently dropped by the next `with_*` call.
+        let counters = self.graph_ctx.counters().cloned();
 
         let new_base = |ctx: &Arc<GraphExecutionContext>| {
             GraphExecutionContext::with_l0_context(
@@ -395,7 +399,19 @@ impl HybridPhysicalPlanner {
         if let Some(w) = writer {
             ctx = ctx.with_writer(w);
         }
+        if counters.is_some() {
+            ctx = ctx.with_counters(counters);
+        }
         ctx
+    }
+
+    /// Attach the per-query counter set, threading it into the graph context
+    /// every physical operator receives.
+    #[must_use]
+    pub fn with_counters(mut self, counters: Option<Arc<uni_store::QueryCounters>>) -> Self {
+        let ctx = self.take_graph_ctx().with_counters(counters);
+        self.graph_ctx = Arc::new(ctx);
+        self
     }
 
     /// Attach the outer transaction's writer handle so declared

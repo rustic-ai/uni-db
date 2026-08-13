@@ -190,6 +190,13 @@ pub struct GraphExecutionContext {
     /// Runtime warnings collected during query execution.
     warnings: Arc<Mutex<Vec<QueryWarning>>>,
 
+    /// Per-query execution counters, shared with the executor.
+    ///
+    /// Unlike `warnings`, this needs no harvest step: it is an `Arc` of atomics
+    /// shared with the `Executor` that seeded it, so the executor reads its own
+    /// handle once execution finishes.
+    counters: Option<Arc<uni_store::QueryCounters>>,
+
     /// Cooperative cancellation token, threaded from `QueryContext`.
     cancellation_token: Option<tokio_util::sync::CancellationToken>,
 
@@ -311,6 +318,7 @@ impl GraphExecutionContext {
             plugin_registry: None,
             xervo_runtime: None,
             warnings: Arc::new(Mutex::new(Vec::new())),
+            counters: None,
             cancellation_token,
             writer: None,
         }
@@ -358,13 +366,48 @@ impl GraphExecutionContext {
         query_ctx: &QueryContext,
         property_manager: Arc<PropertyManager>,
     ) -> Self {
-        Self::with_parts(
+        let mut ctx = Self::with_parts(
             storage,
             L0Context::from_query_context(query_ctx),
             property_manager,
             query_ctx.deadline,
             query_ctx.cancellation_token.clone(),
-        )
+        );
+        ctx.counters = query_ctx.counters.clone();
+        ctx
+    }
+
+    /// Attach the per-query counter set.
+    #[must_use]
+    pub fn with_counters(mut self, counters: Option<Arc<uni_store::QueryCounters>>) -> Self {
+        self.counters = counters;
+        self
+    }
+
+    /// The per-query counter set, if this context belongs to a counted query.
+    pub fn counters(&self) -> Option<&Arc<uni_store::QueryCounters>> {
+        self.counters.as_ref()
+    }
+
+    /// Records `n` rows served from an L0 buffer, if counting is active.
+    pub fn count_l0_rows(&self, n: usize) {
+        if let Some(c) = &self.counters {
+            c.add_l0_rows(n);
+        }
+    }
+
+    /// Records `n` rows served from L1 / Lance storage, if counting is active.
+    pub fn count_storage_rows(&self, n: usize) {
+        if let Some(c) = &self.counters {
+            c.add_storage_rows(n);
+        }
+    }
+
+    /// Records `n` rows examined by a scan, if counting is active.
+    pub fn count_rows_scanned(&self, n: usize) {
+        if let Some(c) = &self.counters {
+            c.add_rows_scanned(n);
+        }
     }
 
     /// Set query timeout deadline.

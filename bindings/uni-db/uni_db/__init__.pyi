@@ -531,6 +531,8 @@ class QueryMetrics:
     l0_reads: int
     storage_reads: int
     cache_hits: int
+    branch_scans: int
+    snapshot_reads: int
 
 class QueryWarning:
     """A query warning emitted during execution (e.g., missing index)."""

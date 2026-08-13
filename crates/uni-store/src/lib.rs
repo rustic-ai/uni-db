@@ -18,6 +18,7 @@ pub use backend::lance::LanceDbBackend;
 pub use backend::types::VectorQueryOpts;
 pub use compaction::{CompactionStats, CompactionStatus};
 pub use runtime::context::QueryContext;
+pub use runtime::counters::QueryCounters;
 pub use runtime::property_manager::PropertyManager;
 pub use runtime::writer::{ForkPoint, Writer};
 pub use snapshot::manager::SnapshotManager;

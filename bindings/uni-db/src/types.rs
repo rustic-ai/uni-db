@@ -38,6 +38,13 @@ pub struct PyQueryMetrics {
     pub storage_reads: usize,
     /// Number of cache hits during execution.
     pub cache_hits: usize,
+    /// Number of scans that executed against a fork's Lance branch.
+    ///
+    /// Counts what executed, not what was configured: a forked session that
+    /// reads a label the fork never wrote falls back to primary and reports 0.
+    pub branch_scans: u64,
+    /// Number of reads that executed against a pinned time-travel snapshot.
+    pub snapshot_reads: u64,
 }
 
 #[pymethods]

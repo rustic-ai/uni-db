@@ -1482,6 +1482,24 @@ impl StorageManager {
         columns: &[&str],
         additional_filter: Option<&FilterExpr>,
     ) -> Result<Option<arrow_array::RecordBatch>> {
+        self.scan_vertex_table_counted(label, columns, additional_filter, None)
+            .await
+    }
+
+    /// [`Self::scan_vertex_table`], carrying a query's counters into the backend.
+    ///
+    /// The backend layer never sees a [`QueryContext`], so `ScanRequest` is the
+    /// only channel by which a count taken at the point a branch scan *executes*
+    /// (`LanceDbBackend::execute_scan_stream`) can be attributed to the query
+    /// that caused it. Callers on a query path pass
+    /// `graph_ctx.counters()`; everything else passes `None` and is not counted.
+    pub async fn scan_vertex_table_counted(
+        &self,
+        label: &str,
+        columns: &[&str],
+        additional_filter: Option<&FilterExpr>,
+        counters: Option<&Arc<crate::runtime::counters::QueryCounters>>,
+    ) -> Result<Option<arrow_array::RecordBatch>> {
         let backend = self.backend();
         let table_name = table_names::vertex_table_name(label);
 
@@ -1495,9 +1513,26 @@ impl StorageManager {
         };
 
         // Build filter with version HWM + optional additional filter
-        let filter = combine_hwm_filter(self.version_high_water_mark(), additional_filter);
+        let hwm = self.version_high_water_mark();
+        // Counted at the point the ceiling is actually applied to a scan, not
+        // from `pinned_snapshot.is_some()` — which would be a config read.
+        //
+        // Deliberately `snapshot_version_hwm`, the manifest-only pin, and not
+        // `version_high_water_mark`: the latter is also `Some` for an ordinary
+        // read-write transaction's version pin (`pinned_version_hwm`), so
+        // counting off it would fire on every transactional read and make the
+        // pinned-vs-live witness meaningless. The *filter* still uses the wider
+        // value; only the count narrows.
+        if self.snapshot_version_hwm().is_some()
+            && let Some(c) = counters
+        {
+            c.add_snapshot_read();
+        }
+        let filter = combine_hwm_filter(hwm, additional_filter);
 
-        let mut request = ScanRequest::all(&table_name).with_columns(actual_columns);
+        let mut request = ScanRequest::all(&table_name)
+            .with_columns(actual_columns)
+            .with_counters(counters.cloned());
         if let Some(f) = filter {
             request = request.with_filter(f);
         }

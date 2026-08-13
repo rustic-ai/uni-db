@@ -3,6 +3,10 @@
 
 //! Backend-agnostic types for storage operations.
 
+use std::sync::Arc;
+
+use crate::runtime::counters::QueryCounters;
+
 /// Canonical column names the engine filters on.
 ///
 /// These are the physical columns every table carries. Naming them here keeps
@@ -530,6 +534,14 @@ pub struct ScanRequest {
     /// Set by the storage manager when a session has fork scope active;
     /// see `crate::backend::lance_branch` for the underlying primitives.
     pub branch: Option<String>,
+    /// Per-query execution counters, when this scan belongs to a query.
+    ///
+    /// The backend layer never sees a [`QueryContext`](crate::QueryContext) —
+    /// `ScanRequest` is the only object that crosses into it — so this is how a
+    /// count taken at the point a branch scan *executes* gets attributed back to
+    /// the query that caused it. `None` for scans issued outside a query
+    /// (compaction, recovery, index builds).
+    pub counters: Option<Arc<QueryCounters>>,
 }
 
 impl ScanRequest {
@@ -541,6 +553,7 @@ impl ScanRequest {
             filter: FilterExpr::Literal(true),
             limit: None,
             branch: None,
+            counters: None,
         }
     }
 
@@ -577,6 +590,30 @@ impl ScanRequest {
     pub fn with_optional_branch(mut self, branch: Option<String>) -> Self {
         self.branch = branch;
         self
+    }
+
+    /// Builder: attach the per-query counter set from an `Option`.
+    ///
+    /// Takes an `Option` so call sites can forward
+    /// `ctx.and_then(|c| c.counters.clone())` without branching.
+    pub fn with_counters(mut self, counters: Option<Arc<QueryCounters>>) -> Self {
+        self.counters = counters;
+        self
+    }
+
+    /// Records that this scan executed against a fork branch, if counting is on.
+    pub fn count_branch_scan(&self) {
+        if let Some(c) = &self.counters {
+            c.add_branch_scan();
+        }
+    }
+
+    /// Records `n` rows produced by this scan, if counting is on.
+    pub fn count_storage_rows(&self, n: usize) {
+        if let Some(c) = &self.counters {
+            c.add_storage_rows(n);
+            c.add_rows_scanned(n);
+        }
     }
 }
 

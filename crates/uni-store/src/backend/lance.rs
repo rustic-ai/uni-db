@@ -238,8 +238,17 @@ impl LanceDbBackend {
     }
 
     /// Run a scan, dispatching to the primary or branch path based on `request.branch`.
+    ///
+    /// This dispatch — not `BranchedBackend::apply_branch`, which merely *sets*
+    /// `request.branch` — is where a fork read actually happens, so it is where
+    /// the branch counter is incremented. `BranchedBackend` resolves a branch per
+    /// call and falls back to primary for tables the fork has never written, so a
+    /// session with fork scope active can and does execute primary scans.
+    /// Counting at selection time would report fork reads that never occurred,
+    /// which is the difference between an execution witness and a config read.
     async fn execute_scan_stream(&self, request: &ScanRequest) -> Result<RecordBatchStream> {
         if let Some(branch) = request.branch.clone() {
+            request.count_branch_scan();
             return self.execute_branch_scan(request, &branch).await;
         }
         self.execute_primary_scan(request).await

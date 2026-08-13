@@ -665,13 +665,28 @@ fn mvcc_dedup_to_option(
 /// Merge a deduped Lance batch with an L0 batch, re-deduplicating the combined
 /// result. Returns an empty batch (against `output_schema`) when both inputs
 /// are empty.
+///
+/// `counters`, when present, records how many rows each tier contributed. This
+/// is the one place in the scan path that already knows the answer — the
+/// `match` below exists precisely to distinguish storage-only, L0-only and
+/// both — so counting here costs a pair of adds and needs no new branching.
+/// Rows are counted **before** the combined dedup, so the numbers describe what
+/// each tier *served*, not what survived MVCC resolution.
 fn merge_lance_and_l0(
     lance_deduped: Option<RecordBatch>,
     l0_batch: RecordBatch,
     internal_schema: &SchemaRef,
     id_column: &str,
+    counters: Option<&Arc<uni_store::QueryCounters>>,
 ) -> DFResult<Option<RecordBatch>> {
     let has_l0 = l0_batch.num_rows() > 0;
+    if let Some(c) = counters {
+        let lance_rows = lance_deduped.as_ref().map_or(0, |b| b.num_rows());
+        let l0_rows = l0_batch.num_rows();
+        c.add_storage_rows(lance_rows);
+        c.add_l0_rows(l0_rows);
+        c.add_rows_scanned(lance_rows + l0_rows);
+    }
     match (lance_deduped, has_l0) {
         (Some(lance), true) => {
             let combined = arrow::compute::concat_batches(internal_schema, &[lance, l0_batch])
@@ -1786,7 +1801,12 @@ async fn columnar_scan_vertex_batch_static(
         Some(b) => (Some(b), false),
         None => (
             storage
-                .scan_vertex_table(label, &lance_columns_refs, combined_filter.as_ref())
+                .scan_vertex_table_counted(
+                    label,
+                    &lance_columns_refs,
+                    combined_filter.as_ref(),
+                    graph_ctx.counters(),
+                )
                 .await
                 .map_err(exec_err)?,
             extra_lance_filter.is_some(),
@@ -1856,7 +1876,13 @@ async fn columnar_scan_vertex_batch_static(
         build_l0_vertex_batch(l0_ctx, label, &internal_schema, label_props, l0_target_vids)?;
 
     // Merge Lance + L0
-    let Some(merged) = merge_lance_and_l0(lance_deduped, l0_batch, &internal_schema, "_vid")?
+    let Some(merged) = merge_lance_and_l0(
+        lance_deduped,
+        l0_batch,
+        &internal_schema,
+        "_vid",
+        graph_ctx.counters(),
+    )?
     else {
         return Ok(RecordBatch::new_empty(output_schema.clone()));
     };
@@ -2038,7 +2064,13 @@ async fn columnar_scan_schemaless_vertex_batch_static(
         build_l0_schemaless_vertex_batch(l0_ctx, label, &internal_schema, l0_target_vids)?;
 
     // Merge Lance + L0
-    let Some(merged) = merge_lance_and_l0(lance_deduped, l0_batch, &internal_schema, "_vid")?
+    let Some(merged) = merge_lance_and_l0(
+        lance_deduped,
+        l0_batch,
+        &internal_schema,
+        "_vid",
+        graph_ctx.counters(),
+    )?
     else {
         return Ok(RecordBatch::new_empty(output_schema.clone()));
     };

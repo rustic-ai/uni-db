@@ -571,6 +571,11 @@ impl Executor {
             HashMap::new(),
         );
 
+        // Thread this execution's counters into the graph context every physical
+        // operator receives. Must come before the other `with_*` calls only in
+        // the sense that `take_graph_ctx` preserves it either way — but it must
+        // be here at all, or every operator-level count is dropped.
+        planner = planner.with_counters(Some(self.counters.clone()));
         planner = planner.with_algo_registry(self.algo_registry.clone());
         if let Some(ref registry) = self.procedure_registry {
             planner = planner.with_procedure_registry(registry.clone());

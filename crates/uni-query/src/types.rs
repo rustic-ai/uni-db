@@ -33,18 +33,43 @@ pub struct QueryMetrics {
     pub total_time: Duration,
     /// Number of rows returned to the caller.
     pub rows_returned: usize,
-    /// Number of rows scanned during execution (0 until executor instrumentation).
+    /// Number of rows examined by scans, before filtering and projection.
     pub rows_scanned: usize,
-    /// Number of bytes read from storage (0 until storage instrumentation).
+    /// Number of bytes read from storage.
+    ///
+    /// **Still unpopulated — always 0.** No planned consumer needs it; see the
+    /// note on [`Self::cache_hits`].
     pub bytes_read: usize,
     /// Whether the plan was served from cache.
+    ///
+    /// **Write path only.** The sole assignment site is the transaction
+    /// execution path; on the read path (`Session::query`) this is permanently
+    /// `false`, because the read plan cache is session-local and reports its hits
+    /// on `SessionMetrics::plan_cache_hits` instead. Do not use this to detect a
+    /// warm cache on a read — use the session-metrics delta.
     pub plan_cache_hit: bool,
-    /// Number of L0 reads during execution (0 until storage instrumentation).
+    /// Number of rows served from an L0 buffer (in-memory, unflushed).
     pub l0_reads: usize,
-    /// Number of storage reads during execution (0 until storage instrumentation).
+    /// Number of rows served from L1 / Lance storage.
     pub storage_reads: usize,
-    /// Number of cache hits during execution (0 until storage instrumentation).
+    /// Number of cache hits during execution.
+    ///
+    /// **Still unpopulated — always 0.** Kept for shape compatibility. A field
+    /// that exists and always reads zero is a trap: anything asserting on it
+    /// compiles and silently never fires, so treat this as absent until a
+    /// consumer justifies wiring it.
     pub cache_hits: usize,
+    /// Number of scans that executed against a fork's Lance branch.
+    ///
+    /// Counts what *executed*, not what was configured: `BranchedBackend`
+    /// resolves a branch per call and falls back to primary for tables the fork
+    /// has never written, so a forked session can run a query with this at 0.
+    pub branch_scans: u64,
+    /// Number of reads that executed against a pinned time-travel snapshot.
+    ///
+    /// Counts only manifest-pinned snapshot reads, never an ordinary read-write
+    /// transaction's version pin.
+    pub snapshot_reads: u64,
 }
 
 /// Single result row from a query.
@@ -293,6 +318,35 @@ impl QueryResult {
     ) {
         self.metrics.parse_time = parse_time;
         self.metrics.total_time = total_time;
+    }
+
+    /// Fill in parse and plan timing measured upstream of result assembly.
+    ///
+    /// The cached read path parses and plans in the session layer and only then
+    /// calls into execution, so the assembling function has no way to observe
+    /// either duration. Without this the two fields report zero on every cached
+    /// read — measurements taken and thrown away.
+    #[doc(hidden)]
+    pub fn set_frontend_timing(
+        &mut self,
+        parse_time: std::time::Duration,
+        plan_time: std::time::Duration,
+    ) {
+        self.metrics.parse_time = parse_time;
+        self.metrics.plan_time = plan_time;
+    }
+
+    /// Attach execution counters harvested from the executor.
+    ///
+    /// Takes the tuple shape `Executor::take_counters` returns.
+    #[doc(hidden)]
+    pub fn set_counters(&mut self, counters: (usize, usize, usize, u64, u64)) {
+        let (l0_reads, storage_reads, rows_scanned, branch_scans, snapshot_reads) = counters;
+        self.metrics.l0_reads = l0_reads;
+        self.metrics.storage_reads = storage_reads;
+        self.metrics.rows_scanned = rows_scanned;
+        self.metrics.branch_scans = branch_scans;
+        self.metrics.snapshot_reads = snapshot_reads;
     }
 }
 
