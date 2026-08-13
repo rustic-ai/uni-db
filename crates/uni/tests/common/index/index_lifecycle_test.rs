@@ -155,3 +155,183 @@ async fn test_auto_rebuild_config_default_disabled() {
     assert_eq!(config.index_rebuild.growth_trigger_ratio, 0.5);
     assert!(config.index_rebuild.max_index_age.is_none());
 }
+
+// ---------------------------------------------------------------------------
+// `status: Online` must mean "physically built", not "declared".
+//
+// `IndexMetadata::default()` sets `status: Online`, so every index was born
+// claiming to be built. When the physical build failed, `IndexManager` swallowed
+// the backend error into a `warn!` and registered the definition anyway — so a
+// scalar index over a column that does not exist reported itself `Online`, and
+// six call sites gate real behaviour on exactly that: `pushdown.rs:166,237,279`
+// and `SchemaManager`'s vector / sparse / fulltext property lookups.
+//
+// The build tolerance is deliberate and is kept: `CREATE INDEX` before a flush,
+// or on a degenerate column, must not fail a DDL statement. What these tests pin
+// is that the *outcome* is now recorded.
+// ---------------------------------------------------------------------------
+
+/// A `Person` label with 200 flushed rows and one typed `age` column.
+async fn seeded_db() -> Result<Uni> {
+    let db = Uni::temporary().build().await?;
+    db.schema()
+        .label("Person")
+        .property("name", uni_db::DataType::String)
+        .property_nullable("age", uni_db::DataType::Int)
+        .apply()
+        .await?;
+
+    let rows: Vec<HashMap<String, uni_db::Value>> = (0..200)
+        .map(|i| {
+            let mut p = HashMap::new();
+            p.insert("name".to_string(), unival!(format!("p{i}")));
+            p.insert("age".to_string(), unival!(i64::from(i % 60)));
+            p
+        })
+        .collect();
+    let tx = db.session().tx().await?;
+    tx.bulk_insert_vertices("Person", rows).await?;
+    tx.commit().await?;
+    db.flush().await?;
+    Ok(db)
+}
+
+fn status_of(db: &Uni, name: &str) -> IndexStatus {
+    db.indexes()
+        .list(Some("Person"))
+        .into_iter()
+        .find(|i| i.name() == name)
+        .unwrap_or_else(|| panic!("index '{name}' was not registered at all"))
+        .metadata()
+        .status
+        .clone()
+}
+
+/// **The regression.** Lance rejects an index on a column that does not exist —
+/// `CreateIndex: column 'x' does not exist` — and that rejection must reach the
+/// index's status.
+///
+/// `apply()` still succeeds: the tolerance is the point, and escalating it to a
+/// hard error would be a separate, wider behaviour change.
+#[tokio::test]
+async fn a_failed_physical_build_is_not_reported_online() -> Result<()> {
+    let db = seeded_db().await?;
+
+    let applied = db
+        .schema()
+        .label("Person")
+        .index(
+            "no_such_column",
+            uni_db::api::schema::IndexType::Scalar(uni_db::api::schema::ScalarType::BTree),
+        )
+        .apply()
+        .await;
+    assert!(
+        applied.is_ok(),
+        "apply() should still tolerate a failed physical build: {applied:?}"
+    );
+
+    let status = status_of(&db, "idx_Person_no_such_column");
+    assert_ne!(
+        status,
+        IndexStatus::Online,
+        "an index whose physical build was rejected by the backend still reports \
+         Online. Every `status == Online` gate — pushdown.rs and the three \
+         SchemaManager property lookups — will treat this index as usable."
+    );
+    Ok(())
+}
+
+/// The other half, and the one that makes the test above mean something.
+///
+/// A fix that marked *every* index non-Online would satisfy the regression test
+/// while silently disabling index pushdown across the board. So a real build on
+/// a real column must still be `Online` — and must now carry the `last_built_at`
+/// stamp that distinguishes it from the old default.
+#[tokio::test]
+async fn a_successful_physical_build_is_online_and_stamped() -> Result<()> {
+    let db = seeded_db().await?;
+
+    db.schema()
+        .label("Person")
+        .index(
+            "age",
+            uni_db::api::schema::IndexType::Scalar(uni_db::api::schema::ScalarType::BTree),
+        )
+        .apply()
+        .await?;
+
+    let idx = db
+        .indexes()
+        .list(Some("Person"))
+        .into_iter()
+        .find(|i| i.name() == "idx_Person_age")
+        .expect("index not registered");
+
+    assert_eq!(
+        idx.metadata().status,
+        IndexStatus::Online,
+        "a scalar index that genuinely built on a typed column is not Online — \
+         index pushdown is now disabled for every index in the database"
+    );
+    assert!(
+        idx.metadata().last_built_at.is_some(),
+        "a built index carries no build timestamp, so Online is still \
+         indistinguishable from the default"
+    );
+    Ok(())
+}
+
+/// **A known gap, pinned so it stays visible.**
+///
+/// An index declared before the label has ever been flushed has no artifact
+/// behind it, and still reports `Online`. That is not right, but demoting it is
+/// not safe today and the reason is worth keeping next to the assertion:
+/// `pushdown.rs:166` gates the hash-index point lookup on `status == Online`,
+/// and that optimization needs no physical artifact — `ScalarIndexType::Hash`
+/// has no Lance counterpart. The `issue_57_match_label_hash_index` suite
+/// exercises exactly this shape: an index declared before any flush, never
+/// physically built (auto-rebuild is off by default), whose pushdown must still
+/// fire. Demoting this case turns those five tests red by disabling a working
+/// optimization.
+///
+/// Closing it means separating "declared" from "materialized" at the six
+/// `Online` gates, which is a wider change than the fix this file tests.
+///
+/// So this asserts today's behaviour deliberately. If it ever fails, the
+/// separation has happened and this test should become the stronger `assert_ne!`
+/// it wants to be.
+#[tokio::test]
+async fn an_index_declared_before_any_flush_still_reports_online() -> Result<()> {
+    let db = Uni::temporary().build().await?;
+    db.schema()
+        .label("Person")
+        .property("name", uni_db::DataType::String)
+        .property_nullable("age", uni_db::DataType::Int)
+        .index(
+            "age",
+            uni_db::api::schema::IndexType::Scalar(uni_db::api::schema::ScalarType::BTree),
+        )
+        .apply()
+        .await?;
+
+    assert_eq!(
+        status_of(&db, "idx_Person_age"),
+        IndexStatus::Online,
+        "an index declared before any flush no longer reports Online. If that \
+         was deliberate, the `Online` gates have been split into declared-vs-\
+         materialized and this test should now assert the opposite."
+    );
+    assert!(
+        db.indexes()
+            .list(Some("Person"))
+            .into_iter()
+            .find(|i| i.name() == "idx_Person_age")
+            .expect("index not registered")
+            .metadata()
+            .last_built_at
+            .is_none(),
+        "an index that was never built carries a build timestamp"
+    );
+    Ok(())
+}
