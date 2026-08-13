@@ -1,0 +1,16 @@
+diff --git a/crates/uni-store/src/backend/lance.rs b/crates/uni-store/src/backend/lance.rs
+index 012770f76..ced9d5744 100644
+--- a/crates/uni-store/src/backend/lance.rs
++++ b/crates/uni-store/src/backend/lance.rs
+@@ -190,7 +190,10 @@ impl LanceDbBackend {
+         // error on a nested fork (#106). This is result-set neutral — the filter still matches
+         // the same rows via a sequential scan — and fork datasets are small, so the lost
+         // acceleration is negligible. The primary (non-branch) scan path keeps the index.
+-        scanner.use_scalar_index(false);
++        // REVERT #103/#106 (validation only): restore scalar-index pushdown on
++        // branch scans. A nested fork's base_paths chain cannot resolve a BTree
++        // index across >1 level, so a filtered branch scan errors.
++        scanner.use_scalar_index(true);
+ 
+         if let ColumnProjection::Columns(cols) = &request.columns {
+             scanner.project(cols).map_err(|e| {

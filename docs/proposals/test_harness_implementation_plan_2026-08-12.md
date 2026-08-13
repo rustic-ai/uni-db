@@ -613,31 +613,131 @@ The tripwire tests fail the moment either lands.
 
 ## Phase 5 — Generator widening, `EXPLAIN`, teeth
 
-### Tasks
+### Tasks as originally written — **superseded, kept for the record**
 
-1. **Widen `Shape`** (`querygen/mod.rs:120`) beyond today's two variants
-   (`Shape::Node(PERSON_A)` and `Shape::Edge(PERSON_A, COMPANY_B)`,
-   `arb_shape()` at :558): 2-hop paths, variable-length `*1..3`,
-   `OPTIONAL MATCH`, aggregation-with-grouping. These are where pushdown and
-   projection bugs live. Fields on `Case` are private (:341), so variants are
-   added as methods there.
-2. **Every new variant joins the round-trip proptest** at `querygen/mod.rs:623`,
-   or `render()` panics on unhandled AST (`render.rs:44`).
-3. **`render_statement` extension for `EXPLAIN`** — handled by `normalize`
-   (`render.rs:71`) but not by `render`. Required for plan-text witnesses.
-4. **Teeth.** Hand-written `#[tokio::test]` cases following `tlp.rs:124-167`,
-   one per historical bug in the proposal's §2.1 table: the Lance `"col"`
-   string-literal fusion bug, #103, #135, #99, #97, #110. **Each verified once
-   against a deliberately reverted fix** — an oracle that cannot re-catch the
-   bugs that motivated it is not yet correct, and this is the only phase that
-   proves it can.
+> 1. **Widen `Shape`** (`querygen/mod.rs:120`): 2-hop paths, variable-length
+>    `*1..3`, `OPTIONAL MATCH`, aggregation-with-grouping. These are where
+>    pushdown and projection bugs live.
+> 2. **Every new variant joins the round-trip proptest.**
+> 3. **`render_statement` extension for `EXPLAIN`** — required for plan-text
+>    witnesses.
+> 4. **Teeth.** Hand-written `#[tokio::test]` cases, one per historical bug,
+>    each verified against a deliberately reverted fix.
 
-### Exit criteria
+**Tasks 1, 3 and 4 were wrong, and the phase was re-scoped before
+implementation.** What follows is what was built and why, because the reasoning
+is more reusable than the task list was.
 
-- [ ] Round-trip proptest green over the widened generator.
-- [ ] Each teeth case documented with the revert it was validated against.
-- [ ] At least one historical bug re-caught by a *generated* case, not only by
-      its hand-written tooth.
+#### Correction 1 — the four shapes score 0/6 on bug reachability
+
+Measured against the six historical bugs the phase exists to re-catch, none of
+the four proposed shapes reaches any of them. Worse, three are harmful or inert:
+
+- **`*1..3` is provably vacuous.** Both fixtures are bipartite `Person→Company`
+  with one `WORKS_AT` edge type, so length > 1 is unreachable and every 2- and
+  3-hop expansion returns zero rows. `bag_eq(∅, ∅)` is green forever.
+- **`OPTIONAL MATCH` and grouped aggregation break the existing oracles
+  semantically** — false positives, not compile errors. `partition_query`
+  conjoins the partition predicate into the MATCH clause's `WHERE`; under
+  `OPTIONAL` a failing row is null-extended rather than dropped, so
+  `bag(base) ≠ t ⊎ f ⊎ n`. NoREC breaks identically. Grouped aggregation breaks
+  `run_scalar`'s 1-row×1-col contract and structural's ungrouped `count(*)` law.
+- **2-hop is law-safe but reaches no new code** on a typed fixture.
+
+#### Correction 2 — the binding constraint is the *fixture*, not the grammar
+
+The task list has no fixture dimension at all, and that is where the teeth
+actually live. Two examples, both verified by reading rather than assumed:
+
+- `build_edge_adjacency_and_target_props` (the **#135** fix site) has exactly one
+  caller, under `GraphTraverseMainStream`, which is planned only when every
+  requested relationship type is **absent from the schema**
+  (`planner.rs:5405`). Both fixtures declare `WORKS_AT`, so no generated query
+  can reach it — at any shape. The #135 regression test declares its label but
+  never its `PARENT` edge type, and that omission is exactly why it reproduces.
+- The **`"col"` fusion** needs a Hash scalar index, and the DQP fixture declared
+  no indexes whatsoever.
+
+A widened generator over a fixture that routes around the defect yields a wider,
+greener, still-toothless oracle.
+
+#### Correction 3 — task 3's rationale for `EXPLAIN` is invalid
+
+"Required for plan-text witnesses" contradicts this codebase's own Phase-3
+reasoning: `dqp/lever.rs:26-34` explicitly rejects plan-difference as an
+activation rule ("a universal plan-difference check would reject precisely the
+levers most worth testing"). `Witness` is `Copy + Eq` and all-integer, so a
+`String` field breaks it; and `format!("{:#?}", plan)` is not ordering-stable
+across processes. The change is worth making for a different reason —
+**routing assertions**, which are what Correction 2 needed.
+
+#### Correction 4 — task 4 duplicates six existing regression suites
+
+Five of the six bugs already have regression tests (twelve for #97 alone). A
+seventh near-copy detects nothing new. What was missing was never another
+assertion but *evidence that the existing ones bite*, so the deliverable became a
+revert ledger plus a validation harness.
+
+### Tasks as built
+
+1. **`SchemaMode` / `Fixture`** in `dqp/seed.rs` — `Typed` and `TypedIndexed`
+   (Hash scalar index on `Person.age`), threaded through both drivers as
+   `impl Into<Fixture>` so every pre-Phase-5 call site is unchanged and all
+   Phase-4 measured budgets stay valid.
+2. **Pushdown predicates** in `querygen` — `arb_in_list`, `arb_same_column_conj`
+   (`=`/`IN` plus a two-sided inclusive range on one column), `arb_case_pushdown`,
+   and `CaseKind::Pushdown`. `arb_pred` previously topped out at two comparisons
+   with independently-drawn targets, so three conditions on one column had
+   probability zero.
+3. **`Query::Explain` in `render`** plus routing assertions that pin which
+   operator a fixture plans through.
+4. **Round-trip widened** to draw from every case strategy and to include the
+   `EXPLAIN` wrapper — closing a pre-existing gap where aggregate cases were
+   round-tripped only by a hand-written spike.
+5. **Revert ledger + harness** — `docs/testing/reverts/*.patch`,
+   `scripts/testing/teeth_validate.sh` (throwaway worktree; asserts the
+   pre-existing regression test *fails* before trusting any oracle result), and
+   `docs/testing/teeth-2026-08-13.md`.
+
+### Results — **phase complete, 2026-08-13**
+
+- [x] Round-trip proptest green over the widened generator — 512 cases × 10
+      variants × 3 strategies.
+- [x] Each tooth documented with the revert it was validated against —
+      `docs/testing/teeth-2026-08-13.md`, six patches.
+- [x] **At least one historical bug re-caught by a generated case** — the Lance
+      `"col"` fusion, by `dqp::flush_lever::flush_pushdown_smoke`:
+      `bag mismatch: left_total=28, right_total=0`, on case 0 of the batch, with
+      replay coordinates printed. The same reconstruction left the pre-Phase-5
+      `flush_smoke` **green**, which is the measured before/after.
+
+Two findings worth carrying forward:
+
+- **A latent defect in the flush lever, found by the activation floor.** The
+  first pushdown run failed at **63.6% activation**. `FlushLever`'s delta wrote
+  five of the fixture's seven `AGE_DOMAIN` values, so a generated `age = 22`
+  predicate selected fixture rows but no *unflushed* row — the lever's whole
+  premise. Unfiltered `Plain` cases could never expose it, since two thirds carry
+  no base `WHERE` and scan the delta wholesale. Fixed at source; **63.6% → 86.6%**.
+  Lowering the floor would have turned it green while making the oracle
+  permanently weaker.
+- **A differential oracle is blind to any defect that damages both sides
+  equally.** #135's naive revert (`HashMap::new()`) nulls target properties on
+  both sides and is therefore DQP-invisible; a DQP-visible revert must be
+  tier-selective. Same shape as the TLP/NoREC blindness recorded in
+  `dqp/mod.rs:14`.
+
+### Deferred, with reasons
+
+| item | reason |
+|---|---|
+| `*1..3` | Vacuous on both bipartite fixtures. Needs a `Person→Person` edge type, which perturbs the exact-cardinality assertions at `metamorphic/seed.rs:107-159`, for zero of the six bugs. |
+| `OPTIONAL MATCH` | Breaks TLP and NoREC semantically. A *leading* `OPTIONAL` — all today's single-clause `Case` can build — is degenerate anyway: nothing precedes it to null-extend. |
+| Grouped aggregation | Breaks `run_scalar`'s 1×1 contract and structural's count law; needs a new `CaseKind` plus admissibility rule. |
+| 2-hop | Reaches no new code on a typed fixture, and on `Tier::Tiny` it is a self-join through a 40-company hub — ~400k rows/case against a 12k per-case ceiling. |
+| Schemaless fixture (#135, #99) | `bulk_insert_edges` rejects an undeclared type (`transaction.rs:857`), so edges must go through Cypher `CREATE` — ~2 orders of magnitude slower, forcing a smaller tier. Guarded meanwhile by `typed_fixture_plans_a_typed_traverse`. |
+| Plan-text witness | No consumer, unsound across processes, and rejected by `dqp/lever.rs:26-34`. |
+| Generated catches for #97/#103/#110 | Each needs a distinct lever capability; see the ledger. #97's blocker — `drive_prepared_with` flushing unconditionally before `prepare` — is worth fixing regardless, since it makes the fork lever structurally blind to a whole bug class. |
 
 ---
 

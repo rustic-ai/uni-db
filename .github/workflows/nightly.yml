@@ -362,9 +362,17 @@ jobs:
       # 54-minute per-test ceiling. So 10000 still holds, with margin, and this
       # box is more contended than the 64-core runner.
       #
+      # Phase 5 added a ninth soak (`flush_pushdown_soak`), and it is **not**
+      # included in the 29.9-minute figure above. Measured only at smoke volume:
+      # 500 cases in 18 s, so 10000 extrapolates to roughly 6 minutes — well
+      # inside the slowest test's 29.9, and these run concurrently, so the
+      # wall-clock bound should be unchanged. That is an extrapolation, not a
+      # measurement; if this job starts approaching the ceiling, re-measure the
+      # set rather than assuming this line was right.
+      #
       # The response to approaching a ceiling is to cut the volume or
       # investigate, not to raise the ceiling again.
-      - name: DQP soak (four levers x plain and aggregate cases)
+      - name: DQP soak (four levers x plain, aggregate and pushdown cases)
         env:
           DQP_CASES: 10000
         run: |

@@ -40,7 +40,7 @@
 use std::collections::HashMap;
 
 use uni_common::core::id::Vid;
-use uni_db::{DataType, Uni, Value, unival};
+use uni_db::{DataType, IndexType, ScalarType, Uni, Value, unival};
 
 /// Boundary value for `age`, mirroring `metamorphic::seed::AGE_BOUNDARY`.
 ///
@@ -50,7 +50,7 @@ pub const AGE_BOUNDARY: i64 = 30;
 
 /// `age` values drawn by the fixture — a subset of `arb_literal`'s Int set that
 /// reads as a plausible age, so `=`, `<` and `>` predicates all have matches.
-const AGE_DOMAIN: &[i64] = &[18, 22, 25, 30, 40, 50, 65];
+pub const AGE_DOMAIN: &[i64] = &[18, 22, 25, 30, 40, 50, 65];
 /// `score` values drawn by the fixture — exactly `arb_literal`'s Float set.
 const SCORE_DOMAIN: &[f64] = &[0.0, 0.2, 0.5, 0.7, 0.9, 1.0];
 /// `city` values drawn by the fixture. `arb_literal` also emits `ZZ` and `p1`,
@@ -75,6 +75,104 @@ const EDGELESS_EVERY: u64 = 7;
 const VERTEX_BATCH: usize = 5_000;
 /// Edges per `bulk_insert_edges` call, same source.
 const EDGE_BATCH: usize = 10_000;
+
+/// How a fixture declares its graph.
+///
+/// This is **not** cosmetic, and it is the dimension Phase 5's task list
+/// missed. What a fixture declares decides which executor paths a generated
+/// query can reach at all:
+///
+/// * Whether an edge type is declared decides `Traverse` vs
+///   `TraverseMainByType` (`planner.rs:5405` routes to the latter only when
+///   *every* requested type is absent from the schema). The #135 fix site,
+///   `build_edge_adjacency_and_target_props`, has exactly one caller and it
+///   lives under `TraverseMainByType` — so a fixture that declares its edge
+///   type cannot reach that bug no matter how wide the generator gets.
+/// * Whether a scalar index exists decides whether a predicate reaches
+///   `LanceFilterGenerator` at all, which is where the deleted `"col"` range
+///   fusion lived.
+///
+/// A widened *generator* over a fixture that routes around the defect produces
+/// a wider, greener, still-toothless oracle. Widen the fixture too.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SchemaMode {
+    /// Labels and `WORKS_AT` declared, no indexes. What every Phase 2-4 lever
+    /// measured against.
+    Typed,
+    /// [`Self::Typed`] plus a **Hash** scalar index on `Person.age`.
+    ///
+    /// The Hash kind specifically: an `=`/`IN` on a Hash-indexed column is what
+    /// puts it into `PushdownStrategy::hash_index_columns`, which is condition
+    /// (2) of three for reaching the range fusion. See
+    /// `bugs/hash_index_range_quoting.rs:15-23`.
+    TypedIndexed,
+}
+
+impl SchemaMode {
+    /// Short name for test output and report tables.
+    pub fn name(self) -> &'static str {
+        match self {
+            SchemaMode::Typed => "typed",
+            SchemaMode::TypedIndexed => "typed-indexed",
+        }
+    }
+}
+
+/// A fixture identity: everything [`build_dqp_seed_for`] needs.
+///
+/// Carried instead of a bare [`Tier`] so a lever states both *how big* and
+/// *what shape* its fixture is. The two are independent — an index changes
+/// which code paths run, a tier changes how much data flows through them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Fixture {
+    pub tier: Tier,
+    pub mode: SchemaMode,
+}
+
+impl Fixture {
+    /// The Phase 2-4 default. Every existing lever uses this, so their measured
+    /// budgets and activation rates carry over unchanged.
+    pub const TINY: Self = Self {
+        tier: Tier::Tiny,
+        mode: SchemaMode::Typed,
+    };
+
+    /// [`Self::TINY`] with the Hash index on `Person.age`. For the pushdown
+    /// lever.
+    pub const TINY_INDEXED: Self = Self {
+        tier: Tier::Tiny,
+        mode: SchemaMode::TypedIndexed,
+    };
+
+    /// Label used in driver output, e.g. `tiny/typed-indexed`.
+    pub fn name(self) -> String {
+        format!("{}/{}", self.tier.name(), self.mode.name())
+    }
+}
+
+impl From<Tier> for Fixture {
+    /// A bare tier means the Phase 2-4 shape, so pre-Phase-5 call sites keep
+    /// their exact semantics.
+    fn from(tier: Tier) -> Self {
+        Self {
+            tier,
+            mode: SchemaMode::Typed,
+        }
+    }
+}
+
+/// The property the [`SchemaMode::TypedIndexed`] Hash index covers.
+///
+/// `age` and not `score`/`city`: it is nullable (so three-valued logic stays
+/// reachable), it is drawn from a small fixed domain [`AGE_DOMAIN`] that the
+/// generator's literals also draw from, and it is the generator's most-used
+/// numeric target — `numeric_targets`/`integer_targets` both surface it.
+///
+/// Aliased from the generator rather than repeated: `arb_case_pushdown` emits
+/// its same-column conjunction over that column, and if the two ever named
+/// different properties the predicate would miss the index entirely and the
+/// lever would soak a path that cannot exhibit the defect — passing green.
+pub const INDEXED_PROPERTY: &str = crate::querygen::PUSHDOWN_PROPERTY;
 
 /// Fixture size class.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -207,14 +305,31 @@ fn dqp_config() -> uni_db::UniConfig {
     }
 }
 
-/// Applies the `querygen`-mandated schema.
-async fn apply_schema(db: &Uni) -> anyhow::Result<()> {
-    db.schema()
+/// Applies the `querygen`-mandated schema, in the shape `mode` asks for.
+async fn apply_schema(db: &Uni, mode: SchemaMode) -> anyhow::Result<()> {
+    let person = db
+        .schema()
         .label("Person")
         .property("name", DataType::String)
         .property_nullable("age", DataType::Int)
         .property_nullable("score", DataType::Float)
-        .property_nullable("city", DataType::String)
+        .property_nullable("city", DataType::String);
+
+    // Declared before any row is inserted, matching how
+    // `bugs/hash_index_range_quoting.rs` reaches the pushdown path. A Hash
+    // scalar index needs no physical Lance artifact — `ScalarIndexType::Hash`
+    // has no Lance counterpart and is mapped onto BTree — so what makes
+    // pushdown engage is the *declaration*, not a build. That is why this is
+    // safe to declare up front and why the self-tests below check behaviour
+    // rather than trusting `apply()` returning `Ok`.
+    let person = match mode {
+        SchemaMode::Typed => person,
+        SchemaMode::TypedIndexed => {
+            person.index(INDEXED_PROPERTY, IndexType::Scalar(ScalarType::Hash))
+        }
+    };
+
+    person
         .done()
         .label("Company")
         .property("name", DataType::String)
@@ -314,7 +429,7 @@ where
 /// Returns any error from database construction, schema application, or the
 /// bulk inserts.
 pub async fn build_dqp_seed(tier: Tier) -> anyhow::Result<Uni> {
-    build_dqp_seed_with(tier, 0x5EED_D9F_u64.wrapping_mul(0x9E37_79B9)).await
+    build_dqp_seed_for(Fixture::from(tier)).await
 }
 
 /// [`build_dqp_seed`] with an explicit RNG seed, for replay harnesses.
@@ -323,8 +438,32 @@ pub async fn build_dqp_seed(tier: Tier) -> anyhow::Result<Uni> {
 ///
 /// As [`build_dqp_seed`].
 pub async fn build_dqp_seed_with(tier: Tier, seed: u64) -> anyhow::Result<Uni> {
+    build_dqp_seed_for_with(Fixture::from(tier), seed).await
+}
+
+/// Builds the fixture `f` describes.
+///
+/// # Errors
+///
+/// As [`build_dqp_seed`].
+pub async fn build_dqp_seed_for(f: Fixture) -> anyhow::Result<Uni> {
+    build_dqp_seed_for_with(f, 0x5EED_D9F_u64.wrapping_mul(0x9E37_79B9)).await
+}
+
+/// [`build_dqp_seed_for`] with an explicit RNG seed, for replay harnesses.
+///
+/// The seed drives only the *data*, never the schema, so two fixtures that
+/// differ solely in [`SchemaMode`] hold byte-identical rows. That is what lets
+/// a pushdown run be compared against a non-indexed one without the data
+/// varying underneath.
+///
+/// # Errors
+///
+/// As [`build_dqp_seed`].
+pub async fn build_dqp_seed_for_with(f: Fixture, seed: u64) -> anyhow::Result<Uni> {
+    let tier = f.tier;
     let db = Uni::temporary().config(dqp_config()).build().await?;
-    apply_schema(&db).await?;
+    apply_schema(&db, f.mode).await?;
 
     let mut rng = Rng::new(seed | 1);
     let person_vids =
@@ -370,7 +509,7 @@ pub async fn build_dqp_seed_with(tier: Tier, seed: u64) -> anyhow::Result<Uni> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Tier, build_dqp_seed, dqp_config};
+    use super::{Fixture, INDEXED_PROPERTY, Tier, build_dqp_seed, build_dqp_seed_for, dqp_config};
 
     /// The background flush timer must stay off for every DQP fixture.
     ///
@@ -458,6 +597,170 @@ mod tests {
             .await?,
             0,
             "'ZZ' is deliberately outside the city domain"
+        );
+        Ok(())
+    }
+
+    /// The two fixtures must hold identical data, so a pushdown run and a
+    /// non-indexed run differ in exactly one variable.
+    #[tokio::test]
+    async fn schema_mode_does_not_change_the_data() -> anyhow::Result<()> {
+        let plain = build_dqp_seed_for(Fixture::TINY).await?;
+        let indexed = build_dqp_seed_for(Fixture::TINY_INDEXED).await?;
+
+        for q in [
+            "MATCH (p:Person) RETURN count(p) AS c",
+            "MATCH (p:Person) WHERE p.age = 30 RETURN count(p) AS c",
+            "MATCH (p:Person) WHERE p.age IS NULL RETURN count(p) AS c",
+            "MATCH (:Person)-[r:WORKS_AT]->(:Company) RETURN count(r) AS c",
+        ] {
+            assert_eq!(
+                count(&plain, q).await?,
+                count(&indexed, q).await?,
+                "SchemaMode changed the data, not just the access path: {q}"
+            );
+        }
+        Ok(())
+    }
+
+    /// The declared index must be **registered and healthy**, not merely
+    /// accepted by `apply()`.
+    ///
+    /// `apply()` returning `Ok` proves nothing here: a physical build failure is
+    /// swallowed into a `warn!` and the definition is registered anyway, and
+    /// `IndexStatus::Online` is the `#[default]` — so an index gets `Online` for
+    /// *existing*, not for being usable. If this fixture's index were silently
+    /// dead, `TypedIndexed` would be indistinguishable from `Typed` and every
+    /// pushdown case would be vacuous while the suite stayed green.
+    #[tokio::test]
+    async fn indexed_fixture_registers_its_index() -> anyhow::Result<()> {
+        use uni_db::core::schema::{IndexDefinition, ScalarIndexType};
+
+        /// A **Hash** scalar index covering `age`. The kind matters as much as
+        /// the column: only `=`/`IN` against a Hash-indexed column populates
+        /// `PushdownStrategy::hash_index_columns`, so a BTree here would leave
+        /// the lever unable to reach the fusion.
+        fn is_the_hash_index(i: &IndexDefinition) -> bool {
+            matches!(
+                i,
+                IndexDefinition::Scalar(c)
+                    if c.index_type == ScalarIndexType::Hash
+                        && c.properties.iter().any(|p| p == INDEXED_PROPERTY)
+            )
+        }
+
+        let db = build_dqp_seed_for(Fixture::TINY_INDEXED).await?;
+        let found = db
+            .indexes()
+            .list(Some("Person"))
+            .into_iter()
+            .find(is_the_hash_index)
+            .unwrap_or_else(|| {
+                panic!("no Hash index on Person.{INDEXED_PROPERTY} — TypedIndexed built nothing")
+            });
+        assert_eq!(
+            format!("{:?}", found.metadata().status),
+            "Online",
+            "the fixture's Hash index is not Online, so pushdown will not engage"
+        );
+
+        // And the plain fixture must genuinely lack it, or the two modes are
+        // the same fixture wearing different names.
+        let plain = build_dqp_seed_for(Fixture::TINY).await?;
+        assert!(
+            !plain
+                .indexes()
+                .list(Some("Person"))
+                .iter()
+                .any(is_the_hash_index),
+            "SchemaMode::Typed carries the index too — the modes do not differ"
+        );
+        Ok(())
+    }
+
+    /// **The routing guard.**
+    ///
+    /// A fixture can hold the right data, run the right transition, and still
+    /// route every generated query around the code path under test. That is not
+    /// hypothetical: `build_edge_adjacency_and_target_props` (the #135 fix site)
+    /// has exactly one caller, under `GraphTraverseMainStream`, which is planned
+    /// only when *every* requested relationship type is absent from the schema
+    /// (`planner.rs:5405`). These fixtures declare `WORKS_AT`, so they plan
+    /// through typed `Traverse` and **cannot reach #135 at all** — no amount of
+    /// generator widening changes that.
+    ///
+    /// Asserting the operator makes that property checkable instead of assumed,
+    /// and turns a future "we made the fixture schemaless" into a passing test
+    /// rather than a silent hope.
+    ///
+    /// Substring containment inside one process only: plan text is
+    /// `format!("{:#?}", plan)` over structures with `HashSet`/`HashMap` fields
+    /// and is not ordering-stable across processes.
+    #[tokio::test]
+    async fn typed_fixture_plans_a_typed_traverse() -> anyhow::Result<()> {
+        let db = build_dqp_seed_for(Fixture::TINY).await?;
+        let r = db
+            .session()
+            .query("EXPLAIN MATCH (a:Person)-[:WORKS_AT]->(b:Company) RETURN b.founded")
+            .await?;
+        let plan: String = r.rows()[0].get("plan")?;
+        assert!(
+            !plan.contains("TraverseMainByType"),
+            "the fixture declares WORKS_AT, so it must plan a typed Traverse — if \
+             this now says TraverseMainByType the fixture went schemaless, and the \
+             levers are exercising a different operator than they were measured \
+             against:\n{plan}"
+        );
+        Ok(())
+    }
+
+    /// **The condition the pushdown lever depends on.**
+    ///
+    /// Reaching the deleted `"col"` range fusion needs all three of: a Hash
+    /// index on the column, an `=`/`IN` on it, and a two-sided *inclusive*
+    /// range on the same column (`bugs/hash_index_range_quoting.rs:15-23`).
+    /// This asserts the fixture supplies the first and that the resulting query
+    /// is both **correct** and **non-empty**.
+    ///
+    /// Non-emptiness is the load-bearing half. The fusion's symptom is an empty
+    /// result, so a case that legitimately matches nothing passes identically
+    /// with and without the bug — exactly why
+    /// `range_still_constrains_when_it_excludes_the_equality` cannot detect it.
+    /// A fixture whose pushdown queries are all empty would give the lever
+    /// nothing to see.
+    #[tokio::test]
+    async fn indexed_fixture_reaches_the_pushdown_path() -> anyhow::Result<()> {
+        let db = build_dqp_seed_for(Fixture::TINY_INDEXED).await?;
+
+        // `age = 30` with a range that contains 30 — the eq-plus-two-sided-range
+        // shape, and the answer must equal the plain equality's answer.
+        let eq_only = count(
+            &db,
+            "MATCH (p:Person) WHERE p.age = 30 RETURN count(p) AS c",
+        )
+        .await?;
+        let fused = count(
+            &db,
+            "MATCH (p:Person) WHERE p.age = 30 AND p.age >= 25 AND p.age <= 40 \
+             RETURN count(p) AS c",
+        )
+        .await?;
+        assert!(eq_only > 0, "fixture has no age=30 rows to push down");
+        assert_eq!(
+            fused, eq_only,
+            "eq + containing range must equal eq alone; got {fused} vs {eq_only}"
+        );
+
+        // The `IN` route into `hash_index_columns` takes the same path.
+        let in_form = count(
+            &db,
+            "MATCH (p:Person) WHERE p.age IN [25, 30, 40] AND p.age >= 25 AND p.age <= 40 \
+             RETURN count(p) AS c",
+        )
+        .await?;
+        assert!(
+            in_form > 0,
+            "IN + range matched nothing, so the lever would compare empty bags"
         );
         Ok(())
     }

@@ -1,0 +1,16 @@
+diff --git a/crates/uni/src/api/fork.rs b/crates/uni/src/api/fork.rs
+index 91c922a40..f7867d687 100644
+--- a/crates/uni/src/api/fork.rs
++++ b/crates/uni/src/api/fork.rs
+@@ -341,7 +341,10 @@ async fn create_fork_2pc(
+             .collect(),
+         None => BTreeMap::new(),
+     };
+-    let fork_point = if let Some(writer_lock) = &parent.db.writer {
++    // REVERT #97 (validation only): re-add the `parent.is_forked()` gate, so a
++    // fork of a primary session skips the flush-and-capture and branches off a
++    // stale Lance tip, losing the parent's committed-but-unflushed L0.
++    let fork_point = if let (true, Some(writer_lock)) = (parent.is_forked(), &parent.db.writer) {
+         let writer: &uni_store::Writer = writer_lock.as_ref();
+         writer
+             .flush_and_capture_fork_point(&candidate_datasets, &parent_branches)

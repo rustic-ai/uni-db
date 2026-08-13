@@ -525,12 +525,34 @@ fn arb_str_op() -> impl Strategy<Value = BinaryOp> {
     select(vec![BinaryOp::Eq, BinaryOp::NotEq])
 }
 
+/// The integer literal domain, shared by [`arb_literal`] and the same-column
+/// strategies below.
+///
+/// One source of truth on purpose: the DQP fixtures populate `age` from exactly
+/// this set (`dqp/seed.rs` module docs), and a strategy that drew bounds from a
+/// wider set would emit predicates matching nothing while the oracle reported
+/// green — the vacuity failure that module is built to avoid.
+const INT_LITERALS: &[i64] = &[0, 18, 22, 25, 30, 40, 50, 65, 1999, 2010];
+
+/// The subset of [`INT_LITERALS`] that the fixtures actually contain.
+///
+/// `0`, `1999` and `2010` are in the full set **deliberately**, as literals that
+/// match nothing — an always-false predicate is a partition worth having for
+/// TLP. But they are useless as the *equality* half of a pushdown conjunction:
+/// the `=`/`IN` is what puts the column into `hash_index_columns`, and one that
+/// selects no row leaves the case unable to exercise the pushdown path at all.
+/// Such a case is not wrong, merely inert, and a run made mostly of them reports
+/// a depressed activation rate rather than a defect.
+///
+/// Kept in step with `dqp::seed::AGE_DOMAIN`, which is asserted below.
+const INT_LITERALS_PRESENT: &[i64] = &[18, 22, 25, 30, 40, 50, 65];
+
 /// Literals for a property kind. All numeric literals are non-negative so they
 /// round-trip (a leading `-` would parse as `UnaryOp::Neg`). Values straddle the
 /// seed's boundaries (e.g. `age = 30`) so off-by-one partitioning is caught.
 fn arb_literal(ty: PropTy) -> BoxedStrategy<CypherLiteral> {
     match ty {
-        PropTy::Int => select(vec![0i64, 18, 22, 25, 30, 40, 50, 65, 1999, 2010])
+        PropTy::Int => select(INT_LITERALS.to_vec())
             .prop_map(CypherLiteral::Integer)
             .boxed(),
         PropTy::Float => select(vec![0.0f64, 0.2, 0.5, 0.7, 0.9, 1.0])
@@ -557,11 +579,120 @@ fn arb_comparison(targets: Vec<(&'static str, Prop)>) -> impl Strategy<Value = E
     })
 }
 
+/// `var.prop IN [l1, l2, l3]` over an integer target.
+///
+/// `IN` is the second route into `PushdownStrategy::hash_index_columns`,
+/// alongside `=`. The list is drawn from [`INT_LITERALS`] and deduplicated —
+/// a repeated literal is legal Cypher but renders a list the parser
+/// canonicalises differently, which would fail the round-trip property for a
+/// reason unrelated to what this generates.
+fn arb_in_list(targets: Vec<(&'static str, Prop)>) -> BoxedStrategy<Expr> {
+    let ints: Vec<(&'static str, Prop)> = targets
+        .into_iter()
+        .filter(|(_, p)| matches!(p.ty, PropTy::Int))
+        .collect();
+    if ints.is_empty() {
+        return Just(Expr::Literal(CypherLiteral::Bool(true))).boxed();
+    }
+    (select(ints), prop_vec(select(INT_LITERALS.to_vec()), 1..=3))
+        .prop_map(|((var, prop), mut vals)| {
+            vals.sort_unstable();
+            vals.dedup();
+            Expr::In {
+                expr: Box::new(prop_expr(var, prop.name)),
+                list: Box::new(Expr::List(
+                    vals.into_iter()
+                        .map(|v| Expr::Literal(CypherLiteral::Integer(v)))
+                        .collect(),
+                )),
+            }
+        })
+        .boxed()
+}
+
+/// An `=`/`IN` **and** a two-sided inclusive range over the *same* column.
+///
+/// This is the only predicate shape that reaches the deleted Lance range
+/// fusion, and all three parts are load-bearing
+/// (`bugs/hash_index_range_quoting.rs:15-23`): the `=`/`IN` is what puts the
+/// column into `PushdownStrategy::hash_index_columns`, and the two-sided
+/// *inclusive* range is the only form the fusion fired on. Drop any one and the
+/// predicate never reaches `LanceFilterGenerator` — which is why the plain
+/// `WHERE p >= 2 AND p <= 4` form always looked correct and the bug survived.
+///
+/// Bounds are drawn as an **ordered** triple `lo <= mid <= hi` with the equality
+/// at `mid`, so the range contains the equality and the predicate selects real
+/// rows. Drawing two independent bounds would put `lo > hi` in half of all
+/// draws — an always-empty predicate, and since the fusion's symptom is *also*
+/// an empty result, those cases pass identically with and without the bug. That
+/// is exactly why `range_still_constrains_when_it_excludes_the_equality`, which
+/// asserts emptiness, cannot detect this defect.
+fn arb_same_column_conj(targets: Vec<(&'static str, Prop)>) -> BoxedStrategy<Expr> {
+    let ints: Vec<(&'static str, Prop)> = targets
+        .into_iter()
+        .filter(|(_, p)| matches!(p.ty, PropTy::Int))
+        .collect();
+    if ints.is_empty() {
+        return Just(Expr::Literal(CypherLiteral::Bool(true))).boxed();
+    }
+    (
+        select(ints),
+        select(INT_LITERALS_PRESENT.to_vec()),
+        prop_vec(select(INT_LITERALS.to_vec()), 2..=2),
+        proptest::bool::ANY,
+    )
+        .prop_map(|((var, prop), point, mut bounds, use_in)| {
+            // The equality is drawn from the values the fixture holds, so it
+            // selects real rows; the bounds may come from the full literal set,
+            // then widen to contain the point. Widening rather than rejecting
+            // keeps every draw usable — a rejection filter here would make
+            // proptest discard cases and silently shrink the run.
+            bounds.sort_unstable();
+            let lo = bounds[0].min(point);
+            let hi = bounds[1].max(point);
+            let mid = point;
+            let col = || prop_expr(var, prop.name);
+
+            // (1) the hash-index entry point: `= mid` or `IN [mid]`.
+            let point = if use_in {
+                Expr::In {
+                    expr: Box::new(col()),
+                    list: Box::new(Expr::List(vec![Expr::Literal(CypherLiteral::Integer(mid))])),
+                }
+            } else {
+                Expr::BinaryOp {
+                    left: Box::new(col()),
+                    op: BinaryOp::Eq,
+                    right: Box::new(Expr::Literal(CypherLiteral::Integer(mid))),
+                }
+            };
+            // (2) and (3): the two-sided inclusive range containing it.
+            let lower = Expr::BinaryOp {
+                left: Box::new(col()),
+                op: BinaryOp::GtEq,
+                right: Box::new(Expr::Literal(CypherLiteral::Integer(lo))),
+            };
+            let upper = Expr::BinaryOp {
+                left: Box::new(col()),
+                op: BinaryOp::LtEq,
+                right: Box::new(Expr::Literal(CypherLiteral::Integer(hi))),
+            };
+            and_expr(and_expr(point, lower), upper)
+        })
+        .boxed()
+}
+
 /// A predicate of depth ≤ 2 whose leaves all compare nullable props, so the
 /// whole predicate can evaluate to NULL (the `IS NULL` partition has teeth).
+///
+/// The two same-column arms carry deliberately modest weight: they widen
+/// ordinary runs onto the pushdown path without displacing the shapes the
+/// Phase 2-4 levers were measured against.
 fn arb_pred(targets: Vec<(&'static str, Prop)>) -> impl Strategy<Value = Expr> {
     prop_oneof![
         3 => arb_comparison(targets.clone()),
+        1 => arb_in_list(targets.clone()),
+        1 => arb_same_column_conj(targets.clone()),
         1 => (arb_comparison(targets.clone()), arb_comparison(targets.clone()))
             .prop_map(|(a, b)| and_expr(a, b)),
         1 => (arb_comparison(targets.clone()), arb_comparison(targets.clone()))
@@ -640,6 +771,45 @@ pub fn arb_case() -> impl Strategy<Value = Case> {
         (
             Just(shape.clone()),
             arb_base_where(targets.clone()),
+            arb_projection(shape.projection_choices()),
+            arb_pred(targets),
+        )
+            .prop_map(|(shape, base_where, projection, predicate)| Case {
+                shape,
+                base_where,
+                projection,
+                predicate,
+            })
+    })
+}
+
+/// The property the pushdown strategies target.
+///
+/// Shared with `dqp::seed::INDEXED_PROPERTY`, which declares the Hash index on
+/// exactly this column — a generated pushdown predicate over any *other*
+/// property would never enter `hash_index_columns`, and the lever would run a
+/// full soak against a path that cannot exhibit the defect. `dqp::seed` aliases
+/// this constant rather than repeating the string, so the two cannot drift.
+pub const PUSHDOWN_PROPERTY: &str = "age";
+
+/// A case whose base `WHERE` is always a same-column conjunction over
+/// [`PUSHDOWN_PROPERTY`] — the shape that reaches the Lance range fusion.
+///
+/// Every case is filtered by construction, so unlike [`arb_case`] this needs no
+/// `arb_base_where` (which emits `None` two draws in three). Pair it with
+/// `dqp::seed::Fixture::TINY_INDEXED`; against a fixture with no index the
+/// predicate is merely a slow filter and the run proves nothing.
+pub fn arb_case_pushdown() -> impl Strategy<Value = Case> {
+    arb_shape().prop_flat_map(|shape| {
+        let targets = shape.nullable_targets();
+        let indexed: Vec<(&'static str, Prop)> = targets
+            .iter()
+            .copied()
+            .filter(|(_, p)| p.name == PUSHDOWN_PROPERTY)
+            .collect();
+        (
+            Just(shape.clone()),
+            arb_same_column_conj(indexed).prop_map(Some),
             arb_projection(shape.projection_choices()),
             arb_pred(targets),
         )
@@ -755,10 +925,46 @@ pub fn arb_agg_case_int() -> impl Strategy<Value = Case> {
 }
 
 #[cfg(test)]
+mod domains {
+    /// The generator's "present" literals must be exactly the fixture's `age`
+    /// values.
+    ///
+    /// These are two constants in two modules that have to agree, and nothing
+    /// else would notice if they drifted: a value present here but absent from
+    /// the fixture makes a pushdown case inert (the equality selects nothing,
+    /// so the hash-index path is never entered), which surfaces only as a
+    /// depressed activation rate that reads like witness drift. A value in the
+    /// fixture but missing here just narrows coverage, silently.
+    #[test]
+    fn present_int_literals_match_the_dqp_fixture_age_domain() {
+        let mut ours = super::INT_LITERALS_PRESENT.to_vec();
+        let mut theirs = crate::metamorphic::dqp::seed::AGE_DOMAIN.to_vec();
+        ours.sort_unstable();
+        theirs.sort_unstable();
+        assert_eq!(
+            ours, theirs,
+            "INT_LITERALS_PRESENT has drifted from dqp::seed::AGE_DOMAIN"
+        );
+    }
+
+    /// Every "present" literal must also be a literal the generator can emit.
+    #[test]
+    fn present_int_literals_are_a_subset_of_the_full_set() {
+        for v in super::INT_LITERALS_PRESENT {
+            assert!(
+                super::INT_LITERALS.contains(v),
+                "{v} is not in INT_LITERALS, so no generated predicate can use it"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
 mod roundtrip {
     use super::render::{normalize, render};
-    use super::{Partition, arb_case};
+    use super::{Partition, arb_agg_case, arb_case, arb_case_pushdown};
     use proptest::prelude::*;
+    use uni_cypher::ast::Query;
     use uni_cypher::parse;
 
     proptest! {
@@ -767,8 +973,18 @@ mod roundtrip {
         // generator and renderer against drift in lock-step.
         #![proptest_config(ProptestConfig { cases: 512, ..ProptestConfig::default() })]
 
+        /// Draws from **every** case strategy, not just `arb_case`.
+        ///
+        /// This is a pure parse/render property with no semantic law to break,
+        /// so it is the one consumer that should never be restricted to a subset
+        /// of the generator — anything the generator can emit, the renderer must
+        /// round-trip. Aggregate cases were previously covered only by a
+        /// hand-written spike below and never by this property; drawing them
+        /// here closes that gap.
         #[test]
-        fn render_roundtrips_generated_queries(case in arb_case()) {
+        fn render_roundtrips_generated_queries(
+            case in prop_oneof![arb_case(), arb_agg_case(), arb_case_pushdown()]
+        ) {
             let variants = [
                 case.base_query(),
                 case.partition_query(Partition::True),
@@ -779,6 +995,9 @@ mod roundtrip {
                 case.ordered_query(),
                 case.limited_query(5),
                 case.count_query(),
+                // The `EXPLAIN` wrapper must survive the same round trip, since
+                // the routing assertions render through it.
+                Query::Explain(Box::new(case.base_query())),
             ];
             for q in variants {
                 let rendered = render(&q);
@@ -840,6 +1059,39 @@ mod spike {
         // Compound predicate + IS NULL partition (the TLP unknown branch).
         assert_render_fixpoint(
             "MATCH (a:Person) WHERE (a.age > 30) AND ((a.score < 0.5) IS NULL) RETURN a.name",
+        );
+    }
+
+    /// The Phase-5 additions: `IN` lists, the same-column conjunction, and the
+    /// `EXPLAIN` wrapper.
+    ///
+    /// Written **before** the strategies that emit these shapes. This helper
+    /// starts from the parser's own AST, so a canonical-form disagreement
+    /// (`IN` list shape, operator nesting, the `EXPLAIN` wrapper) surfaces here
+    /// in milliseconds instead of as a shrinking proptest failure that has to be
+    /// read backwards.
+    #[test]
+    fn fixpoint_pushdown_predicates_and_explain() {
+        // `IN` over an integer column — the second route into
+        // `hash_index_columns` alongside `=`.
+        assert_render_fixpoint("MATCH (a:Person) WHERE (a.age IN [18, 25, 30]) RETURN a.name");
+        assert_render_fixpoint("MATCH (a:Person) WHERE (a.age IN [30]) RETURN a.name");
+
+        // The same-column conjunction: an `=`/`IN` plus a two-sided inclusive
+        // range on one column. All three parts are required to reach the fusion.
+        assert_render_fixpoint(
+            "MATCH (a:Person) WHERE ((a.age = 30) AND (a.age >= 25)) AND (a.age <= 40) \
+             RETURN a.name",
+        );
+        assert_render_fixpoint(
+            "MATCH (a:Person) WHERE ((a.age IN [30]) AND (a.age >= 25)) AND (a.age <= 40) \
+             RETURN a.name",
+        );
+
+        // The `EXPLAIN` wrapper, which the routing assertions render through.
+        assert_render_fixpoint("EXPLAIN MATCH (a:Person) RETURN a.name");
+        assert_render_fixpoint(
+            "EXPLAIN MATCH (a:Person)-[:WORKS_AT]->(b:Company) RETURN b.founded",
         );
     }
 

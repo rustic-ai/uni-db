@@ -50,7 +50,7 @@ use proptest::test_runner::{Config, RngAlgorithm, TestRng, TestRunner};
 
 use super::driver::{Budgets, CaseKind, Db, PrepareFut};
 use super::lever::{Observed, Witness};
-use super::seed::{Tier, build_dqp_seed};
+use super::seed::{Fixture, Tier, build_dqp_seed_for};
 use crate::diff::bag_eq;
 use crate::querygen::{Case, render::render};
 
@@ -102,8 +102,8 @@ fn seed_bytes(seed: u64, batch: u32) -> [u8; 32] {
 /// A pure function of `(kind, tier, seed, batch)`, which is what makes
 /// [`replay_stateful`] possible: the same coordinates always yield the same
 /// queries in the same order.
-fn batch_cases(kind: CaseKind, tier: Tier, seed: u64, batch: u32, n: u32) -> Vec<Case> {
-    let strategy = super::driver::strategy_for(kind, tier);
+fn batch_cases(kind: CaseKind, f: impl Into<Fixture>, seed: u64, batch: u32, n: u32) -> Vec<Case> {
+    let strategy = super::driver::strategy_for(kind, f);
     let mut runner = TestRunner::new_with_rng(
         Config {
             failure_persistence: None,
@@ -169,17 +169,18 @@ pub trait StatefulLever {
 /// At `k = 500` over 50 000 cases that is 100 rebuilds — 17.3 hours of fixture
 /// construction before a single comparison runs. The large tier is Tier-2 only,
 /// where the fixture is built exactly once per run.
-pub fn drive_stateful<L, P>(cases: u32, tier: Tier, kind: CaseKind, prepare: P)
+pub fn drive_stateful<L, P>(cases: u32, f: impl Into<Fixture>, kind: CaseKind, prepare: P)
 where
     L: StatefulLever,
     P: for<'a> Fn(&'a Db) -> PrepareFut<'a, L>,
 {
+    let f = f.into();
     drive_stateful_with(
         cases,
-        tier,
+        f,
         kind,
         BATCH,
-        Budgets::for_tier(tier, cases),
+        Budgets::for_tier(f.tier, cases),
         prepare,
     );
 }
@@ -192,7 +193,7 @@ where
 /// As [`drive_stateful`].
 pub fn drive_stateful_with<L, P>(
     cases: u32,
-    tier: Tier,
+    f: impl Into<Fixture>,
     kind: CaseKind,
     batch_size: u32,
     budgets: Budgets,
@@ -201,8 +202,9 @@ pub fn drive_stateful_with<L, P>(
     L: StatefulLever,
     P: for<'a> Fn(&'a Db) -> PrepareFut<'a, L>,
 {
+    let f = f.into();
     assert!(
-        tier != Tier::Large,
+        f.tier != Tier::Large,
         "the large tier is forbidden to drive_stateful: it measured 621.73 s per \
          fixture build in Phase 0A, and this driver rebuilds once per batch. Use \
          drive_prepared, which builds exactly once per run."
@@ -223,7 +225,7 @@ pub fn drive_stateful_with<L, P>(
 
     for batch in 0..batches {
         let n = batch_size.min(cases - batch * batch_size);
-        let queries: Vec<_> = batch_cases(kind, tier, seed, batch, n)
+        let queries: Vec<_> = batch_cases(kind, f, seed, batch, n)
             .into_iter()
             .map(|case| {
                 if let Some(why) = kind.inadmissible(&case) {
@@ -238,7 +240,7 @@ pub fn drive_stateful_with<L, P>(
             .collect();
 
         let db: Db =
-            std::sync::Arc::new(rt.block_on(build_dqp_seed(tier)).expect("build dqp seed"));
+            std::sync::Arc::new(rt.block_on(build_dqp_seed_for(f)).expect("build dqp seed"));
         let mut lever = rt.block_on(prepare(&db)).expect("prepare lever");
         name = lever.name();
         rt.block_on(lever.check_invariants())
@@ -353,7 +355,7 @@ pub fn replay_stateful<L, P>(
     seed: u64,
     batch: u32,
     index: u32,
-    tier: Tier,
+    f: impl Into<Fixture>,
     kind: CaseKind,
     batch_size: u32,
     prepare: P,
@@ -361,18 +363,19 @@ pub fn replay_stateful<L, P>(
     L: StatefulLever,
     P: for<'a> Fn(&'a Db) -> PrepareFut<'a, L>,
 {
+    let f = f.into();
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .expect("tokio runtime");
 
-    let cases = batch_cases(kind, tier, seed, batch, batch_size);
+    let cases = batch_cases(kind, f, seed, batch, batch_size);
     let case = cases
         .get(index as usize)
         .unwrap_or_else(|| panic!("case {index} is out of range for a batch of {batch_size}"));
     let q = case.base_query();
 
-    let db: Db = std::sync::Arc::new(rt.block_on(build_dqp_seed(tier)).expect("build dqp seed"));
+    let db: Db = std::sync::Arc::new(rt.block_on(build_dqp_seed_for(f)).expect("build dqp seed"));
     let mut lever = rt.block_on(prepare(&db)).expect("prepare lever");
     let name = lever.name();
 

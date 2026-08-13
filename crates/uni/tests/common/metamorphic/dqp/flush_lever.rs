@@ -39,7 +39,7 @@ use uni_db::{Value, unival};
 
 use super::driver::{CaseKind, Db, PrepareFut};
 use super::lever::{Observed, Witness, observe};
-use super::seed::Tier;
+use super::seed::{Fixture, Tier};
 use super::stateful::{StatefulLever, drive_stateful, drive_stateful_with};
 
 /// Extra `Person` rows the lever leaves in L0.
@@ -73,8 +73,21 @@ impl FlushLever {
                 p.insert("name".to_string(), unival!(format!("d{i}")));
                 // Every 7th row leaves `age` unset, mirroring the fixture's NULL
                 // density so three-valued logic still has something to catch.
+                //
+                // Drawn from the fixture's own `AGE_DOMAIN` rather than a
+                // hand-written subset. An earlier version listed five of the
+                // seven values, and the two it omitted (22 and 50) were
+                // invisible to this lever: a generated `age = 22` predicate
+                // selected fixture rows but no *delta* row, so `a.l0_reads` was
+                // 0 and the case did not activate. Unfiltered `Plain` draws
+                // never noticed — two thirds of them carry no base `WHERE` at
+                // all and scan the delta wholesale. It took a case kind that
+                // always filters to expose it, as a 63.6% activation rate.
                 if i % 7 != 0 {
-                    p.insert("age".to_string(), unival!([18i64, 25, 30, 40, 65][i % 5]));
+                    p.insert(
+                        "age".to_string(),
+                        unival!(super::seed::AGE_DOMAIN[i % super::seed::AGE_DOMAIN.len()]),
+                    );
                 }
                 if i % 5 != 0 {
                     p.insert(
@@ -152,6 +165,44 @@ fn flush_soak() {
         super::driver::soak_cases(),
         Tier::Tiny,
         CaseKind::Plain,
+        FlushLever::prepared,
+    );
+}
+
+/// PR lane: the same transition against a **Hash-indexed** fixture, over
+/// predicates that reach Lance's filter pushdown.
+///
+/// This is the phase's teeth. Flushing is exactly the right transition for a
+/// pushdown defect: side A reads the delta out of L0, where a predicate is
+/// evaluated in-process, and side B reads it out of Lance, where the predicate
+/// is lowered to a filter string and pushed down. A defect in that lowering
+/// makes the two sides disagree — which is the definition of the bug the
+/// deleted `"col"` range fusion was.
+///
+/// Validated against `docs/testing/reverts/lance_col_fusion.patch`: with the
+/// fusion reconstructed this run **fails** with a bag diff, and without it the
+/// run passes. Before this test existed, the same reconstruction left
+/// `flush_smoke` green — the oracle was blind to it, because no generated case
+/// could produce three conditions on one column and the fixture had no index
+/// for them to reach.
+#[test]
+fn flush_pushdown_smoke() {
+    drive_stateful(
+        super::driver::smoke_cases(),
+        Fixture::TINY_INDEXED,
+        CaseKind::Pushdown,
+        FlushLever::prepared,
+    );
+}
+
+/// Nightly volume over the pushdown path.
+#[test]
+#[ignore = "soak: DQP L0-union vs flushed over pushed-down predicates"]
+fn flush_pushdown_soak() {
+    drive_stateful(
+        super::driver::soak_cases(),
+        Fixture::TINY_INDEXED,
+        CaseKind::Pushdown,
         FlushLever::prepared,
     );
 }

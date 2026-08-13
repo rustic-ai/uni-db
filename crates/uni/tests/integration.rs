@@ -87,6 +87,8 @@ mod ssi_support;
 mod ssi_telemetry;
 #[path = "common/ssi_write_set_matrix.rs"]
 mod ssi_write_set_matrix;
+#[path = "common/teeth/mod.rs"]
+mod teeth;
 // Backward-compat suite: opens databases with `ssi_enabled = false` to pin the
 // last-writer-wins contract regardless of the global default (now SSI-on).
 #[path = "common/ssi_default_semantics.rs"]

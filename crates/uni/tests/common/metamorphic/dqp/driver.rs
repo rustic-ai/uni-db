@@ -36,10 +36,11 @@ use proptest::strategy::Strategy;
 use proptest::test_runner::{Config, TestCaseError, TestRunner};
 
 use super::lever::Lever;
-use super::seed::{Tier, build_dqp_seed};
+use super::seed::{Fixture, Tier, build_dqp_seed_for};
 use crate::diff::bag_eq;
 use crate::querygen::{
-    Case, arb_agg_case_int, arb_agg_case_int_selective, arb_case, arb_case_selective,
+    Case, arb_agg_case_int, arb_agg_case_int_selective, arb_case, arb_case_pushdown,
+    arb_case_selective,
 };
 
 /// Default case count for the PR lane.
@@ -166,6 +167,19 @@ pub enum CaseKind {
     Plain,
     /// `count(*)` and `sum` over integer properties only.
     IntAggregate,
+    /// Plain projections whose base `WHERE` is always a same-column conjunction
+    /// over the Hash-indexed property — the shape that reaches Lance's
+    /// filter-pushdown path.
+    ///
+    /// Admissibility is identical to [`Self::Plain`]: the predicate is an
+    /// ordinary filter, so nothing about it is nondeterministic across
+    /// execution paths. It is a separate kind only so a run can *target* the
+    /// pushdown path instead of reaching it in a minority of draws.
+    ///
+    /// Pair it with `Fixture::TINY_INDEXED`. Against an unindexed fixture the
+    /// predicate is merely a slow filter, the run cannot exhibit the defect,
+    /// and it would pass while proving nothing.
+    Pushdown,
 }
 
 impl CaseKind {
@@ -174,6 +188,7 @@ impl CaseKind {
         match self {
             CaseKind::Plain => "plain",
             CaseKind::IntAggregate => "int-aggregate",
+            CaseKind::Pushdown => "pushdown",
         }
     }
 
@@ -190,9 +205,17 @@ impl CaseKind {
             );
         }
         match self {
-            CaseKind::Plain if case.is_aggregate() => Some(
+            CaseKind::Plain | CaseKind::Pushdown if case.is_aggregate() => Some(
                 "carries an aggregate projection, but this run was configured for \
                  plain projections"
+                    .to_string(),
+            ),
+            // A pushdown case with no base `WHERE` cannot reach the index at
+            // all, so it would soak silently against the wrong path.
+            CaseKind::Pushdown if !case.has_base_filter() => Some(
+                "carries no base WHERE, so no predicate reaches the scan — a \
+                 pushdown run over these cases would exercise an unfiltered scan \
+                 and pass while proving nothing"
                     .to_string(),
             ),
             CaseKind::IntAggregate if !case.is_aggregate() => Some(
@@ -214,12 +237,19 @@ impl CaseKind {
 ///
 /// Above ~10k vertices every unfiltered case scans the whole fixture, so larger
 /// tiers draw from generators that always carry a base `WHERE`.
-pub fn strategy_for(kind: CaseKind, tier: Tier) -> proptest::strategy::BoxedStrategy<Case> {
-    match (kind, tier.needs_selectivity_floor()) {
+pub fn strategy_for(
+    kind: CaseKind,
+    f: impl Into<Fixture>,
+) -> proptest::strategy::BoxedStrategy<Case> {
+    let f = f.into();
+    match (kind, f.tier.needs_selectivity_floor()) {
         (CaseKind::Plain, false) => arb_case().boxed(),
         (CaseKind::Plain, true) => arb_case_selective().boxed(),
         (CaseKind::IntAggregate, false) => arb_agg_case_int().boxed(),
         (CaseKind::IntAggregate, true) => arb_agg_case_int_selective().boxed(),
+        // Every pushdown case is filtered by construction, so it needs no
+        // selectivity floor and the tier does not change the strategy.
+        (CaseKind::Pushdown, _) => arb_case_pushdown().boxed(),
     }
 }
 
@@ -280,12 +310,13 @@ impl Budgets {
 ///
 /// Panics (failing the test) if the seed cannot be built, the lever cannot be
 /// prepared, any case violates the law, or the run-level floors are breached.
-pub fn drive_prepared<L, P>(cases: u32, tier: Tier, kind: CaseKind, prepare: P)
+pub fn drive_prepared<L, P>(cases: u32, f: impl Into<Fixture>, kind: CaseKind, prepare: P)
 where
     L: Lever,
     P: for<'a> FnOnce(&'a Db) -> PrepareFut<'a, L>,
 {
-    drive_prepared_with(cases, tier, kind, Budgets::for_tier(tier, cases), prepare);
+    let f = f.into();
+    drive_prepared_with(cases, f, kind, Budgets::for_tier(f.tier, cases), prepare);
 }
 
 /// [`drive_prepared`] with explicit budgets.
@@ -295,7 +326,7 @@ where
 /// As [`drive_prepared`].
 pub fn drive_prepared_with<L, P>(
     cases: u32,
-    tier: Tier,
+    f: impl Into<Fixture>,
     kind: CaseKind,
     budgets: Budgets,
     prepare: P,
@@ -303,12 +334,13 @@ pub fn drive_prepared_with<L, P>(
     L: Lever,
     P: for<'a> FnOnce(&'a Db) -> PrepareFut<'a, L>,
 {
+    let f = f.into();
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .expect("tokio runtime");
 
-    let db: Db = Arc::new(rt.block_on(build_dqp_seed(tier)).expect("build dqp seed"));
+    let db: Db = Arc::new(rt.block_on(build_dqp_seed_for(f)).expect("build dqp seed"));
     // Explicit, though `create_fork_2pc` flushes too: doing it here makes the
     // fork point a stated precondition of the run rather than a side effect of
     // the lever, so a future change to the fork path cannot silently move it.
@@ -334,7 +366,7 @@ pub fn drive_prepared_with<L, P>(
         ..Config::default()
     });
 
-    let strategy = strategy_for(kind, tier);
+    let strategy = strategy_for(kind, f);
 
     let outcome = runner.run(&strategy, |case: Case| {
         // Admissibility is checked *before* the case runs, so an inadmissible

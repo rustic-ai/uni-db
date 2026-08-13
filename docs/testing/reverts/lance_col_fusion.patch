@@ -1,0 +1,23 @@
+diff --git a/crates/uni-store/src/backend/types.rs b/crates/uni-store/src/backend/types.rs
+index 059fa57da..457ed07da 100644
+--- a/crates/uni-store/src/backend/types.rs
++++ b/crates/uni-store/src/backend/types.rs
+@@ -382,7 +382,17 @@ impl FilterExpr {
+             FilterExpr::Not(inner) => Ok(format!("NOT {}", paren(inner.to_sql()?))),
+             FilterExpr::Compare { column, op, value } => Ok(format!(
+                 "{} {} {}",
+-                column,
++                // TEETH RECONSTRUCTION — NOT A FIX. Reproduces the deleted
++                // range fusion: Lance parses a double-quoted name as a STRING
++                // LITERAL, so this renders `'age' >= 25` — a constant with no
++                // reference to the data. Scoped to the two-sided-range
++                // operators because that is the only pair the fusion fired on;
++                // quoting unconditionally would break every pushed predicate
++                // and prove only that *some* pushdown bug is catchable.
++                match op {
++                    CmpOp::GtEq | CmpOp::LtEq => format!("\"{column}\""),
++                    _ => column.to_string(),
++                },
+                 op.as_sql(),
+                 scalar_to_sql(value)
+             )),
