@@ -96,9 +96,15 @@ jobs:
           # alone also sweeps in unrelated #[ignore]'d tests (autoembed model
           # downloads needing HF auth, LocalStack e2e) that this job does not
           # provision — LocalStack has its own `cloud` job below.
+          #
+          # `not test(/dqp::/)` mirrors the metamorphic job below, and for the
+          # same reason: every DQP soak's name contains "soak", so this filter
+          # was matching all of them and running the `dqp` job's work a second
+          # time — at the *default* 20 000 cases rather than the 10 000 that job
+          # sets, inside a timeout sized for a different workload.
           cargo nextest run --profile soak -p uni-db -p uni-store -p uni-locy-oracle \
             --run-ignored ignored-only \
-            -E 'test(/soak/) | test(/stress/)'
+            -E '(test(/soak/) | test(/stress/)) and not test(/dqp::/)'
 
   cloud:
     if: github.repository == 'rustic-ai/uni-db'
@@ -342,19 +348,23 @@ jobs:
           save-if: false
 
       # Each case runs the same query down two execution paths and compares the
-      # result bags, so 10000 cases is 20000 queries per soak and 80000 across
-      # the four — still well above the >=100k-queries/night target when counted
-      # alongside the metamorphic job.
+      # result bags, so 10000 cases is 20000 queries per soak and 160000 across
+      # the eight — comfortably past the >=100k-queries/night target on its own.
       #
       # Sized down from 20000 by measurement, not caution. At 20000 the four
-      # soaks measured 10.3 / 30.8 / 10.6 / 33.7 minutes = 85.4 minutes serial
-      # on a 22-core box. nextest runs them concurrently here, so wall-clock is
-      # the slowest rather than the sum — but four heavy tests contending would
-      # push the 33.7-minute one toward this job's 60-minute timeout and the
-      # 54-minute per-test ceiling in .config/nextest.toml. Halving the volume
-      # restores the margin. The response to approaching a ceiling is to cut the
-      # volume or investigate, not to raise the ceiling again.
-      - name: DQP soak (fork and pinned levers, plain and aggregate cases)
+      # soaks that existed then measured 85.4 minutes serial on a 22-core box,
+      # and four heavy tests contending would have pushed the slowest toward this
+      # job's 60-minute timeout.
+      #
+      # Re-measured after Phase 4 took the count from four soaks to eight, in
+      # this exact configuration — all eight concurrently at DQP_CASES=10000 on
+      # 22 cores: **29.9 minutes wall-clock**, slowest test 29.9 min against the
+      # 54-minute per-test ceiling. So 10000 still holds, with margin, and this
+      # box is more contended than the 64-core runner.
+      #
+      # The response to approaching a ceiling is to cut the volume or
+      # investigate, not to raise the ceiling again.
+      - name: DQP soak (four levers x plain and aggregate cases)
         env:
           DQP_CASES: 10000
         run: |

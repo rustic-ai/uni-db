@@ -78,16 +78,23 @@ slow-timeout = { period = "120s", terminate-after = 20 }
 # The DQP soaks are the longest single tests in the suite and need more than the
 # soak profile's 40-minute ceiling.
 #
-# Measured on a 22-core box at 20 000 cases, one soak per lever x case-kind:
-#   fork plain 30.8 min, pinned plain 33.7 min, fork agg 10.3, pinned agg 10.6.
-# Aggregates are cheap because they return one row per case; the plain kinds
-# materialize ~80M rows each. The nightly job now runs 10 000 cases (see
-# nightly.yml for why), roughly halving all four.
+# Measured on a 22-core box in the **nightly configuration** — all eight
+# concurrently at DQP_CASES=10000, which is what the dqp job actually runs:
 #
-# The 54-minute ceiling (120s x 27) is kept rather than tightened to the new
-# numbers: nextest runs the four concurrently, and contention inflates each one
-# by an amount that has not been measured. The job's own `timeout-minutes` is
-# still the real backstop, per the rationale above.
+#   fork agg 8.8   pinned agg 9.7   flush agg 10.2   plan_cache agg 12.3
+#   fork    21.7   pinned    22.0   flush    23.9   plan_cache    29.9   (minutes)
+#
+# Total wall-clock 29.9 min, i.e. the slowest rather than the sum. Aggregates are
+# cheap because they return one row per case; the plain kinds materialize tens of
+# millions of rows each.
+#
+# This measurement supersedes the earlier serial one taken at 20 000 cases with
+# four soaks. It is also pessimistic for CI: eight heavy tests contending over 22
+# cores is more contention than the 64-core runner sees.
+#
+# The 54-minute ceiling (120s x 27) is kept rather than tightened to 30: it was
+# set when the numbers were less certain, and the job's own `timeout-minutes` is
+# the real backstop.
 #
 # If any of these approaches 54 minutes, that is a regression to investigate or a
 # reason to cut DQP_CASES — not a number to bump again.
