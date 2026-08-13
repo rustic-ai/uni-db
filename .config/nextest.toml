@@ -74,3 +74,18 @@ slow-timeout = { period = "60s", terminate-after = 6 }
 [profile.soak]
 fail-fast = false
 slow-timeout = { period = "120s", terminate-after = 20 }
+
+# The DQP soak is the longest single test in the suite and needs more than the
+# soak profile's 40-minute ceiling.
+#
+# Measured: 500 cases in 48s on a 22-core box, i.e. ~96ms per case, because each
+# case runs the same query down two execution paths. At the nightly volume of
+# 20 000 cases that is ~32 minutes — only 20% under the 40-minute kill, which a
+# slower CI runner erases. Raising it to 54 minutes (120s x 27) keeps the job's
+# own `timeout-minutes: 60` as the real backstop, per the rationale above.
+#
+# If this test approaches 54 minutes, that is a regression to investigate or a
+# reason to cut DQP_CASES — not a number to bump again.
+[[profile.soak.overrides]]
+filter = 'test(fork_soak)'
+slow-timeout = { period = "120s", terminate-after = 27 }

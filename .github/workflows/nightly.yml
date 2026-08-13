@@ -7,6 +7,9 @@ name: Nightly
 #   - cloud: LocalStack S3 integration (also on main-push CI; here for the
 #            longer --run-ignored variants on a schedule).
 #   - fuzz:  cargo-fuzz over the parser/codec attack surfaces.
+#   - dqp:   the differential-query-plans oracle at volume — one query down two
+#            execution paths, comparing result bags. Its own job because each
+#            case costs two queries; see docs/perf/dqp-feasibility-2026-08-12.md.
 #   - bench: criterion benches with results uploaded as artifacts for
 #            manual trend comparison (no external regression service).
 #
@@ -36,7 +39,7 @@ permissions:
 # (shown in parens) in Settings > Secrets and variables > Actions > Variables;
 # to roll back, clear the variable.
 #   CI_RUNNER_XLARGE64  default ubuntu-xlarge  → set to linux-64core  — soak, fuzz,
-#                                                 model-check, metamorphic, tsan, bench
+#                                                 model-check, metamorphic, dqp, tsan, bench
 # Note XLARGE64's GitHub-hosted default is ubuntu-xlarge here vs ci.yml's
 # linux-xlarge-64 (preserving each workflow's pre-existing choice); the self-hosted
 # target you'd set it to (linux-64core) is shared. The cloud job is NOT indirected:
@@ -296,12 +299,58 @@ jobs:
       # variance. 50k cases × (4+4+2+7) queries ≈ 850k metamorphic queries/night,
       # ~8.5× the Phase-1 exit target of ≥100k queries/night. The smoke tier runs
       # per-PR (pr.yml metamorphic-smoke); only the #[ignore]'d soaks run here.
+      # `not test(/dqp::/)` — the DQP soak runs in its own job below, at its own
+      # volume via DQP_CASES. Without the exclusion it would run twice.
       - name: Metamorphic soak (TLP + NoREC + structural)
         env:
           METAMORPHIC_CASES: 50000
         run: |
           cargo nextest run --profile soak -p uni-db --test integration \
-            --run-ignored ignored-only -E 'test(/metamorphic::/) and test(soak)'
+            --run-ignored ignored-only \
+            -E 'test(/metamorphic::/) and test(soak) and not test(/dqp::/)'
+
+  # DQP — differential query plans. Separate from the metamorphic job above
+  # because a single lever at nightly volume takes roughly as long as that job's
+  # heaviest existing soak, and sharing would push it toward its 60-minute
+  # ceiling. It also needs its own case-count knob: METAMORPHIC_CASES is pinned
+  # to 50000 there for the other oracles, which is 2.5x the volume measured as
+  # affordable for a lever that runs every case twice.
+  dqp:
+    if: github.repository == 'rustic-ai/uni-db'
+    name: DQP Differential Oracle (soak)
+    runs-on: ${{ vars.CI_RUNNER_XLARGE64 || 'ubuntu-xlarge' }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mold protobuf-compiler
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "ci"
+          cache-on-failure: true
+          save-if: false
+
+      # Each case runs the same query down two execution paths and compares the
+      # result bags, so 20000 cases is 40000 queries. Sized from the per-case
+      # cost measured in docs/perf/dqp-feasibility-2026-08-12.md.
+      - name: DQP soak (primary vs pristine fork)
+        env:
+          DQP_CASES: 20000
+        run: |
+          cargo nextest run --profile soak -p uni-db --test integration \
+            --run-ignored ignored-only \
+            -E 'test(/metamorphic::dqp::/) and test(soak)'
 
   tsan:
     if: github.repository == 'rustic-ai/uni-db'

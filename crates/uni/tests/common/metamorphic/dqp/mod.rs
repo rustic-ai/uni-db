@@ -12,17 +12,25 @@
 //!
 //! Any inequality is a bug in exactly one of the two paths.
 //!
-//! # What is here today
+//! # Layout
 //!
-//! **Phase 0 only.** This module currently contains no oracle, no `Lever` trait
-//! and no driver — only [`seed`], a tiered fixture builder, and [`feasibility`],
-//! a measurement suite whose output sets the parameters the oracle will be built
-//! against. Building the oracle before measuring is how the two preceding
-//! revisions of the proposal ended up committing to fixture sizes and activation
-//! witnesses that do not survive contact with the source.
+//! - [`lever`] — the `Lever` trait, and the `Witness` that proves a comparison
+//!   was not vacuous.
+//! - [`driver`] — `drive_prepared`, the Tier-2 driver, plus the activation-rate
+//!   floor and row budget every run is held to.
+//! - [`fork_lever`] — lever 1, primary vs a pristine fork.
+//! - [`seed`] — the tiered fixture builder.
+//! - [`identity`], [`counters`], [`feasibility`] — the preconditions. These are
+//!   not scaffolding to be deleted: each pins a fact the oracle depends on
+//!   (fork-boundary row identity, counter observability, fixture cost) that was
+//!   an assumption until it was measured.
 //!
 //! See `docs/proposals/test_harness_implementation_plan_2026-08-12.md`.
 
 pub mod counters;
+pub mod driver;
 pub mod feasibility;
+pub mod fork_lever;
+pub mod identity;
+pub mod lever;
 pub mod seed;

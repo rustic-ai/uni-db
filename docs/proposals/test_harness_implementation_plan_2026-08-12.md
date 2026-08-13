@@ -281,19 +281,64 @@ fork), so the oracle is finding bugs before the rest of the levers exist.
 6. **Activation-rate reporting.** Accumulate per-lever activation across the
    run; fail below 80% with a message naming the lever.
 
+### Results — **phase complete, 2026-08-12**
+
+The oracle runs and is non-vacuous. **Activation is 100%** — every one of 500
+generated cases had side B execute a branch scan and side A not — and no bag
+divergence was found, which is the expected outcome for a fork contract the
+codebase has been repairing since #97.
+
+Settled by measurement rather than assumption:
+
+- **Tier 2 really is identity-preserving.** The design called it that on the
+  reasoning that a fork inherits VIDs through the branch's `base_paths` chain,
+  but nothing had checked. `dqp::identity` now pins it three ways: matching
+  `id(n)` per row, a bare `RETURN p` comparing equal, and the edge shape
+  comparing equal. Had this failed, every generated case projecting a bare
+  variable would have diffed for no reason and the lever would have been
+  unusable as designed — `querygen` emits `Expr::Variable` routinely.
+- **Measured PR cost is 48 s for 500 cases**, against the ~32 s projected from
+  the Phase-0A single-side figure. The fork side is slower than primary, which
+  is unsurprising given `use_scalar_index(false)` on the branch scan.
+- **The soak was run at full volume rather than extrapolated**: 20 000 cases,
+  **100% activation**, zero divergences, 80 010 286 rows against a 117 540 000
+  ceiling, in **31.9 minutes**. That is 80% of the `soak` profile's 40-minute
+  per-test kill, which is why `.config/nextest.toml` gained a `test(fork_soak)`
+  override raising it to 54 minutes — the job's own `timeout-minutes: 60` stays
+  the real backstop.
+- **The run row budget must not be enforced inside the case loop.** The first
+  version was, and it double-counted: proptest's shrink replays kept adding
+  rows, so a long shrink sequence could trip the budget and replace a genuine
+  divergence report with a budget message — the harness hiding the bug it had
+  just found. Split into a per-case ceiling (in-loop, immune to replay
+  inflation) and a run total (post-run, checked only on an otherwise-clean run).
+- **`disable_fork_index_builder` is load-bearing, not hygiene.** The background
+  builder can register a fork-local index partway through a run, so the first N
+  cases and the remainder would exercise different machinery with nothing in the
+  output saying so — which breaks the one property `drive_prepared` exists to
+  provide.
+
 ### Exit criteria
 
-- [ ] `dqp::fork_smoke` passes on the smoke tier; `dqp::fork_soak` is
-      `#[ignore]`d and passes on the tier chosen in 0A.
-- [ ] Activation rate for the fork lever ≥ 80%, printed in the run output.
-- [ ] A deliberately broken witness (hardcode `activated → false`) makes the run
-      fail — proving the floor has teeth.
+- [x] `dqp::fork_lever::fork_smoke` passes — on the **Tiny** fixture at 500
+      cases, per the Phase-0A revision, not the Smoke fixture this line
+      originally named. `fork_soak` is `#[ignore]`d and **verified at the full
+      20 000 cases**, not extrapolated.
+- [x] Activation rate printed every run; measured **100%** against the 80% floor.
+- [x] The floor has teeth, proven three ways in `driver::tests`: a stub lever
+      whose two sides are the *same session* and whose `activated` returns false
+      is rejected **even though every one of its comparisons passes**; and both
+      row budgets fire against deliberately impossible ceilings.
+- [x] Soak runs in its own nightly job, with the shared metamorphic soak filter
+      excluding `dqp::` so it does not run twice.
 
 ### Verification
 
 ```
-cargo nextest run -E 'test(/metamorphic::dqp/) and not test(soak)'
-cargo nextest run --run-ignored ignored-only -E 'test(/metamorphic::dqp/) and test(soak)'
+cargo nextest run -p uni-db --test integration -E 'test(/metamorphic::dqp/)'
+
+DQP_CASES=20000 cargo nextest run --profile soak -p uni-db --test integration \
+  --run-ignored ignored-only -E 'test(/metamorphic::dqp::/) and test(soak)'
 ```
 
 ---

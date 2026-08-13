@@ -158,6 +158,30 @@ impl Rng {
     }
 }
 
+/// Config every DQP fixture is built with.
+///
+/// Two overrides, one conventional and one load-bearing:
+///
+/// - `disable_fork_sweeper` — the established convention for deterministic fork
+///   tests. Strictly unnecessary here, since a fork created without an explicit
+///   TTL is never swept (`fork_default_ttl` defaults to `None`), but it removes
+///   the 60 s background task rather than relying on that.
+///
+/// - `disable_fork_index_builder` — **required for a correct comparison.** The
+///   background builder runs on a timer and can register a fork-local index
+///   *partway through a run*. A Tier-2 lever's whole premise is that state does
+///   not change during the case loop; if an index appears at case 200, the first
+///   200 cases and the remaining 300 exercise different machinery, and nothing
+///   in the output would say so. It also registers its own fork holder, which
+///   makes teardown timing nondeterministic.
+fn dqp_config() -> uni_db::UniConfig {
+    uni_db::UniConfig {
+        disable_fork_sweeper: true,
+        disable_fork_index_builder: true,
+        ..Default::default()
+    }
+}
+
 /// Applies the `querygen`-mandated schema.
 async fn apply_schema(db: &Uni) -> anyhow::Result<()> {
     db.schema()
@@ -274,7 +298,7 @@ pub async fn build_dqp_seed(tier: Tier) -> anyhow::Result<Uni> {
 ///
 /// As [`build_dqp_seed`].
 pub async fn build_dqp_seed_with(tier: Tier, seed: u64) -> anyhow::Result<Uni> {
-    let db = Uni::temporary().build().await?;
+    let db = Uni::temporary().config(dqp_config()).build().await?;
     apply_schema(&db).await?;
 
     let mut rng = Rng::new(seed | 1);
