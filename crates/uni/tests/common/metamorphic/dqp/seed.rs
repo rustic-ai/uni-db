@@ -161,6 +161,14 @@ impl From<Tier> for Fixture {
     }
 }
 
+/// The RNG seed [`build_dqp_seed_for`] uses.
+///
+/// Public so a Tier-3 lever can build its *second* instance with the same data
+/// and a different config — the knob has to be the only variable, and a lever
+/// that silently seeded its two sides differently would report every config
+/// change as a correctness failure.
+pub const DEFAULT_DATA_SEED: u64 = 0x5EED_D9F_u64.wrapping_mul(0x9E37_79B9);
+
 /// The property the [`SchemaMode::TypedIndexed`] Hash index covers.
 ///
 /// `age` and not `score`/`city`: it is nullable (so three-valued logic stays
@@ -447,7 +455,7 @@ pub async fn build_dqp_seed_with(tier: Tier, seed: u64) -> anyhow::Result<Uni> {
 ///
 /// As [`build_dqp_seed`].
 pub async fn build_dqp_seed_for(f: Fixture) -> anyhow::Result<Uni> {
-    build_dqp_seed_for_with(f, 0x5EED_D9F_u64.wrapping_mul(0x9E37_79B9)).await
+    build_dqp_seed_for_with(f, DEFAULT_DATA_SEED).await
 }
 
 /// [`build_dqp_seed_for`] with an explicit RNG seed, for replay harnesses.
@@ -461,8 +469,31 @@ pub async fn build_dqp_seed_for(f: Fixture) -> anyhow::Result<Uni> {
 ///
 /// As [`build_dqp_seed`].
 pub async fn build_dqp_seed_for_with(f: Fixture, seed: u64) -> anyhow::Result<Uni> {
+    build_dqp_seed_tuned(f, seed, |_| {}).await
+}
+
+/// [`build_dqp_seed_for_with`] with a mutator over the fixture's [`UniConfig`].
+///
+/// For **Tier-3 levers**, whose two sides differ by a result-neutral config knob
+/// (`batch_size`, `parallelism`, `async_flush_enabled`, …) rather than by a
+/// state transition. The data, seed and schema are held fixed so the knob is the
+/// only variable.
+///
+/// The mutator runs after [`dqp_config`], so it can override anything — but note
+/// that re-enabling `auto_flush_interval` would break every lever whose side A
+/// depends on L0 residency, which the self-test below pins.
+///
+/// # Errors
+///
+/// As [`build_dqp_seed`].
+pub async fn build_dqp_seed_tuned<F>(f: Fixture, seed: u64, tune: F) -> anyhow::Result<Uni>
+where
+    F: FnOnce(&mut uni_db::UniConfig),
+{
     let tier = f.tier;
-    let db = Uni::temporary().config(dqp_config()).build().await?;
+    let mut config = dqp_config();
+    tune(&mut config);
+    let db = Uni::temporary().config(config).build().await?;
     apply_schema(&db, f.mode).await?;
 
     let mut rng = Rng::new(seed | 1);

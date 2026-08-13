@@ -51,6 +51,7 @@
 //! See `docs/proposals/test_harness_implementation_plan_2026-08-12.md`.
 
 pub mod admissibility;
+pub mod cert;
 pub mod counters;
 pub mod driver;
 pub mod feasibility;
@@ -62,4 +63,6 @@ pub mod pinned_lever;
 pub mod plan_cache_lever;
 pub mod seed;
 pub mod stateful;
+pub mod tier3_probe;
 pub mod transition_probe;
+pub mod vid_determinism;

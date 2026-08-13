@@ -239,3 +239,79 @@ proceed against it.
 
 The chain continues to Phase 1, whose scope is now the concrete five-item list in
 §4.2 rather than an open question.
+
+---
+
+## 8. VID determinism — measured 2026-08-13 (Phase 6)
+
+**The question.** Is VID assignment deterministic given an identical insert
+sequence? The plan makes Tier-3's design conditional on the answer and is
+explicit that neither outcome should be designed around before measuring:
+deterministic means a Tier-3 lever compares bags directly, nondeterministic
+means every comparison must first strip identity via a
+`Case::identity_free_projection`.
+
+**The answer: deterministic**, on every axis tested.
+
+| property | result |
+|---|---|
+| Two builds, one seed → identical `name → vid` mapping | ✅ |
+| Mapping survives a `flush()` | ✅ |
+| Mapping stable over 3 further repeats | ✅ |
+| **Mapping survives a config change** (`batch_size` 64/4096, `parallelism=1`) | ✅ |
+| VIDs genuinely distinct per row (1000/1000) | ✅ |
+
+Tests: `metamorphic::dqp::vid_determinism`.
+
+The comparison is over `name → vid` **pairs**, not the VID multiset: a fixture
+whose VIDs were merely a permutation would still break a direct bag comparison,
+because `id(p)` would pair with a different `p.name` on each side.
+
+**The plan asked a narrower question than Tier 3 depends on.** A Tier-3 lever
+never compares two identical builds — it compares two builds that differ by a
+config knob. A fixture could be build-to-build deterministic while allocating
+different VIDs at a different `batch_size`, so the fourth row above is the one
+that actually licenses direct bag comparison. It was added after noticing the
+gap, and it passes.
+
+**Consequence:** `identity_free_projection` is **not needed and has not been
+built**.
+
+### 8.1 Tier-3 levers are deferred anyway — for a different reason
+
+The VID answer said go. A separate constraint says stop, and it is the same one
+that deferred the Phase 4B index and compaction levers: **no activation
+witness**.
+
+Measured across the six candidate knobs (`metamorphic::dqp::tier3_probe`):
+
+| knob | witness | bags |
+|---|---|---|
+| `batch_size=64` | no counter moved | equal |
+| `batch_size=8192` | no counter moved | equal |
+| `parallelism=1` | no counter moved | equal |
+| `partial_lance_writes` (flipped) | no counter moved | equal |
+| `async_flush_enabled` (flipped) | no counter moved | equal |
+| `auto_flush_threshold=1` | no counter moved | equal |
+
+**observable = 0, inert = 6.**
+
+A lever whose two sides move no counter cannot state what it exercised. Its
+`activated` predicate would have nothing true to say, and the drivers' 80%
+activation floor would fail every run — or, if written without a witness, it
+would pass forever while comparing two identical execution paths. That is
+precisely the vacuous test this oracle exists to prevent.
+
+So Tier 3 ships **one** thing rather than a lever set:
+`tier3_knobs_are_result_neutral`, which asserts the premise directly over three
+fixed queries. Narrow, but a real check — a knob that changed results would be a
+defect whether or not a counter noticed.
+
+`probe_which_tier3_knobs_are_observable` is a tripwire: it **fails the moment any
+knob becomes observable**, which is the signal to promote it to a lever with
+`activated` written against the counter it moved.
+
+**What would unblock the full Tier-3 set:** a counter that distinguishes *how*
+rows were produced rather than *what* was produced — morsel count, partition
+count, or a flush-path discriminator. That is the same missing observability
+Phase 4B needs, and closing it once would unblock both.

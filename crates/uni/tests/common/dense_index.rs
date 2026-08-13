@@ -667,6 +667,104 @@ async fn dense_hnsw_ef_search_raises_recall() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// **The ANN directional oracle.** Recall must be non-decreasing in `ef_search`
+/// across a whole ladder, not merely between two hand-picked endpoints.
+///
+/// # Why a directional law rather than bag equality
+///
+/// Every other oracle here compares result *bags*. ANN knobs cannot be tested
+/// that way: `ef_search` changes which neighbours come back **by design**, so
+/// bag equality across two beam widths would fail on a perfectly healthy engine.
+/// That is precisely why these knobs are excluded from the DQP levers. What
+/// survives is a directional law — a wider beam explores more of the graph, so
+/// it may not return *worse* recall.
+///
+/// # Why non-decreasing with a tolerance, and not strictly increasing
+///
+/// The HNSW graph build is nondeterministic and a single recall@k sample is
+/// quantized in `1/k` steps, which is what made an earlier strict `high > low`
+/// assertion flake in about one run in four. Two defences, both inherited from
+/// that fix:
+///
+/// * every rung is a **mean over [`PROBE_QUERIES`] probes**, not one query;
+/// * adjacent rungs are compared with [`RUNG_TOLERANCE`] slack, because two
+///   neighbouring beam widths can legitimately invert by a hair.
+///
+/// The tolerance is what keeps this from being a flake generator. What keeps it
+/// from being vacuous is the separate end-to-end gap assertion: slack alone
+/// would let a completely unplumbed knob pass, since a constant series is
+/// trivially non-decreasing.
+#[tokio::test]
+async fn dense_hnsw_recall_is_monotone_in_ef_search() -> anyhow::Result<()> {
+    /// Slack allowed between two *adjacent* rungs.
+    ///
+    /// From the calibration recorded on `dense_hnsw_ef_search_raises_recall`:
+    /// mean-recall σ ≈ 0.028 over 30 builds, so 0.05 is comfortably outside the
+    /// noise while still rejecting a genuine inversion.
+    const RUNG_TOLERANCE: f64 = 0.05;
+    /// End-to-end separation the ladder must achieve, matching the two-point
+    /// test's threshold. This is the non-vacuity guard.
+    const MIN_END_TO_END_GAIN: f64 = 0.05;
+
+    let db = Uni::temporary().build().await?;
+    db.schema()
+        .label("Doc")
+        .property("title", DataType::String)
+        .property("emb", DataType::Vector { dimensions: DIM })
+        .index("emb", hnsw_cosine())
+        .apply()
+        .await?;
+
+    let corpus = build_corpus(1000, 0xEF5E_A4C8);
+    insert_docs(&db, &corpus, true).await?;
+    db.indexes().rebuild("Doc", false).await?;
+
+    let k = 10;
+    let queries = probe_queries(0xBEA7_5EED);
+    let ladder = [10usize, 20, 40, 80, 160, 320];
+
+    let mut recalls = Vec::with_capacity(ladder.len());
+    for ef in ladder {
+        let r = mean_recall(&db, &corpus, &queries, k, &format!("{{ef_search: {ef}}}")).await?;
+        recalls.push(r);
+    }
+
+    let series: Vec<String> = ladder
+        .iter()
+        .zip(&recalls)
+        .map(|(ef, r)| format!("{ef}:{r:.3}"))
+        .collect();
+    let series = series.join(" ");
+
+    for w in 1..ladder.len() {
+        let (prev, cur) = (recalls[w - 1], recalls[w]);
+        assert!(
+            cur >= prev - RUNG_TOLERANCE,
+            "recall fell when the beam widened: ef_search {} -> {} took mean \
+             recall@{k} {prev:.3} -> {cur:.3}, a drop of {:.3} beyond the {:.2} \
+             tolerance. A wider beam explores a superset of the graph, so this \
+             is a real inversion, not noise.\n  series: {series}",
+            ladder[w - 1],
+            ladder[w],
+            prev - cur,
+            RUNG_TOLERANCE,
+        );
+    }
+
+    let gain = recalls[recalls.len() - 1] - recalls[0];
+    assert!(
+        gain >= MIN_END_TO_END_GAIN,
+        "the ladder gained only {gain:.3} recall from ef_search {} to {}. \
+         Monotonicity alone is satisfied by a constant series, so without a real \
+         gain this oracle would pass even if `ef_search` never reached the index \
+         search at all — which is exactly the regression the two-point test was \
+         written for.\n  series: {series}",
+        ladder[0],
+        ladder[ladder.len() - 1],
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn dense_property_projection_in_return() -> anyhow::Result<()> {
     // `RETURN d.emb` must materialise the dense `Value::Vector` result column (not

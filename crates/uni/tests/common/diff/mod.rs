@@ -280,6 +280,51 @@ mod tests {
         Ok(db)
     }
 
+    /// `bag_is_subset` must reject what it is supposed to reject.
+    ///
+    /// Added when CERT (`metamorphic::dqp::cert`) took a dependency on it and it
+    /// turned out to have no test at all, while its sibling `bag_eq` had one.
+    /// An oracle is only as good as its comparator: a `bag_is_subset` that
+    /// returned `Ok` unconditionally would make every CERT case pass, and the
+    /// narrowing-rate floor would not notice — that floor proves the *inputs*
+    /// differ, not that the *check* works.
+    #[tokio::test]
+    async fn bag_is_subset_has_teeth() -> anyhow::Result<()> {
+        use super::bag_is_subset;
+        let db = db_with_values().await?;
+        let session = db.session();
+
+        let all = bag(&session.query("MATCH (n:X) RETURN n.v AS v").await?);
+        let ones = bag(&session
+            .query("MATCH (n:X) WHERE n.v = 1 RETURN n.v AS v")
+            .await?);
+
+        assert!(bag_is_subset(&all, &all).is_ok(), "a bag contains itself");
+        assert!(
+            bag_is_subset(&ones, &all).is_ok(),
+            "{{1,1}} is a sub-bag of {{1,1,2}}"
+        );
+        assert!(
+            bag_is_subset(&all, &ones).is_err(),
+            "{{1,1,2}} is NOT a sub-bag of {{1,1}} — the 2 is unmatched"
+        );
+
+        // Multiplicity, not just set membership: {1,1} must not fit inside {1}.
+        let one_only = bag(&session
+            .query("MATCH (n:X) WHERE n.v = 1 RETURN n.v AS v LIMIT 1")
+            .await?);
+        assert!(
+            bag_is_subset(&one_only, &ones).is_ok(),
+            "{{1}} fits inside {{1,1}}"
+        );
+        assert!(
+            bag_is_subset(&ones, &one_only).is_err(),
+            "{{1,1}} must NOT fit inside {{1}} — subset is over multisets, and a \
+             set-based check would wrongly accept this"
+        );
+        Ok(())
+    }
+
     #[tokio::test]
     async fn bag_counts_multiplicity_and_is_reflexive() -> anyhow::Result<()> {
         let db = db_with_values().await?;

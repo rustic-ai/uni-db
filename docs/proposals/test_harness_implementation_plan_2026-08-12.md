@@ -769,12 +769,57 @@ Two findings worth carrying forward:
    `index_rebuild.auto_rebuild_enabled` (:486). **Not** `ssi_enabled` (:639) or
    `defer_embeddings` (:519) — neither is result-neutral.
 
-### Exit criteria
+### Results — **phase complete, 2026-08-13**
 
-- [ ] VID-determinism answer recorded in `docs/perf/dqp-feasibility.md`.
-- [ ] CERT and ANN oracles green.
-- [ ] Tier-3 levers ship, or are explicitly deferred with the experiment's
-      answer as the reason.
+- [x] VID-determinism answer recorded — `docs/perf/dqp-feasibility-2026-08-12.md`
+      §8. **Deterministic** across identical builds, a flush, repeats, *and a
+      config change*.
+- [x] CERT and ANN oracles green.
+- [x] Tier-3 decision made and recorded: **deferred**, but not for the reason the
+      plan anticipated. See below.
+
+#### The VID experiment answered a narrower question than Tier 3 rests on
+
+The plan asks whether VIDs are deterministic "given an identical insert
+sequence". But a Tier-3 lever never compares two identical builds — it compares
+two builds that differ by a **config knob**. A fixture could be build-to-build
+deterministic while allocating different VIDs at a different `batch_size`, so
+that stronger property is the one that licenses direct bag comparison. It was
+measured separately and holds.
+
+**Consequence:** `Case::identity_free_projection` is not needed and has not been
+built.
+
+#### Tier-3 levers are deferred on observability, not identity
+
+The VID answer said go; a different constraint says stop, and it is the same one
+that deferred Phase 4B. Measured over the six candidate knobs
+(`dqp::tier3_probe`): **observable = 0, inert = 6** — no knob moves any witness
+counter, while all bags stay equal.
+
+A lever whose two sides move no counter cannot state what it exercised: its
+`activated` predicate would have nothing true to say and the 80% floor would fail
+every run, or — written without a witness — it would pass forever while comparing
+two identical execution paths.
+
+So Tier 3 ships one assertion rather than a lever set —
+`tier3_knobs_are_result_neutral`, which checks the premise directly — plus a
+tripwire that **fails the moment any knob becomes observable**, which is the
+signal to promote it.
+
+**What would unblock the full set:** a counter describing *how* rows were
+produced rather than *what* (morsel count, partition count, a flush-path
+discriminator). That is the same gap Phase 4B needs closed, so closing it once
+unblocks both.
+
+#### Also found
+
+`diff::bag_is_subset` — CERT's comparator — **had no test**, while its sibling
+`bag_eq` did. An oracle is only as good as its comparator, and CERT's
+narrowing-rate floor proves the *inputs* differ, not that the *check* works.
+`bag_is_subset_has_teeth` now covers it, including the multiset case (`{1,1}`
+must not fit inside `{1}`), which a set-based implementation would wrongly
+accept.
 
 **C1 is complete at the end of phase 6.** Every box in the proposal's §3.8
 acceptance list maps to a phase above.
