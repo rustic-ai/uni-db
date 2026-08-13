@@ -190,6 +190,49 @@ What this means concretely:
   Collect ≥ 3 runner instantiations, recompute CV across them, and set the gate
   threshold from the cross-runner figure — not from the 0.21–0.96% measured here.
 
+### How to close it
+
+The mechanism now exists and is dispatch-only; it has **not been run**, so this
+section describes the procedure, not a result.
+
+```
+Actions → "Perf Qualify (cross-runner iai)" → Run workflow
+```
+
+Defaults are **5 runners × 5 runs = 25 samples**. Each matrix shard is a fresh
+VM, so five shards on one label is five runner instantiations; they run in
+parallel, so wall-clock is one shard (~27 min: a ~15 min cold bench compile plus
+5 × ~2.3 min of Valgrind). The runner label is hardcoded `ubuntu-xlarge` rather
+than routed through `vars.CI_RUNNER_*`, because Phase 7 puts `perf-gate` in
+`pr.yml` — whose heavy jobs use that label — and because the variable could
+otherwise land every shard on one self-hosted box and collapse the measurement
+without changing the workflow file.
+
+The `aggregate` job runs `scripts/perf/iai_cross_runner.py`, which reports per
+target:
+
+| column | meaning |
+|---|---|
+| cross-runner CV % | spread of the per-runner means ← **the Phase-7 figure** |
+| within-runner CV % | mean repeatability on fixed hardware — comparable to §1 |
+| spread % | max-to-min across runner means, as a sanity read |
+
+`iai_cv.py` cannot answer this and was not extended to: it pools every run into a
+single CV, conflating the two columns above. A target with perfect repeatability
+and wild machine-to-machine spread produces the same pooled number as the
+reverse, and only one of those threatens a gate.
+
+The script **exits non-zero** on a collection gap or any zero-instruction target,
+rather than warning. That is deliberate — §3.4 above is the record of a
+zero-instruction target being dropped silently, and a CI job that inherited
+`iai_collect.py`'s warn-and-exit-0 behaviour would report a clean cross-runner
+qualification computed over no data.
+
+Then replace this section with the measured table and a recommended threshold.
+**The `baselines::` group is excluded from the headline figure** — the report
+already classes them as non-candidates, and `baseline_noop` is 4 Ir, where a
+one-instruction difference is a double-digit percentage.
+
 Also recorded for Phase 7 while the cost is fresh:
 
 - The Swatinem cache's only saver is `ci.yml:56` (`tck-full`), which never builds

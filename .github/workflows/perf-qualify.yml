@@ -1,0 +1,141 @@
+name: Perf Qualify (cross-runner iai)
+
+# Closes the open leg of the Phase-0B qualification pilot.
+#
+# `docs/perf/iai-qualification-2026-08-12.md` §4 is marked UNRESOLVED: all 20
+# pilot runs came from a single machine, so the 0.21-0.96% CV it reports is
+# *run-to-run variance on fixed hardware*. A PR gate experiences variance
+# **across** runners, which has never been measured — and Phase 7's gate
+# threshold has to come from that figure, not this one.
+#
+# Each matrix shard is a fresh VM, so N shards on one label is N runner
+# instantiations. The aggregation job separates cross-runner from within-runner
+# spread, which `iai_cv.py` structurally cannot do (it pools every run into one
+# CV and conflates the two).
+#
+# **Dispatch-only, on purpose.** This answers a question once and sets a
+# threshold; after that the gate itself is the ongoing monitor. Valgrind carries
+# a 10-50x multiplier and every shard pays a cold bench compile (the Swatinem
+# cache's only saver is ci.yml's `tck-full`, which never builds `--benches`), so
+# there is no case for burning that nightly. It stays in the tree for
+# re-qualification after a toolchain or dependency bump.
+#
+# No untrusted input is interpolated into run commands (workflow_dispatch only,
+# and the one input is a number used as a loop bound).
+
+on:
+  workflow_dispatch:
+    inputs:
+      runs:
+        description: "Benchmark runs per shard"
+        required: false
+        default: "5"
+      shards:
+        description: "Runner instantiations (JSON array)"
+        required: false
+        default: "[1, 2, 3, 4, 5]"
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: read
+
+jobs:
+  measure:
+    if: github.repository == 'rustic-ai/uni-db'
+    name: Measure (shard ${{ matrix.shard }})
+    # Hardcoded, NOT the `vars.CI_RUNNER_*` indirection the other workflows use,
+    # for two reasons that both matter:
+    #
+    #   1. Phase 7 puts `perf-gate` in pr.yml, whose heavy jobs are hardcoded
+    #      `ubuntu-xlarge`. The measurement has to characterize the hardware the
+    #      gate will actually run on.
+    #   2. Five shards on an identical label give five fresh VMs — variance
+    #      across runner *instantiations*, which is the question being asked.
+    #      Routing through the variable means a self-hosted cutover could land
+    #      every shard on one physical box and silently collapse the measurement
+    #      to zero without changing this file.
+    runs-on: ubuntu-xlarge
+    # ~15 min cold bench compile + `runs` x ~2.3 min per Valgrind pass.
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(github.event.inputs.shards || '[1, 2, 3, 4, 5]') }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install system dependencies
+        # valgrind is in no other workflow — iai-callgrind is useless without it.
+        # mold is required because .cargo/config.toml sets -fuse-ld=mold.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mold protobuf-compiler valgrind
+
+      - name: Install iai-callgrind-runner
+        # Must match the `iai-callgrind` dev-dependency in crates/uni/Cargo.toml
+        # exactly; a mismatched runner refuses to parse the harness output.
+        run: cargo install iai-callgrind-runner --version 0.16.1 --locked
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "ci"
+          cache-on-failure: true
+          save-if: false
+
+      - name: Run the pilot
+        env:
+          RUNS: ${{ github.event.inputs.runs || '5' }}
+        run: bash scripts/perf/iai_pilot.sh "$RUNS"
+
+      - name: Upload this shard's collector output
+        uses: actions/upload-artifact@v4
+        with:
+          # Per-shard artifact name so the aggregation job can recover shard
+          # identity — every shard writes the same `run-NN.json` filenames, so
+          # the directory is the only thing distinguishing them.
+          name: iai-shard-${{ matrix.shard }}
+          path: target/iai-pilot/run-*.json
+          if-no-files-found: error
+
+  aggregate:
+    if: always() && github.repository == 'rustic-ai/uni-db'
+    name: Cross-runner variance
+    needs: measure
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download every shard
+        uses: actions/download-artifact@v4
+        with:
+          pattern: iai-shard-*
+          path: shards
+
+      - name: Separate cross-runner from within-runner variance
+        # The script exits non-zero on a collection gap or a zero-instruction
+        # target rather than warning. `iai_collect.py` only warns on stderr and
+        # exits 0, which is how `baseline_noop` was silently dropped from the
+        # original pilot — a job inheriting that would report a clean
+        # qualification computed over no data.
+        run: |
+          python3 scripts/perf/iai_cross_runner.py shards/iai-shard-* \
+            | tee cross-runner.txt
+          {
+            echo '## Cross-runner instruction-count variance'
+            echo
+            python3 scripts/perf/iai_cross_runner.py shards/iai-shard-* --markdown
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the report
+        uses: actions/upload-artifact@v4
+        with:
+          name: iai-cross-runner-report
+          path: cross-runner.txt
+          if-no-files-found: error
