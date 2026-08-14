@@ -915,10 +915,39 @@ dependency on tracks A/B.
       `pr.yml`. `advisories ok, bans ok, licenses ok, sources ok`.
 - [x] **4. Fuzz on PR.** Shipped: `fuzz-smoke` job, 30 s/target, seed-corpus
       first. Verified locally at 3.4M runs in 31 s.
-- [ ] 1. `cargo-llvm-cov` coverage map — not started (`cargo-llvm-cov` is not
-      installed locally).
-- [ ] 2. miri on the pure-logic crates — not started; the `miri` component is
-      not installed on the local nightly.
+- [x] **1. `cargo-llvm-cov` coverage map.** Published:
+      `docs/perf/coverage-map-2026-08-14.md`. 78.9% line coverage, 22
+      zero-coverage files. **The finding is not the percentage** — it is that
+      two *planner-reachable* operators have never executed under any test:
+      `vid_lookup_join.rs` (441 lines, reached from `df_planner.rs:4218`) and
+      `mutation_foreach.rs` (154 lines, `:1342`). No feature gate; the
+      `HashJoinExec` fallback is simply what tests always take. DQP cannot reach
+      either — it varies *storage* state, and `querygen` emits no cross-MATCH
+      joins — so this is the complement to Phase 5, not a duplicate of it.
+- [x] **2. miri on the pure-logic crates.** Run; **zero UB, zero unsupported
+      operations** across all four. One real finding, now fixed: a
+      `std::mem::forget(tempfile::TempDir)` in
+      `uni-common/tests/repro_rename_property_bypass.rs` that leaked the
+      directory *on disk*, once per run, forever. The guard is now returned to
+      the caller. See the correction below — the item's stated motivation was
+      false, and the measured cost re-shapes the recommendation.
+
+  **Measured cost, which should decide how this is wired up:**
+
+  | crate | tests | miri wall-clock |
+  |---|---|---|
+  | `uni-btic` | 103 | 6.8 s |
+  | `uni-sparse-vector` | 25 | 1.5 s |
+  | `uni-common` (excl. `muvera`) | 121 | 23 s |
+  | `uni-crdt` | 31 | **2,426 s (40 min)** |
+  | `uni-common::muvera` | 8 | **killed at 132 min** |
+
+  A ~350× spread, and `muvera`'s float-heavy FDE tests do not finish at all
+  under the interpreter. So a single "miri over the four crates" lane is the
+  wrong shape. Viable: `uni-btic` + `uni-sparse-vector` +
+  `uni-common --skip muvera` ≈ **31 s total**, affordable in the PR lane;
+  `uni-crdt` nightly; `muvera` excluded outright with this measurement as the
+  reason.
 - [ ] 5. Hypothesis `RuleBasedStateMachine` — not started.
 
 **What the first-ever supply-chain run found.** There was no gate at all, and
@@ -963,14 +992,29 @@ Original item list:
    `uni-sparse-vector`. miri cannot run the Lance/DataFusion crates — do not
    attempt workspace-wide.
 
-   **Correction (2026-08-13):** the stated motivation — "a committed
-   `btic_decode` crash artifact in `fuzz/artifacts/`" — is wrong twice over.
-   `fuzz/artifacts/` is gitignored (`fuzz/.gitignore:2`), so nothing there is
-   committed; and the input in question *is* already tracked, as
-   `fuzz/seeds/btic_decode/utf8-boundary-bce-suffix`, where the README records
-   it as fixed on 2026-06-10. Verified: `cargo +nightly fuzz run btic_decode`
-   on that input exits 0 against current code. The BTIC codec's unsafe surface
-   is still a fair reason to run miri; a live crash is not.
+   **Correction (2026-08-13): both stated motivations are false.**
+
+   *"A committed `btic_decode` crash artifact in `fuzz/artifacts/`"* — wrong
+   twice over. `fuzz/artifacts/` is gitignored (`fuzz/.gitignore:2`), so nothing
+   there is committed; and the input *is* already tracked, as
+   `fuzz/seeds/btic_decode/utf8-boundary-bce-suffix`, whose README records it
+   fixed on 2026-06-10. Verified: `cargo +nightly fuzz run btic_decode` on that
+   input exits 0 against current code.
+
+   *"The BTIC codec has unsafe surface"* — it does not. All four nominated
+   crates contain **zero** `unsafe`:
+
+   | crate | `unsafe` occurrences |
+   |---|---|
+   | `uni-btic` | 0 |
+   | `uni-crdt` | 0 |
+   | `uni-common` | 1 — a string literal in an error message (`schema.rs:1419`) |
+   | `uni-sparse-vector` | 0 |
+
+   That does not make miri worthless: it still detects UB reached *through
+   dependencies*, and the crates' own tests exercise those. But the expected
+   value is far lower than "this code has unsafe blocks we should check", and
+   the item should be re-priced on measurement rather than on the premise above.
 3. **`cargo-deny`** in `pr.yml`: advisories, licenses, bans, sources. No
    supply-chain gate exists today.
 4. **Fuzz on PR** at 30 s/target corpus-seeded (~2 min total), keeping the
