@@ -32,7 +32,8 @@
 //!
 //! # Why not the loom/shuttle atomic shim
 //!
-//! [`super::sync`] aliases `AtomicU64` to loom's or shuttle's instrumented twin
+//! The crate-private `runtime::sync` module aliases `AtomicU64` to loom's or
+//! shuttle's instrumented twin
 //! so the OCC commit core can be model-checked. These counters are pure
 //! statistics and are not part of that core; routing them through the shim would
 //! make every query construct model-instrumented state, which loom forbids

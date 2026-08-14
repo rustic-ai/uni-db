@@ -1735,6 +1735,8 @@ Query performance metrics returned with every query result.
 | `l0_reads` | `int` |
 | `storage_reads` | `int` |
 | `cache_hits` | `int` |
+| `branch_scans` | `int` |
+| `snapshot_reads` | `int` |
 
 ---
 
