@@ -63,6 +63,8 @@ mod session_tx;
 mod dense_resilience;
 #[path = "common/multivector_resilience.rs"]
 mod multivector_resilience;
+#[path = "common/plan_shape/mod.rs"]
+mod plan_shape;
 #[path = "common/sparse_resilience.rs"]
 mod sparse_resilience;
 #[path = "common/ssi_for_update.rs"]

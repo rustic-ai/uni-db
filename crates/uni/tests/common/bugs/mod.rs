@@ -118,3 +118,4 @@ pub mod repro_issue_168_family_stale_second_handle;
 // version floor and VID allocator start at 0 and the two languages disagree.
 pub mod repro_issue_169_readonly_fork_incoherent;
 pub mod repro_registry_monotonicity_oracle;
+pub mod vid_lookup_join_reachability;

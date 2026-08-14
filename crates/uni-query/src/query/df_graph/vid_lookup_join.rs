@@ -726,3 +726,301 @@ fn concat_arrays(arrays: &[ArrayRef]) -> DFResult<ArrayRef> {
     arrow::compute::concat(&refs)
         .map_err(|e| datafusion::error::DataFusionError::ArrowError(Box::new(e), None))
 }
+
+#[cfg(test)]
+mod tests {
+    //! Unit tests for the output-construction path.
+    //!
+    //! # Why these target `emit_joined_batch` and not `execute()`
+    //!
+    //! `run_join` does
+    //! `probe.as_any().downcast_ref::<GraphScanExec>().expect(..)`, so handing
+    //! `execute()` a synthetic probe panics — driving it needs a live
+    //! `GraphContext` (storage, schema, L0), i.e. an integration test that
+    //! re-imposes every planner guard. Both defects examined here live entirely
+    //! inside `emit_joined_batch`, so testing it directly loses nothing and is
+    //! the only way to reach them at all.
+    //!
+    //! Reachability, measured 2026-08-14 by
+    //! `bugs::vid_lookup_join_reachability`: the INNER path **does** fire from
+    //! Cypher (`MATCH (a:A) MATCH (b:B) WHERE id(a) = id(b)`, which over
+    //! multi-label nodes means "nodes that are both A and B") and agrees with
+    //! its `HashJoinExec` fallback. The LEFT path does **not** — the anchor loop
+    //! matches the left expression first, giving `(Left, ProbeSide::Left)`,
+    //! which the planner rejects. `unmatched` is non-empty only for LEFT, so
+    //! everything below is the *unreachable* half of this operator.
+
+    use super::*;
+    use arrow::array::{Int64Array, UInt64Array};
+    use arrow::datatypes::DataType;
+
+    fn u64_col(v: &[u64]) -> ArrayRef {
+        Arc::new(UInt64Array::from(v.to_vec()))
+    }
+    fn i64_col(v: &[i64]) -> ArrayRef {
+        Arc::new(Int64Array::from(v.to_vec()))
+    }
+
+    /// Build side: `[("a.k", UInt64, false), ("a.x", Int64, true)]`.
+    fn build_schema() -> SchemaRef {
+        Arc::new(Schema::new(vec![
+            Field::new("a.k", DataType::UInt64, false),
+            Field::new("a.x", DataType::Int64, true),
+        ]))
+    }
+
+    /// Probe side. `vid_nullable = false` mirrors production exactly:
+    /// `GraphScanExec` declares `Field::new("{var}._vid", UInt64, false)`
+    /// (`scan.rs:378,402`).
+    fn probe_schema(vid_nullable: bool) -> SchemaRef {
+        Arc::new(Schema::new(vec![
+            Field::new("b._vid", DataType::UInt64, vid_nullable),
+            Field::new("b.y", DataType::Int64, true),
+        ]))
+    }
+
+    /// **B1.** LEFT-outer NULL-padding writes nulls into `b._vid`, which
+    /// `GraphScanExec` declares non-nullable — so `RecordBatch::try_new`
+    /// rejects the batch.
+    ///
+    /// DataFusion's own `build_join_schema` widens the null-extended side's
+    /// fields to nullable for outer joins. `concat_schemas` copies them
+    /// verbatim, so this operator never does.
+    #[test]
+    fn left_outer_null_pad_violates_probe_nullability() {
+        let bs = build_schema();
+        let ps = probe_schema(false);
+        let out = concat_schemas(&bs, &ps);
+
+        // The root cause, asserted independently of arrow's error text so this
+        // stays meaningful across arrow upgrades.
+        assert!(
+            !out.field(2).is_nullable(),
+            "precondition: the probe _vid column must be non-nullable for this \
+             test to exercise B1"
+        );
+
+        let build = RecordBatch::try_new(bs.clone(), vec![u64_col(&[10, 99]), i64_col(&[1, 2])])
+            .expect("build batch");
+        let probe = RecordBatch::try_new(ps.clone(), vec![u64_col(&[10]), i64_col(&[100])])
+            .expect("probe batch");
+
+        let matches = vec![JoinMatch {
+            build_batch_idx: 0,
+            build_row_idx: 0,
+            probe_row_idx: 0,
+        }];
+        let unmatched = vec![(0usize, 1usize)];
+
+        let res = emit_joined_batch(
+            std::slice::from_ref(&build),
+            &probe,
+            &matches,
+            &unmatched,
+            ProbeSide::Right,
+            &bs,
+            &ps,
+            &out,
+        );
+
+        let err = res.expect_err(
+            "B1 refuted: null-padding a non-nullable probe column was accepted. \
+             If this now succeeds, arrow's validation changed and the LEFT path \
+             may be safe — re-check before relying on it.",
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("non-nullable") || msg.contains("null"),
+            "expected a nullability error, got: {msg}"
+        );
+    }
+
+    /// **B2.** With ≥2 build batches and an unmatched row in a *non-final*
+    /// batch, build and probe columns are assembled in different orders and the
+    /// output pairs the wrong rows together — silently, with no error.
+    ///
+    /// Build columns go `[matches(b0), unmatched(b0), matches(b1), …]` while
+    /// probe columns go `[all matches…, all NULLs…]`. With one build batch the
+    /// two orders coincide, which is why any hand-written smoke test misses it.
+    ///
+    /// The probe schema is declared **nullable here on purpose**, to step past
+    /// B1 and prove B2 is a *separate* defect that fixing B1 would expose.
+    #[test]
+    fn multi_build_batch_left_outer_misaligns_rows() {
+        let bs = build_schema();
+        let ps = probe_schema(true);
+        let out = concat_schemas(&bs, &ps);
+
+        // batch 0: key 10 matches, key 99 does not. batch 1: key 20 matches.
+        let b0 = RecordBatch::try_new(bs.clone(), vec![u64_col(&[10, 99]), i64_col(&[1, 2])])
+            .expect("build batch 0");
+        let b1 = RecordBatch::try_new(bs.clone(), vec![u64_col(&[20]), i64_col(&[3])])
+            .expect("build batch 1");
+        let probe =
+            RecordBatch::try_new(ps.clone(), vec![u64_col(&[10, 20]), i64_col(&[100, 200])])
+                .expect("probe batch");
+
+        let matches = vec![
+            JoinMatch {
+                build_batch_idx: 0,
+                build_row_idx: 0,
+                probe_row_idx: 0,
+            },
+            JoinMatch {
+                build_batch_idx: 1,
+                build_row_idx: 0,
+                probe_row_idx: 1,
+            },
+        ];
+        let unmatched = vec![(0usize, 1usize)];
+
+        let batch = emit_joined_batch(
+            &[b0, b1],
+            &probe,
+            &matches,
+            &unmatched,
+            ProbeSide::Right,
+            &bs,
+            &ps,
+            &out,
+        )
+        .expect("emit");
+
+        let keys = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .unwrap();
+        let ys = batch
+            .column(3)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        let got: Vec<(u64, Option<i64>)> = (0..batch.num_rows())
+            .map(|i| {
+                (
+                    keys.value(i),
+                    if ys.is_null(i) {
+                        None
+                    } else {
+                        Some(ys.value(i))
+                    },
+                )
+            })
+            .collect();
+
+        // The CORRECT answer is [(10, Some(100)), (99, None), (20, Some(200))].
+        // Asserting the wrong answer documents the live behaviour and makes this
+        // test invert cleanly the moment anyone fixes the ordering.
+        assert_eq!(
+            got,
+            vec![(10, Some(100)), (99, Some(200)), (20, None)],
+            "B2 refuted — rows are aligned correctly. If this now yields the \
+             correct triple, the assembly order was fixed and this test should \
+             be inverted to assert correctness."
+        );
+    }
+
+    /// Control: one build batch, same data — the two assembly orders coincide,
+    /// so the result is correct. Pins that B2's trigger is specifically ≥2
+    /// build batches.
+    #[test]
+    fn single_build_batch_left_outer_is_correct() {
+        let bs = build_schema();
+        let ps = probe_schema(true);
+        let out = concat_schemas(&bs, &ps);
+
+        let build = RecordBatch::try_new(bs.clone(), vec![u64_col(&[10, 99]), i64_col(&[1, 2])])
+            .expect("build");
+        let probe =
+            RecordBatch::try_new(ps.clone(), vec![u64_col(&[10]), i64_col(&[100])]).expect("probe");
+
+        let matches = vec![JoinMatch {
+            build_batch_idx: 0,
+            build_row_idx: 0,
+            probe_row_idx: 0,
+        }];
+        let unmatched = vec![(0usize, 1usize)];
+
+        let batch = emit_joined_batch(
+            std::slice::from_ref(&build),
+            &probe,
+            &matches,
+            &unmatched,
+            ProbeSide::Right,
+            &bs,
+            &ps,
+            &out,
+        )
+        .expect("emit");
+
+        let keys = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .unwrap();
+        let ys = batch
+            .column(3)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        assert_eq!(keys.value(0), 10);
+        assert_eq!(ys.value(0), 100);
+        assert_eq!(keys.value(1), 99);
+        assert!(ys.is_null(1), "the unmatched build row must be NULL-padded");
+    }
+
+    /// Control: INNER (no unmatched rows) over two build batches is correct —
+    /// with nothing to NULL-pad, the two orders cannot diverge. This is why the
+    /// reachable half of the operator is unaffected by B2.
+    #[test]
+    fn inner_join_multi_batch_is_correct() {
+        let bs = build_schema();
+        let ps = probe_schema(true);
+        let out = concat_schemas(&bs, &ps);
+
+        let b0 = RecordBatch::try_new(bs.clone(), vec![u64_col(&[10]), i64_col(&[1])]).unwrap();
+        let b1 = RecordBatch::try_new(bs.clone(), vec![u64_col(&[20]), i64_col(&[3])]).unwrap();
+        let probe =
+            RecordBatch::try_new(ps.clone(), vec![u64_col(&[10, 20]), i64_col(&[100, 200])])
+                .unwrap();
+
+        let matches = vec![
+            JoinMatch {
+                build_batch_idx: 0,
+                build_row_idx: 0,
+                probe_row_idx: 0,
+            },
+            JoinMatch {
+                build_batch_idx: 1,
+                build_row_idx: 0,
+                probe_row_idx: 1,
+            },
+        ];
+
+        let batch = emit_joined_batch(
+            &[b0, b1],
+            &probe,
+            &matches,
+            &[],
+            ProbeSide::Right,
+            &bs,
+            &ps,
+            &out,
+        )
+        .expect("emit");
+
+        let keys = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .unwrap();
+        let ys = batch
+            .column(3)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        assert_eq!((keys.value(0), ys.value(0)), (10, 100));
+        assert_eq!((keys.value(1), ys.value(1)), (20, 200));
+    }
+}

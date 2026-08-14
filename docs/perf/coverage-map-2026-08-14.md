@@ -108,6 +108,70 @@ over the async API. The Rust suite is `#[tokio::test]` throughout, so the sync
 wrappers are largely exercised only through the Python bindings, which this run
 excludes.
 
+## Follow-up: `VidLookupJoinExec` investigated — 2026-08-14
+
+The headline item was chased down. It is **not a one-off**, and the answer was
+not what reading the code predicted.
+
+### It is reachable, and correct where it is reachable
+
+`MATCH (a:A) MATCH (b:B) WHERE id(a) = id(b) RETURN a.x, b.y` **emits it**
+(measured: `[GraphScanExec, VidLookupJoinExec, ProjectionExec]`). Over
+multi-label nodes that query means "nodes that are both A and B" — degenerate,
+but a legitimate schemaless question, not a shape nobody writes. It returns the
+right answer, verified differentially against the same query forced onto
+`HashJoinExec` (`vid_lookup_join_agrees_with_its_hash_join_fallback`).
+
+Vids are globally unique, so this only matches when one node carries both
+labels — an earlier version of the probe created `:A` and `:B` separately,
+matched zero rows, and would have "proved" correctness over an empty bag.
+
+### Its own documented use case cannot fire
+
+`MATCH (a:Source) MATCH (b:Target) WHERE id(b) = a.linked_vid` — the query in
+the module's own docs — measures as `[GraphScanExec, GraphScanExec,
+HashJoinExec, ProjectionExec]`. The build anchor must be Arrow `UInt64`
+(`df_planner.rs:4387`) and **no `uni_common::DataType` maps to `UInt64`**;
+Cypher has no unsigned integer. Pinned by
+`documented_query_takes_the_hash_join_fallback`.
+
+### The LEFT half is dead *and* broken
+
+Guard 6 rejects `(Left, ProbeSide::Left)`, and `ProbeSide::Right` needs a
+non-`_vid` `UInt64` build column, of which there are no producers. So
+`VidJoinKind::Left` is unreachable — and unit tests on `emit_joined_batch`
+confirm **both** latent defects live there:
+
+- **B1** — LEFT null-padding writes nulls into `b._vid`, which `GraphScanExec`
+  declares non-nullable, so `RecordBatch::try_new` rejects the batch. DataFusion
+  widens nullability for outer joins; `concat_schemas` copies fields verbatim.
+- **B2** — with ≥2 build batches and an unmatched row in a *non-final* batch,
+  build and probe columns are assembled in different orders and the output pairs
+  the wrong rows: `(99, Some(200)), (20, None)` instead of `(99, None),
+  (20, Some(200))`. **Silent wrong answers, no error.**
+
+Two controls isolate it: single-batch LEFT is correct, and multi-batch INNER is
+correct (nothing to NULL-pad). So the reachable half is unaffected by both.
+
+**Recommendation:** remove `VidJoinKind::Left` and its null-padding path; keep
+the INNER path, which is reachable, exercised and correct. Leaving dead-but-
+broken code in place means a future planner change that makes `ProbeSide::Right`
+reachable silently activates two confirmed defects — the exact silent-fail-open
+shape this repo has been closing elsewhere.
+
+### The systemic fix
+
+`plan_shape::gate` now requires every one of the 31 `ExecutionPlan` impls (35
+observable names — `MutationExec` reports five) to be classified `Proven`,
+`Unreachable`, or `Unproven`, with `MAX_UNPROVEN` ratcheting down only. `Proven`
+must be backed by an actual `assert_plan_uses` call naming the operator, because
+a bare mention in a comment is not evidence — the gate rejected two of its
+author's own claims on exactly that basis.
+
+**Use `PROFILE`, not `EXPLAIN`.** `ExplainOutput.plan_text` is the *logical*
+plan and can never name a physical operator; a positive assertion over it fails
+for the wrong reason and a negative one passes vacuously.
+
 ## What to do with this
 
 Ranked by value, and deliberately short — a long list of "add tests here" is how
