@@ -906,16 +906,71 @@ report and the decision recorded.
 
 ## Phase 8 — C4 cheap correctness wins *(independent)*
 
-Four unrelated items, any order, no dependency on tracks A/B:
+**Five** unrelated items (the count below has always been five), any order, no
+dependency on tracks A/B.
+
+### Progress — 2026-08-13
+
+- [x] **3. `cargo-deny`.** Shipped: `deny.toml` + a `supply-chain` job in
+      `pr.yml`. `advisories ok, bans ok, licenses ok, sources ok`.
+- [x] **4. Fuzz on PR.** Shipped: `fuzz-smoke` job, 30 s/target, seed-corpus
+      first. Verified locally at 3.4M runs in 31 s.
+- [ ] 1. `cargo-llvm-cov` coverage map — not started (`cargo-llvm-cov` is not
+      installed locally).
+- [ ] 2. miri on the pure-logic crates — not started; the `miri` component is
+      not installed on the local nightly.
+- [ ] 5. Hypothesis `RuleBasedStateMachine` — not started.
+
+**What the first-ever supply-chain run found.** There was no gate at all, and
+the default check reported **24 advisories, 10 of them vulnerabilities or
+unsoundness**. Three were fixed outright rather than ignored, by an in-semver
+`cargo update`:
+
+| advisory | crate | |
+|---|---|---|
+| RUSTSEC-2026-0190 *unsound* | anyhow 1.0.102 → 1.0.104 | fixed |
+| RUSTSEC-2026-0204 *vuln* | crossbeam-epoch 0.9.18 → 0.9.20 | fixed |
+| RUSTSEC-2026-0253 *unsound* | lru 0.18.0 → 0.18.2 | fixed |
+
+Both unsoundness advisories in the tree are now gone. The remaining seven are
+upstream-pinned — `extism 1.30` holds `wasmtime 43`, and `lance-io → opendal`
+holds `quick-xml` and `rsa` — and each carries a dated exception naming its
+blocker so it can be re-tested on the next upgrade rather than decaying into
+permanent silence.
+
+Three further findings were **ours**, not upstream:
+
+- **`fxhash` is a direct workspace dependency** (`Cargo.toml:158`, used by
+  `uni-query` and `uni-crdt`), not transitive. Unmaintained, not vulnerable.
+  The fix is migrating to `rustc-hash`; deliberately deferred to its own change
+  because swapping a hasher changes `HashMap` iteration order.
+- **`uni-tck` and `uni-locy-tck` were unlicensed** — missing
+  `license.workspace = true` that every other crate carries. Fixed.
+- **…and implicitly publishable.** Their sibling `uni-locy-oracle` already had
+  `publish = false`, which is exactly why it did not trip the same check. Fixed.
+
+**Correction to item 2's motivation:** see the note under it. The "committed
+`btic_decode` crash artifact" does not exist as described, and the input it
+refers to no longer crashes.
+
+Original item list:
 
 1. **`cargo-llvm-cov` once, as a map — not a gate.** Deliverable: which modules
    across the 35 workspace members have zero coverage. Publish to `docs/perf/`;
    re-run quarterly. Percentage gates breed test theater and are explicitly not
    proposed.
 2. **miri on pure-logic crates only:** `uni-btic`, `uni-crdt`, `uni-common`,
-   `uni-sparse-vector`. The BTIC codec has unsafe surface and a committed
-   `btic_decode` crash artifact in `fuzz/artifacts/`. miri cannot run the
-   Lance/DataFusion crates — do not attempt workspace-wide.
+   `uni-sparse-vector`. miri cannot run the Lance/DataFusion crates — do not
+   attempt workspace-wide.
+
+   **Correction (2026-08-13):** the stated motivation — "a committed
+   `btic_decode` crash artifact in `fuzz/artifacts/`" — is wrong twice over.
+   `fuzz/artifacts/` is gitignored (`fuzz/.gitignore:2`), so nothing there is
+   committed; and the input in question *is* already tracked, as
+   `fuzz/seeds/btic_decode/utf8-boundary-bce-suffix`, where the README records
+   it as fixed on 2026-06-10. Verified: `cargo +nightly fuzz run btic_decode`
+   on that input exits 0 against current code. The BTIC codec's unsafe surface
+   is still a fair reason to run miri; a live crash is not.
 3. **`cargo-deny`** in `pr.yml`: advisories, licenses, bans, sources. No
    supply-chain gate exists today.
 4. **Fuzz on PR** at 30 s/target corpus-seeded (~2 min total), keeping the

@@ -71,6 +71,111 @@ jobs:
             --exclude uni-python-onnx-metal \
             --all-targets -- -D warnings
 
+  # Supply-chain policy. Until 2026-08-13 no such gate existed, and the first
+  # run found 24 advisories — 10 of them vulnerabilities or unsoundness. Three
+  # were fixed outright by an in-semver `cargo update`; the rest are pinned
+  # upstream and carry a documented, blocker-named exception in `deny.toml`.
+  #
+  # Cheap and dependency-graph-only: no build, no `mold`/`protobuf`, and it does
+  # not touch the shared cargo build cache, so it adds a lane rather than
+  # lengthening the critical path.
+  supply-chain:
+    if: github.repository == 'rustic-ai/uni-db'
+    name: Supply Chain (cargo-deny)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      # Pinned: cargo-deny ships new advisory *checks*, so an unpinned install
+      # would let the same commit pass today and fail tomorrow with no change to
+      # this repo. Bump deliberately, alongside re-testing `deny.toml`'s ignores.
+      - name: Install cargo-deny
+        run: cargo install cargo-deny --version 0.19.8 --locked
+
+      # All four checks in one invocation so the summary line reports each:
+      # `advisories ok, bans ok, licenses ok, sources ok`.
+      - name: cargo deny check
+        run: cargo deny check
+
+  # Fuzz smoke — 30 s/target instead of the nightly 5 min.
+  #
+  # The nightly job is the one that finds *new* bugs; this one exists so a
+  # parser or codec regression fails the PR that introduces it rather than
+  # surfacing a day later, when it is no longer obvious which change caused it.
+  #
+  # Seed-corpus first, and that is the load-bearing part at 30 s: a fresh
+  # libFuzzer run spends most of half a minute rediscovering basic structure,
+  # whereas `fuzz/seeds/<target>` holds inputs that previously crashed — e.g.
+  # `btic_decode/utf8-boundary-bce-suffix`, the multi-byte UTF-8 case that
+  # panicked `strip_bce_suffix` (fixed 2026-06-10). Replaying those is a real
+  # regression check; 30 s of blind mutation mostly is not.
+  fuzz-smoke:
+    if: github.repository == 'rustic-ai/uni-db'
+    name: Fuzz Smoke (parsers & codecs)
+    runs-on: ubuntu-xlarge
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust (nightly, for libfuzzer)
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mold protobuf-compiler
+
+      - name: Install cargo-fuzz
+        # Explicit `tool:` form, not the `@cargo-fuzz` shorthand — see the
+        # nightly job for why the shorthand can leave `cargo fuzz` uninstalled.
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
+
+      - name: Cache fuzz build
+        uses: Swatinem/rust-cache@v2
+        with:
+          # Shares the nightly job's cache key: same fuzz workspace, same
+          # targets, so a PR run warms from (and warms) the same artifacts.
+          shared-key: "fuzz"
+          workspaces: fuzz
+          cache-on-failure: true
+
+      - name: Run fuzz targets (30 s each, seed-corpus first)
+        working-directory: fuzz
+        # `--target x86_64-unknown-linux-gnu` is load-bearing — see the nightly
+        # job's comment: without it a musl-built cargo-fuzz statically links
+        # libc, which AddressSanitizer rejects outright.
+        run: |
+          for target in cypher_parse locy_parse wal_decode btic_decode; do
+            echo "::group::fuzz $target"
+            # Corpus-dir order is load-bearing. libFuzzer writes newly-discovered
+            # inputs into the FIRST directory listed and treats the rest as
+            # read-only. So `corpus/$target` must come first: naming
+            # `seeds/$target` first makes the curated, git-tracked seed corpus
+            # the output dir, and a single 30 s run buries its handful of
+            # regression inputs under a few hundred generated files.
+            mkdir -p "corpus/$target"
+            seeds=""
+            # Only some targets have a seed dir, and a missing path makes
+            # libFuzzer error rather than skip it.
+            [ -d "seeds/$target" ] && seeds="seeds/$target"
+            cargo +nightly fuzz run --target x86_64-unknown-linux-gnu \
+              "$target" "corpus/$target" $seeds -- -max_total_time=30 -timeout=10
+            echo "::endgroup::"
+          done
+
+      - name: Upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-smoke-artifacts
+          path: fuzz/artifacts/
+          if-no-files-found: ignore
+
   # Rust tests — the workspace suite (the core signal contributors gate on).
   rust-tests:
     if: github.repository == 'rustic-ai/uni-db'

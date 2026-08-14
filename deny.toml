@@ -1,0 +1,104 @@
+# cargo-deny — supply-chain policy.
+#
+# Until 2026-08-13 no supply-chain gate existed at all. The first run found 24
+# advisories, of which 10 were vulnerabilities or unsoundness. Three were fixed
+# outright by an in-semver `cargo update` (anyhow, crossbeam-epoch, lru); the
+# rest are pinned by upstream and are listed below with the reason and the
+# version that will clear them.
+#
+# # The policy, and why it is shaped this way
+#
+# `vulnerability` and `unsound` DENY. Those are the classes worth stopping a PR
+# for, and the ignore list below is the honest record of the ones we cannot act
+# on -- each with a named blocker, so the entry can be re-tested rather than
+# rotting into permanent silence.
+#
+# `unmaintained` and `yanked` WARN. Seven of the original 24 were unmaintained
+# transitive crates (bincode, bitmaps, fxhash, im-rc, number_prefix, paste,
+# proc-macro-error2), none of them ours and none actionable here. Denying them
+# would have made the gate red on day one, and a gate that is red on day one
+# gets disabled rather than fixed -- which buys nothing and costs the
+# vulnerability coverage too.
+
+[advisories]
+version = 2
+yanked = "warn"
+unmaintained = "workspace"
+
+ignore = [
+  # ---- lance-io -> opendal -> {quick-xml, reqsign-azure-storage -> rsa} ----
+  # Reachable only through object-store paths. Clearing these needs an opendal
+  # bump inside lance, which this repo pins via `lance`; not actionable here.
+  # Re-test on every lance upgrade.
+  { id = "RUSTSEC-2026-0194", reason = "quick-xml 0.38.4 via lance-io->opendal-core; needs >=0.41.0, opendal-pinned. DoS (quadratic attribute check) on XML we do not parse directly." },
+  { id = "RUSTSEC-2026-0195", reason = "quick-xml 0.38.4 via lance-io->opendal-core; needs >=0.41.0, opendal-pinned. Namespace-allocation DoS, same reachability." },
+  { id = "RUSTSEC-2023-0071", reason = "rsa 0.9.10 via lance-io->opendal->reqsign-azure-storage. Marvin timing attack; upstream states NO safe upgrade exists. Only reachable on Azure blob auth." },
+
+  # ---- extism 1.30 pins wasmtime 43 ----
+  # `cargo update -p wasmtime` cannot move these: extism 1.30.0 constrains the
+  # major. Clearing them needs an extism release built against a patched
+  # wasmtime. Re-test on every extism upgrade.
+  { id = "RUSTSEC-2026-0222", reason = "wasmtime 43.0.2 pinned by extism 1.30.0. Cross-engine type-index confusion; we run a single engine per process." },
+  { id = "RUSTSEC-2026-0149", reason = "wasmtime-wasi 43.0.2 pinned by extism 1.30.0. path_open(TRUNCATE) bypasses FilePerms::WRITE." },
+  { id = "RUSTSEC-2026-0182", reason = "wasmtime-wasi 43.0.2 pinned by extism 1.30.0. Leak in WASIp1 fd_renumber." },
+  { id = "RUSTSEC-2026-0188", reason = "wasmtime-wasi 43.0.2 pinned by extism 1.30.0. Hard links/renames bypass the preopen sandbox." },
+
+  # ---- ours, and actionable ----
+  # The only advisory here on a crate WE declare directly (Cargo.toml:158,
+  # used by uni-query and uni-crdt). Unmaintained, not vulnerable. The fix is a
+  # migration to `rustc-hash`, its maintained successor -- deliberately not
+  # bundled into the commit that introduces this gate, because swapping a hasher
+  # changes HashMap iteration order and that deserves its own change with its
+  # own test run rather than riding along with a policy file.
+  { id = "RUSTSEC-2025-0057", reason = "fxhash 0.2 is a DIRECT workspace dep (Cargo.toml:158). Unmaintained, no vulnerability. TODO: migrate to rustc-hash; iteration-order change wants its own PR." },
+]
+
+[licenses]
+version = 2
+# Deliberately explicit rather than a blanket allow: an unrecognised license
+# appearing in the tree should be a decision, not a silent pass.
+allow = [
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "MIT",
+  "MIT-0",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "ISC",
+  "Zlib",
+  "MPL-2.0",
+  "Unicode-3.0",
+  "Unicode-DFS-2016",
+  "CDLA-Permissive-2.0",
+  "OpenSSL",
+  "BSL-1.0",
+  "CC0-1.0",
+  "Unlicense",
+  "0BSD",
+  # Added 2026-08-13 after the first run rejected them. All OSI-permissive; each
+  # was checked rather than blanket-allowed.
+  "BlueOak-1.0.0",   # permissive, plain-language (ripgrep-family crates)
+  "bzip2-1.0.6",     # the bzip2 license, BSD-like
+  "NCSA",            # University of Illinois/NCSA, BSD+MIT-equivalent
+]
+confidence-threshold = 0.8
+
+[[licenses.clarify]]
+name = "ring"
+expression = "MIT AND ISC AND OpenSSL"
+license-files = [{ path = "LICENSE", hash = 0xbd0eed23 }]
+
+[bans]
+multiple-versions = "allow"   # a 500-crate graph with lance+datafusion+candle
+                              # always carries duplicates; denying is noise.
+wildcards = "deny"            # `version = "*"` in a manifest IS actionable...
+allow-wildcard-paths = true   # ...except on path deps, where it is how this
+                              # workspace's internal crates refer to each other
+                              # (uni-tck, uni-locy-tck, uni-locy-oracle). Those
+                              # are not published with a wildcard; the version
+                              # is resolved from the path.
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
