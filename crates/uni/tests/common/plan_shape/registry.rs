@@ -71,7 +71,7 @@ pub const OPERATORS: &[Operator] = &[
         ty: "VidLookupJoinExec",
         runtime_name: "VidLookupJoinExec",
         status: Status::Proven {
-            by: "vid_lookup_join_agrees_with_its_hash_join_fallback",
+            by: "documented_query_uses_the_vid_lookup_join",
             in_file: "crates/uni/tests/common/bugs/vid_lookup_join_reachability.rs",
         },
     },

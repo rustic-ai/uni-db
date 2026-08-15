@@ -117,15 +117,15 @@ async fn probe_guard3_probe_side_filter() {
     eprintln!("[probe-guard3] ops = {ops:?}");
 }
 
-/// **Probe A, guard 5 — the decisive one.**
-///
-/// This is the operator's own documented motivating query
+/// Reporting probe for the operator's documented motivating query
 /// (`vid_lookup_join.rs:6-18`): join a stored vid property against `id(b)`.
-/// `linked_vid` is `Int64`, as it must be — Cypher has no unsigned integer —
-/// and the build anchor must be `UInt64`. If this reports `HashJoinExec`, the
-/// operator cannot serve the purpose it was written for.
+///
+/// This one prints rather than asserts — the assertion lives in
+/// `documented_query_uses_the_vid_lookup_join`. Kept because the printed
+/// operator vector is what the investigation was decided from, and it is
+/// cheaper to read than to reconstruct.
 #[tokio::test]
-async fn documented_motivating_query_cannot_fire() {
+async fn report_documented_motivating_query_plan() {
     let db = Uni::in_memory().build().await.unwrap();
     db.schema()
         .label("Source")
@@ -257,12 +257,20 @@ async fn vid_lookup_join_agrees_with_its_hash_join_fallback() {
 // alters which operator is chosen fails loudly. They are deliberately written
 // against what was *observed*, not what was predicted.
 
-/// Pins that the documented motivating query takes the fallback.
+/// **The operator's documented motivating query now fires it.**
 ///
-/// If this ever fails, guard 5 changed — someone introduced a `UInt64`-typed
-/// property path — and the operator's whole reachability analysis must be redone.
+/// For four months this asserted the opposite. The build anchor here is
+/// `a.linked_vid`, a user property, and therefore `Int64` — Cypher has no
+/// unsigned integer — while guard 5 demanded `UInt64`. So the one shape the
+/// operator was written for could never reach it, and the only shape that could
+/// was `id(a) = id(b)`, where both keys are already vids and there is nothing to
+/// look up.
+///
+/// Widening the guard to accept `Int64` (with a range-checked conversion at the
+/// read site) is what made this real: measured 18.12 ms -> 7.38 ms on a
+/// 20k-target fixture, with the 20,000-row probe scan gone from the plan.
 #[tokio::test]
-async fn documented_query_takes_the_hash_join_fallback() {
+async fn documented_query_uses_the_vid_lookup_join() {
     let db = Uni::in_memory().build().await.unwrap();
     db.schema()
         .label("Source")
@@ -285,6 +293,203 @@ async fn documented_query_takes_the_hash_join_fallback() {
 
     let q = "MATCH (a:Source) MATCH (b:Target) WHERE id(b) = a.linked_vid \
              RETURN a.score AS s, b.name AS n";
-    assert_plan_avoids(&s, q, "VidLookupJoinExec").await;
-    assert_plan_uses(&s, q, "HashJoinExec").await;
+    assert_plan_uses(&s, q, "VidLookupJoinExec").await;
+    assert_plan_avoids(&s, q, "HashJoinExec").await;
+}
+
+/// **The shape `VidJoinKind::Left` was actually written for.**
+///
+/// PR #6 (`deb9d907d`) added LEFT support for "the `OPTIONAL MATCH` pattern",
+/// i.e. the documented motivating query with the target side optional:
+///
+/// ```text
+/// MATCH (a:Source) OPTIONAL MATCH (b:Target) WHERE id(b) = a.linked_vid
+/// ```
+///
+/// The design is sound and the planner comment explains it well: the operator
+/// is *build-outer* — it materialises the build side and fetches the probe by
+/// build VIDs, so it can null-pad unmatched **build** rows but never unmatched
+/// probe rows. LEFT is therefore correct exactly when the build is the left
+/// (outer) side, which is `ProbeSide::Right`.
+///
+/// And this shape does select `ProbeSide::Right`: the classifier puts the
+/// left-subtree variable in `l_expr`, so `l_expr = a.linked_vid` (not a `_vid`
+/// property) and `r_expr = b._vid`, which is what the anchor loop keys on.
+///
+// The LEFT path was blocked twice over, and both are now fixed:
+///
+/// * guard 5 rejected the `Int64` build anchor (same root cause as the INNER
+///   case), and
+/// * guard 3 rejected the probe, because `wrap_optional` wraps an OPTIONAL scan
+///   in `NestedLoopJoinExec(PlaceholderRowExec, GraphScanExec)` and for LEFT the
+///   probe is *necessarily* the optional side. Those are the same condition, so
+///   `VidJoinKind::Left` was dead **by construction** from the commit that
+///   introduced it (`deb9d907d`, April 2026) — born dead, never orphaned.
+///
+/// Unwrapping that redundant wrapper is sound because this operator already
+/// null-pads every unmatched build row, which is the only thing the wrapper
+/// existed to guarantee. Measured 19.03 ms -> 8.86 ms.
+#[tokio::test]
+async fn intended_left_outer_shape_uses_the_vid_lookup_join() {
+    let db = Uni::in_memory().build().await.unwrap();
+    db.schema()
+        .label("Source")
+        .property("score", DataType::Float64)
+        .property_nullable("linked_vid", DataType::Int64)
+        .done()
+        .label("Target")
+        .property("name", DataType::String)
+        .done()
+        .apply()
+        .await
+        .unwrap();
+
+    let s = db.session();
+    let tx = s.tx().await.unwrap();
+    tx.execute("CREATE (:Target {name: 't0'})").await.unwrap();
+    tx.execute("CREATE (:Source {score: 0.9, linked_vid: 0})")
+        .await
+        .unwrap();
+    tx.execute("CREATE (:Source {score: 0.1, linked_vid: 9999})")
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+
+    let q = "MATCH (a:Source) OPTIONAL MATCH (b:Target) WHERE id(b) = a.linked_vid \
+             RETURN a.score AS s, b.name AS n";
+    let ops = plan_ops(&s, q).await;
+    eprintln!("[probe-left/intended] ops = {ops:?}");
+    assert_plan_uses(&s, q, "VidLookupJoinExec").await;
+}
+
+/// The three LEFT-outer tests in `issue_55_cross_match_pushdown.rs` now execute
+/// the LEFT path they were written for — for the first time.
+///
+/// `cross_match_left_outer_preserves_build_with_null` runs precisely the
+/// scenario `VidJoinKind::Left` exists to serve — one matching source, one
+/// unmatched, asserting the unmatched row comes back NULL-padded. It passes.
+/// It has always passed. And it has always run on `HashJoinExec`.
+///
+/// That is why B1 and B2 survived review and three targeted tests: the code
+/// that null-pads is `emit_joined_batch`, and nothing ever called it. The tests
+/// assert the *answer*, which `HashJoinExec` produces correctly — so they are
+/// simultaneously well-written, passing, and blind to the operator they name.
+///
+/// They were always well written — one match, one non-match, asserting the NULL
+/// padding, which is exactly where B1 and B2 lived. They simply asserted the
+/// *answer*, and `HashJoinExec` produced the right answer, so they were
+/// simultaneously correct, passing, and blind to the operator they named. That
+/// is the whole anatomy of the miss, and why `plan_shape::assert_plan_uses`
+/// exists.
+#[tokio::test]
+async fn the_left_outer_tests_now_run_on_the_operator() {
+    let db = Uni::in_memory().build().await.unwrap();
+    db.schema()
+        .label("Source")
+        .property("name", DataType::String)
+        .property("score", DataType::Float64)
+        .property_nullable("linked_vid", DataType::Int64)
+        .done()
+        .label("Target")
+        .property("name", DataType::String)
+        .done()
+        .apply()
+        .await
+        .unwrap();
+
+    let s = db.session();
+    let tx = s.tx().await.unwrap();
+    tx.execute("CREATE (:Target {name: 't'})").await.unwrap();
+    tx.execute("CREATE (:Source {name: 'matches', score: 1.0, linked_vid: 0})")
+        .await
+        .unwrap();
+    tx.execute("CREATE (:Source {name: 'unmatched', score: 1.0, linked_vid: 9999999})")
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+
+    // Verbatim from `cross_match_left_outer_preserves_build_with_null`.
+    let q = "MATCH (a:Source) WHERE a.score > 0.5 \
+             OPTIONAL MATCH (b:Target) WHERE id(b) = a.linked_vid \
+             RETURN a.name AS aname, b.name AS bname";
+
+    let ops = plan_ops(&s, q).await;
+    eprintln!("[left-outer-test/actual] ops = {ops:?}");
+    assert_plan_uses(&s, q, "VidLookupJoinExec").await;
+
+    // And the answer is right anyway — which is the whole problem.
+    let rows = s.query(q).await.unwrap();
+    assert_eq!(
+        rows.rows().len(),
+        2,
+        "both source rows must survive the outer join"
+    );
+}
+
+/// **LEFT-outer correctness, on the operator.**
+///
+/// What the three `cross_match_left_outer_*` tests in
+/// `issue_55_cross_match_pushdown.rs` were always meant to be: the same
+/// scenario, plus proof of which operator answered it. Matched and unmatched
+/// build rows, asserting the NULL padding — the exact path where B1 (a hard
+/// error on the non-nullable `_vid`) and B2 (silent row misalignment) lived.
+#[tokio::test]
+async fn left_outer_null_padding_is_correct_on_the_operator() {
+    let db = Uni::in_memory().build().await.unwrap();
+    db.schema()
+        .label("Source")
+        .property("name", DataType::String)
+        .property_nullable("linked_vid", DataType::Int64)
+        .done()
+        .label("Target")
+        .property("name", DataType::String)
+        .done()
+        .apply()
+        .await
+        .unwrap();
+
+    let s = db.session();
+    let tx = s.tx().await.unwrap();
+    tx.execute("CREATE (:Target {name: 't0'})").await.unwrap();
+    tx.execute("CREATE (:Target {name: 't1'})").await.unwrap();
+    // Two match, one points at a vid that does not exist.
+    tx.execute("CREATE (:Source {name: 'a', linked_vid: 0})")
+        .await
+        .unwrap();
+    tx.execute("CREATE (:Source {name: 'b', linked_vid: 1})")
+        .await
+        .unwrap();
+    tx.execute("CREATE (:Source {name: 'c', linked_vid: 987654})")
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+
+    let q = "MATCH (a:Source) OPTIONAL MATCH (b:Target) WHERE id(b) = a.linked_vid \
+             RETURN a.name AS an, b.name AS bn";
+
+    // Without this the test could pass on the fallback and prove nothing about
+    // the operator — which is exactly what happened for four months.
+    assert_plan_uses(&s, q, "VidLookupJoinExec").await;
+
+    let mut got: Vec<(String, Option<String>)> = s
+        .query(q)
+        .await
+        .unwrap()
+        .rows()
+        .iter()
+        .map(|r| (r.get::<String>("an").unwrap(), r.try_get::<String>("bn")))
+        .collect();
+    got.sort();
+
+    assert_eq!(
+        got,
+        vec![
+            ("a".to_string(), Some("t0".to_string())),
+            ("b".to_string(), Some("t1".to_string())),
+            ("c".to_string(), None),
+        ],
+        "every Source must survive; only the one with no matching Target is \
+         NULL-padded, and each match must keep its OWN target (B2 paired the \
+         unmatched row with a matched row's payload)"
+    );
 }

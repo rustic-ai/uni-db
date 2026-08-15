@@ -126,38 +126,73 @@ Vids are globally unique, so this only matches when one node carries both
 labels — an earlier version of the probe created `:A` and `:B` separately,
 matched zero rows, and would have "proved" correctness over an empty bag.
 
-### Its own documented use case cannot fire
+### Its own documented use case could not fire — the core finding
 
 `MATCH (a:Source) MATCH (b:Target) WHERE id(b) = a.linked_vid` — the query in
-the module's own docs — measures as `[GraphScanExec, GraphScanExec,
-HashJoinExec, ProjectionExec]`. The build anchor must be Arrow `UInt64`
-(`df_planner.rs:4387`) and **no `uni_common::DataType` maps to `UInt64`**;
-Cypher has no unsigned integer. Pinned by
-`documented_query_takes_the_hash_join_fallback`.
+the module's own docs — measured as `[GraphScanExec, GraphScanExec,
+HashJoinExec, ProjectionExec]`. The build anchor had to be Arrow `UInt64`
+(`df_planner.rs:4387`) and **no `uni_common::DataType` maps to `UInt64`**,
+because Cypher has no unsigned integer. So the operator could not serve the
+purpose it was written for, and the only shape that *did* clear the guard was
+`id(a) = id(b)` — where both keys are already vids and there is nothing to look
+up. The one shape it could optimize was the one shape needing no optimization.
 
-### The LEFT half is dead *and* broken
+Now fixed and pinned by `documented_query_uses_the_vid_lookup_join`.
 
-Guard 6 rejects `(Left, ProbeSide::Left)`, and `ProbeSide::Right` needs a
-non-`_vid` `UInt64` build column, of which there are no producers. So
-`VidJoinKind::Left` is unreachable — and unit tests on `emit_joined_batch`
-confirm **both** latent defects live there:
+### The LEFT half was dead *and* broken — both now fixed
 
-- **B1** — LEFT null-padding writes nulls into `b._vid`, which `GraphScanExec`
-  declares non-nullable, so `RecordBatch::try_new` rejects the batch. DataFusion
-  widens nullability for outer joins; `concat_schemas` copies fields verbatim.
-- **B2** — with ≥2 build batches and an unmatched row in a *non-final* batch,
-  build and probe columns are assembled in different orders and the output pairs
-  the wrong rows: `(99, Some(200)), (20, None)` instead of `(99, None),
-  (20, Some(200))`. **Silent wrong answers, no error.**
+`VidJoinKind::Left` had **never executed**, and for a reason neither guard
+analysis found at first: for LEFT the probe is *necessarily* the optional side,
+and `wrap_optional` (`df_planner.rs:747`) always wraps an optional scan in
+`NestedLoopJoinExec(PlaceholderRowExec, GraphScanExec)`, which the bare-scan
+guard rejected. "Optional side" and "wrapped" are the same condition, so the arm
+was dead **by construction** from the commit that introduced it (`deb9d907d`,
+April 2026) — born dead, not orphaned by a later refactor.
 
-Two controls isolate it: single-batch LEFT is correct, and multi-batch INNER is
-correct (nothing to NULL-pad). So the reachable half is unaffected by both.
+Three defects had accumulated in that never-run code:
 
-**Recommendation:** remove `VidJoinKind::Left` and its null-padding path; keep
-the INNER path, which is reachable, exercised and correct. Leaving dead-but-
-broken code in place means a future planner change that makes `ProbeSide::Right`
-reachable silently activates two confirmed defects — the exact silent-fail-open
-shape this repo has been closing elsewhere.
+- **B1** — LEFT null-padding wrote NULLs into `b._vid`, declared non-nullable at
+  `scan.rs:378,402`, so `RecordBatch::try_new` rejected the batch. Fixed by
+  widening the null-extended side in `concat_schemas`, as DataFusion's own
+  `build_join_schema` does for outer joins.
+- **B2** — build columns were assembled `[m(b0), u(b0), m(b1), …]` against a
+  probe side of `[all matches…, all NULLs…]`, so with ≥2 build batches and an
+  unmatched row in a non-final batch the output paired the wrong build row with
+  the wrong probe values — **silently**. Fixed by emitting all matches before all
+  unmatched, so the two agree by construction.
+- **B3** — a *second* `downcast_ref::<UInt64Array>().expect("validated above")`
+  where "above" was a different loop, surfacing as a panic inside a stream future
+  the moment the first assumption changed. Fixed by one shared accessor.
+
+### It pays, measured
+
+Same 20k-target / 50-source fixture, serial runs:
+
+| path | before | after | |
+|---|---|---|---|
+| INNER | 18.12 ms (`HashJoinExec`) | **7.38 ms** | **2.5×** |
+| LEFT outer | 19.03 ms (`HashJoinExec` + `NestedLoopJoinExec`) | **8.86 ms** | **2.1×** |
+
+In both, the 20,000-row probe scan disappears from the plan entirely.
+
+**An earlier revision of this document recommended deleting the LEFT path as
+born-dead.** That was wrong, and the error is worth recording: "never ran" and
+"not worth running" are different claims, and the first is far easier to
+establish. Deleting it would have discarded a 2.1× optimization with no failing
+test and no trace.
+
+### What made it fire
+
+- **Guard 5** now accepts `Int64` build anchors with a range-checked conversion.
+  A vid is a `u64`, but a vid stored in a Cypher property is `Int64` — Cypher has
+  no unsigned integer — so demanding `UInt64` excluded the operator's own
+  motivating shape and left it able to fire only on `id(a) = id(b)`, where both
+  keys are already vids and there is nothing to look up.
+- **Guard 3** now peels the `wrap_optional` wrapper, one level and exact-match
+  only. Sound because this operator already null-pads every unmatched build row,
+  which is the sole thing that wrapper guaranteed; and schema-neutral because the
+  placeholder carries `Schema::empty()`. The SSI `ReadSetRecordingExec` wrapper
+  deliberately still blocks the rewrite, so read-set capture is unaffected.
 
 ### The systemic fix
 

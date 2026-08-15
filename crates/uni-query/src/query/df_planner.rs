@@ -4338,6 +4338,22 @@ impl HybridPhysicalPlanner {
         // scan makes this rewrite bail to `HashJoinExec`, which executes the
         // wrapper normally and records the reads. Non-SSI / read-only contexts
         // have no wrapper, so the optimization still fires there.
+        //
+        // We DO peek through the `wrap_optional` wrapper, and only that one.
+        // An OPTIONAL MATCH scan is wrapped in
+        // `NestedLoopJoinExec(PlaceholderRowExec, GraphScanExec, Left)` whose
+        // sole purpose is to emit one all-NULL row when the scan is empty
+        // (`wrap_optional`). For `VidJoinKind::Left` that wrapper is redundant:
+        // this operator already null-pads every unmatched build row, which
+        // covers the empty-probe case. And because the placeholder carries
+        // `Schema::empty()`, the wrapper's schema equals the scan's, so
+        // unwrapping does not shift any downstream column index.
+        //
+        // Without this, `VidJoinKind::Left` was unreachable *by construction*:
+        // for LEFT the probe is necessarily the optional side, and the optional
+        // side is always wrapped. It had been dead since the commit that
+        // introduced it.
+        let probe_plan = Self::unwrap_optional_scan(probe_plan);
         if probe_plan
             .as_any()
             .downcast_ref::<GraphScanExec>()
@@ -4384,9 +4400,16 @@ impl HybridPhysicalPlanner {
             ProbeSide::Right => anchor.left_col_idx,
         };
         let build_schema = build_plan.schema();
+        // A vid is a `u64`, but Cypher has no unsigned integer type, so a vid
+        // stored in a user property arrives as `Int64`. Accepting only `UInt64`
+        // here excluded the operator's own motivating shape
+        // (`id(b) = a.linked_vid`) and left it able to fire on nothing but
+        // `id(a) = id(b)` — where both keys are already vids and there is
+        // nothing to look up. The conversion is range-checked at the read site.
         if !matches!(
             build_schema.field(anchor_build_idx).data_type(),
             datafusion::arrow::datatypes::DataType::UInt64
+                | datafusion::arrow::datatypes::DataType::Int64
         ) {
             return Ok(None);
         }
@@ -4412,13 +4435,54 @@ impl HybridPhysicalPlanner {
 
         drop(session);
 
+        // Hand `try_new` the unwrapped probe: it re-validates that the probe
+        // child is a `GraphScanExec`, and it drives that scan directly via
+        // `execute_with_vid_filter`.
+        let (final_left, final_right) = match probe_side {
+            ProbeSide::Left => (probe_plan.clone(), right_plan.clone()),
+            ProbeSide::Right => (left_plan.clone(), probe_plan.clone()),
+        };
+
         Ok(Some(Arc::new(VidLookupJoinExec::try_new(
-            left_plan.clone(),
-            right_plan.clone(),
+            final_left,
+            final_right,
             probe_side,
             compiled,
             join_kind,
         )?)))
+    }
+
+    /// Peels the `wrap_optional` wrapper off a probe plan, if that is exactly what
+    /// it is.
+    ///
+    /// `wrap_optional` turns an OPTIONAL MATCH scan into
+    /// `NestedLoopJoinExec(PlaceholderRowExec, inner, Left)` so an empty scan still
+    /// yields one all-NULL row. `VidJoinKind::Left` null-pads unmatched build rows
+    /// itself, so for that operator the wrapper is redundant — and because the
+    /// placeholder's schema is empty, removing it is schema-neutral.
+    ///
+    /// Deliberately **one level, exact match, no recursion.** The SSI
+    /// `ReadSetRecordingExec` wrapper must keep masking the scan so the rewrite
+    /// bails to `HashJoinExec` and read-set capture still happens; a recursive or
+    /// loose unwrap would defeat that. Anything that is not precisely
+    /// `NLJ(PlaceholderRowExec, _, Left)` with no filter is returned untouched.
+    fn unwrap_optional_scan(plan: &Arc<dyn ExecutionPlan>) -> Arc<dyn ExecutionPlan> {
+        let Some(nlj) = plan.as_any().downcast_ref::<NestedLoopJoinExec>() else {
+            return plan.clone();
+        };
+        if *nlj.join_type() != JoinType::Left || nlj.filter().is_some() {
+            return plan.clone();
+        }
+        let children = nlj.children();
+        let [left, right] = children.as_slice() else {
+            return plan.clone();
+        };
+        if left.as_any().downcast_ref::<PlaceholderRowExec>().is_none()
+            || !left.schema().fields().is_empty()
+        {
+            return plan.clone();
+        }
+        (*right).clone()
     }
 
     /// Plan a projection, passing alias map through to Sort nodes in the input chain.
