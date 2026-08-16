@@ -473,6 +473,38 @@ jobs:
           cache-on-failure: true
           save-if: false
 
+      # A bench file with no `[[bench]]` stanza is auto-discovered by Cargo with
+      # the DEFAULT libtest harness. If it calls `criterion_main!`, that main
+      # becomes dead code, libtest finds zero `#[bench]` functions, and the run
+      # reports "0 measured; ok". It does not fail -- it passes while measuring
+      # nothing. `pushdown_performance.rs` did exactly that from the day it was
+      # added until 2026-08-15.
+      #
+      # Note a build check CANNOT catch this: the file compiles fine. Only
+      # comparing the file list against the declared stanzas does.
+      - name: Every bench file must have a [[bench]] stanza
+        run: |
+          cd crates/uni
+          comm -13 \
+            <(grep -A1 '^\[\[bench\]\]' Cargo.toml | grep '^name' | cut -d'"' -f2 | sort) \
+            <(ls benches/*.rs | xargs -n1 basename | sed 's/\.rs$//' | sort) \
+          | tee /dev/stderr | (! grep -q .)
+
+      # Only three benches are actually run below; this type-checks the rest, so
+      # a declared bench that stops compiling is caught here rather than whenever
+      # someone next runs it by hand.
+      #
+      # `check`, deliberately, not `cargo bench --benches --no-run`. Measured
+      # 2026-08-16 on a warm 22-core box: the full bench build is **76m 08s**,
+      # because each of the 19 targets statically links the whole
+      # datafusion/lance/candle tree -- the same cost that caps integration-test
+      # binaries at 3 per crate in docs/test_layout.md. That does not fit this
+      # job's 90-minute budget alongside the benches it actually runs. `check` is
+      # **50s** and catches compile errors in all 19; link errors are not covered,
+      # and the three benches run below are the standing check on linking.
+      - name: Type-check all bench targets
+        run: cargo check -p uni-db --benches
+
       - name: Run commit/SSI benches
         run: |
           cargo bench -p uni-db --bench ssi_commit_overhead

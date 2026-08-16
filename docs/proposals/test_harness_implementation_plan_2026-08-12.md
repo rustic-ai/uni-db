@@ -892,15 +892,43 @@ report and the decision recorded.
    **warn at 2%**.
 5. **Cleanup: delete `crates/uni/benches/pushdown_performance.rs`.** It has no
    `[[bench]]` stanza but `autobenches` is not disabled, so Cargo auto-discovers
-   it with the default libtest harness while the file calls `criterion_main!` —
-   `cargo bench --bench pushdown_performance` fails today. Its three functions
-   have empty TODO bodies and reference no uni-db API.
+   it with the default libtest harness while the file calls `criterion_main!`.
+   Its three functions have empty TODO bodies and reference no uni-db API.
+
+   **Correction (2026-08-15): this item said "`cargo bench --bench
+   pushdown_performance` fails today". Measured, it does not — and the truth is
+   worse.** Under the libtest harness the `criterion_main!` main is dead code, so
+   there is no symbol conflict; libtest finds zero `#[bench]` functions and
+   reports `running 0 tests ... 0 measured; ok` at **RC=0**. It passes while
+   measuring nothing. Only a criterion-specific flag fails
+   (`-- --save-baseline main` → RC=101, `Unrecognized option`), which is what the
+   original narrow observation at `documentation_remediation_2026-08-06.md:271`
+   ("*the command it prints* fails") actually referred to. The claim widened as it
+   was transcribed between documents.
+
+   **Consequence for the fix:** a build check cannot catch this class, because the
+   file compiles. Only comparing `benches/*.rs` against the declared `[[bench]]`
+   names does. Both steps are now in `nightly.yml`'s `bench` job.
 
 ### Exit criteria
 
 - [ ] `perf-gate` fails on a **deliberate-regression PR** — verified, not assumed.
 - [ ] `perf-gate` passes on an unrelated PR.
-- [ ] `pushdown_performance.rs` removed and `cargo bench --benches` builds clean.
+- [x] `pushdown_performance.rs` removed (2026-08-15). Two `nightly.yml` steps now
+      guard the class: a **stanza-coverage check**, verified against a deliberate
+      violation rather than assumed (RC=1 naming a temporarily-added stanza-less
+      file, RC=0 once removed), and `cargo check -p uni-db --benches` for a
+      declared bench that stops compiling.
+
+      **The build variant was measured and rejected.** `cargo bench -p uni-db
+      --benches --no-run` takes **76m 08s** on a warm 22-core box — 20 executables
+      (19 benches + the lib target), 0 errors — because each target statically
+      links the whole datafusion/lance/candle tree, the same cost that caps
+      integration-test binaries at 3 per crate in `docs/test_layout.md`. It does
+      not fit this job's 90-minute budget. `cargo check --benches` is **50s** and
+      covers compile errors across all 19; the three benches the job runs remain
+      the standing check on linking. Useful baseline from that run: **all 19 bench
+      targets currently link clean.**
 
 ---
 

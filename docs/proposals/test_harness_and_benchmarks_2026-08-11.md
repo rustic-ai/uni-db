@@ -831,9 +831,19 @@ bench-binary compile. This is not free.
 `crates/uni/benches/pushdown_performance.rs` has no `[[bench]]` stanza, but
 `autobenches` is not disabled in `crates/uni/Cargo.toml`, so Cargo
 auto-discovers it with the **default libtest harness** while the file calls
-`criterion_main!` — `cargo bench --bench pushdown_performance` fails, as
-recorded in `documentation_remediation_2026-08-06.md:271`. Its three functions
-have empty TODO bodies and reference no uni-db APIs. **Delete it.**
+`criterion_main!`. Its three functions have empty TODO bodies and reference no
+uni-db APIs. **Delete it.**
+
+> **Correction, 2026-08-15.** This section said `cargo bench --bench
+> pushdown_performance` *fails*, citing
+> `documentation_remediation_2026-08-06.md:271`. That citation is narrower than
+> the claim made from it: it says "*the command it prints* fails", meaning a
+> criterion-flag command that `benchmarks.md` no longer prints. Measured, the bare
+> invocation **succeeds at RC=0 reporting `0 measured; ok`** — the
+> `criterion_main!` main is dead code under libtest, so nothing conflicts and
+> libtest simply finds no `#[bench]` functions. It passes while measuring nothing,
+> which is a worse failure than the one described and cannot be caught by a build
+> check. Done 2026-08-15, along with a stanza-coverage check in `nightly.yml`.
 
 ### 7.6 Acceptance criteria
 
@@ -843,7 +853,9 @@ have empty TODO bodies and reference no uni-db APIs. **Delete it.**
 - [ ] `docs/perf/iai-baseline.json` committed; regeneration script in `scripts/`.
 - [ ] `perf-gate` fails on >5% regression, verified by a deliberate-regression PR.
 - [ ] Non-qualifying targets documented as nightly-only, with the reason.
-- [ ] `pushdown_performance.rs` resolved.
+- [x] `pushdown_performance.rs` resolved (2026-08-15) — deleted, with a
+      stanza-coverage check added to `nightly.yml` and verified against a
+      deliberate violation.
 
 ---
 
