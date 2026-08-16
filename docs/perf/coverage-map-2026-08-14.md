@@ -49,15 +49,19 @@ failures and should not read them as regressions.
 
 78.9% across a workspace this size is healthy, and the number is not the point.
 
-## The finding: two live operators that no test has ever run
+## The finding: two operators that no test has ever run
 
-Both are **planner-reachable** — this is not dead code — and both have **zero**
-executed lines:
+> **Corrected 2026-08-15.** This section originally called both operators
+> "planner-reachable". That is true of `VidLookupJoinExec` and **false** of
+> `ForeachExec` — see the correction below the table. The two are different
+> findings and were investigated separately.
 
-| file | lines | reached from |
-|---|---|---|
-| `uni-query/src/query/df_graph/vid_lookup_join.rs` | **441** | `df_planner.rs:4218` (`try_emit_vid_lookup_join`) |
-| `uni-query/src/query/df_graph/mutation_foreach.rs` | **154** | `df_planner.rs:1342` (`ForeachExec::new`) |
+Both have **zero** executed lines:
+
+| file | lines | constructed at | actually reachable? |
+|---|---|---|---|
+| `uni-query/src/query/df_graph/vid_lookup_join.rs` | **441** | `df_planner.rs:4218` (`try_emit_vid_lookup_join`) | **yes** — guarded, now fixed and measured |
+| `uni-query/src/query/df_graph/mutation_foreach.rs` | **154** | `df_planner.rs:1342` (`ForeachExec::new`) | **no** — see #176 |
 
 `VidLookupJoinExec` replaces `HashJoinExec` when the join is INNER or LEFT, the
 equi-pairs contain exactly one anchor pair on the probe-side `_vid`, and the
@@ -72,7 +76,18 @@ That is the single highest-value item this map produced. It is exactly the shape
 Phase 5 was built to catch and structurally cannot: a code path whose entry
 condition no generated case satisfies.
 
-`ForeachExec` (Cypher `FOREACH`) is the same story at 154 lines.
+`ForeachExec` (Cypher `FOREACH`) is **not** the same story, though this document
+originally said it was. It is 154 lines that no query can reach at all:
+`grep -rci foreach crates/uni-cypher/src/` returns **0** — the pest grammar has no
+`FOREACH` rule and the AST has no `Foreach` variant. `LogicalPlan::Foreach` is
+matched in sixteen places and constructed from a query in none, so the front end
+cannot produce the node the operator executes. An existing comment at
+`crates/uni/tests/common/cypher_write/set_projection_test.rs:1497` already said so
+— "(unimplemented in uni) Cypher FOREACH clause" — and is correct.
+
+That makes it a deliberate implement-or-delete decision rather than a coverage
+gap, tracked as **#176**. Zero coverage was the symptom; an absent front end was
+the cause.
 
 ## The rest, and why most of it is uninteresting
 
@@ -212,12 +227,24 @@ for the wrong reason and a negative one passes vacuously.
 Ranked by value, and deliberately short — a long list of "add tests here" is how
 a map becomes theater:
 
-1. **Cover `VidLookupJoinExec`.** Construct the query shape that triggers it and
-   assert the plan actually contains it (`EXPLAIN` substring, per the Phase-5
-   routing-assertion pattern — asserting the operator was reached, not merely
-   that the query returned rows). Then compare its results against the
-   `HashJoinExec` fallback: same query, two operators, one answer. That is a
-   differential test the existing `diff::bag_eq` already supports.
-2. **Cover `ForeachExec`** the same way.
-3. Leave the rest. Trait definitions and error enums at 0% are not a risk, and
+1. ~~**Cover `VidLookupJoinExec`.**~~ **Done** — see the follow-up section above.
+   It is covered, fixed, measured at 2.5× / 2.1×, and `Proven` in
+   `crates/uni/tests/common/plan_shape/registry.rs`.
+
+   **This item originally said to assert the operator via an `EXPLAIN` substring.
+   That was wrong**, and it contradicted this document's own follow-up section ten
+   lines earlier. `ExplainOutput.plan_text` is the *logical* plan and can never
+   name a physical operator, so a positive assertion over it fails for the wrong
+   reason and a negative one passes vacuously. Use `PROFILE`. The retrofit recipe
+   lives in `crates/uni/tests/common/plan_shape/mod.rs`.
+2. ~~**Cover `ForeachExec`** the same way.~~ **Not possible** — the clause has no
+   grammar rule or AST node, so there is no query shape to construct. Tracked as
+   **#176** as an implement-or-delete decision.
+3. **Work the silent-downgrade catalogue.** The `VidLookupJoinExec` investigation
+   found that its failure mode is not rare: a planner survey turned up **29**
+   sites where an optimization silently falls back to a result-identical path, so
+   no result-based test can tell fired from skipped. See
+   `docs/testing/silent-downgrades-2026-08-15.md` for the ranked list, and **#177**
+   for the ratchet that works through it.
+4. Leave the rest. Trait definitions and error enums at 0% are not a risk, and
    the plugin adapters are covered by a lane this run excludes.

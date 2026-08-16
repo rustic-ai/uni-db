@@ -11,6 +11,12 @@
 //!
 //! # Retrofit recipe
 //!
+//! The work-list is `docs/testing/silent-downgrades-2026-08-15.md`, which
+//! catalogues the 29 planner sites where an optimization falls back to a
+//! result-identical path. Note it also records what this module **cannot** reach:
+//! five of those sites are logical-plan rewrites that never produce a distinct
+//! physical operator name, so [`assert_plan_uses`] has nothing to match on.
+//!
 //! 1. Find a query that should emit `FooExec`, and read the guard conditions at
 //!    its construction site in `df_planner.rs` — the fixture shape is usually
 //!    load-bearing (a bare-variable projection, a `WHERE` on the probe side, or
