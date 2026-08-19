@@ -1042,15 +1042,20 @@ fn collect_plan_metrics_inner(
 
     let operator = plan.name().to_string();
 
-    let (actual_rows, time_ms) = match plan.metrics() {
+    let (actual_rows, time_ms, index_hits) = match plan.metrics() {
         Some(metrics) => {
             let rows = metrics.output_rows().unwrap_or(0);
             // elapsed_compute() returns nanoseconds
             let nanos = metrics.elapsed_compute().unwrap_or(0);
             let ms = nanos as f64 / 1_000_000.0;
-            (rows, ms)
+            // Read by name, so only the operator that registered it reports a
+            // value. Every other node keeps `None`, which is the honest answer:
+            // a projection has no index opinion, and copying a query-level total
+            // onto it would be a number that looks like data and is not.
+            let hits = metrics.sum_by_name("index_consulted").map(|v| v.as_usize());
+            (rows, ms, hits)
         }
-        None => (0, 0.0),
+        None => (0, 0.0, None),
     };
 
     out.push(OperatorStats {
@@ -1058,7 +1063,12 @@ fn collect_plan_metrics_inner(
         actual_rows,
         time_ms,
         memory_bytes: 0,
-        index_hits: None,
+        index_hits,
+        // Deliberately left unset. Lance emits no "an index was available and I
+        // chose not to use it" signal, and the tempting definition — a filter
+        // was pushed but no index was consulted — conflates that with an index
+        // served from cache and with a lookup that matched no page. A field
+        // that reads plausible and means nothing is what retired `cache_hits`.
         index_misses: None,
     });
 }

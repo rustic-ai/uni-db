@@ -291,3 +291,77 @@ async fn the_index_signal_survives_a_second_identical_query() {
          now depends entirely on cache-miss counters"
     );
 }
+
+/// `OperatorStats::index_hits` reports per operator, and only where it means
+/// something (#173).
+///
+/// The field was `Option<usize>` hardcoded to `None` at every construction
+/// site, while shipping in `PROFILE` output as though it reported something.
+/// `None` there was indistinguishable from "no index was used".
+///
+/// It is filled from a DataFusion metric that `GraphScanExec` registers by
+/// name, deliberately *not* from the query-level `index_scans`: copying one
+/// total onto every node would print the same number on a projection as on the
+/// scan that did the work — a number that looks like data and is not. So the
+/// assertion has two halves, and the second is the important one.
+#[tokio::test]
+async fn index_hits_is_attributed_to_the_scan_and_not_to_every_operator() {
+    let db = fixture().await;
+    let (_r, profile) = db.session().query_with(EQ_QUERY).profile().await.unwrap();
+
+    let scan = profile
+        .runtime_stats
+        .iter()
+        .find(|s| s.operator == "GraphScanExec")
+        .expect("no GraphScanExec in the profiled plan");
+    assert_eq!(
+        scan.index_hits,
+        Some(1),
+        "the scan that consulted the index did not report it (stats: {:?})",
+        profile.runtime_stats
+    );
+
+    // Every other operator must abstain rather than inherit the scan's number.
+    for s in profile
+        .runtime_stats
+        .iter()
+        .filter(|s| s.operator != "GraphScanExec")
+    {
+        assert_eq!(
+            s.index_hits, None,
+            "{} reported index_hits={:?}; a query-level total has leaked onto an \
+             operator that did no index work",
+            s.operator, s.index_hits
+        );
+    }
+}
+
+/// A scan that consults nothing reports `Some(0)`, not `None`.
+///
+/// The distinction is the point: `None` means "this operator has no index
+/// opinion", `Some(0)` means "this scan looked and used none". Collapsing them
+/// would put the field back where it started.
+#[tokio::test]
+async fn a_scan_without_an_index_reports_zero_rather_than_unknown() {
+    let db = fixture().await;
+    let (_r, profile) = db
+        .session()
+        .query_with("MATCH (n:Item) RETURN n.age AS a")
+        .profile()
+        .await
+        .unwrap();
+
+    let scan = profile
+        .runtime_stats
+        .iter()
+        .find(|s| s.operator == "GraphScanExec")
+        .expect("no GraphScanExec in the profiled plan");
+    assert_eq!(
+        scan.index_hits,
+        Some(0),
+        "an unfiltered scan reported {:?} instead of Some(0) — the metric is not \
+         being registered when it does not fire, so zero is indistinguishable \
+         from absent",
+        scan.index_hits
+    );
+}
