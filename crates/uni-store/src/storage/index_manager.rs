@@ -778,6 +778,78 @@ impl IndexManager {
         Ok(())
     }
 
+    /// Build any declared scalar index for `label` whose physical artifact is
+    /// missing, now that the table exists.
+    ///
+    /// [`Self::create_scalar_index`] records [`BuildOutcome::NotAttempted`] when
+    /// the label has not been flushed, because there is no Lance table to build
+    /// against. That left the deferral with nowhere to resolve: the flush path
+    /// built only the `_vid`/`_uid`/`ext_id` defaults
+    /// (`VertexDataset::ensure_default_indexes`), so an index declared before
+    /// the first insert kept a registry entry and never gained an artifact. A
+    /// user who declared an index up front silently got none, and only an
+    /// explicit `db.indexes().rebuild(label)` ever fixed it. This is the
+    /// resolution point.
+    ///
+    /// Idempotent, and cheap when there is nothing to do: the schema is
+    /// consulted first, so a label with no declared scalar index costs no
+    /// backend call at all. Only when one is declared do we list the physical
+    /// indexes and build what is absent.
+    ///
+    /// Scalar indexes only. Vector indexes are materialized by the flush-time
+    /// FDE path, and inverted/sparse are updated incrementally, so neither is
+    /// stranded the way scalar was.
+    #[cfg(feature = "lance-backend")]
+    pub async fn ensure_declared_scalar_indexes(&self, label: &str) -> Result<()> {
+        let declared: Vec<ScalarIndexConfig> = {
+            let schema = self.schema_manager.schema();
+            schema
+                .indexes
+                .iter()
+                .filter_map(|idx| match idx {
+                    IndexDefinition::Scalar(cfg) if cfg.label == label => Some(cfg.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+        if declared.is_empty() {
+            return Ok(());
+        }
+
+        let Some(backend) = self.backend.as_ref() else {
+            return Ok(());
+        };
+        let table = table_names::vertex_table_name(label);
+        if !backend.table_exists(&table).await? {
+            return Ok(());
+        }
+
+        let existing = backend.list_indexes(&table).await?;
+        // Match on the covered column set, not the index name: the physical
+        // artifact may have been created by a path that named it differently
+        // (e.g. `ensure_default_indexes` passes `None`).
+        let already_built = |props: &[String]| {
+            existing.iter().any(|idx| {
+                idx.columns.len() == props.len() && props.iter().all(|p| idx.columns.contains(p))
+            })
+        };
+
+        for config in declared {
+            if already_built(&config.properties) {
+                continue;
+            }
+            info!(
+                "Resolving deferred scalar index '{}' on '{}' at flush",
+                config.name, table
+            );
+            // Reuse the single build path so outcome-to-status mapping stays in
+            // one place; it re-registers the definition with fresh metadata.
+            self.create_scalar_index(config).await?;
+        }
+
+        Ok(())
+    }
+
     /// Build and persist a full-text search (Lance inverted) index.
     #[cfg(feature = "lance-backend")]
     #[instrument(skip(self), level = "info")]

@@ -335,3 +335,141 @@ async fn an_index_declared_before_any_flush_still_reports_online() -> Result<()>
     );
     Ok(())
 }
+
+/// A scalar index declared before the label has any data must gain a physical
+/// artifact at the first flush.
+///
+/// This is the resolution of the `NotAttempted` deferral. Before
+/// `IndexManager::ensure_declared_scalar_indexes`, nothing ever built such an
+/// index: `create_scalar_index` recorded `NotAttempted` because the Lance table
+/// did not exist yet, and the flush path built only the `_vid`/`_uid`/`ext_id`
+/// defaults. The declaration survived in the registry with no artifact behind
+/// it, and only an explicit `db.indexes().rebuild()` fixed it — so a user who
+/// declared their indexes up front, which is the natural order, silently got
+/// none.
+///
+/// `last_built_at` is the discriminator rather than `status`, because
+/// `NotAttempted` maps to `Online` (see `BuildOutcome`'s docs) and so status
+/// alone cannot tell a built index from a declared one. Asserting it is `None`
+/// *before* the flush is what makes the post-flush assertion mean something:
+/// without it, an index that had somehow been built eagerly would pass the test
+/// while proving nothing about the flush.
+#[tokio::test]
+async fn an_index_declared_before_any_data_is_built_at_the_first_flush() -> Result<()> {
+    let db = Uni::temporary().build().await?;
+
+    db.schema()
+        .label("Person")
+        .property("name", uni_db::core::schema::DataType::String)
+        .done()
+        .apply()
+        .await?;
+
+    // Declared with no rows and no table — the deferral case.
+    db.schema()
+        .label("Person")
+        .index(
+            "name",
+            uni_db::api::schema::IndexType::Scalar(uni_db::api::schema::ScalarType::BTree),
+        )
+        .apply()
+        .await?;
+
+    let before = db
+        .indexes()
+        .list(Some("Person"))
+        .into_iter()
+        .find(|i| i.name() == "idx_Person_name")
+        .expect("index not registered");
+    assert!(
+        before.metadata().last_built_at.is_none(),
+        "precondition: the index must NOT be built yet, or this test proves nothing \
+         about the flush"
+    );
+
+    let s = db.session();
+    let tx = s.tx().await?;
+    tx.query("CREATE (:Person {name: 'a'})").await?;
+    tx.commit().await?;
+    db.flush().await?;
+
+    let after = db
+        .indexes()
+        .list(Some("Person"))
+        .into_iter()
+        .find(|i| i.name() == "idx_Person_name")
+        .expect("index disappeared from the registry across a flush");
+    assert!(
+        after.metadata().last_built_at.is_some(),
+        "a scalar index declared before the table existed was never physically \
+         built: the flush resolved no deferral, so the declaration is decorative \
+         and every query on this column takes a full scan"
+    );
+    assert_eq!(after.metadata().status, IndexStatus::Online);
+
+    Ok(())
+}
+
+/// The flush-time build is idempotent: a second flush must not rebuild.
+///
+/// `ensure_declared_scalar_indexes` runs on every flush of every label, so a
+/// missing skip-if-present check would rebuild every declared index on every
+/// flush — quadratic work that would show up as a flush-latency regression
+/// rather than a failure.
+#[tokio::test]
+async fn the_flush_time_index_build_does_not_repeat() -> Result<()> {
+    let db = Uni::temporary().build().await?;
+    db.schema()
+        .label("Person")
+        .property("name", uni_db::core::schema::DataType::String)
+        .done()
+        .apply()
+        .await?;
+    db.schema()
+        .label("Person")
+        .index(
+            "name",
+            uni_db::api::schema::IndexType::Scalar(uni_db::api::schema::ScalarType::BTree),
+        )
+        .apply()
+        .await?;
+
+    let s = db.session();
+    let tx = s.tx().await?;
+    tx.query("CREATE (:Person {name: 'a'})").await?;
+    tx.commit().await?;
+    db.flush().await?;
+
+    let first = db
+        .indexes()
+        .list(Some("Person"))
+        .into_iter()
+        .find(|i| i.name() == "idx_Person_name")
+        .expect("index not registered")
+        .metadata()
+        .last_built_at;
+    assert!(first.is_some(), "precondition: first flush must build it");
+
+    let tx = s.tx().await?;
+    tx.query("CREATE (:Person {name: 'b'})").await?;
+    tx.commit().await?;
+    db.flush().await?;
+
+    let second = db
+        .indexes()
+        .list(Some("Person"))
+        .into_iter()
+        .find(|i| i.name() == "idx_Person_name")
+        .expect("index not registered")
+        .metadata()
+        .last_built_at;
+
+    assert_eq!(
+        first, second,
+        "the second flush rebuilt an index that was already present — the \
+         skip-if-present check is not working, so every flush pays for every \
+         declared index"
+    );
+
+    Ok(())
+}
