@@ -533,6 +533,9 @@ class QueryMetrics:
     cache_hits: int
     branch_scans: int
     snapshot_reads: int
+    index_scans: int
+    index_comparisons: int
+    scans_reported: int
 
 class QueryWarning:
     """A query warning emitted during execution (e.g., missing index)."""

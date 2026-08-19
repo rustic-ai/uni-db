@@ -45,6 +45,18 @@ pub struct PyQueryMetrics {
     pub branch_scans: u64,
     /// Number of reads that executed against a pinned time-travel snapshot.
     pub snapshot_reads: u64,
+    /// Number of Lance scans whose executed plan reported index work.
+    ///
+    /// Nonzero proves a scalar index was searched; zero does not prove one was
+    /// not (an index already in memory is not re-counted, and a lookup outside
+    /// every page range performs no comparisons).
+    pub index_scans: u64,
+    /// Sum of Lance's index comparisons across those scans. Presence is
+    /// meaningful; the magnitude is index-type dependent.
+    pub index_comparisons: u64,
+    /// Number of Lance scans for which the stats callback fired — the
+    /// denominator that makes `index_scans == 0` unambiguous.
+    pub scans_reported: u64,
 }
 
 #[pymethods]

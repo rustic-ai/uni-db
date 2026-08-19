@@ -695,6 +695,38 @@ mod tests {
             "the fixture's Hash index is not Online, so pushdown will not engage"
         );
 
+        // `Online` alone proves nothing: it is `IndexStatus`'s `#[default]`, and
+        // `BuildOutcome::NotAttempted` deliberately maps to it. Until the
+        // deferred-build fix, this fixture declared its index before inserting a
+        // single row, so the artifact was never created and this test passed
+        // over a registry entry with nothing behind it. `last_built_at` is set
+        // only by a real build, so it is the discriminator.
+        assert!(
+            found.metadata().last_built_at.is_some(),
+            "the fixture's Hash index was registered but never physically built, \
+             so every 'indexed' case in this oracle measures a full scan"
+        );
+
+        // And the end-to-end claim: a query of the shape the lever would use
+        // actually consults it.
+        let m = db
+            .session()
+            .query("MATCH (a:Person) WHERE a.age = 30 RETURN a.name")
+            .await?
+            .metrics()
+            .clone();
+        assert!(
+            m.scans_reported > 0,
+            "no Lance scan was reported, so this assertion measured nothing"
+        );
+        assert!(
+            m.index_scans > 0,
+            "an `=` on the fixture's indexed column consulted no index \
+             (index_scans={}, scans_reported={})",
+            m.index_scans,
+            m.scans_reported
+        );
+
         // And the plain fixture must genuinely lack it, or the two modes are
         // the same fixture wearing different names.
         let plain = build_dqp_seed_for(Fixture::TINY).await?;

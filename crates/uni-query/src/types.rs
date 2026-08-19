@@ -70,6 +70,32 @@ pub struct QueryMetrics {
     /// Counts only manifest-pinned snapshot reads, never an ordinary read-write
     /// transaction's version pin.
     pub snapshot_reads: u64,
+    /// Number of Lance scans whose *executed* plan reported index work.
+    ///
+    /// Sourced from Lance's execution-stats callback, which walks the metrics of
+    /// the plan it actually ran — so this reflects execution, never the fact
+    /// that an index was declared or that a filter was pushed.
+    ///
+    /// **Nonzero proves an index was searched; zero does not prove one was
+    /// not.** Lance's `indices_loaded` counts loads *from storage* and does not
+    /// fire for an index already in memory, and a BTree lookup whose key falls
+    /// outside every page range performs no comparisons. Two paths are also
+    /// structurally invisible: `count_rows` builds no scanner, and a scan whose
+    /// stream is dropped before it drains never reports.
+    pub index_scans: u64,
+    /// Sum of Lance's `index_comparisons` across the scans in this query.
+    ///
+    /// A work proxy whose unit depends on the index type (rows per searched
+    /// BTree leaf, bitmaps intersected, ids scored), so its presence is
+    /// meaningful and its magnitude is not.
+    pub index_comparisons: u64,
+    /// Number of Lance scans for which the execution-stats callback fired.
+    ///
+    /// The denominator for [`Self::index_scans`]. A zero there is ambiguous on
+    /// its own — no scan ran, no index was consulted, or the callback was never
+    /// wired — and this field is what separates those. Check it is nonzero
+    /// whenever you rely on `index_scans` being zero.
+    pub scans_reported: u64,
 }
 
 /// Single result row from a query.
@@ -340,13 +366,15 @@ impl QueryResult {
     ///
     /// Takes the tuple shape `Executor::take_counters` returns.
     #[doc(hidden)]
-    pub fn set_counters(&mut self, counters: (usize, usize, usize, u64, u64)) {
-        let (l0_reads, storage_reads, rows_scanned, branch_scans, snapshot_reads) = counters;
-        self.metrics.l0_reads = l0_reads;
-        self.metrics.storage_reads = storage_reads;
-        self.metrics.rows_scanned = rows_scanned;
-        self.metrics.branch_scans = branch_scans;
-        self.metrics.snapshot_reads = snapshot_reads;
+    pub fn set_counters(&mut self, counters: uni_store::CounterSnapshot) {
+        self.metrics.l0_reads = counters.l0_rows as usize;
+        self.metrics.storage_reads = counters.storage_rows as usize;
+        self.metrics.rows_scanned = counters.rows_scanned as usize;
+        self.metrics.branch_scans = counters.branch_scans;
+        self.metrics.snapshot_reads = counters.snapshot_reads;
+        self.metrics.index_scans = counters.index_scans;
+        self.metrics.index_comparisons = counters.index_comparisons;
+        self.metrics.scans_reported = counters.scans_reported;
     }
 }
 

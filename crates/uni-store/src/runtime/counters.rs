@@ -54,6 +54,9 @@ pub struct QueryCounters {
     rows_scanned: AtomicU64,
     branch_scans: AtomicU64,
     snapshot_reads: AtomicU64,
+    index_scans: AtomicU64,
+    index_comparisons: AtomicU64,
+    scans_reported: AtomicU64,
 }
 
 impl QueryCounters {
@@ -96,6 +99,27 @@ impl QueryCounters {
         self.snapshot_reads.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// Records one completed Lance scan and what its executed plan reported
+    /// about index work.
+    ///
+    /// Called from the scanner's execution-stats callback, which Lance invokes
+    /// after walking the metrics of the plan it actually ran — so this observes
+    /// execution, never configuration. `comparisons` is Lance's
+    /// `index_comparisons`; `consulted` is whether the plan reported any index
+    /// activity at all.
+    ///
+    /// Always bumps [`Self::scans_reported`], including when nothing was
+    /// consulted. That is the point: it is the denominator that makes a zero in
+    /// [`Self::index_scans`] mean something.
+    pub fn add_lance_scan(&self, consulted: bool, comparisons: usize) {
+        self.scans_reported.fetch_add(1, Ordering::Relaxed);
+        if consulted {
+            self.index_scans.fetch_add(1, Ordering::Relaxed);
+        }
+        self.index_comparisons
+            .fetch_add(comparisons as u64, Ordering::Relaxed);
+    }
+
     /// Rows served from L0.
     pub fn l0_rows(&self) -> u64 {
         self.l0_rows.load(Ordering::Relaxed)
@@ -121,6 +145,36 @@ impl QueryCounters {
         self.snapshot_reads.load(Ordering::Relaxed)
     }
 
+    /// Lance scans whose executed plan reported index work.
+    ///
+    /// **Nonzero proves an index was searched. Zero does not prove one was
+    /// not.** Lance's `indices_loaded` counts index *loads from storage* and is
+    /// documented not to fire when the index is already in memory, and a BTree
+    /// lookup whose key falls outside every page range reports zero
+    /// comparisons. Read this as a positive signal only.
+    pub fn index_scans(&self) -> u64 {
+        self.index_scans.load(Ordering::Relaxed)
+    }
+
+    /// Sum of Lance's `index_comparisons` over the scans in this query.
+    ///
+    /// A work proxy whose unit depends on the index type, so the magnitude is
+    /// never worth asserting exactly — only its presence or absence.
+    pub fn index_comparisons(&self) -> u64 {
+        self.index_comparisons.load(Ordering::Relaxed)
+    }
+
+    /// Lance scans for which the execution-stats callback fired at all.
+    ///
+    /// The anti-vacuity denominator. Without it, `index_scans == 0` is
+    /// ambiguous between *no scan ran*, *a scan consulted no index*, and *the
+    /// callback was never wired* — so a negative assertion would be satisfied
+    /// by the very regression it exists to catch. Assert this is nonzero in the
+    /// same breath as asserting `index_scans` is zero.
+    pub fn scans_reported(&self) -> u64 {
+        self.scans_reported.load(Ordering::Relaxed)
+    }
+
     /// Folds another counter set into this one.
     ///
     /// Used where a query fans out into sub-executions that each carry their own
@@ -133,6 +187,12 @@ impl QueryCounters {
             .fetch_add(other.branch_scans(), Ordering::Relaxed);
         self.snapshot_reads
             .fetch_add(other.snapshot_reads(), Ordering::Relaxed);
+        self.index_scans
+            .fetch_add(other.index_scans(), Ordering::Relaxed);
+        self.index_comparisons
+            .fetch_add(other.index_comparisons(), Ordering::Relaxed);
+        self.scans_reported
+            .fetch_add(other.scans_reported(), Ordering::Relaxed);
     }
 
     /// Resets every counter to zero, for reuse across executions.
@@ -142,7 +202,52 @@ impl QueryCounters {
         self.rows_scanned.store(0, Ordering::Relaxed);
         self.branch_scans.store(0, Ordering::Relaxed);
         self.snapshot_reads.store(0, Ordering::Relaxed);
+        self.index_scans.store(0, Ordering::Relaxed);
+        self.index_comparisons.store(0, Ordering::Relaxed);
+        self.scans_reported.store(0, Ordering::Relaxed);
     }
+
+    /// A by-value copy of every counter, for handing across a crate boundary.
+    ///
+    /// Named fields rather than a tuple deliberately: the executor snapshot
+    /// used to be a positional `(usize, usize, usize, u64, u64)` destructured
+    /// at the far end, and with eight counters that is four-plus interchangeable
+    /// `u64` slots where a mis-order type-checks and silently mis-assigns one
+    /// counter to another — a mistake invisible in review that would surface as
+    /// a product bug in whichever lever reads the wrong field.
+    pub fn snapshot(&self) -> CounterSnapshot {
+        CounterSnapshot {
+            l0_rows: self.l0_rows(),
+            storage_rows: self.storage_rows(),
+            rows_scanned: self.rows_scanned(),
+            branch_scans: self.branch_scans(),
+            snapshot_reads: self.snapshot_reads(),
+            index_scans: self.index_scans(),
+            index_comparisons: self.index_comparisons(),
+            scans_reported: self.scans_reported(),
+        }
+    }
+}
+
+/// An immutable, by-value reading of a [`QueryCounters`] set.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CounterSnapshot {
+    /// Rows served from an L0 buffer.
+    pub l0_rows: u64,
+    /// Rows served from L1 / Lance storage.
+    pub storage_rows: u64,
+    /// Rows examined by scans, before filtering and projection.
+    pub rows_scanned: u64,
+    /// Scans executed against a fork branch.
+    pub branch_scans: u64,
+    /// Reads executed against a pinned snapshot.
+    pub snapshot_reads: u64,
+    /// Lance scans whose executed plan reported index work.
+    pub index_scans: u64,
+    /// Sum of Lance's `index_comparisons` across those scans.
+    pub index_comparisons: u64,
+    /// Lance scans for which the stats callback fired at all.
+    pub scans_reported: u64,
 }
 
 #[cfg(test)]
@@ -191,5 +296,66 @@ mod tests {
         a.merge_from(&b);
         assert_eq!(a.l0_rows(), 5);
         assert_eq!(a.branch_scans(), 2);
+    }
+
+    /// A scan that consulted no index still counts as *reported*.
+    ///
+    /// That separation is the whole point of `scans_reported`: without it a zero
+    /// in `index_scans` cannot distinguish "a scan ran and used no index" from
+    /// "no scan was ever observed", and every negative assertion built on it
+    /// would be satisfied by an unwired callback.
+    #[test]
+    fn a_scan_without_an_index_still_reports() {
+        let c = QueryCounters::new();
+        c.add_lance_scan(false, 0);
+        assert_eq!(c.index_scans(), 0);
+        assert_eq!(c.scans_reported(), 1, "the scan itself must be counted");
+
+        c.add_lance_scan(true, 12);
+        assert_eq!(c.index_scans(), 1);
+        assert_eq!(c.index_comparisons(), 12);
+        assert_eq!(c.scans_reported(), 2);
+    }
+
+    /// Every field must survive `merge_from` and be cleared by `reset`.
+    ///
+    /// Adding a counter means five edits — field, adder, getter, `merge_from`,
+    /// `reset` — and nothing but this test enforces the last two. A counter
+    /// missing from `merge_from` silently under-reports whenever a query fans
+    /// out into sub-executions; one missing from `reset` leaks across reuse.
+    #[test]
+    fn every_counter_merges_and_resets() {
+        let a = QueryCounters::new();
+        let b = QueryCounters::new();
+        b.add_l0_rows(1);
+        b.add_storage_rows(2);
+        b.add_rows_scanned(3);
+        b.add_branch_scan();
+        b.add_snapshot_read();
+        b.add_lance_scan(true, 4);
+        a.merge_from(&b);
+
+        let m = a.snapshot();
+        assert_eq!(
+            m,
+            crate::runtime::counters::CounterSnapshot {
+                l0_rows: 1,
+                storage_rows: 2,
+                rows_scanned: 3,
+                branch_scans: 1,
+                snapshot_reads: 1,
+                index_scans: 1,
+                index_comparisons: 4,
+                scans_reported: 1,
+            },
+            "a counter is missing from merge_from"
+        );
+
+        a.reset();
+        assert_eq!(
+            a.snapshot(),
+            crate::runtime::counters::CounterSnapshot::default(),
+            "a counter is missing from reset"
+        );
     }
 }

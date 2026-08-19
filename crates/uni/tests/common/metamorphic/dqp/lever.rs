@@ -70,6 +70,16 @@ pub struct Witness {
     /// lever has deliberately measured it. A lever must not read it unless it
     /// produced its own sides with [`observe_cached`].
     pub plan_cache_hits: u64,
+    /// Lance scans whose executed plan reported scalar-index work.
+    ///
+    /// Carried so an index lever can witness on it. Deliberately **not** folded
+    /// into any existing lever's `activated`: index consultation is
+    /// data-dependent per generated query — only an `=`/`IN` on an indexed
+    /// column reaches the pushdown path — so adding it to the fork, pinned,
+    /// flush or plan-cache predicates would drop them from 100% activation to
+    /// whatever fraction of generated cases carries such a predicate, and fail
+    /// the run's activation floor for a reason unrelated to the lever.
+    pub index_scans: u64,
 }
 
 /// One side's result: the bag to compare, and the evidence of how it was
@@ -92,6 +102,7 @@ pub fn witness_of(r: &QueryResult) -> Witness {
         branch_scans: m.branch_scans,
         snapshot_reads: m.snapshot_reads,
         plan_cache_hits: 0,
+        index_scans: m.index_scans,
     }
 }
 

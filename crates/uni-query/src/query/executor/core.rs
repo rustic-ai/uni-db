@@ -563,15 +563,8 @@ impl Executor {
     /// Snapshot the counters into the shape `QueryMetrics` wants.
     ///
     /// Returns `(l0_reads, storage_reads, rows_scanned, branch_scans, snapshot_reads)`.
-    pub fn take_counters(&self) -> (usize, usize, usize, u64, u64) {
-        let c = &self.counters;
-        (
-            c.l0_rows() as usize,
-            c.storage_rows() as usize,
-            c.rows_scanned() as usize,
-            c.branch_scans(),
-            c.snapshot_reads(),
-        )
+    pub fn take_counters(&self) -> uni_store::CounterSnapshot {
+        self.counters.snapshot()
     }
 
     /// Take all collected warnings from the last execution, leaving the collector empty.

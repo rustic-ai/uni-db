@@ -164,6 +164,8 @@ impl LanceDbBackend {
                 .map_err(|e| anyhow!("Limit on scan of '{}': {}", request.table_name, e))?;
         }
 
+        attach_scan_stats(&mut scanner, request);
+
         let stream = scanner
             .try_into_stream()
             .await
@@ -222,6 +224,12 @@ impl LanceDbBackend {
                 .limit(Some(limit as i64), None)
                 .map_err(|e| anyhow!("Limit on branched scan failed: {}", e))?;
         }
+
+        // Counted too, and expected to report zero index consultation: the
+        // `use_scalar_index(false)` above is what makes this the negative half
+        // of the index observable. Skipping the callback here would leave that
+        // difference unobservable and the assertion unfalsifiable.
+        attach_scan_stats(&mut scanner, request);
 
         let stream = scanner.try_into_stream().await.map_err(|e| {
             anyhow!(
@@ -1197,6 +1205,32 @@ impl StorageBackend for LanceDbBackend {
             })
             .collect())
     }
+}
+
+/// Attaches Lance's execution-stats callback so a scan reports what its plan
+/// actually did with indexes.
+///
+/// Lance harvests these counts by walking the DataFusion `MetricsSet` of the
+/// plan it executed, so they are execution truth rather than a reading of what
+/// we asked for. It must be set before `try_into_stream()`, which clones the
+/// callback into the plan options; setting it afterwards is a silent no-op.
+///
+/// Deliberately used on the plain scan paths only. `indices_loaded` is summed
+/// from one shared `IndexMetrics` across scalar, vector and FTS index nodes
+/// alike, so it cannot say *which kind* was consulted. The distinction comes
+/// from the call site: a scanner that never calls `nearest()` or
+/// `full_text_search()` can only produce scalar-index nodes. Attaching this to
+/// the vector or FTS search paths would destroy that, and nothing would fail.
+fn attach_scan_stats(scanner: &mut lance::dataset::scanner::Scanner, request: &ScanRequest) {
+    let Some(counters) = request.counters.clone() else {
+        return;
+    };
+    scanner.scan_stats_callback(Arc::new(
+        move |s: &lance::dataset::scanner::ExecutionSummaryCounts| {
+            let consulted = s.indices_loaded > 0 || s.parts_loaded > 0 || s.index_comparisons > 0;
+            counters.add_lance_scan(consulted, s.index_comparisons);
+        },
+    ));
 }
 
 #[cfg(test)]

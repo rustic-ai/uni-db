@@ -79,8 +79,13 @@ async fn probe(session: &Session, cypher: &str) -> anyhow::Result<(Witness, usiz
 fn report(label: &str, name: &str, w: &Witness, rows: usize) {
     println!(
         "  {label:<8} {name:<18} rows={rows:<7} l0={:<7} storage={:<7} scanned={:<8} \
-         branch={} snapshot={}",
-        w.l0_reads, w.storage_reads, w.rows_scanned, w.branch_scans, w.snapshot_reads
+         branch={} snapshot={} index_scans={}",
+        w.l0_reads,
+        w.storage_reads,
+        w.rows_scanned,
+        w.branch_scans,
+        w.snapshot_reads,
+        w.index_scans
     );
 }
 
@@ -200,62 +205,80 @@ async fn probe_plan_cache_transition() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// **Tripwire — the index transition is still unobservable.**
+/// The index transition **is** observable, for the shape that reaches pushdown.
 ///
-/// Measured, not assumed: no counter in `QueryMetrics` moves when a scalar index
-/// is created, and the logical plan is byte-identical before and after. The one
-/// place index usage is modelled — `OperatorStats::index_hits` — is hardcoded
-/// `None` at all three construction sites (`executor/core.rs:1068,1102`), so it
-/// is a dead field behind the PROFILE path rather than a witness.
+/// This began as a tripwire asserting the opposite, and it passed — for the
+/// wrong reason. It created a **BTree** index and probed it with `age > 30`,
+/// but `build_indexed_property_pushdown` collects only Hash-indexed `=`/`IN`,
+/// so that shape hands Lance no predicate an index could serve. The probe used
+/// a query that structurally cannot consult an index, observed nothing, and
+/// concluded index usage was unobservable. A non-discriminating probe passes
+/// for free.
 ///
-/// That is why the index lever is deferred: a lever with no activation witness
-/// is the vacuous test this oracle exists to prevent.
+/// Rebuilt around a **Hash** index on `city`, which `node-filtered-str` already
+/// queries with `=`. The expectation is now per-shape, because a single
+/// whole-`Witness` comparison cannot express "one of these four must change and
+/// the other three must not" — and that asymmetry is the actual claim.
 ///
-/// **If this test fails, that is good news**, and the failure message says so.
-/// It means someone has added the observability, and the index lever is now
-/// buildable — see Phase 4B in the implementation plan. This is a reminder
-/// pinned to the fact that justified the deferral, not a regression guard.
+/// `index_scans` comes from Lance's execution-stats callback (#175), so it
+/// reports what the plan did, not what was declared.
 #[tokio::test(flavor = "multi_thread")]
-async fn index_transition_is_still_unobservable() -> anyhow::Result<()> {
+async fn index_transition_is_observable_for_hash_equality_only() -> anyhow::Result<()> {
     use uni_db::api::schema::{IndexType, ScalarType};
+
+    // Only the `=`-on-indexed-column shape may consult an index.
+    fn expects_index(name: &str) -> bool {
+        name == "node-filtered-str"
+    }
 
     let db = build_dqp_seed(Tier::Tiny).await?;
 
-    println!("\n[probe:index] side A = no index on Person.age, side B = BTree on it");
+    println!("\n[probe:index] side A = no index on Person.city, side B = Hash on it");
     let session = db.session();
     let mut before = Vec::new();
     for (name, q) in PROBE_QUERIES {
         let (w, rows) = probe(&session, q).await?;
         report("before", name, &w, rows);
+        assert_eq!(
+            w.index_scans, 0,
+            "[{name}] consulted an index before one was created"
+        );
         before.push((*name, w, rows));
     }
 
     db.schema()
         .label("Person")
-        .index("age", IndexType::Scalar(ScalarType::BTree))
+        .index("city", IndexType::Scalar(ScalarType::Hash))
         .apply()
         .await?;
     println!("  indexes now: {:?}", db.indexes().list(Some("Person")));
 
     let session = db.session();
-    for ((name, w_before, rows_before), (_, q)) in before.iter().zip(PROBE_QUERIES) {
+    for ((name, _w_before, rows_before), (_, q)) in before.iter().zip(PROBE_QUERIES) {
         let (w_after, rows_after) = probe(&session, q).await?;
         report("after", name, &w_after, rows_after);
+
         assert_eq!(
             *rows_before, rows_after,
             "[{name}] creating an index changed the row count — that is a bug, not a \
-             probe result, and it is exactly what this lever would be built to catch"
+             probe result, and it is exactly what the index lever would be built to catch"
         );
-        assert_eq!(
-            *w_before, w_after,
-            "[{name}] a counter moved across index creation.\n\
-             \n\
-             This is good news: the index transition is now observable, so the \
-             deferred index lever (Phase 4B) can be built on whichever counter \
-             changed. Delete this test when you build it.\n\
-             \n\
-             before: {w_before:?}\nafter:  {w_after:?}"
-        );
+
+        if expects_index(name) {
+            assert!(
+                w_after.index_scans > 0,
+                "[{name}] an `=` on a freshly Hash-indexed column did not consult the \
+                 index. Either the index was declared but never physically built, or \
+                 the pushdown route regressed. witness: {w_after:?}"
+            );
+        } else {
+            assert_eq!(
+                w_after.index_scans, 0,
+                "[{name}] consulted an index for a shape that cannot reach pushdown. \
+                 If a BTree/range route was added, this test's expectation table is \
+                 stale rather than wrong. witness: {w_after:?}"
+            );
+        }
     }
     Ok(())
 }
@@ -395,22 +418,28 @@ async fn probe_flush_witness_over_generated_cases() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// **Probe 3b — is the index transition even happening?**
+/// The **logical** plan never shows index selection, permanently and by design.
 ///
-/// Probe 3 showed no counter moving. That has two very different explanations
-/// and the difference decides whether an index lever is worth building:
+/// This was written as a tripwire — "if the plan text changes, the index lever
+/// has a witness" — and it can never fire, which makes it the more dangerous of
+/// the two. Index pushdown is decided in the *physical* planner
+/// (`build_indexed_property_pushdown`, attached to `GraphScanExec` as an extra
+/// Lance filter), and `ExplainOutput::plan_text` is `format!("{:#?}")` over the
+/// `LogicalPlan`. The two cannot meet. A "good news" message that is
+/// unreachable is worse than no message: it advertises a route to the witness
+/// that does not exist, and the next person to look for one will try plan text
+/// again.
 ///
-/// - the index is **built and used**, and merely unobserved — then the lever is
-///   sound and needs only instrumentation; or
-/// - the index is **registered but not used** (or not built over the pre-existing
-///   rows) — then side B is identical to side A, the transition is a no-op, and
-///   no amount of instrumentation would make the lever non-vacuous.
+/// Kept, inverted, and renamed, because the property is worth pinning. There
+/// are now three distinct reports and they should not be confused:
 ///
-/// `EXPLAIN` distinguishes them: the planner's own output says whether it chose
-/// an index path. `rebuild` is called explicitly so "the index was never built
-/// over existing rows" is eliminated as a cause rather than assumed away.
+/// | layer | what it says |
+/// |---|---|
+/// | `LogicalPlan` text | nothing about indexes — asserted here |
+/// | `ExplainOutput::index_usage` | the *planner's prediction*; `used: true` is hardcoded |
+/// | `QueryMetrics::index_scans` | what the *executed* plan did (#175) |
 #[tokio::test(flavor = "multi_thread")]
-async fn probe_index_is_actually_used() -> anyhow::Result<()> {
+async fn logical_plan_does_not_show_index_selection() -> anyhow::Result<()> {
     use uni_db::api::schema::{IndexType, ScalarType};
 
     const Q: &str = "MATCH (a:Person) WHERE a.age > 30 RETURN a.name";
@@ -449,23 +478,27 @@ async fn probe_index_is_actually_used() -> anyhow::Result<()> {
 
     assert_eq!(
         before, after_apply,
-        "the logical plan changed when the index was created. Good news — the \
-         planner now shows index selection, so the index lever has a witness. \
-         See Phase 4B."
+        "the logical plan now changes when an index is created. That is a real \
+         change in behaviour, not a new witness — index selection belongs to the \
+         physical planner, and `index_scans` is the execution-side report. \
+         Update this test deliberately rather than deleting the assertion."
     );
     assert_eq!(
         before, after_rebuild,
-        "the logical plan changed after an explicit index rebuild. Good news — \
-         see above."
+        "the logical plan changed after an explicit index rebuild — see above."
     );
 
-    // Lance may still be using the index below the plan layer — the fork lever's
-    // whole premise is that `use_scalar_index(false)` on branch scans matters.
-    // The claim here is narrow and is all the deferral needs: at the
-    // observability this repo offers, index-absent and index-present are
-    // indistinguishable, so a lever between them cannot prove it activated.
+    // The execution-side observable, on the shape this query cannot reach: a
+    // range predicate collects no hash-index column, so no filter is pushed and
+    // no index is consulted. `scans_reported` is asserted alongside so the zero
+    // means "a scan ran and used no index" rather than "nothing was measured".
     let (w, rows) = probe(&db.session(), Q).await?;
     report("rebuilt", "node-filtered-int", &w, rows);
+    assert_eq!(
+        w.index_scans, 0,
+        "a range predicate consulted an index; if a BTree route was added, the \
+         index lever's query shapes need revisiting"
+    );
     Ok(())
 }
 
