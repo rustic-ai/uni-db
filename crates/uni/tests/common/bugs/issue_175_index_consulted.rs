@@ -248,3 +248,46 @@ async fn an_unflushed_query_reports_no_lance_scan() {
         "a Lance scan was reported for a query served entirely from L0"
     );
 }
+
+/// The signal survives a repeat of the identical query.
+///
+/// This is a tripwire for a change nobody has made yet. `indices_loaded` and
+/// `parts_loaded` are cache-*miss* counters — Lance's `MetricsCollector`
+/// documents that an index already in memory must not be counted as loaded —
+/// and they fire today only because a fresh `Dataset` is opened per scan, so
+/// the cache is always cold. Introduce a dataset or index cache and both drop
+/// to zero on the second call while the index is still being used exactly as
+/// before.
+///
+/// `index_comparisons` is recorded on the search path and is indifferent to
+/// caching, which is why `attach_scan_stats` ORs it in. This test is what
+/// notices if that stops being true: if a cache lands *and* the comparison term
+/// is lost, the second run reports zero and this fails at the point of the
+/// change rather than silently zeroing an observable that other tests depend on.
+#[tokio::test]
+async fn the_index_signal_survives_a_second_identical_query() {
+    let db = fixture().await;
+    let s = db.session();
+
+    let first = s.query(EQ_QUERY).await.unwrap().metrics().clone();
+    let second = s.query(EQ_QUERY).await.unwrap().metrics().clone();
+
+    assert!(
+        first.index_scans > 0,
+        "precondition: the first run must consult the index"
+    );
+    assert!(
+        second.index_scans > 0,
+        "the second run of an identical query reported no index consultation \
+         (first={}, second={}). If a dataset/index cache was added, `indices_loaded` \
+         is now a cache-miss signal and `index_comparisons` must carry this \
+         predicate on its own — see `attach_scan_stats`.",
+        first.index_scans,
+        second.index_scans
+    );
+    assert!(
+        second.index_comparisons > 0,
+        "the cache-insensitive term reported zero on a warm run, so `index_scans` \
+         now depends entirely on cache-miss counters"
+    );
+}

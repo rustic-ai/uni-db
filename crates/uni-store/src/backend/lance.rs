@@ -1227,6 +1227,20 @@ fn attach_scan_stats(scanner: &mut lance::dataset::scanner::Scanner, request: &S
     };
     scanner.scan_stats_callback(Arc::new(
         move |s: &lance::dataset::scanner::ExecutionSummaryCounts| {
+            // Three terms, and the third is load-bearing rather than belt-and-braces.
+            //
+            // `indices_loaded` and `parts_loaded` are cache-MISS counters: Lance's
+            // `MetricsCollector` documents that `record_index_loads` "should not be
+            // called if the index is already in memory" and `record_parts_loaded`
+            // likewise for a cached shard. They fire today only because a fresh
+            // `Dataset` is opened per scan, so the cache is always cold. Add a
+            // dataset or index cache and both go to zero on a warm hit while the
+            // index is still very much being used.
+            //
+            // `index_comparisons` is recorded on the SEARCH path — "a B-tree index
+            // may make comparisons while searching for a value" — so it is
+            // indifferent to caching. It is what keeps this predicate true after
+            // such a change. Do not simplify this to `indices_loaded > 0`.
             let consulted = s.indices_loaded > 0 || s.parts_loaded > 0 || s.index_comparisons > 0;
             counters.add_lance_scan(consulted, s.index_comparisons);
         },
