@@ -29,6 +29,10 @@
 //! - [`plan_cache_lever`] — lever 4, a fresh plan vs a cached one. Listed as
 //!   Tier-1 in the plan; measured to be Tier-2, because the plan cache belongs to
 //!   the `Session` rather than the database.
+//! - [`index_lever`] — the same query with and without a scalar index on the
+//!   column it filters. Tier-1, and the only lever restricted to a single case
+//!   kind: index consultation needs an `=`/`IN` on the indexed column, which
+//!   only `CaseKind::Pushdown` guarantees.
 //! - [`seed`] — the tiered fixture builder.
 //! - [`admissibility`], [`identity`], [`counters`], [`feasibility`],
 //!   [`transition_probe`] — the preconditions. These are
@@ -37,16 +41,25 @@
 //!   which transitions are observable at all) that was an assumption until it
 //!   was measured.
 //!
-//! # Two levers are deferred, with the measurement as the reason
+//! # One lever remains deferred, with the measurement as the reason
 //!
-//! The plan called for index-absent-vs-present and pre-vs-post-compaction levers.
-//! [`transition_probe`] measured both and neither can be built today: no counter
-//! anywhere in `QueryMetrics` moves across either transition, the logical plan is
-//! byte-identical before and after an index is created, and `CompactionStats`
-//! returns hardcoded literals for every field but `duration`. A lever without an
-//! activation witness is exactly the vacuous test this oracle exists to prevent,
-//! so the honest move is to defer them until the observability exists. The probes
-//! stay as the standing evidence, and fail loudly if that changes.
+//! The plan called for index-absent-vs-present and pre-vs-post-compaction levers,
+//! and [`transition_probe`] measured that neither could be built: no counter in
+//! `QueryMetrics` moved across either transition. A lever without an activation
+//! witness is exactly the vacuous test this oracle exists to prevent, so the
+//! honest move was to defer them until the observability existed.
+//!
+//! **The index lever is now built** ([`index_lever`]). #175 supplied its witness:
+//! `QueryMetrics::index_scans` reports whether the *executed* plan consulted a
+//! scalar index, sourced from Lance's execution-stats callback. Note the probe
+//! that justified the deferral had itself been passing for the wrong reason — it
+//! created a `BTree` index and probed it with a range predicate, a shape that
+//! cannot reach pushdown at all, so it observed nothing and concluded nothing was
+//! observable. It has been rebuilt around the shape that does reach it.
+//!
+//! **Compaction stays deferred**: `CompactionStats` still returns hardcoded
+//! literals for every field but `duration` (#172). Its probe stays as the
+//! standing evidence and fails loudly if that changes.
 //!
 //! See `docs/proposals/test_harness_implementation_plan_2026-08-12.md`.
 
@@ -58,6 +71,7 @@ pub mod feasibility;
 pub mod flush_lever;
 pub mod fork_lever;
 pub mod identity;
+pub mod index_lever;
 pub mod lever;
 pub mod pinned_lever;
 pub mod plan_cache_lever;
