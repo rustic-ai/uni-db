@@ -781,7 +781,7 @@ impl IndexManager {
     /// Build any declared scalar index for `label` whose physical artifact is
     /// missing, now that the table exists.
     ///
-    /// [`Self::create_scalar_index`] records [`BuildOutcome::NotAttempted`] when
+    /// [`Self::create_scalar_index`] records `BuildOutcome::NotAttempted` when
     /// the label has not been flushed, because there is no Lance table to build
     /// against. That left the deferral with nowhere to resolve: the flush path
     /// built only the `_vid`/`_uid`/`ext_id` defaults
