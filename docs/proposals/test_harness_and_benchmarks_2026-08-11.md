@@ -2,6 +2,11 @@
 
 **Date:** 2026-08-11
 **Status:** Proposal (rev 3 — incorporates second review of 2026-08-12)
+**Implementation status:** tracked in
+`docs/proposals/test_harness_implementation_plan_2026-08-12.md`. As of
+2026-08-21: **C1 complete** (six levers plus CERT); **B1 pilot published, gate
+blocked** on cross-runner variance; **C4 four-fifths done**; C2, C3, B2, B3, B4
+not started.
 **Scope:** Correctness oracles, fault-injection, perf-regression gating, external benchmarks
 
 > **Rev 3 changes (C1 executability).** DQP fixture scale is split into three
@@ -530,26 +535,48 @@ Wiring: `pub mod dqp;` in `metamorphic/mod.rs:31-37`. **No CI changes needed** �
 
 ### 3.8 Acceptance criteria
 
-- [ ] **Phase 0 measurement done**: per-tier wall-clock and rows-scanned
-      recorded; row-budget ceilings set from the measurement (§3.5.1).
-- [ ] Witness-observability audit complete; missing counters added — including
-      the branch-scan and snapshot-path runtime counters, without which the
-      Tier-2 levers cannot ship.
-- [ ] Session context lands; plan-cache lever demonstrated to reach
-      `plan_cache_hit == true` on side B.
-- [ ] `drive_prepared` lands; Tier-2 levers (pristine fork, pinned) ship on it.
-- [ ] `drive_stateful` batch driver lands; Tier-1 levers ship on it.
-- [ ] Admissibility contract declared per lever and asserted at generation time
-      (§3.5.2).
-- [ ] VID-determinism experiment resolved and recorded; Tier 3 designed on the
-      answer.
-- [ ] Per-lever activation rate reported; run fails below 80%.
-- [ ] Row budget enforced; a run exceeding its tier ceiling fails with the
-      offending case printed.
-- [ ] Teeth reproduce the Lance `"col"` bug, #103, #135, #99 against reverted fixes.
-- [ ] `dqp_replay(seed, case_index)` repro entry point works.
-- [ ] Green at the tier matrix of §3.5.1 — 50 000 cases on the tiny fixture,
-      ≤ 500 on the large one. **Not** 50 000 cases against a 50k-vertex fixture.
+- [x] **Phase 0 measurement done** — `docs/perf/dqp-feasibility-2026-08-12.md`.
+      It **refuted the tier table above on all three rows**; the ceilings and case
+      counts in use are the measured ones, not these.
+- [x] Witness-observability audit complete; the branch-scan and snapshot-path
+      counters were added, along with `l0_reads` / `storage_reads` /
+      `rows_scanned`, which existed as fields that always read zero — a worse
+      state than absent, since a witness written against them compiles and never
+      fires.
+- [x] Session context lands; plan-cache lever activates — but via a
+      `SessionMetrics::plan_cache_hits` **delta**, not `plan_cache_hit == true`,
+      which is a write-path-only field and permanently `false` on the read path.
+      The lever is also **Tier 2, not Tier 1**: the plan cache belongs to the
+      `Session`.
+- [x] `drive_prepared` lands; both Tier-2 levers ship on it, at 100% activation.
+- [x] `drive_stateful` batch driver lands; the flush lever ships on it, and the
+      index lever joined it on 2026-08-20 once #175 supplied a witness.
+- [x] Admissibility contract declared per lever and asserted at generation time.
+      `LIMIT` is **excluded** rather than supported — no method on `Case` produces
+      a deterministic ordered-`LIMIT`, and the only sort key ties.
+- [x] VID-determinism experiment resolved: **deterministic**, including across a
+      config change — which is the stronger property Tier 3 actually needs. So
+      `identity_free_projection` was not built. **Tier 3 is nonetheless deferred,
+      on observability rather than identity**: measured over six knobs,
+      observable = 0, inert = 6.
+- [x] Per-lever activation rate reported; run fails below 80%. The floor has
+      caught two real defects — a background `auto_flush_interval` draining L0
+      mid-run (25.8%) and a flush lever whose delta wrote the wrong value domain
+      (63.6%).
+- [x] Row budget enforced, split into a per-case ceiling and a run total —
+      because enforcing it inside the case loop let proptest shrink replays trip
+      it and replace a genuine divergence report with a budget message.
+- [~] Teeth: six revert patches in `docs/testing/reverts/` with a validation
+      harness, and **one historical bug re-caught by a generated case** — the
+      Lance `"col"` fusion. #97/#103/#110 each need a distinct lever capability
+      and are itemized in the ledger; #135's naive revert damages both sides
+      equally and is therefore DQP-invisible by construction.
+- [x] `dqp_replay(seed, case_index)` works, and is tested to *not* fire one case
+      over — without that third check, a replay that panicked wherever it was
+      pointed would have looked correct.
+- [x] Green at the **measured** tier matrix: 500 cases (PR) / 10 000 (nightly) on
+      tiny, per Phase 0A. The 50 000-case figure above was refuted — 53 min at
+      p50 and 4.2 h at p95 against a 60-minute job.
 
 ---
 
@@ -668,6 +695,11 @@ infeasible. Time-box a spike against the uni-owned WAL + L0 + flush-coordinator
 path only, and decide from the spike. Do not commit to workspace-wide adoption.
 
 ### 4.6 Acceptance criteria
+
+> **Not started as of 2026-08-21.** The workspace still has the same 11
+> `fail_point!` sites this section's baseline records, none of them in
+> `fork/registry.rs`, `api/fork_admin.rs`, or any compaction path, and no
+> `abort()` harness exists.
 
 - [ ] Failpoints between every 2PC phase pair in `registry.rs`; recovery matrix
       green from each.
@@ -847,12 +879,20 @@ uni-db APIs. **Delete it.**
 
 ### 7.6 Acceptance criteria
 
-- [ ] Qualification pilot run; `docs/perf/iai-qualification.md` published with
-      per-target CV and instruction-vs-wall-clock correlation.
-- [ ] One iai target containing only qualified benches.
+- [x] Qualification pilot run; `docs/perf/iai-qualification-2026-08-12.md`
+      published. **5 of 7 qualify.** Every target has CV < 1%, so stability alone
+      would have qualified all seven — the wall-clock correlation leg is what
+      rejected the two IO-dominant ones, at a measured 2.9× and 2.0× slowdown
+      invisible to instruction count.
+- [ ] **Cross-runner variance — open, and it gates everything below.** All 20
+      runs are from one machine. `.github/workflows/perf-qualify.yml` exists to
+      close it and has never been dispatched.
+- [ ] One iai target containing only qualified benches. `hot_paths_iai.rs` exists
+      from the pilot and still carries all seven.
 - [ ] `docs/perf/iai-baseline.json` committed; regeneration script in `scripts/`.
 - [ ] `perf-gate` fails on >5% regression, verified by a deliberate-regression PR.
-- [ ] Non-qualifying targets documented as nightly-only, with the reason.
+- [x] Non-qualifying targets documented as nightly-only, with the reason
+      (§5 of the qualification doc).
 - [x] `pushdown_performance.rs` resolved (2026-08-15) — deleted, with a
       stanza-coverage check added to `nightly.yml` and verified against a
       deliberate violation.

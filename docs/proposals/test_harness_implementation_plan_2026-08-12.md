@@ -20,6 +20,68 @@ Two rules govern the whole plan:
 
 ---
 
+## Status — verified against source, 2026-08-21
+
+Track A (C1, the DQP oracle) is **complete through Phase 6, plus the half of
+Phase 4B that became buildable**. Track B (B1, the perf gate) has its pilot
+published but is **blocked on one unrun measurement**. Tracks C–E are untouched
+except for the four Phase-8 items already recorded below.
+
+| phase | item | status | evidence in-tree |
+|---|---|---|---|
+| 0A | DQP feasibility | **done** 2026-08-12 | `docs/perf/dqp-feasibility-2026-08-12.md` |
+| 1 | Runtime counters | **done** 2026-08-12 | `dqp/counters.rs`, `QueryCounters` |
+| 2 | Harness + fork lever | **done** 2026-08-12 | `dqp/{lever,driver,fork_lever}.rs` |
+| 3 | Pinned lever, admissibility, row budget | **done** 2026-08-12 | `dqp/{pinned_lever,admissibility}.rs` |
+| 4A | `drive_stateful`, flush + plan-cache levers | **done** 2026-08-12 | `dqp/{stateful,flush_lever,plan_cache_lever}.rs` |
+| **4B** | index lever | **done** 2026-08-20 — unblocked by #175 | `dqp/index_lever.rs` |
+| **4B** | compaction lever | **still deferred** — but on a new reason: #172 is fixed, the witness gap is not | `dqp/transition_probe.rs` |
+| 5 | Generator widening, `EXPLAIN`, teeth | **done** 2026-08-13 | `docs/testing/teeth-2026-08-13.md`, 6 revert patches |
+| 6 | CERT, ANN law, Tier-3 answer | **done** 2026-08-13 | `dqp/{cert,tier3_probe,vid_determinism}.rs` |
+| 0B | iai qualification pilot | **done, one leg open** | `docs/perf/iai-qualification-2026-08-12.md` §4 |
+| 7 | Perf gate rollout | **not started** — cleanup only | no `perf-gate` job, no `iai-baseline.json` |
+| 8 | C4 cheap wins | **4 of 5 done** | see the phase's own progress list |
+| 9–13 | C2 / B2 / C3 / B3 / B4 | **not started** | 11 `fail_point!` sites, unchanged since Phase 0 |
+
+**Five levers now ship** — fork, pinned, flush, plan-cache, index — plus CERT as
+an additional law over the same drivers, across **8 smoke tests** in the PR lane
+and **10 soaks** in the nightly `dqp` job.
+
+### What the last ten days changed, that the phases below do not yet say
+
+1. **Phase 4B is half-closed.** The index lever landed on 2026-08-20 at 100%
+   activation. It did not become buildable by trying harder; it became buildable
+   because `QueryMetrics::index_scans` was added (#175, `4ed90d906`) from Lance
+   7.0.0's `Scanner::scan_stats_callback`, which reports what the executed plan
+   consulted rather than what the planner predicted. The tripwire test that
+   justified the deferral is what signalled the unblock.
+2. **The oracle's observability work found three product defects**, none of them
+   in test code: a failed physical index build reported itself `Online`
+   (`1ead21741`), declared scalar indexes were not built at the flush that
+   creates the table (`a2876e37a`), and `OperatorStats::index_hits` shipped in
+   `PROFILE` output hardcoded to `None` (`61bbc78a0`).
+3. **Phase 8's coverage map produced follow-through the plan never scheduled**:
+   `VidLookupJoinExec` was made reachable and three defects it had been hiding
+   were fixed (`76789a0ee`), with an operator-reachability test to keep it that
+   way (`ebbc2c114`), and the 29 silent-downgrade sites in the planner are now
+   catalogued (`docs/testing/silent-downgrades-2026-08-15.md`).
+4. **Phase 7 is gated on a workflow that exists and has never been run.**
+   `perf-qualify.yml` is dispatch-only; until it produces cross-runner CV
+   figures there is no defensible threshold, so the 5%/2% numbers below remain
+   the pilot's recommendation rather than a measured gate.
+
+### Open, in the order they unblock things
+
+| # | item | blocks |
+|---|---|---|
+| 1 | Run `Perf Qualify (cross-runner iai)` and replace §4 of the qualification doc with its table | all of Phase 7 |
+| 2 | ~~Give `CompactionStats` real numbers~~ **DONE 2026-08-21** (#172) — did *not* unblock the lever; see below | Phase 10's compaction matrix |
+| 3 | Re-measure the nightly `dqp` job and add `index_pushdown_soak` | the index lever is smoke-only today |
+| 4 | Wire the miri lane measured in Phase 8 into CI | nothing; it is measured and unshipped |
+| 5 | Phase 8 item 5 — Hypothesis `RuleBasedStateMachine` for the bindings | closes C4 |
+
+---
+
 ## 0. Corrections to the proposal found while planning
 
 Three details in the proposal are wrong or under-specified against live source.
@@ -586,9 +648,11 @@ filter matched 8 DQP tests, the new one matches 0.
 
 - [x] ~~All four~~ **Both witnessable** Tier-1 levers green, each with ≥80%
       activation — `flush_smoke` and `plan_cache_smoke` at **100%**. The index and
-      compaction levers are deferred to 4B with the measurement above as the
+      compaction levers were deferred to 4B with the measurement above as the
       reason; the original criterion was not achievable, and the probes that show
-      why now run in the suite.
+      why now run in the suite. **Update 2026-08-20: the index lever has since
+      shipped** at 100% activation, once #175 supplied its witness — see the
+      rewritten 4B section. Compaction is still deferred.
 - [x] `dqp_replay` reproduces a deliberately injected failure from its printed
       seed alone — `a_failure_reproduces_from_its_printed_coordinates`, which also
       asserts it does *not* fire one case over.
@@ -597,17 +661,100 @@ filter matched 8 DQP tests, the new one matches 0.
       which Phase 0A showed is a write-path-only field and permanently `false` on
       the read path.
 
-### Phase 4B — deferred, and what unblocks it
+### Phase 4B — **half shipped, 2026-08-20**; half still deferred
 
-Not scheduled. Each needs observability that does not exist today:
+Both halves were deferred on the same reason — no witness existed — and the
+tripwire tests were written to fail the moment one appeared. One did.
 
-1. A scan-level counter recording whether a scalar index was consulted, in
-   `uni-store`'s Lance scan path — enough to witness index-absent vs
-   index-present.
-2. `CompactionStats` reporting real numbers, which is worth doing regardless of
-   whether the lever follows.
+#### Index absent-vs-present — **shipped** (`dqp/index_lever.rs`)
 
-The tripwire tests fail the moment either lands.
+The unblock was not persistence, it was a new observable. `4ed90d906` (#175)
+added `QueryMetrics::index_scans` from Lance 7.0.0's
+`Scanner::scan_stats_callback`, which harvests the metrics of the plan that
+**executed** — so, unlike `ExplainOutput::index_usage` (whose `used: true` is
+hardcoded) or the `assert!(rows <= 1)` in the #57 tests (satisfied by the
+in-process `extra_runtime_filter` regardless of what Lance did), it reports
+execution rather than prediction. `Witness::index_scans` was added in that same
+change for this lever.
+
+Measured: **500/500 cases activated (100.0%)**, 28.0 s, zero bag divergences —
+which is the expected result, since an index changes how rows are found and
+never which. The activation rate is the number that matters here.
+
+Three things about it are worth carrying forward:
+
+- **`scans_reported` is the load-bearing counter, not `index_scans`.** Without a
+  denominator, `index_scans == 0` is ambiguous between "no scan ran", "a scan
+  consulted nothing", and "the callback was never wired" — so every negative
+  assertion would be satisfied by the exact regression it exists to catch.
+- **The lever is restricted to `CaseKind::Pushdown`, and the restriction is
+  load-bearing rather than tidy.** A scalar index is consulted only for an
+  `=`/`IN` on a Hash-indexed column. Measured over the generator's kinds, the
+  fraction of cases that can consult one is ~7% for `Plain` and ~22% for the
+  selective variants — both below the 80% floor. A `Plain` variant would fail
+  its floor for a reason having nothing to do with indexing, so it is
+  deliberately not registered.
+- **The spike ran before any lever code was written**, so a 0% activation result
+  could not be mistaken for a broken lever, witness, or fixture — four
+  explanations, one symptom. It also produced the first evidence that
+  `Fixture::TINY_INDEXED` had ever had a physical index: 1 000 rows scanned down
+  to 103. It had been named "indexed" without being one, which is what
+  `a2876e37a` fixed.
+
+**Outstanding on this lever: there is no soak.** The nightly `dqp` job runs ten
+concurrent soaks in a 60-minute budget, last measured at 29.9 minutes; an
+eleventh needs that re-measured rather than assumed, per the workflow's own
+comment. Tracked as open item 3 in the status table above.
+
+#### Pre-vs-post compaction — **still deferred, on a corrected reason** (2026-08-21)
+
+`CompactionStats` is now honest (#172): `tables_optimized`, `fragments_removed`,
+`fragments_added`, `files_removed`, `files_added` and `bytes_reclaimed` are all
+measured, `bytes_before`/`bytes_after` are gone, and both tripwires below have
+been flipped into positive assertions.
+
+**That did not unblock the lever, and the reason is structural rather than
+temporary.** `activated` takes two `Witness`es, which are per-*query*;
+`CompactionStats` is per-*run*. A run-level number cannot feed a per-query
+predicate, and `check_invariants` — the only run-level hook — returns `Err`
+("reject the run"), not "this case activated". So the correct place for
+`CompactionStats` in a future lever is as a run *precondition* (did the
+transition actually merge anything?), never as the activation signal.
+
+What would unblock it is unchanged and unmet: a per-query counter that moves
+across a compaction. The candidate is `iops`/`requests` from Lance's
+`ExecutionSummaryCounts`, which the scan-stats callback already receives and
+discards. Measuring that is Phase 4B's remaining work.
+
+**Two findings from doing it, both worth carrying:**
+
+1. **Compaction runs one flush behind.** The pass immediately after a flush
+   reports no work; a second pass immediately after — with nothing happening in
+   between, so it is not time-based — merges. Reproduced on every round:
+   `compact#1: removed=0` then `compact#2: removed=2 added=1`. Pre-existing, and
+   invisible for as long as the counts were literals. Tests now assert a
+   fixpoint (two consecutive quiet passes) rather than single-pass completeness.
+   Not chased further; it is a separate defect from the reporting one.
+2. **A test that had never tested anything.** `compaction_granular_test.rs`
+   asserted `files_compacted == 1` under a comment reading "we expect compaction
+   to run because we have 2 fragments". The hardcoded literal satisfied it
+   whether or not anything merged — which is precisely how finding 1 stayed
+   hidden.
+
+#### The original deferral, for the record
+
+Re-verified 2026-08-21 and unchanged: `CompactionStats` still reports
+`bytes_before: 0`, `bytes_after: 0` and `crdt_merges: 0` at every construction
+site in `uni-store/src/storage/manager.rs`, and `compact_label` still returns a
+literal `files_compacted: 1` (`:877`). Where `files_compacted` is computed at all
+(`:856`, `:901`, `:1144`) it counts **tables optimized**, not files merged — so
+even the one non-constant field does not mean what its name says. Only `duration`
+is real.
+
+This remains a user-facing defect worth its own ticket independent of the oracle:
+`db.compaction().compact(...)` returns a struct whose every field but `duration`
+is a constant or a mislabelled count. The tripwire in `dqp/transition_probe.rs`
+still asserts the unobservability, so the deferral cannot quietly become false.
 
 ---
 
@@ -858,12 +1005,39 @@ Priors, to be confirmed or refuted:
 | L0 → L1 flush | IO-dominant — expect **does not** qualify |
 | HNSW top-10 search | cache-dominant — pilot decides |
 
+### Results — **published 2026-08-12; one leg open**
+
+`docs/perf/iai-qualification-2026-08-12.md`. **5 of 7 targets qualify**;
+`transaction_commit_wal_on` and `l0_to_l1_flush` are rejected as IO-sensitive —
+the priors held on all five predicted targets, and both "pilot decides" targets
+(`property_read_across_l0_l1`, `hnsw_top10_search`) qualified. Five clears the
+stop-the-chain threshold of three.
+
+Both halves of the qualification were necessary and the rejection proves it:
+every target has CV < 1% (0.21–0.96%), so **stability alone would have qualified
+all seven** — including the two whose measured 2.9× and 2.0× IO-driven slowdowns
+are invisible to an instruction count.
+
+Three defects were found before any number was trusted, the sharpest being that
+`strip = "symbols"` makes iai-callgrind collect **zero instructions while
+reporting success** — a silent-zero of exactly the kind this plan's §0 rules
+exist to catch.
+
 ### Exit criteria
 
-- [ ] `docs/perf/iai-qualification.md` published with per-target CV and
+- [x] `docs/perf/iai-qualification-2026-08-12.md` published with per-target CV and
       instruction-vs-wall-clock correlation.
-- [ ] Qualified set = targets with CV < 1% **and** demonstrated correlation.
-- [ ] Non-qualifying targets documented as nightly-only with the reason.
+- [x] Qualified set chosen on CV < 1% **and** demonstrated correlation — five
+      targets.
+- [x] Non-qualifying targets documented as nightly-only with the reason.
+- [ ] **Cross-runner variance — UNRESOLVED, and it gates Phase 7.** All 20 runs
+      came from **one machine**, so the CV figures characterize run-to-run
+      variance on fixed hardware and say nothing about the machine-to-machine
+      spread a PR gate actually experiences. The mechanism to close it exists —
+      `.github/workflows/perf-qualify.yml`, 5 runners × 5 runs, aggregated by
+      `scripts/perf/iai_cross_runner.py` — and is **dispatch-only and has never
+      been run**. The threshold in Phase 7 must be set from that figure, not
+      from the 0.21–0.96% measured here.
 
 ### Stops the chain if
 
@@ -874,6 +1048,15 @@ report and the decision recorded.
 ---
 
 ## Phase 7 — Perf gate rollout
+
+> **Status 2026-08-21: not started, and correctly so.** Only task 5 (the bench
+> cleanup) has landed. `crates/uni/benches/hot_paths_iai.rs` exists from the 0B
+> pilot, but there is no `perf-gate` job in `pr.yml`, no
+> `docs/perf/iai-baseline.json`, and no regeneration script. **The blocker is
+> Phase 0B's open leg**, not effort: until `perf-qualify.yml` has been dispatched
+> and its cross-runner CV computed, the 5%/2% thresholds below are the pilot's
+> recommendation rather than a measured gate, and setting a gate from
+> single-machine variance is the mistake §7.1 of the proposal exists to prevent.
 
 ### Tasks
 
@@ -976,7 +1159,34 @@ dependency on tracks A/B.
   `uni-common --skip muvera` ≈ **31 s total**, affordable in the PR lane;
   `uni-crdt` nightly; `muvera` excluded outright with this measurement as the
   reason.
-- [ ] 5. Hypothesis `RuleBasedStateMachine` — not started.
+- [ ] 5. Hypothesis `RuleBasedStateMachine` — **still not started** (re-verified
+      2026-08-21: no `hypothesis` import anywhere under `bindings/`). This is the
+      only one of the five outstanding.
+
+**The miri lane is measured but unshipped.** The costs below decided its shape,
+but no miri step exists in any workflow. Wiring `uni-btic` +
+`uni-sparse-vector` + `uni-common --skip muvera` (~31 s) into `pr.yml` and
+`uni-crdt` into `nightly.yml` is a small, already-designed piece of work.
+
+### Follow-through the coverage map produced — 2026-08-14 → 08-16
+
+The map was specified as a deliverable and nothing more, but its two
+zero-coverage planner-reachable operators turned into real work that belongs in
+this record:
+
+- **`VidLookupJoinExec` was made reachable, and three defects it had been hiding
+  were fixed** (`76789a0ee`). It had been inert since April 2026 because its own
+  guard demanded `UInt64` while Cypher properties arrive as `Int64` — so the
+  query written to exercise it never fired it. Once fixed: **2.5× / 2.1×**, and
+  one of the three defects produced silently wrong rows. "Never ran" is not the
+  same as "not worth running".
+- **An operator-reachability test** now proves which physical operators actually
+  execute, rather than which ones the planner can name (`ebbc2c114`).
+- **The 29 silent-downgrade sites in the planner are catalogued** —
+  `docs/testing/silent-downgrades-2026-08-15.md` (`a1b57f366`). This is the
+  same defect class as the `PROFILE` field hardcoded to `None` and the bench
+  that reported "ok" while measuring nothing: code that succeeds while doing
+  less than it claims.
 
 **What the first-ever supply-chain run found.** There was no gate at all, and
 the default check reported **24 advisories, 10 of them vulnerabilities or
@@ -1056,6 +1266,13 @@ Original item list:
 
 ## Phase 9 — C2 fork 2PC failpoints
 
+> **Status 2026-08-21: not started.** Verified rather than assumed — the
+> workspace still has exactly **11 `fail_point!` sites**, the same count this
+> phase's baseline records, and the only one anywhere in the fork create/drop
+> span is still `nested_fork_before_branch` (`uni/src/api/fork.rs:567`).
+> `crates/uni-store/src/fork/registry.rs` and
+> `crates/uni/src/api/fork_admin.rs` contain none.
+
 **Baseline, stated so it is not re-litigated:** the repo already ships fail-rs
 with a `failpoints` feature and 11 `fail_point!` sites, plus crash/reopen suites
 across commit, flush, WAL, index and fork recovery. This phase adds failpoints to
@@ -1088,6 +1305,14 @@ branch-delete loop so a partially-deleted fork is reachable.
 ---
 
 ## Phase 10 — C2 compaction matrices and the abort harness
+
+> **Status 2026-08-21: not started.** No `fail_point!` exists in
+> `storage/manager.rs` or `backend/lance.rs`; no `std::process::abort()` appears
+> anywhere in `crates/`; `madsim` is in no manifest. Note the dependency the
+> plan does not state: the semantic-compaction matrix asserts "no row loss across
+> a `max_l1_runs` merge", and the observable it would naturally assert against —
+> `CompactionStats` — is the same set of hardcoded zeros that keeps the Phase-4B
+> compaction lever deferred. Fixing that once unblocks both.
 
 ### Tasks
 
@@ -1129,6 +1354,8 @@ branch-delete loop so a partially-deleted fork is reachable.
 
 ## Phase 11 — B2 LDBC SNB
 
+> **Status 2026-08-21: not started.** No `crates/uni/benches/ldbc/`.
+
 Path deliberately avoids the Java/Spark toolchain: generate SF0.1 and SF1 once
 offline; commit the SF0.1 CSVs; store SF1 in S3 with a checked-in manifest and
 checksum; write a Rust loader in `crates/uni/benches/ldbc/`; implement the 14
@@ -1146,6 +1373,9 @@ for formally audited results.
 ---
 
 ## Phase 12 — C3 Elle and B3 vector/retrieval quality
+
+> **Status 2026-08-21: not started.** No history-generating driver, no
+> `setup-java` step in any workflow, no SIFT-1M or BEIR harness.
 
 ### C3 Elle
 
@@ -1178,6 +1408,11 @@ for formally audited results.
 ---
 
 ## Phase 13 — B4 contention curves and consolidation
+
+> **Status 2026-08-21: not started.** `crates/uni/benches/ssi_contention.rs`
+> remains in its pre-plan shape. `docs/perf/` now holds four documents
+> (build baseline, DQP feasibility, iai qualification, coverage map) with no
+> index over them.
 
 Formalize `ssi_contention.rs` as throughput and abort-rate vs contention,
 sweeping Zipf θ and thread count — a single number hides the shape change from
