@@ -1754,7 +1754,7 @@ VACUUM
 ```cypher
 // Trigger storage compaction
 CALL uni.admin.compact()
-YIELD files_compacted, bytes_before, bytes_after, duration_ms
+YIELD tables_optimized, fragments_removed, fragments_added, bytes_reclaimed, duration_ms
 
 // Check compaction status
 CALL uni.admin.compactionStatus()
