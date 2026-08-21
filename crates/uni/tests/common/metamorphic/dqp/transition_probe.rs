@@ -41,9 +41,10 @@
 use std::collections::HashMap;
 
 use uni_db::{Session, Uni, Value, unival};
+use uni_store::compaction::CompactionStats;
 
 use super::lever::{Witness, witness_of};
-use super::seed::{Tier, build_dqp_seed};
+use super::seed::{Fixture, Tier, build_dqp_seed, build_dqp_seed_tuned};
 
 /// Queries every probe runs, chosen to span the shapes the generator emits: an
 /// unfiltered node scan, a filtered node scan on an indexable Int property, a
@@ -110,6 +111,56 @@ async fn insert_l0_delta(db: &Uni, n: usize) -> anyhow::Result<()> {
     tx.bulk_insert_vertices("Person", rows).await?;
     tx.commit().await?;
     Ok(())
+}
+
+/// Compacts `label` until a pass reports no work, returning that final pass.
+///
+/// A single `compact` is not guaranteed to merge everything: the planner groups
+/// fragments into bins and can leave some behind, so "already compacted" is a
+/// fixed point rather than a one-call property. Bounded so a planner that never
+/// converges fails loudly instead of hanging.
+async fn compact_until_converged(db: &Uni, label: &str) -> anyhow::Result<CompactionStats> {
+    Ok(compact_to_fixpoint(db, label).await?.1)
+}
+
+/// Compacts to a fixpoint, returning `(total fragments removed, the final pass)`.
+///
+/// **A single `compact` is not enough, and measurably so.** After an insert and
+/// a flush, the first compaction reports no work and a second one immediately
+/// after merges two fragments into one — with nothing happening in between, so
+/// the lag is not time-based. It reproduces on every round:
+///
+/// ```text
+/// round 0 AFTER-insert compact#1: removed=0 added=0
+/// round 0 AFTER-insert compact#2: removed=2 added=1
+/// ```
+///
+/// So compaction runs one flush behind. That is a pre-existing behaviour this
+/// test cannot fix and did not cause — it was simply invisible while
+/// `CompactionStats` returned literals. Tests here assert the fixpoint, which is
+/// deterministic, rather than single-pass completeness, which is not.
+async fn compact_to_fixpoint(db: &Uni, label: &str) -> anyhow::Result<(usize, CompactionStats)> {
+    let mut total_removed = 0;
+    let mut quiet = 0;
+    let mut last = CompactionStats::default();
+    for _ in 0..10 {
+        last = db.compaction().compact(label).await?;
+        db.compaction().wait().await?;
+        if last.fragments_removed == 0 {
+            // Two consecutive quiet passes, not one. Because of the one-flush
+            // lag above, the pass immediately after a flush always reports zero
+            // — stopping there would return before any merge had happened and
+            // report a converged, untouched table.
+            quiet += 1;
+            if quiet == 2 {
+                return Ok((total_removed, last));
+            }
+        } else {
+            quiet = 0;
+            total_removed += last.fragments_removed;
+        }
+    }
+    anyhow::bail!("compaction of '{label}' did not converge in 10 passes; last={last:?}")
 }
 
 /// **Probe 1 — flush.** Does an unflushed delta show up as `l0_reads`, and does
@@ -283,28 +334,26 @@ async fn index_transition_is_observable_for_hash_equality_only() -> anyhow::Resu
     Ok(())
 }
 
-/// **Tripwire — the compaction transition is still unobservable.**
+/// **Compaction is observable at run level, and only there.**
 ///
-/// The hardest of the four, and the only one with *two* problems. After
-/// compaction the read path is identical — same operators, same tier, same rows
-/// — and no per-query counter moves.
+/// This was a tripwire asserting the placeholder — `files_compacted: 1,
+/// bytes_before: 0, bytes_after: 0` — and it has now fired. #172 made
+/// `CompactionStats` report measured work, so the run-level half of the
+/// deferral has expired and this test asserts the measurement instead.
 ///
-/// The run-level observable that should have rescued it does not: `compact_label`
-/// returns a **hardcoded literal** (`uni-store/src/storage/manager.rs:876`) with
-/// `files_compacted: 1` regardless of what was merged and `bytes_before` /
-/// `bytes_after` at `0`, which every one of the six construction sites in that
-/// file also does. Only `duration` is real. Compaction genuinely runs —
-/// `optimize_table` is called — but nothing anywhere reports what it did.
+/// The *lever* half has not. `Witness` is per-query (`lever.rs:48-83`) and
+/// `CompactionStats` is per-run, so run-level honesty cannot feed
+/// `activated(&Witness, &Witness)`. The second half below is still a tripwire:
+/// no per-query counter moves across compaction, and if one ever does, the
+/// compaction lever becomes buildable.
 ///
-/// So the compaction lever is deferred, and separately: a user calling
-/// `db.compaction().compact(...)` gets back a struct whose every field but
-/// `duration` is a constant. That is worth fixing on its own merits.
-///
-/// **If this test fails, that is good news** — see
-/// [`index_transition_is_still_unobservable`].
+/// Background compaction is disabled for the fixture. The loop fires at
+/// `l1_runs >= 8` on a 10 s tick, and a merge behind this test's back would
+/// leave `fragments_removed` at zero on what should be a real compaction — and
+/// `compact_label` would additionally contend for the `CompactionGuard`.
 #[tokio::test(flavor = "multi_thread")]
-async fn compaction_transition_is_still_unobservable() -> anyhow::Result<()> {
-    let db = build_dqp_seed(Tier::Tiny).await?;
+async fn compaction_is_observable_at_run_level_only() -> anyhow::Result<()> {
+    let db = build_dqp_seed_tuned(Fixture::TINY, 0, |c| c.compaction.enabled = false).await?;
     // Several small flushed batches, so there is something to compact.
     for _ in 0..4 {
         insert_l0_delta(&db, 100).await?;
@@ -320,15 +369,68 @@ async fn compaction_transition_is_still_unobservable() -> anyhow::Result<()> {
         before.push((*name, w, rows));
     }
 
-    let stats = db.compaction().compact("Person").await?;
+    let real = db.compaction().compact("Person").await?;
     db.compaction().wait().await?;
-    println!("  CompactionStats: {stats:?}");
+    println!("  real:  {real:?}");
+
+    // `compact_label` visits exactly the Person vertex table.
+    assert_eq!(real.tables_optimized, 1);
+    // The merge happened. `>= 2`, not an exact count: fragments-per-flush is an
+    // implementation detail, not a contract.
+    assert!(
+        real.fragments_removed >= 2,
+        "no fragments were merged — either the fixture did not accumulate them \
+         or a background compaction beat this call. stats: {real:?}"
+    );
+    assert!(
+        real.fragments_added >= 1 && real.fragments_added < real.fragments_removed,
+        "compaction did not reduce the fragment count: {real:?}"
+    );
     assert_eq!(
-        (stats.files_compacted, stats.bytes_before, stats.bytes_after),
-        (1, 0, 0),
-        "CompactionStats now reports something other than its placeholder \
-         literals. Good news — compaction has a run-level observable, so the \
-         deferred compaction lever (Phase 4B) may be buildable. Got: {stats:?}"
+        real.files_added, real.fragments_added,
+        "files_added is documented as equal to fragments added: {real:?}"
+    );
+    assert!(
+        real.files_removed >= real.fragments_removed,
+        "files_removed also counts deletion files, so it can exceed but never \
+         trail fragments_removed: {real:?}"
+    );
+    assert!(real.duration > std::time::Duration::ZERO);
+    // A documented zero, not a placeholder: version pruning only reclaims past
+    // the retention window, and this fixture is seconds old.
+    assert_eq!(real.bytes_reclaimed, 0);
+    // compact_label runs no semantic pass, so crdt_merges is not measured here
+    // — which is exactly what semantic_passes == 0 says.
+    assert_eq!((real.semantic_passes, real.crdt_merges), (0, 0));
+
+    // The discrimination: compact until it converges, then once more. The
+    // converged call must report no work while still reporting the table as
+    // visited.
+    //
+    // One pass is not enough, and that is a property of the planner rather than
+    // a flake: it groups fragments into bins and can leave some unmerged, so
+    // five fragments went 4 -> 1 above and left two behind. Convergence is what
+    // is deterministic here, not single-pass completeness.
+    let noop = compact_until_converged(&db, "Person").await?;
+    println!("  no-op: {noop:?}");
+    assert_eq!(
+        (
+            noop.fragments_removed,
+            noop.fragments_added,
+            noop.files_removed,
+            noop.files_added
+        ),
+        (0, 0, 0, 0),
+        "a compaction over an already-merged table reported work. Either the \
+         fixture left deletion files, which make a lone fragment compact \
+         itself, or these numbers are not coming from the storage layer: {noop:?}"
+    );
+    // Deliberately still 1: the table was visited. This is the denominator, not
+    // a discriminator — do not "fix" it to 0.
+    assert_eq!(noop.tables_optimized, 1);
+    assert_ne!(
+        real.fragments_removed, noop.fragments_removed,
+        "a real compaction and a no-op report identically"
     );
 
     let session = db.session();
@@ -341,8 +443,10 @@ async fn compaction_transition_is_still_unobservable() -> anyhow::Result<()> {
         );
         assert_eq!(
             *w_before, w_after,
-            "[{name}] a counter moved across compaction. Good news — see \
-             `index_transition_is_still_unobservable`.\n\
+            "[{name}] a per-query counter moved across compaction. Good news — \
+             the compaction lever (Phase 4B) may now be buildable. `Witness` is \
+             per-query and `CompactionStats` is per-run, so #172 did not unblock \
+             it; a moving counter here would.\n\
              before: {w_before:?}\nafter:  {w_after:?}"
         );
     }
@@ -502,41 +606,71 @@ async fn logical_plan_does_not_show_index_selection() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// **Probe 4b — is the compaction transition even happening?**
+/// **Is the compaction transition even happening?** Now answerable.
 ///
-/// Probe 4 reported `files_compacted: 1, bytes_before: 0, bytes_after: 0` after
-/// five deliberately separate flushes. Either the fragments were already merged
-/// before `compact` ran, or `compact` did nothing, or `CompactionStats` does not
-/// report what its field names suggest. A lever built on a transition that does
-/// not fire is vacuous no matter how good its witness is, so this is the more
-/// fundamental of the two questions.
+/// This asked a question the old `CompactionStats` could not answer: five
+/// deliberately separate flushes reported `files_compacted: 1, bytes_before: 0,
+/// bytes_after: 0`, and nothing distinguished "the fragments were already
+/// merged" from "compact did nothing" from "the struct does not report what its
+/// field names suggest". It was the third.
+///
+/// With #172 fixed the answer is measurable, so this asserts it: every round
+/// merges, and a re-compact with no writes in between merges nothing. That pair
+/// is the real-vs-no-op distinction a compaction lever would need at run level.
+///
+/// The distinction is deterministic rather than timing-dependent. Lance treats
+/// any fragment under `target_rows_per_fragment` (1 M by default) as a
+/// compaction candidate, but skips a bin holding exactly one such fragment — so
+/// two small fragments always merge, and the single fragment left behind always
+/// plans empty.
 #[tokio::test(flavor = "multi_thread")]
 async fn probe_compaction_actually_compacts() -> anyhow::Result<()> {
-    let db = build_dqp_seed(Tier::Tiny).await?;
+    // Background compaction off, and every write below is an append: a delete
+    // would leave a deletion file, which makes a lone fragment compact *itself*
+    // and destroys the no-op half of this test.
+    let db = build_dqp_seed_tuned(Fixture::TINY, 0, |c| c.compaction.enabled = false).await?;
 
     println!("\n[probe:compaction-real] one compaction per added fragment");
+    let mut grand_total = 0;
     for round in 0..5 {
         insert_l0_delta(&db, 100).await?;
         db.flush().await?;
-        let stats = db.compaction().compact("Person").await?;
-        println!("  round {round}: {stats:?}");
-        assert_eq!(
-            (stats.files_compacted, stats.bytes_before, stats.bytes_after),
-            (1, 0, 0),
-            "round {round} reported real numbers. Good news — see \
-             `compaction_transition_is_still_unobservable`."
+        // To a fixpoint, not one pass — see `compact_to_fixpoint` for why, and
+        // for the measurement that established it.
+        let (removed, final_pass) = compact_to_fixpoint(&db, "Person").await?;
+        println!("  round {round}: merged {removed} fragments, settled at {final_pass:?}");
+        assert!(
+            removed >= 2,
+            "round {round} merged nothing across every pass. The flush added a \
+             fragment to the one left by the previous round, so there was a pair \
+             to merge. removed={removed}, final={final_pass:?}"
         );
+        grand_total += removed;
     }
+    assert!(
+        grand_total >= 10,
+        "five rounds that each merge a pair must remove at least ten fragments; \
+         got {grand_total}"
+    );
 
     // And once more with everything already compacted, so a no-op has something
-    // to be compared against.
-    let again = db.compaction().compact("Person").await?;
-    println!("  immediate re-compact (expected no-op): {again:?}");
+    // to be compared against. Converge first: one pass need not merge every bin.
+    let again = compact_until_converged(&db, "Person").await?;
+    println!("  converged re-compact (expected no-op): {again:?}");
     assert_eq!(
-        (again.files_compacted, again.bytes_before, again.bytes_after),
-        (1, 0, 0),
-        "a no-op compaction now reports differently from a real one — which is \
-         exactly the distinction a compaction lever would need. See Phase 4B."
+        (
+            again.fragments_removed,
+            again.fragments_added,
+            again.files_removed,
+            again.files_added
+        ),
+        (0, 0, 0, 0),
+        "the no-op re-compact reported work, so the fields cannot distinguish a \
+         real compaction from a no-op: {again:?}"
+    );
+    assert!(
+        again.duration > std::time::Duration::ZERO,
+        "duration is real even for a no-op — it measures the call, not the merge"
     );
     Ok(())
 }

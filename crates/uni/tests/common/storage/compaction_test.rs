@@ -269,8 +269,15 @@ async fn test_compaction_procedures() -> anyhow::Result<()> {
     }
 
     // 2. uni.admin.compact()
+    //
+    // This fixture has an empty schema, so `compact()` visits no tables and
+    // every count is legitimately zero. That makes it a wiring test, not a
+    // discrimination test: it proves the procedure yields the measured fields
+    // as Ints. Real-vs-no-op discrimination needs data and lives in
+    // `compaction_granular_test` and `dqp::transition_probe`.
     {
-        let sql = "CALL uni.admin.compact() YIELD files_compacted, duration_ms RETURN files_compacted, duration_ms";
+        let sql = "CALL uni.admin.compact() YIELD tables_optimized, fragments_removed, duration_ms \
+                   RETURN tables_optimized, fragments_removed, duration_ms";
         let query = uni_cypher::parse(sql)?;
         let plan = planner.plan(query)?;
         let results = executor
@@ -279,8 +286,14 @@ async fn test_compaction_procedures() -> anyhow::Result<()> {
         assert_eq!(results.len(), 1);
 
         let row = &results[0];
-        assert!(row.contains_key("files_compacted"));
-        assert!(row.contains_key("duration_ms"));
+        for key in ["tables_optimized", "fragments_removed", "duration_ms"] {
+            match row.get(key) {
+                Some(uni_db::Value::Int(_)) => {}
+                other => panic!("{key} missing or not an Int: {other:?}"),
+            }
+        }
+        // Nothing in the schema, so nothing to visit.
+        assert_eq!(row.get("tables_optimized"), Some(&uni_db::Value::Int(0)));
     }
 
     Ok(())

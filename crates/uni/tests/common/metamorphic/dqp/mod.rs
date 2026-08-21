@@ -57,9 +57,17 @@
 //! cannot reach pushdown at all, so it observed nothing and concluded nothing was
 //! observable. It has been rebuilt around the shape that does reach it.
 //!
-//! **Compaction stays deferred**: `CompactionStats` still returns hardcoded
-//! literals for every field but `duration` (#172). Its probe stays as the
-//! standing evidence and fails loudly if that changes.
+//! **Compaction's deferral is now half expired.** #172 made `CompactionStats`
+//! report measured work — fragments and files merged, tables visited — so a
+//! real compaction is distinguishable from a no-op at run level, and
+//! `compaction_is_observable_at_run_level_only` asserts that rather than the
+//! old placeholder.
+//!
+//! The lever still cannot be built, for a reason the run-level fix does not
+//! touch: `activated` takes two [`lever::Witness`]es, which are per-*query*,
+//! and `CompactionStats` is per-*run*. No per-query counter moves across a
+//! compaction, and until one does there is nothing for `activated` to say. The
+//! second half of that probe remains a tripwire on exactly that.
 //!
 //! See `docs/proposals/test_harness_implementation_plan_2026-08-12.md`.
 

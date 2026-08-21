@@ -522,11 +522,20 @@ impl StorageBackend for BranchedBackend {
 
     // ── Maintenance ──────────────────────────────────────────────────
 
-    async fn optimize_table(&self, table_name: &str) -> Result<()> {
+    async fn optimize_table(
+        &self,
+        table_name: &str,
+        version_retention: std::time::Duration,
+    ) -> Result<OptimizeReport> {
         // Compaction on a fork is a Phase 5 concern. Phase 1 silently
         // delegates to the primary backend; for a fork-only table this
         // is a no-op because the fork has no L1 fragments yet.
-        self.inner.optimize_table(table_name).await
+        //
+        // The report therefore describes the *primary's* table, not the
+        // branch's, and a fork-only table yields an all-zero report.
+        self.inner
+            .optimize_table(table_name, version_retention)
+            .await
     }
 
     async fn recover_staging(&self, table_name: &str) -> Result<()> {

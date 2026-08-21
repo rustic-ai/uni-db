@@ -614,13 +614,22 @@ impl StorageBackend for LanceDbBackend {
     // Maintenance
     // ========================
 
-    async fn optimize_table(&self, table_name: &str) -> Result<()> {
+    async fn optimize_table(
+        &self,
+        table_name: &str,
+        version_retention: std::time::Duration,
+    ) -> Result<OptimizeReport> {
         let mut dataset = self.directory.open(table_name).await?;
 
         // The three steps lancedb's `OptimizeAction::All` performed, in order
-        // (`lancedb/src/table/optimize.rs:172-186`). Its `OptimizeStats` were
-        // discarded by the caller, so only the effects need to match.
-        lance::dataset::optimize::compact_files(
+        // (`lancedb/src/table/optimize.rs:172-186`). lancedb discarded its
+        // `OptimizeStats`; we do not, because everything a caller needs to tell
+        // a real compaction from a no-op is in these two return values (#172).
+        //
+        // An empty compaction plan yields `CompactionMetrics::default()` without
+        // a commit, so all-zeros here is a genuine "nothing to merge" rather
+        // than a counter that was never wired.
+        let metrics = lance::dataset::optimize::compact_files(
             &mut dataset,
             lance::dataset::optimize::CompactionOptions::default(),
             None,
@@ -628,21 +637,27 @@ impl StorageBackend for LanceDbBackend {
         .await
         .map_err(|e| anyhow!("Failed to compact '{}': {}", table_name, e))?;
 
-        // Prune versions older than 7 days, matching lancedb's hardcoded
-        // window. This is safe for forks despite the "retention must not drop
+        // Prune versions older than the configured retention window (7 days by
+        // default, matching lancedb's hardcoded value). This is safe for forks
+        // despite the "retention must not drop
         // below the longest live fork chain" invariant: Lance's cleanup is
         // branch-aware — it calls `find_referenced_branches()` and then
         // `retain_branch_lineage_files()`, and `clean_referenced_branches`
         // defaults to false, so versions a live fork branch still needs are
         // retained regardless of age (`lance/src/dataset/cleanup.rs:146,181,930`).
         let policy = lance::dataset::cleanup::CleanupPolicy {
-            before_timestamp: Some(chrono::Utc::now() - chrono::Duration::days(7)),
+            before_timestamp: Some(
+                chrono::Utc::now()
+                    - chrono::Duration::from_std(version_retention)
+                        .unwrap_or_else(|_| chrono::Duration::days(7)),
+            ),
             ..Default::default()
         };
-        lance::dataset::cleanup::cleanup_old_versions(&dataset, policy)
+        let removal = lance::dataset::cleanup::cleanup_old_versions(&dataset, policy)
             .await
             .map_err(|e| anyhow!("Failed to prune old versions of '{}': {}", table_name, e))?;
 
+        // `optimize_indices` reports nothing, so there is nothing to harvest here.
         lance::index::DatasetIndexExt::optimize_indices(
             &mut dataset,
             &lance_index::optimize::OptimizeOptions::default(),
@@ -650,7 +665,18 @@ impl StorageBackend for LanceDbBackend {
         .await
         .map_err(|e| anyhow!("Failed to optimize indices on '{}': {}", table_name, e))?;
 
-        Ok(())
+        Ok(OptimizeReport {
+            fragments_removed: metrics.fragments_removed,
+            fragments_added: metrics.fragments_added,
+            files_removed: metrics.files_removed,
+            files_added: metrics.files_added,
+            // Bytes freed by version pruning above, not by the compaction
+            // rewrite — Lance reports no before/after size for the rewrite. With
+            // the retention window in force this is 0 for any dataset younger
+            // than it, which is every test fixture.
+            bytes_reclaimed: removal.bytes_removed,
+            old_versions_removed: removal.old_versions,
+        })
     }
 
     async fn recover_staging(&self, name: &str) -> Result<()> {

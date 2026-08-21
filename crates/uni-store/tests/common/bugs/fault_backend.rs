@@ -117,8 +117,14 @@ impl StorageBackend for FaultBackend {
         self.inner.rollback_table(table_name, target_version).await
     }
 
-    async fn optimize_table(&self, table_name: &str) -> Result<()> {
-        self.inner.optimize_table(table_name).await
+    async fn optimize_table(
+        &self,
+        table_name: &str,
+        version_retention: std::time::Duration,
+    ) -> Result<uni_store::backend::OptimizeReport> {
+        self.inner
+            .optimize_table(table_name, version_retention)
+            .await
     }
 
     async fn recover_staging(&self, table_name: &str) -> Result<()> {

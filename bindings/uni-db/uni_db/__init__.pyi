@@ -935,12 +935,16 @@ class DerivedFactSet:
 # =============================================================================
 
 class CompactionStats:
-    """Statistics from a compaction operation."""
+    """What a compaction operation actually did."""
 
-    files_compacted: int
-    bytes_before: int
-    bytes_after: int
+    tables_optimized: int
+    fragments_removed: int
+    fragments_added: int
+    files_removed: int
+    files_added: int
+    bytes_reclaimed: int
     duration_secs: float
+    semantic_passes: int
     crdt_merges: int
 
 class DatabaseMetrics:

@@ -196,7 +196,20 @@ pub trait StorageBackend: Send + Sync + 'static {
     // ========================
 
     /// Optimize a table (compaction, cleanup, etc.).
-    async fn optimize_table(&self, table_name: &str) -> Result<()>;
+    ///
+    /// Returns what the call actually did. `Ok(OptimizeReport::default())` means
+    /// the table was visited and there was nothing to merge — a result, not an
+    /// error, and deliberately distinguishable from `Err`, which means the
+    /// optimize did not run at all.
+    /// `version_retention` is how long a superseded dataset version is kept
+    /// before cleanup may delete it. It is a parameter rather than backend state
+    /// because it belongs to compaction policy, and because a caller must be
+    /// able to drive it to zero to observe reclaimed bytes at all.
+    async fn optimize_table(
+        &self,
+        table_name: &str,
+        version_retention: std::time::Duration,
+    ) -> Result<OptimizeReport>;
 
     /// Recover a table from crash state (incomplete staging writes, etc.).
     async fn recover_staging(&self, table_name: &str) -> Result<()>;

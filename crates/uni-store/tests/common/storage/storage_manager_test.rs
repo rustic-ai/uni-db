@@ -56,7 +56,10 @@ async fn test_compaction_status_default() {
     let status = storage.compaction_status().unwrap();
     assert!(!status.compaction_in_progress);
     assert_eq!(status.total_compactions, 0);
-    assert_eq!(status.total_bytes_compacted, 0);
+    assert_eq!(status.total_bytes_reclaimed, 0);
+    // The denominator is what makes the "fresh database" claim mean something:
+    // without it, every field above reads zero whether it was observed or not.
+    assert_eq!(status.status_refreshes, 0);
 }
 
 /// Compaction on an empty database should succeed without error.

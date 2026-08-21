@@ -90,7 +90,7 @@ async fn test_compact_vertices_with_null_props() -> anyhow::Result<()> {
 
     // Compact
     let stats = storage.compact_label("Node").await?;
-    assert!(stats.files_compacted >= 1);
+    assert_eq!(stats.tables_optimized, 1);
 
     // Verify
     let prop_mgr = PropertyManager::new(storage.clone(), schema_manager.clone(), 10);
@@ -120,8 +120,17 @@ async fn test_compact_empty_dataset() -> anyhow::Result<()> {
 
     // Compact empty - LanceDB creates an empty table during compaction
     let stats = storage.compact_label("Empty").await?;
-    // With LanceDB, compaction creates the table structure even if empty
-    assert!(stats.files_compacted <= 1);
+    // A label with no table is not counted as visited. The old assertion was
+    // `files_compacted <= 1`, which the hardcoded literal satisfied trivially.
+    assert_eq!(stats.tables_optimized, 0);
+    assert_eq!(
+        (
+            stats.fragments_removed,
+            stats.fragments_added,
+            stats.files_added
+        ),
+        (0, 0, 0)
+    );
 
     Ok(())
 }
