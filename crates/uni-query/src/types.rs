@@ -89,6 +89,20 @@ pub struct QueryMetrics {
     /// BTree leaf, bitmaps intersected, ids scored), so its presence is
     /// meaningful and its magnitude is not.
     pub index_comparisons: u64,
+    /// Sum of Lance's `iops` across the scans in this query.
+    ///
+    /// Storage I/O operations, which fall with the number of fragments a table
+    /// holds — measured at roughly five per fragment on a full scan. That makes
+    /// it the one per-query counter known to move across a **compaction**, which
+    /// is what it exists for: `CompactionStats` reports a compaction at run
+    /// level, and a differential oracle comparing two queries needs a per-query
+    /// signal instead.
+    ///
+    /// It counts *physical* reads, so unlike the row counters it is sensitive to
+    /// caching. Every scan currently opens a fresh dataset, so it is stable; a
+    /// dataset cache would shrink it on a warm read the way one already would
+    /// for `index_scans`. Do not read it as "did this query touch storage".
+    pub lance_iops: u64,
     /// Number of Lance scans for which the execution-stats callback fired.
     ///
     /// The denominator for [`Self::index_scans`]. A zero there is ambiguous on
@@ -374,6 +388,7 @@ impl QueryResult {
         self.metrics.snapshot_reads = counters.snapshot_reads;
         self.metrics.index_scans = counters.index_scans;
         self.metrics.index_comparisons = counters.index_comparisons;
+        self.metrics.lance_iops = counters.lance_iops;
         self.metrics.scans_reported = counters.scans_reported;
     }
 }

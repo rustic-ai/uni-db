@@ -56,6 +56,7 @@ pub struct QueryCounters {
     snapshot_reads: AtomicU64,
     index_scans: AtomicU64,
     index_comparisons: AtomicU64,
+    lance_iops: AtomicU64,
     scans_reported: AtomicU64,
 }
 
@@ -111,13 +112,14 @@ impl QueryCounters {
     /// Always bumps [`Self::scans_reported`], including when nothing was
     /// consulted. That is the point: it is the denominator that makes a zero in
     /// [`Self::index_scans`] mean something.
-    pub fn add_lance_scan(&self, consulted: bool, comparisons: usize) {
+    pub fn add_lance_scan(&self, consulted: bool, comparisons: usize, iops: usize) {
         self.scans_reported.fetch_add(1, Ordering::Relaxed);
         if consulted {
             self.index_scans.fetch_add(1, Ordering::Relaxed);
         }
         self.index_comparisons
             .fetch_add(comparisons as u64, Ordering::Relaxed);
+        self.lance_iops.fetch_add(iops as u64, Ordering::Relaxed);
     }
 
     /// Rows served from L0.
@@ -164,6 +166,21 @@ impl QueryCounters {
         self.index_comparisons.load(Ordering::Relaxed)
     }
 
+    /// Storage I/O operations Lance performed across the scans in this query.
+    ///
+    /// Measured to fall with the number of fragments a table holds — about five
+    /// per fragment on a full scan — which is what makes it a witness that a
+    /// compaction changed how a query executed, and not merely that one ran.
+    ///
+    /// It counts *physical* reads, so it is sensitive to caching in a way the
+    /// row counters are not. Today every scan opens a fresh `Dataset`, so it is
+    /// stable; a future dataset cache would shrink it on a warm read, exactly as
+    /// one already would for `indices_loaded`. A consumer that needs "did this
+    /// query touch storage at all" should not use this.
+    pub fn lance_iops(&self) -> u64 {
+        self.lance_iops.load(Ordering::Relaxed)
+    }
+
     /// Lance scans for which the execution-stats callback fired at all.
     ///
     /// The anti-vacuity denominator. Without it, `index_scans == 0` is
@@ -191,6 +208,8 @@ impl QueryCounters {
             .fetch_add(other.index_scans(), Ordering::Relaxed);
         self.index_comparisons
             .fetch_add(other.index_comparisons(), Ordering::Relaxed);
+        self.lance_iops
+            .fetch_add(other.lance_iops(), Ordering::Relaxed);
         self.scans_reported
             .fetch_add(other.scans_reported(), Ordering::Relaxed);
     }
@@ -204,6 +223,7 @@ impl QueryCounters {
         self.snapshot_reads.store(0, Ordering::Relaxed);
         self.index_scans.store(0, Ordering::Relaxed);
         self.index_comparisons.store(0, Ordering::Relaxed);
+        self.lance_iops.store(0, Ordering::Relaxed);
         self.scans_reported.store(0, Ordering::Relaxed);
     }
 
@@ -224,6 +244,7 @@ impl QueryCounters {
             snapshot_reads: self.snapshot_reads(),
             index_scans: self.index_scans(),
             index_comparisons: self.index_comparisons(),
+            lance_iops: self.lance_iops(),
             scans_reported: self.scans_reported(),
         }
     }
@@ -246,6 +267,9 @@ pub struct CounterSnapshot {
     pub index_scans: u64,
     /// Sum of Lance's `index_comparisons` across those scans.
     pub index_comparisons: u64,
+    /// Sum of Lance's `iops` across those scans. See
+    /// [`QueryCounters::lance_iops`] for what it is and is not good for.
+    pub lance_iops: u64,
     /// Lance scans for which the stats callback fired at all.
     pub scans_reported: u64,
 }
@@ -307,14 +331,17 @@ mod tests {
     #[test]
     fn a_scan_without_an_index_still_reports() {
         let c = QueryCounters::new();
-        c.add_lance_scan(false, 0);
+        c.add_lance_scan(false, 0, 3);
         assert_eq!(c.index_scans(), 0);
         assert_eq!(c.scans_reported(), 1, "the scan itself must be counted");
 
-        c.add_lance_scan(true, 12);
+        c.add_lance_scan(true, 12, 7);
         assert_eq!(c.index_scans(), 1);
         assert_eq!(c.index_comparisons(), 12);
         assert_eq!(c.scans_reported(), 2);
+        // Accumulated across both scans, and independent of `consulted`:
+        // physical I/O happens whether or not an index was involved.
+        assert_eq!(c.lance_iops(), 10);
     }
 
     /// Every field must survive `merge_from` and be cleared by `reset`.
@@ -332,7 +359,7 @@ mod tests {
         b.add_rows_scanned(3);
         b.add_branch_scan();
         b.add_snapshot_read();
-        b.add_lance_scan(true, 4);
+        b.add_lance_scan(true, 4, 2);
         a.merge_from(&b);
 
         let m = a.snapshot();
@@ -346,6 +373,7 @@ mod tests {
                 snapshot_reads: 1,
                 index_scans: 1,
                 index_comparisons: 4,
+                lance_iops: 2,
                 scans_reported: 1,
             },
             "a counter is missing from merge_from"

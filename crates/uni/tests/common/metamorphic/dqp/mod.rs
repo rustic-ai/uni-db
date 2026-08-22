@@ -41,7 +41,7 @@
 //!   which transitions are observable at all) that was an assumption until it
 //!   was measured.
 //!
-//! # One lever remains deferred, with the measurement as the reason
+//! # Both deferred levers now ship, each on a measurement
 //!
 //! The plan called for index-absent-vs-present and pre-vs-post-compaction levers,
 //! and [`transition_probe`] measured that neither could be built: no counter in
@@ -57,22 +57,31 @@
 //! cannot reach pushdown at all, so it observed nothing and concluded nothing was
 //! observable. It has been rebuilt around the shape that does reach it.
 //!
-//! **Compaction's deferral is now half expired.** #172 made `CompactionStats`
-//! report measured work — fragments and files merged, tables visited — so a
-//! real compaction is distinguishable from a no-op at run level, and
-//! `compaction_is_observable_at_run_level_only` asserts that rather than the
-//! old placeholder.
+//! **The compaction lever is now built too** ([`compaction_lever`]), and its
+//! deferral expired in two stages worth keeping straight.
 //!
-//! The lever still cannot be built, for a reason the run-level fix does not
-//! touch: `activated` takes two [`lever::Witness`]es, which are per-*query*,
-//! and `CompactionStats` is per-*run*. No per-query counter moves across a
-//! compaction, and until one does there is nothing for `activated` to say. The
-//! second half of that probe remains a tripwire on exactly that.
+//! #172 made `CompactionStats` report measured work, which made a real
+//! compaction distinguishable from a no-op *at run level*. That alone did not
+//! unblock the lever: `activated` takes two [`lever::Witness`]es, which are
+//! per-*query*, so a run-level number has nothing to say about an individual
+//! case. Run-level facts belong in `check_invariants`, and that is where
+//! `CompactionStats` ended up — as a precondition rejecting a batch whose
+//! transition merged nothing.
+//!
+//! What unblocked it was a per-query counter. `QueryMetrics::lance_iops` comes
+//! from the `iops` field Lance's execution-stats callback had been delivering
+//! and `attach_scan_stats` had been discarding. Measured before being relied
+//! on: merging five fragments takes a full scan from 25 iops to 5, merging two
+//! takes it from 10 to 5 — unanimous across shapes and repeats, and scaling
+//! with how much was merged rather than merely reporting that something was.
+//!
+//! So all six levers ship. **No lever remains deferred.**
 //!
 //! See `docs/proposals/test_harness_implementation_plan_2026-08-12.md`.
 
 pub mod admissibility;
 pub mod cert;
+pub mod compaction_lever;
 pub mod counters;
 pub mod driver;
 pub mod feasibility;

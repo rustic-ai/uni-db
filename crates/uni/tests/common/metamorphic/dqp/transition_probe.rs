@@ -341,11 +341,11 @@ async fn index_transition_is_observable_for_hash_equality_only() -> anyhow::Resu
 /// `CompactionStats` report measured work, so the run-level half of the
 /// deferral has expired and this test asserts the measurement instead.
 ///
-/// The *lever* half has not. `Witness` is per-query (`lever.rs:48-83`) and
-/// `CompactionStats` is per-run, so run-level honesty cannot feed
-/// `activated(&Witness, &Witness)`. The second half below is still a tripwire:
-/// no per-query counter moves across compaction, and if one ever does, the
-/// compaction lever becomes buildable.
+/// The *lever* half expired separately, and later: `Witness` is per-query
+/// (`lever.rs`) while `CompactionStats` is per-run, so run-level honesty could
+/// not feed `activated(&Witness, &Witness)`. What could was `lance_iops`, and
+/// the second half below — once a tripwire asserting that nothing moved — now
+/// asserts that it is the *only* thing that moves.
 ///
 /// Background compaction is disabled for the fixture. The loop fires at
 /// `l1_runs >= 8` on a 10 s tick, and a merge behind this test's back would
@@ -441,12 +441,31 @@ async fn compaction_is_observable_at_run_level_only() -> anyhow::Result<()> {
             *rows_before, rows_after,
             "[{name}] compaction changed the row count — that is a bug, not a probe result"
         );
+        // Exactly one counter may move, and it is the lever's witness.
+        //
+        // This half was a tripwire asserting that *nothing* moved, which is what
+        // kept the compaction lever deferred. It has since fired — `lance_iops`
+        // drops because a compacted table takes fewer physical reads — so it now
+        // asserts the shape of that movement instead.
+        assert!(
+            w_after.lance_iops < w_before.lance_iops,
+            "[{name}] lance_iops did not fall across a compaction, so the \
+             compaction lever's witness has stopped working.\n\
+             before: {w_before:?}\nafter:  {w_after:?}"
+        );
+        // Everything else must be identical: compaction changes how rows are
+        // found, never which. A moving row count here would be a bug, not a
+        // witness.
         assert_eq!(
-            *w_before, w_after,
-            "[{name}] a per-query counter moved across compaction. Good news — \
-             the compaction lever (Phase 4B) may now be buildable. `Witness` is \
-             per-query and `CompactionStats` is per-run, so #172 did not unblock \
-             it; a moving counter here would.\n\
+            Witness {
+                lance_iops: 0,
+                ..*w_before
+            },
+            Witness {
+                lance_iops: 0,
+                ..w_after
+            },
+            "[{name}] a counter other than lance_iops moved across compaction.\n\
              before: {w_before:?}\nafter:  {w_after:?}"
         );
     }

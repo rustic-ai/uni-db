@@ -80,6 +80,19 @@ pub struct Witness {
     /// whatever fraction of generated cases carries such a predicate, and fail
     /// the run's activation floor for a reason unrelated to the lever.
     pub index_scans: u64,
+    /// Storage I/O operations Lance performed across this query's scans.
+    ///
+    /// Carried so a compaction lever can witness on it, and measured before
+    /// being relied on: merging five fragments into one takes a full scan from
+    /// 25 to 5, and merging two takes it from 10 to 5 — about five per
+    /// fragment, unanimous across shapes and repeats
+    /// (`uni-store/src/backend/lance.rs::probe_compaction_moves_lance_io_counts`).
+    ///
+    /// Like [`Self::index_scans`], deliberately **not** folded into any other
+    /// lever's `activated`. It counts physical reads, so it is the one field
+    /// here that a caching change could move for reasons having nothing to do
+    /// with the transition under test.
+    pub lance_iops: u64,
 }
 
 /// One side's result: the bag to compare, and the evidence of how it was
@@ -103,6 +116,7 @@ pub fn witness_of(r: &QueryResult) -> Witness {
         snapshot_reads: m.snapshot_reads,
         plan_cache_hits: 0,
         index_scans: m.index_scans,
+        lance_iops: m.lance_iops,
     }
 }
 

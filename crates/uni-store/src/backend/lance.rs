@@ -1268,7 +1268,10 @@ fn attach_scan_stats(scanner: &mut lance::dataset::scanner::Scanner, request: &S
             // indifferent to caching. It is what keeps this predicate true after
             // such a change. Do not simplify this to `indices_loaded > 0`.
             let consulted = s.indices_loaded > 0 || s.parts_loaded > 0 || s.index_comparisons > 0;
-            counters.add_lance_scan(consulted, s.index_comparisons);
+            // `iops` is the compaction witness: it falls with fragment count
+            // (~5 per fragment on a full scan), measured by
+            // `probe_compaction_moves_lance_io_counts` below.
+            counters.add_lance_scan(consulted, s.index_comparisons, s.iops);
         },
     ));
 }
