@@ -35,7 +35,7 @@ except for the four Phase-8 items already recorded below.
 | 3 | Pinned lever, admissibility, row budget | **done** 2026-08-12 | `dqp/{pinned_lever,admissibility}.rs` |
 | 4A | `drive_stateful`, flush + plan-cache levers | **done** 2026-08-12 | `dqp/{stateful,flush_lever,plan_cache_lever}.rs` |
 | **4B** | index lever | **done** 2026-08-20 — unblocked by #175 | `dqp/index_lever.rs` |
-| **4B** | compaction lever | **still deferred** — but on a new reason: #172 is fixed, the witness gap is not | `dqp/transition_probe.rs` |
+| **4B** | compaction lever | **done** 2026-08-22 — `lance_iops` supplied the witness | `dqp/compaction_lever.rs` |
 | 5 | Generator widening, `EXPLAIN`, teeth | **done** 2026-08-13 | `docs/testing/teeth-2026-08-13.md`, 6 revert patches |
 | 6 | CERT, ANN law, Tier-3 answer | **done** 2026-08-13 | `dqp/{cert,tier3_probe,vid_determinism}.rs` |
 | 0B | iai qualification pilot | **done, one leg open** | `docs/perf/iai-qualification-2026-08-12.md` §4 |
@@ -75,8 +75,8 @@ and **10 soaks** in the nightly `dqp` job.
 | # | item | blocks |
 |---|---|---|
 | 1 | Run `Perf Qualify (cross-runner iai)` and replace §4 of the qualification doc with its table | all of Phase 7 |
-| 2 | ~~Give `CompactionStats` real numbers~~ **DONE 2026-08-21** (#172) — did *not* unblock the lever; see below | Phase 10's compaction matrix |
-| 3 | Re-measure the nightly `dqp` job and add `index_pushdown_soak` | the index lever is smoke-only today |
+| 2 | ~~Give `CompactionStats` real numbers~~ **DONE 2026-08-21** (#172); ~~compaction lever~~ **DONE 2026-08-22** — **C1 is now complete** | Phase 10's compaction matrix |
+| 3 | Re-measure the nightly `dqp` job, then add `index_pushdown_soak` **and** `compaction_smoke`'s soak | both levers are smoke-only today |
 | 4 | Wire the miri lane measured in Phase 8 into CI | nothing; it is measured and unshipped |
 | 5 | Phase 8 item 5 — Hypothesis `RuleBasedStateMachine` for the bindings | closes C4 |
 
@@ -706,7 +706,32 @@ concurrent soaks in a 60-minute budget, last measured at 29.9 minutes; an
 eleventh needs that re-measured rather than assumed, per the workflow's own
 comment. Tracked as open item 3 in the status table above.
 
-#### Pre-vs-post compaction — **still deferred, on a corrected reason** (2026-08-21)
+#### Pre-vs-post compaction — **shipped 2026-08-22**
+
+`dqp/compaction_lever.rs`, **500/500 cases activated (100.0%)**, 51 s, zero bag
+divergences. **Phase 4B is closed, and with it C1.**
+
+The witness is `QueryMetrics::lance_iops`, from the `iops` field Lance's
+execution-stats callback had been delivering and `attach_scan_stats` had been
+discarding. Measured before it was relied on
+(`lance.rs::probe_compaction_moves_lance_io_counts`): five fragments merged takes
+a full scan from 25 iops to 5, two takes it from 10 to 5 — unanimous across two
+shapes and three repeats, and **scaling with how much was merged**, which is what
+separates a witness from a `> 0` constant.
+
+`CompactionStats` found its correct role after all — not as the activation
+signal, which is structurally per-query, but as a `check_invariants`
+precondition rejecting a batch whose transition merged nothing. That guard is
+tested by a lever variant that skips its fragment-building rounds and must fail
+**even though every bag comparison passes**, since compaction never changes which
+rows exist.
+
+The section below is kept as written on 2026-08-21, because the two-stage
+expiry is the reusable part: run-level honesty (#172) was necessary and *not*
+sufficient, and mistaking one for the other would have produced a lever with
+nothing true to say.
+
+#### The 2026-08-21 state, for the record
 
 `CompactionStats` is now honest (#172): `tables_optimized`, `fragments_removed`,
 `fragments_added`, `files_removed`, `files_added` and `bytes_reclaimed` are all
