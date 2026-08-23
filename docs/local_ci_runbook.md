@@ -116,6 +116,46 @@ METAMORPHIC_CASES=64 cargo nextest run -p uni-db --test integration \
 UNI_GC_TRACE=1 cargo nextest run -p uni-plugin-builtin -p uni-plugin-rhai -E 'test(graph_compute)'
 ```
 
+### Miri (UB interpreter)
+```bash
+# Needs the PINNED nightly plus the miri component. This is the one pinned
+# toolchain in the repo: `miri` is a rustup component that is not built for
+# every nightly, so an unpinned lane goes red on a random day on the
+# PR-blocking side of the fence.
+rustup toolchain install nightly-2026-07-11 --component miri rust-src
+cargo +nightly-2026-07-11 miri setup
+
+# `cargo miri test`, NOT nextest -- the documented exception to the nextest
+# rule. Nextest runs a process per test and each pays a fresh interpreter + std
+# startup; these suites are only affordable because their tests share one
+# interpreted process.
+PROPTEST_CASES=16 cargo +nightly-2026-07-11 miri test -p uni-btic --lib --tests
+PROPTEST_CASES=16 cargo +nightly-2026-07-11 miri test -p uni-sparse-vector --lib --tests
+
+# uni-common needs -Zmiri-disable-isolation (it calls Utc::now() and does real
+# filesystem I/O through object_store); the two codec crates above deliberately
+# do not, so a new syscall dependency there surfaces instead of passing quietly.
+#
+# The trailing `::` in the skip is load-bearing: libtest's --skip is a plain
+# substring match, and the bare `muvera` form also swallows
+# `vector_index_opts::tests::muvera_defaults_and_inner`. Measured: bare removes
+# 14 tests, anchored removes exactly the 13 in the module.
+MIRIFLAGS="-Zmiri-disable-isolation" \
+  cargo +nightly-2026-07-11 miri test -p uni-common --lib --tests \
+  -- --test-threads=1 --skip 'muvera::'
+```
+Measured 1 min 41 s warm for all three. `muvera` is excluded outright rather
+than budgeted -- its tests were killed at 132 minutes. `uni-crdt` runs in
+`nightly.yml` only.
+
+A miri failure is real signal even though these crates contain zero `unsafe`:
+the UB is reached *through* a dependency, or it is a leak. It has already found
+one here -- a `std::mem::forget(TempDir)` leaking a directory on disk every run
+(`crates/uni-common/tests/repro_rename_property_bypass.rs:19-27`). If the fault
+is upstream, file it and `#[cfg_attr(miri, ignore)]` the single test with a
+comment linking the issue. Do not add `-Zmiri-ignore-leaks`, and do not drop the
+crate from the lane.
+
 ### openCypher TCK (schemaless)
 ```bash
 cargo nextest run -p uni-tck --test tck

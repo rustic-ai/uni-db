@@ -24,7 +24,9 @@
 - `cargo bench`: run Criterion benchmarks.
 - `cargo fmt`: format code.
 - `cargo clippy`: lint for common issues.
-- Use `cargo nextest` instead of `cargo test` for regular test runs.
+- Use `cargo nextest` instead of `cargo test` for regular test runs. The one
+  exception is the miri lane, which uses `cargo miri test` — see the `miri` job
+  in `.github/workflows/pr.yml` for why.
 
 ## Coding Style & Naming Conventions
 - Follow standard Rust style and format with `rustfmt`.

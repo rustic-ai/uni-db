@@ -10,6 +10,9 @@ name: Nightly
 #   - dqp:   the differential-query-plans oracle at volume — one query down two
 #            execution paths, comparing result bags. Its own job because each
 #            case costs two queries; see docs/perf/dqp-feasibility-2026-08-12.md.
+#   - miri:  uni-crdt's lib tests under the miri interpreter — UB reached
+#            through dependencies, plus leaks. 40 min measured, which is why it
+#            is here and not in pr.yml (that lane runs the three cheap crates).
 #   - bench: criterion benches with results uploaded as artifacts for
 #            manual trend comparison (no external regression service).
 #
@@ -39,7 +42,7 @@ permissions:
 # (shown in parens) in Settings > Secrets and variables > Actions > Variables;
 # to roll back, clear the variable.
 #   CI_RUNNER_XLARGE64  default ubuntu-xlarge  → set to linux-64core  — soak, fuzz,
-#                                                 model-check, metamorphic, dqp, tsan, bench
+#                                                 model-check, metamorphic, dqp, tsan, miri, bench
 # Note XLARGE64's GitHub-hosted default is ubuntu-xlarge here vs ci.yml's
 # linux-xlarge-64 (preserving each workflow's pre-existing choice); the self-hosted
 # target you'd set it to (linux-64core) is shared. The cloud job is NOT indirected:
@@ -448,6 +451,74 @@ jobs:
         with:
           name: tsan-log
           path: tsan.log
+          if-no-files-found: warn
+
+  miri:
+    if: github.repository == 'rustic-ai/uni-db'
+    name: Miri (uni-crdt)
+    runs-on: ${{ vars.CI_RUNNER_XLARGE64 || 'ubuntu-xlarge' }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      # Pinned nightly — see pr.yml's miri job for why this one lane pins when
+      # nothing else in the repo does. KEEP THE DATE IN SYNC WITH pr.yml: the
+      # two share the "miri" cache key, and a mismatch means each run rebuilds
+      # the other's sysroot and dependency tree.
+      - name: Setup Rust (pinned nightly + miri)
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-07-11
+          components: miri, rust-src
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mold protobuf-compiler
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "miri"
+          cache-directories: "~/.cache/miri"
+          cache-on-failure: true
+
+      - name: Build the miri sysroot
+        run: cargo +nightly-2026-07-11 miri setup
+
+      # uni-crdt is the crate that does not fit a PR. Measured 2026-08-22 on the
+      # pinned toolchain: 45 min 22 s wall-clock for its 31 lib tests, clean —
+      # no UB, no leaks. Worth knowing where that time goes: only 702 s (12 min)
+      # is interpretation, and the other ~33 min is COMPILING uni-crdt and
+      # uni-plugin under miri. So this job's cost is dominated by a cold cache
+      # rather than by test volume, which is what the shared "miri" cache key
+      # buys. It is slow to interpret because it depends on uni-plugin, so miri
+      # walks the whole plugin dispatch path on the way to a CRDT merge. The timeout is
+      # deliberate headroom for the crate growing, not room to add targets — if
+      # this job approaches the ceiling, re-measure and cut the set rather than
+      # raising it.
+      #
+      # `--lib` is load-bearing and NOT the default. The integration targets add
+      # ~140 more tests, two dozen of them proptest properties that hardcode
+      # `ProptestConfig::with_cases(100)`
+      # (crates/uni-crdt/tests/common/crdt/merge_properties.rs). `with_cases` is
+      # applied over `Config::default()` and therefore OVERRIDES PROPTEST_CASES,
+      # so there is no knob to turn them down from here — thousands of property
+      # cases through an interpreter is not a bounded run.
+      #
+      # Isolation stays ON: uni-crdt's only environmental dependency is
+      # `Uuid::new_v4()`, and miri supplies randomness under isolation.
+      - name: Miri on uni-crdt (lib tests)
+        run: |
+          cargo +nightly-2026-07-11 miri test -p uni-crdt --lib \
+            -- --test-threads=1 2>&1 | tee miri.log
+
+      - name: Upload miri log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: miri-log
+          path: miri.log
           if-no-files-found: warn
 
   bench:
