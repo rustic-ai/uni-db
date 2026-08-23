@@ -8,7 +8,7 @@ Complete symbol surface of the `uni_db` Python bindings, **generated from `bindi
 
 This page is exhaustive and always in sync with the type stubs — it is regenerated in CI. For narrative documentation, worked examples and the recommended patterns, start at the [Python API guide](python-api.md).
 
-**191 classes.**
+**186 classes.**
 
 ---
 
@@ -21,19 +21,6 @@ Result from a Locy ABDUCE command.
 | `command_type() -> str` *(property)* | — |
 | `modifications() -> list[dict[str, Any]]` *(property)* | — |
 | `__getitem__(key: str) -> Any` | — |
-
----
-
-## `AppenderBuilder`
-
-Builder for configurable streaming appenders.
-
-| Signature | Description |
-|---|---|
-| `batch_size(size: int) -> AppenderBuilder` | — |
-| `defer_vector_indexes(defer: bool) -> AppenderBuilder` | — |
-| `max_buffer_size_bytes(size: int) -> AppenderBuilder` | — |
-| `build() -> StreamingAppender` | — |
 
 ---
 
@@ -101,23 +88,6 @@ Async bulk writer for high-throughput data ingestion.
 | `touched_edge_types() -> list[str]` | — |
 | `async commit() -> BulkStats` | — |
 | `async abort() -> None` | — |
-
----
-
-## `AsyncBulkWriterBuilder`
-
-Async builder for bulk data loading.
-
-| Signature | Description |
-|---|---|
-| `defer_vector_indexes(defer: bool) -> AsyncBulkWriterBuilder` | — |
-| `defer_scalar_indexes(defer: bool) -> AsyncBulkWriterBuilder` | — |
-| `batch_size(size: int) -> AsyncBulkWriterBuilder` | — |
-| `async_indexes(async_: bool) -> AsyncBulkWriterBuilder` | — |
-| `validate_constraints(validate: bool) -> AsyncBulkWriterBuilder` | — |
-| `max_buffer_size_bytes(size: int) -> AsyncBulkWriterBuilder` | — |
-| `on_progress(callback: Callable[[BulkProgress], None]) -> AsyncBulkWriterBuilder` | — |
-| `async build() -> AsyncBulkWriter` | — |
 
 ---
 
@@ -311,18 +281,6 @@ Async fluent builder for Locy evaluation on a session.
 | `async run() -> LocyResult` | — |
 | `async explain() -> LocyExplainOutput` | — |
 | `async profile() -> tuple[LocyResult, LocyProfileOutput]` | — |
-
----
-
-## `AsyncSessionProfileBuilder`
-
-Async fluent builder for profiling queries on a session.
-
-| Signature | Description |
-|---|---|
-| `param(name: str, value: Any) -> AsyncSessionProfileBuilder` | — |
-| `params(params: dict[str, Any]) -> AsyncSessionProfileBuilder` | — |
-| `async run() -> tuple[QueryResult, ProfileOutput]` | — |
 
 ---
 
@@ -686,23 +644,6 @@ High-performance bulk data loader.
 | `abort() -> None` | — |
 | `__enter__() -> BulkWriter` | — |
 | `__exit__(exc_type: type[BaseException] | None, exc_val: BaseException | None, exc_tb: Any) -> bool` | — |
-
----
-
-## `BulkWriterBuilder`
-
-Builder for bulk data loading.
-
-| Signature | Description |
-|---|---|
-| `defer_vector_indexes(defer: bool) -> BulkWriterBuilder` | — |
-| `defer_scalar_indexes(defer: bool) -> BulkWriterBuilder` | — |
-| `batch_size(size: int) -> BulkWriterBuilder` | — |
-| `async_indexes(async_: bool) -> BulkWriterBuilder` | — |
-| `validate_constraints(validate: bool) -> BulkWriterBuilder` | — |
-| `max_buffer_size_bytes(size: int) -> BulkWriterBuilder` | — |
-| `on_progress(callback: Callable[[BulkProgress], None]) -> BulkWriterBuilder` | — |
-| `build() -> BulkWriter` | — |
 
 ---
 
@@ -1566,17 +1507,6 @@ A fluent binder for executing a prepared Cypher query.
 |---|---|
 | `param(name: str, value: Any) -> PreparedQueryBinder` | — |
 | `execute() -> QueryResult` | — |
-
----
-
-## `ProfileBuilder`
-
-Fluent builder for profiling queries on a session.
-
-| Signature | Description |
-|---|---|
-| `param(name: str, value: Any) -> ProfileBuilder` | — |
-| `run() -> tuple[QueryResult, ProfileOutput]` | — |
 
 ---
 
