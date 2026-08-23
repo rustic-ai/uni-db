@@ -260,12 +260,28 @@ async fn scan_concat(
     }
 }
 
+/// What a merge-insert should do when its target table does not exist.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MissingTable {
+    /// Fail. Correct when the caller's payload only makes sense against rows
+    /// that must already be there — a partial SET can only update a row whose
+    /// full-row Append has happened, so a missing table means that Append was
+    /// lost and silence would hide it.
+    Error,
+    /// Succeed, having done nothing. Correct for a tombstone: "no such table"
+    /// is the degenerate case of "no rows matched", and an unmatched tombstone
+    /// is already defined as a no-op.
+    SkipAsNoOp,
+}
+
 /// MergeInsert sibling of `write_batch_with_lance_conflict_retry`.
 ///
 /// Source `batch` must contain the join columns in `on` plus any
 /// columns to update. Matched rows have `WhenMatched::UpdateAll`
 /// applied; unmatched source rows are dropped (partial writes never
-/// INSERT). Returns an error if the target table does not exist.
+/// INSERT). Returns an error if the target table does not exist —
+/// see [`merge_insert_batch_tolerating_missing_table`] for the callers
+/// where that is a no-op rather than a fault.
 /// Retries on Lance commit conflicts via `retry_on_lance_conflict`.
 /// RecordBatch clones are cheap (column data is Arc'd).
 pub async fn merge_insert_batch_with_lance_conflict_retry(
@@ -274,19 +290,64 @@ pub async fn merge_insert_batch_with_lance_conflict_retry(
     batch: arrow_array::RecordBatch,
     on: &[&str],
 ) -> anyhow::Result<()> {
+    merge_insert_batch_inner(backend, table_name, batch, on, MissingTable::Error).await
+}
+
+/// As [`merge_insert_batch_with_lance_conflict_retry`], but a missing target
+/// table is a no-op rather than an error.
+///
+/// For tombstone writes (#182). `L0Buffer::delete_vertex` drops the vid from
+/// `vertex_properties` and records a tombstone, so a vertex created and deleted
+/// inside one flush window leaves the window with a tombstone and no live rows.
+/// The flush then skips the full-row write that would have created the table,
+/// and the tombstone has no target — but there is also nothing to tombstone, so
+/// the correct answer is to do nothing rather than to fail a `flush()` the
+/// caller may not even have invoked (`auto_flush_interval` fires on a timer).
+pub async fn merge_insert_batch_tolerating_missing_table(
+    backend: &dyn crate::backend::StorageBackend,
+    table_name: &str,
+    batch: arrow_array::RecordBatch,
+    on: &[&str],
+) -> anyhow::Result<()> {
+    merge_insert_batch_inner(backend, table_name, batch, on, MissingTable::SkipAsNoOp).await
+}
+
+async fn merge_insert_batch_inner(
+    backend: &dyn crate::backend::StorageBackend,
+    table_name: &str,
+    batch: arrow_array::RecordBatch,
+    on: &[&str],
+    missing: MissingTable,
+) -> anyhow::Result<()> {
     // NOTE: `backend.merge_insert` already takes the per-table write lock
     // internally (the same mutex `lock_table_for_write` exposes), so it is
     // serialized against a compaction that holds that lock across its whole
     // scan → overwrite. Do NOT take `lock_table_for_write` here as well — that
     // would re-lock the same non-reentrant mutex and self-deadlock.
     retry_on_lance_conflict(|| async {
+        // Inside the retry, not hoisted: a concurrent flush may create the table
+        // between attempts, and this way the retry still merges. A `table_exists`
+        // guard at the call site would instead widen a TOCTOU window outside the
+        // write lock the backend takes internally.
         let exists = backend.table_exists(table_name).await?;
         if !exists {
-            anyhow::bail!(
-                "merge_insert target table '{}' does not exist (partial writes \
-                 require the row to already be present; CREATE goes through Append)",
-                table_name
-            );
+            match missing {
+                MissingTable::SkipAsNoOp => {
+                    log::debug!(
+                        "merge_insert target table '{}' does not exist; \
+                         treating as a no-op",
+                        table_name
+                    );
+                    return Ok(());
+                }
+                MissingTable::Error => anyhow::bail!(
+                    "merge_insert target table '{}' does not exist; the full-row \
+                     Append that creates it must precede any merge. Callers for \
+                     which an unmatched merge is a no-op should use \
+                     `merge_insert_batch_tolerating_missing_table`.",
+                    table_name
+                ),
+            }
         }
         backend
             .merge_insert(table_name, on, vec![batch.clone()])

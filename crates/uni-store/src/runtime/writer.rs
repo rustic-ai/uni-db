@@ -5528,7 +5528,7 @@ impl Writer {
                 let tomb_batch =
                     ds.build_tombstone_partial_batch(&tombstone_rows, Some(&vertex_updated_at))?;
                 if tomb_batch.num_rows() > 0 {
-                    ds.merge_insert_batch(backend, tomb_batch).await?;
+                    ds.merge_insert_tombstone_batch(backend, tomb_batch).await?;
                 }
             }
 

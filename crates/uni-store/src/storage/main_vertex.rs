@@ -276,7 +276,10 @@ impl MainVertexDataset {
         batch: RecordBatch,
     ) -> Result<()> {
         let table_name = table_names::main_vertex_table_name();
-        crate::storage::manager::merge_insert_batch_with_lance_conflict_retry(
+        // Tolerant of a missing table (#182): "no such table" is the degenerate
+        // case of the unmatched-row rule this method already documents — if the
+        // table was never created there is nothing to tombstone.
+        crate::storage::manager::merge_insert_batch_tolerating_missing_table(
             backend,
             table_name,
             batch,
@@ -291,6 +294,13 @@ impl MainVertexDataset {
     /// full-table rebuilds on every flush (LanceDB replaces indexes on create).
     pub async fn ensure_default_indexes(backend: &dyn StorageBackend) -> Result<()> {
         let table_name = table_names::main_vertex_table_name();
+        // A table that does not exist has nothing to index (#182). Reachable on
+        // a tombstone-only flush, where the full-row write that would have
+        // created it was skipped; `list_indexes` opens the dataset and would
+        // error. Without this the #182 fix merely moves the failure one line.
+        if !backend.table_exists(table_name).await? {
+            return Ok(());
+        }
         let indices = backend.list_indexes(table_name).await?;
 
         let has_index = |col: &str| {
