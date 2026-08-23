@@ -70,6 +70,10 @@ dev = [
     # here so `uv sync --group dev` (what CI runs) makes the guard executable
     # rather than silently error on a missing import.
     "pyarrow>=16",
+    # Required by tests/test_stateful_crud.py, the model-based state machine.
+    # Declared here so `uv sync --group dev` (what CI runs) makes it executable
+    # rather than collect-error on a missing import.
+    "hypothesis>=6.100",
 ]
 
 [tool.black]
