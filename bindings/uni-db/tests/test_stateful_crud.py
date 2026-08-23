@@ -53,9 +53,9 @@ Coverage
 --------
 A generated machine can pass by never exercising anything. Measured with
 ``--hypothesis-show-statistics`` on the ``pr`` profile, the share of examples in
-which each rule fired at least once: unwind_merge 77%, detach_delete 60%,
-rollback 53%, create_vertex 47%, commit 40%, flush 40%, completed_tx_rejects
-33%, merge_edge 30%, create_edge 27%, set_property 27%.
+which each rule fired at least once: create_vertex 81%, flush 62%,
+unwind_merge 58%, detach_delete 50%, completed_tx_rejects 46%, merge_edge 46%,
+create_edge 42%, rollback 42%, set_property 42%, commit 38%.
 
 That is worth recording because the first version was far worse -- an explicit
 ``begin_tx`` rule left ``create_edge`` and ``detach_delete`` at **0%**, because
@@ -63,11 +63,9 @@ Hypothesis draws uniformly among *enabled* rules and every write rule was
 disabled whenever no transaction happened to be open. If these numbers sag,
 suspect a precondition before suspecting the generator.
 
-The two ``detach_delete skipped: ...`` events are the visible cost of the #181
-and #182 narrowings: roughly 60% of generated deletes currently become no-ops.
-They are emitted as events rather than hidden so the weakening shows up in the
-statistics instead of being invisible, and both guards come out when those
-issues are fixed.
+Measured after #181 and #182 were fixed and the two guards that had been
+suppressing roughly 60% of generated deletes were removed, so `detach_delete`'s
+50% is real work rather than a skip.
 
 There is no async twin, breaking this directory's naming convention on purpose:
 Hypothesis's stateful runner does not drive coroutine rules, and sync/async
@@ -171,10 +169,6 @@ class GraphMachine(RuleBasedStateMachine):
         # vertex that an open transaction has deleted but not yet committed.
         self.pending_del_v: set[int] = set()
         self.pending_del_e: set[tuple[int, int, str]] = set()
-        # Vertices known to have been flushed to L1. Deleting one that has not
-        # been breaks the next `flush()` -- see
-        # `test_delete_before_flush_breaks_the_next_flush`.
-        self.flushed_v: set[int] = set()
 
         self._uid = itertools.count(1)
 
@@ -300,25 +294,6 @@ class GraphMachine(RuleBasedStateMachine):
     @rule(u=consumes(uids))
     def detach_delete(self, u: int) -> None:
         event("detach_delete")
-        if u not in self.flushed_v:
-            # Deleting a vertex that has never been flushed to L1 makes the next
-            # `flush()` raise UniInternalError -- see
-            # `test_delete_before_flush_breaks_the_next_flush` and #182, which
-            # this machine found and which is pinned as a strict xfail below.
-            #
-            # The guard keys on flushed-ness rather than on the transaction
-            # boundary: the first version skipped only same-transaction deletes,
-            # which made the machine pass by luck on the seeds tried and would
-            # have gone red on others. A narrowing, not a fix -- remove it when
-            # that test starts passing.
-            event("detach_delete skipped: vertex not yet flushed")
-            return
-        if any(e[0] == u or e[1] == u for e in self.visible_e):
-            # Deleting a vertex that has incident edges resurrects those edges
-            # on the next flush, with a null endpoint (#181). Same shape of
-            # narrowing as the guard above, and it comes out with that issue.
-            event("detach_delete skipped: vertex has edges")
-            return
         self._exec(f"MATCH (n {{uid: {u}}}) DETACH DELETE n")
         self.pending_v.pop(u, None)
         self.pending_del_v.add(u)
@@ -411,7 +386,6 @@ class GraphMachine(RuleBasedStateMachine):
         # model's visibility rule stays trivial.
         event("flush")
         self.db.flush()
-        self.flushed_v |= set(self.committed_v)
 
     # -- invariants -------------------------------------------------------
 
@@ -472,18 +446,8 @@ GraphMachine.TestCase.settings = settings.get_profile(
 TestGraphMachine = GraphMachine.TestCase
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "Deleting a vertex that has never been flushed to L1 makes the next "
-        "flush() raise UniInternalError 'merge_insert target table vertices does "
-        "not exist' (#182). The delete tombstone is written into the main vertices "
-        "table with a merge_insert, and that table is only materialised by a "
-        "flush. Found by GraphMachine; minimised here."
-    ),
-)
-def test_delete_before_flush_breaks_the_next_flush() -> None:
-    """Create, delete, flush -- with no flush in between -- is an error.
+def test_delete_before_flush_survives_the_next_flush() -> None:
+    """Create, delete, flush -- with no flush in between -- must not error.
 
     The trigger is flush state, not the transaction boundary. All of these
     reproduce it: same transaction or two transactions, schemaless or with the
@@ -495,8 +459,9 @@ def test_delete_before_flush_breaks_the_next_flush() -> None:
     has been materialised, and no tombstone is emitted at all when nothing
     matched.
 
-    Strict xfail: when this starts passing, the guard in
-    :meth:`GraphMachine.detach_delete` should come out with it.
+    Fixed in #182. Kept as a named regression alongside the Rust-side
+    `repro_issue_182_delete_before_first_flush`, because this is the shape the
+    machine actually generated and the one a binding user would hit.
     """
     db = uni_db.UniBuilder.temporary().build()
     s = db.session()
@@ -509,14 +474,6 @@ def test_delete_before_flush_breaks_the_next_flush() -> None:
     db.flush()
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "flush() resurrects an edge that DETACH DELETE removed, with a null "
-        "endpoint: the traversal is correct before the flush and wrong after "
-        "it, with no error raised (#181)."
-    ),
-)
 def test_flush_does_not_resurrect_a_detached_edge() -> None:
     """A flush must not change query results.
 
@@ -524,9 +481,11 @@ def test_flush_does_not_resurrect_a_detached_edge() -> None:
     ``EDGE_P: {(6, 6), (2, None)} != {(6, 6)}`` -- a row whose destination reads
     ``None`` because the vertex it points at is deleted.
 
-    The severe half of the pair with #182: that one raises loudly, this one
-    silently returns a wrong answer, and it is in the "correct before flush,
+    The severe half of the pair with #182: that one raised loudly, this one
+    silently returned a wrong answer, and it is in the "correct before flush,
     wrong after" family the fork and traversal fixes keep landing in.
+
+    Fixed in #181. Kept for the same reason as its sibling above.
     """
     db = uni_db.UniBuilder.temporary().build()
     s = db.session()
