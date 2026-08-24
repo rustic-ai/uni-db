@@ -324,3 +324,143 @@ async fn multivector_corrupt_wal_tail_skipped_on_reopen() -> Result<()> {
     );
     Ok(())
 }
+
+// ── The same seams under a real process abort ────────────────────────────────
+//
+// Siblings of the three crash tests above, run under `SIGABRT` in a child
+// process instead of a panic followed by a `Drop` that still flushes. See
+// `common/crash_harness.rs`.
+
+/// The child half of the abort tests in this file. Never returns.
+#[cfg(feature = "failpoints")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "internal: child process entry point for the abort harness"]
+async fn multivector_abort_child() {
+    let Some((scenario, path)) = crate::crash_harness::child_env() else {
+        return;
+    };
+    let uri = path.to_string_lossy().into_owned();
+    let delta_tokens = vec![basis(2), basis(3)];
+
+    {
+        let db = Uni::open(&uri).build().await.unwrap();
+        define_multi_schema(&db).await.unwrap();
+        match scenario.as_str() {
+            "during-flush" => {
+                insert_doc(&db, "base", &target_tokens()).await.unwrap();
+                db.flush().await.unwrap();
+                insert_doc(&db, "delta", &delta_tokens).await.unwrap();
+            }
+            _ => {
+                insert_doc(&db, "base", &base_tokens()).await.unwrap();
+                db.flush().await.unwrap();
+                if scenario == "after-wal-flush" {
+                    insert_doc(&db, "target", &target_tokens()).await.unwrap();
+                }
+            }
+        }
+        db.shutdown().await.unwrap();
+    }
+
+    let db = Uni::open(&uri).build().await.unwrap();
+    match scenario.as_str() {
+        "after-wal-flush" => {
+            crate::crash_harness::abort_at("commit::after-wal-flush");
+            let _ = insert_doc(&db, "doomed", &target_tokens()).await;
+        }
+        "after-validate" => {
+            crate::crash_harness::abort_at("commit::after-validate");
+            let _ = insert_doc(&db, "doomed", &target_tokens()).await;
+        }
+        "during-flush" => {
+            crate::crash_harness::abort_at("flush::after-rotate-before-lance");
+            let _ = db.flush().await;
+        }
+        other => crate::crash_harness::unknown_scenario("multivector_abort_child", other),
+    }
+    panic!("the operation returned; the seam for '{scenario}' was never reached");
+}
+
+/// Abort sibling of [`multivector_committed_value_survives_crash_recovery`].
+#[cfg(feature = "failpoints")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn multivector_abort_committed_value_survives_recovery() -> Result<()> {
+    let dir = tempfile::TempDir::new()?;
+    let uri = dir.path().join("db");
+    crate::crash_harness::run_child_async(
+        "multivector_resilience::multivector_abort_child",
+        "after-wal-flush",
+        &uri,
+    )
+    .await;
+
+    let db = Uni::open(uri.to_string_lossy().as_ref()).build().await?;
+    assert_eq!(
+        doc_count(&db, "target").await?,
+        1,
+        "committed multivector doc lost across abort recovery"
+    );
+    assert_eq!(
+        top_multi_title(&db).await?.as_deref(),
+        Some("target"),
+        "recovered multivector doc not retrievable via the L0-union path"
+    );
+    db.shutdown().await?;
+    Ok(())
+}
+
+/// Abort sibling of [`multivector_crash_before_wal_recovers_nothing`].
+#[cfg(feature = "failpoints")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn multivector_abort_before_wal_recovers_nothing() -> Result<()> {
+    let dir = tempfile::TempDir::new()?;
+    let uri = dir.path().join("db");
+    crate::crash_harness::run_child_async(
+        "multivector_resilience::multivector_abort_child",
+        "after-validate",
+        &uri,
+    )
+    .await;
+
+    let db = Uni::open(uri.to_string_lossy().as_ref()).build().await?;
+    assert_eq!(
+        doc_count(&db, "doomed").await?,
+        0,
+        "a multivector write that aborted before the WAL flush must leave no trace"
+    );
+    assert_eq!(
+        doc_count(&db, "base").await?,
+        1,
+        "the durable baseline multivector doc must survive"
+    );
+    db.shutdown().await?;
+    Ok(())
+}
+
+/// Abort sibling of [`multivector_crash_during_flush_loses_no_committed_data`].
+#[cfg(feature = "failpoints")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn multivector_abort_during_flush_loses_no_committed_data() -> Result<()> {
+    let dir = tempfile::TempDir::new()?;
+    let uri = dir.path().join("db");
+    crate::crash_harness::run_child_async(
+        "multivector_resilience::multivector_abort_child",
+        "during-flush",
+        &uri,
+    )
+    .await;
+
+    let db = Uni::open(uri.to_string_lossy().as_ref()).build().await?;
+    assert_eq!(
+        doc_count(&db, "base").await?,
+        1,
+        "flushed multivector doc lost across abort-during-flush"
+    );
+    assert_eq!(
+        doc_count(&db, "delta").await?,
+        1,
+        "committed-but-unflushed multivector doc lost across abort-during-flush"
+    );
+    db.shutdown().await?;
+    Ok(())
+}

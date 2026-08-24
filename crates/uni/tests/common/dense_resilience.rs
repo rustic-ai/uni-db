@@ -277,3 +277,155 @@ async fn dense_corrupt_wal_tail_skipped_on_reopen() -> Result<()> {
     );
     Ok(())
 }
+
+// ── The same seams under a real process abort ────────────────────────────────
+//
+// Siblings of the three crash tests above, run under `SIGABRT` in a child
+// process instead of a panic followed by a `Drop` that still flushes. See
+// `common/crash_harness.rs`.
+
+/// The child half of the abort tests in this file. Never returns.
+#[cfg(feature = "failpoints")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "internal: child process entry point for the abort harness"]
+async fn dense_abort_child() {
+    let Some((scenario, path)) = crate::crash_harness::child_env() else {
+        return;
+    };
+    let uri = path.to_string_lossy().into_owned();
+    let delta_emb = Value::Vector(vec![0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2]);
+
+    {
+        let db = Uni::open(&uri).build().await.unwrap();
+        define_dense_schema(&db).await.unwrap();
+        match scenario.as_str() {
+            "during-flush" => {
+                insert_doc(&db, "base", target_emb()).await.unwrap();
+                db.flush().await.unwrap();
+                insert_doc(&db, "delta", delta_emb).await.unwrap();
+            }
+            _ => {
+                insert_doc(&db, "base", base_emb()).await.unwrap();
+                db.flush().await.unwrap();
+                if scenario == "after-wal-flush" {
+                    insert_doc(&db, "target", target_emb()).await.unwrap();
+                }
+            }
+        }
+        db.shutdown().await.unwrap();
+    }
+
+    let db = Uni::open(&uri).build().await.unwrap();
+    match scenario.as_str() {
+        "after-wal-flush" => {
+            crate::crash_harness::abort_at("commit::after-wal-flush");
+            let _ = insert_doc(&db, "doomed", target_emb()).await;
+        }
+        "after-validate" => {
+            crate::crash_harness::abort_at("commit::after-validate");
+            let _ = insert_doc(&db, "doomed", target_emb()).await;
+        }
+        "during-flush" => {
+            crate::crash_harness::abort_at("flush::after-rotate-before-lance");
+            let _ = db.flush().await;
+        }
+        other => crate::crash_harness::unknown_scenario("dense_abort_child", other),
+    }
+    panic!("the operation returned; the seam for '{scenario}' was never reached");
+}
+
+/// Abort sibling of [`dense_committed_value_survives_crash_recovery`].
+#[cfg(feature = "failpoints")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dense_abort_committed_value_survives_recovery() -> Result<()> {
+    let dir = tempfile::TempDir::new()?;
+    let uri = dir.path().join("db");
+    crate::crash_harness::run_child_async(
+        "dense_resilience::dense_abort_child",
+        "after-wal-flush",
+        &uri,
+    )
+    .await;
+
+    let db = Uni::open(uri.to_string_lossy().as_ref()).build().await?;
+    assert_eq!(
+        read_emb(&db, "target").await?,
+        Some(target_emb()),
+        "committed dense value corrupted or lost across abort recovery"
+    );
+    assert_eq!(
+        top_dense_title(&db).await?.as_deref(),
+        Some("target"),
+        "recovered dense doc not retrievable via the L0-union path (no rebuild)"
+    );
+    db.shutdown().await?;
+    Ok(())
+}
+
+/// Abort sibling of [`dense_crash_before_wal_recovers_nothing`].
+#[cfg(feature = "failpoints")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dense_abort_before_wal_recovers_nothing() -> Result<()> {
+    let dir = tempfile::TempDir::new()?;
+    let uri = dir.path().join("db");
+    crate::crash_harness::run_child_async(
+        "dense_resilience::dense_abort_child",
+        "after-validate",
+        &uri,
+    )
+    .await;
+
+    let db = Uni::open(uri.to_string_lossy().as_ref()).build().await?;
+    assert_eq!(
+        read_emb(&db, "doomed").await?,
+        None,
+        "a dense write that aborted before the WAL flush must leave no trace"
+    );
+    assert_eq!(
+        read_emb(&db, "base").await?,
+        Some(base_emb()),
+        "the durable baseline dense doc must survive"
+    );
+    db.shutdown().await?;
+    Ok(())
+}
+
+/// Abort sibling of [`dense_crash_during_flush_loses_no_committed_data`].
+#[cfg(feature = "failpoints")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dense_abort_during_flush_loses_no_committed_data() -> Result<()> {
+    let dir = tempfile::TempDir::new()?;
+    let uri = dir.path().join("db");
+    let delta_emb = Value::Vector(vec![0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2]);
+    crate::crash_harness::run_child_async(
+        "dense_resilience::dense_abort_child",
+        "during-flush",
+        &uri,
+    )
+    .await;
+
+    let db = Uni::open(uri.to_string_lossy().as_ref()).build().await?;
+    assert_eq!(
+        read_emb(&db, "base").await?,
+        Some(target_emb()),
+        "flushed dense doc lost across abort-during-flush"
+    );
+    assert_eq!(
+        read_emb(&db, "delta").await?,
+        Some(delta_emb),
+        "committed-but-unflushed dense doc lost across abort-during-flush"
+    );
+    for title in ["base", "delta"] {
+        let n = db
+            .session()
+            .query_with("MATCH (d:Doc {title: $t}) RETURN d.title AS title")
+            .param("t", Value::String(title.to_string()))
+            .fetch_all()
+            .await?
+            .rows()
+            .len();
+        assert_eq!(n, 1, "{title} double-applied across abort recovery");
+    }
+    db.shutdown().await?;
+    Ok(())
+}
