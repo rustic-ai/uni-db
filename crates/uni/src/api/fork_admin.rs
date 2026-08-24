@@ -176,6 +176,9 @@ impl Uni {
         // those destructors before we check holder_count.
         self.wait_for_holders_drained(preview.id).await;
         let info = self.inner.fork_registry.begin_drop(name).await?;
+        // Crash seam: the tombstone and the Tombstoned registry entry are now
+        // durable, and nothing else has happened. Recovery must finish the drop.
+        fail::fail_point!("fork::drop-after-begin");
         // Phase 2 Day 8: evict the cached `Weak<UniInner>` (if any)
         // before deleting branches. The registry has already
         // transitioned the fork to Tombstoned, so concurrent
@@ -209,6 +212,11 @@ impl Uni {
                 );
                 delete_failure = Some(format!("{dataset}/{branch}: {e}"));
             }
+            // Crash seam, per iteration. Arm it `1*off->panic` to crash after
+            // one branch is already gone: that is the partially-deleted fork
+            // the env-var fault injection cannot produce, because it fails
+            // *every* delete rather than the Nth.
+            fail::fail_point!("fork::drop-mid-delete-loop");
         }
         if let Some(detail) = delete_failure {
             // Tombstone + registry entry remain; `recover_forks` will retry
@@ -222,6 +230,9 @@ impl Uni {
                 .into(),
             });
         }
+        // Crash seam: every branch is gone but the tombstone is still the
+        // anchor. Recovery must finish the drop and leave no residue.
+        fail::fail_point!("fork::drop-before-finish");
         // Step 4: remove the fork's storage-side artifacts (WAL, id allocator,
         // fork-scoped snapshot manifests) so a dropped fork leaves no disk
         // residue (review H3). On the storage object store, not the registry's.
@@ -241,6 +252,9 @@ impl Uni {
         // are already gone — and recovery simply re-runs the same idempotent
         // deletes.
         uni_store::fork::delete_fork_artifacts(&self.inner.storage.store(), &info.id).await;
+        // Crash seam for exactly that window: artifacts gone, tombstone still
+        // present. This is the seam that proves the reorder is safe.
+        fail::fail_point!("fork::drop-after-artifacts");
         // Step 5 + 6: clear the registry entry, delete tombstone + schema
         // overlay files.
         self.inner.fork_registry.finish_drop(&info).await?;
