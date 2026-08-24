@@ -116,6 +116,27 @@ METAMORPHIC_CASES=64 cargo nextest run -p uni-db --test integration \
 UNI_GC_TRACE=1 cargo nextest run -p uni-plugin-builtin -p uni-plugin-rhai -E 'test(graph_compute)'
 ```
 
+### Failpoint Crash Suite
+```bash
+# The fail-rs crash/reopen tests are compiled out unless this feature is on.
+# `--run-ignored all` is load-bearing: the env-var fault-injection tests are
+# #[ignore]d because fail-rs's registry and the counters in lance_branch.rs are
+# process-global.
+cargo nextest run -p uni-db -p uni-store --features failpoints --run-ignored all \
+  -E 'test(/resilience|recovery|durability/)'
+
+# And the other half of the contract -- the seams must stay inert without the
+# feature, since that is what every other job builds:
+cargo nextest run -p uni-store -E 'test(/resilience|recovery/)'
+```
+116 tests, 6 s warm. The cold cost is ~3 min 40 s and is almost entirely the
+second feature configuration compiling, so expect a slow first run after any
+dependency change.
+
+Worth knowing: this suite existed for a long time before any CI job ran it. If
+you add a `fail_point!` seam, add its test to a file matching the filter above,
+or it will be dormant on arrival.
+
 ### Miri (UB interpreter)
 ```bash
 # Needs the PINNED nightly plus the miri component. This is the one pinned

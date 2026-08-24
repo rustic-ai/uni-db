@@ -11,14 +11,14 @@
 //! its own process under nextest, so the global registry does not bleed.
 //!
 //! Covered:
-//!  - Bug #3  — a failed async rotate permanently wedges the flush finalizer
-//!              (`flush::rotate-fail`).
-//!  - Bug #4  — a non-transactional delete races L0 rotation and is silently
-//!              lost (`nontx::after-capture`).
-//!  - Bug #9A — a unique-constraint hole opens during the flush window
-//!              (`flush::after-rotate-before-lance`).
-//!  - Bug #10 — a stale property-cache window after flush finalize yields a
-//!              non-monotonic read (`flush::after-complete-before-cache-clear`).
+//! - Bug #3 — a failed async rotate permanently wedges the flush finalizer
+//!   (`flush::rotate-fail`).
+//! - Bug #4 — a non-transactional delete races L0 rotation and is silently lost
+//!   (`nontx::after-capture`).
+//! - Bug #9A — a unique-constraint hole opens during the flush window
+//!   (`flush::after-rotate-before-lance`).
+//! - Bug #10 — a stale property-cache window after flush finalize yields a
+//!   non-monotonic read (`flush::after-complete-before-cache-clear`).
 //!
 //! Run with: `cargo nextest run -p uni-store --features failpoints <test_name>`.
 
@@ -119,12 +119,14 @@ fn read_ctx(writer: &Writer) -> QueryContext {
 /// are rolled back on the Err path.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn failed_rotate_does_not_wedge_flush_finalizer() -> Result<()> {
-    let mut config = UniConfig::default();
-    config.async_flush_enabled = true;
-    config.auto_flush_threshold = 1; // every commit triggers a flush
-    config.auto_flush_min_mutations = 1;
-    config.max_pending_flushes = 4;
-    config.drop_fork_drain_timeout = Duration::from_secs(2);
+    let config = UniConfig {
+        async_flush_enabled: true,
+        auto_flush_threshold: 1, // every commit triggers a flush
+        auto_flush_min_mutations: 1,
+        max_pending_flushes: 4,
+        drop_fork_drain_timeout: Duration::from_secs(2),
+        ..Default::default()
+    };
     let (writer, _dir) = make_writer_with_config(config).await?;
 
     let coord = writer
