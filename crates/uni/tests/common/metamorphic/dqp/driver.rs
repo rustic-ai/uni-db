@@ -389,7 +389,7 @@ pub fn drive_prepared_with<L, P>(
             .map_err(|e| TestCaseError::fail(e.to_string()))?;
 
         total.set(total.get() + 1);
-        if lever.activated(&a.witness, &b.witness) {
+        if lever.activated(&a, &b) {
             activated.set(activated.get() + 1);
         }
         let case_rows = a.bag.total + b.bag.total;
@@ -500,7 +500,7 @@ mod tests {
         async fn side_b(&self, q: &Query) -> anyhow::Result<Observed> {
             observe(&self.session, q).await
         }
-        fn activated(&self, _a: &Witness, _b: &Witness) -> bool {
+        fn activated(&self, _a: &Observed, _b: &Observed) -> bool {
             false
         }
     }

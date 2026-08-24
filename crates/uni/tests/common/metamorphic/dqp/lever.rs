@@ -190,7 +190,17 @@ pub trait Lever {
     /// **No default body, on purpose.** See the module docs: a lever that cannot
     /// answer this is indistinguishable from one that compares a path against
     /// itself.
-    fn activated(&self, a: &Witness, b: &Witness) -> bool;
+    /// Takes the whole [`Observed`], not just the [`Witness`].
+    ///
+    /// Most levers change *machinery* — a different scan path, a warm cache, an
+    /// index — and witness that through a counter. A lever whose transition
+    /// changes *data* has no counter to point at: deleting rows leaves
+    /// `rows_scanned` and `storage_reads` identical, because a tombstoned row is
+    /// still scanned and then filtered. Measured, in
+    /// `transition_probe::probe_delete_transition`: zero of four probe queries
+    /// moved any field. Such a lever witnesses on the bag instead, so both are
+    /// in scope here.
+    fn activated(&self, a: &Observed, b: &Observed) -> bool;
 
     /// Anything else that must hold for this lever's comparisons to mean
     /// something. Called before and after the case loop.

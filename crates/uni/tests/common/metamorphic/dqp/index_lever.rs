@@ -137,8 +137,8 @@ impl StatefulLever for IndexLever {
     /// guaranteed: a predicate matching most of the table would legitimately
     /// scan nearly all of it while still consulting the index. A third clause
     /// would fail runs for a reason unrelated to what this lever measures.
-    fn activated(&self, a: &Witness, b: &Witness) -> bool {
-        a.index_scans == 0 && b.index_scans > 0
+    fn activated(&self, a: &Observed, b: &Observed) -> bool {
+        a.witness.index_scans == 0 && b.witness.index_scans > 0
     }
 }
 

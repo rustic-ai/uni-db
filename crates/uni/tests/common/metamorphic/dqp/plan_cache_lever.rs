@@ -96,8 +96,8 @@ impl Lever for PlanCacheLever {
     /// — that field is assigned at exactly one site, on the write path, and is
     /// permanently `false` for a read. `feasibility.rs` pins that fact, and
     /// `observe_cached` exists because of it.
-    fn activated(&self, a: &Witness, b: &Witness) -> bool {
-        b.plan_cache_hits > 0 && a.plan_cache_hits == 0
+    fn activated(&self, a: &Observed, b: &Observed) -> bool {
+        b.witness.plan_cache_hits > 0 && a.witness.plan_cache_hits == 0
     }
 }
 
@@ -203,7 +203,7 @@ mod tests {
         let a = lever.side_a(&q).await?;
         let b = lever.side_b(&q).await?;
         assert!(
-            lever.activated(&a.witness, &b.witness),
+            lever.activated(&a, &b),
             "the lever did not activate on its own sides: a={:?} b={:?}",
             a.witness,
             b.witness

@@ -51,7 +51,7 @@ use proptest::test_runner::{Config, RngAlgorithm, TestRng, TestRunner};
 use super::driver::{Budgets, CaseKind, Db, PrepareFut};
 use super::lever::{Observed, Witness};
 use super::seed::{Fixture, Tier, build_dqp_seed_for};
-use crate::diff::bag_eq;
+use crate::diff::{BagDiff, RowBag, bag_eq};
 use crate::querygen::{Case, render::render};
 
 /// Cases per batch — one fixture build and one transition per batch.
@@ -144,7 +144,23 @@ pub trait StatefulLever {
     ///
     /// `a` is the witness from before the transition, `b` from after. As on
     /// [`super::lever::Lever::activated`] this has **no default body**.
-    fn activated(&self, a: &Witness, b: &Witness) -> bool;
+    /// See [`super::lever::Lever::activated`] for why this takes the whole
+    /// [`Observed`] rather than just the [`Witness`].
+    fn activated(&self, a: &Observed, b: &Observed) -> bool;
+
+    /// The law relating a pass-1 observation to its pass-2 counterpart.
+    ///
+    /// Defaults to equality, which is what every physical-state lever wants:
+    /// the same query over the same data, executed differently, must return the
+    /// same bag.
+    ///
+    /// A lever whose transition changes the *data* needs a weaker law, because
+    /// the two sides then differ legitimately. Deletion is the case in hand:
+    /// removing rows can only take answers away, so the law is containment, and
+    /// a row present afterwards that was absent before is the defect.
+    fn compare(&self, before: &RowBag, after: &RowBag) -> Result<(), BagDiff> {
+        bag_eq(before, after)
+    }
 
     /// Anything else that must hold for the comparison to mean something.
     /// Called before the first pass and after the second.
@@ -262,7 +278,7 @@ pub fn drive_stateful_with<L, P>(
             let a = &side_a[index];
 
             total.set(total.get() + 1);
-            if lever.activated(&a.witness, &b.witness) {
+            if lever.activated(a, &b) {
                 activated.set(activated.get() + 1);
             }
             let case_rows = a.bag.total + b.bag.total;
@@ -276,7 +292,7 @@ pub fn drive_stateful_with<L, P>(
                 render(q),
             );
 
-            if let Err(d) = bag_eq(&a.bag, &b.bag) {
+            if let Err(d) = lever.compare(&a.bag, &b.bag) {
                 panic!(
                     "[{name}] the two states disagree.\n\
                      query: {}\n\
@@ -407,8 +423,8 @@ pub fn replay_stateful<L, P>(
 
     println!("  before: {:?}", a.witness);
     println!("  after:  {:?}", b.witness);
-    println!("  activated: {}", lever.activated(&a.witness, &b.witness));
-    match bag_eq(&a.bag, &b.bag) {
+    println!("  activated: {}", lever.activated(&a, &b));
+    match lever.compare(&a.bag, &b.bag) {
         Ok(()) => println!("  bags AGREE — the failure did not reproduce at these coordinates"),
         Err(d) => panic!("  bags DISAGREE, as reported:\n{d}"),
     }
@@ -648,7 +664,7 @@ mod tests {
             Ok(())
         }
 
-        fn activated(&self, a: &super::Witness, b: &super::Witness) -> bool {
+        fn activated(&self, a: &super::Observed, b: &super::Observed) -> bool {
             self.inner.activated(a, b)
         }
     }

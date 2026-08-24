@@ -81,8 +81,8 @@ impl Lever for ForkLever {
     /// against primary. Without the second, a change that started routing
     /// ordinary sessions through a branch would go unnoticed and the lever would
     /// again be comparing one path against itself.
-    fn activated(&self, a: &Witness, b: &Witness) -> bool {
-        b.branch_scans > 0 && a.branch_scans == 0
+    fn activated(&self, a: &Observed, b: &Observed) -> bool {
+        b.witness.branch_scans > 0 && a.witness.branch_scans == 0
     }
 }
 

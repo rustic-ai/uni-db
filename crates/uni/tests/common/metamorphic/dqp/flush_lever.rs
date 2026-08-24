@@ -141,8 +141,10 @@ impl StatefulLever for FlushLever {
     /// `l0 200→0, storage 1000→1200`. Without it, a bug that dropped the delta
     /// entirely on the post-flush path would still look activated; it would be
     /// caught by `bag_eq`, but the witness would be lying in the meantime.
-    fn activated(&self, a: &Witness, b: &Witness) -> bool {
-        a.l0_reads > 0 && b.l0_reads == 0 && b.storage_reads > a.storage_reads
+    fn activated(&self, a: &Observed, b: &Observed) -> bool {
+        a.witness.l0_reads > 0
+            && b.witness.l0_reads == 0
+            && b.witness.storage_reads > a.witness.storage_reads
     }
 }
 

@@ -77,12 +77,35 @@
 //!
 //! So all six levers ship. **No lever remains deferred.**
 //!
+//! # The first data-changing lever
+//!
+//! [`delete_lever`] (#183) breaks the pattern the other six share. Their
+//! transitions change *physical state* — a flush, an index, a compaction — so
+//! both sides read the same rows and the law is bag equality. A deletion
+//! changes the data, so the two sides differ legitimately and the law weakens to
+//! containment: `bag(after) ⊆ bag(before)`, since removing rows can only take
+//! answers away. It rides [`stateful::StatefulLever::compare`], which defaults
+//! to equality, so nothing else was touched.
+//!
+//! It also has no counter to witness on. Measured in
+//! [`transition_probe::probe_delete_transition`]: a deletion of 124 vertices and
+//! 539 edges moved **zero** `Witness` fields, because a tombstoned row is still
+//! scanned and then filtered. So `activated` reads the bag instead — which is
+//! why it takes the whole [`lever::Observed`] rather than just the witness.
+//!
+//! What it does **not** reach is worth stating: the #181 family lives on the
+//! schemaless traversal, and these fixtures declare `WORKS_AT` by construction
+//! (`seed.rs`'s `typed_fixture_plans_a_typed_traverse` asserts exactly that).
+//! Deletion coverage here is real and was absent before; it is not the same as
+//! reaching that operator, which needs a schemaless fixture.
+//!
 //! See `docs/proposals/test_harness_implementation_plan_2026-08-12.md`.
 
 pub mod admissibility;
 pub mod cert;
 pub mod compaction_lever;
 pub mod counters;
+pub mod delete_lever;
 pub mod driver;
 pub mod feasibility;
 pub mod flush_lever;

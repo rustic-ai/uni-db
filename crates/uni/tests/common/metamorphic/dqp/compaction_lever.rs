@@ -203,8 +203,8 @@ impl StatefulLever for CompactionLever {
     /// are found, never which, so the row counts are expected to be identical on
     /// both sides — asserting on them would add nothing, and asserting they
     /// *differ* would be wrong.
-    fn activated(&self, a: &Witness, b: &Witness) -> bool {
-        a.lance_iops > 0 && b.lance_iops < a.lance_iops
+    fn activated(&self, a: &Observed, b: &Observed) -> bool {
+        a.witness.lance_iops > 0 && b.witness.lance_iops < a.witness.lance_iops
     }
 
     /// Rejects a batch whose transition merged nothing.

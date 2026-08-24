@@ -116,8 +116,8 @@ impl Lever for PinnedLever {
     /// and counts manifest pins only — an ordinary transaction's internal version
     /// pin does not qualify, or every transactional read would look like a
     /// time-travel read and the witness would mean nothing.
-    fn activated(&self, a: &Witness, b: &Witness) -> bool {
-        b.snapshot_reads > 0 && a.snapshot_reads == 0
+    fn activated(&self, a: &Observed, b: &Observed) -> bool {
+        b.witness.snapshot_reads > 0 && a.witness.snapshot_reads == 0
     }
 
     /// The live version must not have moved since prepare.

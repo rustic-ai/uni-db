@@ -472,6 +472,76 @@ async fn compaction_is_observable_at_run_level_only() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// **Probe 5 — does a deletion move any per-query counter?**
+///
+/// The deletion lever (#183) needs an `activated` predicate, and the trait has
+/// no default for one on purpose. Rather than guess which `Witness` field moves
+/// when rows go away, measure it — the same order the compaction lever
+/// followed, where `iops` was probed before anything was built on it.
+///
+/// Unlike the flush, index and compaction transitions, a deletion changes the
+/// *data* rather than the physical layout, so the row counters are the obvious
+/// candidates and the I/O counters are the interesting ones. If nothing moves,
+/// the lever ships on its narrowing rate and says so, rather than returning a
+/// constant from `activated`.
+#[tokio::test(flavor = "multi_thread")]
+async fn probe_delete_transition() -> anyhow::Result<()> {
+    let db = build_dqp_seed_tuned(Fixture::TINY, 0, |c| c.compaction.enabled = false).await?;
+
+    println!("\n[probe:delete] side A = full fixture, side B = a slice deleted");
+    let session = db.session();
+    let mut before = Vec::new();
+    for (name, q) in PROBE_QUERIES {
+        let (w, rows) = probe(&session, q).await?;
+        report("before", name, &w, rows);
+        before.push((*name, w, rows));
+    }
+
+    // Deterministic slice, not a random one: `replay_stateful` reproduces a
+    // failure from a seed, so a transition that varies run to run would print
+    // coordinates that reproduce nothing.
+    let tx = db.session().tx().await?;
+    let deleted = tx
+        .execute("MATCH (a:Person) WHERE a.age = 18 DETACH DELETE a")
+        .await?;
+    tx.commit().await?;
+    println!("  deleted: {deleted:?}");
+
+    let session = db.session();
+    let mut moved = Vec::new();
+    for ((name, w_before, rows_before), (_, q)) in before.iter().zip(PROBE_QUERIES) {
+        let (w_after, rows_after) = probe(&session, q).await?;
+        report("after", name, &w_after, rows_after);
+        if w_before != &w_after {
+            moved.push((*name, *w_before, w_after));
+        }
+        assert!(
+            rows_after <= *rows_before,
+            "[{name}] a deletion returned MORE rows than before: {rows_before} -> {rows_after}"
+        );
+    }
+
+    println!(
+        "\n  queries whose witness moved: {}/{}",
+        moved.len(),
+        PROBE_QUERIES.len()
+    );
+    for (name, b, a) in &moved {
+        println!(
+            "    {name}: rows_scanned {} -> {}, l0 {} -> {}, storage {} -> {}, iops {} -> {}",
+            b.rows_scanned,
+            a.rows_scanned,
+            b.l0_reads,
+            a.l0_reads,
+            b.storage_reads,
+            a.storage_reads,
+            b.lance_iops,
+            a.lance_iops
+        );
+    }
+    Ok(())
+}
+
 /// **Probe 1b — which clause of the flush witness fails on generated cases?**
 ///
 /// The four hand-written queries in [`PROBE_QUERIES`] activated the flush lever's
