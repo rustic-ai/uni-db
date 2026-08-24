@@ -187,7 +187,7 @@ fn generate_uuid_v4() -> String {
 
     // xorshift64* — generate 16 bytes of pseudo-random output.
     let mut bytes = [0u8; 16];
-    for chunk in bytes.chunks_exact_mut(8) {
+    for chunk in bytes.as_chunks_mut::<8>().0 {
         state ^= state << 13;
         state ^= state >> 7;
         state ^= state << 17;
