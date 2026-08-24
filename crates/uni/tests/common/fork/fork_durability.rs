@@ -291,3 +291,106 @@ async fn fork_flush_crash_before_truncate_no_double_apply() -> Result<()> {
 
     Ok(())
 }
+
+// ── The same seam under a real process abort ─────────────────────────────────
+
+/// The child half of the abort test in this file. Never returns.
+#[cfg(feature = "failpoints")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "internal: child process entry point for the abort harness"]
+async fn fork_durability_abort_child() {
+    let Some((scenario, path)) = crate::crash_harness::child_env() else {
+        return;
+    };
+    let uri = path.to_string_lossy().into_owned();
+    if scenario != "flush-before-truncate" {
+        crate::crash_harness::unknown_scenario("fork_durability_abort_child", &scenario);
+    }
+
+    {
+        let db = Uni::open(&uri)
+            .config(sync_flush_config())
+            .build()
+            .await
+            .unwrap();
+        db.schema()
+            .label("N")
+            .property("i", DataType::Int)
+            .apply()
+            .await
+            .unwrap();
+        let s = db.session();
+        let fork = s.fork("scn").await.unwrap();
+        for i in 0..6 {
+            let tx = fork.tx().await.unwrap();
+            tx.execute(&format!("CREATE (:N {{i: {i}}})"))
+                .await
+                .unwrap();
+            tx.commit().await.unwrap();
+        }
+        drop(fork);
+        db.shutdown().await.unwrap();
+    }
+
+    let db = Uni::open(&uri)
+        .config(sync_flush_config())
+        .build()
+        .await
+        .unwrap();
+    crate::crash_harness::abort_at("flush::after-complete-before-cache-clear");
+    let s = db.session();
+    let fork = s.fork("scn").await.unwrap();
+    let _ = fork.flush().await;
+    panic!("fork flush returned; the seam was never reached");
+}
+
+/// Abort sibling of [`fork_flush_crash_before_truncate_no_double_apply`].
+///
+/// Under a real abort the WAL is not truncated *and* no shutdown flush runs, so
+/// this is the stricter form of the exactly-once claim.
+#[cfg(feature = "failpoints")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "failpoint crash injection; run with --features failpoints"]
+async fn fork_abort_before_truncate_no_double_apply() -> Result<()> {
+    let dir = tempfile::TempDir::new()?;
+    let uri = dir.path().to_path_buf();
+    crate::crash_harness::run_child_async(
+        "fork::fork_durability::fork_durability_abort_child",
+        "flush-before-truncate",
+        &uri,
+    )
+    .await;
+
+    let db = Uni::open(uri.to_string_lossy().as_ref())
+        .config(sync_flush_config())
+        .build()
+        .await?;
+    let s = db.session();
+    let fork = s.fork("scn").await?;
+    assert_eq!(
+        node_count(&fork).await?,
+        6,
+        "interrupted-truncate reopen must not double-apply flushed rows"
+    );
+    fork.flush().await?;
+    assert_eq!(
+        node_count(&fork).await?,
+        6,
+        "re-flush after recovery must not duplicate rows"
+    );
+    drop(fork);
+    db.shutdown().await?;
+    Ok(())
+}
+
+/// `count(n)` over label `N`, for the abort test's before/after assertions.
+#[cfg(feature = "failpoints")]
+async fn node_count(session: &uni_db::Session) -> Result<i64> {
+    Ok(session
+        .query("MATCH (n:N) RETURN count(n) AS c")
+        .await?
+        .rows()
+        .first()
+        .and_then(|r| r.get::<i64>("c").ok())
+        .unwrap_or(-1))
+}
