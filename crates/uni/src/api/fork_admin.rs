@@ -222,13 +222,28 @@ impl Uni {
                 .into(),
             });
         }
-        // Step 4 + 5: clear the registry entry, delete tombstone + schema
-        // overlay files.
-        self.inner.fork_registry.finish_drop(&info).await?;
-        // Step 6: remove the fork's storage-side artifacts (WAL, id allocator,
+        // Step 4: remove the fork's storage-side artifacts (WAL, id allocator,
         // fork-scoped snapshot manifests) so a dropped fork leaves no disk
         // residue (review H3). On the storage object store, not the registry's.
+        //
+        // **Before `finish_drop`, deliberately.** The Step-3 comment above
+        // states the rule for branches — `finish_drop` deletes the recovery
+        // tombstone, "the only anchor that lets boot-time recovery retry the
+        // deletion" — and the same rule governs these artifacts. With the old
+        // order a crash between the two left the WAL directory and the id
+        // allocator on disk with no tombstone and no registry entry, so
+        // `recover_forks` never saw them: a permanent leak, and the one drop
+        // window that was not self-healing.
+        //
+        // This order has no such window. `delete_fork_artifacts` is best-effort
+        // and idempotent (prefix list + delete, errors only warned), so a crash
+        // between it and `finish_drop` leaves a Tombstoned fork whose artifacts
+        // are already gone — and recovery simply re-runs the same idempotent
+        // deletes.
         uni_store::fork::delete_fork_artifacts(&self.inner.storage.store(), &info.id).await;
+        // Step 5 + 6: clear the registry entry, delete tombstone + schema
+        // overlay files.
+        self.inner.fork_registry.finish_drop(&info).await?;
         Ok(())
     }
 

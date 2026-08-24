@@ -84,8 +84,12 @@ pub async fn recover_forks(
     for info in tombstoned {
         info!(fork_name = %info.name, fork_id = %info.id, "completing tombstoned drop");
         delete_all_branches(&info, branching).await;
-        registry.finish_drop(&info).await?;
+        // Artifacts before `finish_drop`, matching `Uni::drop_fork`: the
+        // tombstone is the anchor that brings us back here, so it must outlive
+        // what it points at. The reverse order leaks the WAL directory and id
+        // allocator if recovery itself is interrupted.
         super::delete_fork_artifacts(storage_store, &info.id).await;
+        registry.finish_drop(&info).await?;
         reconciled += 1;
     }
 
@@ -100,8 +104,12 @@ pub async fn recover_forks(
             "sweeping orphan tombstone"
         );
         delete_all_branches(&info, branching).await;
-        registry.finish_drop(&info).await?;
+        // Artifacts before `finish_drop`, matching `Uni::drop_fork`: the
+        // tombstone is the anchor that brings us back here, so it must outlive
+        // what it points at. The reverse order leaks the WAL directory and id
+        // allocator if recovery itself is interrupted.
         super::delete_fork_artifacts(storage_store, &info.id).await;
+        registry.finish_drop(&info).await?;
         reconciled += 1;
     }
 
