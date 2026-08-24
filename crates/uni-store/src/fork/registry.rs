@@ -565,6 +565,14 @@ impl ForkRegistryHandle {
             id
         };
 
+        // Crash seam: the registry says Active but the overlay file does not
+        // exist yet. `finish_create` is two PUTs, not one, and this window sits
+        // between them — the fork is fully reachable while a file it nominally
+        // owns is missing. Benign by design, since `load_schema_overlay`
+        // returns an empty delta on any read failure, but a seam here turns
+        // that from an assumption into something a test can assert.
+        fail::fail_point!("fork::create-mid-finish");
+
         // Outside the cache lock — schema overlay PUT shouldn't block readers.
         self.put_schema_overlay(&id, &SchemaDelta::empty(), name)
             .await?;

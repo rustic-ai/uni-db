@@ -331,3 +331,113 @@ async fn fork_2pc_crash_before_finish_drop_recovers() -> Result<()> {
     db.shutdown().await?;
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// Create path
+// ---------------------------------------------------------------------------
+
+/// Crash right after `begin_create`: a `Pending` entry, no allocator, no
+/// branches. Recovery always rolls a `Pending` fork back, never forward.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "failpoint crash injection; run with --features failpoints"]
+async fn fork_2pc_crash_after_begin_create_rolls_back() -> Result<()> {
+    let dir = tempfile::TempDir::new()?;
+    let uri = dir.path().to_str().unwrap().to_string();
+    {
+        let db = seeded(&uri).await?;
+        db.shutdown().await?;
+    }
+
+    crash_at(&uri, "fork::create-after-begin", "panic", |db| async move {
+        let _ = db.session().fork("halfborn").await;
+    })
+    .await?;
+
+    let db = Uni::open(&uri).config(sync_flush_config()).build().await?;
+    assert_no_torn_state(&db).await?;
+    assert!(
+        db.list_forks().await.iter().all(|f| f.name != "halfborn"),
+        "a Pending fork must be rolled back, not left visible"
+    );
+    // The name must be reusable — a rolled-back create that left the name
+    // claimed would be indistinguishable from a leak to the caller.
+    let f = db.session().fork("halfborn").await?;
+    drop(f);
+    db.shutdown().await?;
+    Ok(())
+}
+
+/// Crash after the id allocator is written but before any branch exists.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "failpoint crash injection; run with --features failpoints"]
+async fn fork_2pc_crash_after_allocator_rolls_back() -> Result<()> {
+    let dir = tempfile::TempDir::new()?;
+    let uri = dir.path().to_str().unwrap().to_string();
+    {
+        let db = seeded(&uri).await?;
+        db.shutdown().await?;
+    }
+
+    crash_at(
+        &uri,
+        "fork::create-after-allocator",
+        "panic",
+        |db| async move {
+            let _ = db.session().fork("allocated").await;
+        },
+    )
+    .await?;
+
+    let db = Uni::open(&uri).config(sync_flush_config()).build().await?;
+    assert_no_torn_state(&db).await?;
+    assert!(
+        db.list_forks().await.iter().all(|f| f.name != "allocated"),
+        "a Pending fork must be rolled back"
+    );
+    db.shutdown().await?;
+    Ok(())
+}
+
+/// Crash between `finish_create`'s two PUTs: the registry says `Active` while
+/// the schema overlay file does not exist yet.
+///
+/// Benign by design — `load_schema_overlay` returns an empty delta on any read
+/// failure — but that is an assumption worth asserting rather than trusting.
+/// The fork must be usable after the reopen.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "failpoint crash injection; run with --features failpoints"]
+async fn fork_2pc_crash_between_finish_create_puts_is_usable() -> Result<()> {
+    let dir = tempfile::TempDir::new()?;
+    let uri = dir.path().to_str().unwrap().to_string();
+    {
+        let db = seeded(&uri).await?;
+        db.shutdown().await?;
+    }
+
+    crash_at(&uri, "fork::create-mid-finish", "panic", |db| async move {
+        let _ = db.session().fork("overlayless").await;
+    })
+    .await?;
+
+    let db = Uni::open(&uri).config(sync_flush_config()).build().await?;
+    assert_no_torn_state(&db).await?;
+
+    // Active with no overlay file: the fork must still open and read.
+    if db
+        .list_forks()
+        .await
+        .iter()
+        .any(|f| f.name == "overlayless")
+    {
+        let fork = db.session().fork("overlayless").await?;
+        let n = fork.query("MATCH (n:A) RETURN count(n) AS c").await?;
+        assert_eq!(
+            n.rows().len(),
+            1,
+            "a fork whose overlay PUT was interrupted must still be readable"
+        );
+        drop(fork);
+    }
+    db.shutdown().await?;
+    Ok(())
+}
