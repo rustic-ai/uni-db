@@ -340,10 +340,26 @@ jobs:
   # anything that also arms them. Without the flag this job silently skips the
   # fault-injection half of what it exists to run.
   #
-  # Cost measured on a 22-core box: 6 s warm, 3 min 41 s cold — of which 3 min
-  # 33 s is compilation. Like the miri lane, this job's cost is a second feature
-  # configuration being built, not the tests, which is why it gets its own cache
-  # key rather than sharing "ci".
+  # The suite now also carries 21 abort tests, which re-run the crash seams in a
+  # child process killed with SIGABRT instead of a panic followed by `drop(db)`.
+  # That distinction is not cosmetic: `Drop for Uni` broadcasts the shutdown
+  # signal and the auto-flush task answers it with a full `flush_to_l1`, so the
+  # panic-path tests were validating graceful-close atomicity and racing that
+  # un-awaited flush against their own reopen. Both forms are kept — the
+  # graceful path has its own regression history (#167). See
+  # `crates/uni/tests/common/crash_harness.rs`.
+  #
+  # `crash_harness` is in the filter for its two self-tests, which assert the
+  # harness rejects a child that exits cleanly or panics instead of aborting.
+  # Without them "the child died of SIGABRT" would not establish *where* it
+  # died, and several parent assertions would pass against a child that aborted
+  # before doing any work.
+  #
+  # Cost measured on a 22-core box: 19 s warm (152 tests, up from 116/6 s — the
+  # delta is 21 child-process spawns of a large test binary), 3 min 41 s cold,
+  # of which 3 min 33 s is compilation. Like the miri lane, this job's cost is a
+  # second feature configuration being built, not the tests, which is why it
+  # gets its own cache key rather than sharing "ci".
   failpoints:
     if: github.repository == 'rustic-ai/uni-db'
     name: Failpoint Crash Suite
@@ -378,7 +394,7 @@ jobs:
         run: |
           cargo nextest run -p uni-db -p uni-store \
             --features failpoints --run-ignored all \
-            -E 'test(/resilience|recovery|durability/)'
+            -E 'test(/resilience|recovery|durability|crash_harness/)'
 
       # The macros must stay inert without the feature, because that is the
       # configuration every other job builds. A `fail_point!` that changed
