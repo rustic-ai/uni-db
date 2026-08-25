@@ -175,7 +175,15 @@ MIRIFLAGS="-Zmiri-disable-isolation" \
   cargo +nightly-2026-07-11 miri test -p uni-common --lib --tests \
   -- --test-threads=1 --skip 'muvera::'
 ```
-Measured 1 min 41 s warm for all three. `muvera` is excluded outright rather
+Measured 2 min 08 s warm for all three. (The older 1 min 41 s figure predates
+the sparse proptests actually running: under isolation they aborted at startup
+on a blocked `getcwd`, so that timing covered a target that verified nothing.)
+
+Two miri-isolation traps, both silent, both hit by this lane: `current_dir` is
+blocked, which is what aborted the proptest target, and **the environment is
+hidden**, so any test tuned through an env var quietly reverts to its library
+default. Set such knobs in code under `cfg!(miri)`, not through the job's
+`env:`. `muvera` is excluded outright rather
 than budgeted -- its tests were killed at 132 minutes. `uni-crdt` runs in
 `nightly.yml` only.
 

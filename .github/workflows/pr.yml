@@ -271,9 +271,15 @@ jobs:
       # `--lib --tests` is explicit rather than left to the default. The budget
       # was measured on these targets; leaving the scope implicit means the next
       # `tests/*.rs` file silently joins a PR-blocking lane.
+      # No `PROPTEST_CASES` here, deliberately. It used to be set and did
+      # nothing: miri's isolation hides the environment, so
+      # `std::env::var("PROPTEST_CASES")` is `Err(NotPresent)` and proptest
+      # falls back to its built-in 256. `uni-btic` and `uni-common` do not use
+      # proptest at all, so the only crate it could ever have applied to is
+      # `uni-sparse-vector` — which runs under isolation, where it cannot be
+      # read. The case count now lives in `miri_safe_config` in
+      # `crates/uni-sparse-vector/tests/proptest.rs`, which also explains why.
       - name: Miri — codecs (isolation ON)
-        env:
-          PROPTEST_CASES: "16"
         run: |
           echo "::group::miri uni-btic"
           cargo +nightly-2026-07-11 miri test -p uni-btic --lib --tests 2>&1 | tee -a miri.log

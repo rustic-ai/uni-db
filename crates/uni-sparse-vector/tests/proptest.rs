@@ -33,7 +33,59 @@ fn reference_dot(a: &SparseVector, b: &SparseVector) -> f32 {
         .sum()
 }
 
+/// Cases per property under miri.
+///
+/// Matches the `PROPTEST_CASES: "16"` the miri CI job sets, which never
+/// actually arrives — see [`miri_safe_config`].
+const MIRI_CASES: u32 = 16;
+
+/// Proptest config that survives miri's isolation.
+///
+/// Two separate things break under `-Zmiri-isolation` (which the codec crates
+/// run with deliberately, so a new syscall dependency surfaces rather than
+/// passing quietly), and both are silent:
+///
+/// **1. The target aborted before checking anything.** Proptest resolves
+/// `file!()` — always a relative path — through `std::env::current_dir` to
+/// locate `.proptest-regressions`, and does so in `load_persisted_failures2` at
+/// *runner startup*, before a single case runs. Under isolation that is a
+/// blocked `getcwd`, so the whole target died having verified nothing. It had
+/// been failing that way since this file was added, which is why the lane's
+/// recorded timings never included these properties: they never ran.
+///
+/// Disabling persistence under miri turns off only the reading and writing of
+/// `.proptest-regressions`. All eight properties still run — the point of
+/// keeping this crate in the lane — and a failing seed is still printed.
+///
+/// **2. `PROPTEST_CASES` does not reach proptest under isolation.** Miri hides
+/// the environment, so `std::env::var("PROPTEST_CASES")` is `Err(NotPresent)`
+/// and `ProptestConfig::default()` falls back to proptest's built-in 256 rather
+/// than the 16 the CI job asks for. Measured: 16 cases takes ~90 s for
+/// `--lib --tests`; letting it default to 256 takes over 20 minutes, against
+/// that job's 20-minute budget. So the count is set here explicitly instead of
+/// through an env var that cannot be read.
+///
+/// Outside miri both fields keep their normal behaviour, including honouring
+/// `PROPTEST_CASES`.
+fn miri_safe_config() -> ProptestConfig {
+    ProptestConfig {
+        failure_persistence: if cfg!(miri) {
+            None
+        } else {
+            ProptestConfig::default().failure_persistence
+        },
+        cases: if cfg!(miri) {
+            MIRI_CASES
+        } else {
+            ProptestConfig::default().cases
+        },
+        ..ProptestConfig::default()
+    }
+}
+
 proptest! {
+    #![proptest_config(miri_safe_config())]
+
     #[test]
     fn from_pairs_yields_valid_sorted_unique(p in pairs()) {
         let sv = SparseVector::from_pairs(p).unwrap();
