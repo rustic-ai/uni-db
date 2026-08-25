@@ -1057,14 +1057,11 @@ exist to catch.
 - [x] Qualified set chosen on CV < 1% **and** demonstrated correlation — five
       targets.
 - [x] Non-qualifying targets documented as nightly-only with the reason.
-- [ ] **Cross-runner variance — UNRESOLVED, and it gates Phase 7.** All 20 runs
-      came from **one machine**, so the CV figures characterize run-to-run
-      variance on fixed hardware and say nothing about the machine-to-machine
-      spread a PR gate actually experiences. The mechanism to close it exists —
-      `.github/workflows/perf-qualify.yml`, 5 runners × 5 runs, aggregated by
-      `scripts/perf/iai_cross_runner.py` — and is **dispatch-only and has never
-      been run**. The threshold in Phase 7 must be set from that figure, not
-      from the 0.21–0.96% measured here.
+- [x] **Cross-runner variance — RESOLVED 2026-08-25.** Run 32810181500,
+      5 runners x 5 runs. Cross-runner CV 0.07-0.20%, lower than within-runner
+      CV on every target. The gate's thresholds (5 runs, fail 2%, warn 1%) were
+      derived from it by computing the worst drift of an N-run median over every
+      N-subset of the 25 samples: 0.997% at 3 runs, 0.599% at 5.
 
 ### Stops the chain if
 

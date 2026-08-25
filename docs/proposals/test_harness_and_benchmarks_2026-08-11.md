@@ -884,13 +884,25 @@ uni-db APIs. **Delete it.**
       would have qualified all seven — the wall-clock correlation leg is what
       rejected the two IO-dominant ones, at a measured 2.9× and 2.0× slowdown
       invisible to instruction count.
-- [ ] **Cross-runner variance — open, and it gates everything below.** All 20
-      runs are from one machine. `.github/workflows/perf-qualify.yml` exists to
-      close it and has never been dispatched.
-- [ ] One iai target containing only qualified benches. `hot_paths_iai.rs` exists
-      from the pilot and still carries all seven.
-- [ ] `docs/perf/iai-baseline.json` committed; regeneration script in `scripts/`.
-- [ ] `perf-gate` fails on >5% regression, verified by a deliberate-regression PR.
+- [x] **Cross-runner variance — RESOLVED 2026-08-25**, run 32810181500: 5 runners
+      x 5 runs. Cross-runner CV 0.07-0.20%, *lower* than within-runner CV
+      (0.13-0.46%) on every target, so the single-machine figures were
+      pessimistic. §4 of the qualification doc carries the table.
+- [~] One iai target of qualified benches. `hot_paths_iai.rs` deliberately keeps
+      all seven plus the `baselines::` group: the gate ignores non-gated targets,
+      trimming would delete the rejected targets' only reference for a future
+      re-qualification, and `baseline_noop`'s fixed 4 Ir is what separates "no
+      regression" from "collection is broken". Deviation recorded in §4.2.
+- [x] `docs/perf/iai-baseline.json` committed (9 targets recorded, 5 gated), and
+      `scripts/perf/iai_baseline.py` generates it from collected runs.
+- [ ] **`perf-gate` verified by a deliberate-regression PR — still open.** The
+      job exists in `pr.yml` and the gate logic is proven against synthetic
+      fixtures (+2.5% fails, +1.4% warns, all-zero counters and a missing target
+      both fail hard), but it has never fired on a real PR.
+- [ ] **Baseline regeneration owed.** The multi-label fix (2026-08-25) moved four
+      of five gated targets by +2% to +9.3%, deliberately. Regenerate from a
+      cross-runner CI run once it lands; local numbers must not be used, since a
+      local run of unchanged code measured 25-56% below the CI baseline.
 - [x] Non-qualifying targets documented as nightly-only, with the reason
       (§5 of the qualification doc).
 - [x] `pushdown_performance.rs` resolved (2026-08-15) — deleted, with a
