@@ -38,8 +38,8 @@ except for the four Phase-8 items already recorded below.
 | **4B** | compaction lever | **done** 2026-08-22 — `lance_iops` supplied the witness | `dqp/compaction_lever.rs` |
 | 5 | Generator widening, `EXPLAIN`, teeth | **done** 2026-08-13 | `docs/testing/teeth-2026-08-13.md`, 6 revert patches |
 | 6 | CERT, ANN law, Tier-3 answer | **done** 2026-08-13 | `dqp/{cert,tier3_probe,vid_determinism}.rs` |
-| 0B | iai qualification pilot | **done, one leg open** | `docs/perf/iai-qualification-2026-08-12.md` §4 |
-| 7 | Perf gate rollout | **not started** — cleanup only | no `perf-gate` job, no `iai-baseline.json` |
+| 0B | iai qualification pilot | **done** 2026-08-25 — cross-runner leg closed | `docs/perf/iai-qualification-2026-08-12.md` §4 |
+| 7 | Perf gate rollout | **done** 2026-08-25 | `perf-gate` in `pr.yml`, `docs/perf/iai-baseline.json`, `scripts/perf/iai_{baseline,gate}.py` |
 | 8 | C4 cheap wins | **4 of 5 done** | see the phase's own progress list |
 | 9–13 | C2 / B2 / C3 / B3 / B4 | **not started** | 11 `fail_point!` sites, unchanged since Phase 0 |
 
