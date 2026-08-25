@@ -366,6 +366,75 @@ jobs:
   # of which 3 min 33 s is compilation. Like the miri lane, this job's cost is a
   # second feature configuration being built, not the tests, which is why it
   # gets its own cache key rather than sharing "ci".
+  perf-gate:
+    if: github.repository == 'rustic-ai/uni-db'
+    name: Perf Gate (instruction counts)
+    runs-on: ubuntu-xlarge
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      # valgrind is what makes this metric deterministic, and is in no other PR
+      # job. mold is required by .cargo/config.toml's linux rustflags.
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mold protobuf-compiler valgrind
+
+      # Must match crates/uni/Cargo.toml's iai-callgrind version exactly or the
+      # runner refuses to parse the harness output.
+      - name: Install iai-callgrind-runner
+        run: cargo install iai-callgrind-runner --version 0.16.1 --locked
+
+      # save-if: false — this job never populates the shared cache. The "ci"
+      # saver (ci.yml's tck-full) never builds --benches, so the bench binary is
+      # a cold compile here (~15 min). That is why a job doing ~12 minutes of
+      # measurement carries a 45-minute budget. Do not "fix" the slowness by
+      # saving: it would evict entries the stable jobs depend on.
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "ci"
+          save-if: false
+
+      # RUNS=5 is measured, not chosen. Against the 25-sample cross-runner set
+      # (run 32810181500) the worst drift of a median with NO code change is
+      # 0.997% at 3 runs and 0.599% at 5; 7 runs only reaches 0.581% for another
+      # 4.6 minutes. 5 is where the curve flattens.
+      - name: Measure
+        env:
+          RUNS: "5"
+        run: bash scripts/perf/iai_pilot.sh "$RUNS"
+
+      # Thresholds are explicit arguments — iai_gate.py has no defaults — so the
+      # number a build fails on is visible here and traceable to the measurement
+      # that produced it. 2% is 3.3x the worst measured false positive (0.599%).
+      # The proposal's original 5% predated any cross-runner measurement.
+      - name: Compare against committed baseline
+        run: |
+          python3 scripts/perf/iai_gate.py \
+            --baseline docs/perf/iai-baseline.json \
+            --current target/iai-pilot \
+            --fail-pct "${FAIL_PCT}" \
+            --warn-pct "${WARN_PCT}" \
+            --markdown | tee -a "$GITHUB_STEP_SUMMARY"
+        env:
+          FAIL_PCT: "2"
+          WARN_PCT: "1"
+
+      # A regression and a collection failure are different problems that look
+      # identical in a red X. Keep the samples so they can be told apart.
+      - name: Upload samples
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-gate-samples
+          path: target/iai-pilot/run-*.json
+          if-no-files-found: warn
+
   failpoints:
     if: github.repository == 'rustic-ai/uni-db'
     name: Failpoint Crash Suite

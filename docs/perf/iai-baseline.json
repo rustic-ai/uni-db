@@ -1,0 +1,83 @@
+{
+  "generated_from": {
+    "runners": [
+      "iai-shard-1",
+      "iai-shard-2",
+      "iai-shard-3",
+      "iai-shard-4",
+      "iai-shard-5"
+    ],
+    "samples_per_target": {
+      "baselines::baseline_noop.noop": 25,
+      "baselines::baseline_session_only.session_only": 25,
+      "read_paths::expand_batch_one_hop_warm.warm": 25,
+      "read_paths::hnsw_top10_search.top10": 25,
+      "read_paths::parse_and_plan_cold.cold": 25,
+      "read_paths::property_read_across_l0_l1.l0_over_l1": 25,
+      "read_paths::vertex_lookup_by_id.by_id": 25,
+      "write_paths::l0_to_l1_flush.l0_to_l1": 25,
+      "write_paths::transaction_commit_wal_on.wal_on": 25
+    }
+  },
+  "schema": 1,
+  "targets": {
+    "baselines::baseline_noop.noop": {
+      "cv_pct": 0.0,
+      "gated": false,
+      "instructions": 4,
+      "reason": "calibration baseline; too small to gate",
+      "samples": 25
+    },
+    "baselines::baseline_session_only.session_only": {
+      "cv_pct": 0.495,
+      "gated": false,
+      "instructions": 4758656,
+      "reason": "calibration baseline; too small to gate",
+      "samples": 25
+    },
+    "read_paths::expand_batch_one_hop_warm.warm": {
+      "cv_pct": 0.308,
+      "gated": true,
+      "instructions": 52708611,
+      "samples": 25
+    },
+    "read_paths::hnsw_top10_search.top10": {
+      "cv_pct": 0.135,
+      "gated": true,
+      "instructions": 55525362,
+      "samples": 25
+    },
+    "read_paths::parse_and_plan_cold.cold": {
+      "cv_pct": 0.364,
+      "gated": true,
+      "instructions": 20794225,
+      "samples": 25
+    },
+    "read_paths::property_read_across_l0_l1.l0_over_l1": {
+      "cv_pct": 0.282,
+      "gated": true,
+      "instructions": 24171868,
+      "samples": 25
+    },
+    "read_paths::vertex_lookup_by_id.by_id": {
+      "cv_pct": 0.456,
+      "gated": true,
+      "instructions": 21727545,
+      "samples": 25
+    },
+    "write_paths::l0_to_l1_flush.l0_to_l1": {
+      "cv_pct": 0.232,
+      "gated": false,
+      "instructions": 28687502,
+      "reason": "IO-dominant: rejected by the qualification pilot's wall-clock-correlation leg (2026-08-12), not by variance",
+      "samples": 25
+    },
+    "write_paths::transaction_commit_wal_on.wal_on": {
+      "cv_pct": 0.399,
+      "gated": false,
+      "instructions": 12406079,
+      "reason": "IO-dominant: rejected by the qualification pilot's wall-clock-correlation leg (2026-08-12), not by variance",
+      "samples": 25
+    }
+  }
+}
