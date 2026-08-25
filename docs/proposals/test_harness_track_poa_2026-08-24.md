@@ -243,9 +243,28 @@ abort matrix fails on both sides (`did not abort: status Some(101), signal
 None` in the parent, `the seam was never reached` in the child). Both were
 verified by deliberately pointing a test at a non-existent seam.
 
-**Still open:** the Lance-tier matrix (S5, around `compact_files` /
-`cleanup_old_versions`), S4's multi-label ordering case, and the madsim spike —
-split out per the scope decision, re-scoped to the background compaction loop.
+**S4 and S5 landed 2026-08-25**, taking the path to **five seams**:
+`compaction::between-labels` (per-label skew) and
+`compaction::after-compact-files-before-cleanup` (Lance committed a fragment
+rewrite, indices not yet re-optimized — the only seam reachable from the public
+`compact()` API). Both recover clean: index-backed lookups agree with a full
+scan for all 60 rows and compaction reaches a fixpoint; both label anchors agree
+and converge.
+
+**S4 found a defect, and the crash turned out to be irrelevant to it.** A
+label-anchored `DETACH DELETE` of a multi-label vertex is undone by the next
+flush for the vertex's *other* labels — measured before any compaction runs. The
+same delete is correct with no flush, and correct when unanchored or fully
+anchored, which localizes it to the flush writing the tombstone into only the
+matched label's per-label table. Pinned by
+`storage::multi_label_delete`, whose correct-behaviour case is `#[ignore]`d with
+the reason so it neither reddens CI nor encodes the bug as intended. **Not fixed
+here** — it is a write-path defect, unrelated to compaction, and wants its own
+change.
+
+**Still open:** the madsim spike, split out per the scope decision and
+re-scoped to the background compaction loop; and the multi-label delete defect
+above.
 
 #### Original task list, for the record
 

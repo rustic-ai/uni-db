@@ -44,6 +44,23 @@ impl Compactor {
                 Ok(_) => {}
                 Err(e) => error!("Failed to compact vertices for {}: {}", label, e),
             }
+
+            // Crash window: some labels' vertex tables have been replaced and
+            // the rest have not, and no adjacency has been compacted at all
+            // (that phase runs after this loop). A vertex carrying two labels
+            // therefore lives in one compacted table and one uncompacted table
+            // simultaneously.
+            //
+            // Recovery duty: both label anchors must agree about it. The
+            // tombstone fan-out writes a tombstone into EVERY label's table, and
+            // this pass physically drops tombstones — so one anchor can lose the
+            // evidence of a delete while the other keeps it, and
+            // `find_props_by_vid` takes a global best version across all of the
+            // vid's labels.
+            //
+            // `schema.labels` is a map, so which label this fires after is not
+            // defined. Assertions must hold whichever one ran.
+            fail::fail_point!("compaction::between-labels");
         }
 
         // Compact Edges

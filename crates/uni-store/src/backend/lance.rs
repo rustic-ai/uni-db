@@ -637,6 +637,18 @@ impl StorageBackend for LanceDbBackend {
         .await
         .map_err(|e| anyhow!("Failed to compact '{}': {}", table_name, e))?;
 
+        // Crash window: Lance has COMMITTED the rewritten fragments, but the old
+        // versions are not yet pruned and `optimize_indices` below has not run,
+        // so every index still points at pre-rewrite row addresses.
+        //
+        // Recovery duty: reads must stay correct — an index-backed predicate and
+        // a full scan must agree. Note that nothing re-triggers the index repair
+        // on its own: the next `compact_files` finds an empty plan and returns
+        // without committing, so if the repair is genuinely required it would
+        // never happen. `compact_files` itself is a single opaque upstream call,
+        // so this boundary is the finest granularity uni controls.
+        fail::fail_point!("compaction::after-compact-files-before-cleanup");
+
         // Prune versions older than the configured retention window (7 days by
         // default, matching lancedb's hardcoded value). This is safe for forks
         // despite the "retention must not drop

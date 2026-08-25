@@ -10,6 +10,7 @@ pub mod compaction_test;
 pub mod created_updated_at_test;
 pub mod delta_test;
 pub mod embedding_stack_overflow_test;
+pub mod multi_label_delete;
 pub mod overflow_json_e2e;
 pub mod overflow_json_test;
 pub mod parquet_export_test;
