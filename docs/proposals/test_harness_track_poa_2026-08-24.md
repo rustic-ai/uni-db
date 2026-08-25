@@ -262,9 +262,22 @@ the reason so it neither reddens CI nor encodes the bug as intended. **Not fixed
 here** — it is a write-path defect, unrelated to compaction, and wants its own
 change.
 
-**Still open:** the madsim spike, split out per the scope decision and
-re-scoped to the background compaction loop; and the multi-label delete defect
-above.
+**madsim spike filed 2026-08-25 — verdict REJECT**, with evidence:
+`docs/testing/madsim-spike-2026-08-25.md`. madsim's own source marks `fs`,
+`sync`, `io` and `select!` as "not simulated API", so it would make the timer
+deterministic and nothing else; the path is dense with `parking_lot`,
+`std::sync::atomic`, `dashmap` and `spawn_blocking` it cannot intercept; there
+is no in-memory `StorageBackend` to run the uni-owned path without Lance; and
+its global `--cfg` is exactly the mechanism the loom lane documented refusing.
+
+The motivation was real, and is answered more cheaply: `tokio/test-util`'s
+paused clock, enabled nowhere in this workspace before, drives the real loop
+deterministically at **0.048-0.058 s against the 2 s real sleep** it replaces,
+5/5 stable. **With C2's last criterion closed, T3 is complete.**
+
+**Still open:** migrating the other five `background_compaction_test.rs` cases
+off their real sleeps (~8 s per run, five timing dependencies); and the
+multi-label delete defect's own follow-ups.
 
 #### Original task list, for the record
 

@@ -378,3 +378,65 @@ async fn test_background_compaction_handles_empty_db() {
     assert_eq!(status.l1_runs, 0);
     assert_eq!(status.l1_estimated_bytes, 0);
 }
+
+/// The background compaction loop, driven by a **paused clock** instead of a
+/// real sleep.
+///
+/// Every other test in this file starts the loop and then
+/// `tokio::time::sleep`s for a wall-clock second or two, hoping enough ticks
+/// land. That is both slow and timing-dependent — the nondeterminism a
+/// deterministic-runtime simulator was proposed to fix.
+///
+/// `start_paused` gives the same determinism with no new dependency, no global
+/// `--cfg`, and no fourth CI lane: the clock only advances when every task is
+/// idle, so each `interval` tick fires exactly once, after the work the
+/// previous tick started has actually finished.
+#[tokio::test(start_paused = true)]
+async fn background_compaction_ticks_deterministically_on_a_paused_clock() {
+    let dir = tempdir().unwrap();
+    let db_path_str = dir.path().to_str().unwrap();
+
+    let mut config = UniConfig::default();
+    config.compaction.enabled = true;
+    config.compaction.max_l1_runs = 1;
+    config.compaction.check_interval = Duration::from_millis(200);
+
+    let (storage, schema_manager, edge_type_id) =
+        setup_schema_and_storage(db_path_str, config.clone()).await;
+    write_and_flush(&storage, &schema_manager, edge_type_id, config).await;
+
+    let (shutdown_tx, shutdown_rx) = tokio::sync::broadcast::channel(1);
+    let handle = storage.clone().start_background_compaction(shutdown_rx);
+
+    // Advance one interval at a time, yielding between steps so the tick's work
+    // — which is real IO through `spawn_blocking` — can actually run before the
+    // next advance. A single bulk `advance` fires the timers but returns before
+    // the loop has polled them, and the shutdown below then wins the `select!`.
+    for _ in 0..8 {
+        tokio::time::advance(Duration::from_millis(200)).await;
+        for _ in 0..64 {
+            tokio::task::yield_now().await;
+        }
+        let compactions = storage
+            .compaction_status()
+            .map(|s| s.total_compactions)
+            .unwrap_or(0);
+        if compactions >= 1 {
+            break;
+        }
+    }
+
+    let _ = shutdown_tx.send(());
+    handle.await.unwrap();
+
+    let status = storage.compaction_status().unwrap();
+    assert!(
+        status.total_compactions >= 1,
+        "a paused clock must still drive the loop; got {}",
+        status.total_compactions
+    );
+    assert_eq!(
+        status.l1_runs, 0,
+        "l1_runs is reset by a completed semantic pass"
+    );
+}
