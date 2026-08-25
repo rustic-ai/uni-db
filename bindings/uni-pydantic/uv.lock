@@ -2159,6 +2159,7 @@ provides-extras = ["docs", "notebook-data-prep", "notebook-runtime"]
 [package.metadata.requires-dev]
 dev = [
     { name = "black", specifier = ">=23.0.0" },
+    { name = "hypothesis", specifier = ">=6.100" },
     { name = "maturin", specifier = ">=1.0,<2.0" },
     { name = "mypy", specifier = ">=1.0.0" },
     { name = "patchelf", specifier = ">=0.17" },
