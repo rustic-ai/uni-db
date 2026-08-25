@@ -132,15 +132,11 @@ lane.
 
 `tokio/test-util` is **not** part of tokio's `full` feature and was enabled
 nowhere in this workspace; no test used `time::pause`, `time::advance`, or
-`start_paused`. It is now a `uni-store` dev-dependency, and
-`background_compaction_ticks_deterministically_on_a_paused_clock`
-(`crates/uni-store/tests/common/storage/background_compaction_test.rs`)
-demonstrates it against the real loop, real Lance IO included:
-
-| | wall-clock |
-|---|---|
-| `test_background_compaction_runs_semantic` (2 s real sleep) | ~2.08 s |
-| the same loop on a paused clock | **0.048-0.058 s**, 5/5 stable |
+`start_paused`. It is now a `uni-store` dev-dependency, and the shared
+`run_compaction_cycle` helper in
+`crates/uni-store/tests/common/storage/background_compaction_test.rs` drives the
+real loop on it — real Lance IO included. Per-test figures are in the follow-up
+table below.
 
 **One caveat, stated because it is the whole reason to record this rather than
 just assert it.** A single bulk `advance()` does *not* work: it fires the timers
