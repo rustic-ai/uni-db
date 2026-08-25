@@ -1,0 +1,115 @@
+diff --git b/crates/uni-store/src/storage/compaction.rs a/crates/uni-store/src/storage/compaction.rs
+index 032307e69..b0bffab3a 100644
+--- b/crates/uni-store/src/storage/compaction.rs
++++ a/crates/uni-store/src/storage/compaction.rs
+@@ -6,9 +6,7 @@ use crate::storage::manager::StorageManager;
+ use anyhow::{Result, anyhow};
+ use arrow_array::Array;
+ use arrow_array::builder::{ListBuilder, UInt64Builder};
+-use arrow_array::{
+-    LargeBinaryArray, ListArray, RecordBatch, StringArray, TimestampNanosecondArray, UInt64Array,
+-};
++use arrow_array::{ListArray, RecordBatch, UInt64Array};
+ use metrics;
+ use std::collections::{HashMap, HashSet};
+ use std::sync::Arc;
+@@ -151,8 +149,6 @@ impl Compactor {
+         let mut vertex_state: HashMap<Vid, (Properties, bool)> = HashMap::new();
+         let mut vertex_versions: HashMap<Vid, u64> = HashMap::new();
+         let mut vertex_labels: HashMap<Vid, Vec<String>> = HashMap::new();
+-        let mut created_at: HashMap<Vid, i64> = HashMap::new();
+-        let mut updated_at: HashMap<Vid, i64> = HashMap::new();
+ 
+         let mut rows_processed = 0;
+ 
+@@ -182,27 +178,6 @@ impl Compactor {
+                 .column_by_name("_labels")
+                 .and_then(|c| c.as_any().downcast_ref::<arrow_array::ListArray>());
+ 
+-            // `ext_id` and `overflow_json` are on the reserved-property list, so
+-            // they can NEVER appear in `label_props` — the schema-driven rebuild
+-            // below is structurally incapable of seeing them. Read them from
+-            // their physical columns and put them back into the property map, so
+-            // `build_record_batch_with_timestamps` re-derives `ext_id`, `_uid`
+-            // and `overflow_json` from the same inputs the flush path used.
+-            let ext_id_col = batch
+-                .column_by_name("ext_id")
+-                .and_then(|c| c.as_any().downcast_ref::<StringArray>());
+-            let overflow_col = batch
+-                .column_by_name("overflow_json")
+-                .and_then(|c| c.as_any().downcast_ref::<LargeBinaryArray>());
+-            // Timestamps are metadata rather than properties, so they are
+-            // carried in side maps and handed to the batch builder directly.
+-            let created_col = batch
+-                .column_by_name("_created_at")
+-                .and_then(|c| c.as_any().downcast_ref::<TimestampNanosecondArray>());
+-            let updated_col = batch
+-                .column_by_name("_updated_at")
+-                .and_then(|c| c.as_any().downcast_ref::<TimestampNanosecondArray>());
+-
+             for i in 0..batch.num_rows() {
+                 let vid = Vid::from(vid_col.value(i));
+                 let version = ver_col.value(i);
+@@ -259,47 +234,6 @@ impl Compactor {
+                     }
+                 }
+ 
+-                // Restore the reserved columns the loop above cannot reach.
+-                if let Some(col) = ext_id_col
+-                    && !col.is_null(i)
+-                {
+-                    row_props.insert(
+-                        "ext_id".to_string(),
+-                        Value::String(col.value(i).to_string()),
+-                    );
+-                }
+-                if let Some(col) = overflow_col
+-                    && !col.is_null(i)
+-                    && let Value::Map(overflow) =
+-                        uni_common::cypher_value_codec::decode(col.value(i))?
+-                {
+-                    // Schemaless properties merge exactly like declared ones;
+-                    // `build_overflow_json_column` re-splits them on the way out.
+-                    for (key, value) in overflow {
+-                        row_props.insert(key, value);
+-                    }
+-                }
+-
+-                // `_created_at` is the earliest we have seen for this vid and
+-                // `_updated_at` the latest: rows arrive unordered, so taking the
+-                // row's own value would depend on scan order.
+-                if let Some(col) = created_col
+-                    && !col.is_null(i)
+-                {
+-                    created_at
+-                        .entry(vid)
+-                        .and_modify(|existing| *existing = (*existing).min(col.value(i)))
+-                        .or_insert(col.value(i));
+-                }
+-                if let Some(col) = updated_col
+-                    && !col.is_null(i)
+-                {
+-                    updated_at
+-                        .entry(vid)
+-                        .and_modify(|existing| *existing = (*existing).max(col.value(i)))
+-                        .or_insert(col.value(i));
+-                }
+-
+                 crdt_merges += Self::merge_row_into_state(
+                     row_props,
+                     null_props,
+@@ -329,13 +263,11 @@ impl Compactor {
+         }
+ 
+         if !valid_vertices.is_empty() {
+-            let batch = dataset.build_record_batch_with_timestamps(
++            let batch = dataset.build_record_batch(
+                 &valid_vertices,
+                 &valid_deleted,
+                 &valid_versions,
+                 &schema,
+-                Some(&created_at),
+-                Some(&updated_at),
+             )?;
+             dataset
+                 .replace(self.storage.backend(), batch, &schema)

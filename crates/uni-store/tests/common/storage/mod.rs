@@ -1,5 +1,6 @@
 pub mod background_compaction_test;
 pub mod branched_backend_writes;
+pub mod compaction_property_fidelity;
 pub mod extid_index_test;
 pub mod json_index_test;
 pub mod lance_merge_insert_probe;

@@ -22,6 +22,7 @@ pub mod snapshot_integration;
 pub mod snapshot_test;
 pub mod storage_edge_cases;
 pub mod test_list_labels;
+pub mod vacuum_property_fidelity;
 pub mod valid_at_test;
 pub mod vertex_edge_cases;
 pub mod wal_coordination;
