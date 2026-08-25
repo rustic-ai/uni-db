@@ -175,6 +175,18 @@ async fn write_and_flush(
 
 /// Helper: run background compaction for a given duration, then shut it down
 /// and return the final compaction status.
+/// Run the background compaction loop for `run_duration` of **virtual** time.
+///
+/// Every caller is a `#[tokio::test(start_paused = true)]`, so the clock only
+/// advances when this function advances it — and only when every task is idle.
+/// That makes tick delivery deterministic and costs no wall-clock: the same
+/// coverage that used to take a 2-second real sleep now takes milliseconds.
+///
+/// The stepping is load-bearing. A single bulk `advance(run_duration)` fires
+/// the timers and returns before the loop has polled them, so the shutdown
+/// below wins the `select!` and no compaction ever runs. Advancing in small
+/// steps and yielding between lets each tick's work — which is real Lance IO
+/// through `spawn_blocking` — finish before the clock moves again.
 async fn run_compaction_cycle(
     storage: &Arc<StorageManager>,
     run_duration: Duration,
@@ -182,7 +194,14 @@ async fn run_compaction_cycle(
     let (shutdown_tx, shutdown_rx) = tokio::sync::broadcast::channel(1);
     let handle = storage.clone().start_background_compaction(shutdown_rx);
 
-    tokio::time::sleep(run_duration).await;
+    let step = Duration::from_millis(50);
+    let steps = (run_duration.as_millis() / step.as_millis()).max(1);
+    for _ in 0..steps {
+        tokio::time::advance(step).await;
+        for _ in 0..32 {
+            tokio::task::yield_now().await;
+        }
+    }
 
     let _ = shutdown_tx.send(());
     handle.await.unwrap();
@@ -192,7 +211,7 @@ async fn run_compaction_cycle(
 
 /// Verify that background compaction runs Tier 2 semantic compaction
 /// (L1 deltas cleared, total_compactions >= 1).
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn test_background_compaction_runs_semantic() {
     let dir = tempdir().unwrap();
     let db_path_str = dir.path().to_str().unwrap();
@@ -233,7 +252,7 @@ async fn test_background_compaction_runs_semantic() {
 }
 
 /// Verify that the BySize trigger fires when max_l1_size_bytes is exceeded.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn test_compaction_by_size_trigger() {
     let dir = tempdir().unwrap();
     let db_path_str = dir.path().to_str().unwrap();
@@ -259,7 +278,7 @@ async fn test_compaction_by_size_trigger() {
 }
 
 /// Verify that the ByAge trigger fires when max_l1_age is exceeded.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn test_compaction_by_age_trigger() {
     let dir = tempdir().unwrap();
     let db_path_str = dir.path().to_str().unwrap();
@@ -277,7 +296,12 @@ async fn test_compaction_by_age_trigger() {
     write_and_flush(&storage, &schema_manager, edge_type_id, config).await;
 
     // Wait for data to age past the threshold
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    // A REAL sleep, deliberately. `oldest_l1_age` is computed from
+    // `SystemTime::now()` (`storage/manager.rs`), not from tokio's clock, so a
+    // paused-clock `tokio::time::sleep` would auto-advance instantly and the
+    // data would never age past `max_l1_age`. Only the loop's ticking below is
+    // virtual; the aging itself has to be real.
+    std::thread::sleep(Duration::from_millis(200));
 
     let status = run_compaction_cycle(&storage, Duration::from_secs(2)).await;
 
@@ -291,7 +315,7 @@ async fn test_compaction_by_age_trigger() {
 /// Verify that l1_runs only counts non-empty delta tables.
 /// After semantic compaction clears deltas, l1_runs should be 0
 /// even though the tables still exist.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn test_l1_runs_counts_non_empty_only() {
     let dir = tempdir().unwrap();
     let db_path_str = dir.path().to_str().unwrap();
@@ -324,7 +348,7 @@ async fn test_l1_runs_counts_non_empty_only() {
 }
 
 /// Verify l1_estimated_bytes is computed from row counts, not hardcoded to 0.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn test_compaction_status_tracks_data_size() {
     let dir = tempdir().unwrap();
     let db_path_str = dir.path().to_str().unwrap();
@@ -356,7 +380,7 @@ async fn test_compaction_status_tracks_data_size() {
 
 /// Verify that background compaction handles an empty DB gracefully
 /// (no crash, no panic, 0 total_compactions).
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn test_background_compaction_handles_empty_db() {
     let dir = tempdir().unwrap();
     let db_path_str = dir.path().to_str().unwrap();
@@ -377,66 +401,4 @@ async fn test_background_compaction_handles_empty_db() {
     );
     assert_eq!(status.l1_runs, 0);
     assert_eq!(status.l1_estimated_bytes, 0);
-}
-
-/// The background compaction loop, driven by a **paused clock** instead of a
-/// real sleep.
-///
-/// Every other test in this file starts the loop and then
-/// `tokio::time::sleep`s for a wall-clock second or two, hoping enough ticks
-/// land. That is both slow and timing-dependent — the nondeterminism a
-/// deterministic-runtime simulator was proposed to fix.
-///
-/// `start_paused` gives the same determinism with no new dependency, no global
-/// `--cfg`, and no fourth CI lane: the clock only advances when every task is
-/// idle, so each `interval` tick fires exactly once, after the work the
-/// previous tick started has actually finished.
-#[tokio::test(start_paused = true)]
-async fn background_compaction_ticks_deterministically_on_a_paused_clock() {
-    let dir = tempdir().unwrap();
-    let db_path_str = dir.path().to_str().unwrap();
-
-    let mut config = UniConfig::default();
-    config.compaction.enabled = true;
-    config.compaction.max_l1_runs = 1;
-    config.compaction.check_interval = Duration::from_millis(200);
-
-    let (storage, schema_manager, edge_type_id) =
-        setup_schema_and_storage(db_path_str, config.clone()).await;
-    write_and_flush(&storage, &schema_manager, edge_type_id, config).await;
-
-    let (shutdown_tx, shutdown_rx) = tokio::sync::broadcast::channel(1);
-    let handle = storage.clone().start_background_compaction(shutdown_rx);
-
-    // Advance one interval at a time, yielding between steps so the tick's work
-    // — which is real IO through `spawn_blocking` — can actually run before the
-    // next advance. A single bulk `advance` fires the timers but returns before
-    // the loop has polled them, and the shutdown below then wins the `select!`.
-    for _ in 0..8 {
-        tokio::time::advance(Duration::from_millis(200)).await;
-        for _ in 0..64 {
-            tokio::task::yield_now().await;
-        }
-        let compactions = storage
-            .compaction_status()
-            .map(|s| s.total_compactions)
-            .unwrap_or(0);
-        if compactions >= 1 {
-            break;
-        }
-    }
-
-    let _ = shutdown_tx.send(());
-    handle.await.unwrap();
-
-    let status = storage.compaction_status().unwrap();
-    assert!(
-        status.total_compactions >= 1,
-        "a paused clock must still drive the loop; got {}",
-        status.total_compactions
-    );
-    assert_eq!(
-        status.l1_runs, 0,
-        "l1_runs is reset by a completed semantic pass"
-    );
 }

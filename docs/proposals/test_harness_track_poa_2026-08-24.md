@@ -275,9 +275,14 @@ paused clock, enabled nowhere in this workspace before, drives the real loop
 deterministically at **0.048-0.058 s against the 2 s real sleep** it replaces,
 5/5 stable. **With C2's last criterion closed, T3 is complete.**
 
-**Still open:** migrating the other five `background_compaction_test.rs` cases
-off their real sleeps (~8 s per run, five timing dependencies); and the
-multi-label delete defect's own follow-ups.
+The sleep migration is **done 2026-08-25**: all six cases now run on a paused
+clock, 0.277 s for the group against ~10 s of sleeping, 8/8 repeats stable, and
+the whole `uni-store` suite fell from ~2.9 s to 0.994 s. One case keeps a real
+sleep by necessity — `oldest_l1_age` reads `SystemTime::now()`, which a paused
+tokio clock does not move.
+
+**Still open:** the multi-label delete defect's own follow-ups, and the iai
+baseline regeneration, which needs these commits landed upstream first.
 
 #### Original task list, for the record
 

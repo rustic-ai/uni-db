@@ -150,10 +150,31 @@ interval at a time and yield between steps, so each tick's IO can complete. The
 clock only auto-advances when every task is idle, which is what makes the result
 deterministic rather than merely fast.
 
-**Recommended follow-up, not done here:** migrate the other five
-`background_compaction_test.rs` cases off their real sleeps. That is ~8 seconds
-of every test run and five separate timing dependencies, and it is the honest
-remainder of the value this item was chartered to deliver.
+**Follow-up: done 2026-08-25.** All six cases in
+`background_compaction_test.rs` now drive the loop on a paused clock through
+the shared `run_compaction_cycle` helper. The standalone demo test was removed
+once it became redundant; its reasoning lives on the helper.
+
+| test | before | after |
+|---|---:|---:|
+| `test_compaction_by_size_trigger` | 2.076 s | 0.058 s |
+| `test_background_compaction_runs_semantic` | 2.084 s | 0.057 s |
+| `test_l1_runs_counts_non_empty_only` | 2.071 s | 0.061 s |
+| `test_compaction_by_age_trigger` | 2.285 s | 0.275 s |
+| `test_background_compaction_handles_empty_db` | 1.017 s | 0.012 s |
+| `test_compaction_status_tracks_data_size` | 0.569 s | 0.046 s |
+
+8/8 repeat runs stable at 0.263-0.280 s. The whole `uni-store` suite dropped
+from ~2.9 s to 0.994 s.
+
+**One case could not be fully virtualized, and that is a finding worth
+keeping.** `oldest_l1_age` is computed from `SystemTime::now()`
+(`storage/manager.rs`), not from tokio's clock, so under a paused clock the
+aging sleep in `test_compaction_by_age_trigger` would auto-advance instantly
+and the data would never age past `max_l1_age` — the trigger would never fire.
+It keeps a real `std::thread::sleep` for the aging and virtualizes only the
+loop's ticking. Converting it blindly would have produced a test that fails
+mysteriously, or passes for the wrong reason.
 
 ## 6. What would change the verdict
 
