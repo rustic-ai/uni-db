@@ -382,6 +382,9 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y mold protobuf-compiler
 
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
         with:
