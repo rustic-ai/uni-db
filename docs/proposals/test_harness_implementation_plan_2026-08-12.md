@@ -20,12 +20,23 @@ Two rules govern the whole plan:
 
 ---
 
-## Status — verified against source, 2026-08-21
+## Status — verified against source, 2026-08-25
 
-Track A (C1, the DQP oracle) is **complete through Phase 6, plus the half of
-Phase 4B that became buildable**. Track B (B1, the perf gate) has its pilot
-published but is **blocked on one unrun measurement**. Tracks C–E are untouched
-except for the four Phase-8 items already recorded below.
+**Phases 0A through 10 are complete: C1, C2, C4 and B1 are all closed.** Track A
+(the DQP oracle) ships eight levers plus CERT; Track B's gate is in `pr.yml` with
+thresholds derived from a measured cross-runner run; Track C's cheap wins are all
+five in; Track D's fault injection covers the fork 2PC windows, five compaction
+seams and a real `SIGABRT` harness, and its madsim spike is filed as a reject.
+
+**Track E (Phases 11-13) has not started.** That plus six small loose ends is
+the entire remainder — both enumerated under "Open" below.
+
+Worth stating plainly, because it is the argument for the whole track: the work
+after Phase 8 found **six product defects** that the existing suite did not —
+fork artifacts deleted before their recovery tombstone; semantic compaction
+erasing `ext_id`, schemaless properties and timestamps; anchored matches
+truncating a multi-label vertex across five statement forms; and, via the
+Hypothesis machine, #181 and #182.
 
 | phase | item | status | evidence in-tree |
 |---|---|---|---|
@@ -40,16 +51,20 @@ except for the four Phase-8 items already recorded below.
 | 6 | CERT, ANN law, Tier-3 answer | **done** 2026-08-13 | `dqp/{cert,tier3_probe,vid_determinism}.rs` |
 | 0B | iai qualification pilot | **done** 2026-08-25 — cross-runner leg closed | `docs/perf/iai-qualification-2026-08-12.md` §4 |
 | 7 | Perf gate rollout | **done** 2026-08-25 | `perf-gate` in `pr.yml`, `docs/perf/iai-baseline.json`, `scripts/perf/iai_{baseline,gate}.py` |
-| 8 | C4 cheap wins | **4 of 5 done** | see the phase's own progress list |
+| 8 | C4 cheap wins | **done** — miri lane shipped, Hypothesis machine shipped | `pr.yml` `miri` job, `nightly.yml` `miri`, `bindings/uni-db/tests/test_stateful_crud.py` |
 | 9 | C2 fork 2PC failpoints | **done** | 17 seams; `fork_2pc_recovery_matrix.rs` |
-| 10 | C2 compaction + abort harness | **semantic tier done** 2026-08-25 | 3 compaction seams, `compaction_resilience.rs` in both crates; Lance tier + madsim deferred |
-| 11–13 | B2 / C3 / B3 / B4 | **not started** | — |
+| 10 | C2 compaction + abort harness + madsim | **done** 2026-08-25 — **C2 closed** | 5 compaction seams + Lance-tier seam, `compaction_resilience.rs` in both crates, `crash_harness.rs`, `docs/testing/madsim-spike-2026-08-25.md` (reject) |
+| 11 | B2 LDBC SNB | **not started** | no `benches/ldbc/`, no SF0.1 data |
+| 12 | C3 Elle | **not started** | no history driver, no `setup-java` in any workflow |
+| 12 | B3 ann-benchmarks + BEIR | **not started** | no SIFT/GloVe/GIST/BEIR harness, no nDCG@10 |
+| 13 | B4 contention curves | **not started** | `benches/ssi_contention.rs` unchanged — fixed writer sweep, wall-time only |
+| 13 | `docs/perf/` consolidation | **not started** | no index over `docs/perf/` or `docs/testing/` |
 
 **Five levers now ship** — fork, pinned, flush, plan-cache, index — plus CERT as
 an additional law over the same drivers, across **8 smoke tests** in the PR lane
 and **10 soaks** in the nightly `dqp` job.
 
-### What the last ten days changed, that the phases below do not yet say
+### What changed between 2026-08-13 and 2026-08-21
 
 1. **Phase 4B is half-closed.** The index lever landed on 2026-08-20 at 100%
    activation. It did not become buildable by trying harder; it became buildable
@@ -72,10 +87,43 @@ and **10 soaks** in the nightly `dqp` job.
    figures there is no defensible threshold, so the 5%/2% numbers below remain
    the pilot's recommendation rather than a measured gate.
 
-### Open, in the order they unblock things
+### Open, verified against the tree 2026-08-25
 
-| # | item | blocks |
+Every phase through 10 is complete: **C1, C2, C4 and B1 are closed.** What is
+left is Track E plus six small items.
+
+**Track E — the bulk, each multi-day except the first:**
+
+| # | item | shape |
 |---|---|---|
+| E1 | **B4 contention curves** | cheapest real win — reshape one existing bench. `ssi_contention.rs` is a fixed `[1,4,12,24]` writer sweep on a single hot key, wall-time only; it needs Zipf-θ sweep and abort-rate instrumentation, which its own header notes are missing ("here we only measure time") |
+| E2 | **B3 ann-benchmarks + BEIR** | recall@10-vs-QPS on SIFT-1M, nDCG@10 on ≥3 BEIR subsets. Adjacent work exists but is not the deliverable: `uni-store/examples/multivec_recall_real.rs` sweeps `nprobes` over locally-encoded ColBERT embeddings — no public dataset, no nDCG, nothing published |
+| E3 | **B2 LDBC SNB** | largest; doubles as a correctness benchmark via LDBC reference answers |
+| E4 | **C3 Elle** | sequenced last on the proposal's own reasoning: it *demonstrates* a property we believe holds, whereas C1/C2 hunted bugs we believed existed |
+| E5 | **`docs/perf/` consolidation** | fold the index in. Note the drift problem below — the right move is probably to fold these two documents into the POA rather than add a fourth tracking file |
+
+**Six small items, roughly a day together:**
+
+| # | item | note |
+|---|---|---|
+| S1 | DQP soak parity — index, compaction and delete levers are smoke-only | `compaction_lever.rs:235` documents the omission as deliberate on the 60-minute budget. The first-ever CI run of the `dqp` job measured **28.1 min**, so that constraint is now revisitable — but re-measure as CI runs it: 28.1 min is the slowest of ten *concurrent* soaks, not their sum |
+| S2 | `perf-gate` has never fired on a real regression PR | logic proven against synthetic fixtures (+2.5% fails, +1.4% warns, all-zero counters and a missing target both fail hard); the acceptance criterion asks for a deliberate-regression PR |
+| S3 | iai baseline regeneration owed | the multi-label fix moved four gated targets +2% to +9.3%, deliberately. Needs a cross-runner CI run — local numbers must not be used, since a local run of *unchanged* code measured 25-56% below the CI baseline |
+| S4 | `iai_gate.py` hardening | it reported `all 5 gated targets within 2.0%` on a comparison showing −25% to −56%, because it only fails on regressions. Record machine identity in the baseline and warn on mismatch; treat a large negative delta as suspicious |
+| S5 | Hypothesis `nightly` profile is dead code | `test_stateful_crud.py` registers `pr` (25×12) and `nightly` (500×50) selected by `UNI_HYPOTHESIS_PROFILE`, which **no workflow sets** — and `nightly.yml` has no pytest step at all. Wire it or delete it |
+| S6 | `deny.toml` — **all eight** ignores lack expiry dates | not just `fxhash`. The lance/opendal and extism/wasmtime groups say "re-test on every upgrade" with nothing enforcing it |
+
+### A note on these documents
+
+This file and `test_harness_and_benchmarks_2026-08-11.md` have repeatedly drifted
+from the tree, in **both** directions — boxes left unchecked for work that
+shipped (the fork 2PC matrix, the compaction failpoints, the abort harness, the
+madsim report), and Phase 8 item 5 marked "still not started" for a test that
+exists. Recent commits update `test_harness_track_poa_2026-08-24.md` instead,
+which is the live tracking document. Three overlapping trackers is one too many;
+E5 should consolidate rather than add a fourth.
+
+---|---|---|
 | 1 | Run `Perf Qualify (cross-runner iai)` and replace §4 of the qualification doc with its table | all of Phase 7 |
 | 2 | ~~Give `CompactionStats` real numbers~~ **DONE 2026-08-21** (#172); ~~compaction lever~~ **DONE 2026-08-22** — **C1 is now complete** | Phase 10's compaction matrix |
 | 3 | Re-measure the nightly `dqp` job, then add `index_pushdown_soak` **and** `compaction_smoke`'s soak | both levers are smoke-only today |
@@ -1183,9 +1231,18 @@ dependency on tracks A/B.
   `uni-common --skip muvera` ≈ **31 s total**, affordable in the PR lane;
   `uni-crdt` nightly; `muvera` excluded outright with this measurement as the
   reason.
-- [ ] 5. Hypothesis `RuleBasedStateMachine` — **still not started** (re-verified
-      2026-08-21: no `hypothesis` import anywhere under `bindings/`). This is the
-      only one of the five outstanding.
+- [x] 5. Hypothesis `RuleBasedStateMachine` — **shipped**, and this line was
+      stale in the *opposite* direction from the rest of this document.
+      `bindings/uni-db/tests/test_stateful_crud.py` defines `GraphMachine` with
+      10 rules and 3 invariants, and **it found two product bugs**: #182 (a
+      delete before the first flush resurrected by the next one) and #181 (flush
+      resurrecting a detached edge), both fixed with Rust twins.
+
+      **Caveat, tracked as S5 above:** it registers a `nightly` profile
+      (500 examples x 50 steps) selected by `UNI_HYPOTHESIS_PROFILE`, which no
+      workflow sets — and `nightly.yml` has no pytest step at all. Only the
+      25 x 12 `pr` profile has ever run. C4 is closed on the deliverable; the
+      dead profile is a loose end, not a gap in the item.
 
 **The miri lane is measured but unshipped.** The costs below decided its shape,
 but no miri step exists in any workflow. Wiring `uni-btic` +
@@ -1322,9 +1379,13 @@ branch-delete loop so a partially-deleted fork is reachable.
 
 ### Exit criteria
 
-- [ ] Recovery matrix green from every failpoint: recovery lands on Active or
-      Tombstoned, never a torn state.
-- [ ] A crash mid-delete-loop provably leaves the tombstone intact.
+- [x] Recovery matrix green from every failpoint: recovery lands on Active or
+      Tombstoned, never a torn state. **17 production seams** (up from 11) —
+      3 in `api/fork.rs`, 4 in `api/fork_admin.rs`, 1 in `fork/registry.rs`.
+- [x] A crash mid-delete-loop provably leaves the tombstone intact.
+
+**It found a product defect**, which is the point of the phase: fork artifacts
+were being deleted *before* the tombstone that anchors recovery (`99791f4a8`).
 
 ---
 
@@ -1369,10 +1430,26 @@ branch-delete loop so a partially-deleted fork is reachable.
 
 ### Exit criteria
 
-- [ ] The four existing `ssi_resilience.rs` crash tests re-run under the abort
-      harness and pass, **or** their failures are triaged as real findings.
-- [ ] Both compaction matrices green; the upstream limitation documented.
-- [ ] madsim spike report filed.
+- [x] The four existing `ssi_resilience.rs` crash tests re-run under the abort
+      harness and pass. `crash_harness.rs` now backs **18 parent abort tests
+      across 6 suites**, closing the graceful-drop confound §4.4 opened.
+- [x] Both compaction matrices green; the upstream limitation documented.
+      **Five seams**: three semantic (`after-adj-replace-before-delta-clear`,
+      `between-fwd-and-bwd`, `after-vertex-replace`), one per-label
+      (`between-labels`), one Lance-tier (`after-compact-files-before-cleanup`).
+      `compact_files` remains a single opaque upstream call, so that boundary is
+      the finest granularity uni controls — recorded rather than attempted.
+- [x] madsim spike report filed — `docs/testing/madsim-spike-2026-08-25.md`,
+      **verdict reject**, on four independently sufficient findings. The
+      motivation was answered instead with tokio's paused clock: the six
+      `background_compaction_test.rs` cases went from ~10 s of real sleeping to
+      0.277 s, 8/8 repeats stable.
+
+**Two product defects surfaced here**, both fixed: semantic vertex compaction
+erased `ext_id`, every schemaless property and both timestamps
+(`7ab57f94b`), and an anchored match reported only its anchor label, which the
+executor then wrote back — truncating DELETE, `SET n:Label`, `REMOVE`, plain
+`SET n.prop` and `labels(n)` (`db54eeb0d`).
 
 ---
 
