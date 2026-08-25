@@ -2,6 +2,9 @@
 name = "uni-tck"
 version.workspace = true
 edition = "2021"
+license.workspace = true
+# Conformance harness, not a published artifact — matches uni-locy-oracle.
+publish = false
 # Integration tests are consolidated: `tck` is the cucumber runner, everything
 # else lives in the `integration` binary. See `docs/test_layout.md`.
 autotests = false

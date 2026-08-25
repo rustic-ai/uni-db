@@ -5,13 +5,13 @@ use crate::backend::StorageBackend;
 #[cfg(feature = "lance-backend")]
 use crate::backend::lance::LanceDbBackend;
 use crate::backend::table_names;
-use crate::backend::types::{FilterExpr, ScanRequest, VectorQueryOpts};
+use crate::backend::types::{FilterExpr, OptimizeReport, ScanRequest, VectorQueryOpts};
 use crate::compaction::{CompactionStats, CompactionStatus, CompactionTask};
 use crate::runtime::WorkingGraph;
 use crate::runtime::context::QueryContext;
 use crate::runtime::l0::L0Buffer;
 use crate::storage::adjacency::AdjacencyDataset;
-use crate::storage::compaction::Compactor;
+use crate::storage::compaction::{Compactor, SemanticCompactionReport};
 use crate::storage::delta::{DeltaDataset, ENTRY_SIZE_ESTIMATE, Op};
 use crate::storage::direction::Direction;
 #[cfg(feature = "lance-backend")]
@@ -260,12 +260,28 @@ async fn scan_concat(
     }
 }
 
+/// What a merge-insert should do when its target table does not exist.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MissingTable {
+    /// Fail. Correct when the caller's payload only makes sense against rows
+    /// that must already be there — a partial SET can only update a row whose
+    /// full-row Append has happened, so a missing table means that Append was
+    /// lost and silence would hide it.
+    Error,
+    /// Succeed, having done nothing. Correct for a tombstone: "no such table"
+    /// is the degenerate case of "no rows matched", and an unmatched tombstone
+    /// is already defined as a no-op.
+    SkipAsNoOp,
+}
+
 /// MergeInsert sibling of `write_batch_with_lance_conflict_retry`.
 ///
 /// Source `batch` must contain the join columns in `on` plus any
 /// columns to update. Matched rows have `WhenMatched::UpdateAll`
 /// applied; unmatched source rows are dropped (partial writes never
-/// INSERT). Returns an error if the target table does not exist.
+/// INSERT). Returns an error if the target table does not exist —
+/// see [`merge_insert_batch_tolerating_missing_table`] for the callers
+/// where that is a no-op rather than a fault.
 /// Retries on Lance commit conflicts via `retry_on_lance_conflict`.
 /// RecordBatch clones are cheap (column data is Arc'd).
 pub async fn merge_insert_batch_with_lance_conflict_retry(
@@ -274,19 +290,64 @@ pub async fn merge_insert_batch_with_lance_conflict_retry(
     batch: arrow_array::RecordBatch,
     on: &[&str],
 ) -> anyhow::Result<()> {
+    merge_insert_batch_inner(backend, table_name, batch, on, MissingTable::Error).await
+}
+
+/// As [`merge_insert_batch_with_lance_conflict_retry`], but a missing target
+/// table is a no-op rather than an error.
+///
+/// For tombstone writes (#182). `L0Buffer::delete_vertex` drops the vid from
+/// `vertex_properties` and records a tombstone, so a vertex created and deleted
+/// inside one flush window leaves the window with a tombstone and no live rows.
+/// The flush then skips the full-row write that would have created the table,
+/// and the tombstone has no target — but there is also nothing to tombstone, so
+/// the correct answer is to do nothing rather than to fail a `flush()` the
+/// caller may not even have invoked (`auto_flush_interval` fires on a timer).
+pub async fn merge_insert_batch_tolerating_missing_table(
+    backend: &dyn crate::backend::StorageBackend,
+    table_name: &str,
+    batch: arrow_array::RecordBatch,
+    on: &[&str],
+) -> anyhow::Result<()> {
+    merge_insert_batch_inner(backend, table_name, batch, on, MissingTable::SkipAsNoOp).await
+}
+
+async fn merge_insert_batch_inner(
+    backend: &dyn crate::backend::StorageBackend,
+    table_name: &str,
+    batch: arrow_array::RecordBatch,
+    on: &[&str],
+    missing: MissingTable,
+) -> anyhow::Result<()> {
     // NOTE: `backend.merge_insert` already takes the per-table write lock
     // internally (the same mutex `lock_table_for_write` exposes), so it is
     // serialized against a compaction that holds that lock across its whole
     // scan → overwrite. Do NOT take `lock_table_for_write` here as well — that
     // would re-lock the same non-reentrant mutex and self-deadlock.
     retry_on_lance_conflict(|| async {
+        // Inside the retry, not hoisted: a concurrent flush may create the table
+        // between attempts, and this way the retry still merges. A `table_exists`
+        // guard at the call site would instead widen a TOCTOU window outside the
+        // write lock the backend takes internally.
         let exists = backend.table_exists(table_name).await?;
         if !exists {
-            anyhow::bail!(
-                "merge_insert target table '{}' does not exist (partial writes \
-                 require the row to already be present; CREATE goes through Append)",
-                table_name
-            );
+            match missing {
+                MissingTable::SkipAsNoOp => {
+                    log::debug!(
+                        "merge_insert target table '{}' does not exist; \
+                         treating as a no-op",
+                        table_name
+                    );
+                    return Ok(());
+                }
+                MissingTable::Error => anyhow::bail!(
+                    "merge_insert target table '{}' does not exist; the full-row \
+                     Append that creates it must precede any merge. Callers for \
+                     which an unmatched merge is a no-op should use \
+                     `merge_insert_batch_tolerating_missing_table`.",
+                    table_name
+                ),
+            }
         }
         backend
             .merge_insert(table_name, on, vec![batch.clone()])
@@ -837,28 +898,59 @@ impl StorageManager {
         Ok(guard.clone())
     }
 
-    pub async fn compact(&self) -> Result<CompactionStats> {
-        // Backend handles compaction internally via optimize_table()
-        let start = std::time::Instant::now();
-        let schema = self.schema_manager.schema();
-        let mut files_compacted = 0;
+    /// Optimize one table if it exists, folding what it did into `stats`.
+    ///
+    /// A table that does not exist is not counted: `tables_optimized` means
+    /// "visited", and reporting a table that was never there is exactly the
+    /// defect this replaced — `compact_label` used to return
+    /// `files_compacted: 1` for a label with no table at all (#172).
+    async fn optimize_into(&self, table: &str, stats: &mut CompactionStats) -> Result<()> {
+        if self.backend.table_exists(table).await? {
+            let report = self
+                .backend
+                .optimize_table(table, self.config.compaction.version_retention)
+                .await?;
+            stats.absorb(&report);
+            self.backend.invalidate_cache(table);
+        }
+        Ok(())
+    }
 
-        for label in schema.labels.keys() {
-            let name = table_names::vertex_table_name(label);
-            if self.backend.table_exists(&name).await? {
-                self.backend.optimize_table(&name).await?;
-                files_compacted += 1;
-                self.backend.invalidate_cache(&name);
+    /// Every table the schema owns: vertex tables, per-edge-type delta and
+    /// adjacency tables in both directions, and the two main tables.
+    ///
+    /// Shared by `compact` and `execute_compaction` so the two cannot drift
+    /// apart. They had: `compact` walked only vertex tables, so
+    /// `uni.admin.compact()` reported success having never touched an edge.
+    fn all_tables(schema: &uni_common::core::schema::Schema) -> Vec<String> {
+        let mut tables: Vec<String> = schema
+            .labels
+            .keys()
+            .map(|l| table_names::vertex_table_name(l))
+            .collect();
+        for edge_type in schema.edge_types.keys() {
+            for dir in ["fwd", "bwd"] {
+                tables.push(table_names::delta_table_name(edge_type, dir));
+                tables.push(table_names::adjacency_table_name(edge_type, dir));
             }
         }
+        tables.push(table_names::main_vertex_table_name().to_string());
+        tables.push(table_names::main_edge_table_name().to_string());
+        tables
+    }
 
-        Ok(CompactionStats {
-            files_compacted,
-            bytes_before: 0,
-            bytes_after: 0,
-            duration: start.elapsed(),
-            crdt_merges: 0,
-        })
+    pub async fn compact(&self) -> Result<CompactionStats> {
+        let start = std::time::Instant::now();
+        let schema = self.schema_manager.schema();
+        let mut stats = CompactionStats::default();
+
+        for table in Self::all_tables(&schema) {
+            self.optimize_into(&table, &mut stats).await?;
+        }
+
+        stats.duration = start.elapsed();
+        self.record_run(&stats)?;
+        Ok(stats)
     }
 
     pub async fn compact_label(&self, label: &str) -> Result<CompactionStats> {
@@ -866,20 +958,13 @@ impl StorageManager {
             .ok_or_else(|| anyhow!("Compaction already in progress"))?;
 
         let start = std::time::Instant::now();
-        let name = table_names::vertex_table_name(label);
+        let mut stats = CompactionStats::default();
+        self.optimize_into(&table_names::vertex_table_name(label), &mut stats)
+            .await?;
 
-        if self.backend.table_exists(&name).await? {
-            self.backend.optimize_table(&name).await?;
-            self.backend.invalidate_cache(&name);
-        }
-
-        Ok(CompactionStats {
-            files_compacted: 1,
-            bytes_before: 0,
-            bytes_after: 0,
-            duration: start.elapsed(),
-            crdt_merges: 0,
-        })
+        stats.duration = start.elapsed();
+        self.record_run(&stats)?;
+        Ok(stats)
     }
 
     pub async fn compact_edge_type(&self, edge_type: &str) -> Result<CompactionStats> {
@@ -887,23 +972,33 @@ impl StorageManager {
             .ok_or_else(|| anyhow!("Compaction already in progress"))?;
 
         let start = std::time::Instant::now();
-        let mut files_compacted = 0;
+        let mut stats = CompactionStats::default();
 
         for dir in ["fwd", "bwd"] {
-            let name = table_names::delta_table_name(edge_type, dir);
-            if self.backend.table_exists(&name).await? {
-                self.backend.optimize_table(&name).await?;
-                files_compacted += 1;
-            }
+            self.optimize_into(&table_names::delta_table_name(edge_type, dir), &mut stats)
+                .await?;
+            self.optimize_into(
+                &table_names::adjacency_table_name(edge_type, dir),
+                &mut stats,
+            )
+            .await?;
         }
 
-        Ok(CompactionStats {
-            files_compacted,
-            bytes_before: 0,
-            bytes_after: 0,
-            duration: start.elapsed(),
-            crdt_merges: 0,
-        })
+        stats.duration = start.elapsed();
+        self.record_run(&stats)?;
+        Ok(stats)
+    }
+
+    /// Fold a finished run into the lifetime counters.
+    ///
+    /// Called by every entry point. `total_compactions` used to move only on the
+    /// background path, so a user driving compaction by hand saw it stay at
+    /// zero forever.
+    fn record_run(&self, stats: &CompactionStats) -> Result<()> {
+        let mut status = acquire_mutex(&self.compaction_status, "compaction_status")?;
+        status.total_compactions += 1;
+        status.total_bytes_reclaimed += stats.bytes_reclaimed;
+        Ok(())
     }
 
     pub async fn wait_for_compaction(&self) -> Result<()> {
@@ -1012,7 +1107,9 @@ impl StorageManager {
         let mut status = acquire_mutex(&self.compaction_status, "compaction_status")?;
         // Note: l1_runs is managed by flush_to_l1 (increment) and execute_compaction
         // (reset). It counts flush generations, not delta table count.
-        status.l1_size_bytes = (total_rows * ENTRY_SIZE_ESTIMATE) as u64;
+        status.l1_rows = total_rows as u64;
+        status.l1_estimated_bytes = status.l1_rows.saturating_mul(ENTRY_SIZE_ESTIMATE as u64);
+        status.status_refreshes += 1;
         status.oldest_l1_age = oldest_l1_age;
         Ok(())
     }
@@ -1023,7 +1120,7 @@ impl StorageManager {
         if status.l1_runs >= self.config.compaction.max_l1_runs {
             return Some(CompactionTask::ByRunCount);
         }
-        if status.l1_size_bytes >= self.config.compaction.max_l1_size_bytes {
+        if status.l1_estimated_bytes >= self.config.compaction.max_l1_size_bytes {
             return Some(CompactionTask::BySize);
         }
         if status.oldest_l1_age >= self.config.compaction.max_l1_age
@@ -1036,12 +1133,24 @@ impl StorageManager {
     }
 
     /// Optimize a table via the backend, returning `true` on success.
-    async fn try_optimize_table(backend: &dyn StorageBackend, table_name: &str) -> bool {
-        if let Err(e) = backend.optimize_table(table_name).await {
-            log::warn!("Failed to optimize table {}: {}", table_name, e);
-            return false;
+    /// Optimize one table, downgrading a failure to a warning.
+    ///
+    /// `None` means the optimize did not run; `Some(report)` means it ran, and
+    /// an all-zero report inside means it ran and found nothing to merge. The
+    /// two are kept apart deliberately — collapsing them is how
+    /// `files_compacted` came to count "calls that did not error" (#172).
+    async fn try_optimize_table(
+        backend: &dyn StorageBackend,
+        table_name: &str,
+        version_retention: std::time::Duration,
+    ) -> Option<OptimizeReport> {
+        match backend.optimize_table(table_name, version_retention).await {
+            Ok(report) => Some(report),
+            Err(e) => {
+                log::warn!("Failed to optimize table {}: {}", table_name, e);
+                None
+            }
         }
-        true
     }
 
     /// Trigger L1 compaction asynchronously without blocking the caller.
@@ -1065,22 +1174,27 @@ impl StorageManager {
             .ok_or_else(|| anyhow!("Compaction already in progress"))?;
 
         let schema = this.schema_manager.schema();
-        let mut files_compacted = 0;
+        let mut stats = CompactionStats::default();
 
         // ── Tier 2: Semantic compaction ──
         // Dedup vertices, merge CRDTs, consolidate L1→L2 deltas, clean tombstones
         let compactor = Compactor::new(Arc::clone(&this));
-        let compaction_results = compactor.compact_all().await.unwrap_or_else(|e| {
+        // On failure the default report leaves `semantic_passes` at zero, which
+        // correctly reads as "no CRDT merge count was measured" rather than
+        // "no CRDT merges happened".
+        let semantic = compactor.compact_all().await.unwrap_or_else(|e| {
             log::error!(
                 "Semantic compaction failed (continuing with backend optimize): {}",
                 e
             );
-            Vec::new()
+            SemanticCompactionReport::default()
         });
+        stats.semantic_passes = semantic.vertex_passes;
+        stats.crdt_merges = semantic.crdt_merges;
 
         // Re-warm adjacency CSR after semantic compaction
         let am = this.adjacency_manager();
-        for info in &compaction_results {
+        for info in &semantic.adjacency {
             let direction = match info.direction.as_str() {
                 "fwd" => Direction::Outgoing,
                 "bwd" => Direction::Incoming,
@@ -1099,54 +1213,27 @@ impl StorageManager {
         }
 
         // ── Tier 3: Backend optimize ──
+        // Same table set as `compact`, via the shared walk, so the two cannot
+        // drift apart again.
         let backend = this.backend.as_ref();
-
-        // Optimize edge delta and adjacency tables
-        for name in schema.edge_types.keys() {
-            for dir in ["fwd", "bwd"] {
-                let delta = table_names::delta_table_name(name, dir);
-                if Self::try_optimize_table(backend, &delta).await {
-                    files_compacted += 1;
-                }
-                let adj = table_names::adjacency_table_name(name, dir);
-                if Self::try_optimize_table(backend, &adj).await {
-                    files_compacted += 1;
-                }
+        for table in Self::all_tables(&schema) {
+            if let Some(report) =
+                Self::try_optimize_table(backend, &table, this.config.compaction.version_retention)
+                    .await
+            {
+                stats.absorb(&report);
+                backend.invalidate_cache(&table);
             }
         }
 
-        // Optimize vertex tables
-        for label in schema.labels.keys() {
-            let tbl = table_names::vertex_table_name(label);
-            if Self::try_optimize_table(backend, &tbl).await {
-                files_compacted += 1;
-                backend.invalidate_cache(&tbl);
-            }
-        }
-
-        // Optimize main vertex and edge tables
-        for tbl in [
-            table_names::main_vertex_table_name(),
-            table_names::main_edge_table_name(),
-        ] {
-            if Self::try_optimize_table(backend, tbl).await {
-                files_compacted += 1;
-            }
-        }
-
+        stats.duration = start.elapsed();
+        this.record_run(&stats)?;
         {
             let mut status = acquire_mutex(&this.compaction_status, "compaction_status")?;
-            status.total_compactions += 1;
             status.l1_runs = 0; // Reset flush generation counter
         }
 
-        Ok(CompactionStats {
-            files_compacted,
-            bytes_before: 0,
-            bytes_after: 0,
-            duration: start.elapsed(),
-            crdt_merges: 0,
-        })
+        Ok(stats)
     }
 
     /// Open a LanceDB table for a label.
@@ -1482,6 +1569,24 @@ impl StorageManager {
         columns: &[&str],
         additional_filter: Option<&FilterExpr>,
     ) -> Result<Option<arrow_array::RecordBatch>> {
+        self.scan_vertex_table_counted(label, columns, additional_filter, None)
+            .await
+    }
+
+    /// [`Self::scan_vertex_table`], carrying a query's counters into the backend.
+    ///
+    /// The backend layer never sees a [`QueryContext`], so `ScanRequest` is the
+    /// only channel by which a count taken at the point a branch scan *executes*
+    /// (`LanceDbBackend::execute_scan_stream`) can be attributed to the query
+    /// that caused it. Callers on a query path pass
+    /// `graph_ctx.counters()`; everything else passes `None` and is not counted.
+    pub async fn scan_vertex_table_counted(
+        &self,
+        label: &str,
+        columns: &[&str],
+        additional_filter: Option<&FilterExpr>,
+        counters: Option<&Arc<crate::runtime::counters::QueryCounters>>,
+    ) -> Result<Option<arrow_array::RecordBatch>> {
         let backend = self.backend();
         let table_name = table_names::vertex_table_name(label);
 
@@ -1495,9 +1600,26 @@ impl StorageManager {
         };
 
         // Build filter with version HWM + optional additional filter
-        let filter = combine_hwm_filter(self.version_high_water_mark(), additional_filter);
+        let hwm = self.version_high_water_mark();
+        // Counted at the point the ceiling is actually applied to a scan, not
+        // from `pinned_snapshot.is_some()` — which would be a config read.
+        //
+        // Deliberately `snapshot_version_hwm`, the manifest-only pin, and not
+        // `version_high_water_mark`: the latter is also `Some` for an ordinary
+        // read-write transaction's version pin (`pinned_version_hwm`), so
+        // counting off it would fire on every transactional read and make the
+        // pinned-vs-live witness meaningless. The *filter* still uses the wider
+        // value; only the count narrows.
+        if self.snapshot_version_hwm().is_some()
+            && let Some(c) = counters
+        {
+            c.add_snapshot_read();
+        }
+        let filter = combine_hwm_filter(hwm, additional_filter);
 
-        let mut request = ScanRequest::all(&table_name).with_columns(actual_columns);
+        let mut request = ScanRequest::all(&table_name)
+            .with_columns(actual_columns)
+            .with_counters(counters.cloned());
         if let Some(f) = filter {
             request = request.with_filter(f);
         }

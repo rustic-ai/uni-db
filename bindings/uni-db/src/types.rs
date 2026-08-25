@@ -38,6 +38,25 @@ pub struct PyQueryMetrics {
     pub storage_reads: usize,
     /// Number of cache hits during execution.
     pub cache_hits: usize,
+    /// Number of scans that executed against a fork's Lance branch.
+    ///
+    /// Counts what executed, not what was configured: a forked session that
+    /// reads a label the fork never wrote falls back to primary and reports 0.
+    pub branch_scans: u64,
+    /// Number of reads that executed against a pinned time-travel snapshot.
+    pub snapshot_reads: u64,
+    /// Number of Lance scans whose executed plan reported index work.
+    ///
+    /// Nonzero proves a scalar index was searched; zero does not prove one was
+    /// not (an index already in memory is not re-counted, and a lookup outside
+    /// every page range performs no comparisons).
+    pub index_scans: u64,
+    /// Sum of Lance's index comparisons across those scans. Presence is
+    /// meaningful; the magnitude is index-type dependent.
+    pub index_comparisons: u64,
+    /// Number of Lance scans for which the stats callback fired — the
+    /// denominator that makes `index_scans == 0` unambiguous.
+    pub scans_reported: u64,
 }
 
 #[pymethods]
@@ -1410,19 +1429,33 @@ pub struct PyRuleInfo {
     pub is_recursive: bool,
 }
 
-/// Statistics from a compaction operation.
+/// What a compaction operation actually did.
 #[pyclass(get_all, name = "CompactionStats", from_py_object)]
 #[derive(Debug, Clone)]
 pub struct PyCompactionStats {
-    /// Number of files compacted.
-    pub files_compacted: usize,
-    /// Total bytes before compaction.
-    pub bytes_before: u64,
-    /// Total bytes after compaction.
-    pub bytes_after: u64,
-    /// Duration in seconds.
+    /// Tables whose optimize ran, including those with nothing to merge. The
+    /// denominator: a zero in the fragment counts means "nothing to do" only
+    /// when this is non-zero.
+    pub tables_optimized: usize,
+    /// Fragments merged away.
+    pub fragments_removed: usize,
+    /// Fragments written in their place.
+    pub fragments_added: usize,
+    /// Data files merged away; includes deletion files.
+    pub files_removed: usize,
+    /// Data files written.
+    pub files_added: usize,
+    /// Bytes freed by pruning versions past the retention window. Reads 0 for
+    /// any database younger than that window, so it is not a measure of whether
+    /// compaction did anything — use `fragments_removed` for that.
+    pub bytes_reclaimed: u64,
+    /// Duration in seconds. Real even for a no-op.
     pub duration_secs: f64,
-    /// Number of CRDT merge operations performed.
+    /// Semantic compaction passes that ran. The denominator for `crdt_merges`;
+    /// zero on the per-label and per-edge-type entry points, which do no
+    /// semantic pass.
+    pub semantic_passes: usize,
+    /// CRDT merges performed. Meaningful only when `semantic_passes` is nonzero.
     pub crdt_merges: usize,
 }
 
@@ -1430,8 +1463,17 @@ pub struct PyCompactionStats {
 impl PyCompactionStats {
     fn __repr__(&self) -> String {
         format!(
-            "CompactionStats(files={}, before={}B, after={}B, duration={:.2}s)",
-            self.files_compacted, self.bytes_before, self.bytes_after, self.duration_secs
+            "CompactionStats(tables={}, fragments={}->{}, files={}->{}, \
+             reclaimed={}B, semantic_passes={}, crdt_merges={}, duration={:.2}s)",
+            self.tables_optimized,
+            self.fragments_removed,
+            self.fragments_added,
+            self.files_removed,
+            self.files_added,
+            self.bytes_reclaimed,
+            self.semantic_passes,
+            self.crdt_merges,
+            self.duration_secs
         )
     }
 }

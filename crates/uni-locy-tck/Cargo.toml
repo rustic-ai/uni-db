@@ -2,6 +2,9 @@
 name = "uni-locy-tck"
 version.workspace = true
 edition = "2021"
+license.workspace = true
+# Conformance harness, not a published artifact — matches uni-locy-oracle.
+publish = false
 
 [dependencies]
 uni-db = { path = "../uni" }

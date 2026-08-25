@@ -7,6 +7,12 @@ name: Nightly
 #   - cloud: LocalStack S3 integration (also on main-push CI; here for the
 #            longer --run-ignored variants on a schedule).
 #   - fuzz:  cargo-fuzz over the parser/codec attack surfaces.
+#   - dqp:   the differential-query-plans oracle at volume — one query down two
+#            execution paths, comparing result bags. Its own job because each
+#            case costs two queries; see docs/perf/dqp-feasibility-2026-08-12.md.
+#   - miri:  uni-crdt's lib tests under the miri interpreter — UB reached
+#            through dependencies, plus leaks. 40 min measured, which is why it
+#            is here and not in pr.yml (that lane runs the three cheap crates).
 #   - bench: criterion benches with results uploaded as artifacts for
 #            manual trend comparison (no external regression service).
 #
@@ -36,7 +42,7 @@ permissions:
 # (shown in parens) in Settings > Secrets and variables > Actions > Variables;
 # to roll back, clear the variable.
 #   CI_RUNNER_XLARGE64  default ubuntu-xlarge  → set to linux-64core  — soak, fuzz,
-#                                                 model-check, metamorphic, tsan, bench
+#                                                 model-check, metamorphic, dqp, tsan, miri, bench
 # Note XLARGE64's GitHub-hosted default is ubuntu-xlarge here vs ci.yml's
 # linux-xlarge-64 (preserving each workflow's pre-existing choice); the self-hosted
 # target you'd set it to (linux-64core) is shared. The cloud job is NOT indirected:
@@ -93,9 +99,15 @@ jobs:
           # alone also sweeps in unrelated #[ignore]'d tests (autoembed model
           # downloads needing HF auth, LocalStack e2e) that this job does not
           # provision — LocalStack has its own `cloud` job below.
+          #
+          # `not test(/dqp::/)` mirrors the metamorphic job below, and for the
+          # same reason: every DQP soak's name contains "soak", so this filter
+          # was matching all of them and running the `dqp` job's work a second
+          # time — at the *default* 20 000 cases rather than the 10 000 that job
+          # sets, inside a timeout sized for a different workload.
           cargo nextest run --profile soak -p uni-db -p uni-store -p uni-locy-oracle \
             --run-ignored ignored-only \
-            -E 'test(/soak/) | test(/stress/)'
+            -E '(test(/soak/) | test(/stress/)) and not test(/dqp::/)'
 
   cloud:
     if: github.repository == 'rustic-ai/uni-db'
@@ -296,12 +308,80 @@ jobs:
       # variance. 50k cases × (4+4+2+7) queries ≈ 850k metamorphic queries/night,
       # ~8.5× the Phase-1 exit target of ≥100k queries/night. The smoke tier runs
       # per-PR (pr.yml metamorphic-smoke); only the #[ignore]'d soaks run here.
+      # `not test(/dqp::/)` — the DQP soak runs in its own job below, at its own
+      # volume via DQP_CASES. Without the exclusion it would run twice.
       - name: Metamorphic soak (TLP + NoREC + structural)
         env:
           METAMORPHIC_CASES: 50000
         run: |
           cargo nextest run --profile soak -p uni-db --test integration \
-            --run-ignored ignored-only -E 'test(/metamorphic::/) and test(soak)'
+            --run-ignored ignored-only \
+            -E 'test(/metamorphic::/) and test(soak) and not test(/dqp::/)'
+
+  # DQP — differential query plans. Separate from the metamorphic job above
+  # because a single lever at nightly volume takes roughly as long as that job's
+  # heaviest existing soak, and sharing would push it toward its 60-minute
+  # ceiling. It also needs its own case-count knob: METAMORPHIC_CASES is pinned
+  # to 50000 there for the other oracles, which is 2.5x the volume measured as
+  # affordable for a lever that runs every case twice.
+  dqp:
+    if: github.repository == 'rustic-ai/uni-db'
+    name: DQP Differential Oracle (soak)
+    runs-on: ${{ vars.CI_RUNNER_XLARGE64 || 'ubuntu-xlarge' }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mold protobuf-compiler
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "ci"
+          cache-on-failure: true
+          save-if: false
+
+      # Each case runs the same query down two execution paths and compares the
+      # result bags, so 10000 cases is 20000 queries per soak and 160000 across
+      # the eight — comfortably past the >=100k-queries/night target on its own.
+      #
+      # Sized down from 20000 by measurement, not caution. At 20000 the four
+      # soaks that existed then measured 85.4 minutes serial on a 22-core box,
+      # and four heavy tests contending would have pushed the slowest toward this
+      # job's 60-minute timeout.
+      #
+      # Re-measured after Phase 4 took the count from four soaks to eight, in
+      # this exact configuration — all eight concurrently at DQP_CASES=10000 on
+      # 22 cores: **29.9 minutes wall-clock**, slowest test 29.9 min against the
+      # 54-minute per-test ceiling. So 10000 still holds, with margin, and this
+      # box is more contended than the 64-core runner.
+      #
+      # Phase 5 added a ninth soak (`flush_pushdown_soak`), and it is **not**
+      # included in the 29.9-minute figure above. Measured only at smoke volume:
+      # 500 cases in 18 s, so 10000 extrapolates to roughly 6 minutes — well
+      # inside the slowest test's 29.9, and these run concurrently, so the
+      # wall-clock bound should be unchanged. That is an extrapolation, not a
+      # measurement; if this job starts approaching the ceiling, re-measure the
+      # set rather than assuming this line was right.
+      #
+      # The response to approaching a ceiling is to cut the volume or
+      # investigate, not to raise the ceiling again.
+      - name: DQP soak (four levers x plain, aggregate and pushdown cases)
+        env:
+          DQP_CASES: 10000
+        run: |
+          cargo nextest run --profile soak -p uni-db --test integration \
+            --run-ignored ignored-only \
+            -E 'test(/metamorphic::dqp::/) and test(soak)'
 
   tsan:
     if: github.repository == 'rustic-ai/uni-db'
@@ -373,6 +453,74 @@ jobs:
           path: tsan.log
           if-no-files-found: warn
 
+  miri:
+    if: github.repository == 'rustic-ai/uni-db'
+    name: Miri (uni-crdt)
+    runs-on: ${{ vars.CI_RUNNER_XLARGE64 || 'ubuntu-xlarge' }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      # Pinned nightly — see pr.yml's miri job for why this one lane pins when
+      # nothing else in the repo does. KEEP THE DATE IN SYNC WITH pr.yml: the
+      # two share the "miri" cache key, and a mismatch means each run rebuilds
+      # the other's sysroot and dependency tree.
+      - name: Setup Rust (pinned nightly + miri)
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-07-11
+          components: miri, rust-src
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mold protobuf-compiler
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "miri"
+          cache-directories: "~/.cache/miri"
+          cache-on-failure: true
+
+      - name: Build the miri sysroot
+        run: cargo +nightly-2026-07-11 miri setup
+
+      # uni-crdt is the crate that does not fit a PR. Measured 2026-08-22 on the
+      # pinned toolchain: 45 min 22 s wall-clock for its 31 lib tests, clean —
+      # no UB, no leaks. Worth knowing where that time goes: only 702 s (12 min)
+      # is interpretation, and the other ~33 min is COMPILING uni-crdt and
+      # uni-plugin under miri. So this job's cost is dominated by a cold cache
+      # rather than by test volume, which is what the shared "miri" cache key
+      # buys. It is slow to interpret because it depends on uni-plugin, so miri
+      # walks the whole plugin dispatch path on the way to a CRDT merge. The timeout is
+      # deliberate headroom for the crate growing, not room to add targets — if
+      # this job approaches the ceiling, re-measure and cut the set rather than
+      # raising it.
+      #
+      # `--lib` is load-bearing and NOT the default. The integration targets add
+      # ~140 more tests, two dozen of them proptest properties that hardcode
+      # `ProptestConfig::with_cases(100)`
+      # (crates/uni-crdt/tests/common/crdt/merge_properties.rs). `with_cases` is
+      # applied over `Config::default()` and therefore OVERRIDES PROPTEST_CASES,
+      # so there is no knob to turn them down from here — thousands of property
+      # cases through an interpreter is not a bounded run.
+      #
+      # Isolation stays ON: uni-crdt's only environmental dependency is
+      # `Uuid::new_v4()`, and miri supplies randomness under isolation.
+      - name: Miri on uni-crdt (lib tests)
+        run: |
+          cargo +nightly-2026-07-11 miri test -p uni-crdt --lib \
+            -- --test-threads=1 2>&1 | tee miri.log
+
+      - name: Upload miri log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: miri-log
+          path: miri.log
+          if-no-files-found: warn
+
   bench:
     if: github.repository == 'rustic-ai/uni-db'
     name: Benchmarks (artifact upload)
@@ -395,6 +543,38 @@ jobs:
           shared-key: "ci"
           cache-on-failure: true
           save-if: false
+
+      # A bench file with no `[[bench]]` stanza is auto-discovered by Cargo with
+      # the DEFAULT libtest harness. If it calls `criterion_main!`, that main
+      # becomes dead code, libtest finds zero `#[bench]` functions, and the run
+      # reports "0 measured; ok". It does not fail -- it passes while measuring
+      # nothing. `pushdown_performance.rs` did exactly that from the day it was
+      # added until 2026-08-15.
+      #
+      # Note a build check CANNOT catch this: the file compiles fine. Only
+      # comparing the file list against the declared stanzas does.
+      - name: Every bench file must have a [[bench]] stanza
+        run: |
+          cd crates/uni
+          comm -13 \
+            <(grep -A1 '^\[\[bench\]\]' Cargo.toml | grep '^name' | cut -d'"' -f2 | sort) \
+            <(ls benches/*.rs | xargs -n1 basename | sed 's/\.rs$//' | sort) \
+          | tee /dev/stderr | (! grep -q .)
+
+      # Only three benches are actually run below; this type-checks the rest, so
+      # a declared bench that stops compiling is caught here rather than whenever
+      # someone next runs it by hand.
+      #
+      # `check`, deliberately, not `cargo bench --benches --no-run`. Measured
+      # 2026-08-16 on a warm 22-core box: the full bench build is **76m 08s**,
+      # because each of the 19 targets statically links the whole
+      # datafusion/lance/candle tree -- the same cost that caps integration-test
+      # binaries at 3 per crate in docs/test_layout.md. That does not fit this
+      # job's 90-minute budget alongside the benches it actually runs. `check` is
+      # **50s** and catches compile errors in all 19; link errors are not covered,
+      # and the three benches run below are the standing check on linking.
+      - name: Type-check all bench targets
+        run: cargo check -p uni-db --benches
 
       - name: Run commit/SSI benches
         run: |

@@ -1,0 +1,15 @@
+diff --git a/crates/uni-query/src/query/df_graph/mod.rs b/crates/uni-query/src/query/df_graph/mod.rs
+index b378fd073..f68d8b866 100644
+--- a/crates/uni-query/src/query/df_graph/mod.rs
++++ b/crates/uni-query/src/query/df_graph/mod.rs
+@@ -548,7 +548,9 @@ impl GraphExecutionContext {
+             return Some(Vec::new());
+         }
+         uni_store::runtime::l0_visibility::get_vertex_labels_optional(vid, query_ctx)
+-            .or_else(|| self.storage.get_labels_from_index(vid))
++            // REVERT #99 (validation only): drop the persisted-index fallback so
++            // label resolution is L0-only, as it was before the fix.
++            .or_else(|| None)
+     }
+ 
+     /// Wall-clock deadline for the surrounding query, if any.

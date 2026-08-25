@@ -2,6 +2,7 @@
 // Copyright 2024-2026 Dragonscale Team
 
 pub mod context;
+pub mod counters;
 /// Embedding-capability mapping (task→heads) and per-alias head requirements,
 /// shared by open-time validation and write-time auto-embed routing.
 pub mod embed_caps;
@@ -31,6 +32,7 @@ pub use property_manager::PropertyManager;
 pub use vid_remapper::{EidRemapper, VidRemapper};
 // Re-export SimpleGraph from uni-common
 pub use context::QueryContext;
+pub use counters::QueryCounters;
 pub use id_reservoir::{DEFAULT_RESERVOIR_BATCH, TxIdReservoir};
 pub use uni_common::graph::simple_graph::{Direction, SimpleGraph};
 pub use wal::WriteAheadLog;

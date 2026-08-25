@@ -358,6 +358,29 @@ impl VertexDataset {
         .await
     }
 
+    /// MergeInsert a tombstone batch into this label's table.
+    ///
+    /// Separate from [`Self::merge_insert_batch`] because the two callers
+    /// differ in what a missing table means. That one serves partial SETs,
+    /// where the row must already exist, so a missing table is a fault. This
+    /// one serves tombstones, where an unmatched row is a no-op — and a missing
+    /// table is the degenerate case of that (#182): a label whose vertices were
+    /// created and deleted inside one flush window never had its table written.
+    pub async fn merge_insert_tombstone_batch(
+        &self,
+        backend: &dyn StorageBackend,
+        batch: RecordBatch,
+    ) -> Result<()> {
+        let table_name = table_names::vertex_table_name(&self.label);
+        crate::storage::manager::merge_insert_batch_tolerating_missing_table(
+            backend,
+            &table_name,
+            batch,
+            &["_vid"],
+        )
+        .await
+    }
+
     /// Build a partial-column RecordBatch marking VIDs as deleted. Used
     /// by the per-label DELETE flush path to skip the wide-row tombstone
     /// Append. Schema mirrors
@@ -397,6 +420,12 @@ impl VertexDataset {
     /// Ensure default scalar indexes exist on system columns (_vid, _uid, ext_id).
     pub async fn ensure_default_indexes(&self, backend: &dyn StorageBackend) -> Result<()> {
         let table_name = table_names::vertex_table_name(&self.label);
+        // Nothing to index on a table that does not exist (#182). Reachable on
+        // a tombstone-only flush for this label, where the full-row write that
+        // would have created it was skipped.
+        if !backend.table_exists(&table_name).await? {
+            return Ok(());
+        }
         let indices = backend.list_indexes(&table_name).await?;
 
         let has_index = |col: &str| {

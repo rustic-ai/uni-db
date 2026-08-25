@@ -39,7 +39,9 @@ use chrono::{NaiveDate, NaiveTime, Timelike};
 use datafusion::common::Result as DFResult;
 use datafusion::execution::{RecordBatchStream, SendableRecordBatchStream, TaskContext};
 use datafusion::physical_expr::PhysicalExpr;
-use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
+use datafusion::physical_plan::metrics::{
+    BaselineMetrics, Count, ExecutionPlanMetricsSet, MetricBuilder, MetricsSet,
+};
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties};
 use futures::Stream;
 use std::any::Any;
@@ -205,6 +207,11 @@ impl GraphScanExec {
                 Some(vids),
                 self.extra_lance_filter.as_deref(),
                 self.extra_runtime_filter.as_ref(),
+                // No per-node metric: this is the probe side of
+                // `VidLookupJoinExec`, which does not expose this scan as a
+                // child, so nothing would collect it (#179). The query-level
+                // counters still see it.
+                None,
             )
             .await
         }
@@ -471,6 +478,11 @@ impl ExecutionPlan for GraphScanExec {
         _context: Arc<TaskContext>,
     ) -> DFResult<SendableRecordBatchStream> {
         let metrics = BaselineMetrics::new(&self.metrics, partition);
+        // Named so `collect_plan_metrics` can find it; a scan that consults no
+        // index still registers the metric at zero, which is what lets
+        // `index_hits: Some(0)` mean "asked and did not" rather than "unknown".
+        let index_consulted =
+            MetricBuilder::new(&self.metrics).counter("index_consulted", partition);
 
         Ok(Box::pin(GraphScanStream::new(
             self.graph_ctx.clone(),
@@ -484,6 +496,7 @@ impl ExecutionPlan for GraphScanExec {
             self.extra_runtime_filter.clone(),
             self.schema.clone(),
             metrics,
+            index_consulted,
         )))
     }
 
@@ -544,6 +557,10 @@ struct GraphScanStream {
 
     /// Metrics.
     metrics: BaselineMetrics,
+
+    /// Per-node count of scans that consulted a scalar index, surfaced as
+    /// `OperatorStats::index_hits`.
+    index_consulted: Count,
 }
 
 impl GraphScanStream {
@@ -561,6 +578,7 @@ impl GraphScanStream {
         extra_runtime_filter: Option<Arc<dyn PhysicalExpr>>,
         schema: SchemaRef,
         metrics: BaselineMetrics,
+        index_consulted: Count,
     ) -> Self {
         Self {
             graph_ctx,
@@ -575,6 +593,7 @@ impl GraphScanStream {
             schema,
             state: GraphScanState::Init,
             metrics,
+            index_consulted,
         }
     }
 }
@@ -665,13 +684,28 @@ fn mvcc_dedup_to_option(
 /// Merge a deduped Lance batch with an L0 batch, re-deduplicating the combined
 /// result. Returns an empty batch (against `output_schema`) when both inputs
 /// are empty.
+///
+/// `counters`, when present, records how many rows each tier contributed. This
+/// is the one place in the scan path that already knows the answer — the
+/// `match` below exists precisely to distinguish storage-only, L0-only and
+/// both — so counting here costs a pair of adds and needs no new branching.
+/// Rows are counted **before** the combined dedup, so the numbers describe what
+/// each tier *served*, not what survived MVCC resolution.
 fn merge_lance_and_l0(
     lance_deduped: Option<RecordBatch>,
     l0_batch: RecordBatch,
     internal_schema: &SchemaRef,
     id_column: &str,
+    counters: Option<&Arc<uni_store::QueryCounters>>,
 ) -> DFResult<Option<RecordBatch>> {
     let has_l0 = l0_batch.num_rows() > 0;
+    if let Some(c) = counters {
+        let lance_rows = lance_deduped.as_ref().map_or(0, |b| b.num_rows());
+        let l0_rows = l0_batch.num_rows();
+        c.add_storage_rows(lance_rows);
+        c.add_l0_rows(l0_rows);
+        c.add_rows_scanned(lance_rows + l0_rows);
+    }
     match (lance_deduped, has_l0) {
         (Some(lance), true) => {
             let combined = arrow::compute::concat_batches(internal_schema, &[lance, l0_batch])
@@ -1670,6 +1704,11 @@ async fn columnar_scan_vertex_batch_static(
     vid_list_filter: Option<&[u64]>,
     extra_lance_filter: Option<&str>,
     extra_runtime_filter: Option<&Arc<dyn PhysicalExpr>>,
+    // Per-node sink for `index_hits`. Separate from the query-level counters
+    // because `collect_plan_metrics` reports per operator: copying a
+    // query-wide total onto every node would print the same number on a
+    // projection as on the scan that did the work.
+    index_consulted: Option<&Count>,
 ) -> DFResult<RecordBatch> {
     let storage = graph_ctx.storage();
     let l0_ctx = graph_ctx.l0_context();
@@ -1785,10 +1824,29 @@ async fn columnar_scan_vertex_batch_static(
     let (lance_batch, pushdown_filtered) = match plugin_batch {
         Some(b) => (Some(b), false),
         None => (
-            storage
-                .scan_vertex_table(label, &lance_columns_refs, combined_filter.as_ref())
-                .await
-                .map_err(exec_err)?,
+            {
+                // A scan-local counter set, merged into the query's afterwards.
+                // Taking a delta on the shared set instead would misattribute
+                // whenever two scans of the same query overlap; `merge_from`
+                // exists for exactly this fan-out.
+                let scan_local = Arc::new(uni_store::QueryCounters::new());
+                let batch = storage
+                    .scan_vertex_table_counted(
+                        label,
+                        &lance_columns_refs,
+                        combined_filter.as_ref(),
+                        Some(&scan_local),
+                    )
+                    .await
+                    .map_err(exec_err)?;
+                if let Some(q) = graph_ctx.counters() {
+                    q.merge_from(&scan_local);
+                }
+                if let Some(m) = index_consulted {
+                    m.add(scan_local.index_scans() as usize);
+                }
+                batch
+            },
             extra_lance_filter.is_some(),
         ),
     };
@@ -1856,7 +1914,13 @@ async fn columnar_scan_vertex_batch_static(
         build_l0_vertex_batch(l0_ctx, label, &internal_schema, label_props, l0_target_vids)?;
 
     // Merge Lance + L0
-    let Some(merged) = merge_lance_and_l0(lance_deduped, l0_batch, &internal_schema, "_vid")?
+    let Some(merged) = merge_lance_and_l0(
+        lance_deduped,
+        l0_batch,
+        &internal_schema,
+        "_vid",
+        graph_ctx.counters(),
+    )?
     else {
         return Ok(RecordBatch::new_empty(output_schema.clone()));
     };
@@ -2038,7 +2102,13 @@ async fn columnar_scan_schemaless_vertex_batch_static(
         build_l0_schemaless_vertex_batch(l0_ctx, label, &internal_schema, l0_target_vids)?;
 
     // Merge Lance + L0
-    let Some(merged) = merge_lance_and_l0(lance_deduped, l0_batch, &internal_schema, "_vid")?
+    let Some(merged) = merge_lance_and_l0(
+        lance_deduped,
+        l0_batch,
+        &internal_schema,
+        "_vid",
+        graph_ctx.counters(),
+    )?
     else {
         return Ok(RecordBatch::new_empty(output_schema.clone()));
     };
@@ -3391,6 +3461,7 @@ impl Stream for GraphScanStream {
                     let extra_lance_filter = self.extra_lance_filter.clone();
                     let extra_runtime_filter = self.extra_runtime_filter.clone();
                     let schema = self.schema.clone();
+                    let index_consulted = self.index_consulted.clone();
 
                     let fut = async move {
                         graph_ctx.check_timeout().map_err(exec_err)?;
@@ -3419,6 +3490,7 @@ impl Stream for GraphScanStream {
                                 vid_list_filter.as_deref(),
                                 extra_lance_filter.as_deref(),
                                 extra_runtime_filter.as_ref(),
+                                Some(&index_consulted),
                             )
                             .await?
                         };

@@ -26,16 +26,21 @@ impl Compactor {
     }
 
     #[instrument(skip(self), level = "info")]
-    pub async fn compact_all(&self) -> Result<Vec<CompactionInfo>> {
+    pub async fn compact_all(&self) -> Result<SemanticCompactionReport> {
         let start = std::time::Instant::now();
         let schema = self.storage.schema_manager().schema();
-        let mut compaction_results = Vec::new();
+        let mut report = SemanticCompactionReport::default();
 
         // Compact Vertices
         for label in schema.labels.keys() {
             info!("Compacting vertices for label {}", label);
-            if let Err(e) = self.compact_vertices(label).await {
-                error!("Failed to compact vertices for {}: {}", label, e);
+            match self.compact_vertices(label).await {
+                Ok(v) if v.ran => {
+                    report.vertex_passes += 1;
+                    report.crdt_merges += v.crdt_merges;
+                }
+                Ok(_) => {}
+                Err(e) => error!("Failed to compact vertices for {}: {}", label, e),
             }
         }
 
@@ -45,7 +50,7 @@ impl Compactor {
             for label in &meta.src_labels {
                 info!("Compacting adjacency {} -> {} (fwd)", label, edge_type);
                 match self.compact_adjacency(edge_type, label, "fwd").await {
-                    Ok(info) => compaction_results.push(info),
+                    Ok(info) => report.adjacency.push(info),
                     Err(e) => {
                         error!(
                             "Failed to compact adjacency {} -> {}: {}",
@@ -59,7 +64,7 @@ impl Compactor {
             for label in &meta.dst_labels {
                 info!("Compacting adjacency {} <- {} (bwd)", label, edge_type);
                 match self.compact_adjacency(edge_type, label, "bwd").await {
-                    Ok(info) => compaction_results.push(info),
+                    Ok(info) => report.adjacency.push(info),
                     Err(e) => {
                         error!(
                             "Failed to compact adjacency {} <- {}: {}",
@@ -74,12 +79,13 @@ impl Compactor {
         metrics::histogram!("uni_compaction_duration_seconds")
             .record(start.elapsed().as_secs_f64());
 
-        Ok(compaction_results)
+        Ok(report)
     }
 
     #[instrument(skip(self), fields(rows_processed, duration_ms), level = "info")]
-    pub async fn compact_vertices(&self, label: &str) -> Result<()> {
+    pub async fn compact_vertices(&self, label: &str) -> Result<VertexCompactionReport> {
         let start = std::time::Instant::now();
+        let mut crdt_merges = 0usize;
         let schema_manager = self.storage.schema_manager();
         let schema = schema_manager.schema();
 
@@ -102,7 +108,9 @@ impl Compactor {
         // Check if table exists
         if !backend.table_exists(&table_name).await.unwrap_or(false) {
             info!("No vertex data to compact for label '{}'", label);
-            return Ok(());
+            // `ran: false` — nothing was measured, as distinct from a pass that
+            // ran and merged no CRDT properties.
+            return Ok(VertexCompactionReport::default());
         }
 
         // In-memory compaction for now (MVP).
@@ -226,7 +234,7 @@ impl Compactor {
                     }
                 }
 
-                Self::merge_row_into_state(
+                crdt_merges += Self::merge_row_into_state(
                     row_props,
                     null_props,
                     version,
@@ -282,7 +290,11 @@ impl Compactor {
         metrics::histogram!("uni_compaction_duration_seconds", "type" => "vertex")
             .record(duration.as_secs_f64());
 
-        Ok(())
+        Ok(VertexCompactionReport {
+            ran: true,
+            rows_processed,
+            crdt_merges,
+        })
     }
 
     fn merge_crdt_values(
@@ -320,7 +332,11 @@ impl Compactor {
         current_version: &mut u64,
         crdt_props: &HashSet<String>,
         registry: Option<&uni_plugin::PluginRegistry>,
-    ) -> Result<()> {
+    ) -> Result<usize> {
+        // Returned rather than accumulated through an out-param: one more
+        // `&mut` argument would push this past clippy's arity limit, and the
+        // count is genuinely a result of the call.
+        let mut crdt_merges = 0usize;
         if version > *current_version {
             // New version wins for LWW, merge for CRDTs
             *current_version = version;
@@ -330,6 +346,7 @@ impl Compactor {
                 if crdt_props.contains(&k) {
                     let existing = current_entry.0.entry(k.clone()).or_insert(Value::Null);
                     *existing = Self::merge_crdt_values(existing, &v, registry)?;
+                    crdt_merges += 1;
                 } else {
                     current_entry.0.insert(k, v);
                 }
@@ -348,6 +365,7 @@ impl Compactor {
                 if crdt_props.contains(&k) {
                     let existing = current_entry.0.entry(k.clone()).or_insert(Value::Null);
                     *existing = Self::merge_crdt_values(existing, &v, registry)?;
+                    crdt_merges += 1;
                 } else {
                     current_entry.0.insert(k, v);
                 }
@@ -359,11 +377,12 @@ impl Compactor {
                     if crdt_props.contains(&k) {
                         let existing = current_entry.0.entry(k.clone()).or_insert(Value::Null);
                         *existing = Self::merge_crdt_values(existing, &v, registry)?;
+                        crdt_merges += 1;
                     }
                 }
             }
         }
-        Ok(())
+        Ok(crdt_merges)
     }
 
     #[instrument(skip(self), fields(delta_count, duration_ms), level = "info")]
@@ -667,6 +686,35 @@ fn append_edges_to_builders(
 pub struct CompactionInfo {
     pub edge_type: String,
     pub direction: String,
+}
+
+/// What one vertex-label semantic compaction pass did.
+///
+/// Deliberately a plain struct rather than `Option<usize>`: `Option` is
+/// `#[must_use]`, and a dozen callers invoke `compact_vertices(..).await?;` in
+/// statement position, which would all break under `-D warnings` for no gain.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct VertexCompactionReport {
+    /// Whether the pass ran at all. `false` means the label had no table, so
+    /// nothing was measured — a `crdt_merges` of `0` only means "no merges
+    /// happened" when this is `true`.
+    pub ran: bool,
+    /// Rows read during the pass.
+    pub rows_processed: usize,
+    /// CRDT value merges performed.
+    pub crdt_merges: usize,
+}
+
+/// What a full semantic (tier-2) compaction pass did.
+#[derive(Debug, Clone, Default)]
+pub struct SemanticCompactionReport {
+    /// Adjacency compactions performed — the unchanged payload its consumers
+    /// use to re-warm the in-memory CSR.
+    pub adjacency: Vec<CompactionInfo>,
+    /// Vertex passes that actually ran. The denominator for `crdt_merges`.
+    pub vertex_passes: usize,
+    /// CRDT value merges across every vertex pass.
+    pub crdt_merges: usize,
 }
 
 #[cfg(test)]

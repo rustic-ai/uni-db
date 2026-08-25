@@ -379,10 +379,14 @@ pub async fn compact_core(
 ) -> Result<crate::types::PyCompactionStats, UniError> {
     let stats = db.compaction().compact(name).await?;
     Ok(crate::types::PyCompactionStats {
-        files_compacted: stats.files_compacted,
-        bytes_before: stats.bytes_before,
-        bytes_after: stats.bytes_after,
+        tables_optimized: stats.tables_optimized,
+        fragments_removed: stats.fragments_removed,
+        fragments_added: stats.fragments_added,
+        files_removed: stats.files_removed,
+        files_added: stats.files_added,
+        bytes_reclaimed: stats.bytes_reclaimed,
         duration_secs: stats.duration.as_secs_f64(),
+        semantic_passes: stats.semantic_passes,
         crdt_merges: stats.crdt_merges,
     })
 }

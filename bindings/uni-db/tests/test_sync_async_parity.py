@@ -20,37 +20,69 @@ import uni_db
 # Parity guard
 # ---------------------------------------------------------------------------
 
-# Each sync pyclass and its async counterpart must expose the same public
-# (non-dunder) method surface. Context-manager / iterator dunders differ by
-# design (`__enter__` vs `__aenter__`, `__next__` vs `__anext__`) and are
-# intentionally excluded by the `_public_methods` filter.
-SYNC_ASYNC_PAIRS = [
-    ("Uni", "AsyncUni"),
-    ("Session", "AsyncSession"),
-    ("Transaction", "AsyncTransaction"),
-    ("UniBuilder", "AsyncUniBuilder"),
-    ("TransactionBuilder", "AsyncTransactionBuilder"),
-    ("SessionQueryBuilder", "AsyncSessionQueryBuilder"),
-    ("SessionLocyBuilder", "AsyncSessionLocyBuilder"),
-    ("TxQueryBuilder", "AsyncTxQueryBuilder"),
-    ("TxExecuteBuilder", "AsyncTxExecuteBuilder"),
-    ("TxLocyBuilder", "AsyncTxLocyBuilder"),
-    ("ApplyBuilder", "AsyncApplyBuilder"),
-    ("ForkBuilder", "AsyncForkBuilder"),
-    ("ForkSchemaBuilder", "AsyncForkSchemaBuilder"),
-    ("Compaction", "AsyncCompaction"),
-    ("Indexes", "AsyncIndexes"),
-    ("TxBulkWriterBuilder", "AsyncTxBulkWriterBuilder"),
-    ("TxAppenderBuilder", "AsyncTxAppenderBuilder"),
-    ("StreamingAppender", "AsyncStreamingAppender"),
-    ("SessionTemplateBuilder", "AsyncSessionTemplateBuilder"),
-    ("SessionTemplate", "AsyncSessionTemplate"),
-    ("BulkWriter", "AsyncBulkWriter"),
-    ("QueryCursor", "AsyncQueryCursor"),
-    ("SchemaBuilder", "AsyncSchemaBuilder"),
-    ("LabelBuilder", "AsyncLabelBuilder"),
-    ("EdgeTypeBuilder", "AsyncEdgeTypeBuilder"),
-]
+# Every `AsyncX` exported by the package must expose the same public method
+# surface as its sync twin `X`.
+#
+# **Derived, not hand-maintained.** This was a literal list of 25 pairs, and it
+# had fallen four behind the surface it guards: `AsyncCommitStream`,
+# `AsyncRuleRegistry`, `AsyncXervo` and `AsyncBulkWriter` all existed, all had
+# sync twins, and none was being compared. (All four matched when the list was
+# replaced, so nothing was broken -- but nothing was watching either.)
+#
+# A hand-maintained list that drifts away from what it guards is the exact
+# failure `scripts/ci/check_doc_symbols.py` was written about. Deriving the
+# pairs means a new `Async*` class is covered the moment it is added, and the
+# failure mode for a legitimate difference becomes "declare the exception
+# below" rather than "silently never notice".
+
+
+def _discover_pairs() -> list[tuple[str, str]]:
+    """Every `(X, AsyncX)` pair reachable from the package."""
+    names = {n for n in dir(uni_db) if not n.startswith("_")}
+    return sorted(
+        (n[len("Async") :], n)
+        for n in names
+        if n.startswith("Async") and n[len("Async") :] in names
+    )
+
+
+# Async classes with no sync twin, and why. An entry here is a claim that the
+# asymmetry is intentional -- not a parking spot for a class nobody has looked
+# at.
+UNPAIRED_ASYNC: dict[str, str] = {}
+
+
+SYNC_ASYNC_PAIRS = _discover_pairs()
+
+
+def test_pair_discovery_is_not_vacuous():
+    """The derived list must actually find the pairs.
+
+    Without this, a rename that broke `_discover_pairs` would empty the list and
+    every parity check below would pass by having nothing to check -- the
+    parametrised tests would simply disappear from the run. The floor is the 25
+    pairs the hand-written list carried; it should only ever grow.
+    """
+    assert len(SYNC_ASYNC_PAIRS) >= 25, (
+        f"only {len(SYNC_ASYNC_PAIRS)} sync/async pairs discovered: {SYNC_ASYNC_PAIRS}"
+    )
+
+
+def test_every_async_class_is_paired_or_declared():
+    """No `AsyncX` may quietly lack a sync twin."""
+    unpaired = sorted(
+        n
+        for n in dir(uni_db)
+        if not n.startswith("_")
+        and n.startswith("Async")
+        and n[len("Async") :] not in dir(uni_db)
+        and n not in UNPAIRED_ASYNC
+    )
+    assert not unpaired, (
+        f"async classes with no sync counterpart: {unpaired}.\n"
+        "Add the sync class, or record the asymmetry in UNPAIRED_ASYNC with a "
+        "reason."
+    )
 
 
 def _public_methods(cls):
@@ -75,7 +107,15 @@ def test_sync_async_method_parity(sync_name, async_name):
 
 
 def test_async_query_builder_removed():
-    """The dead, unreachable `AsyncQueryBuilder` was removed."""
+    """The dead, unreachable `AsyncQueryBuilder` was removed.
+
+    Kept as a named regression even though
+    `test_stub_drift.test_stub_has_no_phantom_classes` now generalises it. This
+    one-off assertion existed for years while the same defect recurred five more
+    times in the stub, precisely because nothing generalised it -- so the
+    general check is the fix, and this line is the reminder of why it was
+    needed.
+    """
     assert not hasattr(uni_db, "AsyncQueryBuilder")
 
 

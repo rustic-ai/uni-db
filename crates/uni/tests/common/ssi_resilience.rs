@@ -419,3 +419,185 @@ async fn corrupt_wal_tail_does_not_block_reopen() -> Result<()> {
     );
     Ok(())
 }
+
+// ── The same seams under a real process abort ────────────────────────────────
+//
+// The tests above panic mid-commit and then drop the `Uni`, which still runs
+// the shutdown flush. These re-run the same four seams under `SIGABRT`, where
+// nothing runs: no unwinding, no `Drop`, no final flush. See
+// `common/crash_harness.rs` for why that distinction matters and how the child
+// process works.
+//
+// Both are kept. Graceful close is a real path with its own regression history,
+// and `crash_during_flush_preserves_committed_unflushed_commit` documents that
+// its bug is reachable *only* there.
+
+/// The child half of the abort tests in this file.
+///
+/// Rebuilds the pre-crash state from scratch at the path the parent chose, arms
+/// the seam to abort, and drives the operation into it. Never returns.
+///
+/// Runs as a no-op when the environment is absent — the CI failpoint lane
+/// passes `--run-ignored all`, so it gets executed directly with nothing set.
+/// The parent tests are the ones that assert.
+#[cfg(feature = "failpoints")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "internal: child process entry point for the abort harness"]
+async fn ssi_abort_child() {
+    let Some((scenario, path)) = crate::crash_harness::child_env() else {
+        return;
+    };
+    let uri = path.to_string_lossy().into_owned();
+
+    // Seed and close cleanly, so the pre-crash state is genuinely durable and
+    // the abort below is the only ungraceful event in the run.
+    {
+        let db = Uni::open(&uri).build().await.unwrap();
+        init_schema_and_seed(&db).await.unwrap();
+        db.flush().await.unwrap();
+        if scenario == "during-flush" {
+            // An acknowledged commit that is NOT yet in L1: the thing whose
+            // survival across a crash-during-flush is under test.
+            let s = db.session();
+            let tx = s.tx().await.unwrap();
+            tx.execute("MATCH (c:C {id: 'x'}) SET c.n = 5")
+                .await
+                .unwrap();
+            tx.commit().await.unwrap();
+        }
+        db.shutdown().await.unwrap();
+    }
+
+    let db = Uni::open(&uri).build().await.unwrap();
+
+    // The control case for the whole harness: arm a real seam that this
+    // operation never evaluates, then run the operation and exit cleanly.
+    // `run_child` must reject that. Without it, "the child died of SIGABRT"
+    // would not establish *where* it died, and several parent assertions
+    // (n == 0, n == 5) would pass just as happily against a child that
+    // aborted the instant the seam was armed.
+    if scenario == "unreached-seam" {
+        crate::crash_harness::abort_at("fork::drop-after-begin");
+        set_n(&db, 1).await;
+        db.shutdown().await.unwrap();
+        return;
+    }
+
+    match scenario.as_str() {
+        "after-validate" => {
+            crate::crash_harness::abort_at("commit::after-validate");
+            set_n(&db, 42).await;
+        }
+        "after-wal-flush" => {
+            crate::crash_harness::abort_at("commit::after-wal-flush");
+            set_n(&db, 7).await;
+        }
+        "after-merge" => {
+            crate::crash_harness::abort_at("commit::after-merge");
+            set_n(&db, 3).await;
+        }
+        "during-flush" => {
+            crate::crash_harness::abort_at("flush::after-rotate-before-lance");
+            let _ = db.flush().await;
+        }
+        other => crate::crash_harness::unknown_scenario("ssi_abort_child", other),
+    }
+    panic!("the operation returned; the seam for '{scenario}' was never reached");
+}
+
+/// Drives a `SET c.n = val` commit that is expected to abort the process.
+#[cfg(feature = "failpoints")]
+async fn set_n(db: &Uni, val: i64) {
+    let s = db.session();
+    let tx = s.tx().await.unwrap();
+    tx.execute(&format!("MATCH (c:C {{id: 'x'}}) SET c.n = {val}"))
+        .await
+        .unwrap();
+    let _ = tx.commit().await;
+}
+
+/// Opens the crashed database and returns it, for the abort tests' assertions.
+#[cfg(feature = "failpoints")]
+async fn reopen_after_abort(path: &std::path::Path) -> Result<Uni> {
+    Ok(Uni::open(path.to_string_lossy().as_ref()).build().await?)
+}
+
+/// Abort sibling of [`crash_after_validate_recovers_nothing`].
+#[cfg(feature = "failpoints")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn abort_after_validate_recovers_nothing() -> Result<()> {
+    let dir = tempfile::TempDir::new()?;
+    let uri = dir.path().join("db");
+    crate::crash_harness::run_child_async(
+        "ssi_resilience::ssi_abort_child",
+        "after-validate",
+        &uri,
+    )
+    .await;
+
+    let db = reopen_after_abort(&uri).await?;
+    assert_eq!(
+        read_n(&db).await?,
+        0,
+        "a crash before the WAL flush must leave no trace"
+    );
+    db.shutdown().await?;
+    Ok(())
+}
+
+/// Abort sibling of [`crash_after_wal_flush_is_atomic`].
+#[cfg(feature = "failpoints")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn abort_after_wal_flush_is_atomic() -> Result<()> {
+    let dir = tempfile::TempDir::new()?;
+    let uri = dir.path().join("db");
+    crate::crash_harness::run_child_async(
+        "ssi_resilience::ssi_abort_child",
+        "after-wal-flush",
+        &uri,
+    )
+    .await;
+
+    let db = reopen_after_abort(&uri).await?;
+    assert_atomic_and_usable(&db, 7).await?;
+    db.shutdown().await?;
+    Ok(())
+}
+
+/// Abort sibling of [`crash_after_merge_is_atomic`].
+#[cfg(feature = "failpoints")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn abort_after_merge_is_atomic() -> Result<()> {
+    let dir = tempfile::TempDir::new()?;
+    let uri = dir.path().join("db");
+    crate::crash_harness::run_child_async("ssi_resilience::ssi_abort_child", "after-merge", &uri)
+        .await;
+
+    let db = reopen_after_abort(&uri).await?;
+    assert_atomic_and_usable(&db, 3).await?;
+    db.shutdown().await?;
+    Ok(())
+}
+
+/// Abort sibling of [`crash_during_flush_preserves_committed_unflushed_commit`].
+///
+/// The sibling's own docs note the loss it regresses was reachable only on the
+/// graceful-close path — under a real abort the WAL was already durable, so
+/// this asserts the acknowledged commit survives.
+#[cfg(feature = "failpoints")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn abort_during_flush_preserves_committed_unflushed_commit() -> Result<()> {
+    let dir = tempfile::TempDir::new()?;
+    let uri = dir.path().join("db");
+    crate::crash_harness::run_child_async("ssi_resilience::ssi_abort_child", "during-flush", &uri)
+        .await;
+
+    let db = reopen_after_abort(&uri).await?;
+    assert_eq!(
+        read_n(&db).await?,
+        5,
+        "an acknowledged commit was lost across a crash during flush"
+    );
+    db.shutdown().await?;
+    Ok(())
+}

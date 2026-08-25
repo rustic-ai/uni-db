@@ -31,6 +31,115 @@ use uni_common::core::schema::{
     VectorIndexType,
 };
 
+/// What happened when a physical index artifact was — or was not — materialized.
+///
+/// Every `create_*_index` path registers the index definition in the schema even
+/// when the backend refuses to build the artifact. That tolerance is deliberate:
+/// it lets `CREATE INDEX` succeed before the label has ever been flushed, and it
+/// lets a degenerate column through rather than failing a DDL statement.
+///
+/// The cost used to be paid silently. `IndexMetadata::default()` sets
+/// `status: Online` (`uni-common/src/core/schema/index_types.rs:13-17`), so
+/// `Online` was what an index got for *existing*, not for being built — and six
+/// call sites gate real behaviour on it: `pushdown.rs:166,237,279` and
+/// `SchemaManager`'s `vector_index_for_property` / `sparse_index_for_property` /
+/// `fulltext_index_for_property`. An index whose build had hard-failed still
+/// advertised itself to all six.
+///
+/// **The tolerance is kept; what changes is that the outcome is recorded.** No
+/// build path gains or loses an error return here.
+///
+/// The scope is deliberately narrow: only a build that was *attempted and
+/// refused* changes status. A build that was never attempted stays `Online` for
+/// now — see [`BuildOutcome::NotAttempted`], where demoting it was tried,
+/// measured against the suite, and backed out.
+///
+/// # Why a failed build is `Stale` and not `Failed`
+///
+/// `Failed` is terminal: `index_rebuild.rs:72` skips both `Building` and
+/// `Failed` when deciding which labels need a rebuild, on the reasoning that
+/// they are "already being rebuilt or have permanently failed". Marking a
+/// build error `Failed` would therefore convert a *retryable* failure into a
+/// permanent one — and the vector path documents its failures as exactly that
+/// (`build_physical_vector_index`: "Lance may clamp or defer ANN training"),
+/// expecting the next flush's rebuild to materialize the index.
+///
+/// `Stale` denies every `Online` gate above, which is the correctness fix, while
+/// leaving retry behaviour exactly as it is today. It is also the status the
+/// flush-driven rebuild path already assigns (`runtime/writer.rs:6000`).
+#[cfg(feature = "lance-backend")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BuildOutcome {
+    /// The backend materialized the artifact.
+    Built,
+    /// The backend was asked and refused. The error is logged at the call site.
+    Failed,
+    /// No build was attempted — the table is not flushed yet, or there is no
+    /// backend. The definition is registered; the artifact does not exist.
+    ///
+    /// **Currently mapped to `Online`, which is a known gap and not an
+    /// endorsement.** Marking it `Stale` is the honest reading, but it is not a
+    /// safe change today: `pushdown.rs:166` gates the hash-index point lookup on
+    /// `status == Online`, and that optimization needs no physical artifact —
+    /// `ScalarIndexType::Hash` has no Lance counterpart (it is mapped to BTree
+    /// at `:611-616`), and the `issue_57_match_label_hash_index` tests exercise
+    /// it against a label that is declared before any flush and never physically
+    /// built at all, since auto-rebuild is off by default. Demoting this case
+    /// turns those five tests red by disabling a working optimization.
+    ///
+    /// Closing the gap means separating "the user declared this index" from "an
+    /// artifact exists for it" at the six `Online` gates. That is a wider change
+    /// than this one and is deliberately left alone.
+    NotAttempted,
+    /// No artifact is required for this configuration, and the index is
+    /// complete without one.
+    ///
+    /// The L1/Manhattan vector case: there is no ANN backend metric for L1, so
+    /// the build is skipped by design and the column is searched
+    /// exact/brute-force. The *definition* is the index, and `vector_search`
+    /// reads the metric off it — which means this must stay `Online` or
+    /// `SchemaManager::vector_index_for_property` would stop returning it and
+    /// L1 vector search would silently stop finding its index.
+    NotRequired,
+}
+
+#[cfg(feature = "lance-backend")]
+impl BuildOutcome {
+    /// The metadata an index carries after this outcome.
+    ///
+    /// `last_built_at` is stamped only on success, which is what makes `Online`
+    /// falsifiable: before this, an index registered by any of the
+    /// `IndexManager` paths reported `Online` with `last_built_at: None` and
+    /// there was no way to tell it apart from one that had genuinely built.
+    pub(crate) fn into_metadata(self) -> uni_common::core::schema::IndexMetadata {
+        use uni_common::core::schema::{IndexMetadata, IndexStatus};
+        match self {
+            BuildOutcome::Built => IndexMetadata {
+                status: IndexStatus::Online,
+                last_built_at: Some(Utc::now()),
+                // Left to the rebuild manager, which is the only path that
+                // counts rows; see `index_rebuild.rs:433`.
+                row_count_at_build: None,
+            },
+            // Online, but with no `last_built_at`: nothing was built, and
+            // claiming a build timestamp would be the same lie in a new field.
+            // `NotRequired` is correct to be Online permanently; `NotAttempted`
+            // is Online only because demoting it is not yet safe — see the
+            // variant's docs.
+            BuildOutcome::NotRequired | BuildOutcome::NotAttempted => IndexMetadata {
+                status: IndexStatus::Online,
+                last_built_at: None,
+                row_count_at_build: None,
+            },
+            BuildOutcome::Failed => IndexMetadata {
+                status: IndexStatus::Stale,
+                last_built_at: None,
+                row_count_at_build: None,
+            },
+        }
+    }
+}
+
 /// Status of an index rebuild task.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum IndexRebuildStatus {
@@ -323,10 +432,10 @@ impl IndexManager {
     #[cfg(feature = "lance-backend")]
     async fn create_vector_index_inner(
         &self,
-        config: VectorIndexConfig,
+        mut config: VectorIndexConfig,
         force_backfill: bool,
     ) -> Result<()> {
-        if let VectorIndexType::Muvera { inner, .. } = &config.index_type {
+        let outcome = if let VectorIndexType::Muvera { inner, .. } = &config.index_type {
             // Register + backfill the derived FDE column (forced on a full rebuild).
             self.prepare_muvera_fde(&config, force_backfill).await?;
             let inner_cfg = VectorIndexConfig {
@@ -338,10 +447,11 @@ impl IndexManager {
                 embedding_config: None,
                 metadata: config.metadata.clone(),
             };
-            self.build_physical_vector_index(&inner_cfg).await?;
+            self.build_physical_vector_index(&inner_cfg).await?
         } else {
-            self.build_physical_vector_index(&config).await?;
-        }
+            self.build_physical_vector_index(&config).await?
+        };
+        config.metadata = outcome.into_metadata();
         self.schema_manager
             .add_index(IndexDefinition::Vector(config))?;
         self.schema_manager.save().await?;
@@ -488,7 +598,10 @@ impl IndexManager {
     /// does, possibly under a different logical config (see MUVERA in
     /// [`Self::create_vector_index`]).
     #[cfg(feature = "lance-backend")]
-    async fn build_physical_vector_index(&self, config: &VectorIndexConfig) -> Result<()> {
+    async fn build_physical_vector_index(
+        &self,
+        config: &VectorIndexConfig,
+    ) -> Result<BuildOutcome> {
         let label = &config.label;
         let property = &config.property;
         info!(
@@ -511,7 +624,7 @@ impl IndexManager {
                  searched exact/brute-force",
                 config.name
             );
-            return Ok(());
+            return Ok(BuildOutcome::NotRequired);
         }
 
         // Fail fast on an invalid PQ configuration before touching Lance (which
@@ -558,7 +671,7 @@ impl IndexManager {
                 "No storage backend; physical vector index '{}' deferred until a flush",
                 config.name
             );
-            return Ok(());
+            return Ok(BuildOutcome::NotAttempted);
         };
 
         // Build only once the table is flushed; create-before-flush is a no-op
@@ -575,26 +688,27 @@ impl IndexManager {
                 .await
             {
                 warn!(
-                    "Failed to build physical vector index '{}' (column may be empty): {}",
-                    config.name, e
+                    "Failed to build physical vector index '{}' on '{}': {}",
+                    config.name, table, e
                 );
+                Ok(BuildOutcome::Failed)
             } else {
                 info!("Vector index '{}' created", config.name);
+                Ok(BuildOutcome::Built)
             }
         } else {
             debug!(
-                "Label '{}' not flushed yet; physical vector index '{}' built on next flush",
+                "Label '{}' not flushed yet; physical vector index '{}' deferred",
                 label, config.name
             );
+            Ok(BuildOutcome::NotAttempted)
         }
-
-        Ok(())
     }
 
     /// Build and persist a scalar (BTree) index for exact-match and range queries.
     #[cfg(feature = "lance-backend")]
     #[instrument(skip(self), level = "info")]
-    pub async fn create_scalar_index(&self, config: ScalarIndexConfig) -> Result<()> {
+    pub async fn create_scalar_index(&self, mut config: ScalarIndexConfig) -> Result<()> {
         let label = &config.label;
         let properties = &config.properties;
         info!(
@@ -618,7 +732,7 @@ impl IndexManager {
         };
         let table = table_names::vertex_table_name(label);
 
-        if let Some(backend) = self.backend.as_ref() {
+        let outcome = if let Some(backend) = self.backend.as_ref() {
             if backend.table_exists(&table).await? {
                 info!(
                     "Building physical scalar index '{}' on '{}'",
@@ -628,25 +742,34 @@ impl IndexManager {
                     .create_scalar_index(&table, &columns, backend_idx_type, Some(&config.name))
                     .await
                 {
+                    // The error is reported as-is. It previously read "(table
+                    // may be empty)", which guessed at a cause and guessed
+                    // wrong for the reachable case — a column that does not
+                    // exist, which Lance rejects with exactly that message.
                     warn!(
-                        "Failed to build physical scalar index '{}' (table may be empty): {}",
-                        config.name, e
+                        "Failed to build physical scalar index '{}' on '{}': {}",
+                        config.name, table, e
                     );
+                    BuildOutcome::Failed
                 } else {
                     info!("Scalar index '{}' created", config.name);
+                    BuildOutcome::Built
                 }
             } else {
                 debug!(
-                    "Label '{}' not flushed yet; physical scalar index '{}' built on next flush",
+                    "Label '{}' not flushed yet; physical scalar index '{}' deferred",
                     label, config.name
                 );
+                BuildOutcome::NotAttempted
             }
         } else {
             warn!(
                 "No storage backend; physical scalar index '{}' deferred until a flush",
                 config.name
             );
-        }
+            BuildOutcome::NotAttempted
+        };
+        config.metadata = outcome.into_metadata();
 
         self.schema_manager
             .add_index(IndexDefinition::Scalar(config))?;
@@ -655,10 +778,82 @@ impl IndexManager {
         Ok(())
     }
 
+    /// Build any declared scalar index for `label` whose physical artifact is
+    /// missing, now that the table exists.
+    ///
+    /// [`Self::create_scalar_index`] records `BuildOutcome::NotAttempted` when
+    /// the label has not been flushed, because there is no Lance table to build
+    /// against. That left the deferral with nowhere to resolve: the flush path
+    /// built only the `_vid`/`_uid`/`ext_id` defaults
+    /// (`VertexDataset::ensure_default_indexes`), so an index declared before
+    /// the first insert kept a registry entry and never gained an artifact. A
+    /// user who declared an index up front silently got none, and only an
+    /// explicit `db.indexes().rebuild(label)` ever fixed it. This is the
+    /// resolution point.
+    ///
+    /// Idempotent, and cheap when there is nothing to do: the schema is
+    /// consulted first, so a label with no declared scalar index costs no
+    /// backend call at all. Only when one is declared do we list the physical
+    /// indexes and build what is absent.
+    ///
+    /// Scalar indexes only. Vector indexes are materialized by the flush-time
+    /// FDE path, and inverted/sparse are updated incrementally, so neither is
+    /// stranded the way scalar was.
+    #[cfg(feature = "lance-backend")]
+    pub async fn ensure_declared_scalar_indexes(&self, label: &str) -> Result<()> {
+        let declared: Vec<ScalarIndexConfig> = {
+            let schema = self.schema_manager.schema();
+            schema
+                .indexes
+                .iter()
+                .filter_map(|idx| match idx {
+                    IndexDefinition::Scalar(cfg) if cfg.label == label => Some(cfg.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+        if declared.is_empty() {
+            return Ok(());
+        }
+
+        let Some(backend) = self.backend.as_ref() else {
+            return Ok(());
+        };
+        let table = table_names::vertex_table_name(label);
+        if !backend.table_exists(&table).await? {
+            return Ok(());
+        }
+
+        let existing = backend.list_indexes(&table).await?;
+        // Match on the covered column set, not the index name: the physical
+        // artifact may have been created by a path that named it differently
+        // (e.g. `ensure_default_indexes` passes `None`).
+        let already_built = |props: &[String]| {
+            existing.iter().any(|idx| {
+                idx.columns.len() == props.len() && props.iter().all(|p| idx.columns.contains(p))
+            })
+        };
+
+        for config in declared {
+            if already_built(&config.properties) {
+                continue;
+            }
+            info!(
+                "Resolving deferred scalar index '{}' on '{}' at flush",
+                config.name, table
+            );
+            // Reuse the single build path so outcome-to-status mapping stays in
+            // one place; it re-registers the definition with fresh metadata.
+            self.create_scalar_index(config).await?;
+        }
+
+        Ok(())
+    }
+
     /// Build and persist a full-text search (Lance inverted) index.
     #[cfg(feature = "lance-backend")]
     #[instrument(skip(self), level = "info")]
-    pub async fn create_fts_index(&self, config: FullTextIndexConfig) -> Result<()> {
+    pub async fn create_fts_index(&self, mut config: FullTextIndexConfig) -> Result<()> {
         let label = &config.label;
         info!(
             "Creating FTS index '{}' on {}.{:?}",
@@ -673,7 +868,7 @@ impl IndexManager {
         let columns: Vec<&str> = config.properties.iter().map(|s| s.as_str()).collect();
         let table = table_names::vertex_table_name(label);
 
-        if let Some(backend) = self.backend.as_ref() {
+        let outcome = if let Some(backend) = self.backend.as_ref() {
             if backend.table_exists(&table).await? {
                 info!(
                     "Building physical FTS index '{}' on '{}'",
@@ -681,7 +876,7 @@ impl IndexManager {
                 );
                 // Validate the tokenizer config up front so an invalid analyzer
                 // is surfaced as a hard error rather than being swallowed by the
-                // "table may be empty" downgrade below.
+                // downgrade below.
                 if let Err(e) = crate::backend::fts_analyzer::to_inverted_params(
                     &config.tokenizer,
                     config.with_positions,
@@ -703,24 +898,29 @@ impl IndexManager {
                     .await
                 {
                     warn!(
-                        "Failed to build physical FTS index '{}' (table may be empty): {}",
-                        config.name, e
+                        "Failed to build physical FTS index '{}' on '{}': {}",
+                        config.name, table, e
                     );
+                    BuildOutcome::Failed
                 } else {
                     info!("FTS index '{}' created", config.name);
+                    BuildOutcome::Built
                 }
             } else {
                 debug!(
-                    "Label '{}' not flushed yet; physical FTS index '{}' built on next flush",
+                    "Label '{}' not flushed yet; physical FTS index '{}' deferred",
                     label, config.name
                 );
+                BuildOutcome::NotAttempted
             }
         } else {
             warn!(
                 "No storage backend; physical FTS index '{}' deferred until a flush",
                 config.name
             );
-        }
+            BuildOutcome::NotAttempted
+        };
+        config.metadata = outcome.into_metadata();
 
         self.schema_manager
             .add_index(IndexDefinition::FullText(config))?;
@@ -735,9 +935,10 @@ impl IndexManager {
     /// enabling BM25-based full-text search with optional phrase matching.
     #[cfg(feature = "lance-backend")]
     #[instrument(skip(self), level = "info")]
-    pub async fn create_json_fts_index(&self, config: JsonFtsIndexConfig) -> Result<()> {
-        let label = &config.label;
-        let column = &config.column;
+    pub async fn create_json_fts_index(&self, mut config: JsonFtsIndexConfig) -> Result<()> {
+        let label = config.label.clone();
+        let column = config.column.clone();
+        let (label, column) = (&label, &column);
         info!(
             "Creating JSON FTS index '{}' on {}.{}",
             config.name, label, column
@@ -750,7 +951,7 @@ impl IndexManager {
 
         let table = table_names::vertex_table_name(label);
 
-        if let Some(backend) = self.backend.as_ref() {
+        let outcome = if let Some(backend) = self.backend.as_ref() {
             if backend.table_exists(&table).await? {
                 info!(
                     "Building physical JSON FTS index '{}' on '{}'",
@@ -769,24 +970,29 @@ impl IndexManager {
                     .await
                 {
                     warn!(
-                        "Failed to build physical JSON FTS index '{}' (table may be empty): {}",
-                        config.name, e
+                        "Failed to build physical JSON FTS index '{}' on '{}': {}",
+                        config.name, table, e
                     );
+                    BuildOutcome::Failed
                 } else {
                     info!("JSON FTS index '{}' created", config.name);
+                    BuildOutcome::Built
                 }
             } else {
                 debug!(
-                    "Label '{}' not flushed yet; physical JSON FTS index '{}' built on next flush",
+                    "Label '{}' not flushed yet; physical JSON FTS index '{}' deferred",
                     label, config.name
                 );
+                BuildOutcome::NotAttempted
             }
         } else {
             warn!(
                 "No storage backend; physical JSON FTS index '{}' deferred until a flush",
                 config.name
             );
-        }
+            BuildOutcome::NotAttempted
+        };
+        config.metadata = outcome.into_metadata();
 
         self.schema_manager
             .add_index(IndexDefinition::JsonFullText(config))?;
@@ -875,7 +1081,7 @@ impl IndexManager {
         if let Some(backend) = self.backend.as_ref() {
             if backend.table_exists(&table).await? {
                 info!("Building composite index '{}' on '{}'", index_name, table);
-                if let Err(e) = backend
+                let outcome = if let Err(e) = backend
                     .create_scalar_index(
                         &table,
                         &columns,
@@ -885,12 +1091,14 @@ impl IndexManager {
                     .await
                 {
                     warn!(
-                        "Failed to build composite index '{}' (table may be empty): {}",
-                        index_name, e
+                        "Failed to build composite index '{}' on '{}': {}",
+                        index_name, table, e
                     );
+                    BuildOutcome::Failed
                 } else {
                     info!("Composite index '{}' created", index_name);
-                }
+                    BuildOutcome::Built
+                };
 
                 let config = ScalarIndexConfig {
                     name: index_name,
@@ -898,7 +1106,7 @@ impl IndexManager {
                     properties: properties.to_vec(),
                     index_type: uni_common::core::schema::ScalarIndexType::BTree,
                     where_clause: None,
-                    metadata: Default::default(),
+                    metadata: outcome.into_metadata(),
                 };
                 self.schema_manager
                     .add_index(IndexDefinition::Scalar(config))?;

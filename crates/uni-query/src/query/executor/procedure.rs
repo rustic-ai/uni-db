@@ -392,16 +392,36 @@ impl Executor {
                 let stats = self.storage.compact().await?;
                 let full_result = HashMap::from([
                     (
-                        "files_compacted".to_string(),
-                        Value::Int(stats.files_compacted as i64),
+                        "tables_optimized".to_string(),
+                        Value::Int(stats.tables_optimized as i64),
                     ),
                     (
-                        "bytes_before".to_string(),
-                        Value::Int(stats.bytes_before as i64),
+                        "fragments_removed".to_string(),
+                        Value::Int(stats.fragments_removed as i64),
                     ),
                     (
-                        "bytes_after".to_string(),
-                        Value::Int(stats.bytes_after as i64),
+                        "fragments_added".to_string(),
+                        Value::Int(stats.fragments_added as i64),
+                    ),
+                    (
+                        "files_removed".to_string(),
+                        Value::Int(stats.files_removed as i64),
+                    ),
+                    (
+                        "files_added".to_string(),
+                        Value::Int(stats.files_added as i64),
+                    ),
+                    (
+                        "bytes_reclaimed".to_string(),
+                        Value::Int(stats.bytes_reclaimed as i64),
+                    ),
+                    (
+                        "semantic_passes".to_string(),
+                        Value::Int(stats.semantic_passes as i64),
+                    ),
+                    (
+                        "crdt_merges".to_string(),
+                        Value::Int(stats.crdt_merges as i64),
                     ),
                     (
                         "duration_ms".to_string(),
@@ -418,9 +438,14 @@ impl Executor {
                     .map_err(|e| anyhow::anyhow!("Failed to get compaction status: {}", e))?;
                 let full_result = HashMap::from([
                     ("l1_runs".to_string(), Value::Int(status.l1_runs as i64)),
+                    ("l1_rows".to_string(), Value::Int(status.l1_rows as i64)),
                     (
-                        "l1_size_bytes".to_string(),
-                        Value::Int(status.l1_size_bytes as i64),
+                        "l1_estimated_bytes".to_string(),
+                        Value::Int(status.l1_estimated_bytes as i64),
+                    ),
+                    (
+                        "status_refreshes".to_string(),
+                        Value::Int(status.status_refreshes as i64),
                     ),
                     (
                         "in_progress".to_string(),
@@ -435,8 +460,8 @@ impl Executor {
                         Value::Int(status.total_compactions as i64),
                     ),
                     (
-                        "total_bytes_compacted".to_string(),
-                        Value::Int(status.total_bytes_compacted as i64),
+                        "total_bytes_reclaimed".to_string(),
+                        Value::Int(status.total_bytes_reclaimed as i64),
                     ),
                 ]);
 

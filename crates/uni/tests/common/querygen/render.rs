@@ -44,7 +44,25 @@ use uni_cypher::ast::{
 pub fn render(q: &Query) -> String {
     match q {
         Query::Single(stmt) => render_statement(stmt),
-        other => panic!("render: only Query::Single is in the generated subgrammar, got {other:?}"),
+        // Symmetric with `normalize`, which has always recursed through
+        // `Explain`. The motivation is **routing assertions**, not plan-text
+        // witnesses: `EXPLAIN` names the operator a query planned through, which
+        // is how a test proves it reaches the code path it claims to. That guard
+        // is what the #135 trap needed — a fixture can supply the right data and
+        // the right transition and still route around the fix site entirely,
+        // because a declared edge type plans to `Traverse` while the defect lives
+        // under `TraverseMainByType`.
+        //
+        // Deliberately **not** for differential comparison. Plan text is
+        // `format!("{:#?}", plan)` over structures holding `HashSet`/`HashMap`
+        // fields, so its ordering is not stable across processes; and the two
+        // sides of a lever are *expected* to plan differently. Use it for
+        // substring containment within one process, nothing more.
+        Query::Explain(inner) => format!("EXPLAIN {}", render(inner)),
+        other => panic!(
+            "render: only Query::Single and Query::Explain are in the generated \
+             subgrammar, got {other:?}"
+        ),
     }
 }
 

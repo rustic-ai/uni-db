@@ -397,6 +397,10 @@ async fn create_fork_2pc(
 
     // Step 2: persist the Pending entry.
     registry.begin_create(info).await?;
+    // Crash seam: a Pending entry exists with no allocator and no branches.
+    // Recovery must roll it back — it never rolls a Pending fork forward,
+    // because doing so would require verifying every branch exists.
+    fail::fail_point!("fork::create-after-begin");
 
     // Phase 2 Day 7: bootstrap the fork's IdAllocator above primary's
     // current HWM. Without this, the fork starts at VID 0 and collides
@@ -419,6 +423,10 @@ async fn create_fork_2pc(
         }
         return Err(UniError::Internal(e));
     }
+    // Crash seam: Pending entry plus an id-allocator file, still no branches.
+    // Note the allocator file is what `rollback_create` does *not* remove, so
+    // this seam is also how the orphaned-allocator question gets asked.
+    fail::fail_point!("fork::create-after-allocator");
 
     // Step 3: create one Lance branch per known dataset. Phase 1
     // collects the dataset list from the *current* schema's labels +

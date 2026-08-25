@@ -116,6 +116,85 @@ METAMORPHIC_CASES=64 cargo nextest run -p uni-db --test integration \
 UNI_GC_TRACE=1 cargo nextest run -p uni-plugin-builtin -p uni-plugin-rhai -E 'test(graph_compute)'
 ```
 
+### Failpoint Crash Suite
+```bash
+# The fail-rs crash/reopen tests are compiled out unless this feature is on.
+# `--run-ignored all` is load-bearing: the env-var fault-injection tests are
+# #[ignore]d because fail-rs's registry and the counters in lance_branch.rs are
+# process-global.
+cargo nextest run -p uni-db -p uni-store --features failpoints --run-ignored all \
+  -E 'test(/resilience|recovery|durability|crash_harness/)'
+
+# And the other half of the contract -- the seams must stay inert without the
+# feature, since that is what every other job builds:
+cargo nextest run -p uni-store -E 'test(/resilience|recovery/)'
+```
+152 tests, 19 s warm. The cold cost is ~3 min 40 s and is almost entirely the
+second feature configuration compiling, so expect a slow first run after any
+dependency change.
+
+Two things worth knowing:
+
+* **This suite existed for a long time before any CI job ran it.** If you add a
+  `fail_point!` seam, add its test to a file matching the filter above, or it
+  will be dormant on arrival.
+* **A "crash" test that panics and drops the `Uni` is not testing a crash.**
+  `Drop for Uni` broadcasts shutdown, and the auto-flush task answers with a
+  full `flush_to_l1` that nothing awaits — so the test gets graceful-close
+  semantics, racing its own reopen. For real crash semantics use the abort
+  harness in `crates/uni/tests/common/crash_harness.rs`: it re-invokes this
+  test binary as a child and kills it with `SIGABRT` at the seam. Grep for
+  `abort_child` for the pattern. Keep the panic-path test too where the
+  graceful path is itself worth pinning.
+
+### Miri (UB interpreter)
+```bash
+# Needs the PINNED nightly plus the miri component. This is the one pinned
+# toolchain in the repo: `miri` is a rustup component that is not built for
+# every nightly, so an unpinned lane goes red on a random day on the
+# PR-blocking side of the fence.
+rustup toolchain install nightly-2026-07-11 --component miri rust-src
+cargo +nightly-2026-07-11 miri setup
+
+# `cargo miri test`, NOT nextest -- the documented exception to the nextest
+# rule. Nextest runs a process per test and each pays a fresh interpreter + std
+# startup; these suites are only affordable because their tests share one
+# interpreted process.
+PROPTEST_CASES=16 cargo +nightly-2026-07-11 miri test -p uni-btic --lib --tests
+PROPTEST_CASES=16 cargo +nightly-2026-07-11 miri test -p uni-sparse-vector --lib --tests
+
+# uni-common needs -Zmiri-disable-isolation (it calls Utc::now() and does real
+# filesystem I/O through object_store); the two codec crates above deliberately
+# do not, so a new syscall dependency there surfaces instead of passing quietly.
+#
+# The trailing `::` in the skip is load-bearing: libtest's --skip is a plain
+# substring match, and the bare `muvera` form also swallows
+# `vector_index_opts::tests::muvera_defaults_and_inner`. Measured: bare removes
+# 14 tests, anchored removes exactly the 13 in the module.
+MIRIFLAGS="-Zmiri-disable-isolation" \
+  cargo +nightly-2026-07-11 miri test -p uni-common --lib --tests \
+  -- --test-threads=1 --skip 'muvera::'
+```
+Measured 2 min 08 s warm for all three. (The older 1 min 41 s figure predates
+the sparse proptests actually running: under isolation they aborted at startup
+on a blocked `getcwd`, so that timing covered a target that verified nothing.)
+
+Two miri-isolation traps, both silent, both hit by this lane: `current_dir` is
+blocked, which is what aborted the proptest target, and **the environment is
+hidden**, so any test tuned through an env var quietly reverts to its library
+default. Set such knobs in code under `cfg!(miri)`, not through the job's
+`env:`. `muvera` is excluded outright rather
+than budgeted -- its tests were killed at 132 minutes. `uni-crdt` runs in
+`nightly.yml` only.
+
+A miri failure is real signal even though these crates contain zero `unsafe`:
+the UB is reached *through* a dependency, or it is a leak. It has already found
+one here -- a `std::mem::forget(TempDir)` leaking a directory on disk every run
+(`crates/uni-common/tests/repro_rename_property_bypass.rs:19-27`). If the fault
+is upstream, file it and `#[cfg_attr(miri, ignore)]` the single test with a
+comment linking the issue. Do not add `-Zmiri-ignore-leaks`, and do not drop the
+crate from the lane.
+
 ### openCypher TCK (schemaless)
 ```bash
 cargo nextest run -p uni-tck --test tck

@@ -102,7 +102,7 @@ async fn test_manual_compaction_trigger() {
     assert!(result.is_ok());
 
     let stats = result.unwrap();
-    assert_eq!(stats.files_compacted, 0); // Empty DB
+    assert_eq!(stats.tables_optimized, 0); // Empty DB
 }
 
 /// Helper: create schema with Person label and KNOWS edge type.
@@ -323,7 +323,7 @@ async fn test_l1_runs_counts_non_empty_only() {
     );
 }
 
-/// Verify l1_size_bytes is computed from row counts, not hardcoded to 0.
+/// Verify l1_estimated_bytes is computed from row counts, not hardcoded to 0.
 #[tokio::test]
 async fn test_compaction_status_tracks_data_size() {
     let dir = tempdir().unwrap();
@@ -344,9 +344,9 @@ async fn test_compaction_status_tracks_data_size() {
     let status = run_compaction_cycle(&storage, Duration::from_millis(500)).await;
 
     assert!(
-        status.l1_size_bytes > 0,
-        "l1_size_bytes should be non-zero after writing data, got {}",
-        status.l1_size_bytes
+        status.l1_estimated_bytes > 0,
+        "l1_estimated_bytes should be non-zero after writing data, got {}",
+        status.l1_estimated_bytes
     );
     assert!(
         status.l1_runs > 0,
@@ -376,5 +376,5 @@ async fn test_background_compaction_handles_empty_db() {
         "Empty DB should not trigger compaction"
     );
     assert_eq!(status.l1_runs, 0);
-    assert_eq!(status.l1_size_bytes, 0);
+    assert_eq!(status.l1_estimated_bytes, 0);
 }

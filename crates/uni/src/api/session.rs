@@ -123,7 +123,11 @@ pub struct SessionMetrics {
     pub transactions_rolled_back: u64,
     /// Total rows returned across all queries.
     pub total_rows_returned: u64,
-    /// Total rows scanned across all queries (0 until executor instrumentation).
+    /// Total rows scanned across all queries.
+    ///
+    /// Accumulated from each result's `QueryMetrics::rows_scanned`, so it counts
+    /// scan-path reads only — a query answered entirely from an index or the
+    /// plan cache contributes nothing.
     pub total_rows_scanned: u64,
     /// Number of plan cache hits.
     pub plan_cache_hits: u64,
@@ -608,6 +612,11 @@ impl Session {
             self.metrics_inner
                 .total_rows_returned
                 .fetch_add(qr.len() as u64, Ordering::Relaxed);
+            // Previously never incremented anywhere in the workspace, so
+            // `SessionMetrics::total_rows_scanned` was permanently 0.
+            self.metrics_inner
+                .total_rows_scanned
+                .fetch_add(qr.metrics().rows_scanned as u64, Ordering::Relaxed);
             self.run_after_query_hooks(cypher, QueryType::Cypher, &params, qr.metrics());
         }
         result
@@ -1315,6 +1324,10 @@ impl Session {
 
         if let Some(plan) = cached {
             // Cache hit — skip parse and plan, execute the cached plan directly.
+            //
+            // `parse_time`/`plan_time` stay zero on this path and that is
+            // *correct*: neither phase ran. Only the miss path below has real
+            // durations to report.
             // The deep clone for the owned plan happens here, off the cache mutex.
             self.plan_cache_metrics.hits.fetch_add(1, Ordering::Relaxed);
             let plan = Arc::unwrap_or_clone(plan);
@@ -1338,7 +1351,9 @@ impl Session {
             .fetch_add(1, Ordering::Relaxed);
 
         // Parse
+        let parse_start = std::time::Instant::now();
         let ast = uni_cypher::parse(cypher).map_err(crate::api::impl_query::into_parse_error)?;
+        let parse_time = parse_start.elapsed();
 
         // Enforce read-only semantics for session queries — mutations require
         // a transaction for isolation, WAL protection, and commit hooks. This
@@ -1363,6 +1378,7 @@ impl Session {
         }
 
         // Plan
+        let plan_start = std::time::Instant::now();
         let planner = uni_query::QueryPlanner::new(self.db.schema.schema().clone())
             .with_params(params.clone())
             .with_plugin_registry(Arc::clone(&self.db.plugin_registry))
@@ -1373,6 +1389,7 @@ impl Session {
                 .map_err(|e| crate::api::impl_query::into_query_error(e, cypher))?,
         );
         let folded = planner.folded_limit_skip_params();
+        let plan_time = plan_start.elapsed();
 
         // Cache the entry under the effective key (folding in any LIMIT/SKIP
         // parameter values the planner baked into this plan).
@@ -1390,8 +1407,12 @@ impl Session {
             );
         }
 
-        // Execute the freshly planned query
-        uni_query::scoped_with_session_context(
+        // Execute the freshly planned query.
+        //
+        // Parse and plan happened here, above `execute_plan_internal`, which has
+        // no way to observe either — so the durations are stamped onto the result
+        // afterwards rather than measured and discarded.
+        let mut result = uni_query::scoped_with_session_context(
             session_pr,
             session_principal,
             self.db.execute_plan_internal(
@@ -1402,7 +1423,9 @@ impl Session {
                 self.cancel_scope(None),
             ),
         )
-        .await
+        .await?;
+        result.set_frontend_timing(parse_time, plan_time);
+        Ok(result)
     }
 
     /// Get the database inner reference (for Transaction, LocyEngine, etc.)

@@ -36,6 +36,7 @@ pub mod issue69_unwind_merge_perf;
 pub mod issue_100_collect_bytes;
 pub mod issue_131_locy_iter_cross_join;
 pub mod issue_137_vector_dim_enforcement;
+pub mod issue_175_index_consulted;
 pub mod issue_41_pattern_exists_perf;
 pub mod issue_55_batch_edge_patterns;
 pub mod issue_55_cross_match_pushdown;
@@ -117,4 +118,12 @@ pub mod repro_issue_168_family_stale_second_handle;
 // #169: a fork of a read-only parent captures a zeroed `ForkPoint`, so its
 // version floor and VID allocator start at 0 and the two languages disagree.
 pub mod repro_issue_169_readonly_fork_incoherent;
+// #181: flush() resurrected an edge removed by DETACH DELETE, leaving it with a
+// null endpoint — correct before the flush, wrong after.
+pub mod repro_issue_181_flush_resurrects_detached_edge;
+// #182: flush() raised an internal error after deleting a vertex that had never
+// been flushed — the tombstone had no table to merge into.
+pub mod repro_issue_182_delete_before_first_flush;
 pub mod repro_registry_monotonicity_oracle;
+pub mod vid_lookup_join_payoff;
+pub mod vid_lookup_join_reachability;

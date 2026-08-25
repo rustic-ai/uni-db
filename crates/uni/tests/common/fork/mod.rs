@@ -9,6 +9,9 @@ pub mod fork_diff_uid;
 pub mod fork_drop_cleanup;
 pub mod fork_drop_inflight;
 pub mod fork_drop_open_race;
+// Phase 9: crash inside every fork 2PC window and prove recovery lands on
+// Active or absent, never a torn state.
+pub mod fork_2pc_recovery_matrix;
 pub mod fork_durability;
 pub mod fork_error_audit;
 pub mod fork_flush_known_labels;

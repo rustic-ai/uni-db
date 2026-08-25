@@ -549,7 +549,7 @@ CALL uni.admin.snapshot.restore($snapshot_id) YIELD status
 ### Compaction
 
 ```cypher
-CALL uni.admin.compact() YIELD success, files_compacted, bytes_before, bytes_after, duration_ms
+CALL uni.admin.compact() YIELD tables_optimized, fragments_removed, fragments_added, bytes_reclaimed, duration_ms
 CALL uni.admin.compactionStatus() YIELD l1_runs, l1_size_bytes, in_progress, pending
 ```
 

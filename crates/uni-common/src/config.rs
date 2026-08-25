@@ -34,6 +34,21 @@ pub struct CompactionConfig {
     /// they accumulate. The default of 2 keeps the read-side overhead
     /// bounded across a wide range of write rates. See issue #55.
     pub frozen_segments_compact_threshold: usize,
+
+    /// How long a superseded dataset version is retained before compaction may
+    /// delete it (default: 7 days).
+    ///
+    /// This is what `CompactionStats::bytes_reclaimed` measures against: nothing
+    /// is reclaimed until a version is older than this, so a database younger
+    /// than the window always reports zero. It is configurable so that a test
+    /// can set it to zero and observe a non-zero reclaim — without that, the
+    /// field would be real in production and indistinguishable from a constant
+    /// everywhere it could be checked.
+    ///
+    /// Lowering it below the lifetime of the longest live fork chain is safe:
+    /// version cleanup is branch-aware and retains versions a live branch still
+    /// needs regardless of age.
+    pub version_retention: Duration,
 }
 
 impl Default for CompactionConfig {
@@ -46,6 +61,7 @@ impl Default for CompactionConfig {
             check_interval: Duration::from_secs(10),
             worker_threads: 1,
             frozen_segments_compact_threshold: 2,
+            version_retention: Duration::from_secs(7 * 24 * 3600),
         }
     }
 }

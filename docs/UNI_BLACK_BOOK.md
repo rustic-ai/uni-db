@@ -3175,11 +3175,11 @@ When reranking is active, `score` reflects the reranker score and `rerank_score`
 ```cypher
 // Trigger manual compaction
 CALL uni.admin.compact()
-YIELD success, files_compacted, bytes_before, bytes_after, duration_ms
+YIELD tables_optimized, fragments_removed, fragments_added, bytes_reclaimed, duration_ms
 
 // Check compaction status
 CALL uni.admin.compactionStatus()
-YIELD l1_runs, l1_size_bytes, in_progress, pending, total_compactions, total_bytes_compacted
+YIELD l1_runs, l1_rows, l1_estimated_bytes, in_progress, pending, total_compactions, total_bytes_reclaimed
 ```
 
 ### Snapshots

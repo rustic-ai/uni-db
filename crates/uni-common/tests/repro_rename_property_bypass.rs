@@ -16,19 +16,28 @@ use std::sync::Arc;
 use uni_common::DataType;
 use uni_common::core::schema::SchemaManager;
 
-async fn new_manager() -> SchemaManager {
+/// Returns the manager together with its `TempDir` guard.
+///
+/// The guard has to travel with the manager: the store is rooted at
+/// `dir.path()`, so dropping the `TempDir` here would delete the directory out
+/// from under a live `SchemaManager`. This previously used
+/// `std::mem::forget(dir)` to keep it alive, which worked but leaked the
+/// directory **on disk** — it was never cleaned up, once per test run, forever.
+/// miri flags exactly this (`error: memory leaked: … tempfile::TempDir`), which
+/// is how it was found. Handing the guard back keeps the directory alive for as
+/// long as it is needed and still deletes it at end of test.
+async fn new_manager() -> (SchemaManager, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
     let store: Arc<dyn ObjectStore> =
         Arc::new(LocalFileSystem::new_with_prefix(dir.path()).unwrap());
     let path = ObjectStorePath::from("schema.json");
-    // Keep tempdir alive for the duration via leak (test-only).
-    std::mem::forget(dir);
-    SchemaManager::load_from_store(store, &path).await.unwrap()
+    let manager = SchemaManager::load_from_store(store, &path).await.unwrap();
+    (manager, dir)
 }
 
 #[tokio::test]
 async fn rename_property_bypasses_reserved_storage_column_guard() {
-    let manager = new_manager().await;
+    let (manager, _dir) = new_manager().await;
     manager.add_label("Foo").unwrap();
     manager
         .add_property("Foo", "a", DataType::Int64, true)
@@ -67,7 +76,7 @@ async fn rename_property_bypasses_reserved_storage_column_guard() {
 
 #[tokio::test]
 async fn rename_property_bypasses_leading_underscore_rule() {
-    let manager = new_manager().await;
+    let (manager, _dir) = new_manager().await;
     manager.add_label("Foo").unwrap();
     manager
         .add_property("Foo", "a", DataType::Int64, true)

@@ -29,6 +29,19 @@ use std::sync::Arc;
 use uni_common::Properties;
 use uni_common::core::id::{Eid, UniId, Vid};
 
+/// One candidate row for an edge, while ranking a type scan by `_version`.
+///
+/// Carries `deleted` because a tombstone is a *winning* row, not an absent one:
+/// it has to beat the older live row before being filtered out.
+struct VersionedEdge {
+    src_vid: Vid,
+    dst_vid: Vid,
+    edge_type: String,
+    properties: Properties,
+    version: u64,
+    deleted: bool,
+}
+
 /// Which edge endpoint a pushed-down vid set constrains in
 /// [`MainEdgeDataset::find_edges_by_type_names`].
 ///
@@ -416,21 +429,37 @@ impl MainEdgeDataset {
             return Ok(Vec::new());
         }
 
-        let base_filter = FilterExpr::all([
-            FilterExpr::not_deleted(),
-            FilterExpr::one_of(
-                "type",
-                type_names.iter().map(|t| Scalar::Str((*t).to_string())),
-            ),
-        ]);
+        // MVCC (#181): NO `_deleted = false` pushdown here. The main edges
+        // table is append-only (`write_batch`, an Append), so a deleted edge has
+        // both a live row and a tombstone at a higher `_version`. Filtering on
+        // `_deleted` would select the stale live row and discard its own
+        // tombstone, resurrecting the edge — with a null endpoint if the delete
+        // came from a `DETACH DELETE` whose vertex is now gone.
+        //
+        // Instead every row for the type is ranked by `_eid`, highest version
+        // wins, and an eid whose winner is a tombstone is dropped. Same rule as
+        // the sibling `find_props_by_eid`, whose comment records the identical
+        // hazard for key reads.
+        //
+        // Cost: tombstone rows now leave storage and are discarded here, in
+        // proportion to delete volume until compaction rewrites the table.
+        // `not_deleted()` was a post-index row filter, never an index probe, so
+        // the `type` BTree and the endpoint pushdown below still bound the scan.
+        let base_filter = FilterExpr::one_of(
+            "type",
+            type_names.iter().map(|t| Scalar::Str((*t).to_string())),
+        );
 
-        let mut edges = Vec::new();
+        // Winners keyed by eid, carried across every endpoint chunk below so an
+        // edge whose live row and tombstone land in different chunks still ranks
+        // correctly.
+        let mut winners: HashMap<Eid, VersionedEdge> = HashMap::new();
         match endpoint_filter {
             None => {
                 // Fetch all columns for edge data
                 let batches = Self::execute_query(backend, base_filter.clone(), None).await?;
                 for batch in &batches {
-                    Self::extract_edges_with_type_from_batch(batch, &mut edges)?;
+                    Self::rank_edges_from_batch(batch, &mut winners)?;
                 }
             }
             Some((_, [])) => {}
@@ -450,19 +479,46 @@ impl MainEdgeDataset {
                     let filter = FilterExpr::all([base_filter.clone(), endpoint_clause]);
                     let batches = Self::execute_query(backend, filter, None).await?;
                     for batch in &batches {
-                        Self::extract_edges_with_type_from_batch(batch, &mut edges)?;
+                        Self::rank_edges_from_batch(batch, &mut winners)?;
                     }
                 }
             }
         }
 
+        // Drop eids whose winning row is a tombstone, then sort by eid.
+        //
+        // Sorted because the ranking turns scan order into map order, and a
+        // deterministic result is worth more than the saved sort: no current
+        // consumer depends on ordering — `StorageManager` passes it straight
+        // through and the traversal builds a HashMap from it — and pinning that
+        // here stops an ordering assumption creeping back in.
+        let mut edges: Vec<(Eid, Vid, Vid, String, Properties)> = winners
+            .into_iter()
+            .filter(|(_, w)| !w.deleted)
+            .map(|(eid, w)| (eid, w.src_vid, w.dst_vid, w.edge_type, w.properties))
+            .collect();
+        edges.sort_unstable_by_key(|(eid, ..)| eid.as_u64());
+
         Ok(edges)
     }
 
-    /// Extract edge data with type from a record batch.
-    fn extract_edges_with_type_from_batch(
+    /// Fold one batch into the per-eid winners map, keeping the highest
+    /// `_version` row for each edge.
+    ///
+    /// Ties go to the tombstone: `version > best || (version == best && deleted)`.
+    /// Deliberately NOT the sibling's `version >= best` — that resolves a tie as
+    /// "last row scanned wins", and Lance guarantees no scan order, so the same
+    /// data could rank either way across fragments. Preferring the tombstone is
+    /// order-independent and errs in the safe direction: it can under-report a
+    /// live edge, never resurrect a deleted one. (`find_props_by_eid` still uses
+    /// the `>=` form and should be aligned in a follow-up, with its own test.)
+    ///
+    /// A same-version live/dead pair is what a create-and-delete in one flush
+    /// window produces; any other source of one would be a writer bug. So the
+    /// drop is correct here and is not over-filtering.
+    fn rank_edges_from_batch(
         batch: &RecordBatch,
-        edges: &mut Vec<(Eid, Vid, Vid, String, Properties)>,
+        winners: &mut HashMap<Eid, VersionedEdge>,
     ) -> Result<()> {
         let Some(eid_arr) = batch
             .column_by_name("_eid")
@@ -488,6 +544,12 @@ impl MainEdgeDataset {
         let props_arr = batch
             .column_by_name("props_json")
             .and_then(|c| c.as_any().downcast_ref::<arrow_array::LargeBinaryArray>());
+        let version_arr = batch
+            .column_by_name("_version")
+            .and_then(|c| c.as_any().downcast_ref::<UInt64Array>());
+        let deleted_arr = batch
+            .column_by_name("_deleted")
+            .and_then(|c| c.as_any().downcast_ref::<arrow_array::BooleanArray>());
 
         for i in 0..batch.num_rows() {
             if eid_arr.is_null(i) || src_arr.is_null(i) || dst_arr.is_null(i) {
@@ -495,18 +557,41 @@ impl MainEdgeDataset {
             }
 
             let eid = Eid::new(eid_arr.value(i));
-            let src_vid = Vid::new(src_arr.value(i));
-            let dst_vid = Vid::new(dst_arr.value(i));
-            let edge_type = type_arr
+            let version = version_arr
                 .filter(|arr| !arr.is_null(i))
-                .map(|arr| arr.value(i).to_string())
-                .unwrap_or_default();
-            let props = props_arr
+                .map(|arr| arr.value(i))
+                .unwrap_or(0);
+            let deleted = deleted_arr.is_some_and(|arr| !arr.is_null(i) && arr.value(i));
+
+            let wins = match winners.get(&eid) {
+                None => true,
+                Some(best) => version > best.version || (version == best.version && deleted),
+            };
+            if !wins {
+                continue;
+            }
+
+            // Decode props only for a row that actually wins, matching the
+            // sibling's laziness — a churned edge can have many superseded rows.
+            let properties = props_arr
                 .map(|arr| Self::parse_props_json(arr, i))
                 .transpose()?
                 .unwrap_or_default();
 
-            edges.push((eid, src_vid, dst_vid, edge_type, props));
+            winners.insert(
+                eid,
+                VersionedEdge {
+                    src_vid: Vid::new(src_arr.value(i)),
+                    dst_vid: Vid::new(dst_arr.value(i)),
+                    edge_type: type_arr
+                        .filter(|arr| !arr.is_null(i))
+                        .map(|arr| arr.value(i).to_string())
+                        .unwrap_or_default(),
+                    properties,
+                    version,
+                    deleted,
+                },
+            );
         }
 
         Ok(())
@@ -629,6 +714,135 @@ mod tests {
         // Timestamp columns should exist and not be all null
         let created_col = batch.column_by_name("_created_at").unwrap();
         assert!(!created_col.is_null(0), "created_at should be populated");
+    }
+
+    /// Build a one-row main-edge batch. Mirrors the shape
+    /// `test_edge_key_reads_respect_tombstone_winner` uses.
+    #[cfg(test)]
+    fn edge_row(
+        eid: u64,
+        src: u64,
+        dst: u64,
+        ty: &str,
+        deleted: bool,
+        version: u64,
+    ) -> RecordBatch {
+        MainEdgeDataset::build_record_batch(
+            &[(
+                Eid::new(eid),
+                Vid::new(src),
+                Vid::new(dst),
+                ty.to_string(),
+                HashMap::new(),
+                deleted,
+                version,
+            )],
+            None,
+            None,
+        )
+        .unwrap()
+    }
+
+    async fn scan_backend() -> (tempfile::TempDir, crate::backend::lance::LanceDbBackend) {
+        let dir = tempfile::TempDir::new().unwrap();
+        let be = crate::backend::lance::LanceDbBackend::connect(dir.path().to_str().unwrap(), None)
+            .await
+            .unwrap();
+        (dir, be)
+    }
+
+    /// #181: a type scan must honour deletion tombstones.
+    ///
+    /// The sibling `find_props_by_eid` was fixed for this in review C2;
+    /// `find_edges_by_type_names` never was. The main edges table is
+    /// append-only, so a deleted edge has both a live row and a tombstone, and
+    /// filtering `_deleted = false` picks the stale live one.
+    #[tokio::test]
+    async fn test_type_scan_respects_tombstone_winner() {
+        let (_dir, be) = scan_backend().await;
+        let backend: &dyn StorageBackend = &be;
+
+        MainEdgeDataset::write_batch(backend, edge_row(1, 1, 2, "KNOWS", false, 1))
+            .await
+            .unwrap();
+        MainEdgeDataset::write_batch(backend, edge_row(2, 3, 4, "KNOWS", false, 1))
+            .await
+            .unwrap();
+
+        let live = MainEdgeDataset::find_edges_by_type_names(backend, &["KNOWS"], None)
+            .await
+            .unwrap();
+        assert_eq!(live.len(), 2, "both edges visible while live");
+
+        // Tombstone eid 1 at a higher version — the winning row.
+        MainEdgeDataset::write_batch(backend, edge_row(1, 1, 2, "KNOWS", true, 2))
+            .await
+            .unwrap();
+
+        let after = MainEdgeDataset::find_edges_by_type_names(backend, &["KNOWS"], None)
+            .await
+            .unwrap();
+        let eids: Vec<u64> = after.iter().map(|(e, ..)| e.as_u64()).collect();
+        assert_eq!(
+            eids,
+            vec![2],
+            "the deleted edge must not be resurrected by its own older live row"
+        );
+    }
+
+    /// #181: at equal `_version`, the tombstone wins — in either write order.
+    ///
+    /// The sibling uses `version >= best`, i.e. last-row-scanned-wins, and Lance
+    /// guarantees no scan order. Ranking here is order-independent: a tie can
+    /// only under-report, never resurrect.
+    #[tokio::test]
+    async fn test_type_scan_tie_prefers_the_tombstone() {
+        for (first_deleted, label) in [(false, "live-then-dead"), (true, "dead-then-live")] {
+            let (_dir, be) = scan_backend().await;
+            let backend: &dyn StorageBackend = &be;
+
+            MainEdgeDataset::write_batch(backend, edge_row(7, 1, 2, "R", first_deleted, 5))
+                .await
+                .unwrap();
+            MainEdgeDataset::write_batch(backend, edge_row(7, 1, 2, "R", !first_deleted, 5))
+                .await
+                .unwrap();
+
+            let rows = MainEdgeDataset::find_edges_by_type_names(backend, &["R"], None)
+                .await
+                .unwrap();
+            assert!(
+                rows.is_empty(),
+                "{label}: a same-version tie must resolve to the tombstone"
+            );
+        }
+    }
+
+    /// #181 on the endpoint-filtered branch, which takes a different scan path
+    /// (chunked, with a src/dst predicate pushed down).
+    #[tokio::test]
+    async fn test_type_scan_endpoint_filter_respects_tombstone() {
+        let (_dir, be) = scan_backend().await;
+        let backend: &dyn StorageBackend = &be;
+
+        MainEdgeDataset::write_batch(backend, edge_row(1, 1, 2, "KNOWS", false, 1))
+            .await
+            .unwrap();
+        MainEdgeDataset::write_batch(backend, edge_row(1, 1, 2, "KNOWS", true, 2))
+            .await
+            .unwrap();
+
+        let vids = [Vid::new(1), Vid::new(2)];
+        for side in [EndpointSide::Src, EndpointSide::Dst, EndpointSide::Either] {
+            let rows =
+                MainEdgeDataset::find_edges_by_type_names(backend, &["KNOWS"], Some((side, &vids)))
+                    .await
+                    .unwrap();
+            assert!(
+                rows.is_empty(),
+                "{side:?}: tombstone must win on the endpoint-filtered path too"
+            );
+        }
     }
 
     /// MVCC regression (review C2): a deletion tombstone written at a higher

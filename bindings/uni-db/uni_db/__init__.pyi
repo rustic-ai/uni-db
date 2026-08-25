@@ -531,6 +531,11 @@ class QueryMetrics:
     l0_reads: int
     storage_reads: int
     cache_hits: int
+    branch_scans: int
+    snapshot_reads: int
+    index_scans: int
+    index_comparisons: int
+    scans_reported: int
 
 class QueryWarning:
     """A query warning emitted during execution (e.g., missing index)."""
@@ -930,12 +935,16 @@ class DerivedFactSet:
 # =============================================================================
 
 class CompactionStats:
-    """Statistics from a compaction operation."""
+    """What a compaction operation actually did."""
 
-    files_compacted: int
-    bytes_before: int
-    bytes_after: int
+    tables_optimized: int
+    fragments_removed: int
+    fragments_added: int
+    files_removed: int
+    files_added: int
+    bytes_reclaimed: int
     duration_secs: float
+    semantic_passes: int
     crdt_merges: int
 
 class DatabaseMetrics:
@@ -1291,12 +1300,6 @@ class SessionLocyBuilder:
     def explain(self) -> LocyExplainOutput: ...
     def profile(self) -> tuple[LocyResult, LocyProfileOutput]: ...
 
-class ProfileBuilder:
-    """Fluent builder for profiling queries on a session."""
-
-    def param(self, name: str, value: Any) -> ProfileBuilder: ...
-    def run(self) -> tuple[QueryResult, ProfileOutput]: ...
-
 class Params:
     """Session-scoped parameter store, returned by ``Session.params()``."""
 
@@ -1363,20 +1366,6 @@ class ApplyBuilder:
 # Builder Classes — Bulk Loading
 # =============================================================================
 
-class BulkWriterBuilder:
-    """Builder for bulk data loading."""
-
-    def defer_vector_indexes(self, defer: bool) -> BulkWriterBuilder: ...
-    def defer_scalar_indexes(self, defer: bool) -> BulkWriterBuilder: ...
-    def batch_size(self, size: int) -> BulkWriterBuilder: ...
-    def async_indexes(self, async_: bool) -> BulkWriterBuilder: ...
-    def validate_constraints(self, validate: bool) -> BulkWriterBuilder: ...
-    def max_buffer_size_bytes(self, size: int) -> BulkWriterBuilder: ...
-    def on_progress(
-        self, callback: Callable[[BulkProgress], None]
-    ) -> BulkWriterBuilder: ...
-    def build(self) -> BulkWriter: ...
-
 class BulkWriter:
     """High-performance bulk data loader."""
 
@@ -1404,14 +1393,6 @@ class BulkWriter:
 # =============================================================================
 # Builder Classes — Streaming Appender
 # =============================================================================
-
-class AppenderBuilder:
-    """Builder for configurable streaming appenders."""
-
-    def batch_size(self, size: int) -> AppenderBuilder: ...
-    def defer_vector_indexes(self, defer: bool) -> AppenderBuilder: ...
-    def max_buffer_size_bytes(self, size: int) -> AppenderBuilder: ...
-    def build(self) -> StreamingAppender: ...
 
 class StreamingAppender:
     """Streaming data appender for a single label."""
@@ -2335,13 +2316,6 @@ class AsyncSessionLocyBuilder:
     async def explain(self) -> LocyExplainOutput: ...
     async def profile(self) -> tuple[LocyResult, LocyProfileOutput]: ...
 
-class AsyncSessionProfileBuilder:
-    """Async fluent builder for profiling queries on a session."""
-
-    def param(self, name: str, value: Any) -> AsyncSessionProfileBuilder: ...
-    def params(self, params: dict[str, Any]) -> AsyncSessionProfileBuilder: ...
-    async def run(self) -> tuple[QueryResult, ProfileOutput]: ...
-
 # =============================================================================
 # Async API — Transaction-Level Builders
 # =============================================================================
@@ -2400,20 +2374,6 @@ class AsyncApplyBuilder:
 # =============================================================================
 # Async API — Bulk Loading
 # =============================================================================
-
-class AsyncBulkWriterBuilder:
-    """Async builder for bulk data loading."""
-
-    def defer_vector_indexes(self, defer: bool) -> AsyncBulkWriterBuilder: ...
-    def defer_scalar_indexes(self, defer: bool) -> AsyncBulkWriterBuilder: ...
-    def batch_size(self, size: int) -> AsyncBulkWriterBuilder: ...
-    def async_indexes(self, async_: bool) -> AsyncBulkWriterBuilder: ...
-    def validate_constraints(self, validate: bool) -> AsyncBulkWriterBuilder: ...
-    def max_buffer_size_bytes(self, size: int) -> AsyncBulkWriterBuilder: ...
-    def on_progress(
-        self, callback: Callable[[BulkProgress], None]
-    ) -> AsyncBulkWriterBuilder: ...
-    async def build(self) -> AsyncBulkWriter: ...
 
 class AsyncBulkWriter:
     """Async bulk writer for high-throughput data ingestion."""

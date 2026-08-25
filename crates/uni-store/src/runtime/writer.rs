@@ -5528,11 +5528,20 @@ impl Writer {
                 let tomb_batch =
                     ds.build_tombstone_partial_batch(&tombstone_rows, Some(&vertex_updated_at))?;
                 if tomb_batch.num_rows() > 0 {
-                    ds.merge_insert_batch(backend, tomb_batch).await?;
+                    ds.merge_insert_tombstone_batch(backend, tomb_batch).await?;
                 }
             }
 
             ds.ensure_default_indexes(backend).await?;
+
+            // Resolve any scalar index declared before this label had a table.
+            // `create_scalar_index` records NotAttempted in that case, and until
+            // this call nothing ever built it — the declaration survived in the
+            // registry with no artifact behind it.
+            self.storage
+                .index_manager()
+                .ensure_declared_scalar_indexes(label_name)
+                .await?;
 
             // VidLabelsIndex maintenance is centralized at the main-vertex
             // flush above (it sees both schema'd and schemaless vertices).

@@ -21,6 +21,18 @@ directions:
 Deliberate exceptions go in ``IGNORED_CLASSES`` / ``IGNORED_MEMBERS`` with a
 reason, so the allowlist is the only place drift can hide -- and it is
 reviewable.
+
+Four directions, and all four are checked:
+
+===========================  ============================================
+runtime class  -> stub       ``test_stub_documents_every_runtime_class``
+runtime member -> stub       ``test_stub_documents_every_runtime_member``
+stub member    -> runtime    ``test_stub_has_no_phantom_members``
+stub class     -> runtime    ``test_stub_has_no_phantom_classes``
+===========================  ============================================
+
+The last was missing until 2026-08-22 and five phantom classes had accumulated
+behind it.
 """
 
 from __future__ import annotations
@@ -193,6 +205,53 @@ def test_stub_documents_every_runtime_member() -> None:
     )
 
 
+def _package_names() -> set[str]:
+    """Public names reachable as ``uni_db.<name>``.
+
+    Broader than :func:`_runtime_classes`, which enumerates the extension only.
+    A stub class is legitimate if it is reachable from the package, whether it
+    came from the extension or from a pure-Python helper module.
+    """
+    return {name for name in dir(uni_db) if _public(name)}
+
+
+def test_stub_has_no_phantom_classes() -> None:
+    """Every stub class must exist at runtime (catches whole-class rot).
+
+    This is the fourth direction of the drift matrix, and it was missing. The
+    other three are covered above: runtime class -> stub, runtime member ->
+    stub, and stub member -> runtime. But that last one skips any class the
+    runtime does not have, so a class that exists *only* in the stub sailed
+    through every check.
+
+    It was not hypothetical. When this test was written it failed immediately on
+    five classes: ``BulkWriterBuilder``, ``AppenderBuilder`` and
+    ``AsyncBulkWriterBuilder`` (byte-identical leftovers from the rename to the
+    ``Tx*`` names) and ``ProfileBuilder`` / ``AsyncSessionProfileBuilder`` (a
+    superseded ``param``/``run`` profiling API). Each was reachable only from
+    its own fluent methods, so nothing referenced them and nothing complained.
+
+    A phantom class is worse than a phantom method: annotating against one type
+    checks clean and then fails at import, because the name has never existed at
+    runtime at all.
+
+    Compared against the package rather than the extension, so a genuine
+    pure-Python re-export would still pass -- see :func:`_package_names`.
+    """
+    stub = _stub_surface()
+    available = _package_names()
+    phantom = sorted(
+        name for name in stub if name not in available and name not in IGNORED_CLASSES
+    )
+    assert not phantom, (
+        "Classes declared in uni_db/__init__.pyi do not exist at runtime: "
+        f"{phantom}.\n"
+        "They are unimportable, so any annotation against them fails at import "
+        "while type-checking clean. Delete the stale entries, or list them in "
+        "IGNORED_CLASSES with a reason."
+    )
+
+
 def test_stub_has_no_phantom_members() -> None:
     """Every stub member must exist at runtime (catches removals/typos)."""
     runtime = _runtime_classes()
@@ -200,7 +259,13 @@ def test_stub_has_no_phantom_members() -> None:
     phantom: dict[str, list[str]] = {}
     for name, members in stub.items():
         if name not in runtime or name in IGNORED_CLASSES:
-            continue  # stub-only classes (pure-Python helpers) are out of scope
+            # A stub class the extension does not export is out of scope *here*
+            # -- there are no members to compare against. It is not unchecked:
+            # `test_stub_has_no_phantom_classes` asserts it exists somewhere in
+            # the package. That test exists because this skip once read as
+            # "pure-Python helpers are out of scope" and was hiding five classes
+            # that existed nowhere at all.
+            continue
         allowed = _runtime_members(runtime[name]) | IGNORED_MEMBERS.get(name, set())
         extra = sorted(members - allowed)
         if extra:

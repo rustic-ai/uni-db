@@ -317,7 +317,7 @@ For on-demand compaction after bulk loads, you can trigger it manually:
 
 ```bash
 # Manual compaction (via Cypher)
-uni query "CALL uni.admin.compact() YIELD files_compacted, duration_ms RETURN *" --path ./storage
+uni query "CALL uni.admin.compact() YIELD tables_optimized, fragments_removed, duration_ms RETURN *" --path ./storage
 ```
 
 ```rust

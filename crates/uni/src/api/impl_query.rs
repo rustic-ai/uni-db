@@ -566,10 +566,16 @@ impl crate::api::UniInner {
         let columns = columns_for_results(&results, projection_order);
         let rows = rows_for_results(results, &columns, true);
 
-        Ok((
-            QueryResult::new(columns, rows, Vec::new(), Default::default()),
-            profile_output,
-        ))
+        // PROFILE used to return `Default::default()` here, i.e. a result whose
+        // every metric read zero — the one query form a user runs *specifically*
+        // to see metrics.
+        let metrics = QueryMetrics {
+            rows_returned: rows.len(),
+            ..Default::default()
+        };
+        let mut result = QueryResult::new(columns, rows, Vec::new(), metrics);
+        result.set_counters(executor.take_counters());
+        Ok((result, profile_output))
     }
 
     pub(crate) async fn execute_cursor_internal_with_config(
@@ -921,12 +927,9 @@ impl crate::api::UniInner {
             ..Default::default()
         };
 
-        Ok(QueryResult::new(
-            columns,
-            rows,
-            executor.take_warnings(),
-            metrics,
-        ))
+        let mut result = QueryResult::new(columns, rows, executor.take_warnings(), metrics);
+        result.set_counters(executor.take_counters());
+        Ok(result)
     }
 
     /// Profile a Cypher query within a transaction's private L0 buffer.
@@ -978,10 +981,13 @@ impl crate::api::UniInner {
         let columns = columns_for_results(&results, projection_order);
         let rows = rows_for_results(results, &columns, true);
 
-        Ok((
-            QueryResult::new(columns, rows, executor.take_warnings(), Default::default()),
-            profile_output,
-        ))
+        let metrics = QueryMetrics {
+            rows_returned: rows.len(),
+            ..Default::default()
+        };
+        let mut result = QueryResult::new(columns, rows, executor.take_warnings(), metrics);
+        result.set_counters(executor.take_counters());
+        Ok((result, profile_output))
     }
 
     /// Execute a cursor query with a private transaction L0 buffer.
@@ -1138,12 +1144,9 @@ impl crate::api::UniInner {
             ..Default::default()
         };
 
-        Ok(QueryResult::new(
-            columns,
-            rows,
-            executor.take_warnings(),
-            metrics,
-        ))
+        let mut result = QueryResult::new(columns, rows, executor.take_warnings(), metrics);
+        result.set_counters(executor.take_counters());
+        Ok(result)
     }
 
     /// Execute a pre-parsed Cypher AST through the planner and executor.
@@ -1209,12 +1212,9 @@ impl crate::api::UniInner {
             ..Default::default()
         };
 
-        Ok(QueryResult::new(
-            columns,
-            rows,
-            executor.take_warnings(),
-            metrics,
-        ))
+        let mut result = QueryResult::new(columns, rows, executor.take_warnings(), metrics);
+        result.set_counters(executor.take_counters());
+        Ok(result)
     }
 
     /// Resolve a time-travel spec to a snapshot ID.
@@ -1311,11 +1311,8 @@ impl crate::api::UniInner {
             ..Default::default()
         };
 
-        Ok(QueryResult::new(
-            columns,
-            rows,
-            executor.take_warnings(),
-            metrics,
-        ))
+        let mut result = QueryResult::new(columns, rows, executor.take_warnings(), metrics);
+        result.set_counters(executor.take_counters());
+        Ok(result)
     }
 }

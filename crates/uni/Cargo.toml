@@ -129,6 +129,7 @@ imbl = "7"
 metrics-util = "0.20"
 # Randomized workload generation for the SSI invariant-oracle + chaos tests.
 proptest = { workspace = true }
+iai-callgrind = "0.16.1"
 
 [[bench]]
 name = "algo_benchmarks"
@@ -202,6 +203,14 @@ harness = false
 
 [[bench]]
 name = "multivec_retrieval"
+harness = false
+
+# Phase 0B instruction-count qualification pilot (docs/proposals/
+# test_harness_implementation_plan_2026-08-12.md). Requires `valgrind` and an
+# `iai-callgrind-runner` at exactly the `iai-callgrind` dev-dependency version.
+# Not a gate: it decides which targets *can* be gated.
+[[bench]]
+name = "hot_paths_iai"
 harness = false
 
 [[example]]

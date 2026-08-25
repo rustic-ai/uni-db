@@ -74,3 +74,33 @@ slow-timeout = { period = "60s", terminate-after = 6 }
 [profile.soak]
 fail-fast = false
 slow-timeout = { period = "120s", terminate-after = 20 }
+
+# The DQP soaks are the longest single tests in the suite and need more than the
+# soak profile's 40-minute ceiling.
+#
+# Measured on a 22-core box in the **nightly configuration** — all eight
+# concurrently at DQP_CASES=10000, which is what the dqp job actually runs:
+#
+#   fork agg 8.8   pinned agg 9.7   flush agg 10.2   plan_cache agg 12.3
+#   fork    21.7   pinned    22.0   flush    23.9   plan_cache    29.9   (minutes)
+#
+# Total wall-clock 29.9 min, i.e. the slowest rather than the sum. Aggregates are
+# cheap because they return one row per case; the plain kinds materialize tens of
+# millions of rows each.
+#
+# This measurement supersedes the earlier serial one taken at 20 000 cases with
+# four soaks. It is also pessimistic for CI: eight heavy tests contending over 22
+# cores is more contention than the 64-core runner sees.
+#
+# The 54-minute ceiling (120s x 27) is kept rather than tightened to 30: it was
+# set when the numbers were less certain, and the job's own `timeout-minutes` is
+# the real backstop.
+#
+# If any of these approaches 54 minutes, that is a regression to investigate or a
+# reason to cut DQP_CASES — not a number to bump again.
+#
+# The filter matches every DQP soak, not just the first one: each lever x
+# case-kind combination runs at the same volume, so they share the ceiling.
+[[profile.soak.overrides]]
+filter = 'test(/metamorphic::dqp::/) and test(soak)'
+slow-timeout = { period = "120s", terminate-after = 27 }

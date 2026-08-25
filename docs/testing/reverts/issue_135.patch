@@ -1,0 +1,20 @@
+diff --git a/crates/uni-query/src/query/df_graph/traverse.rs b/crates/uni-query/src/query/df_graph/traverse.rs
+index 28a7b1621..9bfa11899 100644
+--- a/crates/uni-query/src/query/df_graph/traverse.rs
++++ b/crates/uni-query/src/query/df_graph/traverse.rs
+@@ -2675,6 +2675,15 @@ async fn build_edge_adjacency_and_target_props(
+         .get_batch_vertex_props(&target_vids, &name_refs, Some(&query_ctx))
+         .await
+         .map_err(exec_err)?;
++    // REVERT #135 (validation only): drop every hydrated property, restoring the
++    // pre-fix behaviour where flushed traversal targets read back NULL.
++    //
++    // NOTE: this is the *naive* revert and it is DQP-INVISIBLE — it nulls
++    // properties on both sides of a differential comparison, and an oracle
++    // cannot see a defect that corrupts both sides identically. It is faithful
++    // enough for the existing regression test, which compares against a
++    // non-traversal scan.
++    let props = { let _ = &props; HashMap::new() };
+     Ok((adjacency, props))
+ }
+ 

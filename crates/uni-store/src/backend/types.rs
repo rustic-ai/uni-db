@@ -3,6 +3,10 @@
 
 //! Backend-agnostic types for storage operations.
 
+use std::sync::Arc;
+
+use crate::runtime::counters::QueryCounters;
+
 /// Canonical column names the engine filters on.
 ///
 /// These are the physical columns every table carries. Naming them here keeps
@@ -530,6 +534,14 @@ pub struct ScanRequest {
     /// Set by the storage manager when a session has fork scope active;
     /// see `crate::backend::lance_branch` for the underlying primitives.
     pub branch: Option<String>,
+    /// Per-query execution counters, when this scan belongs to a query.
+    ///
+    /// The backend layer never sees a [`QueryContext`](crate::QueryContext) —
+    /// `ScanRequest` is the only object that crosses into it — so this is how a
+    /// count taken at the point a branch scan *executes* gets attributed back to
+    /// the query that caused it. `None` for scans issued outside a query
+    /// (compaction, recovery, index builds).
+    pub counters: Option<Arc<QueryCounters>>,
 }
 
 impl ScanRequest {
@@ -541,6 +553,7 @@ impl ScanRequest {
             filter: FilterExpr::Literal(true),
             limit: None,
             branch: None,
+            counters: None,
         }
     }
 
@@ -577,6 +590,30 @@ impl ScanRequest {
     pub fn with_optional_branch(mut self, branch: Option<String>) -> Self {
         self.branch = branch;
         self
+    }
+
+    /// Builder: attach the per-query counter set from an `Option`.
+    ///
+    /// Takes an `Option` so call sites can forward
+    /// `ctx.and_then(|c| c.counters.clone())` without branching.
+    pub fn with_counters(mut self, counters: Option<Arc<QueryCounters>>) -> Self {
+        self.counters = counters;
+        self
+    }
+
+    /// Records that this scan executed against a fork branch, if counting is on.
+    pub fn count_branch_scan(&self) {
+        if let Some(c) = &self.counters {
+            c.add_branch_scan();
+        }
+    }
+
+    /// Records `n` rows produced by this scan, if counting is on.
+    pub fn count_storage_rows(&self, n: usize) {
+        if let Some(c) = &self.counters {
+            c.add_storage_rows(n);
+            c.add_rows_scanned(n);
+        }
     }
 }
 
@@ -680,4 +717,69 @@ pub struct IndexInfo {
     pub columns: Vec<String>,
     /// Index type description (backend-specific, e.g., "IVF_PQ", "BTree").
     pub index_type: String,
+}
+
+/// What a single [`StorageBackend::optimize_table`] call did.
+///
+/// [`StorageBackend::optimize_table`]: crate::backend::StorageBackend::optimize_table
+///
+/// Backend-neutral by construction: the Lance backend fills it from
+/// `CompactionMetrics` and `RemovalStats`, and a backend that optimizes nothing
+/// returns [`OptimizeReport::default`], which reads correctly as "ran, did
+/// nothing". That distinction is the whole point — before this type existed,
+/// `optimize_table` returned `Result<()>` and every number describing what
+/// compaction actually did was discarded one layer below the struct that
+/// reported it (#172).
+///
+/// An all-zero report is a **real reading**, not a missing one: Lance skips the
+/// commit entirely when the compaction plan is empty, returning zeroed metrics.
+/// The denominator that separates "nothing to do" from "no table was visited"
+/// lives one level up, on [`CompactionStats::tables_optimized`].
+///
+/// [`CompactionStats::tables_optimized`]: crate::compaction::CompactionStats::tables_optimized
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct OptimizeReport {
+    /// Fragments merged away and rewritten.
+    pub fragments_removed: usize,
+    /// Fragments written in their place. Never more than `fragments_removed`
+    /// for a compaction that made progress.
+    pub fragments_added: usize,
+    /// Data files merged away. Counts deletion files too, so it can exceed
+    /// `fragments_removed` but never trails it.
+    pub files_removed: usize,
+    /// Data files written. Lance documents this as equal to the number of
+    /// fragments added.
+    pub files_added: usize,
+    /// Bytes freed by pruning dataset versions older than the retention window.
+    ///
+    /// This is *reclaimed*, not "before minus after": it counts bytes deleted
+    /// from disk by version cleanup, and does not account for space saved by
+    /// re-encoding, which the storage layer does not report. It reads `0` for
+    /// any database younger than the retention window — which is every
+    /// short-lived one, including test fixtures.
+    pub bytes_reclaimed: u64,
+    /// Dataset versions pruned.
+    pub old_versions_removed: u64,
+}
+
+impl OptimizeReport {
+    /// Did this call find nothing to do?
+    ///
+    /// True only for a report that is zero in every field — which the storage
+    /// layer produces for an empty compaction plan, and which is therefore a
+    /// measurement rather than an absence.
+    pub fn is_noop(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+impl std::ops::AddAssign for OptimizeReport {
+    fn add_assign(&mut self, rhs: Self) {
+        self.fragments_removed += rhs.fragments_removed;
+        self.fragments_added += rhs.fragments_added;
+        self.files_removed += rhs.files_removed;
+        self.files_added += rhs.files_added;
+        self.bytes_reclaimed += rhs.bytes_reclaimed;
+        self.old_versions_removed += rhs.old_versions_removed;
+    }
 }

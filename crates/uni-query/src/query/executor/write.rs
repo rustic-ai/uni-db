@@ -610,12 +610,12 @@ impl Executor {
 
             // Compaction can run without holding the writer lock
             let compactor = uni_store::storage::compaction::Compactor::new(self.storage.clone());
-            let compaction_results = compactor.compact_all().await?;
+            let semantic = compactor.compact_all().await?;
 
             // Re-warm adjacency manager for compacted edge types to sync in-memory CSR with new L2 storage
             let am = self.storage.adjacency_manager();
             let schema = self.storage.schema_manager().schema();
-            for info in compaction_results {
+            for info in semantic.adjacency {
                 // Convert string direction to Direction enum
                 let direction = match info.direction.as_str() {
                     "fwd" => uni_store::storage::direction::Direction::Outgoing,

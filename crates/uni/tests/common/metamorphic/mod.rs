@@ -29,6 +29,7 @@
 //! per-case cost) is what makes the ≥100k nightly volume feasible.
 
 pub mod dense;
+pub mod dqp;
 pub mod multi;
 pub mod norec;
 pub mod seed;

@@ -164,6 +164,8 @@ impl LanceDbBackend {
                 .map_err(|e| anyhow!("Limit on scan of '{}': {}", request.table_name, e))?;
         }
 
+        attach_scan_stats(&mut scanner, request);
+
         let stream = scanner
             .try_into_stream()
             .await
@@ -223,6 +225,12 @@ impl LanceDbBackend {
                 .map_err(|e| anyhow!("Limit on branched scan failed: {}", e))?;
         }
 
+        // Counted too, and expected to report zero index consultation: the
+        // `use_scalar_index(false)` above is what makes this the negative half
+        // of the index observable. Skipping the callback here would leave that
+        // difference unobservable and the assertion unfalsifiable.
+        attach_scan_stats(&mut scanner, request);
+
         let stream = scanner.try_into_stream().await.map_err(|e| {
             anyhow!(
                 "Branched scan stream on '{}@{}': {}",
@@ -238,8 +246,17 @@ impl LanceDbBackend {
     }
 
     /// Run a scan, dispatching to the primary or branch path based on `request.branch`.
+    ///
+    /// This dispatch — not `BranchedBackend::apply_branch`, which merely *sets*
+    /// `request.branch` — is where a fork read actually happens, so it is where
+    /// the branch counter is incremented. `BranchedBackend` resolves a branch per
+    /// call and falls back to primary for tables the fork has never written, so a
+    /// session with fork scope active can and does execute primary scans.
+    /// Counting at selection time would report fork reads that never occurred,
+    /// which is the difference between an execution witness and a config read.
     async fn execute_scan_stream(&self, request: &ScanRequest) -> Result<RecordBatchStream> {
         if let Some(branch) = request.branch.clone() {
+            request.count_branch_scan();
             return self.execute_branch_scan(request, &branch).await;
         }
         self.execute_primary_scan(request).await
@@ -597,13 +614,22 @@ impl StorageBackend for LanceDbBackend {
     // Maintenance
     // ========================
 
-    async fn optimize_table(&self, table_name: &str) -> Result<()> {
+    async fn optimize_table(
+        &self,
+        table_name: &str,
+        version_retention: std::time::Duration,
+    ) -> Result<OptimizeReport> {
         let mut dataset = self.directory.open(table_name).await?;
 
         // The three steps lancedb's `OptimizeAction::All` performed, in order
-        // (`lancedb/src/table/optimize.rs:172-186`). Its `OptimizeStats` were
-        // discarded by the caller, so only the effects need to match.
-        lance::dataset::optimize::compact_files(
+        // (`lancedb/src/table/optimize.rs:172-186`). lancedb discarded its
+        // `OptimizeStats`; we do not, because everything a caller needs to tell
+        // a real compaction from a no-op is in these two return values (#172).
+        //
+        // An empty compaction plan yields `CompactionMetrics::default()` without
+        // a commit, so all-zeros here is a genuine "nothing to merge" rather
+        // than a counter that was never wired.
+        let metrics = lance::dataset::optimize::compact_files(
             &mut dataset,
             lance::dataset::optimize::CompactionOptions::default(),
             None,
@@ -611,21 +637,27 @@ impl StorageBackend for LanceDbBackend {
         .await
         .map_err(|e| anyhow!("Failed to compact '{}': {}", table_name, e))?;
 
-        // Prune versions older than 7 days, matching lancedb's hardcoded
-        // window. This is safe for forks despite the "retention must not drop
+        // Prune versions older than the configured retention window (7 days by
+        // default, matching lancedb's hardcoded value). This is safe for forks
+        // despite the "retention must not drop
         // below the longest live fork chain" invariant: Lance's cleanup is
         // branch-aware — it calls `find_referenced_branches()` and then
         // `retain_branch_lineage_files()`, and `clean_referenced_branches`
         // defaults to false, so versions a live fork branch still needs are
         // retained regardless of age (`lance/src/dataset/cleanup.rs:146,181,930`).
         let policy = lance::dataset::cleanup::CleanupPolicy {
-            before_timestamp: Some(chrono::Utc::now() - chrono::Duration::days(7)),
+            before_timestamp: Some(
+                chrono::Utc::now()
+                    - chrono::Duration::from_std(version_retention)
+                        .unwrap_or_else(|_| chrono::Duration::days(7)),
+            ),
             ..Default::default()
         };
-        lance::dataset::cleanup::cleanup_old_versions(&dataset, policy)
+        let removal = lance::dataset::cleanup::cleanup_old_versions(&dataset, policy)
             .await
             .map_err(|e| anyhow!("Failed to prune old versions of '{}': {}", table_name, e))?;
 
+        // `optimize_indices` reports nothing, so there is nothing to harvest here.
         lance::index::DatasetIndexExt::optimize_indices(
             &mut dataset,
             &lance_index::optimize::OptimizeOptions::default(),
@@ -633,7 +665,18 @@ impl StorageBackend for LanceDbBackend {
         .await
         .map_err(|e| anyhow!("Failed to optimize indices on '{}': {}", table_name, e))?;
 
-        Ok(())
+        Ok(OptimizeReport {
+            fragments_removed: metrics.fragments_removed,
+            fragments_added: metrics.fragments_added,
+            files_removed: metrics.files_removed,
+            files_added: metrics.files_added,
+            // Bytes freed by version pruning above, not by the compaction
+            // rewrite — Lance reports no before/after size for the rewrite. With
+            // the retention window in force this is 0 for any dataset younger
+            // than it, which is every test fixture.
+            bytes_reclaimed: removal.bytes_removed,
+            old_versions_removed: removal.old_versions,
+        })
     }
 
     async fn recover_staging(&self, name: &str) -> Result<()> {
@@ -1190,6 +1233,49 @@ impl StorageBackend for LanceDbBackend {
     }
 }
 
+/// Attaches Lance's execution-stats callback so a scan reports what its plan
+/// actually did with indexes.
+///
+/// Lance harvests these counts by walking the DataFusion `MetricsSet` of the
+/// plan it executed, so they are execution truth rather than a reading of what
+/// we asked for. It must be set before `try_into_stream()`, which clones the
+/// callback into the plan options; setting it afterwards is a silent no-op.
+///
+/// Deliberately used on the plain scan paths only. `indices_loaded` is summed
+/// from one shared `IndexMetrics` across scalar, vector and FTS index nodes
+/// alike, so it cannot say *which kind* was consulted. The distinction comes
+/// from the call site: a scanner that never calls `nearest()` or
+/// `full_text_search()` can only produce scalar-index nodes. Attaching this to
+/// the vector or FTS search paths would destroy that, and nothing would fail.
+fn attach_scan_stats(scanner: &mut lance::dataset::scanner::Scanner, request: &ScanRequest) {
+    let Some(counters) = request.counters.clone() else {
+        return;
+    };
+    scanner.scan_stats_callback(Arc::new(
+        move |s: &lance::dataset::scanner::ExecutionSummaryCounts| {
+            // Three terms, and the third is load-bearing rather than belt-and-braces.
+            //
+            // `indices_loaded` and `parts_loaded` are cache-MISS counters: Lance's
+            // `MetricsCollector` documents that `record_index_loads` "should not be
+            // called if the index is already in memory" and `record_parts_loaded`
+            // likewise for a cached shard. They fire today only because a fresh
+            // `Dataset` is opened per scan, so the cache is always cold. Add a
+            // dataset or index cache and both go to zero on a warm hit while the
+            // index is still very much being used.
+            //
+            // `index_comparisons` is recorded on the SEARCH path — "a B-tree index
+            // may make comparisons while searching for a value" — so it is
+            // indifferent to caching. It is what keeps this predicate true after
+            // such a change. Do not simplify this to `indices_loaded > 0`.
+            let consulted = s.indices_loaded > 0 || s.parts_loaded > 0 || s.index_comparisons > 0;
+            // `iops` is the compaction witness: it falls with fragment count
+            // (~5 per fragment on a full scan), measured by
+            // `probe_compaction_moves_lance_io_counts` below.
+            counters.add_lance_scan(consulted, s.index_comparisons, s.iops);
+        },
+    ));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1220,6 +1306,240 @@ mod tests {
             ],
         )
         .unwrap()
+    }
+
+    /// **Phase 4B probe — does any per-query I/O count move across a compaction?**
+    ///
+    /// The deferred DQP compaction lever needs a witness, and `CompactionStats`
+    /// cannot be one: `Lever::activated` takes two per-*query* `Witness`es while
+    /// the stats are per-*run*. So the lever is blocked on finding a per-query
+    /// counter that changes when fragments merge.
+    ///
+    /// `ExecutionSummaryCounts` is the candidate. [`attach_scan_stats`] already
+    /// receives `iops`, `requests` and `bytes_read` on every scan and reads none
+    /// of them — only the three index fields. Fewer fragments should mean fewer
+    /// file opens, so `iops` is the natural place to look.
+    ///
+    /// This measures rather than assumes, and it lives here rather than in the
+    /// DQP suite for a reason: those counts are visible only inside the callback
+    /// closure. Reaching them from `crates/uni` means plumbing them through
+    /// `QueryCounters` -> `QueryMetrics` -> `Witness`, which is exactly the
+    /// production change this probe exists to justify or rule out.
+    ///
+    /// The conclusion is gated on a **confirmed merge**. A probe that observes
+    /// nothing and concludes "unobservable" is how the index lever was wrongly
+    /// deferred once already — that probe used a predicate shape that could
+    /// never consult an index, so it measured nothing and blamed the counter.
+    #[tokio::test]
+    async fn probe_compaction_moves_lance_io_counts() {
+        use std::sync::Mutex;
+
+        /// One scan's raw counts.
+        #[derive(Debug, Clone, Default)]
+        struct Counts {
+            iops: usize,
+            requests: usize,
+            bytes_read: usize,
+        }
+
+        async fn scan_counts(
+            backend: &LanceDbBackend,
+            table: &str,
+            filter: Option<&str>,
+        ) -> Counts {
+            let dataset = backend.directory.open(table).await.unwrap();
+            let mut scanner = dataset.scan();
+            if let Some(f) = filter {
+                scanner.filter(f).unwrap();
+            }
+            let seen: Arc<Mutex<Counts>> = Arc::new(Mutex::new(Counts::default()));
+            let sink = Arc::clone(&seen);
+            scanner.scan_stats_callback(Arc::new(
+                move |s: &lance::dataset::scanner::ExecutionSummaryCounts| {
+                    let mut g = sink.lock().unwrap();
+                    g.iops += s.iops;
+                    g.requests += s.requests;
+                    g.bytes_read += s.bytes_read;
+                },
+            ));
+            let mut stream = scanner.try_into_stream().await.unwrap();
+            while let Some(b) = stream.next().await {
+                b.unwrap();
+            }
+            let g = seen.lock().unwrap();
+            g.clone()
+        }
+
+        let (_dir, backend) = create_test_backend().await;
+        let table = "probe_io";
+
+        // Five separate appends, so there are five fragments to merge. Append
+        // only: a delete would leave a deletion file and change what compaction
+        // does.
+        backend
+            .create_table(table, vec![test_batch(vec![0], vec![0])])
+            .await
+            .unwrap();
+        for i in 1..5u64 {
+            backend
+                .write(
+                    table,
+                    vec![test_batch(
+                        (i * 100..i * 100 + 100).collect(),
+                        (0..100).collect(),
+                    )],
+                    WriteMode::Append,
+                )
+                .await
+                .unwrap();
+        }
+
+        const SHAPES: [(&str, Option<&str>); 2] =
+            [("full", None), ("filtered", Some("value > 50"))];
+        const TRIALS: usize = 3;
+
+        let mut before = Vec::new();
+        for (name, filter) in SHAPES {
+            for t in 0..TRIALS {
+                before.push((name, t, scan_counts(&backend, table, filter).await));
+            }
+        }
+
+        // The transition, and the proof it happened. Retention is irrelevant
+        // here; what matters is `fragments_removed`.
+        let report = backend
+            .optimize_table(table, std::time::Duration::from_secs(7 * 24 * 3600))
+            .await
+            .unwrap();
+        println!("\n[probe:compaction-io] optimize report: {report:?}");
+        assert!(
+            report.fragments_removed >= 2 && report.fragments_added < report.fragments_removed,
+            "no merge happened, so nothing below is evidence about observability. \
+             This is the trap that mis-deferred the index lever: a probe that \
+             measures nothing must not conclude 'unobservable'. report={report:?}"
+        );
+
+        let mut after = Vec::new();
+        for (name, filter) in SHAPES {
+            for t in 0..TRIALS {
+                after.push((name, t, scan_counts(&backend, table, filter).await));
+            }
+        }
+
+        println!("| shape    | trial | iops b/a  | requests b/a | bytes_read b/a |");
+        let mut iops_dropped = 0;
+        let mut requests_dropped = 0;
+        for ((name, t, b), (_, _, a)) in before.iter().zip(after.iter()) {
+            println!(
+                "| {name:<8} | {t}     | {:>3} / {:<3} | {:>3} / {:<8} | {:>7} / {:<7} |",
+                b.iops, a.iops, b.requests, a.requests, b.bytes_read, a.bytes_read
+            );
+            if a.iops < b.iops {
+                iops_dropped += 1;
+            }
+            if a.requests < b.requests {
+                requests_dropped += 1;
+            }
+        }
+
+        let n = before.len();
+        // The denominator. Without I/O before, a zero delta says nothing —
+        // the same argument `scans_reported` exists for.
+        assert!(
+            before.iter().all(|(_, _, c)| c.iops > 0),
+            "no I/O was reported at all, so the comparison below is vacuous"
+        );
+
+        println!(
+            "\nverdict: iops strictly lower on {iops_dropped}/{n} trials, \
+             requests on {requests_dropped}/{n}"
+        );
+
+        // Clause 2 of the decision rule: **100%**, not a majority. An
+        // intermittent witness fails the oracle's 80% activation floor for
+        // reasons having nothing to do with the transition, which is why the
+        // existing levers pin 1.0 in their own tests.
+        assert_eq!(
+            (iops_dropped, requests_dropped),
+            (n, n),
+            "the drop is not unanimous, so `iops` is not a dependable witness"
+        );
+
+        // Clause 4: the delta must **scale with how much was merged**. A
+        // counter that moves the same amount whether five fragments merged or
+        // two is a `> 0` constant wearing a number, and a lever built on it
+        // would report activation it did not earn.
+        let two_frag = "probe_io_small";
+        backend
+            .create_table(two_frag, vec![test_batch(vec![0], vec![0])])
+            .await
+            .unwrap();
+        backend
+            .write(
+                two_frag,
+                vec![test_batch((100..200).collect(), (0..100).collect())],
+                WriteMode::Append,
+            )
+            .await
+            .unwrap();
+
+        let small_before = scan_counts(&backend, two_frag, None).await;
+        let small_report = backend
+            .optimize_table(two_frag, std::time::Duration::from_secs(7 * 24 * 3600))
+            .await
+            .unwrap();
+        assert!(
+            small_report.fragments_removed >= 2,
+            "the two-fragment table did not merge: {small_report:?}"
+        );
+        let small_after = scan_counts(&backend, two_frag, None).await;
+
+        let big_drop = before[0].2.iops - after[0].2.iops;
+        let small_drop = small_before.iops - small_after.iops;
+        println!(
+            "scaling: {} fragments merged -> iops {} -> {} (drop {big_drop}); \
+             {} fragments merged -> iops {} -> {} (drop {small_drop})",
+            report.fragments_removed,
+            before[0].2.iops,
+            after[0].2.iops,
+            small_report.fragments_removed,
+            small_before.iops,
+            small_after.iops
+        );
+        assert!(
+            big_drop > small_drop,
+            "merging {} fragments moved `iops` no more than merging {} did, so \
+             the counter reports that compaction happened but not how much. \
+             big={big_drop}, small={small_drop}",
+            report.fragments_removed,
+            small_report.fragments_removed
+        );
+
+        // Clause 3: not a cold-open artefact. Production opens a fresh
+        // `Dataset` per scan (`LanceDirectory::open` always loads), so the
+        // repeated trials above are already the production shape — but read
+        // twice through **one** handle to record what a future dataset cache
+        // would do to this witness. Reported, not asserted: it does not change
+        // today's verdict, and pinning it would pin an implementation detail.
+        let dataset = backend.directory.open(table).await.unwrap();
+        let mut warm = Vec::new();
+        for _ in 0..2 {
+            let seen: Arc<Mutex<Counts>> = Arc::new(Mutex::new(Counts::default()));
+            let sink = Arc::clone(&seen);
+            let mut scanner = dataset.scan();
+            scanner.scan_stats_callback(Arc::new(
+                move |s: &lance::dataset::scanner::ExecutionSummaryCounts| {
+                    sink.lock().unwrap().iops += s.iops;
+                },
+            ));
+            let mut stream = scanner.try_into_stream().await.unwrap();
+            while let Some(b) = stream.next().await {
+                b.unwrap();
+            }
+            let g = seen.lock().unwrap();
+            warm.push(g.iops);
+        }
+        println!("warm re-read through one handle: iops {warm:?}");
     }
 
     /// `LanceDirectory` reimplements lancedb's table listing and path layout

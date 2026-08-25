@@ -71,7 +71,347 @@ jobs:
             --exclude uni-python-onnx-metal \
             --all-targets -- -D warnings
 
+  # Supply-chain policy. Until 2026-08-13 no such gate existed, and the first
+  # run found 24 advisories — 10 of them vulnerabilities or unsoundness. Three
+  # were fixed outright by an in-semver `cargo update`; the rest are pinned
+  # upstream and carry a documented, blocker-named exception in `deny.toml`.
+  #
+  # Cheap and dependency-graph-only: no build, no `mold`/`protobuf`, and it does
+  # not touch the shared cargo build cache, so it adds a lane rather than
+  # lengthening the critical path.
+  supply-chain:
+    if: github.repository == 'rustic-ai/uni-db'
+    name: Supply Chain (cargo-deny)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      # Pinned: cargo-deny ships new advisory *checks*, so an unpinned install
+      # would let the same commit pass today and fail tomorrow with no change to
+      # this repo. Bump deliberately, alongside re-testing `deny.toml`'s ignores.
+      - name: Install cargo-deny
+        run: cargo install cargo-deny --version 0.19.8 --locked
+
+      # All four checks in one invocation so the summary line reports each:
+      # `advisories ok, bans ok, licenses ok, sources ok`.
+      - name: cargo deny check
+        run: cargo deny check
+
+  # Fuzz smoke — 30 s/target instead of the nightly 5 min.
+  #
+  # The nightly job is the one that finds *new* bugs; this one exists so a
+  # parser or codec regression fails the PR that introduces it rather than
+  # surfacing a day later, when it is no longer obvious which change caused it.
+  #
+  # Seed-corpus first, and that is the load-bearing part at 30 s: a fresh
+  # libFuzzer run spends most of half a minute rediscovering basic structure,
+  # whereas `fuzz/seeds/<target>` holds inputs that previously crashed — e.g.
+  # `btic_decode/utf8-boundary-bce-suffix`, the multi-byte UTF-8 case that
+  # panicked `strip_bce_suffix` (fixed 2026-06-10). Replaying those is a real
+  # regression check; 30 s of blind mutation mostly is not.
+  fuzz-smoke:
+    if: github.repository == 'rustic-ai/uni-db'
+    name: Fuzz Smoke (parsers & codecs)
+    runs-on: ubuntu-xlarge
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust (nightly, for libfuzzer)
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mold protobuf-compiler
+
+      - name: Install cargo-fuzz
+        # Explicit `tool:` form, not the `@cargo-fuzz` shorthand — see the
+        # nightly job for why the shorthand can leave `cargo fuzz` uninstalled.
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
+
+      - name: Cache fuzz build
+        uses: Swatinem/rust-cache@v2
+        with:
+          # Shares the nightly job's cache key: same fuzz workspace, same
+          # targets, so a PR run warms from (and warms) the same artifacts.
+          shared-key: "fuzz"
+          workspaces: fuzz
+          cache-on-failure: true
+
+      - name: Run fuzz targets (30 s each, seed-corpus first)
+        working-directory: fuzz
+        # `--target x86_64-unknown-linux-gnu` is load-bearing — see the nightly
+        # job's comment: without it a musl-built cargo-fuzz statically links
+        # libc, which AddressSanitizer rejects outright.
+        run: |
+          for target in cypher_parse locy_parse wal_decode btic_decode; do
+            echo "::group::fuzz $target"
+            # Corpus-dir order is load-bearing. libFuzzer writes newly-discovered
+            # inputs into the FIRST directory listed and treats the rest as
+            # read-only. So `corpus/$target` must come first: naming
+            # `seeds/$target` first makes the curated, git-tracked seed corpus
+            # the output dir, and a single 30 s run buries its handful of
+            # regression inputs under a few hundred generated files.
+            mkdir -p "corpus/$target"
+            seeds=""
+            # Only some targets have a seed dir, and a missing path makes
+            # libFuzzer error rather than skip it.
+            [ -d "seeds/$target" ] && seeds="seeds/$target"
+            cargo +nightly fuzz run --target x86_64-unknown-linux-gnu \
+              "$target" "corpus/$target" $seeds -- -max_total_time=30 -timeout=10
+            echo "::endgroup::"
+          done
+
+      - name: Upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-smoke-artifacts
+          path: fuzz/artifacts/
+          if-no-files-found: ignore
+
+  # Miri (UB interpreter) — the three crates whose suites fit in seconds.
+  #
+  # This is NOT here to police our own `unsafe`: these crates contain none. The
+  # only `unsafe` token across all four is a string literal inside an error
+  # message (crates/uni-common/src/core/schema.rs:1419). What miri checks is UB
+  # reached THROUGH dependencies as our call patterns exercise them — the
+  # pointer and aliasing work inside object_store, tokio, rmp-serde, chrono —
+  # plus leaks. The leak check is the part that has already paid: it found a
+  # `std::mem::forget(TempDir)` that leaked a directory on disk once per test
+  # run, forever (crates/uni-common/tests/repro_rename_property_bypass.rs:19-27).
+  #
+  # `uni-crdt` is deliberately not here — 40 minutes for its lib tests alone,
+  # because it pulls in uni-plugin. It runs nightly, as the long fuzz tier does.
+  # `muvera` is excluded outright rather than budgeted: its tests were KILLED at
+  # 132 minutes. It has grown since that measurement, so the number only moves
+  # the wrong way.
+  #
+  # Measured 2026-08-22 on a 22-core box, warm, exactly as the steps below run:
+  # 1 min 41 s for all three. That is more than the 31 s recorded when the lane
+  # was first priced, and the gap is scope rather than drift — that measurement
+  # was `--lib` only for two of the three crates, while these steps also run
+  # `--tests`. Included deliberately: the integration target is where miri found
+  # the TempDir leak. If this passes ~5 min, drop `--tests` from uni-common
+  # before touching the timeout.
+  #
+  # `cargo miri test`, NOT nextest — the documented exception to CLAUDE.md's
+  # nextest rule. Nextest runs a process per test and each one pays a fresh
+  # interpreter + std startup; these suites are only affordable because all
+  # their tests share one interpreted process.
+  miri:
+    if: github.repository == 'rustic-ai/uni-db'
+    name: Miri (UB interpreter)
+    runs-on: ubuntu-xlarge
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      # PINNED, and the only pinned toolchain in the repo — deliberately.
+      # `fuzz-smoke` can ride `@nightly` because cargo-fuzz is a crates.io
+      # binary that always installs. `miri` is a rustup COMPONENT, and it is not
+      # built for every nightly, so an unpinned lane goes red on a random day
+      # for reasons unrelated to the PR — on the branch-protection side of the
+      # fence. Miri's -Z flag surface also churns faster than anything else we
+      # run.
+      #
+      # Bump deliberately, and keep it in sync with nightly.yml's miri job: the
+      # two share the "miri" cache key, so a mismatch makes each run rebuild the
+      # other's sysroot. Pick a date that has `miri` at
+      # https://rust-lang.github.io/rustup-components-history.
+      - name: Setup Rust (pinned nightly + miri)
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-07-11
+          components: miri, rust-src
+
+      # miri interprets our crates, but build scripts and proc macros are still
+      # compiled and LINKED natively, so mold (required by .cargo/config.toml's
+      # linux rustflags) is not optional here.
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mold protobuf-compiler
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          # Its own key, for the reason "tsan" has one: a different toolchain
+          # and a different build mode mean nothing in "ci" is reusable, and
+          # writing miri's artifacts into "ci" would only evict entries the
+          # stable jobs need. Shared with nightly.yml's miri job — same crates,
+          # same pinned toolchain — so a PR run warms from and warms the same
+          # artifacts, exactly as fuzz-smoke does.
+          shared-key: "miri"
+          # rust-cache knows nothing about ~/.cache/miri, where `cargo miri
+          # setup` puts the interpreted sysroot; without this, every run
+          # rebuilds it. The key already includes the rustc version, so a
+          # toolchain bump invalidates it correctly.
+          cache-directories: "~/.cache/miri"
+          cache-on-failure: true
+
+      # Its own step on purpose: this is what breaks when a nightly ships a
+      # broken or missing component, and separating it means that failure reads
+      # as "toolchain", not "we found UB".
+      - name: Build the miri sysroot
+        run: cargo +nightly-2026-07-11 miri setup
+
+      # Isolation stays ON here. These two are pure codecs — no clock, no
+      # filesystem, no environment — so they do not need the weakening applied
+      # to uni-common below, and keeping it that way means a new syscall
+      # dependency in a codec crate surfaces as a miri error instead of passing
+      # silently.
+      #
+      # `--lib --tests` is explicit rather than left to the default. The budget
+      # was measured on these targets; leaving the scope implicit means the next
+      # `tests/*.rs` file silently joins a PR-blocking lane.
+      # No `PROPTEST_CASES` here, deliberately. It used to be set and did
+      # nothing: miri's isolation hides the environment, so
+      # `std::env::var("PROPTEST_CASES")` is `Err(NotPresent)` and proptest
+      # falls back to its built-in 256. `uni-btic` and `uni-common` do not use
+      # proptest at all, so the only crate it could ever have applied to is
+      # `uni-sparse-vector` — which runs under isolation, where it cannot be
+      # read. The case count now lives in `miri_safe_config` in
+      # `crates/uni-sparse-vector/tests/proptest.rs`, which also explains why.
+      - name: Miri — codecs (isolation ON)
+        run: |
+          echo "::group::miri uni-btic"
+          cargo +nightly-2026-07-11 miri test -p uni-btic --lib --tests 2>&1 | tee -a miri.log
+          echo "::endgroup::"
+          echo "::group::miri uni-sparse-vector"
+          cargo +nightly-2026-07-11 miri test -p uni-sparse-vector --lib --tests 2>&1 | tee -a miri.log
+          echo "::endgroup::"
+
+      # -Zmiri-disable-isolation is scoped to THIS step, and it is load-bearing
+      # twice over: uni-common calls `Utc::now()` throughout the schema/fork/
+      # snapshot paths, and tests/repro_rename_property_bypass.rs:29-33 builds a
+      # real LocalFileSystem over a tempdir. Under isolation both abort the run
+      # rather than fail a test. The cost is that miri no longer proves these
+      # tests are hermetic — which is exactly why the flag is not on the step
+      # above.
+      #
+      # The trailing `::` in `--skip 'muvera::'` is load-bearing. libtest's
+      # --skip is a plain substring match over the full test path, and the bare
+      # `muvera` form also swallows
+      # `vector_index_opts::tests::muvera_defaults_and_inner` — a test in a
+      # different module that merely has the word in its name. Measured: bare
+      # removes 14, anchored removes exactly the 13 in the module. muvera's
+      # tests are inline (crates/uni-common/src/muvera.rs) so they list as
+      # `muvera::tests::*`; there is no separate target to exclude with -p or
+      # --test.
+      - name: Miri — uni-common minus muvera (isolation OFF)
+        env:
+          MIRIFLAGS: "-Zmiri-disable-isolation"
+        run: |
+          echo "::group::miri uni-common (--skip muvera)"
+          cargo +nightly-2026-07-11 miri test -p uni-common --lib --tests \
+            -- --test-threads=1 --skip 'muvera::' 2>&1 | tee -a miri.log
+          echo "::endgroup::"
+
+      # The log IS the triage input — a miri report is a full interpreter
+      # backtrace through dependency frames, and the web UI truncates scrollback.
+      - name: Upload miri log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: miri-log
+          path: miri.log
+          if-no-files-found: ignore
+
   # Rust tests — the workspace suite (the core signal contributors gate on).
+  # Failpoint crash suite — the fail-rs-driven crash/reopen tests.
+  #
+  # These existed long before this job and **none of them ran**. Every test
+  # behind `#[cfg(feature = "failpoints")]` is compiled out unless that feature
+  # is on, and no workflow turned it on: `rust-tests` below runs
+  # `cargo nextest run --workspace` with no `--features`, and the only feature
+  # flags anywhere in CI are loom, shuttle, pyo3, provider-onnx and
+  # wasm-plugins. So ssi_resilience, flush_resilience, the dense/sparse/
+  # multivector resilience suites, fork_durability, the fork recovery suites and
+  # the nested-fork capture race — 116 tests — were dormant, while the
+  # test-harness plan cited them as existing crash coverage.
+  #
+  # They were not rotten, only unrun: 116/116 green the first time this job's
+  # command was executed (2026-08-23).
+  #
+  # `--run-ignored all` is load-bearing. The env-var fault-injection tests carry
+  # `#[ignore]` because fail-rs's registry and the injection counters in
+  # `lance_branch.rs` are process-global, so they cannot run concurrently with
+  # anything that also arms them. Without the flag this job silently skips the
+  # fault-injection half of what it exists to run.
+  #
+  # The suite now also carries 21 abort tests, which re-run the crash seams in a
+  # child process killed with SIGABRT instead of a panic followed by `drop(db)`.
+  # That distinction is not cosmetic: `Drop for Uni` broadcasts the shutdown
+  # signal and the auto-flush task answers it with a full `flush_to_l1`, so the
+  # panic-path tests were validating graceful-close atomicity and racing that
+  # un-awaited flush against their own reopen. Both forms are kept — the
+  # graceful path has its own regression history (#167). See
+  # `crates/uni/tests/common/crash_harness.rs`.
+  #
+  # `crash_harness` is in the filter for its two self-tests, which assert the
+  # harness rejects a child that exits cleanly or panics instead of aborting.
+  # Without them "the child died of SIGABRT" would not establish *where* it
+  # died, and several parent assertions would pass against a child that aborted
+  # before doing any work.
+  #
+  # Cost measured on a 22-core box: 19 s warm (152 tests, up from 116/6 s — the
+  # delta is 21 child-process spawns of a large test binary), 3 min 41 s cold,
+  # of which 3 min 33 s is compilation. Like the miri lane, this job's cost is a
+  # second feature configuration being built, not the tests, which is why it
+  # gets its own cache key rather than sharing "ci".
+  failpoints:
+    if: github.repository == 'rustic-ai/uni-db'
+    name: Failpoint Crash Suite
+    runs-on: ubuntu-xlarge
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mold protobuf-compiler
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          # Its own key: `--features failpoints` is a different feature
+          # resolution for uni-db and uni-store, so none of the "ci" artifacts
+          # are reusable and writing these back would only evict entries the
+          # stable jobs need. Same reasoning as "tsan" and "miri".
+          shared-key: "failpoints"
+          cache-on-failure: true
+
+      # One `-E` filter rather than whole crates: these two packages hold
+      # thousands of tests, and this job exists for the crash/reopen ones. A
+      # new suite that wants this lane should match the pattern or extend it
+      # deliberately.
+      - name: Run the crash/reopen suite under failpoints
+        run: |
+          cargo nextest run -p uni-db -p uni-store \
+            --features failpoints --run-ignored all \
+            -E 'test(/resilience|recovery|durability|crash_harness/)'
+
+      # The macros must stay inert without the feature, because that is the
+      # configuration every other job builds. A `fail_point!` that changed
+      # behaviour in a default build would be a production bug shipped by a
+      # test-only change.
+      - name: Verify the seams are inert without the feature
+        run: cargo nextest run -p uni-store -E 'test(/resilience|recovery/)'
+
   rust-tests:
     if: github.repository == 'rustic-ai/uni-db'
     name: Rust Tests

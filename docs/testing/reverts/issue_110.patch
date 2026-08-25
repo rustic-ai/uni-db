@@ -1,0 +1,16 @@
+diff --git a/crates/uni-query/src/query/df_graph/mod.rs b/crates/uni-query/src/query/df_graph/mod.rs
+index b378fd073..a47e491d6 100644
+--- a/crates/uni-query/src/query/df_graph/mod.rs
++++ b/crates/uni-query/src/query/df_graph/mod.rs
+@@ -633,7 +633,10 @@ impl GraphExecutionContext {
+                 {
+                     self.storage.invalidate_adjacency_csr(etype_id, dir);
+                 }
+-                if !am.has_csr(etype_id, dir) {
++                // REVERT #110 (validation only): gate on the dual-write overlay
++                // instead of per-direction CSR presence, so a reverse traversal on a
++                // written fork skips its warm.
++                if !am.is_active_for(etype_id, dir) {
+                     self.storage
+                         .warm_adjacency_coalesced(etype_id, dir, version)
+                         .await?;

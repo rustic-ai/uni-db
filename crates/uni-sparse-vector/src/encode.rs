@@ -54,12 +54,16 @@ pub fn decode_slice(bytes: &[u8]) -> Result<SparseVector, SparseError> {
     // splits cleanly into 4-byte chunks.
     let (index_bytes, value_bytes) = bytes[4..need].split_at(count * 4);
     let indices = index_bytes
-        .chunks_exact(4)
-        .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|c| u32::from_le_bytes(*c))
         .collect();
     let values = value_bytes
-        .chunks_exact(4)
-        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|c| f32::from_le_bytes(*c))
         .collect();
 
     SparseVector::new(indices, values)

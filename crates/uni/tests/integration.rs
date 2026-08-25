@@ -59,10 +59,14 @@ mod session_tx;
 // Shared infra for the SSI release-readiness suite (metrics capture, reopen
 // harness, conflict assertions, invariant oracles). Must precede the modules
 // that use it.
+#[path = "common/crash_harness.rs"]
+mod crash_harness;
 #[path = "common/dense_resilience.rs"]
 mod dense_resilience;
 #[path = "common/multivector_resilience.rs"]
 mod multivector_resilience;
+#[path = "common/plan_shape/mod.rs"]
+mod plan_shape;
 #[path = "common/sparse_resilience.rs"]
 mod sparse_resilience;
 #[path = "common/ssi_for_update.rs"]
@@ -87,6 +91,8 @@ mod ssi_support;
 mod ssi_telemetry;
 #[path = "common/ssi_write_set_matrix.rs"]
 mod ssi_write_set_matrix;
+#[path = "common/teeth/mod.rs"]
+mod teeth;
 // Backward-compat suite: opens databases with `ssi_enabled = false` to pin the
 // last-writer-wins contract regardless of the global default (now SSI-on).
 #[path = "common/ssi_default_semantics.rs"]
