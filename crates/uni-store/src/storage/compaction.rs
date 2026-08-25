@@ -62,6 +62,18 @@ impl Compactor {
                 }
             }
 
+            // Crash window: for this edge type, `adj_..._fwd` is merged AND its
+            // deltas are cleared, while `adj_..._bwd` and its deltas are
+            // untouched. The two directions therefore disagree about every edge
+            // deleted since the last compaction.
+            //
+            // Recovery duty: reads must still agree in both directions — the
+            // bwd side resolves through its intact L1 overlay — and the next
+            // compaction must converge them. Nothing in this loop ties the two
+            // directions together, so the agreement is a claim about the read
+            // path's delta overlay, not about compaction.
+            fail::fail_point!("compaction::between-fwd-and-bwd");
+
             // Incoming: dst_labels
             for label in &meta.dst_labels {
                 info!("Compacting adjacency {} <- {} (bwd)", label, edge_type);
@@ -341,6 +353,17 @@ impl Compactor {
                 .replace(self.storage.backend(), batch, &schema)
                 .await?;
         }
+
+        // Crash window: the per-label table has been replaced with the merged,
+        // tombstone-free row set, while `main_vertices` still holds the original
+        // rows INCLUDING the `_deleted = true` tombstones. The two tables
+        // disagree by construction until the next compaction.
+        //
+        // Recovery duty: a vertex deleted before the crash must stay deleted —
+        // the surviving main-table row must not resurrect it — and a survivor
+        // must keep every property, including the reserved columns this pass
+        // reconstructs.
+        fail::fail_point!("compaction::after-vertex-replace");
 
         let duration = start.elapsed();
         let rows_reclaimed = rows_processed as u64 - valid_vertices.len() as u64;
@@ -631,6 +654,18 @@ impl Compactor {
             // Replace the table with compacted data
             adj_ds.replace(self.storage.backend(), batch).await?;
         }
+
+        // Crash window: L2 `adj_{et}_{dir}` has been fully overwritten with
+        // merge(L2, deltas), but `delta_{et}_{dir}` still holds every merged row
+        // at `_version <= clear_hwm`. This is the only genuine write-then-delete
+        // window in the compaction path.
+        //
+        // Recovery duty: none — the redo must be a no-op. Re-applying the same
+        // deltas onto an already-merged L2 is safe only because
+        // `apply_deltas_to_edges` is a per-op HashMap insert/remove. That is a
+        // property of the merge, not a protocol guarantee, so it is asserted
+        // rather than assumed.
+        fail::fail_point!("compaction::after-adj-replace-before-delta-clear");
 
         // CRITICAL: Clear Delta L1 after compaction
         // Topology ops from Delta L1 are now incorporated into L2 adjacency.

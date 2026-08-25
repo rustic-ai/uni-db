@@ -201,7 +201,53 @@ an extrapolation.
 **Exit:** every lever has a soak or a written reason it does not, and the
 nightly job's runtime is a measurement rather than an extrapolation.
 
-### T3 — Close C2 *(independent of T1)*
+### T3 — Close C2 — **Phases 1-3 DONE 2026-08-25**; Lance tier + madsim deferred
+
+The compaction path had zero fault injection. It now has three seams, and both
+an in-process ordering suite and a real `SIGABRT` matrix over them.
+
+**Phase 1 found and fixed a live data-loss defect** — semantic vertex
+compaction erased `ext_id`, every schemaless property and both timestamps, and
+recomputed `_uid` from the truncated map. Reachable from `VACUUM`. Tests were
+observed RED first, and the revert patch is registered in the teeth ledger and
+verified to bite.
+
+**Phase 2 seams**, all inert without the `failpoints` feature:
+
+| seam | window |
+|---|---|
+| `compaction::after-adj-replace-before-delta-clear` | L2 merged, the deltas that produced it not yet cleared |
+| `compaction::between-fwd-and-bwd` | one direction merged and cleared, the other untouched |
+| `compaction::after-vertex-replace` | per-label table replaced, `main_vertices` still holds the tombstones |
+
+**What the matrix established** — all three properties were previously assumed:
+
+- The adjacency redo **is** idempotent, including when the same endpoints are
+  re-connected between the crash and the redo. Per-op idempotence of
+  `apply_deltas_to_edges` turns out to be sufficient; that is now asserted
+  rather than argued.
+- A mid-`compact_all` crash leaves **both directions agreeing**, because the
+  uncompacted direction still resolves through its intact L1 overlay, and the
+  next pass converges them.
+- A crash after the vertex replace does **not** resurrect the deleted vertex
+  from the surviving `main_vertices` row, and survivors keep their schemaless
+  properties.
+
+**Phase 3**: the `:265` pin and the multi-src-label probe both green — an edge
+type with two `src_labels` compacts the same tables twice, and the second pass
+does not clear what the first merged.
+
+Every crash assertion is guarded by a denominator that was proven to
+discriminate: the in-process helper fails if the seam is never reached, and the
+abort matrix fails on both sides (`did not abort: status Some(101), signal
+None` in the parent, `the seam was never reached` in the child). Both were
+verified by deliberately pointing a test at a non-existent seam.
+
+**Still open:** the Lance-tier matrix (S5, around `compact_files` /
+`cleanup_old_versions`), S4's multi-label ordering case, and the madsim spike —
+split out per the scope decision, re-scoped to the background compaction loop.
+
+#### Original task list, for the record
 
 Phase 10's remaining half. The dependency the plan flagged is now **resolved**:
 `CompactionStats` reports real numbers since #172, so the semantic-compaction

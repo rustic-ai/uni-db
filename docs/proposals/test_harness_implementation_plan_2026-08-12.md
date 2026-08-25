@@ -41,7 +41,9 @@ except for the four Phase-8 items already recorded below.
 | 0B | iai qualification pilot | **done** 2026-08-25 — cross-runner leg closed | `docs/perf/iai-qualification-2026-08-12.md` §4 |
 | 7 | Perf gate rollout | **done** 2026-08-25 | `perf-gate` in `pr.yml`, `docs/perf/iai-baseline.json`, `scripts/perf/iai_{baseline,gate}.py` |
 | 8 | C4 cheap wins | **4 of 5 done** | see the phase's own progress list |
-| 9–13 | C2 / B2 / C3 / B3 / B4 | **not started** | 11 `fail_point!` sites, unchanged since Phase 0 |
+| 9 | C2 fork 2PC failpoints | **done** | 17 seams; `fork_2pc_recovery_matrix.rs` |
+| 10 | C2 compaction + abort harness | **semantic tier done** 2026-08-25 | 3 compaction seams, `compaction_resilience.rs` in both crates; Lance tier + madsim deferred |
+| 11–13 | B2 / C3 / B3 / B4 | **not started** | — |
 
 **Five levers now ship** — fork, pinned, flush, plan-cache, index — plus CERT as
 an additional law over the same drivers, across **8 smoke tests** in the PR lane
