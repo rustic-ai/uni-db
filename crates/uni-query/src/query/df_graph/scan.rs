@@ -1473,6 +1473,25 @@ fn build_l0_vertex_batch(
                 }
                 columns.push(Arc::new(builder.finish()));
             }
+            "_labels" => {
+                // Rows in this batch exist only in L0, so there is no stored
+                // label set to carry. Emitting nulls is not a shortcut: a null
+                // row makes `build_labels_column_for_known_label` fall back to
+                // `[label]`, and its L0 overlay then resolves the true set from
+                // `vertex_labels` — the same path these rows took before
+                // `_labels` joined the projection, and the one that is already
+                // correct for unflushed vertices.
+                //
+                // Without this arm the column falls through to
+                // `build_l0_property_column`, which does not handle
+                // `List<Utf8>`, and `RecordBatch::try_new` below fails.
+                let mut builder = ListBuilder::new(StringBuilder::new())
+                    .with_field(Arc::new(Field::new("item", DataType::Utf8, true)));
+                for _ in 0..num_rows {
+                    builder.append_null();
+                }
+                columns.push(Arc::new(builder.finish()));
+            }
             _ => {
                 // Schema property column: convert L0 Value → Arrow typed value
                 let col = build_l0_property_column(&vids, &vid_data, col_name, field.data_type())?;
@@ -1727,6 +1746,17 @@ async fn columnar_scan_vertex_batch_static(
         "_deleted".to_string(),
         "_version".to_string(),
     ];
+    // `_labels` is REQUIRED, not a projection nicety. Without it
+    // `build_labels_column_for_known_label` fabricates `[label]`, and that
+    // fabricated set is what the executor writes back — truncating a
+    // multi-label vertex on DELETE, SET/REMOVE label, and even a plain
+    // `SET n.prop`, as well as returning a wrong `labels(n)`.
+    //
+    // Requesting it is safe on legacy tables that predate the column:
+    // `StorageManager::scan_vertex_table_counted` narrows the projection to
+    // physically-present columns, and the builder's `[label]` fallback covers
+    // the absence.
+    push_column_if_absent(&mut lance_columns, "_labels");
     for prop in projected_properties {
         if prop == "overflow_json" {
             push_column_if_absent(&mut lance_columns, "overflow_json");
@@ -1878,6 +1908,15 @@ async fn columnar_scan_vertex_batch_static(
                 }
                 if col == "overflow_json" {
                     fields.push(Field::new("overflow_json", DataType::LargeBinary, true));
+                } else if col == "_labels" {
+                    // Typed explicitly: falling through to the `label_props`
+                    // lookup below would default it to LargeBinary, since
+                    // `_labels` is never a declared user property.
+                    fields.push(Field::new(
+                        "_labels",
+                        crate::query::df_graph::common::labels_data_type(),
+                        true,
+                    ));
                 } else if col == "_created_at" || col == "_updated_at" {
                     fields.push(Field::new(
                         col,

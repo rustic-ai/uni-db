@@ -317,3 +317,89 @@ async fn all_vertices_deleted_leaves_none_visible() -> Result<()> {
     );
     Ok(())
 }
+
+/// The flush's tombstone fan-out must union the caller-supplied label set with
+/// the in-memory label index.
+///
+/// `Writer::delete_vertex` treats a `Some(labels)` argument as authoritative and
+/// skips its own storage lookup, so a caller that knows only one of the
+/// vertex's labels — `Uni::delete_vertex_by_vid`, the fork-promote path, or a
+/// Cypher scan that reported a truncated set — would leave a live row in every
+/// unlisted label's table. The fan-out unions in `VidLabelsIndex` to cover them.
+///
+/// This is the `Some(..)`-is-less-correct-than-`None` asymmetry pinned at the
+/// Writer API level: passing `None` here has always worked, which is why no
+/// existing test caught it.
+#[tokio::test]
+async fn a_truncated_delete_still_tombstones_every_label() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().to_str().unwrap();
+    let store = Arc::new(LocalFileSystem::new_with_prefix(dir.path())?);
+    let schema_path = ObjectStorePath::from("schema.json");
+    let schema_manager = Arc::new(SchemaManager::load_from_store(store, &schema_path).await?);
+    schema_manager.add_label("Person")?;
+    schema_manager.add_property("Person", "name", DataType::String, true)?;
+    schema_manager.add_label("Staff")?;
+    schema_manager.add_property("Staff", "badge", DataType::String, true)?;
+    schema_manager.save().await?;
+
+    let storage = Arc::new(StorageManager::new(path, schema_manager.clone()).await?);
+    let writer = Arc::new(Writer::new(storage.clone(), schema_manager.clone(), 1).await?);
+
+    let vid = writer.next_vid().await?;
+    let mut props: HashMap<String, Value> = HashMap::new();
+    props.insert("name".to_string(), Value::String("carol".to_string()));
+    props.insert("badge".to_string(), Value::String("c1".to_string()));
+    writer
+        .insert_vertex_with_labels(
+            vid,
+            props,
+            &["Person".to_string(), "Staff".to_string()],
+            None,
+        )
+        .await?;
+    writer.flush_to_l1(None).await?;
+
+    // Precondition: the index knows both labels. Without this the union has
+    // nothing to contribute and the test would pass for the wrong reason.
+    let indexed = storage.get_labels_from_index(vid).unwrap_or_default();
+    assert_eq!(
+        indexed.len(),
+        2,
+        "precondition: VidLabelsIndex must hold both labels, got {indexed:?}"
+    );
+
+    // The truncating caller: only one of the two labels.
+    writer
+        .delete_vertex(vid, Some(vec!["Person".to_string()]), None)
+        .await?;
+    writer.flush_to_l1(None).await?;
+
+    for label in ["Person", "Staff"] {
+        let batch = storage
+            .scan_vertex_table(label, &["_vid", "_deleted"], None)
+            .await?
+            .expect("per-label table exists");
+        let vids = batch
+            .column_by_name("_vid")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .unwrap();
+        let deleted = batch
+            .column_by_name("_deleted")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<arrow_array::BooleanArray>()
+            .unwrap();
+        let row = (0..vids.len())
+            .find(|&i| vids.value(i) == vid.as_u64())
+            .unwrap_or_else(|| panic!("{label} table has no row for the vertex"));
+        assert!(
+            deleted.value(row),
+            "the {label} table still holds a LIVE row after a delete that named only \
+             Person: the fan-out did not union the label index"
+        );
+    }
+    Ok(())
+}

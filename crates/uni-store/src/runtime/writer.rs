@@ -4945,12 +4945,39 @@ impl Writer {
                     vertex_updated_at.insert(vid, ts);
                 }
                 if let Some(labels) = old_l0.vertex_labels.get(&vid) {
+                    // Union the L0 set with the in-memory label index before
+                    // bucketing. The L0 entry carries whatever the caller
+                    // supplied, and callers that never went through a scan —
+                    // `Uni::delete_vertex_by_vid`, the fork-promote path — pass
+                    // a single label. A truncated set here leaves a live row in
+                    // every unlisted label's table, i.e. the vertex reappears
+                    // through its other labels.
+                    //
+                    // `get_labels_from_index` is sync and O(1), which matters:
+                    // the `old_l0` read lock is held here and cannot await. The
+                    // index is pruned later in this same flush, so it still
+                    // holds the pre-delete set at this point.
+                    //
+                    // Union is sound for TOMBSTONES ONLY. Writing a tombstone
+                    // into a table the vertex has already left is a no-op, so
+                    // the index's known staleness and its rebuild row cap can
+                    // only ever cost a missed extra tombstone, never a wrong
+                    // one. Do NOT generalize this to SET/REMOVE, where the
+                    // label set is a replacement and a union would resurrect
+                    // removed labels.
+                    let mut labels = labels.clone();
+                    for extra in self.storage.get_labels_from_index(vid).unwrap_or_default() {
+                        if !labels.contains(&extra) {
+                            labels.push(extra);
+                        }
+                    }
+
                     // Round-12 §B: tombstones flush via Lance MergeInsert
                     // (just `_vid`, `_deleted=true`, `_version`,
                     // `_updated_at`) — skipping the wide-row Append.
                     // Unconditional (no `partial_lance_writes` gating);
                     // tombstone Append carries no useful payload.
-                    for label in labels {
+                    for label in &labels {
                         if let Some(label_id) = schema.label_id_by_name(label) {
                             tombstones_by_label
                                 .entry(label_id)

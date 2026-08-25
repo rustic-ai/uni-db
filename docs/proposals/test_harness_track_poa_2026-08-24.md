@@ -308,6 +308,39 @@ Four instances of the track's own theme, found while verifying this document:
 4. **Refresh the two proposal documents' status blocks** so they stop
    understating the tree by two phases.
 
+### Baseline regeneration owed to B1 — **open**
+
+The multi-label truncation fix (2026-08-25) deliberately trades read-scan
+instructions for correctness. Measured local before/after on identical hardware,
+5 runs each:
+
+| target | delta |
+|---|---:|
+| `parse_and_plan_cold` | **+9.30%** |
+| `property_read_across_l0_l1` | **+8.00%** |
+| `vertex_lookup_by_id` | **+3.86%** |
+| `expand_batch_one_hop_warm` | **+2.02%** |
+| `hnsw_top10_search` | −0.21% |
+
+Four of five gated targets exceed the 2% fail / 1% warn thresholds, so
+`docs/perf/iai-baseline.json` **must be regenerated once this lands upstream**,
+by dispatching `Perf Qualify (cross-runner iai)` and rebuilding the baseline
+from its artifacts. It was deliberately NOT regenerated locally: instruction
+counts are machine-dependent, and a local run measured the *unchanged* code at
+25-56% below the CI-generated baseline. Writing local numbers into the committed
+baseline would poison the gate far worse than the regression it is meant to
+catch.
+
+**Two hardenings this exposed in the B1 tooling**, both follow-ups:
+
+- `iai_gate.py` reported `all 5 gated targets within 2.0%` for a comparison of
+  local numbers against a CI baseline showing −25% to −56%. It only fails on
+  regressions, so an implausible improvement — or a baseline from different
+  hardware — passes silently. Record the machine identity in the baseline and
+  warn on a mismatch.
+- Treat a large negative delta as suspicious rather than free. A 50%
+  improvement deserves the same scrutiny as a 50% regression.
+
 ### T5 — Track E, in value order *(not yet scheduled)*
 
 Sequenced last and deliberately unstarted. In ascending cost:
