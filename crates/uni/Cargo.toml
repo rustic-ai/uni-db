@@ -210,6 +210,14 @@ harness = false
 name = "ann_pareto"
 harness = false
 
+# LDBC SNB Interactive: loads SF1 from the pinned CSV fixtures and runs the 14
+# complex reads. Doubles as a correctness benchmark — the results are compared
+# against a second engine running LDBC's official Cypher unmodified. Needs the
+# `ldbc-sf1-*` fixtures; see docs/fixtures.md.
+[[bench]]
+name = "ldbc_snb"
+harness = false
+
 [[bench]]
 name = "multivec_retrieval"
 harness = false
