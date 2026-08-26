@@ -581,8 +581,26 @@ pub struct UniConfig {
     /// when `async_flush_enabled` is true. Default: 10s.
     pub drop_fork_drain_timeout: Duration,
 
-    /// Maximum time `flush_to_l1` will wait for in-flight async flushes to
-    /// drain before failing. Default: 120s.
+    /// Maximum time `flush_to_l1` will wait **without progress** while draining
+    /// in-flight async flushes, before failing. Default: 900s.
+    ///
+    /// This bounds a *stall*, not total drain time. Ingesting a million rows
+    /// queues roughly one flush per `auto_flush_threshold` mutations, so the
+    /// backlog scales with the data and no fixed total is right for every load —
+    /// a 3.8 GB corpus legitimately drains for well past any constant worth
+    /// setting. What marks a wedged coordinator is that the pending count stops
+    /// falling, which is what this measures.
+    ///
+    /// The default is deliberately generous because this is a backstop, not a
+    /// control: its job is to stop a wedged coordinator hanging forever, and the
+    /// per-stream `flush_stream_timeout` is what is meant to catch a stuck
+    /// stream first. **Known gap:** a single large flush (measured on a 3.8 GB,
+    /// 960-d corpus) can run past `flush_stream_timeout` without the pending
+    /// count moving, so at this layer a legitimately slow flush and a stalled
+    /// one are indistinguishable. Until that is resolved the bound has to exceed
+    /// the longest single flush a deployment expects. Erring high is the right
+    /// side to err on: the failure this replaced returned success while not
+    /// having flushed.
     ///
     /// `flush_to_l1` is a **synchronization barrier**: fork setup, shutdown and
     /// test fixtures rely on it meaning "all writes are now durably in Lance".
@@ -742,7 +760,7 @@ impl Default for UniConfig {
                 .map(Duration::from_secs)
                 .unwrap_or(Duration::from_secs(60)),
             drop_fork_drain_timeout: Duration::from_secs(10),
-            flush_drain_timeout: Duration::from_secs(120),
+            flush_drain_timeout: Duration::from_secs(900),
             max_forks: None,
             fork_default_ttl: None,
             fork_sweeper_interval: Duration::from_secs(60),

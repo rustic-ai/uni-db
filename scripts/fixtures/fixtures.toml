@@ -122,3 +122,57 @@ bytes       = 4040000
 license     = "apache-2.0 (mirror); upstream TEXMEX/INRIA states none"
 consumer    = "E2a -- ANN recall-vs-QPS curves; externally-defined top-100 per query"
 produced_by = "upstream: TEXMEX, via qbo-odp/sift1m"
+
+# --- GIST-1M (TEXMEX/INRIA), mirrored on the Hub -------------------------------
+#
+# A second ANN corpus with a deliberately different shape from SIFT: 960-d GIST
+# descriptors rather than 128-d SIFT, and 1,000 queries rather than 10,000. Used
+# to test whether a `refine_factor` policy generalises across dimensionality and
+# distribution rather than being fitted to one dataset.
+#
+#   base    1_000_000 x (4 + 960*4) = 3_844_000_000
+#   query       1_000 x (4 + 960*4) =     3_844_000
+#   gt          1_000 x (4 + 100*4) =       404_000
+#
+# The mirror declares **no license**, and upstream TEXMEX/INRIA publishes neither
+# a license nor a checksum. These digests pin this mirror and nothing more; see
+# docs/fixtures.md, "What verified means". Do not redistribute from here.
+
+[[fixture]]
+name        = "gist1m-base"
+repo        = "SkyTbac/ANNS_GIST1M"
+repo_type   = "dataset"
+revision    = "dc84faaeda80a6ca5d7bd3f75a068d5ad81b8f4d"
+path        = "gist_base.fvecs"
+digest_algo = "sha256"
+digest      = "73418110328f5aa522d9f6b0cd9115a6c515dc44e3c48420e506ddeddbdbdbc0"
+bytes       = 3844000000
+license     = "none declared (mirror); upstream TEXMEX/INRIA states none"
+consumer    = "refine_factor policy measurement"
+produced_by = "upstream: TEXMEX, via SkyTbac/ANNS_GIST1M"
+
+[[fixture]]
+name        = "gist1m-query"
+repo        = "SkyTbac/ANNS_GIST1M"
+repo_type   = "dataset"
+revision    = "dc84faaeda80a6ca5d7bd3f75a068d5ad81b8f4d"
+path        = "gist_query.fvecs"
+digest_algo = "sha256"
+digest      = "0d1d620049de12da455ed7201e97cbab372c4d54d0e6dedbc8c503f62c911299"
+bytes       = 3844000
+license     = "none declared (mirror); upstream TEXMEX/INRIA states none"
+consumer    = "refine_factor policy measurement"
+produced_by = "upstream: TEXMEX, via SkyTbac/ANNS_GIST1M"
+
+[[fixture]]
+name        = "gist1m-groundtruth"
+repo        = "SkyTbac/ANNS_GIST1M"
+repo_type   = "dataset"
+revision    = "dc84faaeda80a6ca5d7bd3f75a068d5ad81b8f4d"
+path        = "gist_groundtruth.ivecs"
+digest_algo = "sha256"
+digest      = "01f7eda9dc98600c6288f606e55f94f13ae95f8b07d818572260440062d609f6"
+bytes       = 404000
+license     = "none declared (mirror); upstream TEXMEX/INRIA states none"
+consumer    = "refine_factor policy measurement"
+produced_by = "upstream: TEXMEX, via SkyTbac/ANNS_GIST1M"

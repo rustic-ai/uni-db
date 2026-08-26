@@ -62,14 +62,68 @@ mod ann_fixtures;
 
 use ann_fixtures::{fixture, l2_sq, read_fvecs, read_ivecs};
 
-/// SIFT-1M dimensionality.
-const DIM: usize = 128;
-/// Retrieved per query.
-const K: usize = 10;
-/// Vectors in the full base set.
-const FULL: usize = 1_000_000;
-/// Ground-truth neighbours per query in `sift_groundtruth.ivecs`.
+/// Ground-truth neighbours per query in a `*_groundtruth.ivecs`.
 const GT_DEPTH: usize = 100;
+
+/// A pinned ANN corpus. Two are wired so a tuning conclusion can be checked
+/// against a different dimensionality and distribution rather than fitted to
+/// one dataset.
+struct Corpus {
+    name: &'static str,
+    base: &'static str,
+    query: &'static str,
+    gt: &'static str,
+    dim: usize,
+    full: usize,
+    /// Queries the shipped query file actually contains.
+    queries_avail: usize,
+}
+
+const SIFT: Corpus = Corpus {
+    name: "sift1m",
+    base: "sift1m-base",
+    query: "sift1m-query",
+    gt: "sift1m-groundtruth",
+    dim: 128,
+    full: 1_000_000,
+    queries_avail: 10_000,
+};
+
+const GIST: Corpus = Corpus {
+    name: "gist1m",
+    base: "gist1m-base",
+    query: "gist1m-query",
+    gt: "gist1m-groundtruth",
+    dim: 960,
+    full: 1_000_000,
+    queries_avail: 1_000,
+};
+
+fn corpus() -> &'static Corpus {
+    match std::env::var("ANN_CORPUS")
+        .unwrap_or_else(|_| "sift".into())
+        .as_str()
+    {
+        "sift" | "sift1m" => &SIFT,
+        "gist" | "gist1m" => &GIST,
+        other => panic!("ANN_CORPUS: unknown corpus {other:?} (want sift or gist)"),
+    }
+}
+
+/// Neighbours retrieved per query. Runtime rather than a constant because the
+/// cost of a refine pass scales with it — refine re-scores roughly
+/// `k * refine_factor` candidates, so a policy chosen at one `k` does not
+/// transfer without checking.
+fn k_val() -> usize {
+    env_usize("ANN_K", 10)
+}
+
+/// PQ sub-vectors. Sets the compression ratio, which is what determines how
+/// much precision a refine pass has to recover: at `dim` f32 in and one byte
+/// per sub-vector out, the ratio is `dim * 4 / sub_vectors`.
+fn sub_vectors() -> usize {
+    env_usize("ANN_SUB_VECTORS", 16)
+}
 /// Rows per `bulk_insert_vertices` call.
 const BATCH: usize = 10_000;
 
@@ -129,14 +183,14 @@ fn algo(kind: &str) -> VectorAlgo {
         "hnsw_pq" => VectorAlgo::HnswPq {
             m: 16,
             ef_construction: 100,
-            sub_vectors: 16,
+            sub_vectors: sub_vectors() as u32,
             partitions: Some(1024),
         },
         // sqrt(N) partitions is the usual IVF rule of thumb; 16 sub-vectors over
         // 128 dims is 8 dims per sub-quantizer.
         "ivf_pq" => VectorAlgo::IvfPq {
             partitions: 1024,
-            sub_vectors: 16,
+            sub_vectors: sub_vectors() as u32,
         },
         other => unreachable!("unknown index kind: {other}"),
     }
@@ -157,7 +211,12 @@ async fn setup(base: &[Vec<f32>], kind: &str) -> anyhow::Result<Uni> {
     db.schema()
         .label("Doc")
         .property("idx", DataType::Int)
-        .property("emb", DataType::Vector { dimensions: DIM })
+        .property(
+            "emb",
+            DataType::Vector {
+                dimensions: corpus().dim,
+            },
+        )
         .index(
             "emb",
             IndexType::Vector(VectorIndexCfg {
@@ -221,7 +280,7 @@ async fn query_once(db: &Uni, q: &[f32], options: &str) -> anyhow::Result<Vec<u3
         .session()
         .query_with(&cypher)
         .param("q", Value::Vector(q.to_vec()))
-        .param("k", Value::Int(K as i64))
+        .param("k", Value::Int(k_val() as i64))
         .fetch_all()
         .await?;
     Ok(rows
@@ -240,7 +299,7 @@ async fn explain(db: &Uni, q: &[f32], options: &str) -> anyhow::Result<()> {
         .session()
         .query_with(&cypher)
         .param("q", Value::Vector(q.to_vec()))
-        .param("k", Value::Int(K as i64))
+        .param("k", Value::Int(k_val() as i64))
         .fetch_all()
         .await?;
     for r in rows {
@@ -262,11 +321,12 @@ async fn measure(
     let start = Instant::now();
     for (qi, q) in queries.iter().enumerate() {
         let got = query_once(db, q, options).await?;
-        let want: std::collections::HashSet<u32> = truth[qi].iter().take(K).copied().collect();
+        let want: std::collections::HashSet<u32> =
+            truth[qi].iter().take(k_val()).copied().collect();
         hits += got.iter().filter(|i| want.contains(i)).count();
     }
     let elapsed = start.elapsed().as_secs_f64();
-    let recall = hits as f64 / (queries.len() * K) as f64;
+    let recall = hits as f64 / (queries.len() * k_val()) as f64;
     let qps = queries.len() as f64 / elapsed;
     Ok((recall, qps))
 }
@@ -298,33 +358,44 @@ fn main() {
         return;
     }
 
-    let n = env_usize("ANN_DOCS", FULL);
+    let c = corpus();
+    let k = k_val();
+    let n = env_usize("ANN_DOCS", c.full);
     let nq = env_usize("ANN_QUERIES", 100);
     let rt = Runtime::new().unwrap();
 
-    let base_path = fixture("sift1m-base");
-    let query_path = fixture("sift1m-query");
-    let gt_path = fixture("sift1m-groundtruth");
+    let base_path = fixture(c.base);
+    let query_path = fixture(c.query);
+    let gt_path = fixture(c.gt);
 
     eprintln!("[ann] reading corpus…");
-    let base = read_fvecs(&base_path, DIM, Some(n));
+    let base = read_fvecs(&base_path, c.dim, Some(n));
     assert_eq!(
         base.len(),
         n,
         "asked for {n} base vectors, read {}",
         base.len()
     );
-    let queries = read_fvecs(&query_path, DIM, Some(nq));
+    // GIST ships 1,000 queries where SIFT ships 10,000. Asking for more than
+    // exist would silently measure fewer than requested, so it is an error.
+    assert!(
+        nq <= c.queries_avail,
+        "ANN_QUERIES={nq} exceeds the {} queries {} ships",
+        c.queries_avail,
+        c.name
+    );
+    let queries = read_fvecs(&query_path, c.dim, Some(nq));
     assert_eq!(queries.len(), nq);
 
     // Ground truth: external when the whole corpus is present, recomputed
     // otherwise. Never the file's answers against a prefix.
-    let (truth, truth_kind) = if n == FULL {
-        (read_ivecs(&gt_path, GT_DEPTH, Some(nq)), "external (SIFT)")
+    let (truth, truth_kind) = if n == c.full {
+        (read_ivecs(&gt_path, GT_DEPTH, Some(nq)), "external")
     } else {
         eprintln!(
-            "[ann] corpus is a {n}-vector prefix, not the full {FULL}; SIFT's ground truth does \
-             not describe it. Recomputing by brute force…"
+            "[ann] corpus is a {n}-vector prefix, not the full {}; the shipped ground truth \
+             does not describe it. Recomputing by brute force…",
+            c.full
         );
         (recompute_truth(&base, &queries), "recomputed (subset)")
     };
@@ -356,8 +427,9 @@ fn main() {
         .block_on(measure(&flat, flat_queries, flat_truth, "{}"))
         .unwrap();
     println!(
-        "[ann] corpus=sift1m n={n} queries={nq_flat} truth={truth_kind} index=flat \
-         recall@{K}={flat_recall:.4} qps={flat_qps:.3}"
+        "[ann] corpus={} n={n} queries={nq_flat} truth={truth_kind} index=flat \
+         recall@{k}={flat_recall:.4} qps={flat_qps:.3}",
+        c.name
     );
     points.push(Point {
         index: "flat".into(),
@@ -382,8 +454,9 @@ fn main() {
                     .block_on(measure(&hnsw, &queries, &truth, &opts))
                     .unwrap();
                 println!(
-                    "[ann] corpus=sift1m n={n} queries={nq} truth={truth_kind} index={fam} \
-             ef_search={ef} recall@{K}={recall:.4} qps={qps:.1}"
+                    "[ann] corpus={} n={n} queries={nq} truth={truth_kind} index={fam} \
+             ef_search={ef} recall@{k}={recall:.4} qps={qps:.1}",
+                    c.name
                 );
                 points.push(Point {
                     index: fam.into(),
@@ -427,8 +500,9 @@ fn main() {
             }
             let (recall, qps) = rt.block_on(measure(&ivf, &queries, &truth, &opts)).unwrap();
             println!(
-                "[ann] corpus=sift1m n={n} queries={nq} truth={truth_kind} index=ivf_pq \
-             nprobes={np} refine={refine:?} recall@{K}={recall:.4} qps={qps:.1}"
+                "[ann] corpus={} n={n} queries={nq} truth={truth_kind} index=ivf_pq \
+             nprobes={np} refine={refine:?} recall@{k}={recall:.4} qps={qps:.1}",
+                c.name
             );
             points.push(Point {
                 index: "ivf_pq".into(),
@@ -447,9 +521,16 @@ fn main() {
 }
 
 fn report(points: &[Point], n: usize, nq: usize, truth_kind: &str, flat_recall: f64) {
+    let c = corpus();
+    let k = k_val();
     println!("\n## ANN Pareto — SIFT-1M\n");
-    println!("corpus = sift1m, n = {n}, queries = {nq}, K = {K}, truth = {truth_kind}\n");
-    println!("| index | knob | recall@{K} | QPS |");
+    println!(
+        "corpus = {}, dim = {}, sub_vectors = {}, n = {n}, queries = {nq}, K = {k}, truth = {truth_kind}\n",
+        c.name,
+        c.dim,
+        sub_vectors()
+    );
+    println!("| index | knob | recall@{k} | QPS |");
     println!("|---|---|---:|---:|");
     for p in points {
         println!(
@@ -507,11 +588,12 @@ fn report(points: &[Point], n: usize, nq: usize, truth_kind: &str, flat_recall: 
     for family in ["hnsw", "ivf_pq"] {
         let ran: Vec<&Point> = points.iter().filter(|p| p.index == family).collect();
         let all_perfect = !ran.is_empty() && ran.iter().all(|p| p.recall >= 0.9999);
-        if all_perfect && n < FULL {
+        if all_perfect && n < c.full {
             eprintln!(
                 "[ann] SUSPECT: every {family} cell is exact at n={n}. Below the full corpus \
                  Lance may brute-force, in which case the index under test never ran. Re-run at \
-                 n={FULL} before citing these numbers."
+                 n={} before citing these numbers.",
+                c.full
             );
             std::process::exit(1);
         }

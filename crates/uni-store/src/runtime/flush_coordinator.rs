@@ -434,21 +434,46 @@ impl FlushCoordinator {
     }
 
     /// Wait until pending_count drops to zero. Used by `drop_fork`.
-    pub async fn drain(&self, timeout: std::time::Duration) -> Result<(), &'static str> {
-        let deadline = tokio::time::Instant::now() + timeout;
+    /// `stall_timeout` bounds **time without progress**, not total drain time.
+    ///
+    /// A total deadline cannot tell a large legitimate backlog from a wedged
+    /// coordinator, and the two need opposite responses. Ingesting a million
+    /// rows queues roughly one flush per `auto_flush_threshold` mutations, so the
+    /// backlog scales with the data and no fixed total is correct for every load.
+    /// What distinguishes a wedge is that `pending_flush_count` stops falling.
+    /// The deadline therefore resets on every observed decrease, and only a
+    /// genuine stall returns an error.
+    pub async fn drain(&self, stall_timeout: std::time::Duration) -> Result<(), &'static str> {
+        let mut last = self.pending_flush_count();
+        if last == 0 {
+            return Ok(());
+        }
+        let mut deadline = tokio::time::Instant::now() + stall_timeout;
         loop {
-            if self.pending_flush_count() == 0 {
-                return Ok(());
-            }
             let notified = self.drain_notify.notified();
             tokio::select! {
-                _ = notified => continue,
+                _ = notified => {
+                    let now = self.pending_flush_count();
+                    if now == 0 {
+                        return Ok(());
+                    }
+                    if now < last {
+                        last = now;
+                        deadline = tokio::time::Instant::now() + stall_timeout;
+                    }
+                }
                 _ = tokio::time::sleep_until(deadline) => {
-                    return if self.pending_flush_count() == 0 {
-                        Ok(())
-                    } else {
-                        Err("pending flushes did not drain before deadline")
-                    };
+                    let now = self.pending_flush_count();
+                    if now == 0 {
+                        return Ok(());
+                    }
+                    // Progress since the deadline was set: not a stall, extend.
+                    if now < last {
+                        last = now;
+                        deadline = tokio::time::Instant::now() + stall_timeout;
+                        continue;
+                    }
+                    return Err("pending flushes made no progress before deadline");
                 }
             }
         }
