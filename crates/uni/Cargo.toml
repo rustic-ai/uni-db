@@ -201,6 +201,15 @@ harness = false
 name = "dense_retrieval"
 harness = false
 
+# ann-benchmarks protocol: recall@10 vs QPS on SIFT-1M, against SIFT's own
+# ground truth. Separate from `dense_retrieval` because that bench measures
+# single-query latency on a synthetic corpus against an oracle we compute;
+# this one measures a Pareto curve on a real corpus against external truth.
+# Needs the pinned fixtures -- see docs/fixtures.md.
+[[bench]]
+name = "ann_pareto"
+harness = false
+
 [[bench]]
 name = "multivec_retrieval"
 harness = false
