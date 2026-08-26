@@ -276,6 +276,33 @@ runs, and the non-vacuity check fails when pointed at a uniform keyspace.
 
 **Stops the chain if:** nothing. B4 has no dependents.
 
+### E2a — ANN recall-vs-QPS curves — **DONE 2026-08-26**
+
+`crates/uni/benches/ann_pareto.rs` on SIFT-1M against SIFT's own ground truth.
+Published: `docs/perf/ann-2026-08-25.md`.
+
+**Best operating point: IVF_PQ `nprobes=64, refine_factor=20` — 0.992 recall@10
+at 49 QPS**, beating both HNSW (0.980 at 32.6) and the exact scan (1.000 at 6.3)
+on the axis each is supposed to win.
+
+Three findings, two of them defects that are now fixed:
+
+- **A shared Lance `Session` was missing**, so every ANN query re-read and
+  re-decoded the index cold. HNSW gained **~40x** once fixed. Before it, HNSW was
+  Pareto-dominated by brute force — a conclusion this document briefly held and
+  then withdrew.
+- **The flush barrier silently did not flush** above ~600k rows, so the ANN index
+  was never built while queries fell back to an exact scan and reported recall
+  0.999 with every knob inert. The non-vacuity gate rejected that table, which is
+  how both defects were found.
+- **`refine_factor` is nearly free and omitting it halves recall** — 0.562 →
+  0.992 for 3% throughput. The default is a trap worth closing in the product.
+
+**Still open from E2a:** whether IVF_PQ should default `refine_factor` above 1,
+or warn at index-creation time. That is a product decision, not a benchmark one.
+
+### E2b — BEIR nDCG@10 *(not started; needs an embedding model in the loop)*
+
 ### E2 — B3 ann-benchmarks + BEIR *(depends on E0)*
 
 The benchmark that can show RRF fusion is not earning its complexity.
@@ -425,7 +452,8 @@ speculatively.
 E0  fixture fetch + verify        ── DONE 2026-08-25
 E1  B4 contention curves          ── DONE 2026-08-25
 E5  docs/perf index               ── DONE 2026-08-25
-E2  B3 ann-benchmarks + BEIR      ── depends on E0, medium
+E2a B3 ANN Pareto curves          ── DONE 2026-08-26
+E2b B3 BEIR nDCG@10               ── depends on E0, needs an embedder
 E3  B2 LDBC SNB                   ── depends on E0, largest
 E4  C3 Elle                       ── independent, sequenced last
 ```

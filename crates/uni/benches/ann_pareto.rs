@@ -400,20 +400,42 @@ fn main() {
     if fams.contains(&"ivf_pq".to_string()) {
         eprintln!("[ann] building ivf_pq…");
         let ivf = rt.block_on(setup(&base, "ivf_pq")).unwrap();
-        for np in [1usize, 4, 16, 64, 128] {
-            let opts = format!("{{nprobes: {np}}}");
-            if std::env::var("ANN_EXPLAIN").is_ok() && np == 16 {
+        // PQ stores lossy codes, so probing ranks candidates on approximate
+        // distances. `refine_factor` over-fetches and re-scores against the
+        // original vectors — the standard remedy for a recall ceiling that more
+        // probing does not lift. Sweeping it alongside nprobes separates "not
+        // enough search" from "not enough precision".
+        let ivf_cells: Vec<(usize, Option<usize>)> = vec![
+            (1, None),
+            (4, None),
+            (16, None),
+            (64, None),
+            (128, None),
+            (16, Some(5)),
+            (16, Some(20)),
+            (64, Some(5)),
+            (64, Some(20)),
+        ];
+        for (np, refine) in ivf_cells {
+            let opts = match refine {
+                Some(r) => format!("{{nprobes: {np}, refine_factor: {r}}}"),
+                None => format!("{{nprobes: {np}}}"),
+            };
+            if std::env::var("ANN_EXPLAIN").is_ok() && np == 16 && refine.is_none() {
                 println!("[ann][plan] ===== ivf_pq nprobes={np} =====");
                 let _ = rt.block_on(explain(&ivf, &queries[0], &opts));
             }
             let (recall, qps) = rt.block_on(measure(&ivf, &queries, &truth, &opts)).unwrap();
             println!(
                 "[ann] corpus=sift1m n={n} queries={nq} truth={truth_kind} index=ivf_pq \
-             nprobes={np} recall@{K}={recall:.4} qps={qps:.1}"
+             nprobes={np} refine={refine:?} recall@{K}={recall:.4} qps={qps:.1}"
             );
             points.push(Point {
                 index: "ivf_pq".into(),
-                knob: format!("nprobes={np}"),
+                knob: match refine {
+                    Some(r) => format!("nprobes={np}, refine={r}"),
+                    None => format!("nprobes={np}"),
+                },
                 recall,
                 qps,
             });
