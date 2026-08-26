@@ -287,6 +287,14 @@ CALL uni.vector.query('Document', 'embedding', $query_vector, 10)
 YIELD node, score
 RETURN node.title, score ORDER BY score DESC
 
+// IVF-PQ is the DEFAULT index and stores lossy codes: without refine_factor
+// recall is silently capped (~0.56 measured on SIFT-1M vs ~0.99 with it, for
+// ~3% throughput). Raising nprobes alone does not fix it.
+CALL uni.vector.query('Document', 'embedding', $query_vector, 10, NULL, NULL,
+    { nprobes: 64, refine_factor: 20 })
+YIELD node, score
+RETURN node.title, score ORDER BY score DESC
+
 // ~= operator (shorthand for vector top-K scan, desugars to uni.vector.query)
 MATCH (d:Doc) WHERE d.embedding ~= $query_vector RETURN d.title LIMIT 10
 

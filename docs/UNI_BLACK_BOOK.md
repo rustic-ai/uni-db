@@ -1329,6 +1329,33 @@ Stored as a Lance table (`adjacency_{edge_type}_{direction}`) with row-per-verte
 | Forward Adjacency | `adjacency_{edge_type}_fwd` | Forward CSR adjacency |
 | Backward Adjacency | `adjacency_{edge_type}_bwd` | Backward CSR adjacency |
 
+## Dataset Opens and the Lance Session Cache
+
+`LanceDirectory::open` builds a fresh `Dataset` on **every** call and
+deliberately never caches the handle: a cached handle pins a manifest version,
+so a later flush's rows would be silently invisible to it.
+
+Every open is nonetheless given the directory's **shared `Arc<Session>`** via
+`DatasetBuilder::with_session`. The session owns Lance's index and metadata
+caches, and the two concerns are separate:
+
+| what | cached? | why |
+|---|---|---|
+| `Dataset` handle | **no** | pins a manifest version; would miss later flushes |
+| Index + metadata blocks (the `Session`) | **yes** | content-addressed, so reuse cannot go stale |
+
+**Why this is load-bearing.** Without the shared session each builder gets
+`session: None`, i.e. a fresh cache per open, so an ANN index is re-read and
+re-decoded on *every query*. The measured signature was: query cost linear in
+corpus size, unaffected by `ef_search`, `m`, partition count or payload
+encoding, with the HNSW graph search itself only ~6% of profile samples and the
+rest in page decode, memmove and allocation. Sharing the session gave HNSW a
+**~40x** speedup at 1M vectors (0.8 → 32 QPS) with recall unchanged.
+
+Any new code path that opens a Lance dataset must go through `LanceDirectory`
+rather than calling `DatasetBuilder::from_uri` directly, or it silently opts out
+of these caches.
+
 ## Write Path Detailed
 
 ### Regular Writer
@@ -1366,6 +1393,20 @@ Two refinements to this sequence:
   the L0 generation a committer wants to merge into, the committer clones
   the buffer aside instead of mutating the pinned view — snapshots never
   observe post-pin writes, and uncontended commits never pay for the clone.
+- **`flush_to_l1` is a synchronization barrier.** Fork setup, shutdown and test
+  fixtures rely on it meaning *all writes are now durably in Lance*. With async
+  flush on it first drains in-flight streams, bounded by `flush_drain_timeout`
+  (default 120s). **A drain that does not finish is an error**, never a silent
+  partial flush.
+
+  This was a live defect: the drain was previously bounded by
+  `drop_fork_drain_timeout` (10s, a field documented for `drop_fork`) with its
+  result discarded, so above roughly 600k rows the barrier returned `Ok` having
+  not flushed. Downstream every link also reported success — the index build
+  found no flushed table, declined at `debug!` level, and returned
+  `BuildOutcome::NotAttempted`, which maps to `Online`. The observable effect was
+  an ANN index that was never built while queries silently fell back to an exact
+  scan of the unflushed L0. See `docs/perf/ann-2026-08-25.md`.
 
 ### BulkWriter Path
 
@@ -1588,11 +1629,39 @@ CREATE INDEX idx_status FOR (o:Order) ON (o.status)         // BTree
 
 For approximate nearest neighbor (ANN) search on embedding vectors:
 
-| Type | Best For | Parameters |
-|---|---|---|
-| **HNSW** | < 1M vectors, high recall | `m` (connections), `ef_construction`, `ef_search` |
-| **IVF-PQ** | > 1M vectors, memory-efficient | `num_partitions`, `num_sub_vectors`, `bits` |
-| **Flat** | < 10k vectors, exact search | None (brute force) |
+| Type | Best For | Build Parameters | Query Knobs |
+|---|---|---|---|
+| **IVF-PQ** | the default; best recall/QPS with `refine_factor` | `num_partitions`, `num_sub_vectors`, `bits` | `nprobes`, **`refine_factor`** |
+| **HNSW** | high recall without a refine pass | `m`, `ef_construction`, `partitions` | `ef_search` |
+| **Flat** | small corpora, exact search | None (brute force) | None |
+
+#### Measured trade-offs (SIFT-1M, 128-d, L2, K=10)
+
+From `crates/uni/benches/ann_pareto.rs`, scored against SIFT's own published
+ground truth. Full analysis in `docs/perf/ann-2026-08-25.md`.
+
+| index | knob | recall@10 | QPS |
+|---|---|---:|---:|
+| flat (exact) | — | 1.0000 | 6.3 |
+| hnsw | `ef_search=25` | 0.9600 | 32.6 |
+| hnsw | `ef_search=50` | 0.9800 | 32.6 |
+| ivf_pq | `nprobes=64` (no refine) | 0.5620 | 50.8 |
+| ivf_pq | `nprobes=64, refine_factor=5` | 0.9260 | 52.3 |
+| **ivf_pq** | **`nprobes=64, refine_factor=20`** | **0.9920** | **49.1** |
+
+Three things this replaces earlier guidance with:
+
+- **`refine_factor` is not optional on a PQ index.** Omitting it caps recall at
+  ~0.56 no matter how high `nprobes` goes — the ceiling is quantization
+  precision, not search breadth. Adding it costs ~3% throughput and returns
+  +43 points of recall. Since IVF-PQ is the **default** algorithm, the default
+  query path without `refine_factor` returns a silently poor answer from a
+  correctly-built index.
+- **The old "HNSW < 1M, IVF-PQ > 1M" rule does not hold.** Both work at 1M;
+  IVF-PQ with refine beats HNSW on recall *and* throughput.
+- **`ef_search` saturates.** Recall stops improving at 50 and QPS falls
+  monotonically after; 25–50 is the useful band. Lance's `1.5xk` default (15 for
+  k=10) lands near 0.86 and is too low for recall-sensitive work.
 
 ```cypher
 // Create vector index with HNSW
@@ -4197,6 +4266,36 @@ session.transact_with_retry(RetryOptions::default(), |tx| async move {
 session.execute_with_retry("MERGE (u:User {email:'a@b.com'})").await?;
 ```
 
+#### Measured: where the default retry budget stops being enough
+
+`RetryOptions::default()` allows **5 attempts**. From
+`crates/uni/benches/ssi_contention.rs` — 256 counters, Zipf-skewed
+read-modify-write, 22 cores, abort rate = serialization conflicts / writing
+commit attempts:
+
+| skew (Zipf theta) | writers | abort rate | ops that exhausted all 5 attempts |
+|---:|---:|---:|---:|
+| 0.00 | 24 | 8.8% | 0 |
+| 0.90 | 8 | 15.0% | 75 |
+| 0.90 | 24 | 40.2% | 1334 |
+| 1.20 | 24 | 59.4% | 3353 |
+
+Three things follow:
+
+- **Past roughly 40% abort rate the default budget stops absorbing contention.**
+  Those exhausted operations are not retries that eventually succeeded — they are
+  errors returned to the caller. Hot-key workloads need a raised `max_attempts`,
+  application-level backoff, or `FOR UPDATE`.
+- **Uniform access is not conflict-free.** At `theta = 0` over 256 keys, 24
+  writers still abort 8.8% of commits (birthday-paradox collisions). "Spread the
+  keys" reduces contention but does not remove it.
+- **The SSI cost is a function of skew, not a constant** — about 10% throughput
+  at `theta = 0` and 27% at `theta = 1.2` versus the same workload with
+  `ssi_enabled = false` (which is last-writer-wins and *loses* updates, so it is
+  a reference line, not an option).
+
+Full analysis: `docs/perf/contention-2026-08-25.md`.
+
 ### `FOR UPDATE` Row Locks
 
 For read-modify-write hotspots, `FOR UPDATE` provides pessimistic per-key
@@ -5476,6 +5575,9 @@ Python: `UniBuilder.in_memory().strict_schema(True).build()` or `.config({"stric
 | `auto_flush_interval` | `Option<Duration>` | 5s | Time-based flush interval |
 | `auto_flush_min_mutations` | `usize` | 1 | Min mutations before time-based flush |
 | `wal_enabled` | `bool` | `true` | Write-ahead logging |
+| `flush_stream_timeout` | `Duration` | 60s | Max wall time one async L0→L1 stream phase may run before it becomes a flush *failure* |
+| `flush_drain_timeout` | `Duration` | 120s | Max time `flush_to_l1` waits for in-flight flushes to drain. Exceeding it is an **error**, not a silent partial flush |
+| `drop_fork_drain_timeout` | `Duration` | 10s | Max time `drop_fork` waits for that fork's pending flushes |
 
 ### CompactionConfig
 
