@@ -151,17 +151,6 @@ async fn setup(base: &[Vec<f32>], kind: &str) -> anyhow::Result<Uni> {
     // bench whose job is to time the exact baseline must not be bounded by it.
     let config = UniConfig {
         query_timeout: Duration::from_secs(600),
-        // `Uni::flush()` -> `flush_to_l1` drains in-flight async flushes bounded
-        // by this field and *discards the result* (`writer.rs`, `let _ =
-        // coord.drain(...)`). Its default is 10s. Above roughly 600k rows the
-        // drain does not finish, flush returns Ok having broken the barrier its
-        // own rustdoc promises, the L1 table is absent, and the index build is
-        // skipped as `NotAttempted` -- which is mapped to `Online`. The measured
-        // consequence is recall 0.999 with ef_search/nprobes completely inert.
-        // Raised here so the corpus is genuinely flushed before indexing; the
-        // underlying silent-success is a product defect, recorded in
-        // docs/perf/ann-2026-08-25.md.
-        drop_fork_drain_timeout: Duration::from_secs(900),
         ..Default::default()
     };
     let db = Uni::temporary().config(config).build().await?;

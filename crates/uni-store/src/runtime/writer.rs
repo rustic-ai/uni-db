@@ -4510,7 +4510,19 @@ impl Writer {
         // `flush_to_l1` returns, leaving a window where forks branch
         // off pre-write Lance state and lose data.
         if let Some(coord) = self.flush_coordinator.as_ref() {
-            let _ = coord.drain(self.config.drop_fork_drain_timeout).await;
+            // Propagated, not discarded. A drain that does not finish means the
+            // barrier this function documents has not been established, and
+            // returning Ok would hand the caller a guarantee it does not have.
+            coord
+                .drain(self.config.flush_drain_timeout)
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "flush_to_l1 barrier not established: {e} (waited {:?}); \
+                         writes are not yet durable in Lance",
+                        self.config.flush_drain_timeout
+                    )
+                })?;
         }
         let _flush_lock_guard = self.flush_lock.lock().await;
         self.flush_inline_under_lock(name).await

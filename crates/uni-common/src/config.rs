@@ -581,6 +581,24 @@ pub struct UniConfig {
     /// when `async_flush_enabled` is true. Default: 10s.
     pub drop_fork_drain_timeout: Duration,
 
+    /// Maximum time `flush_to_l1` will wait for in-flight async flushes to
+    /// drain before failing. Default: 120s.
+    ///
+    /// `flush_to_l1` is a **synchronization barrier**: fork setup, shutdown and
+    /// test fixtures rely on it meaning "all writes are now durably in Lance".
+    /// It previously bounded this wait with `drop_fork_drain_timeout` (10s) and
+    /// **discarded the result**, so above roughly 600k rows the drain silently
+    /// did not finish and the barrier returned success anyway. Downstream, the
+    /// index build found no flushed table, declined at `debug!` level, and
+    /// reported `Online` — measured consequence was an ANN index that was never
+    /// built while every query quietly fell back to an exact scan.
+    ///
+    /// This is a backstop against a wedged coordinator, not a normal control:
+    /// each individual stream is already bounded by `flush_stream_timeout`, so a
+    /// healthy drain finishes far inside it (a 1M-row flush measures ~27s).
+    /// Exceeding it is an error, never a silent partial flush.
+    pub flush_drain_timeout: Duration,
+
     /// Phase 4a: cap on total fork count (Active + Pending + Tombstoned).
     /// `None` = unbounded. When set, `Session::fork(name).await` errors
     /// with `UniError::ForkBudgetExceeded` once the cap is reached.
@@ -724,6 +742,7 @@ impl Default for UniConfig {
                 .map(Duration::from_secs)
                 .unwrap_or(Duration::from_secs(60)),
             drop_fork_drain_timeout: Duration::from_secs(10),
+            flush_drain_timeout: Duration::from_secs(120),
             max_forks: None,
             fork_default_ttl: None,
             fork_sweeper_interval: Duration::from_secs(60),
