@@ -287,9 +287,10 @@ CALL uni.vector.query('Document', 'embedding', $query_vector, 10)
 YIELD node, score
 RETURN node.title, score ORDER BY score DESC
 
-// IVF-PQ is the DEFAULT index and stores lossy codes: without refine_factor
-// recall is silently capped (~0.56 measured on SIFT-1M vs ~0.99 with it, for
-// ~3% throughput). Raising nprobes alone does not fix it.
+// IVF-PQ is the DEFAULT index and stores lossy codes. Since 3.5 a refine pass is
+// applied automatically (0.978 measured on SIFT-1M vs 0.562 without); pass
+// refine_factor to tune it, or refine_factor: 1 to opt out. nprobes alone does
+// not lift the quantization ceiling.
 CALL uni.vector.query('Document', 'embedding', $query_vector, 10, NULL, NULL,
     { nprobes: 64, refine_factor: 20 })
 YIELD node, score

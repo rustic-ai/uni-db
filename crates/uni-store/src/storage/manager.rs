@@ -424,6 +424,16 @@ impl Drop for CompactionGuard {
     }
 }
 
+/// Upper bound on candidates a **defaulted** refine pass may re-score
+/// (`fetch_k * refine_factor`).
+///
+/// Refine cost scales with `k`: measured on SIFT-1M, `refine_factor = 20` costs
+/// ~5% throughput at k=10 but 19% at k=100. Bounding the multiplier alone would
+/// therefore get expensive exactly where result sets are large, so the *work* is
+/// what is capped. An explicit `refine_factor` from the caller is honoured
+/// verbatim and never clamped.
+const REFINE_CANDIDATE_CAP: usize = 10_000;
+
 impl StorageManager {
     /// Create a new StorageManager with a pre-configured backend.
     pub async fn new_with_backend(
@@ -2015,10 +2025,32 @@ impl StorageManager {
             ));
         }
 
-        let metric = schema
-            .vector_index_for_property(label, property)
+        let index_cfg = schema.vector_index_for_property(label, property);
+        let metric = index_cfg
             .map(|config| config.metric.clone())
             .unwrap_or(DistanceMetric::L2);
+
+        // Quantized indexes rank on lossy codes; without a refine pass recall is
+        // capped by quantization rather than by search breadth (0.56 vs 0.99 on a
+        // 32x-compressed 1M corpus, for ~3% throughput). Prefer the value stored
+        // at index creation, and compute an equivalent for indexes created before
+        // that field existed so they benefit without a rebuild. An explicit
+        // `refine_factor` — including `1`, the documented opt-out — is untouched.
+        let mut opts = opts;
+        let mut defaulted_refine = false;
+        if opts.refine_factor.is_none()
+            && let Some(cfg) = index_cfg
+        {
+            let dim = schema
+                .properties
+                .get(label)
+                .and_then(|props| props.get(property))
+                .and_then(|meta| crate::storage::muvera_index::resolve_vector_dim(&meta.r#type));
+            opts.refine_factor = cfg.default_refine_factor.or_else(|| {
+                uni_common::vector_index_opts::default_refine_factor(&cfg.index_type, dim)
+            });
+            defaulted_refine = opts.refine_factor.is_some();
+        }
 
         let backend = self.backend.as_ref();
         let name = table_names::vertex_table_name(label);
@@ -2056,6 +2088,15 @@ impl StorageManager {
             } else {
                 k
             };
+
+            // Cap the *work* a defaulted refine may do, now that `fetch_k` is
+            // known. Only `defaulted_refine` is clamped; a caller-supplied value
+            // is left exactly as given.
+            let mut opts = opts;
+            if defaulted_refine && let Some(r) = opts.refine_factor {
+                let budget = (REFINE_CANDIDATE_CAP / fetch_k.max(1)).max(1);
+                opts.refine_factor = Some(r.min(budget as u32).max(1));
+            }
 
             let batches = backend
                 .vector_search(

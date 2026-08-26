@@ -152,6 +152,18 @@ pub struct VectorIndexConfig {
     pub embedding_config: Option<EmbeddingConfig>,
     #[serde(default)]
     pub metadata: IndexMetadata,
+    /// `refine_factor` applied when a query does not pass one, for quantized
+    /// (PQ/SQ/RQ) indexes.
+    ///
+    /// PQ ranks candidates on lossy codes; a refine pass re-scores them against
+    /// the original vectors. Without it recall is capped by quantization rather
+    /// than by search breadth — measured at 0.56 on a 32x-compressed 1M corpus
+    /// versus 0.99 with a refine pass, for ~3% throughput. Resolved at index
+    /// creation from the compression ratio; `None` on indexes created before
+    /// this existed, in which case the query path computes an equivalent value.
+    /// An explicit `refine_factor` in the query always wins, including `1`.
+    #[serde(default)]
+    pub default_refine_factor: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

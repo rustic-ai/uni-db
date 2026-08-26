@@ -62,10 +62,11 @@ RETURN node.title, score
 | `nprobes` | all IVF families | How many IVF partitions to probe |
 | `ef_search` | HNSW families | Search beam width |
 
-**Always set `refine_factor` on an IVF-PQ index.** IVF-PQ is the *default*
-algorithm and stores lossy codes, so without a refine pass results are ranked on
-approximate distances and recall is capped — with no error and nothing unusual in
-the output. Measured on SIFT-1M (1M x 128-d, L2, K=10, against the dataset's own
+**Since 3.5 a quantized index applies a `refine_factor` by default**, derived
+from its compression ratio; pass one explicitly to tune, or `refine_factor: 1` to
+opt out. The reason it exists: IVF-PQ is the *default* algorithm and stores lossy
+codes, so ranking on approximate distances alone caps recall — with no error and
+nothing unusual in the output. Measured on SIFT-1M (1M x 128-d, L2, K=10, against the dataset's own
 ground truth):
 
 | index | knob | recall@10 | QPS |
@@ -78,7 +79,12 @@ ground truth):
 | flat | exact | 1.000 | 6.3 |
 
 Raising `nprobes` alone does not help — recall is flat from 64 to 128, because
-the ceiling is quantization precision, not search breadth.
+the ceiling is quantization precision, not search breadth. With the default in
+place that `nprobes=64` cell measures **0.978**.
+
+`sub_vectors` is also dimension-aware since 3.5: it was a fixed 16, which
+compressed 192x at 768-d and 384x at 1536-d. It now targets ~32x by picking the
+smallest divisor of `dim` at or above `dim/8` (768-d -> 96).
 
 ```cypher
 CALL uni.vector.query('Document', 'embedding', $q, 10, NULL, NULL,

@@ -30,6 +30,7 @@ use uni_common::core::schema::{
     ScalarIndexConfig, ScalarIndexType, SparseVectorIndexConfig, VectorIndexConfig,
     VectorIndexType,
 };
+use uni_common::vector_index_opts::{AUTO_SUB_VECTORS, default_refine_factor, default_sub_vectors};
 
 /// What happened when a physical index artifact was — or was not — materialized.
 ///
@@ -446,12 +447,23 @@ impl IndexManager {
                 metric: DistanceMetric::Dot,
                 embedding_config: None,
                 metadata: config.metadata.clone(),
+                default_refine_factor: config.default_refine_factor,
             };
             self.build_physical_vector_index(&inner_cfg).await?
         } else {
             self.build_physical_vector_index(&config).await?
         };
         config.metadata = outcome.into_metadata();
+        // Turn `AUTO_SUB_VECTORS` into a real, dimension-aware value and attach a
+        // refine default before the definition is persisted, so a stored schema
+        // never contains the sentinel.
+        {
+            let schema = self.schema_manager.schema();
+            let dim = index_build_dim(&schema, &config);
+            let fde_dim = crate::storage::muvera_index::fde_spec_for_config(&schema, &config)
+                .map(|spec| spec.params.fde_dim());
+            resolve_vector_index_defaults(&mut config, dim, fde_dim);
+        }
         self.schema_manager
             .add_index(IndexDefinition::Vector(config))?;
         self.schema_manager.save().await?;
@@ -1272,4 +1284,62 @@ impl IndexManager {
             .ok_or_else(|| anyhow!("No sparse vector index found for {}.{}", label, property))?;
         SparseVectorIndex::new(&self.base_uri, config).await
     }
+}
+
+/// Resolve the `AUTO_SUB_VECTORS` sentinel and fill in `default_refine_factor`.
+///
+/// Called on every path that persists a vector index definition, so a stored
+/// schema never contains the sentinel and every quantized index carries a refine
+/// default. Idempotent: an explicit `sub_vectors` and an already-set
+/// `default_refine_factor` are both left alone.
+///
+/// `dim` is the dimensionality the index is actually built over — for MUVERA
+/// that is the derived FDE column's width, not the source column's.
+pub fn resolve_vector_index_defaults(
+    config: &mut VectorIndexConfig,
+    dim: Option<usize>,
+    fde_dim: Option<usize>,
+) {
+    fn resolve_type(t: &mut VectorIndexType, dim: Option<usize>, fde_dim: Option<usize>) {
+        match t {
+            VectorIndexType::IvfPq {
+                num_sub_vectors, ..
+            }
+            | VectorIndexType::HnswPq {
+                num_sub_vectors, ..
+            } => {
+                if *num_sub_vectors == AUTO_SUB_VECTORS {
+                    *num_sub_vectors = default_sub_vectors(dim);
+                }
+            }
+            // The inner ANN is built over the derived FDE column, whose width
+            // the caller resolves via `fde_spec_for_config` and passes in as
+            // `fde_dim` — it is not the source column's width.
+            VectorIndexType::Muvera { inner, .. } => {
+                // Inside MUVERA the FDE width *is* the dim the inner index sees.
+                resolve_type(inner, fde_dim, fde_dim);
+            }
+            _ => {}
+        }
+    }
+    resolve_type(&mut config.index_type, dim, fde_dim);
+    if config.default_refine_factor.is_none() {
+        let effective_dim = match &config.index_type {
+            VectorIndexType::Muvera { .. } => fde_dim,
+            _ => dim,
+        };
+        config.default_refine_factor = default_refine_factor(&config.index_type, effective_dim);
+    }
+}
+
+/// Dimensionality the index is built over, from the schema's declared type.
+pub fn index_build_dim(
+    schema: &uni_common::core::schema::Schema,
+    config: &VectorIndexConfig,
+) -> Option<usize> {
+    schema
+        .properties
+        .get(&config.label)
+        .and_then(|props| props.get(&config.property))
+        .and_then(|meta| crate::storage::muvera_index::resolve_vector_dim(&meta.r#type))
 }

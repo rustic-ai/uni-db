@@ -8820,6 +8820,10 @@ impl QueryPlanner {
                     index_type,
                     embedding_config,
                     metadata: Default::default(),
+                    // Resolved from the column's dimensionality by
+                    // `resolve_vector_index_defaults` before the definition is
+                    // persisted.
+                    default_refine_factor: None,
                 };
                 Ok(LogicalPlan::CreateVectorIndex {
                     config,

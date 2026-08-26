@@ -194,6 +194,24 @@ impl<'a> SchemaBuilder<'a> {
                         })?;
                 }
                 SchemaChange::AddIndex(idx) => {
+                    // The Python config paths build an `IndexDefinition` with no
+                    // schema in scope, so a vector index can still carry the
+                    // `AUTO_SUB_VECTORS` sentinel here. Resolve it (and attach a
+                    // refine default) against the declared column type before it
+                    // is registered, so a persisted schema never holds the
+                    // sentinel regardless of which surface created the index.
+                    let idx = match idx {
+                        uni_common::core::schema::IndexDefinition::Vector(mut cfg) => {
+                            let snapshot = manager.schema();
+                            let dim =
+                                uni_store::storage::index_manager::index_build_dim(&snapshot, &cfg);
+                            uni_store::storage::index_manager::resolve_vector_index_defaults(
+                                &mut cfg, dim, None,
+                            );
+                            uni_common::core::schema::IndexDefinition::Vector(cfg)
+                        }
+                        other => other,
+                    };
                     // Skip the synchronous Lance rebuild when the index is
                     // already registered with the same config — re-applying
                     // the same schema is the documented "register on every
@@ -354,6 +372,10 @@ impl<'a> LabelBuilder<'a> {
                 index_type: cfg.algorithm.into_internal(),
                 metric: cfg.metric.into_internal(),
                 embedding_config: cfg.embedding.map(|e| e.into_internal()),
+                // The typed `VectorAlgo` takes an explicit `sub_vectors`, so
+                // there is no sentinel to resolve here; the refine default is
+                // still filled in on apply.
+                default_refine_factor: None,
                 metadata: Default::default(),
             }),
             IndexType::FullText => IndexDefinition::FullText(FullTextIndexConfig {

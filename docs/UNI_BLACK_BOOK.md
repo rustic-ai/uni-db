@@ -1651,12 +1651,22 @@ ground truth. Full analysis in `docs/perf/ann-2026-08-25.md`.
 
 Three things this replaces earlier guidance with:
 
-- **`refine_factor` is not optional on a PQ index.** Omitting it caps recall at
-  ~0.56 no matter how high `nprobes` goes — the ceiling is quantization
-  precision, not search breadth. Adding it costs ~3% throughput and returns
-  +43 points of recall. Since IVF-PQ is the **default** algorithm, the default
-  query path without `refine_factor` returns a silently poor answer from a
-  correctly-built index.
+- **`refine_factor` is applied by default on PQ indexes (since 3.5).** Omitting
+  it caps recall at ~0.56 no matter how high `nprobes` goes — the ceiling is
+  quantization precision, not search breadth. A quantized index now carries a
+  default derived from its compression ratio, so the same `nprobes=64` cell
+  measures **0.978**. An explicit `refine_factor` overrides it; `1` opts out.
+  Resolved by `uni_common::vector_index_opts::default_refine_factor`, stored on
+  `VectorIndexConfig.default_refine_factor` at creation, and recomputed at query
+  time for indexes created before the field existed.
+- **`sub_vectors` is dimension-aware (since 3.5).** It was a fixed 16 regardless
+  of `dim`, which meant compression grew with embedding width — 32x at 128-d but
+  192x at 768-d and 384x at 1536-d. `default_sub_vectors(dim)` now picks the
+  smallest divisor of `dim` at or above `dim/8`, holding compression near 32x
+  (768-d -> 96, 1536-d -> 192). It must be a **divisor**: `IndexManager` rejects
+  `dim % sub != 0`. Dimensions below 128, and those with no divisor in range,
+  keep 16 — which preserves the deliberate `sub > dim` case that lets an index be
+  declared on an empty table.
 - **The old "HNSW < 1M, IVF-PQ > 1M" rule does not hold.** Both work at 1M;
   IVF-PQ with refine beats HNSW on recall *and* throughput.
 - **`ef_search` saturates.** Recall stops improving at 50 and QPS falls

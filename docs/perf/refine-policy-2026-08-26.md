@@ -74,6 +74,42 @@ Refine re-scores roughly `k * refine_factor` candidates, so its cost scales with
 recall). `refine=20` is free at k<=10 and costs 19% at k=100. A bare multiplier
 therefore gets expensive exactly where result sets are large.
 
+## Implemented 2026-08-26
+
+Both changes shipped; the recommendation below is what they implement.
+
+**Measured after, on the same corpus, with no options passed** (SIFT-1M, 128-d,
+K=10):
+
+| cell | before | after |
+|---|---:|---:|
+| `nprobes=16` | 0.5360 | **0.9080** |
+| `nprobes=64` | 0.5620 | **0.9780** |
+| `nprobes=128` | 0.5620 | **0.9820** |
+
+Two deviations from the recommendation, both forced by evidence:
+
+- **`sub_vectors` must be a divisor of `dim`.** `IndexManager` rejects
+  `dim % sub != 0`, so the `max(16, dim/8)` rule proposed below would have made
+  index creation *fail* for many dimensions (100, for one). The shipped rule is
+  the smallest **divisor** of `dim` at or above `dim/8`, which hits the same
+  ~32x target and is always encodable. Dimensions under 128, and those with no
+  divisor in range (primes), keep 16.
+- **The refine floor is 12, not 10.** At 32x, refine=5 measured 0.902 and
+  refine=8 measured 0.944 — both short of the 0.95 bar. 12 clears it.
+
+**Scalar and RaBitQ quantization were deliberately left alone.** They are far
+milder than PQ, and an HNSW-SQ index already reaches 0.98 through `ef_search`.
+Adding a refine default there flattened that curve — a refine pass re-scores
+exactly, so recall stops responding to `ef_search` — and it broke two existing
+recall tests. Every number in this document is PQ; defaulting SQ by analogy
+would have been the same unmeasured guess this work exists to remove.
+
+**A note on the QPS column.** Absolute throughput is not comparable across the
+runs here: the earlier ones ran on `/tmp` (tmpfs) and the later ones on real disk
+after the quota problem below. Recall is the stable quantity, as recorded in
+`docs/perf/ann-2026-08-25.md`.
+
 ## Recommended policy
 
 Two changes, because fixing either alone leaves a hole:
