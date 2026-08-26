@@ -264,6 +264,17 @@ async fn setup(base: &[Vec<f32>], kind: &str) -> anyhow::Result<Uni> {
 
     // Force the ANN structure over the whole flushed corpus, so the measured
     // query exercises the index rather than a residual brute-force fallback.
+    // Is the data actually queryable after the flush the barrier just
+    // guaranteed? `table_exists` returning false while rows are visible would
+    // mean the rows are still being served from L0, i.e. the flush wrote no L1
+    // table despite reporting success.
+    let rows = db
+        .session()
+        .query("MATCH (n:Doc) RETURN count(n) AS c")
+        .await?;
+    let count: i64 = rows.rows()[0].get("c")?;
+    eprintln!("[ann]   {kind}: rows visible after flush = {count}");
+
     let t = Instant::now();
     db.indexes().rebuild("Doc", false).await?;
     eprintln!("[ann]   {kind}: index {:.1}s", t.elapsed().as_secs_f64());
@@ -349,6 +360,18 @@ fn recompute_truth(base: &[Vec<f32>], queries: &[Vec<f32>]) -> Vec<Vec<u32>> {
 }
 
 fn main() {
+    // ANN_LOG=<filter> turns on tracing so the index manager says which branch
+    // it took. `create_vector_index_inner` logs "not flushed yet ... deferred"
+    // at debug! when it declines, and a build failure at warn!, and without a
+    // subscriber both are invisible — an index that reports 0.0s looks
+    // identical either way.
+    if let Ok(filter) = std::env::var("ANN_LOG") {
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(tracing_subscriber::EnvFilter::new(filter))
+            .with_target(true)
+            .try_init();
+    }
+
     // No criterion harness: criterion measures per-iteration latency, and the
     // quantity here is queries-per-second over a fixed query set alongside the
     // recall of those same queries. Both come from one pass, so the timing loop

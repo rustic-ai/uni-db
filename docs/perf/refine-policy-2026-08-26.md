@@ -103,12 +103,43 @@ opt-out for anyone who wants raw PQ speed.
 - **Only `nprobes` 16 and 64 were paired with refine.** The optimum is
   bracketed, not located.
 
-## Open defect found while measuring
+## The "960-d index build" defect — diagnosed
 
-**The vector index build silently does nothing above some corpus size at 960-d.**
-At n=50k the IVF-PQ build takes 13.1s and the knobs sweep normally; at n=200k and
-n=1M it reports `index 0.0s` and never builds, while `flush` succeeds (144.4s and
-194.7s respectively, so this is *not* the flush-barrier defect fixed in
-`docs/perf/ann-2026-08-25.md`). SIFT at 1M/128-d builds fine, so this is not
-purely a row count. Not diagnosed; it wants its own investigation, and it is the
-reason the GIST column above stops at 50k.
+Filed above as an open, undiagnosed defect ("the vector index build silently does
+nothing above some corpus size at 960-d"). It was **not** dimension-related, and
+it was two things stacked:
+
+1. **The environment.** `Uni::temporary()` places the database under
+   `std::env::temp_dir()`, and on this machine `/tmp` is a **32 GB tmpfs with
+   ~7 GB free**. GIST at 200k x 960-d is 768 MB per index family; three families
+   plus Lance's own copies exhausted it. SIFT at 1M x 128-d (512 MB) fit, which
+   is why it looked dimension-specific. Tracing showed the real error:
+   `Failed to create table 'vertices': LanceError(IO): Disk quota exceeded`.
+   With `TMPDIR` on real disk the same 200k GIST build succeeds in 3.5s.
+
+2. **A real product defect underneath it.** The flush *failed*, and
+   `flush_to_l1` still returned `Ok`. The chain:
+   - the async flush stream fails; its rotated L0 stays on `pending_flush` and
+     the WAL retains the data (data-safe by design, recovered on replay);
+   - the drain completes anyway, because the failure decrements `pending_count`;
+   - `flush_inline_under_lock` cannot repair it — it only ever writes
+     `get_current()`, never a buffer stranded by an earlier failure;
+   - so the barrier reports success having flushed nothing, the index build finds
+     no table, declines at `debug!`, and reports `Online`.
+
+   This is the *same* silent-success family as the drain-timeout defect fixed in
+   `docs/perf/ann-2026-08-25.md`, and it survived that fix. `flush_to_l1` now
+   fails when the coordinator has recorded a failed flush.
+
+**A false start worth recording.** The first attempt asserted `pending_flush` was
+empty after the barrier. That is a proxy, not the condition, and it produced a
+false positive: under full-suite load a healthy in-flight flush can sit there
+transiently, and the check failed `async_flush_visibility_after_drain` — a test
+that passes in isolation. Replaced with an explicit failed-flush counter on the
+coordinator, which has no timing race.
+
+**A finding about the test environment, too.** Before this check, flushes were
+silently failing under tmpfs pressure during the full suite and nothing reported
+it. Running the suite with `TMPDIR` on real disk is what makes it green
+(2571/2571); on tmpfs the same run reports a genuine, previously invisible flush
+failure.

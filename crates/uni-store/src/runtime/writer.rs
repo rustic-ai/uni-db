@@ -4525,7 +4525,34 @@ impl Writer {
                 })?;
         }
         let _flush_lock_guard = self.flush_lock.lock().await;
-        self.flush_inline_under_lock(name).await
+        let manifest = self.flush_inline_under_lock(name).await?;
+
+        // The barrier's contract is "all writes are now durably in Lance", so a
+        // flush whose stream phase FAILED must not be reported as success.
+        //
+        // Draining does not surface it: the failure decrements `pending_count`,
+        // so the drain completes normally. And the inline flush above cannot
+        // repair it, because it only ever writes `get_current()` — never an L0
+        // stranded on `pending_flush` by an earlier failure. So `flush_to_l1`
+        // would return Ok having flushed nothing. Observed with a Lance write
+        // failing on `Disk quota exceeded`: the ANN index build then found no
+        // table, declined at debug level, and every query silently served an
+        // exact scan from L0.
+        //
+        // The count is used rather than `pending_flush.len()`, which was tried
+        // first and is a false-positive proxy: under load a buffer can sit there
+        // transiently for a perfectly healthy in-flight flush.
+        if let Some(coord) = self.flush_coordinator.as_ref() {
+            let failed = coord.failed_flush_count();
+            if failed > 0 {
+                return Err(anyhow::anyhow!(
+                    "flush_to_l1 barrier not established: {failed} async flush(es) have failed and \
+                     their L0 is stranded; the WAL retains that data and replay recovers it on \
+                     restart, but it is NOT in Lance and no later flush picks it up"
+                ));
+            }
+        }
+        Ok(manifest)
     }
 
     /// Flush L0→L1 and capture the fork point under one held `flush_lock`.
