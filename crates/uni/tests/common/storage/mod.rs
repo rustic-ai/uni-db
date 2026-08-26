@@ -2,6 +2,7 @@ pub mod async_flush_basic;
 pub mod async_flush_repro;
 pub mod auto_flush_test;
 pub mod backup_test;
+pub mod bulk_multi_label;
 pub mod collection_types_test;
 pub mod compaction_edge_cases;
 pub mod compaction_granular_test;
