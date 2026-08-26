@@ -5,9 +5,18 @@
 //! and the read-set recording cost on a read-heavy transaction.
 //!
 //! ```bash
-//! cargo bench --bench ssi_commit_overhead                  # baseline
-//! cargo bench --bench ssi_commit_overhead --features ssi   # ssi on; compare
+//! cargo bench --bench ssi_commit_overhead
 //! ```
+//!
+//! # The off arm
+//!
+//! An earlier revision of this header told you to pass `--features ssi`. **There
+//! is no such feature** -- SSI/OCC is always compiled and toggled at runtime via
+//! `UniConfig::ssi_enabled` (default `true`), so cargo rejects the flag and the
+//! comparison this bench documents has never been runnable from it. Until this
+//! bench sweeps both arms as cells the way `ssi_contention.rs` does, run the off
+//! arm by building the database with
+//! `Uni::in_memory().config(UniConfig { ssi_enabled: false, ..Default::default() })`.
 //!
 //! - `small_commit` — single-vertex RMW commit. The ssi-on delta is the
 //!   validate + `WriteSet::from_l0` + registry-insert cost. Target: < 10%.
