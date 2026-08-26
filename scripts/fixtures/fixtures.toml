@@ -1,0 +1,124 @@
+# Benchmark fixtures too large to commit, pinned by digest.
+#
+# Every entry is fetched and verified by `scripts/fixtures/fetch.py`. Read
+# `docs/fixtures.md` before adding one.
+#
+# The three rules that make a pin mean something:
+#
+#   1. `revision` is a 40-hex commit sha, never a branch. A branch moves, which
+#      turns a pinned digest into a spurious failure and makes a published
+#      benchmark number unreproducible.
+#   2. `digest` is what the *Hub publishes* for that path at that revision --
+#      `lfs.oid` (sha256) for LFS-backed files, the git blob sha1 for small
+#      plain ones. Generate an entry with
+#      `fetch.py --emit-entry REPO PATH --revision SHA` rather than by hand, and
+#      re-assert it with `fetch.py --check-upstream`.
+#   3. Nothing here is optional. A missing digest is a hard error, not an
+#      unverified download.
+
+schema = 1
+
+# --- BEIR SciFact -----------------------------------------------------------
+#
+# Corpus and queries live in `BeIR/scifact`; the relevance judgements are a
+# separate repo. Two repos and both digest algorithms, which is why this is the
+# fixture the fetch layer was first proven against.
+
+[[fixture]]
+name        = "beir-scifact-corpus"
+repo        = "BeIR/scifact"
+repo_type   = "dataset"
+revision    = "b3b5335604bf5ee3c4447671af975ea25143d4f5"
+path        = "corpus/corpus-00000-of-00001.parquet"
+digest_algo = "sha256"
+digest      = "243324b35f03d82bd6d98a5f575966876e86cad7ce16e5333a35b1b793dc4f45"
+bytes       = 4469916
+license     = "cc-by-sa-4.0"
+consumer    = "E2b -- BEIR nDCG@10"
+produced_by = "upstream: BeIR/scifact"
+
+[[fixture]]
+name        = "beir-scifact-queries"
+repo        = "BeIR/scifact"
+repo_type   = "dataset"
+revision    = "b3b5335604bf5ee3c4447671af975ea25143d4f5"
+path        = "queries/queries-00000-of-00001.parquet"
+digest_algo = "sha256"
+digest      = "1c37956c5dc8b810b60302323c24d1a9e79e26411ba8f5ad9d0888642e2a9034"
+bytes       = 64982
+license     = "cc-by-sa-4.0"
+consumer    = "E2b -- BEIR nDCG@10"
+produced_by = "upstream: BeIR/scifact"
+
+# Small enough that the Hub stores it as a plain git blob rather than LFS, so
+# the published digest is a git blob sha1. Verified with the same rigour as the
+# sha256 entries -- skipping the non-LFS case would be a silent-pass path.
+[[fixture]]
+name        = "beir-scifact-qrels-test"
+repo        = "BeIR/scifact-qrels"
+repo_type   = "dataset"
+revision    = "2938d17dc3b09882fdb8c12bbbe2e2dc0e75a029"
+path        = "test.tsv"
+digest_algo = "sha1-git"
+digest      = "c62f58c75f10c0cee23483b7269bff2902ae4080"
+bytes       = 5389
+license     = "cc-by-sa-4.0"
+consumer    = "E2b -- BEIR nDCG@10"
+produced_by = "upstream: BeIR/scifact-qrels"
+
+# --- SIFT-1M (TEXMEX/INRIA), mirrored on the Hub ---------------------------
+#
+# The canonical ANN benchmark corpus. Byte sizes are structurally exact and are
+# asserted by the consumer, not merely recorded:
+#
+#   base   1_000_000 x (4 + 128*4) =   516_000_000
+#   query     10_000 x (4 + 128*4) =     5_160_000
+#   gt        10_000 x (4 + 100*4) =     4_040_000
+#
+# A file of the right length in the wrong slot -- query pinned as base, say --
+# cannot survive that arithmetic, which is why the reader recomputes it rather
+# than trusting the manifest's `bytes`.
+#
+# Provenance note: upstream is TEXMEX at INRIA, served over FTP, which publishes
+# no checksum of its own. These digests pin *this Hub mirror*, which is the
+# strongest honest claim available -- see docs/fixtures.md, "What verified
+# means". The mirror declares apache-2.0.
+
+[[fixture]]
+name        = "sift1m-base"
+repo        = "qbo-odp/sift1m"
+repo_type   = "dataset"
+revision    = "bd8ccad6c2a0a0a3a7519f6d37c0e5a2d59fe55b"
+path        = "sift_base.fvecs"
+digest_algo = "sha256"
+digest      = "21f66e2975057b5728ba56de1c825bac4f4d89d596609ae985741c6242631816"
+bytes       = 516000000
+license     = "apache-2.0 (mirror); upstream TEXMEX/INRIA states none"
+consumer    = "E2a -- ANN recall-vs-QPS curves"
+produced_by = "upstream: TEXMEX ftp://ftp.irisa.fr/local/texmex/corpus/sift.tar.gz, via qbo-odp/sift1m"
+
+[[fixture]]
+name        = "sift1m-query"
+repo        = "qbo-odp/sift1m"
+repo_type   = "dataset"
+revision    = "bd8ccad6c2a0a0a3a7519f6d37c0e5a2d59fe55b"
+path        = "sift_query.fvecs"
+digest_algo = "sha256"
+digest      = "f7fc9be140accdfd64116c2fa2365ecdb69b8f084970c6b0532db5ff79ac8fdc"
+bytes       = 5160000
+license     = "apache-2.0 (mirror); upstream TEXMEX/INRIA states none"
+consumer    = "E2a -- ANN recall-vs-QPS curves"
+produced_by = "upstream: TEXMEX, via qbo-odp/sift1m"
+
+[[fixture]]
+name        = "sift1m-groundtruth"
+repo        = "qbo-odp/sift1m"
+repo_type   = "dataset"
+revision    = "bd8ccad6c2a0a0a3a7519f6d37c0e5a2d59fe55b"
+path        = "sift_groundtruth.ivecs"
+digest_algo = "sha256"
+digest      = "2b71de0a8d5a83e6a84eec3e23fb8b611d8801dd9b3a6cd62f070ab65ea65f4f"
+bytes       = 4040000
+license     = "apache-2.0 (mirror); upstream TEXMEX/INRIA states none"
+consumer    = "E2a -- ANN recall-vs-QPS curves; externally-defined top-100 per query"
+produced_by = "upstream: TEXMEX, via qbo-odp/sift1m"
