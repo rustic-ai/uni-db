@@ -21,6 +21,7 @@ pub mod explain_test;
 pub mod int_arithmetic_overflow_test;
 pub mod map_literal_test;
 pub mod map_projection_test;
+pub mod mixed_type_list_literal_test;
 pub mod normalization_test;
 pub mod not_operator_test;
 pub mod null_handling_test;

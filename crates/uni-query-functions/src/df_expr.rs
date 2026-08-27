@@ -3311,6 +3311,33 @@ fn coerce_scalar_function(
         .map(|a| apply_type_coercion(a, schema))
         .collect::<Result<Vec<_>>>()?;
 
+    // A Cypher list literal is heterogeneous by definition, but `make_array`
+    // requires one child type. `translate_list_literal` routes mixed lists to
+    // `_make_cypher_list`, yet it decides *syntactically* — `TranslationContext`
+    // carries no field types, so `[u.name, u.classYear]` looks uniform to it and
+    // lowers to `make_array` whatever the columns hold. Here the `DFSchema` is
+    // available, so the same decision can be made on actual types.
+    //
+    // Worth doing even though a plan-time error would be survivable: `make_array`
+    // over `[Utf8, Int64]` *plans* successfully and then trips an assertion in
+    // Arrow's `MutableArrayData`, which aborts the process. Only lists that are
+    // genuinely mixed are rewritten, so the native path — and with it the
+    // `uni_raw_bytes` list-child marking invariant, which `is_markable_list`
+    // already declines to apply to mixed lists — is untouched.
+    if func.func.name().eq_ignore_ascii_case("make_array") && coerced_args.len() > 1 {
+        let types: Vec<_> = coerced_args
+            .iter()
+            .filter_map(|a| a.get_type(schema).ok())
+            .filter(|t| !matches!(t, DataType::Null))
+            .collect();
+        let has_mixed_types = types.windows(2).any(|w| w[0] != w[1]);
+        if has_mixed_types {
+            // `_make_cypher_list` is `VariadicAny` and converts every argument
+            // through `Value`, so the arguments need no casting first.
+            return Ok(dummy_udf_expr("_make_cypher_list", coerced_args));
+        }
+    }
+
     if func.func.name().eq_ignore_ascii_case("coalesce") && coerced_args.len() > 1 {
         let types: Vec<_> = coerced_args
             .iter()
