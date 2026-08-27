@@ -189,3 +189,68 @@ async fn unanchored_pattern_predicate_control() {
         .unwrap();
     assert_eq!(r.rows().len(), 3);
 }
+
+/// A pattern variable must shadow an outer column of the same name.
+///
+/// The fallback declares the outer row's bare columns in the subquery's scope so
+/// the comprehension can correlate through any value, not only through a property
+/// access. Without excluding the pattern's own bindings, `a` here would resolve to
+/// the outer `a` and the pattern would stop being a fresh match.
+#[tokio::test]
+async fn a_pattern_variable_shadows_an_outer_column_of_the_same_name() {
+    let db = fixture().await;
+    let r = db
+        .session()
+        .query(
+            "MATCH (p:P {name:'c'}) WITH p.name AS a \
+             RETURN a, [(a:P)-[:KNOWS]->(b:P) | a.name] AS l",
+        )
+        .await
+        .unwrap();
+    assert_eq!(r.rows().len(), 1);
+    assert_eq!(r.rows()[0].values()[0], Value::String("c".to_string()));
+    // The pattern's own `a` is the KNOWS source, not the outer string 'c'.
+    assert_eq!(
+        as_list(&r.rows()[1 - 1].values()[1]),
+        vec![Value::String("a".to_string())]
+    );
+}
+
+/// Correlating through an outer variable, which the fallback must resolve by
+/// declaring the outer row's bare columns in the subquery's scope.
+///
+/// LDBC SNB IC14 correlates the same way but reaches its outer relationship via
+/// `startNode(r).id`. That form cannot be tested here because `startNode(e).name`
+/// does not plan at all — `MATCH ()-[e:KNOWS]->() RETURN startNode(e).name` fails
+/// with `Schema error: No field named e`, with no comprehension involved. It is
+/// an independent defect, reported separately.
+#[tokio::test]
+async fn correlates_through_an_outer_variable() {
+    let db = fixture().await;
+    let r = db
+        .session()
+        .query(
+            "MATCH (n:P) RETURN n.name AS name, \
+             [(a:P)-[:KNOWS]->(b:P) WHERE a.name = n.name | a.name] AS l",
+        )
+        .await
+        .unwrap();
+    let mut got: Vec<(String, usize)> = r
+        .rows()
+        .iter()
+        .map(|row| match &row.values()[0] {
+            Value::String(s) => (s.clone(), as_list(&row.values()[1]).len()),
+            other => panic!("expected a name, got {other:?}"),
+        })
+        .collect();
+    got.sort();
+    // Only 'a' is a KNOWS source, so only that outer row correlates.
+    assert_eq!(
+        got,
+        vec![
+            ("a".to_string(), 1),
+            ("b".to_string(), 0),
+            ("c".to_string(), 0)
+        ]
+    );
+}

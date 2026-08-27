@@ -808,8 +808,31 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
             ],
         });
 
+        let mut pattern_vars: HashSet<String> = HashSet::new();
+        for path in &pattern.paths {
+            if let Some(v) = &path.variable {
+                pattern_vars.insert(v.clone());
+            }
+            for elem in &path.elements {
+                match elem {
+                    uni_cypher::ast::PatternElement::Node(n) => {
+                        if let Some(v) = &n.variable {
+                            pattern_vars.insert(v.clone());
+                        }
+                    }
+                    uni_cypher::ast::PatternElement::Relationship(r) => {
+                        if let Some(v) = &r.variable {
+                            pattern_vars.insert(v.clone());
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
         Ok(Arc::new(PatternComprehensionSubqueryExpr {
             query,
+            pattern_vars,
             graph_ctx: self
                 .graph_ctx
                 .clone()
@@ -2631,6 +2654,10 @@ impl PhysicalExpr for ExistsExecExpr {
 /// baseline to be measured against.
 struct PatternComprehensionSubqueryExpr {
     query: Query,
+    /// Names the pattern itself binds. An outer column of the same name must not
+    /// be declared in scope, or the planner would treat the pattern's fresh
+    /// binding as a reference to the outer one and silently change the query.
+    pattern_vars: HashSet<String>,
     graph_ctx: Arc<GraphExecutionContext>,
     session_ctx: Arc<RwLock<SessionContext>>,
     storage: Arc<StorageManager>,
@@ -2721,9 +2748,33 @@ impl PhysicalExpr for PatternComprehensionSubqueryExpr {
                 entity_vars.insert(name.to_string());
             }
         }
-        let vars_in_scope: Vec<String> = entity_vars.iter().cloned().collect();
+        // Everything the outer row carries under a bare name is in scope for the
+        // subquery, not just entity variables: a comprehension may correlate
+        // through any value, and `startNode(r).id` — how LDBC IC14 correlates —
+        // reaches `r` inside a function call rather than as a property access, so
+        // the property-access rewrite below never sees it. `extract_row_params`
+        // already supplies these by column name, and `arrow_to_json_value`
+        // decodes a CypherValue column, so an edge arrives as an edge.
+        let mut vars_in_scope: HashSet<String> = entity_vars.clone();
+        for field in schema.fields() {
+            let name = field.name();
+            if !name.contains('.') && !name.starts_with('_') {
+                vars_in_scope.insert(name.clone());
+            }
+        }
+        // A pattern variable shadows an outer column of the same name.
+        for v in &self.pattern_vars {
+            vars_in_scope.remove(v);
+        }
+        let vars_in_scope: Vec<String> = vars_in_scope.into_iter().collect();
 
-        let rewritten_query = rewrite_query_correlated(&self.query, &entity_vars);
+        // Only genuine entity variables drive the property-access rewrite; a
+        // shadowed name must not be rewritten to an outer parameter either.
+        let correlated_vars: HashSet<String> = entity_vars
+            .difference(&self.pattern_vars)
+            .cloned()
+            .collect();
+        let rewritten_query = rewrite_query_correlated(&self.query, &correlated_vars);
 
         // Planned once; the rewrite turned correlated references into parameters,
         // so the plan is the same for every row.
@@ -2760,13 +2811,13 @@ impl PhysicalExpr for PatternComprehensionSubqueryExpr {
                     })?;
 
                 let mut combined_entity_vars = self.outer_entity_vars.clone();
-                combined_entity_vars.extend(entity_vars.iter().cloned());
+                combined_entity_vars.extend(correlated_vars.iter().cloned());
 
                 for row_idx in 0..num_rows {
                     let row_params = extract_row_params(batch, row_idx);
                     let mut sub_params = base_params.clone();
                     sub_params.extend(row_params);
-                    for var in &entity_vars {
+                    for var in &correlated_vars {
                         let vid_key = format!("{}._vid", var);
                         if let Some(vid_val) = sub_params.get(&vid_key).cloned() {
                             sub_params.insert(var.clone(), vid_val);
