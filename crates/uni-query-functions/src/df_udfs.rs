@@ -4706,6 +4706,54 @@ cypher_scalar_udf! {
     }
 }
 
+/// Equality for `IN`, which must reconcile the two ways an entity reaches this
+/// UDF.
+///
+/// `translate_in_expression` rewrites a node/edge variable on the *left* of `IN`
+/// down to its bare `_vid` / `_eid` `Int64` column, because a list injected from
+/// a parameter holds ids rather than entities. It does not rewrite the right
+/// side, so a list built in the query itself — `[countryX, countryY]`, or
+/// anything from `collect()` — still holds whole entities. The comparison was
+/// then `Int` against `Node`, which is unequal for every row: `n IN [n]`
+/// returned false, silently and with no error.
+///
+/// Matching an entity against a bare id here restores the id-list contract the
+/// left-hand rewrite assumes, in the one place that can see both sides. It adds
+/// no new looseness to `IN`: because that rewrite already replaces the entity
+/// with its id, `n IN [1, 2]` compares ids today regardless.
+///
+/// Entity-against-entity is left to `cypher_eq`, which compares by identity.
+fn entity_aware_eq(left: &Value, right: &Value) -> Option<bool> {
+    fn entity_id(v: &Value) -> Option<i64> {
+        match v {
+            Value::Node(n) => Some(n.vid.as_u64() as i64),
+            Value::Edge(e) => Some(e.eid.as_u64() as i64),
+            // An entity that came through a projection arrives as a map carrying
+            // `_vid` / `_eid` alongside its properties, not as a typed `Node` or
+            // `Edge`. Both encodings are live: `cypher_eq`'s own entity arms are
+            // split the same way. Missing this one is what made the first attempt
+            // at this fix a no-op.
+            Value::Map(m) => m
+                .get("_vid")
+                .or_else(|| m.get("_eid"))
+                .and_then(|id| id.as_i64()),
+            _ => None,
+        }
+    }
+    match (entity_id(left), entity_id(right)) {
+        // Exactly one side is an entity and the other is a bare id.
+        (Some(id), None) => match right.as_i64() {
+            Some(other) => Some(id == other),
+            None => cypher_eq(left, right),
+        },
+        (None, Some(id)) => match left.as_i64() {
+            Some(other) => Some(id == other),
+            None => cypher_eq(left, right),
+        },
+        _ => cypher_eq(left, right),
+    }
+}
+
 // ============================================================================
 // _cypher_in(element, list) -> Boolean (nullable)
 // ============================================================================
@@ -4765,7 +4813,7 @@ cypher_scalar_udf! {
         // 3-valued comparison: cypher_eq returns Some(true/false) or None (indeterminate)
         let mut has_null = false;
         for item in items {
-            match cypher_eq(element, item) {
+            match entity_aware_eq(element, item) {
                 Some(true) => return Ok(Value::Bool(true)),
                 None => has_null = true,
                 Some(false) => {}
