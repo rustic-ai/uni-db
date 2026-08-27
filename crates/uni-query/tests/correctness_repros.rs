@@ -1049,6 +1049,7 @@ async fn repro_find04_hybrid_autoembed_swallowed() {
                 status: IndexStatus::Online,
                 ..Default::default()
             },
+            default_refine_factor: None,
         }))
         .unwrap();
         sm.add_index(IndexDefinition::JsonFullText(JsonFtsIndexConfig {
@@ -1256,6 +1257,7 @@ async fn repro_find09_metric_by_property_ignores_label() {
                 status: IndexStatus::Online,
                 ..Default::default()
             },
+            default_refine_factor: None,
         }))
         .unwrap();
         sm.add_index(IndexDefinition::Vector(VectorIndexConfig {
@@ -1269,6 +1271,7 @@ async fn repro_find09_metric_by_property_ignores_label() {
                 status: IndexStatus::Online,
                 ..Default::default()
             },
+            default_refine_factor: None,
         }))
         .unwrap();
     })
