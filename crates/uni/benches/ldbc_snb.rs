@@ -559,6 +559,35 @@ fn main() {
         );
     }
 
+    let out_dir = std::env::var("LDBC_OUT")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::env::temp_dir().join("ldbc-results"));
+    std::fs::create_dir_all(&out_dir).expect("create result dir");
+
+    // A query that aborts the *process* — issue #184 does, on a multi-TB
+    // allocation — takes every query after it down too, so eight of the fourteen
+    // were never measured at all. The per-query deadline cannot help: an abort is
+    // not catchable.
+    //
+    // So when the graph is persistent, the parent supervises. Each child runs the
+    // remaining queries in-process, writing a status file as it finishes each one;
+    // if it dies, the first query with no status is the one that killed it, and
+    // the parent records that and restarts after it. Running the *rest* in-process
+    // rather than one child per query keeps caches warm, which is the condition an
+    // Interactive workload is supposed to be measured under.
+    let resume_from: Option<usize> = std::env::var("LDBC_FROM").ok().and_then(|v| v.parse().ok());
+    if resume_from.is_none() && persist.is_some() {
+        supervise(&out_dir);
+        return;
+    }
+    let start = resume_from.unwrap_or(0);
+    if resume_from.is_none() && persist.is_some() {
+        // Close this handle before any child opens the same directory.
+        drop(db);
+        supervise(&out_dir);
+        return;
+    }
+
     eprintln!("[ldbc] deriving substitution parameters…");
     let bound = rt
         .block_on(params::derive(&db))
@@ -570,13 +599,8 @@ fn main() {
         println!("- `{k}` = `{:?}`", bound[k]);
     }
 
-    let out_dir = std::env::var("LDBC_OUT")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| std::env::temp_dir().join("ldbc-results"));
-    std::fs::create_dir_all(&out_dir).expect("create result dir");
-
     let mut runs: Vec<QueryRun> = Vec::new();
-    for (name, cypher) in QUERIES {
+    for (name, cypher) in QUERIES.iter().skip(start) {
         match rt.block_on(run_query(&db, cypher, &bound)) {
             Ok((rows, ms, dump, m)) => {
                 std::fs::write(out_dir.join(format!("{name}.tsv")), format_rows(&dump))
@@ -586,7 +610,7 @@ fn main() {
                     "[ldbc]   {name:<5} {rows:>6} rows  {ms:>9.1} ms                       idx_scans={} cmp={} scans_reported={} peak_rss={rss}MiB",
                     m.index_scans, m.index_comparisons, m.scans_reported
                 );
-                runs.push(QueryRun {
+                let run = QueryRun {
                     name,
                     rows,
                     ms,
@@ -595,11 +619,13 @@ fn main() {
                     scans_reported: m.scans_reported,
                     peak_rss_mib: rss,
                     error: None,
-                });
+                };
+                write_status(&out_dir, &run);
+                runs.push(run);
             }
             Err(e) => {
                 eprintln!("[ldbc]   {name:<5} ERROR {e}");
-                runs.push(QueryRun {
+                let run = QueryRun {
                     name,
                     rows: 0,
                     ms: 0.0,
@@ -608,11 +634,107 @@ fn main() {
                     scans_reported: 0,
                     peak_rss_mib: peak_rss_mib(),
                     error: Some(e.to_string()),
-                });
+                };
+                write_status(&out_dir, &run);
+                runs.push(run);
             }
         }
     }
-    query_report(&runs, &out_dir);
+    if resume_from.is_none() {
+        query_report(&runs, &out_dir);
+    }
+}
+
+/// One line per query, so the parent can reassemble a run that spanned several
+/// processes. Tab-separated and written eagerly — a status that is not on disk
+/// when a child dies is exactly the signal the supervisor needs.
+fn write_status(out_dir: &std::path::Path, r: &QueryRun) {
+    let line = format!(
+        "{}\t{}\t{}\t{}\t{}\t{}\t{}",
+        r.rows,
+        r.ms,
+        r.index_scans,
+        r.index_comparisons,
+        r.scans_reported,
+        r.peak_rss_mib,
+        r.error.as_deref().unwrap_or("")
+    );
+    let _ = std::fs::write(out_dir.join(format!("{}.status", r.name)), line);
+}
+
+fn read_status(out_dir: &std::path::Path, name: &'static str) -> Option<QueryRun> {
+    let raw = std::fs::read_to_string(out_dir.join(format!("{name}.status"))).ok()?;
+    let f: Vec<&str> = raw.split('\t').collect();
+    if f.len() < 7 {
+        return None;
+    }
+    Some(QueryRun {
+        name,
+        rows: f[0].parse().ok()?,
+        ms: f[1].parse().ok()?,
+        index_scans: f[2].parse().ok()?,
+        index_comparisons: f[3].parse().ok()?,
+        scans_reported: f[4].parse().ok()?,
+        peak_rss_mib: f[5].parse().ok()?,
+        error: if f[6].is_empty() {
+            None
+        } else {
+            Some(f[6].to_string())
+        },
+    })
+}
+
+/// Run the query set across as many child processes as it takes, and report once.
+fn supervise(out_dir: &std::path::Path) {
+    for (name, _) in QUERIES {
+        let _ = std::fs::remove_file(out_dir.join(format!("{name}.status")));
+    }
+    let exe = std::env::current_exe().expect("current exe");
+
+    let mut next = 0usize;
+    while next < QUERIES.len() {
+        let status = std::process::Command::new(&exe)
+            .env("LDBC_FROM", next.to_string())
+            .status();
+
+        // The first query with no status file is the one that stopped the child.
+        let missing = (next..QUERIES.len()).find(|i| read_status(out_dir, QUERIES[*i].0).is_none());
+        let Some(i) = missing else { break };
+
+        let died = !matches!(&status, Ok(s) if s.success());
+        if !died {
+            // Exited cleanly yet left a gap: nothing more will fill it.
+            eprintln!(
+                "[ldbc]   {:<5} no result and the child exited cleanly",
+                QUERIES[i].0
+            );
+        }
+        let how = match &status {
+            Ok(s) => format!("child exited with {s}"),
+            Err(e) => format!("could not run child: {e}"),
+        };
+        eprintln!("[ldbc]   {:<5} ABORTED the process ({how})", QUERIES[i].0);
+        write_status(
+            out_dir,
+            &QueryRun {
+                name: QUERIES[i].0,
+                rows: 0,
+                ms: 0.0,
+                index_scans: 0,
+                index_comparisons: 0,
+                scans_reported: 0,
+                peak_rss_mib: 0,
+                error: Some(format!("aborted the process — {how}")),
+            },
+        );
+        next = i + 1;
+    }
+
+    let runs: Vec<QueryRun> = QUERIES
+        .iter()
+        .filter_map(|(name, _)| read_status(out_dir, name))
+        .collect();
+    query_report(&runs, out_dir);
 }
 
 /// Newline-delimited rows, each tab-joined. Deliberately plain so the oracle can
