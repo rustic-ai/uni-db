@@ -42,6 +42,7 @@ pub mod return_expressions_test;
 pub mod stddev_variance_test;
 pub mod temporal_property_type_test;
 pub mod type_conversion_test;
+pub mod unanchored_pattern_comprehension_test;
 pub mod where_clause_test;
 pub mod where_debug_test;
 pub mod window_execution_test;

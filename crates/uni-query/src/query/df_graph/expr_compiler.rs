@@ -15,18 +15,22 @@ use crate::query::df_graph::quantifier::{QuantifierExecExpr, QuantifierType};
 use crate::query::df_graph::raw_bytes_marker;
 use crate::query::df_graph::reduce::ReduceExecExpr;
 use crate::query::df_graph::similar_to_expr::SimilarToExecExpr;
+use crate::query::df_graph::unwind::arrow_to_json_value;
 use crate::query::planner::QueryPlanner;
 use crate::query::similar_to::SimilarToError;
 use anyhow::{Result, anyhow};
 use arrow_array::builder::BooleanBuilder;
 use arrow_schema::{DataType, Field, Schema};
+use datafusion::arrow::buffer::{OffsetBuffer, ScalarBuffer};
 use datafusion::execution::context::SessionState;
 use datafusion::physical_expr::expressions::binary;
 use datafusion::physical_plan::PhysicalExpr;
 use datafusion::physical_planner::PhysicalPlanner;
 use datafusion::prelude::SessionContext;
 use parking_lot::RwLock;
+use std::any::Any;
 use std::collections::{HashMap, HashSet};
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use uni_common::Value;
 use uni_common::core::schema::{DistanceMetric, IndexDefinition, Schema as UniSchema};
@@ -764,6 +768,63 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
         )
     }
 
+    /// Evaluate a pattern comprehension as `MATCH <pattern> WHERE <w> RETURN <map>`,
+    /// run per outer row.
+    ///
+    /// Used when the pattern has no node bound in the outer scope. The synthesized
+    /// query is the comprehension's own semantics written out longhand, so the
+    /// existing correlated-subquery machinery — `rewrite_query_correlated`,
+    /// `plan_with_scope`, `execute_subplan_with_outer_vars` — evaluates it without
+    /// needing to understand pattern comprehensions at all.
+    fn compile_pattern_comprehension_as_subquery(
+        &self,
+        pattern: &uni_cypher::ast::Pattern,
+        where_clause: Option<&Expr>,
+        map_expr: &Expr,
+    ) -> Result<Arc<dyn PhysicalExpr>> {
+        use uni_cypher::ast::{Clause, MatchClause, Query, ReturnClause, ReturnItem, Statement};
+
+        let err = |dep: &str| anyhow!("Pattern comprehension fallback requires {}", dep);
+
+        let query = Query::Single(Statement {
+            clauses: vec![
+                Clause::Match(MatchClause {
+                    optional: false,
+                    pattern: pattern.clone(),
+                    where_clause: where_clause.cloned(),
+                    for_update: false,
+                }),
+                Clause::Return(ReturnClause {
+                    distinct: false,
+                    items: vec![ReturnItem::Expr {
+                        expr: map_expr.clone(),
+                        alias: Some("__pc_item".to_string()),
+                        source_text: None,
+                    }],
+                    order_by: None,
+                    skip: None,
+                    limit: None,
+                }),
+            ],
+        });
+
+        Ok(Arc::new(PatternComprehensionSubqueryExpr {
+            query,
+            graph_ctx: self
+                .graph_ctx
+                .clone()
+                .ok_or_else(|| err("GraphExecutionContext"))?,
+            session_ctx: self
+                .session_ctx
+                .clone()
+                .ok_or_else(|| err("SessionContext"))?,
+            storage: self.storage.clone().ok_or_else(|| err("StorageManager"))?,
+            uni_schema: self.uni_schema.clone().ok_or_else(|| err("UniSchema"))?,
+            params: self.params.clone(),
+            outer_entity_vars: self.outer_entity_vars.clone(),
+        }))
+    }
+
     /// Compile bracket access on a struct column (e.g. `x['a']` where `x` is Struct).
     fn compile_array_index(
         &self,
@@ -1425,8 +1486,28 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
             .ok_or_else(|| err("GraphExecutionContext"))?;
         let uni_schema = self.uni_schema.as_ref().ok_or_else(|| err("UniSchema"))?;
 
-        // 1. Analyze pattern to get anchor column and traversal steps
-        let (anchor_col, steps) = analyze_pattern(pattern, input_schema, uni_schema)?;
+        // 1. Analyze pattern to get anchor column and traversal steps.
+        //
+        // Failure here means no pattern node is bound in the outer scope, so
+        // there is nothing to expand CSR adjacency *from*. That is not an invalid
+        // query — `[(a:P)-[:KNOWS]->(b:P) | a.name]` is legal openCypher — it is
+        // only outside what the vectorized operator can do. Fall back to
+        // evaluating the comprehension as a correlated subquery, mirroring what
+        // the `Expr::Exists` arm above already does when `compile_pattern_exists`
+        // cannot vectorize a pattern predicate.
+        let (anchor_col, steps) = match analyze_pattern(pattern, input_schema, uni_schema) {
+            Ok(analysis) => analysis,
+            Err(e) => {
+                log::debug!(
+                    "Pattern comprehension vectorization failed, falling back to subquery: {e}"
+                );
+                return self.compile_pattern_comprehension_as_subquery(
+                    pattern,
+                    where_clause,
+                    map_expr,
+                );
+            }
+        };
 
         // 2. Collect needed properties from where_clause and map_expr
         let (vertex_props, edge_props) = collect_inner_properties(where_clause, map_expr, &steps);
@@ -2522,6 +2603,254 @@ impl PhysicalExpr for ExistsExecExpr {
 
     fn fmt_sql(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Unanchored pattern comprehension
+// ---------------------------------------------------------------------------
+
+/// A pattern comprehension evaluated as a correlated subquery, one row at a time.
+///
+/// The vectorized operator (`PatternComprehensionExecExpr`) anchors on a pattern
+/// node that is already bound in the outer scope and walks CSR adjacency from its
+/// VID. When every pattern variable is fresh there is no such node, and
+/// `analyze_pattern` fails.
+///
+/// That is not a reason to reject the query: `[(a:P)-[:KNOWS]->(b:P) | a.name]`
+/// is legal openCypher, and pattern *predicates* in the same position already
+/// worked — `compile_pattern_exists` falls back to `ExistsExecExpr` when
+/// anchoring fails (see the `Expr::Exists` arm of `compile`). Comprehensions
+/// simply had no equivalent, which is the asymmetry this closes.
+///
+/// This is deliberately the *slow* path: the subquery is planned once and then
+/// executed per outer row, so an uncorrelated comprehension pays for a full
+/// evaluation on every row even though its value is identical each time. Making
+/// that case cheap is a planner rewrite (hoist it, evaluate once, broadcast) and
+/// is separate work; correctness comes first, and it gives that work a working
+/// baseline to be measured against.
+struct PatternComprehensionSubqueryExpr {
+    query: Query,
+    graph_ctx: Arc<GraphExecutionContext>,
+    session_ctx: Arc<RwLock<SessionContext>>,
+    storage: Arc<StorageManager>,
+    uni_schema: Arc<UniSchema>,
+    params: HashMap<String, Value>,
+    outer_entity_vars: HashSet<String>,
+}
+
+impl std::fmt::Debug for PatternComprehensionSubqueryExpr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PatternComprehensionSubqueryExpr")
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Display for PatternComprehensionSubqueryExpr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "PatternComprehensionSubquery")
+    }
+}
+
+impl PartialEq for PatternComprehensionSubqueryExpr {
+    fn eq(&self, other: &Self) -> bool {
+        self.query == other.query
+    }
+}
+
+impl Eq for PatternComprehensionSubqueryExpr {}
+
+impl Hash for PatternComprehensionSubqueryExpr {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        format!("{:?}", self.query).hash(state);
+    }
+}
+
+/// The item type of the produced list.
+///
+/// `LargeBinary` CypherValue, matching what the vectorized path produces for the
+/// common case of a property projection: `build_inner_schema` types vertex and
+/// edge properties as `LargeBinary`, so `[... | a.name]` is a
+/// `LargeList(LargeBinary)` there too. A fixed item type is required at plan
+/// time and the map expression's type is not known on this path, so encoding
+/// every element as a CypherValue is the one choice that cannot be wrong for a
+/// particular map expression.
+fn comprehension_item_field() -> Arc<Field> {
+    Arc::new(Field::new("item", DataType::LargeBinary, true))
+}
+
+impl PhysicalExpr for PatternComprehensionSubqueryExpr {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn data_type(
+        &self,
+        _input_schema: &Schema,
+    ) -> datafusion::error::Result<arrow_schema::DataType> {
+        Ok(DataType::LargeList(comprehension_item_field()))
+    }
+
+    fn nullable(&self, _input_schema: &Schema) -> datafusion::error::Result<bool> {
+        Ok(true)
+    }
+
+    fn evaluate(
+        &self,
+        batch: &arrow_array::RecordBatch,
+    ) -> datafusion::error::Result<datafusion::physical_plan::ColumnarValue> {
+        let num_rows = batch.num_rows();
+
+        // Identify the outer scope's entity variables from the batch schema, the
+        // same way `ExistsExecExpr` does, so correlated references inside the
+        // comprehension resolve against the current row.
+        let schema = batch.schema();
+        let mut entity_vars: HashSet<String> = HashSet::new();
+        for field in schema.fields() {
+            let name = field.name();
+            if let Some(base) = name.strip_suffix("._vid") {
+                entity_vars.insert(base.to_string());
+            }
+            if matches!(field.data_type(), DataType::Struct(_)) {
+                entity_vars.insert(name.to_string());
+            }
+            if !name.contains('.')
+                && !name.starts_with('_')
+                && matches!(field.data_type(), DataType::Int64 | DataType::UInt64)
+            {
+                entity_vars.insert(name.to_string());
+            }
+        }
+        let vars_in_scope: Vec<String> = entity_vars.iter().cloned().collect();
+
+        let rewritten_query = rewrite_query_correlated(&self.query, &entity_vars);
+
+        // Planned once; the rewrite turned correlated references into parameters,
+        // so the plan is the same for every row.
+        let planner = QueryPlanner::new(self.uni_schema.clone());
+        let logical_plan = planner
+            .plan_with_scope(rewritten_query, vars_in_scope)
+            .map_err(|e| {
+                datafusion::error::DataFusionError::Execution(format!(
+                    "pattern comprehension subquery planning failed: {e}"
+                ))
+            })?;
+
+        let graph_ctx = self.graph_ctx.clone();
+        let session_ctx = self.session_ctx.clone();
+        let storage = self.storage.clone();
+        let uni_schema = self.uni_schema.clone();
+        let base_params = self.params.clone();
+
+        // One list per outer row, flattened into `values` with `offsets` marking
+        // the boundaries — the LargeListArray layout.
+        let mut values: Vec<Option<Vec<u8>>> = Vec::new();
+        let mut offsets: Vec<i64> = Vec::with_capacity(num_rows + 1);
+        offsets.push(0);
+
+        let result = std::thread::scope(|s| {
+            s.spawn(|| {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(|e| {
+                        datafusion::error::DataFusionError::Execution(format!(
+                            "failed to create runtime for pattern comprehension: {e}"
+                        ))
+                    })?;
+
+                let mut combined_entity_vars = self.outer_entity_vars.clone();
+                combined_entity_vars.extend(entity_vars.iter().cloned());
+
+                for row_idx in 0..num_rows {
+                    let row_params = extract_row_params(batch, row_idx);
+                    let mut sub_params = base_params.clone();
+                    sub_params.extend(row_params);
+                    for var in &entity_vars {
+                        let vid_key = format!("{}._vid", var);
+                        if let Some(vid_val) = sub_params.get(&vid_key).cloned() {
+                            sub_params.insert(var.clone(), vid_val);
+                        }
+                    }
+
+                    let (batches, _plan) = rt.block_on(execute_subplan_with_outer_vars(
+                        &logical_plan,
+                        &sub_params,
+                        &HashMap::new(),
+                        &graph_ctx,
+                        &session_ctx,
+                        &storage,
+                        &uni_schema,
+                        &combined_entity_vars,
+                        None,
+                    ))?;
+
+                    // The synthesized query returns exactly one column — the
+                    // comprehension's map expression.
+                    for b in &batches {
+                        if b.num_columns() == 0 {
+                            continue;
+                        }
+                        let col = b.column(0);
+                        for i in 0..b.num_rows() {
+                            let v = arrow_to_json_value(col.as_ref(), i);
+                            values.push(Some(uni_common::cypher_value_codec::encode(&v)));
+                        }
+                    }
+                    offsets.push(values.len() as i64);
+                }
+
+                Ok::<_, datafusion::error::DataFusionError>(())
+            })
+            .join()
+            .unwrap_or_else(|_| {
+                Err(datafusion::error::DataFusionError::Execution(
+                    "pattern comprehension subquery thread panicked".to_string(),
+                ))
+            })
+        });
+        result?;
+
+        let values_array = arrow_array::LargeBinaryArray::from_iter(values);
+        // No null buffer: a row that matched nothing gets an empty list, never
+        // null — the same contract the vectorized path has.
+        let list = arrow_array::LargeListArray::new(
+            comprehension_item_field(),
+            OffsetBuffer::new(ScalarBuffer::from(offsets)),
+            Arc::new(values_array),
+            None,
+        );
+        Ok(datafusion::physical_plan::ColumnarValue::Array(Arc::new(
+            list,
+        )))
+    }
+
+    fn children(&self) -> Vec<&Arc<dyn PhysicalExpr>> {
+        vec![]
+    }
+
+    fn with_new_children(
+        self: Arc<Self>,
+        children: Vec<Arc<dyn PhysicalExpr>>,
+    ) -> datafusion::error::Result<Arc<dyn PhysicalExpr>> {
+        if !children.is_empty() {
+            return Err(datafusion::error::DataFusionError::Plan(
+                "PatternComprehensionSubqueryExpr has no children".to_string(),
+            ));
+        }
+        Ok(self)
+    }
+
+    fn fmt_sql(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self)
+    }
+}
+
+impl PartialEq<dyn Any> for PatternComprehensionSubqueryExpr {
+    fn eq(&self, other: &dyn Any) -> bool {
+        other
+            .downcast_ref::<Self>()
+            .is_some_and(|o| self.query == o.query)
     }
 }
 
