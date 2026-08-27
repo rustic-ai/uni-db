@@ -132,19 +132,52 @@ pub async fn derive(db: &Uni) -> anyhow::Result<HashMap<String, Value>> {
     )?;
     p.insert("tagClassName".to_string(), tag_class);
 
-    // The two countries with the most residents — IC3 compares activity across
-    // a pair, so both need to be populated.
-    let countries = db
+    // The two countries with the most *messages*.
+    //
+    // Residents were the obvious first choice and were the wrong quantity: IC3
+    // counts messages located in each country, and additionally requires the
+    // friend to live *outside* both. Picking the two most-populated countries
+    // therefore maximised exactly the set the query excludes, and IC3 returned
+    // zero rows against SF1 — a vacuous comparison that would have "agreed" with
+    // any oracle. Ranking by message count targets the quantity IC3 actually
+    // aggregates.
+    // Ranking globally still is not enough on its own: IC3 additionally requires
+    // a friend of the hub who lives outside *both* countries and posted in
+    // *both*. So the pair is derived from a friend that already has that shape,
+    // which makes non-emptiness structural rather than hoped for. The global
+    // ranking stays as a fallback for a graph where no such friend exists.
+    let paired = db
         .session()
-        .query(
-            "MATCH (c:Country)<-[:IS_PART_OF]-(:City)<-[:IS_LOCATED_IN]-(p:Person) \
-             WITH c, count(p) AS n RETURN c.name AS n2 ORDER BY n DESC LIMIT 2",
-        )
+        .query(&format!(
+            "MATCH (p:Person {{id: {hub_id}}})-[:KNOWS]-(f:Person) \
+             MATCH (f)-[:IS_LOCATED_IN]->(:City)-[:IS_PART_OF]->(home:Country) \
+             MATCH (f)<-[:HAS_CREATOR]-(m)-[:IS_LOCATED_IN]->(c:Country) \
+             WHERE c.name <> home.name \
+             WITH f, collect(DISTINCT c.name) AS cs \
+             WHERE size(cs) >= 2 \
+             RETURN cs[0] AS a, cs[1] AS b LIMIT 1"
+        ))
         .await?;
+    let countries = if paired.rows().is_empty() {
+        eprintln!(
+            "[ldbc] no friend of the hub posted from two countries outside their own; \
+             falling back to the globally busiest pair, which may leave IC3 empty"
+        );
+        db.session()
+            .query(
+                "MATCH (c:Country)<-[:IS_LOCATED_IN]-(m:Message) \
+                 WITH c, count(m) AS n RETURN c.name AS n2 ORDER BY n DESC LIMIT 2",
+            )
+            .await?
+    } else {
+        paired
+    };
+    // The paired form returns one row of two columns; the fallback returns two
+    // rows of one. Flattening handles both.
     let names: Vec<Value> = countries
         .rows()
         .iter()
-        .filter_map(|r| r.values().first().cloned())
+        .flat_map(|r| r.values().iter().cloned())
         .collect();
     anyhow::ensure!(
         names.len() >= 2,

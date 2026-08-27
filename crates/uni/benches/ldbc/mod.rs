@@ -219,6 +219,7 @@ fn read_lines(path: &Path) -> (Vec<ColRole>, Vec<String>) {
 pub async fn load_nodes(
     db: &Uni,
     entity: &str,
+    base_labels: &[&str],
     path: &Path,
     ids: &mut IdMap,
 ) -> anyhow::Result<FileStat> {
@@ -234,7 +235,7 @@ pub async fn load_nodes(
     for line in &lines {
         let cols: Vec<&str> = line.split('|').collect();
         let mut ext_id = 0i64;
-        let mut labels: Vec<String> = vec![entity.to_string()];
+        let mut labels: Vec<String> = base_labels.iter().map(|l| (*l).to_string()).collect();
         let mut props: HashMap<String, Value> = HashMap::new();
         for (i, role) in header.iter().enumerate() {
             let Some(raw) = cols.get(i) else { continue };
@@ -250,12 +251,15 @@ pub async fn load_nodes(
                     // (`:City`, `:University`) while the supertype (`:Place`)
                     // is equally part of the data, and dropping either would
                     // make a legitimate query silently return nothing.
-                    labels = raw
-                        .split(';')
-                        .map(str::trim)
-                        .filter(|s| !s.is_empty())
-                        .map(str::to_string)
-                        .collect();
+                    // Union with the base labels rather than replacing them:
+                    // the column carries the node's full label set for files
+                    // that have one, and the base set carries the supertype for
+                    // files that do not (Post/Comment are `:Message`).
+                    for l in raw.split(';').map(str::trim).filter(|s| !s.is_empty()) {
+                        if !labels.iter().any(|x| x == l) {
+                            labels.push(l.to_string());
+                        }
+                    }
                 }
                 ColRole::Prop(name, ty) => {
                     props.insert(name.clone(), ty.value(raw));

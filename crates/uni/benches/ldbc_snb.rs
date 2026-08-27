@@ -27,7 +27,7 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use tokio::runtime::Runtime;
-use uni_db::{DataType, Uni, UniConfig};
+use uni_db::{DataType, IndexType, QueryMetrics, ScalarType, Uni, UniConfig};
 
 #[path = "ldbc/mod.rs"]
 mod ldbc;
@@ -189,13 +189,35 @@ const EDGE_FILES: &[(&str, &str, &str, &str)] = &[
     ),
 ];
 
-/// Concrete labels a `:LABEL` column splits an entity into. LDBC's Cypher matches
-/// on these, not on the supertype.
+/// Labels every row of a file carries, independent of any `:LABEL` column.
+///
+/// Taken from LDBC's own import command
+/// (`cypher/scripts/import-to-neo4j.sh`: `--nodes=Post:Message=...`,
+/// `--nodes=Comment:Message=...`), which is the authoritative source — the CSVs
+/// do not encode the `Message` supertype anywhere. Without it, the
+/// `(message:Message)` patterns in IC2/IC5/IC8 match nothing.
+const BASE_LABELS: &[(&str, &[&str])] = &[
+    ("Post", &["Post", "Message"]),
+    ("Comment", &["Comment", "Message"]),
+];
+
+/// The labels rows of `entity` always carry.
+fn base_labels(entity: &str) -> Vec<&'static str> {
+    BASE_LABELS.iter().find(|(e, _)| *e == entity).map_or_else(
+        || vec![Box::leak(entity.to_string().into_boxed_str()) as &'static str],
+        |(_, ls)| ls.to_vec(),
+    )
+}
+
+/// Every label a file's rows may end up with: the base set plus anything a
+/// `:LABEL` column contributes. All of them must be declared up front.
 const SPLIT_LABELS: &[(&str, &[&str])] = &[
     // The supertype is listed too: LDBC rows carry `Place;City`, and the loader
     // now stores both, so both must be declared.
     ("Place", &["Place", "City", "Country", "Continent"]),
     ("Organisation", &["Organisation", "University", "Company"]),
+    ("Post", &["Post", "Message"]),
+    ("Comment", &["Comment", "Message"]),
 ];
 
 /// Concrete labels an entity is stored under, expanding any `:LABEL` split.
@@ -206,18 +228,39 @@ fn labels_of(entity: &str) -> Vec<&'static str> {
     )
 }
 
-/// Declare a label from its file's header, so the schema follows the data.
-async fn declare_from_header(db: &Uni, label: &str, header_line: &str) -> anyhow::Result<()> {
-    let roles = parse_header(header_line);
-    let mut b = db.schema().label(label).property("id", DataType::Int64);
-    for role in &roles {
-        if let ldbc::ColRole::Prop(name, ty) = role {
-            b = b.property(name, ty.to_uni());
-        }
+/// Declare one label from the union of the property sets its source files carry.
+///
+/// Nullable, deliberately. LDBC's schema has genuinely optional fields — a Post
+/// carries `imageFile` XOR `content`, never both — and a label fed by several
+/// files (`Message`) has columns only some of them provide. Declaring them
+/// non-nullable makes the L0->L1 flush fail with "Column 'imageFile' is declared
+/// as non-nullable but contains null values", which strands the batch.
+async fn declare_label(db: &Uni, label: &str, props: &[(String, DataType)]) -> anyhow::Result<()> {
+    let mut b = db
+        .schema()
+        .label(label)
+        .property_nullable("id", DataType::Int64);
+    for (name, ty) in props {
+        b = b.property_nullable(name, ty.clone());
+    }
+    // LDBC's own Neo4j setup creates id/name indexes before the driver runs, so a
+    // run without them is not measuring the same workload. Every complex read
+    // starts from an equality lookup — `Person {id: $personId}`,
+    // `Tag {name: $tagName}` — and the first instrumented run reported
+    // `index_scans=0` on all of them.
+    for (name, _) in std::iter::once(&("id".to_string(), DataType::Int64))
+        .chain(props.iter())
+        .filter(|(n, _)| INDEXED_PROPERTIES.contains(&n.as_str()))
+    {
+        b = b.index(name, IndexType::Scalar(ScalarType::BTree));
     }
     b.done().apply().await?;
     Ok(())
 }
+
+/// Properties the 14 complex reads filter or look up on. Indexing every column
+/// would inflate load time without changing what is measured.
+const INDEXED_PROPERTIES: &[&str] = &["id", "name", "firstName", "creationDate"];
 
 fn first_line(path: &std::path::Path) -> String {
     use std::io::{BufRead, BufReader};
@@ -258,7 +301,35 @@ struct QueryRun {
     name: &'static str,
     rows: usize,
     ms: f64,
+    /// Engine counters, so a slow query can be attributed rather than guessed at.
+    /// `scans_reported` is the denominator that separates "no index was used"
+    /// from "the callback never fired" — a zero in `index_scans` means nothing
+    /// without it.
+    index_scans: u64,
+    index_comparisons: u64,
+    scans_reported: u64,
+    /// Process peak RSS *after* this query, in MiB. Monotonic across the run, so
+    /// the interesting figure is the step between consecutive queries.
+    peak_rss_mib: u64,
     error: Option<String>,
+}
+
+/// Peak resident set size of this process, in MiB, from `VmHWM`.
+///
+/// `max_query_memory` defaults to 1 GiB, so if the process is killed while well
+/// above that the OS did it, not the engine's own guard — which is a finding
+/// about the guard, not just about the query.
+fn peak_rss_mib() -> u64 {
+    std::fs::read_to_string("/proc/self/status")
+        .ok()
+        .and_then(|s| {
+            s.lines()
+                .find_map(|l| l.strip_prefix("VmHWM:"))
+                .and_then(|v| v.split_whitespace().next().map(str::to_string))
+        })
+        .and_then(|kb| kb.parse::<u64>().ok())
+        .map(|kb| kb / 1024)
+        .unwrap_or(0)
 }
 
 /// Run one query with only the parameters it actually references — the set
@@ -267,7 +338,7 @@ async fn run_query(
     db: &Uni,
     cypher: &str,
     all: &HashMap<String, uni_db::Value>,
-) -> anyhow::Result<(usize, f64, Vec<Vec<String>>)> {
+) -> anyhow::Result<(usize, f64, Vec<Vec<String>>, QueryMetrics)> {
     // The session must outlive the builder that borrows it.
     let session = db.session();
     let mut q = session.query_with(cypher);
@@ -277,18 +348,39 @@ async fn run_query(
         }
     }
     let t = Instant::now();
-    let rows = q.fetch_all().await?;
+    // An Interactive-workload query that runs for minutes has already failed the
+    // benchmark's premise, and one that never returns stops the other thirteen
+    // from being measured at all. So the deadline records a result rather than
+    // guarding against one: "exceeded N s" is the measurement.
+    let budget = std::env::var("LDBC_QUERY_TIMEOUT")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(300);
+    let result = tokio::time::timeout(Duration::from_secs(budget), q.fetch_all()).await;
     let ms = t.elapsed().as_secs_f64() * 1000.0;
+    let rows = match result {
+        Ok(r) => r?,
+        Err(_) => anyhow::bail!("exceeded the {budget}s per-query budget"),
+    };
     // Stringified so the oracle can emit the same shape without both sides
     // sharing a serialization library.
     let dump: Vec<Vec<String>> = rows
         .iter()
         .map(|r| r.values().iter().map(|v| format!("{v:?}")).collect())
         .collect();
-    Ok((rows.len(), ms, dump))
+    let m = rows.metrics();
+    Ok((rows.len(), ms, dump, m.clone()))
 }
 
 fn main() {
+    // `LDBC_LOG=<filter>` installs a subscriber so the storage layer's own
+    // warnings are visible. A failed async flush logs its cause at `warn!`, and
+    // without a subscriber the barrier error says only that one failed.
+    if let Ok(filter) = std::env::var("LDBC_LOG") {
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(tracing_subscriber::EnvFilter::new(filter))
+            .try_init();
+    }
     if std::env::args().any(|a| a == "--test") {
         eprintln!("[ldbc] --test mode: this bench loads SF1; skipping");
         return;
@@ -342,26 +434,48 @@ fn main() {
     // --- schema, declared from the CSV headers -----------------------------
     if !already_loaded {
         eprintln!("[ldbc] declaring schema…");
+        // A label can be fed by more than one file — `Message` receives both
+        // Post and Comment, which have different columns (`imageFile` and
+        // `language` are Post-only). Declaring it once per file would apply two
+        // different schemas for the same label and the second would not describe
+        // the rows the first wrote. So the property sets are unioned per label
+        // and each label is declared exactly once, as edge types already are.
+        let mut label_props: HashMap<String, Vec<(String, DataType)>> = HashMap::new();
         for (entity, fixture_name) in NODE_FILES {
-            let path = fixture(fixture_name);
-            let header = first_line(&path);
+            let header = first_line(&fixture(fixture_name));
             let labels: Vec<&str> = SPLIT_LABELS
                 .iter()
                 .find(|(e, _)| e == entity)
                 .map_or_else(|| vec![*entity], |(_, ls)| ls.to_vec());
             for label in labels {
-                rt.block_on(declare_from_header(&db, label, &header))
-                    .unwrap_or_else(|e| panic!("declare {label}: {e}"));
+                let props = label_props.entry(label.to_string()).or_default();
+                for role in parse_header(&header) {
+                    if let ldbc::ColRole::Prop(name, ty) = role
+                        && !props.iter().any(|(n, _)| *n == name)
+                    {
+                        props.push((name, ty.to_uni()));
+                    }
+                }
             }
+        }
+        for (label, props) in &label_props {
+            rt.block_on(declare_label(&db, label, props))
+                .unwrap_or_else(|e| panic!("declare {label}: {e}"));
         }
         // Several LDBC edge types span more than one endpoint pair — IS_LOCATED_IN
         // connects Person, Post, Comment and Organisation to places; HAS_TAG and
         // LIKES and REPLY_OF likewise. So the src/dst label sets are aggregated per
         // type and the type is declared once, rather than per file.
         let mut edge_labels: HashMap<String, (Vec<String>, Vec<String>)> = HashMap::new();
-        for (stem, _, src, dst) in EDGE_FILES {
+        // Edge properties are declared from the file headers too. Left
+        // undeclared they are stored as an `overflow_json` blob and surface as
+        // opaque CypherValue at query time, which is correct-by-design for a
+        // schemaless property but means LDBC's typed columns (`classYear:INT`,
+        // `creationDate:LONG`) would lose their types for no reason.
+        let mut edge_props: HashMap<String, Vec<(String, DataType)>> = HashMap::new();
+        for (stem, fixture_name, src, dst) in EDGE_FILES {
             let et = edge_type_from_filename(stem).expect("edge type from filename");
-            let e = edge_labels.entry(et).or_default();
+            let e = edge_labels.entry(et.clone()).or_default();
             for l in labels_of(src) {
                 if !e.0.iter().any(|x| x == l) {
                     e.0.push(l.to_string());
@@ -372,11 +486,26 @@ fn main() {
                     e.1.push(l.to_string());
                 }
             }
+            let props = edge_props.entry(et).or_default();
+            for role in parse_header(&first_line(&fixture(fixture_name))) {
+                if let ldbc::ColRole::Prop(name, ty) = role
+                    && !props.iter().any(|(n, _)| *n == name)
+                {
+                    props.push((name, ty.to_uni()));
+                }
+            }
         }
         for (et, (from, to)) in &edge_labels {
             let from_r: Vec<&str> = from.iter().map(String::as_str).collect();
             let to_r: Vec<&str> = to.iter().map(String::as_str).collect();
-            rt.block_on(db.schema().edge_type(et, &from_r, &to_r).apply())
+            let mut b = db.schema().edge_type(et, &from_r, &to_r);
+            for (name, ty) in edge_props.get(et).into_iter().flatten() {
+                // Nullable for the same reason as vertex properties: an edge
+                // type appearing in more than one file (IS_LOCATED_IN, HAS_TAG)
+                // has a property only some of those files carry.
+                b = b.property_nullable(name, ty.clone());
+            }
+            rt.block_on(b.apply())
                 .unwrap_or_else(|e| panic!("declare edge {et}: {e}"));
         }
 
@@ -385,8 +514,9 @@ fn main() {
         let mut node_stats: Vec<FileStat> = Vec::new();
         for (entity, fixture_name) in NODE_FILES {
             let path = fixture(fixture_name);
+            let bases = base_labels(entity);
             let stat = rt
-                .block_on(load_nodes(&db, entity, &path, &mut ids))
+                .block_on(load_nodes(&db, entity, &bases, &path, &mut ids))
                 .unwrap_or_else(|e| panic!("load nodes {entity}: {e}"));
             eprintln!(
                 "[ldbc]   nodes {:<14} {:>9} rows  {:>7.1}s",
@@ -448,14 +578,22 @@ fn main() {
     let mut runs: Vec<QueryRun> = Vec::new();
     for (name, cypher) in QUERIES {
         match rt.block_on(run_query(&db, cypher, &bound)) {
-            Ok((rows, ms, dump)) => {
+            Ok((rows, ms, dump, m)) => {
                 std::fs::write(out_dir.join(format!("{name}.tsv")), format_rows(&dump))
                     .expect("write result");
-                eprintln!("[ldbc]   {name:<5} {rows:>6} rows  {ms:>8.1} ms");
+                let rss = peak_rss_mib();
+                eprintln!(
+                    "[ldbc]   {name:<5} {rows:>6} rows  {ms:>9.1} ms                       idx_scans={} cmp={} scans_reported={} peak_rss={rss}MiB",
+                    m.index_scans, m.index_comparisons, m.scans_reported
+                );
                 runs.push(QueryRun {
                     name,
                     rows,
                     ms,
+                    index_scans: m.index_scans,
+                    index_comparisons: m.index_comparisons,
+                    scans_reported: m.scans_reported,
+                    peak_rss_mib: rss,
                     error: None,
                 });
             }
@@ -465,6 +603,10 @@ fn main() {
                     name,
                     rows: 0,
                     ms: 0.0,
+                    index_scans: 0,
+                    index_comparisons: 0,
+                    scans_reported: 0,
+                    peak_rss_mib: peak_rss_mib(),
                     error: Some(e.to_string()),
                 });
             }
@@ -484,12 +626,26 @@ fn format_rows(rows: &[Vec<String>]) -> String {
 
 fn query_report(runs: &[QueryRun], out_dir: &std::path::Path) {
     println!("\n## Interactive complex reads\n");
-    println!("| query | rows | ms |");
-    println!("|---|---:|---:|");
+    println!("| query | rows | ms | index scans | comparisons | scans reported | peak RSS (MiB) |");
+    println!("|---|---:|---:|---:|---:|---:|---:|");
     for r in runs {
         match &r.error {
-            Some(e) => println!("| {} | — | **error**: {} |", r.name, e.replace('|', "-")),
-            None => println!("| {} | {} | {:.1} |", r.name, r.rows, r.ms),
+            Some(e) => println!(
+                "| {} | — | — | — | — | — | {} | **error**: {} |",
+                r.name,
+                r.peak_rss_mib,
+                e.replace('|', "-")
+            ),
+            None => println!(
+                "| {} | {} | {:.1} | {} | {} | {} | {} |",
+                r.name,
+                r.rows,
+                r.ms,
+                r.index_scans,
+                r.index_comparisons,
+                r.scans_reported,
+                r.peak_rss_mib
+            ),
         }
     }
     println!("\nResults written to `{}`\n", out_dir.display());
