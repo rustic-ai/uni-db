@@ -2101,7 +2101,50 @@ fn datetime_value_from_local_and_offset(
     }
 }
 
+/// The instant described by `epochMillis` or `epochSeconds`, if either is given.
+///
+/// `Ok(None)` when the map uses neither, which leaves the calendar-based forms
+/// untouched — a map with no epoch field and no `year` must still be the error it
+/// was.
+///
+/// `epochSeconds` may be refined by a `nanosecond` field, as Neo4j allows;
+/// `epochMillis` already carries sub-second precision and ignores it. Both are
+/// UTC by definition. Negative values are handled by `chrono`, which floors
+/// rather than truncating toward zero, so `-1` is 1969-12-31T23:59:59.999 rather
+/// than a millisecond *after* the epoch.
+fn datetime_from_epoch_fields(map: &HashMap<String, Value>) -> Result<Option<NaiveDateTime>> {
+    if let Some(millis) = map.get("epochMillis").and_then(|v| v.as_i64()) {
+        return chrono::DateTime::from_timestamp_millis(millis)
+            .map(|dt| Some(dt.naive_utc()))
+            .ok_or_else(|| anyhow!("epochMillis out of range: {millis}"));
+    }
+    if let Some(seconds) = map.get("epochSeconds").and_then(|v| v.as_i64()) {
+        let nanos = map
+            .get("nanosecond")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0)
+            .clamp(0, 999_999_999) as u32;
+        return chrono::DateTime::from_timestamp(seconds, nanos)
+            .map(|dt| Some(dt.naive_utc()))
+            .ok_or_else(|| anyhow!("epochSeconds out of range: {seconds}"));
+    }
+    Ok(None)
+}
+
 fn eval_datetime_from_map(map: &HashMap<String, Value>, with_timezone: bool) -> Result<Value> {
+    // An instant given as an offset from the Unix epoch. Checked before every
+    // other form because it is complete on its own: there is no year/month/day to
+    // combine it with, and the calendar path rejects a map without a `year`.
+    if let Some(ndt) = datetime_from_epoch_fields(map)? {
+        return Ok(if with_timezone {
+            // The epoch is defined in UTC, so the offset is zero and there is no
+            // named zone to attach.
+            datetime_value_from_local_and_offset(&ndt, 0, None)
+        } else {
+            localdatetime_value_from_naive(&ndt)
+        });
+    }
+
     // Check if we have a 'datetime' field to copy from another datetime
     if let Some(dt_val) = map.get("datetime") {
         return eval_datetime_from_projection(map, dt_val, with_timezone);
