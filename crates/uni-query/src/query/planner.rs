@@ -5286,6 +5286,12 @@ impl QueryPlanner {
 
         let mut edge_type_ids = Vec::new();
         let mut dst_labels = Vec::new();
+        // Endpoint-label inference for an *unlabelled* target has to know which
+        // side of the edge the traversal actually lands on, so both sides are
+        // collected. Using `dst_labels` regardless of direction constrained an
+        // incoming traversal to the label it started from and silently returned
+        // no rows.
+        let mut src_labels = Vec::new();
         let mut unknown_types = Vec::new();
 
         if params.rel.types.is_empty() {
@@ -5294,6 +5300,7 @@ impl QueryPlanner {
             edge_type_ids = self.schema.all_edge_type_ids();
             for meta in self.schema.edge_types.values() {
                 dst_labels.extend(meta.dst_labels.iter().cloned());
+                src_labels.extend(meta.src_labels.iter().cloned());
             }
         } else {
             for type_name in &params.rel.types {
@@ -5301,6 +5308,7 @@ impl QueryPlanner {
                     // Known type - use standard Traverse with type_id
                     edge_type_ids.push(edge_meta.id);
                     dst_labels.extend(edge_meta.dst_labels.iter().cloned());
+                    src_labels.extend(edge_meta.src_labels.iter().cloned());
                 } else if let Some((vid, _)) = self.allocate_virtual_edge_type(type_name)? {
                     // M5b.3: virtual edge type (plugin-registered CatalogTable).
                     // Resolving it into `edge_type_ids` (not `unknown_types`)
@@ -5569,17 +5577,42 @@ impl QueryPlanner {
                 }
             }
         } else if !target_is_bound {
-            // Infer from edge type(s)
-            let unique_dsts: Vec<_> = dst_labels
+            // Infer the unlabelled target's label from the edge type(s) — but
+            // from the side the traversal actually *lands on*, which depends on
+            // direction:
+            //
+            //   (a:A)-[:R]->(x)   x is on the destination side  -> dst_labels
+            //   (a:A)<-[:R]-(x)   x is on the source side       -> src_labels
+            //   (a:A)-[:R]-(x)    either side                   -> no constraint
+            //
+            // Using `dst_labels` unconditionally constrained an incoming
+            // traversal to the label it had just come *from*, so
+            // `MATCH (b:B)<-[:R]-()` matched nothing at all while
+            // `MATCH (b:B)<-[:R]-(a:A)` returned the right rows — a silent wrong
+            // answer, with the data untouched on disk.
+            //
+            // The single-label guard below is why this hid for so long: an edge
+            // type with two or more labels on the inferred side already fell
+            // through to "allow any target" and behaved correctly.
+            let candidates = match params.rel.direction {
+                Direction::Outgoing => Some(dst_labels),
+                Direction::Incoming => Some(src_labels),
+                // Undirected reaches both sides. Constraining to either would
+                // drop the other half, so leave the target unconstrained; a
+                // `WHERE x:Label` still narrows it.
+                Direction::Both => None,
+            };
+            let unique: Vec<_> = candidates
+                .unwrap_or_default()
                 .into_iter()
                 .collect::<HashSet<_>>()
                 .into_iter()
                 .collect();
-            if unique_dsts.len() == 1 {
-                let label_name = &unique_dsts[0];
+            if unique.len() == 1 {
+                let label_name = &unique[0];
                 self.schema.get_label_case_insensitive(label_name)
             } else {
-                // Multiple or no destination labels inferred - allow any target
+                // Multiple or no labels inferred - allow any target.
                 // This supports patterns like MATCH (a)-[:EDGE_TYPE]-(b) WHERE b:Label
                 // where the edge type can connect to multiple labels
                 None
