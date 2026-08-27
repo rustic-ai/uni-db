@@ -1211,10 +1211,23 @@ impl Executor {
         let type_str = type_str.trim();
         match type_str {
             "string" | "text" | "varchar" => Ok(DataType::String),
-            "int" | "integer" | "int32" => Ok(DataType::Int32),
-            "long" | "int64" | "bigint" => Ok(DataType::Int64),
-            "float" | "float32" | "real" => Ok(DataType::Float32),
-            "double" | "float64" => Ok(DataType::Float64),
+            // A Cypher integer is 64-bit, so the unqualified spellings must be
+            // too. They mapped to `Int32` here while the procedure path
+            // (`ddl_procedures::parse_data_type`) read the same keywords as
+            // `Int64`; values beyond 32 bits written through `CREATE LABEL` were
+            // silently wrapped, so `4294967296` read back as `0`.
+            "int" | "integer" | "int64" | "long" | "bigint" => Ok(DataType::Int64),
+            // Still available when a narrow column is what is actually wanted.
+            "int32" => Ok(DataType::Int32),
+            // As with the integer spellings above: a Cypher float is 64-bit, and
+            // `ddl_procedures::parse_data_type` already read `FLOAT` that way.
+            // Reading it as `Float32` here silently dropped precision —
+            // `0.1234567890123456` came back as `0.12345679104328156`.
+            "float" | "float64" | "double" => Ok(DataType::Float64),
+            // `FLOAT32` is the explicit narrow form. `REAL` keeps SQL's
+            // single-precision meaning; it is not a Cypher keyword, so no
+            // conformance question arises.
+            "float32" | "real" => Ok(DataType::Float32),
             "bool" | "boolean" => Ok(DataType::Bool),
             "timestamp" => Ok(DataType::Timestamp),
             "date" => Ok(DataType::Date),

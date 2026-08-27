@@ -16,6 +16,8 @@ pub mod cypher_pushdown;
 pub mod cypher_reduce;
 pub mod cypher_subquery_parser;
 pub mod cypher_union;
+pub mod datetime_epoch_map_test;
+pub mod ddl_numeric_width_test;
 pub mod dynamic_access_test;
 pub mod entity_after_unwind_test;
 pub mod entity_identity_in_list_test;
