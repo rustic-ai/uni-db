@@ -20,7 +20,7 @@ use uni_cypher::ast::{
     CreateLabel, CypherLiteral, Direction, DropConstraint, DropEdgeType, DropLabel, Expr,
     MatchClause, MergeClause, NodePattern, PathPattern, Pattern, PatternElement, Query,
     RelationshipPattern, RemoveItem, ReturnClause, ReturnItem, SchemaCommand, SetClause, SetItem,
-    ShortestPathMode, ShowConstraints, SortItem, Statement, WindowSpec, WithClause,
+    ShortestPathMode, ShowConstraints, SortItem, Statement, UnaryOp, WindowSpec, WithClause,
     WithRecursiveClause,
 };
 
@@ -154,6 +154,76 @@ fn contains_pattern_predicate(expr: &Expr) -> bool {
         }
     });
     found
+}
+
+/// Does a pattern predicate appear somewhere a boolean is not expected?
+///
+/// A pattern in an expression is a *predicate*, not a value. openCypher permits
+/// one wherever a boolean belongs and rejects it everywhere else, and the TCK
+/// pins both halves:
+///
+/// - `Pattern1` [22] / [23] — `RETURN (n)-[]->()` and `WITH (n)-[]->() AS x`
+///   are `SyntaxError: UnexpectedSyntax`: a projection is not a boolean context.
+/// - `List6` [6] — `RETURN size((a)-->())` likewise; `size` wants a list.
+/// - `Pattern1` [19]-[21] — `WHERE NOT (n)-[:REL2]-()` and conjunctions of
+///   pattern predicates must *work*.
+/// - `List6` [7] — `size([(a)-->(b) | b])`, a pattern *comprehension*, is a list
+///   and is fine.
+///
+/// So the test cannot be "does this expression contain a pattern predicate",
+/// which was the original guard and rejected the legal cases along with the
+/// illegal ones, nor "is the projected expression itself one", which lets
+/// `size((a)-->())` through. It is positional: descend, tracking whether the
+/// current position expects a boolean.
+fn pattern_predicate_in_non_boolean_position(expr: &Expr) -> bool {
+    fn walk(e: &Expr, boolean_ok: bool) -> bool {
+        match e {
+            Expr::Exists {
+                from_pattern_predicate: true,
+                ..
+            } => !boolean_ok,
+            // Boolean connectives propagate a boolean context to their operands.
+            Expr::UnaryOp {
+                op: UnaryOp::Not,
+                expr: inner,
+            } => walk(inner, true),
+            Expr::BinaryOp {
+                left,
+                op: BinaryOp::And | BinaryOp::Or | BinaryOp::Xor,
+                right,
+            } => walk(left, true) || walk(right, true),
+            // `NOT` also reaches here spelled as a call, which is how LDBC writes
+            // it: `not((liker)-[:KNOWS]-(person))`.
+            Expr::FunctionCall { name, args, .. } if name.eq_ignore_ascii_case("not") => {
+                args.iter().any(|a| walk(a, true))
+            }
+            // A comprehension's filter is a boolean context; the list it draws
+            // from and the value it produces are not.
+            Expr::ListComprehension {
+                list,
+                map_expr,
+                where_clause,
+                ..
+            } => {
+                walk(list, false)
+                    || walk(map_expr, false)
+                    || where_clause.as_ref().is_some_and(|w| walk(w, true))
+            }
+            // Anything else: children sit in a non-boolean position unless one of
+            // the arms above says otherwise.
+            other => {
+                let mut found = false;
+                other.for_each_child(&mut |child| {
+                    if !found {
+                        found = walk(child, false);
+                    }
+                });
+                found
+            }
+        }
+    }
+    // A projection is not a boolean context.
+    walk(expr, false)
 }
 
 /// Add a variable to scope with type conflict validation.
@@ -2898,8 +2968,10 @@ impl QueryPlanner {
                         validate_expression_variables(expr, vars_in_scope)?;
                         // Validate function argument types and boolean operators
                         validate_expression(expr, vars_in_scope)?;
-                        // Pattern predicates are not allowed in RETURN
-                        if contains_pattern_predicate(expr) {
+                        // A pattern is a predicate, not a value, so it cannot be
+                        // projected on its own — but it may appear inside an
+                        // expression here, as it may inside WHERE.
+                        if pattern_predicate_in_non_boolean_position(expr) {
                             return Err(anyhow!(
                                 "SyntaxError: UnexpectedSyntax - Pattern predicates are not allowed in RETURN"
                             ));
@@ -7119,8 +7191,8 @@ impl QueryPlanner {
                         // Validate expression variables and syntax
                         validate_expression_variables(expr, vars_in_scope)?;
                         validate_expression(expr, vars_in_scope)?;
-                        // Pattern predicates are not allowed in WITH
-                        if contains_pattern_predicate(expr) {
+                        // See the RETURN projection above: bare pattern only.
+                        if pattern_predicate_in_non_boolean_position(expr) {
                             return Err(anyhow!(
                                 "SyntaxError: UnexpectedSyntax - Pattern predicates are not allowed in WITH"
                             ));

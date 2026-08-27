@@ -29,6 +29,7 @@ pub mod not_operator_test;
 pub mod null_handling_test;
 pub mod order_by_flow_test;
 pub mod path_property_access;
+pub mod pattern_predicate_in_projection_test;
 pub mod prepared_query_test;
 pub mod procedure_call_df_test;
 pub mod procedure_variable_args_test;

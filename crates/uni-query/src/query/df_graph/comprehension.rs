@@ -222,7 +222,15 @@ impl PhysicalExpr for ListComprehensionExecExpr {
                 let loop_var_idx = inner_fields
                     .iter()
                     .position(|f| f.name() == &self.variable_name);
-                if let Some(idx) = loop_var_idx {
+                // Only a CypherValue column carries an entity to extract an id
+                // from. A comprehension over plain scalars can still contain a
+                // pattern predicate — one referring to variables from the outer
+                // scope — and extraction would fail on its loop column, so the
+                // absence of a vid column is the correct outcome there rather
+                // than an error.
+                if let Some(idx) = loop_var_idx
+                    && *inner_columns[idx].data_type() == DataType::LargeBinary
+                {
                     let vid_array = super::common::extract_vids_from_cypher_value_column(
                         inner_columns[idx].as_ref(),
                     )?;

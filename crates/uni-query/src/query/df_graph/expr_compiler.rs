@@ -969,7 +969,23 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
         )))
     }
 
-    /// Check if map_expr or where_clause contains a pattern comprehension that references the variable.
+    /// Does the comprehension body need a `{var}._vid` column materialized from
+    /// its CypherValue loop variable?
+    ///
+    /// A nested pattern needs an anchor, and the anchor is found by looking for
+    /// `{var}._vid` in the input schema. The loop variable of a comprehension is
+    /// a single CypherValue column, so that column has to be derived.
+    ///
+    /// A pattern *predicate* needs this exactly as much as a pattern
+    /// *comprehension* does, and only the latter was checked: with
+    /// `[q IN ps WHERE (q)-[:KNOWS]-(:P)]` no `q._vid` was produced, the predicate
+    /// could not bind its anchor, and it **failed open** — every element passed
+    /// the filter. A wrong count, with no error.
+    ///
+    /// The pattern-predicate case is answered conservatively rather than by
+    /// walking the subquery for a reference to the variable: an unnecessary vid
+    /// column is one nullable column nothing reads, while a missing one is a
+    /// silent wrong answer.
     fn needs_vid_extraction_for_variable(
         variable: &str,
         map_expr: &Expr,
@@ -1016,6 +1032,13 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
                             .as_ref()
                             .is_some_and(|w| expr_has_pattern_comp_referencing(w, var))
                 }
+                // A bare pattern predicate. Its pattern lives inside a whole
+                // subquery rather than beside it, so this does not try to prove
+                // the variable is referenced — see the note above.
+                Expr::Exists {
+                    from_pattern_predicate: true,
+                    ..
+                } => true,
                 _ => false,
             }
         }
