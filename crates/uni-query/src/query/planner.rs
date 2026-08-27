@@ -247,16 +247,22 @@ fn infer_with_output_type(expr: &Expr, vars_in_scope: &[VariableInfo]) -> Variab
                 VariableType::EdgeList
             } else if lower == "collect" && !args.is_empty() {
                 let collected = infer_with_output_type(&args[0], vars_in_scope);
-                if matches!(
-                    collected,
-                    VariableType::Node
-                        | VariableType::Edge
-                        | VariableType::Path
-                        | VariableType::Imported
-                ) {
-                    collected
-                } else {
-                    VariableType::Scalar
+                match collected {
+                    // `collect` aggregates *into a list*, so collecting nodes
+                    // yields a node list, exactly as `nodes()` does above.
+                    // Returning the element type unchanged made
+                    // `WITH collect(n) AS ns` look like a single node, which
+                    // rejected `size(ns)` as "size() requires a string, list, or
+                    // path argument" and would equally have let `MATCH (ns)-->()`
+                    // through. `unwrap_list_type` maps these back for `UNWIND`,
+                    // so consuming the list one element at a time is unaffected.
+                    VariableType::Node => VariableType::NodeList,
+                    VariableType::Edge => VariableType::EdgeList,
+                    // `Path` has no list counterpart to map to, and `Imported`
+                    // is deliberately opaque; both are carried through as before
+                    // rather than collapsed to `Scalar`.
+                    VariableType::Path | VariableType::Imported => collected,
+                    _ => VariableType::Scalar,
                 }
             } else {
                 VariableType::Scalar

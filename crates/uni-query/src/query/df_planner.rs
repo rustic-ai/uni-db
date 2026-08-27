@@ -6754,7 +6754,13 @@ fn collect_variable_kinds(plan: &LogicalPlan, kinds: &mut HashMap<String, Variab
             ..
         } => {
             collect_variable_kinds(input, kinds);
-            kinds.insert(source_variable.clone(), VariableKind::Node);
+            // The target's columns are produced *here*, so the traversal is
+            // authoritative for it. The source is only consumed — whatever bound
+            // it below stays authoritative, or this would overwrite an `UNWIND`
+            // rebinding with a `Node` whose columns do not exist.
+            kinds
+                .entry(source_variable.clone())
+                .or_insert(VariableKind::Node);
             kinds.insert(target_variable.clone(), VariableKind::Node);
             if let Some(sv) = step_variable {
                 kinds.insert(sv.clone(), VariableKind::edge_for(*is_variable_length));
@@ -6865,7 +6871,6 @@ fn collect_variable_kinds(plan: &LogicalPlan, kinds: &mut HashMap<String, Variab
         | LogicalPlan::Aggregate { input, .. }
         | LogicalPlan::Distinct { input, .. }
         | LogicalPlan::Window { input, .. }
-        | LogicalPlan::Unwind { input, .. }
         | LogicalPlan::Create { input, .. }
         | LogicalPlan::CreateBatch { input, .. }
         | LogicalPlan::Merge { input, .. }
@@ -6875,6 +6880,22 @@ fn collect_variable_kinds(plan: &LogicalPlan, kinds: &mut HashMap<String, Variab
         | LogicalPlan::Foreach { input, .. }
         | LogicalPlan::SubqueryCall { input, .. } => {
             collect_variable_kinds(input, kinds);
+        }
+        // UNWIND *rebinds* its variable; it is not a pass-through for that name.
+        // The element it binds is a single CypherValue column, with none of the
+        // `{var}._vid` / `{var}.{prop}` columns a scan produces — so when the
+        // alias shadows a scan variable below (`... collect(friend) AS friends
+        // UNWIND friends AS friend`), leaving the scan's `Node` kind in place made
+        // every consumer above reach for columns that are not in the schema.
+        //
+        // Rebinding is correctly scoped: `translation_context_for_plan` is built
+        // from each operator's own input, so expressions *below* the UNWIND still
+        // see the scan binding.
+        LogicalPlan::Unwind {
+            input, variable, ..
+        } => {
+            collect_variable_kinds(input, kinds);
+            kinds.insert(variable.clone(), VariableKind::Opaque);
         }
         LogicalPlan::Union { left, right, .. } | LogicalPlan::CrossJoin { left, right, .. } => {
             collect_variable_kinds(left, kinds);

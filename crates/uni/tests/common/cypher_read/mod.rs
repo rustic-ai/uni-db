@@ -17,6 +17,7 @@ pub mod cypher_reduce;
 pub mod cypher_subquery_parser;
 pub mod cypher_union;
 pub mod dynamic_access_test;
+pub mod entity_after_unwind_test;
 pub mod entity_identity_in_list_test;
 pub mod explain_test;
 pub mod int_arithmetic_overflow_test;

@@ -415,10 +415,11 @@ struct IdUdf {
 impl IdUdf {
     fn new() -> Self {
         Self {
-            signature: Signature::new(
-                TypeSignature::Exact(vec![DataType::UInt64]),
-                Volatility::Immutable,
-            ),
+            // `Any`, not `Exact(UInt64)`: an entity that reached here as a
+            // CypherValue blob — anything that has been through `collect()` and
+            // `UNWIND` — is a `LargeBinary`, and an exact signature would reject
+            // it before `invoke` could decode it.
+            signature: Signature::any(1, Volatility::Immutable),
         }
     }
 }
@@ -443,13 +444,72 @@ impl ScalarUDFImpl for IdUdf {
     }
 
     fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DFResult<ColumnarValue> {
-        // id() is a pass-through - the VID/EID is already stored as UInt64
         if args.args.is_empty() {
             return Err(datafusion::error::DataFusionError::Execution(
                 "id(): requires 1 argument".to_string(),
             ));
         }
-        Ok(args.args[0].clone())
+        // Usually a pass-through: the planner rewrites `id(n)` to the `n._vid`
+        // column, which is already `UInt64`. But when `n` is an entity carried as
+        // a single CypherValue column — what `UNWIND` over a collected list binds
+        // — there is no `_vid` column to rewrite to, so the whole entity arrives
+        // here and its id has to be read out of the encoding.
+        // `return_type` promises `UInt64`, and DataFusion asserts that at
+        // runtime, so every branch here has to produce one — passing an argument
+        // straight through is only correct when it is already `UInt64`.
+        let arg = args.args[0].clone();
+        match arg.data_type() {
+            DataType::UInt64 => Ok(arg),
+            DataType::LargeBinary => {
+                let array = arg.to_array(args.number_rows)?;
+                let blobs = array
+                    .as_any()
+                    .downcast_ref::<LargeBinaryArray>()
+                    .ok_or_else(|| {
+                        datafusion::error::DataFusionError::Execution(
+                            "id(): expected a LargeBinary entity column".to_string(),
+                        )
+                    })?;
+                let ids: UInt64Array = (0..blobs.len())
+                    .map(|i| {
+                        if blobs.is_null(i) {
+                            return None;
+                        }
+                        let value = uni_common::cypher_value_codec::decode(blobs.value(i)).ok()?;
+                        entity_identity(&value)
+                    })
+                    .collect();
+                Ok(ColumnarValue::Array(Arc::new(ids)))
+            }
+            other => {
+                let array = arg.to_array(args.number_rows)?;
+                arrow::compute::cast(&array, &DataType::UInt64)
+                    .map(ColumnarValue::Array)
+                    .map_err(|_| {
+                        datafusion::error::DataFusionError::Execution(format!(
+                            "id(): expected an entity or an identity column, got {other}"
+                        ))
+                    })
+            }
+        }
+    }
+}
+
+/// The id of an entity, whichever way it is encoded.
+///
+/// A typed `Value::Node` / `Value::Edge` and the `Value::Map` form carrying
+/// `_vid` / `_eid` are both live representations of the same thing, and code that
+/// handles only one of them silently does nothing for the other.
+pub(crate) fn entity_identity(value: &Value) -> Option<u64> {
+    match value {
+        Value::Node(n) => Some(n.vid.as_u64()),
+        Value::Edge(e) => Some(e.eid.as_u64()),
+        Value::Map(m) => m
+            .get("_vid")
+            .or_else(|| m.get("_eid"))
+            .and_then(|id| id.as_i64())
+            .map(|id| id as u64),
+        _ => None,
     }
 }
 

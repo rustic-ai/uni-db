@@ -233,6 +233,17 @@ pub enum VariableKind {
     NodeList,
     /// Path variable - kept as-is (struct with nodes/relationships)
     Path,
+    /// A value bound by `UNWIND`: one column, whose shape is known only at
+    /// runtime.
+    ///
+    /// Distinct from *absent* on purpose. Absent means "nothing below bound this
+    /// name", which lets a later operator supply a binding; this says "the name
+    /// is bound, and not to the `{var}._vid` / `{var}.{prop}` columns a scan
+    /// produces". Rewrites that reach for those columns must not fire for it —
+    /// an entity that has been through `collect()` and `UNWIND` is a single
+    /// CypherValue blob, and reaching for `{var}._vid` produced
+    /// `Schema error: No field named "f._vid"`.
+    Opaque,
 }
 
 impl VariableKind {
@@ -681,7 +692,12 @@ fn translate_null_check(
         let col_name = match kind {
             VariableKind::Node => format!("{}.{}", var, COL_VID),
             VariableKind::Edge => format!("{}.{}", var, COL_EID),
-            VariableKind::Path | VariableKind::EdgeList | VariableKind::NodeList => var.clone(),
+            // These are each carried in a single column, so the column itself is
+            // the thing to test for null — there is no identity column beside it.
+            VariableKind::Path
+            | VariableKind::EdgeList
+            | VariableKind::NodeList
+            | VariableKind::Opaque => var.clone(),
         };
         let col_expr = DfExpr::Column(Column::from_name(col_name));
         return Ok(if is_null {
@@ -2036,10 +2052,26 @@ fn translate_graph_function(
             // When called with a bare variable (ID(n)), rewrite to the internal
             // identity column reference (_vid for nodes, _eid for edges).
             if let Some(Expr::Variable(var)) = args.first() {
-                let is_edge = context.is_some_and(|ctx| {
-                    ctx.variable_kinds.get(var) == Some(&VariableKind::Edge)
-                        || ctx.mutation_edge_hints.iter().any(|h| h == var)
-                });
+                let kind = context.and_then(|ctx| ctx.variable_kinds.get(var));
+                let is_edge = kind == Some(&VariableKind::Edge)
+                    || context.is_some_and(|ctx| ctx.mutation_edge_hints.iter().any(|h| h == var));
+                // Only rewrite to the identity column when the variable really is
+                // bound to one. A variable bound by `UNWIND` over a collected list
+                // is a single CypherValue column with no `{var}._vid` beside it,
+                // and rewriting regardless produced `Schema error: No field named
+                // "f._vid"`. Handing the whole entity to the `id` UDF lets it read
+                // the id out of the encoding instead.
+                // A CREATE/MERGE-bound entity is bound to identity columns just
+                // as a scan-bound one is; it is simply tracked in the hint lists
+                // rather than in `variable_kinds`, so both have to be consulted.
+                let is_bound_entity = matches!(kind, Some(VariableKind::Node | VariableKind::Edge))
+                    || context.is_some_and(|ctx| {
+                        ctx.mutation_edge_hints.iter().any(|h| h == var)
+                            || ctx.node_variable_hints.iter().any(|h| h == var)
+                    });
+                if !is_bound_entity {
+                    return Some(Ok(dummy_udf_expr("id", df_args.to_vec())));
+                }
                 let id_suffix = if is_edge { COL_EID } else { COL_VID };
                 Some(Ok(DfExpr::Column(Column::from_name(format!(
                     "{}.{}",
