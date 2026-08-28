@@ -2065,7 +2065,43 @@ impl UniBuilder {
         // instead of paying ~140 µs to construct a fresh SessionContext and
         // re-register the UDFs every call.
         let df_session_template = {
-            let ctx = datafusion::execution::context::SessionContext::new();
+            // `max_query_memory` is enforced here, in DataFusion's own memory
+            // pool, and not only after the fact on the finished result set.
+            // The post-hoc check measures what a query *returned*; a query
+            // that returns twenty rows can still build a forty-gigabyte hash
+            // table on the way there, and nothing observed that.
+            //
+            // `GreedyMemoryPool` rather than `FairSpillPool`: no disk-spill
+            // path is configured, so neither pool can spill and the choice is
+            // only about how the budget is divided. The fair pool reserves a
+            // share for spilling consumers that can never use it, which would
+            // silently halve the usable budget; the greedy pool hands out the
+            // whole limit and fails the reservation that crosses it.
+            //
+            // Two honest limits. The pool is on the shared template, so it is
+            // a budget across concurrent queries rather than per query — which
+            // is the behaviour that actually protects the process. And a pool
+            // only accounts allocations that reserve through it: an operator
+            // building an Arrow buffer directly (`MutableArrayData`, the
+            // allocation behind #184) never asks, so it is still unbounded.
+            // This makes the limit real where DataFusion cooperates; it is not
+            // a fix for #184.
+            let ctx = if self.config.max_query_memory == 0 {
+                datafusion::execution::context::SessionContext::new()
+            } else {
+                let runtime = datafusion::execution::runtime_env::RuntimeEnvBuilder::new()
+                    .with_memory_pool(Arc::new(
+                        datafusion::execution::memory_pool::GreedyMemoryPool::new(
+                            self.config.max_query_memory,
+                        ),
+                    ))
+                    .build_arc()
+                    .map_err(|e| UniError::Internal(anyhow::anyhow!(e)))?;
+                datafusion::execution::context::SessionContext::new_with_config_rt(
+                    datafusion::execution::context::SessionConfig::new(),
+                    runtime,
+                )
+            };
             uni_query_functions::df_udfs::register_cypher_udfs(&ctx)
                 .map_err(|e| UniError::Internal(anyhow::anyhow!(e)))?;
             Arc::new(ctx)

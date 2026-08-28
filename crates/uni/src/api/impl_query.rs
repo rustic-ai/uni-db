@@ -237,22 +237,72 @@ fn rows_for_results(
         .collect()
 }
 
-/// Coarse in-memory size estimate for a result batch: a per-value size plus a
-/// fixed 64-byte overhead.
+/// In-memory size estimate for a result batch, counting heap bytes.
 ///
 /// Shared by the materializing and cursor paths so the two cannot drift — the
 /// cursor previously had no accounting at all, and a second copy of this
 /// formula would have let the same query be accepted by one path and rejected
 /// by the other.
+///
+/// This used to be `size_of_val(v) + 64`, which is the size of the `Value`
+/// enum's *discriminant* — a constant. It ignored everything on the heap, so a
+/// row of megabyte strings and a row of small integers were charged the same
+/// and the figure was really a row count wearing a byte label. A limit
+/// expressed in bytes has to count bytes.
 fn estimate_result_bytes(results: &[HashMap<String, ApiValue>]) -> usize {
     results
         .iter()
         .map(|row| {
-            row.values()
-                .map(|v| std::mem::size_of_val(v) + 64)
+            row.iter()
+                .map(|(key, v)| key.capacity() + ROW_ENTRY_OVERHEAD + value_bytes(v))
                 .sum::<usize>()
         })
         .sum()
+}
+
+/// Per-entry bookkeeping charged on top of the key and value: the `HashMap`
+/// slot, its hash, and the `Value` discriminant.
+const ROW_ENTRY_OVERHEAD: usize = 64;
+
+/// Heap bytes a single result value holds, including anything it owns.
+///
+/// Containers recurse, so a list of long strings is charged for the strings.
+/// Approximate by construction — it does not chase `Arc` sharing or allocator
+/// slack — but it moves with the data, which the previous constant did not.
+fn value_bytes(v: &ApiValue) -> usize {
+    let own = std::mem::size_of_val(v);
+    own + match v {
+        ApiValue::String(s) => s.capacity(),
+        ApiValue::Bytes(b) => b.capacity(),
+        ApiValue::Vector(f) => f.capacity() * std::mem::size_of::<f32>(),
+        ApiValue::BinaryVector(b) => b.capacity(),
+        ApiValue::SparseVector { indices, values } => {
+            indices.capacity() * std::mem::size_of::<u32>()
+                + values.capacity() * std::mem::size_of::<f32>()
+        }
+        ApiValue::List(items) => items.iter().map(value_bytes).sum(),
+        ApiValue::Map(entries) => entries
+            .iter()
+            .map(|(k, val)| k.capacity() + ROW_ENTRY_OVERHEAD + value_bytes(val))
+            .sum(),
+        ApiValue::Node(node) => {
+            node.labels.iter().map(String::capacity).sum::<usize>()
+                + node
+                    .properties
+                    .iter()
+                    .map(|(k, val)| k.capacity() + ROW_ENTRY_OVERHEAD + value_bytes(val))
+                    .sum::<usize>()
+        }
+        ApiValue::Edge(edge) => {
+            edge.edge_type.capacity()
+                + edge
+                    .properties
+                    .iter()
+                    .map(|(k, val)| k.capacity() + ROW_ENTRY_OVERHEAD + value_bytes(val))
+                    .sum::<usize>()
+        }
+        _ => 0,
+    }
 }
 
 /// The error both paths raise when `max_query_memory` is exceeded.
@@ -900,18 +950,37 @@ impl crate::api::UniInner {
         let projection_order = extract_projection_order(&logical_plan);
 
         let exec_start = Instant::now();
+        let timeout_duration = self.config.query_timeout;
+        let deadline = exec_start + timeout_duration;
         // The transaction's own scope reaches execution here. Without this the
         // token accepted by `TxQueryBuilder::cancellation_token` was discarded
         // for want of a parameter to put it in, and `Transaction::cancel()`
         // cancelled a token nothing was listening to.
+        //
+        // `query_timeout` is enforced here too, for the same reason the memory
+        // ceiling below is: the session paths wrapped execution in
+        // `tokio::time::timeout` and the transaction paths did not, so a
+        // statement run inside a transaction had a cancellation scope but no
+        // wall-clock bound whatsoever. An asymmetry between the two surfaces is
+        // the shape of defect this work removes, not one to add to.
         let results = tokio::select! {
             biased;
             () = cancel.cancelled() => return Err(UniError::Cancelled),
-            res = executor.execute(logical_plan, &self.properties, &params) => {
-                res.map_err(|e| into_execution_error(e, cypher, self.config.query_timeout))?
-            }
+            res = tokio::time::timeout(
+                timeout_duration,
+                executor.execute(logical_plan, &self.properties, &params),
+            ) => res
+                .map_err(|_| query_timed_out_error(timeout_duration))?
+                .map_err(|e| into_execution_error(e, cypher, self.config.query_timeout))?,
         };
         let exec_time = exec_start.elapsed();
+
+        // A query that completes inside a single poll never lets the timer
+        // fire, so the elapsed time is compared directly as well — the same
+        // guard the session paths carry.
+        if Instant::now() > deadline {
+            return Err(query_timed_out_error(timeout_duration));
+        }
 
         // `max_query_memory` was previously enforced only on the session's
         // materializing paths, so a transaction query had no ceiling at all.
@@ -1125,18 +1194,32 @@ impl crate::api::UniInner {
         let projection_order = extract_projection_order(&logical_plan);
 
         let exec_start = Instant::now();
+        let timeout_duration = config.query_timeout;
+        let deadline = exec_start + timeout_duration;
         // Mirrors `execute_ast_internal`: the executor's own token only reaches
         // operators that happen to call `check_timeout`, so correctness comes
         // from racing the scope against execution here. This twin was the one
         // AST path that did neither, which is why `Transaction::cancel()` was
         // inert for `Transaction::apply` and tx-bound Locy.
+        //
+        // The wall-clock bound is here for the same reason as in
+        // `execute_tx_query_internal`: without it a transaction statement was
+        // cancellable but not time-bounded.
         let results = tokio::select! {
             biased;
             () = cancel.cancelled() => return Err(UniError::Cancelled),
-            res = executor.execute(logical_plan, &self.properties, &params) => res
+            res = tokio::time::timeout(
+                timeout_duration,
+                executor.execute(logical_plan, &self.properties, &params),
+            ) => res
+                .map_err(|_| query_timed_out_error(timeout_duration))?
                 .map_err(|e| into_execution_error(e, cypher, config.query_timeout))?,
         };
         let exec_time = exec_start.elapsed();
+
+        if Instant::now() > deadline {
+            return Err(query_timed_out_error(timeout_duration));
+        }
 
         let columns = columns_for_results(&results, projection_order);
         let rows = rows_for_results(results, &columns, true);

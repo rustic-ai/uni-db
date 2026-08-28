@@ -246,6 +246,16 @@ fn merge_dotted_columns(row: &mut HashMap<String, Value>, var: &str) {
     }
 }
 
+/// Print every physical plan to stderr when `UNI_DUMP_PHYSICAL` is set.
+///
+/// `EXPLAIN` shows the *logical* plan, and several defects only become visible
+/// in the physical one — #184's is a column that survives into a traversal's
+/// projection, which no logical plan shows. Read once rather than per query:
+/// `std::env::var` takes a lock on the environment, and this sits in the
+/// execution path of every statement.
+static DUMP_PHYSICAL_PLAN: std::sync::LazyLock<bool> =
+    std::sync::LazyLock::new(|| std::env::var("UNI_DUMP_PHYSICAL").is_ok());
+
 impl Executor {
     /// Helper to verify and filter candidates against an optional predicate.
     ///
@@ -464,12 +474,32 @@ impl Executor {
             || host_plugin_registry.is_some()
             || session_local_registry.is_some();
 
+        // `max_query_memory` reaches DataFusion here, as a memory pool on the
+        // runtime environment. The pool cannot be swapped onto an existing
+        // `SessionContext`, so it has to be installed wherever one is built —
+        // and both places matter, because `needs_dynamic_registration` is true
+        // whenever a host plugin registry is attached, which is every database
+        // that loaded the built-in plugins. Sizing it here rather than only on
+        // the shared template also makes a per-statement `.max_memory()`
+        // override real, and makes the budget per query rather than shared
+        // across concurrent ones, which is what the setting's name promises.
+        let df_runtime = Self::memory_bounded_runtime(self.config.max_query_memory)?;
+
         let session = if let (Some(tmpl), false) = (
             self.df_session_template.as_ref(),
             needs_dynamic_registration,
         ) {
             // Hot path: clone the template (Cypher UDFs already registered).
-            (**tmpl).clone()
+            match df_runtime.clone() {
+                Some(rt) => {
+                    use datafusion::execution::session_state::SessionStateBuilder;
+                    let state = SessionStateBuilder::new_from_existing(tmpl.state())
+                        .with_runtime_env(rt)
+                        .build();
+                    SessionContext::new_with_state(state)
+                }
+                None => (**tmpl).clone(),
+            }
         } else {
             // Cold path: build a fresh session, optionally with any
             // plugin-registered optimizer rules folded in.
@@ -479,11 +509,20 @@ impl Executor {
             // snapshotted at session-construction time; reload discipline
             // is M10's problem.
             let session = if optimizer_providers.is_empty() {
-                SessionContext::new()
+                match df_runtime.clone() {
+                    Some(rt) => SessionContext::new_with_config_rt(
+                        datafusion::prelude::SessionConfig::new(),
+                        rt,
+                    ),
+                    None => SessionContext::new(),
+                }
             } else {
                 use datafusion::execution::session_state::SessionStateBuilder;
                 use uni_plugin::traits::operator::OptimizerPhase;
                 let mut builder = SessionStateBuilder::new().with_default_features();
+                if let Some(rt) = df_runtime.clone() {
+                    builder = builder.with_runtime_env(rt);
+                }
                 for provider in optimizer_providers.iter() {
                     match provider.phase() {
                         OptimizerPhase::Logical => {
@@ -598,21 +637,106 @@ impl Executor {
         Ok((session_ctx, planner, prop_manager_arc))
     }
 
+    /// A DataFusion runtime environment whose memory pool caps execution at
+    /// `max_query_memory` bytes, or `None` when the limit is disabled (`0`).
+    ///
+    /// `GreedyMemoryPool` rather than `FairSpillPool`: no disk-spill path is
+    /// configured, so neither can spill and the only difference is how the
+    /// budget is divided. The fair pool holds back a share for spilling
+    /// consumers that can never use it, silently halving the usable budget;
+    /// the greedy pool hands out the whole limit and refuses the reservation
+    /// that crosses it.
+    ///
+    /// The bound is real but partial, and deliberately so: a pool only accounts
+    /// allocations that *reserve* through it. An operator that builds an Arrow
+    /// buffer directly — `MutableArrayData`, the allocation behind #184 — never
+    /// asks the pool and is still unbounded. This makes the limit real where
+    /// DataFusion cooperates; it is not a fix for that crash.
+    fn memory_bounded_runtime(
+        max_query_memory: usize,
+    ) -> Result<Option<Arc<datafusion::execution::runtime_env::RuntimeEnv>>> {
+        if max_query_memory == 0 {
+            return Ok(None);
+        }
+        let rt = datafusion::execution::runtime_env::RuntimeEnvBuilder::new()
+            .with_memory_pool(Arc::new(
+                datafusion::execution::memory_pool::GreedyMemoryPool::new(max_query_memory),
+            ))
+            .build_arc()?;
+        Ok(Some(rt))
+    }
+
     /// Execute a DataFusion physical plan and collect all result batches.
+    ///
+    /// Unbounded: no deadline and no cancellation are observed. Prefer
+    /// [`Self::collect_batches_checked`] wherever a `GraphExecutionContext` is
+    /// at hand — which is every query path inside this crate.
     pub fn collect_batches(
         session_ctx: &Arc<SyncRwLock<SessionContext>>,
         execution_plan: Arc<dyn datafusion::physical_plan::ExecutionPlan>,
     ) -> BoxFuture<'_, Result<Vec<RecordBatch>>> {
+        Self::drain_plan(session_ctx, execution_plan, None)
+    }
+
+    /// [`Self::collect_batches`], checking the query's deadline and
+    /// cancellation token at every batch boundary.
+    ///
+    /// The unchecked form used `try_collect()`, which consumes the whole stream
+    /// in one await. Nothing between the first batch and the last could observe
+    /// a timeout, so a long-running query ran to completion and only *then*
+    /// discovered it was over budget — the outer `tokio::time::timeout` returns
+    /// an error to the caller while the abandoned work keeps burning CPU and
+    /// memory on its task. LDBC IC12 returned after 571 s against a 120 s
+    /// budget this way.
+    ///
+    /// The bound this restores is per batch, not per instant: an operator that
+    /// never yields between two batches still cannot be preempted, so a single
+    /// long-running operator remains unbounded. That is a real remaining gap
+    /// and needs interruption inside the operators; what this fixes is the case
+    /// where the query *does* yield and nothing was looking.
+    pub fn collect_batches_checked(
+        session_ctx: &Arc<SyncRwLock<SessionContext>>,
+        execution_plan: Arc<dyn datafusion::physical_plan::ExecutionPlan>,
+        graph_ctx: &Arc<crate::query::df_graph::GraphExecutionContext>,
+    ) -> BoxFuture<'static, Result<Vec<RecordBatch>>> {
+        let session_ctx = Arc::clone(session_ctx);
+        let graph_ctx = Arc::clone(graph_ctx);
+        Box::pin(
+            async move { Self::drain_plan(&session_ctx, execution_plan, Some(&graph_ctx)).await },
+        )
+    }
+
+    /// Shared drain loop for both collectors.
+    fn drain_plan<'a>(
+        session_ctx: &'a Arc<SyncRwLock<SessionContext>>,
+        execution_plan: Arc<dyn datafusion::physical_plan::ExecutionPlan>,
+        graph_ctx: Option<&'a Arc<crate::query::df_graph::GraphExecutionContext>>,
+    ) -> BoxFuture<'a, Result<Vec<RecordBatch>>> {
         Box::pin(async move {
-            use futures::TryStreamExt;
+            use futures::StreamExt;
 
             let task_ctx = session_ctx.read().task_ctx();
+            if *DUMP_PHYSICAL_PLAN {
+                eprintln!(
+                    "{}",
+                    datafusion::physical_plan::displayable(execution_plan.as_ref()).indent(true)
+                );
+            }
             let partition_count = execution_plan.output_partitioning().partition_count();
             let mut all_batches = Vec::new();
             for partition in 0..partition_count {
-                let stream = execution_plan.execute(partition, task_ctx.clone())?;
-                let batches: Vec<RecordBatch> = stream.try_collect().await?;
-                all_batches.extend(batches);
+                let mut stream = execution_plan.execute(partition, task_ctx.clone())?;
+                loop {
+                    // Before awaiting the next batch, so a query already over
+                    // budget does not start more work.
+                    if let Some(ctx) = graph_ctx {
+                        ctx.check_timeout()?;
+                    }
+                    match stream.next().await {
+                        Some(batch) => all_batches.push(batch?),
+                        None => break,
+                    }
+                }
             }
             Ok(all_batches)
         })
@@ -683,7 +807,8 @@ impl Executor {
 
         let execution_plan = planner.plan(&plan)?;
         let plan_clone = Arc::clone(&execution_plan);
-        let result = Self::collect_batches(&session_ctx, execution_plan).await;
+        let result =
+            Self::collect_batches_checked(&session_ctx, execution_plan, planner.graph_ctx()).await;
 
         // Harvest warnings from the graph execution context after query completion.
         let graph_warnings = planner.graph_ctx().take_warnings();
@@ -718,7 +843,9 @@ impl Executor {
             .map(|v| (v.clone(), ["*".to_string()].into_iter().collect()))
             .collect();
         let execution_plan = planner.plan_with_properties(&plan, extra)?;
-        let all_batches = Self::collect_batches(&session_ctx, execution_plan).await?;
+        let all_batches =
+            Self::collect_batches_checked(&session_ctx, execution_plan, planner.graph_ctx())
+                .await?;
 
         // Convert to flat rows (dotted column names like "a._vid", "b._labels")
         let flat_rows = self.record_batches_to_rows(all_batches)?;

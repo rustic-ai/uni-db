@@ -560,3 +560,155 @@ async fn test_uncancelled_locy_program_still_runs() -> Result<()> {
 
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// `max_query_memory` must bound execution, not only the result set — #185
+// ---------------------------------------------------------------------------
+//
+// `enforce_memory_limit` runs *after* `executor.execute(...)` and measures the
+// finished rows. A query that returns a handful of rows passed it while peak
+// RSS reached tens of gigabytes on the way there, because the limit never
+// reached DataFusion: the `SessionContext` was built with `SessionContext::new()`
+// and therefore with DataFusion's default unbounded memory pool, which never
+// refuses a reservation and never spills.
+//
+// It is now built with a `GreedyMemoryPool` sized from `max_query_memory`, so
+// operators that reserve through the pool are bounded. Two limits are honest
+// and deliberate: the pool sits on the shared session template, so it is a
+// budget across concurrent queries rather than strictly per query; and an
+// operator that allocates an Arrow buffer directly without reserving (the
+// `MutableArrayData` path behind #184) is still unbounded.
+
+/// A database whose only unusual setting is a small query-memory ceiling.
+async fn db_with_memory_limit(bytes: usize) -> Result<Uni> {
+    let mut config = uni_db::UniConfig::default();
+    config.max_query_memory = bytes;
+    Ok(Uni::in_memory().config(config).build().await?)
+}
+
+/// The discriminating shape from #185: **one row out**, a large intermediate.
+/// The post-hoc result-size check cannot see this query at all — one integer
+/// is far below any ceiling — so if it is rejected, the rejection came from
+/// the execution-time pool.
+#[tokio::test]
+async fn max_query_memory_bounds_execution_not_just_results() -> Result<()> {
+    // 256 KiB: comfortably above what the seeding writes need, far below the
+    // distinct-value hash table built below.
+    let db = db_with_memory_limit(256 * 1024).await?;
+    db.schema()
+        .label("W")
+        .property("k", uni_db::DataType::String)
+        .apply()
+        .await?;
+
+    let tx = db.session().tx().await?;
+    tx.execute(
+        "UNWIND range(0, 40000) AS i CREATE (:W {k: 'key-that-is-long-enough-to-matter-' + toString(i)})",
+    )
+    .await?;
+    tx.commit().await?;
+
+    // A *grouped* aggregate, because that is what reserves through the pool:
+    // `count(DISTINCT x)` with no grouping keys uses a plain accumulator that
+    // allocates its hash set directly. The inner aggregate builds 40k groups;
+    // the outer collapses them so only one row is ever returned, which is what
+    // keeps the post-hoc result-size check out of the picture.
+    let res = db
+        .session()
+        .query("MATCH (n:W) WITH n.k AS k, count(*) AS per RETURN count(k) AS c")
+        .await;
+
+    match res {
+        Err(e) => {
+            let msg = e.to_string();
+            assert!(
+                msg.contains("memory") || msg.contains("Resources") || msg.contains("resources"),
+                "expected a memory-exhaustion error, got: {msg}"
+            );
+        }
+        Ok(rows) => panic!(
+            "a 256 KiB ceiling accepted a 40k-distinct-value aggregation returning {:?}; \
+             the limit is still measuring the result set rather than execution",
+            rows.rows()[0].values()[0]
+        ),
+    }
+    Ok(())
+}
+
+/// The same ceiling must not reject an ordinary query. Guards against "fixed"
+/// meaning "everything now fails".
+#[tokio::test]
+async fn a_modest_query_is_unaffected_by_the_execution_pool() -> Result<()> {
+    let db = db_with_memory_limit(256 * 1024).await?;
+    db.schema()
+        .label("S")
+        .property("k", uni_db::DataType::String)
+        .apply()
+        .await?;
+    let tx = db.session().tx().await?;
+    tx.execute("UNWIND range(0, 50) AS i CREATE (:S {k: toString(i)})")
+        .await?;
+    tx.commit().await?;
+
+    let rows = db
+        .session()
+        .query("MATCH (n:S) RETURN count(*) AS c")
+        .await?;
+    assert_eq!(rows.rows()[0].values()[0], uni_db::Value::Int(51));
+    Ok(())
+}
+
+/// The result-size estimator has to count heap bytes.
+///
+/// It was `size_of_val(v) + 64` — the size of the `Value` enum's discriminant,
+/// a constant — so a row holding a megabyte string was charged the same as a
+/// row holding a small integer, and the "byte" limit was really a row count.
+/// One row of ~1 MB must exceed a 64 KiB ceiling.
+#[tokio::test]
+async fn the_memory_estimator_counts_heap_bytes() -> Result<()> {
+    let db = db_with_memory_limit(64 * 1024).await?;
+
+    let res = db
+        .session()
+        .query("RETURN reduce(s = '', x IN range(0, 4000) | s + '0123456789abcdefghij') AS big")
+        .await;
+
+    let err = res
+        .err()
+        .expect("one ~80 KB string must exceed a 64 KiB ceiling; a per-value constant would not");
+    assert!(
+        err.to_string().contains("Query exceeded memory limit"),
+        "expected the result-size limit, got: {err}"
+    );
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// A transaction statement must be time-bounded, like its session twin
+// ---------------------------------------------------------------------------
+//
+// The session paths wrapped execution in `tokio::time::timeout`; the two
+// transaction paths raced only the cancellation scope, so a statement run
+// inside a transaction had no wall-clock bound at all.
+
+#[tokio::test]
+async fn a_transaction_statement_honours_query_timeout() -> Result<()> {
+    let db = seeded_db().await?;
+    let session = db.session();
+    let tx = session.tx().await?;
+
+    let res = tx
+        .query_with("MATCH (n:Node) RETURN n")
+        .timeout(Duration::from_nanos(1))
+        .fetch_all()
+        .await;
+
+    let err = res
+        .err()
+        .expect("a 1ns timeout must reject a transaction statement on the materializing terminal");
+    assert!(
+        matches!(err, uni_db::UniError::Timeout { .. }),
+        "expected UniError::Timeout, got: {err:?}"
+    );
+    Ok(())
+}

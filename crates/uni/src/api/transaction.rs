@@ -42,14 +42,27 @@ async fn with_optional_timeout<T>(
     timeout: Option<Duration>,
     fut: impl std::future::Future<Output = Result<T>>,
 ) -> Result<T> {
-    match timeout {
-        Some(t) => tokio::time::timeout(t, fut)
-            .await
-            .map_err(|_| UniError::Timeout {
-                timeout_ms: t.as_millis() as u64,
-            })?,
-        None => fut.await,
+    let Some(t) = timeout else {
+        return fut.await;
+    };
+    let started = std::time::Instant::now();
+    let out = tokio::time::timeout(t, fut)
+        .await
+        .map_err(|_| UniError::Timeout {
+            timeout_ms: t.as_millis() as u64,
+        })??;
+    // `tokio::time::timeout` polls the inner future before arming its timer, so
+    // a statement that finishes inside a single poll returns `Ok` no matter how
+    // small the budget — the timer never gets a chance to fire. Comparing the
+    // elapsed time closes that hole, which is why the session terminals carry
+    // the same check; without it `.timeout()` was silently inert on every
+    // transaction statement fast enough not to yield.
+    if started.elapsed() > t {
+        return Err(UniError::Timeout {
+            timeout_ms: t.as_millis() as u64,
+        });
     }
+    Ok(out)
 }
 
 /// Transaction isolation level.
