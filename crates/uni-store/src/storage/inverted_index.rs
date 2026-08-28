@@ -11,7 +11,7 @@
 use crate::backend::types::{FilterExpr, Scalar};
 use anyhow::{Result, anyhow};
 use arrow_array::types::UInt64Type;
-use arrow_array::{Array, ListArray, RecordBatch, RecordBatchIterator, StringArray, UInt64Array};
+use arrow_array::{Array, ListArray, RecordBatch, StringArray, UInt64Array};
 use arrow_schema::{DataType, Field, Schema as ArrowSchema};
 use futures::TryStreamExt;
 use lance::Dataset;
@@ -238,19 +238,24 @@ impl InvertedIndex {
             ..Default::default()
         };
 
-        let iterator = RecordBatchIterator::new(
-            vec![Ok(batch)],
-            Arc::new(ArrowSchema::new(vec![
-                Field::new("term", DataType::Utf8, false),
-                Field::new(
-                    "vids",
-                    DataType::List(Arc::new(Field::new("item", DataType::UInt64, true))),
-                    false,
-                ),
-            ])),
-        );
+        let iter_schema = Arc::new(ArrowSchema::new(vec![
+            Field::new("term", DataType::Utf8, false),
+            Field::new(
+                "vids",
+                DataType::List(Arc::new(Field::new("item", DataType::UInt64, true))),
+                false,
+            ),
+        ]));
 
-        let ds = Dataset::write(iterator, &path, Some(write_params)).await?;
+        // Retried: a losing Lance commit is retryable, and this writer used to
+        // propagate it.
+        let ds = crate::storage::manager::write_dataset_with_lance_conflict_retry(
+            &path,
+            iter_schema,
+            vec![batch],
+            write_params.mode,
+        )
+        .await?;
         self.dataset = Some(ds);
 
         Ok(())

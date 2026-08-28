@@ -4,10 +4,10 @@
 use crate::backend::types::{FilterExpr, Scalar};
 use anyhow::{Result, anyhow};
 use arrow_array::builder::{FixedSizeBinaryBuilder, StringBuilder};
-use arrow_array::{Array, RecordBatch, RecordBatchIterator, StringArray, UInt64Array};
+use arrow_array::{Array, RecordBatch, StringArray, UInt64Array};
 use arrow_schema::{DataType as ArrowDataType, Field, Schema as ArrowSchema};
 use futures::TryStreamExt;
-use lance::dataset::{Dataset, WriteMode, WriteParams};
+use lance::dataset::{Dataset, WriteMode};
 use lance::index::DatasetIndexExt;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -106,14 +106,14 @@ impl UidIndex {
             ],
         )?;
 
-        let reader = RecordBatchIterator::new(std::iter::once(Ok(batch)), schema);
-
-        let params = WriteParams {
-            mode: WriteMode::Append,
-            ..Default::default()
-        };
-
-        Dataset::write(Box::new(reader), &self.uri, Some(params)).await?;
+        // Retried: a losing Lance commit is retryable.
+        crate::storage::manager::write_dataset_with_lance_conflict_retry(
+            &self.uri,
+            schema,
+            vec![batch],
+            WriteMode::Append,
+        )
+        .await?;
         self.ensure_uid_hex_index().await?;
         Ok(())
     }
@@ -167,12 +167,14 @@ impl UidIndex {
             )?);
         }
 
-        let reader = RecordBatchIterator::new(migrated.into_iter().map(Ok), new_schema);
-        let params = WriteParams {
-            mode: WriteMode::Overwrite,
-            ..Default::default()
-        };
-        Dataset::write(Box::new(reader), &self.uri, Some(params)).await?;
+        // Retried: a losing Lance commit is retryable.
+        crate::storage::manager::write_dataset_with_lance_conflict_retry(
+            &self.uri,
+            new_schema,
+            migrated,
+            WriteMode::Overwrite,
+        )
+        .await?;
         Ok(())
     }
 
@@ -363,6 +365,8 @@ impl UidIndex {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use arrow_array::RecordBatchIterator;
+    use lance::dataset::WriteParams;
     use tempfile::TempDir;
 
     fn test_uid(counter: u8) -> UniId {

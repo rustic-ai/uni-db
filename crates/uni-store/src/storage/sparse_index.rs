@@ -27,8 +27,7 @@ use crate::backend::types::{FilterExpr, Scalar};
 use anyhow::{Result, anyhow};
 use arrow_array::types::{Float32Type, UInt8Type, UInt64Type};
 use arrow_array::{
-    Array, Float32Array, ListArray, RecordBatch, RecordBatchIterator, StructArray, UInt8Array,
-    UInt32Array, UInt64Array,
+    Array, Float32Array, ListArray, RecordBatch, StructArray, UInt8Array, UInt32Array, UInt64Array,
 };
 use arrow_schema::{DataType, Field, Schema as ArrowSchema};
 use futures::TryStreamExt;
@@ -402,8 +401,15 @@ impl SparseVectorIndex {
             mode: lance::dataset::WriteMode::Overwrite,
             ..Default::default()
         };
-        let iterator = RecordBatchIterator::new(vec![Ok(batch)], Self::postings_schema(quantize));
-        let ds = Dataset::write(iterator, &path, Some(write_params)).await?;
+        // Retried: Lance reports a losing commit as retryable, and this
+        // writer used to propagate it to the caller.
+        let ds = crate::storage::manager::write_dataset_with_lance_conflict_retry(
+            &path,
+            Self::postings_schema(quantize),
+            vec![batch],
+            write_params.mode,
+        )
+        .await?;
         self.dataset = Some(ds);
         Ok(())
     }

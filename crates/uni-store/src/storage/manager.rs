@@ -173,14 +173,24 @@ fn is_lance_conflict(err: &anyhow::Error) -> bool {
 /// Up to 10 attempts (~10s worst case); backoff is 1ms, 2ms, 4ms, ...,
 /// 512ms. Non-conflict errors return immediately. `op` is re-invoked each
 /// attempt so it can re-check table existence and adjust strategy.
-async fn retry_on_lance_conflict<F, Fut>(mut op: F) -> anyhow::Result<()>
+///
+/// Every Lance commit belongs inside this, not just the vertex and delta
+/// writes it was introduced for. Lance reports a losing commit as a
+/// *retryable* conflict — "Retryable commit conflict … preempted by concurrent
+/// transaction" — and a writer that propagates it instead of retrying turns a
+/// scheduling coincidence into a user-visible failure. The secondary-index
+/// writers (`index`, `json_index`, `inverted_index`, `sparse_index`) each
+/// committed unguarded, which is what made
+/// `sparse_recovered_update_overrides_stale_posting_without_rebuild` fail under
+/// parallel load and pass alone.
+pub(crate) async fn retry_on_lance_conflict<T, F, Fut>(mut op: F) -> anyhow::Result<T>
 where
     F: FnMut() -> Fut,
-    Fut: std::future::Future<Output = anyhow::Result<()>>,
+    Fut: std::future::Future<Output = anyhow::Result<T>>,
 {
     for attempt in 0u32..10 {
         match op().await {
-            Ok(()) => return Ok(()),
+            Ok(v) => return Ok(v),
             Err(e) => {
                 if !is_lance_conflict(&e) || attempt == 9 {
                     return Err(e);
@@ -191,6 +201,48 @@ where
         }
     }
     unreachable!("retry loop exits via Ok or Err")
+}
+
+/// Write `batches` to the Lance dataset at `uri`, retrying a losing commit.
+///
+/// One concrete function rather than a closure per call site, for two reasons.
+/// It is the whole of what the four secondary-index writers were doing by hand,
+/// so a single definition keeps them from drifting apart again. And it keeps the
+/// future's type flat: wrapping each site's write in its own async closure
+/// nested another layer of anonymous future inside already-`#[instrument]`ed
+/// flush paths, and the compiler gave up proving `Send` for the result
+/// (`E0275`, overflow evaluating the requirement) in
+/// `repro_16_compact_vertices_concurrent_flush`.
+pub(crate) async fn write_dataset_with_lance_conflict_retry(
+    uri: &str,
+    schema: Arc<arrow_schema::Schema>,
+    batches: Vec<arrow_array::RecordBatch>,
+    mode: lance::dataset::WriteMode,
+) -> anyhow::Result<lance::Dataset> {
+    // The attempt future is boxed, which is load-bearing rather than stylistic.
+    // Unboxed, each retry layer nests `lance::Dataset::write`'s anonymous future
+    // inside this one, inside the `#[instrument]`ed flush future above it, and
+    // the trait solver gives up proving `Send` while unrolling Lance's internal
+    // moka cache types — `E0275`, reported against
+    // `repro_16_compact_vertices_concurrent_flush`'s `tokio::spawn`, several
+    // crates away from the cause. `Box::pin` erases the inner type and the
+    // nesting stops.
+    type Attempt<'a> = std::pin::Pin<
+        Box<dyn std::future::Future<Output = anyhow::Result<lance::Dataset>> + Send + 'a>,
+    >;
+    retry_on_lance_conflict(|| -> Attempt<'_> {
+        let schema = Arc::clone(&schema);
+        let batches = batches.clone();
+        Box::pin(async move {
+            let reader = arrow_array::RecordBatchIterator::new(batches.into_iter().map(Ok), schema);
+            let params = lance::dataset::WriteParams {
+                mode,
+                ..Default::default()
+            };
+            Ok(lance::Dataset::write(Box::new(reader), uri, Some(params)).await?)
+        })
+    })
+    .await
 }
 
 /// Combine a version high-water-mark predicate with an optional caller filter.
