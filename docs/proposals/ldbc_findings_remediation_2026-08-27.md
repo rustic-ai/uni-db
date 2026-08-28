@@ -770,6 +770,7 @@ The single current list. Everything above this point is narrative.
 | #193 | undirected hops built the edge struct from the traversal's source, reporting the same edge reversed on half the rows |
 | #194 | a filtered FTS query was bounded by `k` *before* the filter, so excluded rows consumed the top-k slots — measured 0 rows of 10 with 50 matches |
 | #196 | an aggregate group key was marked "*", so the whole entity — `_all_props` and `overflow_json` included — was scanned and hashed per group |
+| #184 | the `UNWIND` source really was the crash — with it pruned, IC6 answers 10 rows at SF1 rather than aborting on a 14 TB allocation |
 | #175 | not unobservable as filed — the scalar half already shipped; the gap was vector/FTS, where the scan path's predicate is *unsound* rather than merely absent |
 
 Gates on the current tip: `fmt`, workspace `clippy --all-targets -D warnings`,
@@ -786,8 +787,9 @@ reported, latency work could not attribute anything to an index. It reports now.
 
 | item | state | gate |
 |---|---|---|
-| #184 | the unbounded allocation, plus one correctness hole | **Spiked** — `docs/proposals/column_pruning_spike_2026-08-28.md`. SF1 now runs (#196 unblocked it): peak RSS **13.8 GB** against a 1 GiB pool, ending in SIGKILL. The doc recommends **not** building a general pass — close the subquery catch-all (a silent wrong answer, ranked first), bound the unwind output into chunks, and audit the remaining marker sites, `Distinct` first. |
-| #192 | `resolve_flat_column_properties` covers 5 of 27 `Expr` variants behind a catch-all | Folded into #184's sweep. Still **no user-visible repro** across 16 probed shapes. |
+| #192 | `resolve_flat_column_properties` covers 5 of 27 `Expr` variants behind a catch-all | Still **no user-visible repro** across 16 probed shapes. Fold into #197's sweep, which is the same defect class with a live consequence. |
+| #197 | a subquery-body read can go unrecorded, so a **live** `UNWIND` source can be proven dead and pruned | Split from #184. Ranked first of what remains: an under-report here is a silent wrong answer, not a missed optimisation. |
+| #198 | peak RSS 13.8 GB against a 1 GiB pool, ending in SIGKILL | Split from #184. Bound the unwind output into chunks; pruning cannot cover a list that is legitimately live. |
 | Track 0 | differential oracle | Not started; blocked on infrastructure, not code. |
 | Wave 5.2–5.5 | comprehension hoisting, anchoring, latency, decorrelation | **Ungated** — #175 closed. Start with 5.4's latency attribution, which now has a witness. |
 
