@@ -17,6 +17,7 @@ of finding and closing those.
 | [teeth-2026-08-13.md](teeth-2026-08-13.md) | per bug, what happened when the defect was **deliberately put back**. A test only ever observed passing is not evidence | 2026-08-13 |
 | [silent-downgrades-2026-08-15.md](silent-downgrades-2026-08-15.md) | every planner site where an optimization is attempted and falls back to a slower-but-correct path with no error, warning, or trace | 2026-08-15 |
 | [madsim-spike-2026-08-25.md](madsim-spike-2026-08-25.md) | deterministic-simulation spike for C2 — **verdict REJECT**, with the evidence, plus the cheaper alternative that replaced it | 2026-08-25 |
+| [single-shape-coverage-2026-08-27.md](single-shape-coverage-2026-08-27.md) | four defects in features the TCK *does* cover, where every scenario shared one structural shape — and the smaller version of the trap, a control that could only pass | 2026-08-27 |
 | [reverts/](reverts/) | the revert patches the teeth ledger replays — 7 of them, one per pinned defect | ongoing |
 
 ## The reverts directory
@@ -40,6 +41,13 @@ investigating rather than deleting.
 at a non-existent failpoint seam, a fixture fetch pointed at a corrupted file, a
 contention sweep with no cell that can collide. An assertion never observed
 failing is an assumption wearing a test's clothes.
+
+**One shape is not coverage.** Eight pattern-comprehension scenarios all
+anchored on an outer variable are eight tests and one bucket; the defect lived
+in the empty bucket next to it. Count the axes a feature varies along, not the
+scenarios. `single-shape-coverage` works this through, including the version
+that fits inside a single test — a control whose input was already sorted, so a
+sort doing nothing looked exactly like a sort that worked.
 
 **A denominator that cannot discriminate is not a denominator.** The
 `vid_lookup_join` case in `silent-downgrades` is the canonical one: the operator

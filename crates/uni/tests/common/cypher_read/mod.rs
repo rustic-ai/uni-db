@@ -20,6 +20,7 @@ pub mod datetime_epoch_map_test;
 pub mod ddl_numeric_width_test;
 pub mod dynamic_access_test;
 pub mod entity_after_unwind_test;
+pub mod entity_function_binding_shapes_test;
 pub mod entity_identity_in_list_test;
 pub mod explain_test;
 pub mod int_arithmetic_overflow_test;
