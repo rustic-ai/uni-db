@@ -135,8 +135,6 @@ async fn a_property_projection_still_works() {
 /// widening `x` to the whole entity, which would defeat the projection pruning
 /// the test above pins.
 #[tokio::test]
-#[ignore = "#189: inner pattern variables are absent from the comprehension's \
-            TranslationContext, so a map value compiles as index(bare x, …)"]
 async fn a_map_literal_over_an_inner_property() {
     let db = fixture().await;
     let items = list_for_a(
@@ -152,7 +150,6 @@ async fn a_map_literal_over_an_inner_property() {
 
 /// Same cause, through map-projection syntax.
 #[tokio::test]
-#[ignore = "#189: same cause as a_map_literal_over_an_inner_property"]
 async fn a_map_projection_over_an_inner_entity() {
     let db = fixture().await;
     let items = list_for_a(
@@ -162,6 +159,101 @@ async fn a_map_projection_over_an_inner_entity() {
     .await;
     match &items[0] {
         Value::Map(m) => assert_eq!(m.get("name"), Some(&Value::String("b".to_string()))),
+        other => panic!("expected a map, got {other:?}"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The container sweep.
+//
+// #189 arrived as "a map value fails where a list value works", and it was
+// tempting to read that as a fact about maps. It was not: `translate_property_
+// access` picks between `Column("x.name")` and `index(Column("x"), 'name')` on
+// whether the context calls `x` a graph entity, and the comprehension compiled
+// its inner expressions with the *outer* context, which has never heard of `x`.
+// Every container that reaches that leaf was therefore broken, and the list
+// literal worked only because a separate pre-pass happened to rewrite it first.
+//
+// So a test per container, not a test per bug report. `List` is the shape that
+// already worked and is kept as the control: if these ever diverge again, the
+// difference is the diagnosis.
+// ---------------------------------------------------------------------------
+
+/// The control. This shape worked before the fix and must keep working.
+#[tokio::test]
+async fn a_list_literal_over_an_inner_property_is_the_control() {
+    let db = fixture().await;
+    let items = list_for_a(
+        &db,
+        "MATCH (n:P) RETURN [(n)-[:KNOWS]->(x) | [x.name]] AS l",
+    )
+    .await;
+    match &items[0] {
+        Value::List(inner) => assert_eq!(inner[0], Value::String("b".to_string())),
+        other => panic!("expected a list, got {other:?}"),
+    }
+}
+
+/// `CASE` reaches the same leaf as a map value and was broken the same way.
+#[tokio::test]
+async fn a_case_over_an_inner_property() {
+    let db = fixture().await;
+    let items = list_for_a(
+        &db,
+        "MATCH (n:P) RETURN [(n)-[:KNOWS]->(x) | CASE WHEN x.name = 'b' THEN 'hit' ELSE 'miss' END] AS l",
+    )
+    .await;
+    assert_eq!(items[0], Value::String("hit".to_string()));
+}
+
+/// `IN` likewise. A wrong answer here is `false`, not an error, which is why it
+/// is asserted against a value rather than merely against planning.
+#[tokio::test]
+async fn an_in_list_over_an_inner_property() {
+    let db = fixture().await;
+    let items = list_for_a(
+        &db,
+        "MATCH (n:P) RETURN [(n)-[:KNOWS]->(x) | x.name IN ['b', 'c']] AS l",
+    )
+    .await;
+    assert_eq!(items[0], Value::Bool(true));
+}
+
+/// An edge property through a map value — the edge variable needs registering
+/// as an entity just as the node variable does, and it takes the other arm.
+#[tokio::test]
+async fn a_map_literal_over_an_inner_edge_property() {
+    let db = fixture().await;
+    let items = list_for_a(
+        &db,
+        "MATCH (n:P) RETURN [(n)-[r:KNOWS]->(x) | {since: r.since, who: x.name}] AS l",
+    )
+    .await;
+    match &items[0] {
+        Value::Map(m) => {
+            assert_eq!(m.get("since"), Some(&Value::String("YEAR".to_string())));
+            assert_eq!(m.get("who"), Some(&Value::String("b".to_string())));
+        }
+        other => panic!("expected a map, got {other:?}"),
+    }
+}
+
+/// A map projection naming two properties. The collector must narrow to both,
+/// not widen `x` to the whole entity — widening would pass this assertion while
+/// undoing the pruning the projection tests above pin.
+#[tokio::test]
+async fn a_map_projection_naming_a_property_and_a_literal_entry() {
+    let db = fixture().await;
+    let items = list_for_a(
+        &db,
+        "MATCH (n:P) RETURN [(n)-[:KNOWS]->(x) | x {.name, tag: x.name}] AS l",
+    )
+    .await;
+    match &items[0] {
+        Value::Map(m) => {
+            assert_eq!(m.get("name"), Some(&Value::String("b".to_string())));
+            assert_eq!(m.get("tag"), Some(&Value::String("b".to_string())));
+        }
         other => panic!("expected a map, got {other:?}"),
     }
 }

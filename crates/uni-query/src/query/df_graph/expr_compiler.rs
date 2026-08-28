@@ -285,6 +285,53 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
         }
     }
 
+    /// Build a compiler that treats `entity_vars` as graph entities.
+    ///
+    /// The mirror of [`Self::scoped_compiler`]. A pattern comprehension compiles
+    /// its predicate and map expression against an *inner* schema whose entity
+    /// columns are flat — `x._vid`, `x.name` — but the translation context it
+    /// inherits describes only the outer scope. `translate_property_access`
+    /// picks between `Column("x.name")` and `index(Column("x"), 'name')` on
+    /// exactly that context, so without this the inner variables compile to an
+    /// index into a bare `x` the inner schema does not carry (#189).
+    ///
+    /// A context is created even when there is none to inherit: absent context
+    /// means "not a graph entity", which is the wrong answer here rather than an
+    /// unknown one.
+    ///
+    /// The caller must own `scoped_ctx_slot` and keep it alive for the returned
+    /// compiler's lifetime.
+    fn entity_scoped_compiler<'b>(
+        &'b self,
+        entity_vars: &[(String, VariableKind)],
+        scoped_ctx_slot: &'b mut Option<TranslationContext>,
+    ) -> CypherPhysicalExprCompiler<'b>
+    where
+        'a: 'b,
+    {
+        let ctx_ref = if entity_vars.is_empty() {
+            self.translation_ctx
+        } else {
+            let mut ctx = self.translation_ctx.cloned().unwrap_or_default();
+            for (var, kind) in entity_vars {
+                ctx.variable_kinds.insert(var.clone(), *kind);
+            }
+            *scoped_ctx_slot = Some(ctx);
+            scoped_ctx_slot.as_ref()
+        };
+
+        CypherPhysicalExprCompiler {
+            state: self.state,
+            translation_ctx: ctx_ref,
+            graph_ctx: self.graph_ctx.clone(),
+            uni_schema: self.uni_schema.clone(),
+            session_ctx: self.session_ctx.clone(),
+            storage: self.storage.clone(),
+            params: self.params.clone(),
+            outer_entity_vars: self.outer_entity_vars.clone(),
+        }
+    }
+
     /// Attach graph context and schema for pattern comprehension support.
     pub fn with_graph_ctx(
         mut self,
@@ -1580,11 +1627,30 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
             path_variable.as_deref(),
         );
 
-        // 4. Compile predicate and map_expr against inner schema
+        // 4. Compile predicate and map_expr against inner schema.
+        //
+        // The pattern's own variables are entities of the inner scope, and the
+        // inner schema carries them as flat `x._vid` / `x.name` columns. The
+        // inherited context knows nothing about them, so they are registered
+        // before compiling — otherwise a property access on one compiles as an
+        // index into a bare `x` that the inner schema does not have (#189).
+        let entity_vars: Vec<(String, VariableKind)> = steps
+            .iter()
+            .flat_map(|s| {
+                s.target_variable
+                    .clone()
+                    .map(|v| (v, VariableKind::Node))
+                    .into_iter()
+                    .chain(s.edge_variable.clone().map(|v| (v, VariableKind::Edge)))
+            })
+            .collect();
+        let mut inner_ctx_slot = None;
+        let inner_compiler = self.entity_scoped_compiler(&entity_vars, &mut inner_ctx_slot);
+
         let pred_phy = where_clause
-            .map(|p| self.compile(p, &inner_schema))
+            .map(|p| inner_compiler.compile(p, &inner_schema))
             .transpose()?;
-        let map_phy = self.compile(map_expr, &inner_schema)?;
+        let map_phy = inner_compiler.compile(map_expr, &inner_schema)?;
         let output_type = map_phy.data_type(&inner_schema)?;
 
         // 5. Return expression

@@ -28,7 +28,8 @@ use datafusion::physical_plan::PhysicalExpr;
 use uni_common::core::id::{Eid, Vid};
 use uni_common::core::schema::Schema as UniSchema;
 use uni_cypher::ast::{
-    Direction as AstDirection, Expr, NodePattern, Pattern, PatternElement, RelationshipPattern,
+    Direction as AstDirection, Expr, MapProjectionItem, NodePattern, Pattern, PatternElement,
+    RelationshipPattern,
 };
 use uni_store::QueryContext;
 use uni_store::storage::direction::Direction;
@@ -1053,11 +1054,43 @@ fn build_node_entity_column(
 /// nothing else and the query failed to plan with `No field named x`.
 pub const WHOLE_ENTITY: &str = "*";
 
+/// Record one property reference against whichever inner map owns `var`.
+///
+/// A variable that is neither a node nor an edge of this pattern belongs to the
+/// outer scope and is left alone.
+fn record_inner_prop(
+    var: &str,
+    prop: &str,
+    node_vars: &HashSet<String>,
+    edge_vars: &HashSet<String>,
+    vertex_props: &mut HashMap<String, Vec<String>>,
+    edge_props: &mut HashMap<String, Vec<String>>,
+) {
+    if node_vars.contains(var) {
+        vertex_props
+            .entry(var.to_string())
+            .or_default()
+            .push(prop.to_string());
+    } else if edge_vars.contains(var) {
+        edge_props
+            .entry(var.to_string())
+            .or_default()
+            .push(prop.to_string());
+    }
+}
+
 /// Collect property references from expressions that refer to inner variables.
 ///
 /// Walks expression trees looking for `Expr::Property(Expr::Variable(v), prop)`
 /// where `v` is in `inner_vars`. Separates vertex props from edge props based on
 /// whether the variable is a node or edge variable.
+///
+/// The match below is **exhaustive on purpose** — there is no catch-all arm. A
+/// variant that is silently skipped here does not fail loudly; it produces an
+/// inner schema missing a column, and the failure surfaces much later as
+/// `No field named x`. That is how a map projection over an inner property
+/// (#189) went unnoticed while the list form worked. Adding a variant to `Expr`
+/// must therefore be a compile error here, not a silent omission.
 pub fn collect_inner_properties(
     where_clause: Option<&Expr>,
     map_expr: &Expr,
@@ -1086,17 +1119,14 @@ pub fn collect_inner_properties(
         match expr {
             Expr::Property(base, prop) => {
                 if let Expr::Variable(var) = base.as_ref() {
-                    if node_vars.contains(var) {
-                        vertex_props
-                            .entry(var.clone())
-                            .or_default()
-                            .push(prop.clone());
-                    } else if edge_vars.contains(var) {
-                        edge_props
-                            .entry(var.clone())
-                            .or_default()
-                            .push(prop.clone());
-                    }
+                    record_inner_prop(
+                        var,
+                        prop,
+                        &node_vars,
+                        &edge_vars,
+                        &mut vertex_props,
+                        &mut edge_props,
+                    );
                     // Deliberately *not* re-pushed. `x.name` names one property
                     // of `x`, not the whole of `x`; walking the base would hit
                     // the bare-variable arm below and widen it to the entire
@@ -1110,16 +1140,67 @@ pub fn collect_inner_properties(
             // A bare entity reference: `[(n)-[:R]->(x) | x]` wants the whole
             // node, not one of its properties.
             Expr::Variable(var) => {
-                if node_vars.contains(var) {
-                    vertex_props
-                        .entry(var.clone())
-                        .or_default()
-                        .push(WHOLE_ENTITY.to_string());
-                } else if edge_vars.contains(var) {
-                    edge_props
-                        .entry(var.clone())
-                        .or_default()
-                        .push(WHOLE_ENTITY.to_string());
+                record_inner_prop(
+                    var,
+                    WHOLE_ENTITY,
+                    &node_vars,
+                    &edge_vars,
+                    &mut vertex_props,
+                    &mut edge_props,
+                );
+            }
+            // `x {.name, .age}` names properties of `x` exactly as `x.name`
+            // does, so it must narrow the same way rather than widen `x` to the
+            // whole entity. `.*` is the one item that genuinely needs all of it.
+            Expr::MapProjection { base, items } => {
+                let base_var = match base.as_ref() {
+                    Expr::Variable(v) => Some(v.as_str()),
+                    _ => {
+                        exprs_to_visit.push(base);
+                        None
+                    }
+                };
+                for item in items {
+                    match item {
+                        MapProjectionItem::Property(prop) => {
+                            if let Some(var) = base_var {
+                                record_inner_prop(
+                                    var,
+                                    prop,
+                                    &node_vars,
+                                    &edge_vars,
+                                    &mut vertex_props,
+                                    &mut edge_props,
+                                );
+                            }
+                        }
+                        MapProjectionItem::AllProperties => {
+                            if let Some(var) = base_var {
+                                record_inner_prop(
+                                    var,
+                                    WHOLE_ENTITY,
+                                    &node_vars,
+                                    &edge_vars,
+                                    &mut vertex_props,
+                                    &mut edge_props,
+                                );
+                            }
+                        }
+                        // `x {y}` splices another variable in whole.
+                        MapProjectionItem::Variable(var) => {
+                            record_inner_prop(
+                                var,
+                                WHOLE_ENTITY,
+                                &node_vars,
+                                &edge_vars,
+                                &mut vertex_props,
+                                &mut edge_props,
+                            );
+                        }
+                        MapProjectionItem::LiteralEntry(_, value) => {
+                            exprs_to_visit.push(value);
+                        }
+                    }
                 }
             }
             Expr::BinaryOp { left, right, .. } => {
@@ -1135,10 +1216,13 @@ pub fn collect_inner_properties(
                 }
             }
             Expr::Case {
+                expr: subject,
                 when_then,
                 else_expr,
-                ..
             } => {
+                if let Some(s) = subject {
+                    exprs_to_visit.push(s);
+                }
                 for (w, t) in when_then {
                     exprs_to_visit.push(w);
                     exprs_to_visit.push(t);
@@ -1147,7 +1231,7 @@ pub fn collect_inner_properties(
                     exprs_to_visit.push(e);
                 }
             }
-            Expr::IsNull(inner) | Expr::IsNotNull(inner) => {
+            Expr::IsNull(inner) | Expr::IsNotNull(inner) | Expr::IsUnique(inner) => {
                 exprs_to_visit.push(inner);
             }
             Expr::List(items) => {
@@ -1164,7 +1248,77 @@ pub fn collect_inner_properties(
                 exprs_to_visit.push(l);
                 exprs_to_visit.push(r);
             }
-            _ => {}
+            Expr::ArrayIndex { array, index } => {
+                exprs_to_visit.push(array);
+                exprs_to_visit.push(index);
+            }
+            Expr::ArraySlice { array, start, end } => {
+                exprs_to_visit.push(array);
+                if let Some(s) = start {
+                    exprs_to_visit.push(s);
+                }
+                if let Some(e) = end {
+                    exprs_to_visit.push(e);
+                }
+            }
+            Expr::LabelCheck { expr: inner, .. } => {
+                exprs_to_visit.push(inner);
+            }
+            Expr::ValidAt {
+                entity, timestamp, ..
+            } => {
+                exprs_to_visit.push(entity);
+                exprs_to_visit.push(timestamp);
+            }
+            // These bind a variable of their own. Its name could shadow one of
+            // this pattern's, in which case a property is recorded that the
+            // entity does not have — an unused NULL column, never a missing one.
+            // Under-collecting is the failure that matters, so walk them.
+            Expr::Quantifier {
+                list, predicate, ..
+            } => {
+                exprs_to_visit.push(list);
+                exprs_to_visit.push(predicate);
+            }
+            Expr::Reduce {
+                init, list, expr, ..
+            } => {
+                exprs_to_visit.push(init);
+                exprs_to_visit.push(list);
+                exprs_to_visit.push(expr);
+            }
+            Expr::ListComprehension {
+                list,
+                where_clause,
+                map_expr,
+                ..
+            } => {
+                exprs_to_visit.push(list);
+                if let Some(w) = where_clause {
+                    exprs_to_visit.push(w);
+                }
+                exprs_to_visit.push(map_expr);
+            }
+            // A nested comprehension has inner variables of its own, but its
+            // body may still correlate to ours, so it is walked for the same
+            // reason as the binders above.
+            Expr::PatternComprehension {
+                where_clause,
+                map_expr,
+                ..
+            } => {
+                if let Some(w) = where_clause {
+                    exprs_to_visit.push(w);
+                }
+                exprs_to_visit.push(map_expr);
+            }
+            // Subqueries carry a `Query`, not an `Expr`, so this walker cannot
+            // reach into them. A correlated reference from inside one is not
+            // collected here; that is a pre-existing limit, recorded rather than
+            // hidden behind a catch-all.
+            Expr::Exists { .. } | Expr::CountSubquery(_) | Expr::CollectSubquery(_) => {}
+            // Genuine leaves.
+            Expr::Literal(_) | Expr::Parameter(_) | Expr::Wildcard => {}
         }
     }
 
