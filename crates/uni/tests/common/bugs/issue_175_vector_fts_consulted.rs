@@ -357,3 +357,86 @@ async fn the_fts_counter_is_not_a_constant() {
     assert_eq!(b.fts_index_scans, 0, "the counter never falls");
 }
 
+// ── FTS filtering (found while wiring the counter above) ────────────────────
+
+/// A filtered FTS query must not be starved by rows the filter excludes.
+///
+/// `full_text_search` applied its filter with no `prefilter(true)`, unlike
+/// `vector_search`. The FTS query is bounded by `k` *before* the filter runs, so
+/// excluded rows consumed top-k slots: with 50 high-scoring excluded documents
+/// ahead of 50 matching ones, `k = 10` with a filter returned **zero** rows
+/// while the same query unfiltered returned ten. No error — just nothing.
+///
+/// That is the exact failure `vector_search`'s own comment says prefiltering
+/// exists to prevent, and the asymmetry between the two paths was the bug.
+///
+/// The fixture is built so postfiltering *must* fail: every excluded document
+/// repeats the search term and so outranks every matching one. A fixture where
+/// the matches happen to rank highly passes either way and proves nothing.
+#[tokio::test]
+async fn a_filtered_fts_query_is_not_starved_by_excluded_rows() {
+    let db = Uni::in_memory().build().await.unwrap();
+    db.schema()
+        .label("Doc")
+        .property("body", DataType::String)
+        .property("tag", DataType::String)
+        .apply()
+        .await
+        .unwrap();
+    let tx = db.session().tx().await.unwrap();
+    for i in 0..50 {
+        tx.execute(&format!(
+            "CREATE (:Doc {{tag:'drop', body:'gamma gamma gamma gamma gamma d{i}'}})"
+        ))
+        .await
+        .unwrap();
+    }
+    for i in 0..50 {
+        tx.execute(&format!(
+            "CREATE (:Doc {{tag:'keep', body:'gamma filler filler filler filler k{i}'}})"
+        ))
+        .await
+        .unwrap();
+    }
+    tx.commit().await.unwrap();
+    db.flush().await.unwrap();
+    db.schema()
+        .label("Doc")
+        .index("body", IndexType::FullText)
+        .apply()
+        .await
+        .unwrap();
+    db.flush().await.unwrap();
+
+    let rows = db
+        .session()
+        .query_with(
+            "CALL uni.fts.query('Doc', 'body', 'gamma', 10, $f, null, {}) \
+             YIELD node RETURN node.tag AS tag",
+        )
+        .param("f", Value::String("tag = 'keep'".to_string()))
+        .fetch_all()
+        .await
+        .unwrap();
+
+    let tags: Vec<String> = rows
+        .rows()
+        .iter()
+        .map(|r| match &r.values()[0] {
+            Value::String(s) => s.clone(),
+            other => panic!("expected a tag string, got {other:?}"),
+        })
+        .collect();
+
+    assert_eq!(
+        tags.len(),
+        10,
+        "a filtered FTS query returned {} of 10 rows; 50 documents match the \
+         term and the filter, so the excluded ones consumed the top-k slots",
+        tags.len()
+    );
+    assert!(
+        tags.iter().all(|t| t == "keep"),
+        "the filter did not hold: {tags:?}"
+    );
+}

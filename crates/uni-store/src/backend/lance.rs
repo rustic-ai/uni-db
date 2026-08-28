@@ -958,6 +958,13 @@ impl StorageBackend for LanceDbBackend {
 
         if !filter.is_trivially_true() {
             let sql = filter.to_sql()?;
+            // Prefilter, for the same reason `vector_search` does: the FTS
+            // query is bounded by `k` *before* the filter runs, so
+            // postfiltering lets excluded rows consume top-k slots. Measured
+            // without this, on 50 high-scoring excluded docs and 50 matching
+            // ones, `k = 10` with a filter returned **zero** rows while the
+            // same query unfiltered returned ten.
+            scanner.prefilter(true);
             scanner
                 .filter(&sql)
                 .map_err(|e| anyhow!("FTS filter '{}' on '{}': {}", sql, table, e))?;
