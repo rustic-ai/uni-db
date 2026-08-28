@@ -860,6 +860,71 @@ mod tests {
         assert_eq!(common, DataType::Utf8);
     }
 
+    /// Two node structs of differing shape unify to CypherValue, not Utf8.
+    ///
+    /// The shapes below are the ones a real plan produces: a scanned anchor
+    /// carries `_all_props` and a traversal target does not. Before this rule
+    /// the pair matched nothing and fell through to the Utf8 fallback, and the
+    /// physical planner then died on `Unsupported CAST from Struct(..) to
+    /// Utf8`.
+    #[test]
+    fn test_find_common_result_type_entity_structs_differing_in_shape() {
+        use datafusion::arrow::datatypes::Field;
+        let scanned = DataType::Struct(
+            vec![
+                Field::new("_vid", DataType::UInt64, true),
+                Field::new("name", DataType::Utf8, true),
+                Field::new("_all_props", DataType::LargeBinary, true),
+            ]
+            .into(),
+        );
+        let traversed = DataType::Struct(
+            vec![
+                Field::new("_vid", DataType::UInt64, true),
+                Field::new("name", DataType::Utf8, true),
+            ]
+            .into(),
+        );
+        let schema = datafusion::common::DFSchema::empty();
+        let common = find_common_result_type(&[scanned, traversed], &schema);
+        assert_eq!(common, DataType::LargeBinary);
+    }
+
+    /// Identical entity structs still take Rule 1 and stay a struct.
+    ///
+    /// Without this, the rule above would silently widen the common case —
+    /// every same-shape `CASE` over nodes would start round-tripping through
+    /// CypherValue for no reason.
+    #[test]
+    fn test_find_common_result_type_identical_entity_structs_are_unchanged() {
+        use datafusion::arrow::datatypes::Field;
+        let node = DataType::Struct(
+            vec![
+                Field::new("_vid", DataType::UInt64, true),
+                Field::new("name", DataType::Utf8, true),
+            ]
+            .into(),
+        );
+        let schema = datafusion::common::DFSchema::empty();
+        let common = find_common_result_type(&[node.clone(), node.clone()], &schema);
+        assert_eq!(common, node);
+    }
+
+    /// A non-entity struct is not an entity: it has no identity field, so it
+    /// keeps the old fallback rather than being encoded as an entity.
+    #[test]
+    fn test_find_common_result_type_plain_structs_are_not_entities() {
+        use datafusion::arrow::datatypes::Field;
+        let a = DataType::Struct(vec![Field::new("a", DataType::Int64, true)].into());
+        let b = DataType::Struct(vec![Field::new("b", DataType::Int64, true)].into());
+        let schema = datafusion::common::DFSchema::empty();
+        assert_eq!(
+            find_common_result_type(&[a, b], &schema),
+            DataType::Utf8,
+            "only structs carrying `_vid`/`_eid` are entities"
+        );
+    }
+
     #[test]
     fn test_type_compat_one_struct_one_non_struct_incomparable() {
         use datafusion::arrow::datatypes::Field;
