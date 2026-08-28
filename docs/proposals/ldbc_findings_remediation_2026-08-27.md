@@ -730,11 +730,15 @@ The `{_vid}` stand-in is gone. Returning a map that answers `id()` correctly and
 every property as NULL is the defect, not a fallback for it; 358 related tests
 pass without it.
 
-### Found while fixing it: an undirected match reversed the relationship
+### #193 — found while fixing it: an undirected match reversed the relationship
 
 `MATCH ()-[e:KNOWS]-() RETURN e` returned the *same* edge twice — once as
 `src:0, dst:1` and once as `src:1, dst:0`. The second is fabricated. No error,
 and nothing to do with `startNode`.
+
+Filed as #193 and fixed in the same pass. Filed separately rather than folded
+into #187's record because it predates that work, reproduces with no endpoint
+call anywhere in the query, and is a silent wrong answer in its own right.
 
 `add_edge_structural_projection` built `_src`/`_dst` from the traversal's own
 source and target variables, which for an undirected hop are whichever end the
@@ -744,6 +748,13 @@ computes for exactly this ambiguity — now orients them back to storage order.
 It was found only because the hydrated `startNode` disagreed with
 `undirected_endpoints_do_not_depend_on_the_anchor`, a test #188 had already
 written. Fixing the struct rather than special-casing the hydration closed both.
+
+Worth noting why the existing suite could not see it: the edge really is present
+in both rows and its `eid` and type are right, so anything asserting identity
+passes. Only an assertion on the endpoints of a relationship *value* from an
+undirected match can catch it, and #188's endpoint tests go through the `_fwd`
+rewrite rather than through the edge struct. Two paths to the same fact, one
+tested.
 
 ### Open after this round
 
