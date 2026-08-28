@@ -341,6 +341,12 @@ consulted an index. That is the gate on 5.2–5.4, not effort.
 
 ### Open, with issues
 
+- #190 — **`UNION` over a whole node or relationship returns the wrong value,
+  silently.** Filed 2026-08-28; the most severe item now open here.
+- #191 — a node's Arrow struct differs between the scan path and the traversal
+  path, breaking `UNION` loudly. Filed 2026-08-28.
+- #192 — `resolve_flat_column_properties` handles 5 of 27 `Expr` variants behind
+  a catch-all. Filed 2026-08-28 as hardening, **with no user-visible repro**.
 - #184 — the `UNWIND`-source allocation is gone; there is still no general
   column-pruning pass, and the unbounded `MutableArrayData` allocation is
   untouched. **Unverified at SF1.**
@@ -374,8 +380,9 @@ error rather than a column that silently fails to appear.
 
 **The same catch-all still exists in `resolve_flat_column_properties`** (5 arms
 of 27 variants, behind `other => other.clone()`). It is no longer the cause of
-anything known, but it is the same latent defect in a second place — worth
-closing on its own.
+anything known, but it is the same latent defect in a second place — filed as
+**#192**, and folded into #184's catch-all sweep rather than given its own PR,
+because sixteen probed shapes failed to produce a repro for it.
 
 ### #188 — the orientation was known and discarded
 
@@ -445,3 +452,156 @@ explanation was "the rewrite produces a shape the compiler cannot handle," which
 is true and useless. The discriminating test — the same `CASE` with no
 `startNode` in it — took one minute and moved the defect somewhere else
 entirely.
+
+## Found while closing #189 and #188 — 2026-08-28
+
+The `CASE`-over-entities fix above ended by noting that a scanned node and a
+traversed node are not the same Arrow struct. That was recorded as latent — "not
+observable in seven probed paths." The claim was accurate about those seven
+paths and wrong as a conclusion: an eighth, `UNION`, observes it, and probing it
+turned up an unrelated and more serious defect sitting next to it.
+
+Both were confirmed with controls before filing. Neither came from LDBC; both
+were found by hunting a repro for something already believed to be harmless.
+
+### #190 — `UNION` over a whole entity returns the wrong value, silently
+
+```cypher
+MATCH (a:P)-[:KNOWS]->(b:P) RETURN b AS n
+```
+
+returns `Node{vid: 1, name: "b"}`. The same query `UNION ALL` with **itself** —
+identical schemas on both branches, nothing to reconcile — returns
+`[List(["P"]), Null]`. Over a relationship it returns `[Null, Null]`.
+
+Two controls bound it. `UNION` over a *property* (`b.name`) is correct, and
+`UNION` over a *scan*-bound entity is correct. So the defect is specific to
+entities produced by a traversal. `List(["P"])` is the struct's `_labels` field,
+which reads like positional column misalignment — recorded on the issue as a
+hypothesis drawn from the observed value, not as a verified cause.
+
+**This is a silent wrong answer in a shape users write directly.** Under this
+document's own ordering principle it outranks everything else still open.
+
+### #191 — the struct asymmetry itself, now with a repro
+
+```cypher
+MATCH (z:P) RETURN z AS n
+UNION
+MATCH (x:P)-[:KNOWS]->(y:P) RETURN y AS n
+```
+
+fails with `cannot UNION branches with mismatched schemas`, whose own text says
+"This is a planner bug; please file an issue."
+
+Verified *not* affected, and recorded on the issue so the next person does not
+re-probe them: equality, `id()`, list literals, `IN`, `DISTINCT`, `collect`,
+`coalesce`. All of those route through the CypherValue encoding, which erases
+the difference. `UNION` compares Arrow schemas directly and does not.
+
+The `CASE` coercion rule shipped above treats the symptom — it makes mixed
+entity types agree on `LargeBinary`. It does not answer why a traversal target
+lacks `_all_props` when a scan anchor carries it. That question is #191.
+
+### #192 — the catch-all, filed as hardening rather than as a bug
+
+`resolve_flat_column_properties` still matches 5 of `Expr`'s 27 variants behind
+`other => other.clone()`. Sixteen shapes were probed for a user-visible
+consequence — map, `CASE`, `IN`, `IS NOT NULL`, array index, nested map, each
+with and without an intervening `WITH`, inside `CALL {}`, after `collect`/
+`UNWIND`, and inside comprehensions. **All sixteen returned correct answers.**
+
+Triggering it needs a flat `"v.p"` column to exist *while* `v` is absent from
+`variable_kinds`, which appears unreachable outside pattern comprehensions — and
+that path is now fixed at the context layer. So the issue is `enhancement`, not
+`bug`, and says plainly that no repro exists. Filing it as a defect would have
+dressed a hunch as a finding.
+
+## Revised plan for what remains — 2026-08-28
+
+The original sequencing (PR 1 #189 → PR 2 #188 → PR 3 #187 → PR 4 #175 → PR 5
+#184) is discharged through PR 2. The remaining order changes, because two of
+the items now open did not exist when it was written and one of them is a silent
+wrong answer.
+
+```
+PR 3  #190 UNION over a traversal-bound entity      (silent wrong answer)
+PR 4  #191 struct parity scan vs traversal          (likely the same root cause)
+PR 5  #187 startNode after a WITH                   (projection widening)
+PR 6  #175 vector/FTS reporting        P0 gate first
+PR 7  #184 spike: catch-all removal + SF1 re-run + design doc
+      #192 folded into PR 7's catch-all sweep
+```
+
+### PR 3 — #190, first
+
+Ranked first on severity alone: it returns a wrong value with no error, in a
+query shape with no exotic syntax in it. Everything else open is either a loud
+failure, a missing observable, or a known gap.
+
+Root-cause before estimating. The one hypothesis on record — positional
+misalignment between the branch schema and the branch's actual columns — is
+inferred from the returned value (`_labels`, the struct's second field) and is
+**unverified**. The discriminating question is whether the wrong field is read
+because the columns are ordered differently on the two sides, or because the
+`UNION` node projects by position where it should project by name. A single
+branch whose struct has its fields deliberately reordered answers it.
+
+The self-`UNION` case is the useful reproducer, not the mixed one: with both
+branches identical there is nothing for schema reconciliation to do, so anything
+that goes wrong is downstream of reconciliation.
+
+### PR 4 — #191, immediately after
+
+Sequenced second because #190 may well subsume it. If the two branches' structs
+were identical, the mismatched-schema error could not arise; whatever makes a
+traversal target's struct differ from a scan anchor's is a plausible common
+cause with the misalignment in #190. Root-cause #190 first and re-check whether
+#191 survives.
+
+If it does survive, the fix belongs where the struct is *built*, not where it is
+compared: make the traversal path and the scan path agree on a node's field set,
+rather than teaching `UNION` to reconcile them. The `CASE` coercion rule stays
+regardless — it is what handles two *different labels*, which no parity fix can
+make structurally identical.
+
+### PR 5 — #187, unchanged
+
+Projection widening in `planner.rs`, with the four refusal conditions the
+original plan specified (`Distinct`, aggregates, `Union` branch, `CALL {}`
+boundary) each pinned by a test asserting a clear error. Its `#[ignore]` at
+`start_end_node_test.rs:124` is the last one in that file.
+
+One thing the #188 work adds to it: the aggregate/repr-rename defect fixed there
+was invisible until an endpoint call was placed under an aggregate. #187's
+widening interacts with the same post-planning pass, so its test list must
+include the aggregate shape from the start rather than discovering it later.
+
+### PR 6 — #175, unchanged and still gated
+
+The P0 probe stands as written: confirm `partitions_searched` fires on ANN and
+FTS and *not* on a flat search with a scalar prefilter, **before** wiring
+anything. If it cannot discriminate, the honest outcome is to record that on
+#175 and stop — a counter that cannot tell an index from a brute-force scan is
+worse than the gap it would paper over.
+
+### PR 7 — #184 spike, absorbing #192
+
+The spike's P0 was already "delete the catch-all arms in
+`collect_properties_recursive` so a new `LogicalPlan` variant is a compile
+error." #192 is the identical defect class one layer down, in `Expr` rather than
+`LogicalPlan`, and in the same crate. Doing them together is one review of one
+idea instead of two.
+
+Both are exhaustiveness work with no known user-visible symptom, which is why
+neither justifies a PR of its own and why neither should be sold as a bug fix.
+
+### What this round should be read as evidence for
+
+Two of the three newly-open items were found by trying to write a failing test
+for something already recorded as harmless. Neither would have been found by
+running the suite, the TCK, or LDBC — the suite was green and stayed green
+throughout. That is the same mechanism `docs/testing/single-shape-coverage-2026-08-27.md`
+describes, arriving from the other direction: a claim of "not observable" is
+bounded by the paths actually probed, in exactly the way a green TCK is bounded
+by the shapes it contains.
