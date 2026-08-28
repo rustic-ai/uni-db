@@ -15,6 +15,7 @@ because the machine it came from turns out to matter more than it looks.
 | [contention-2026-08-25.md](contention-2026-08-25.md) | SSI throughput **and abort rate** vs Zipf skew × writer count | 2026-08-25 | Intel Core Ultra 9 185H, 22 cores, Linux 7.1.8 | no |
 | [dqp-feasibility-2026-08-12.md](dqp-feasibility-2026-08-12.md) | DQP fixture-tier cost; **refutes and replaces** the proposal's tier table | 2026-08-12 | Intel Core Ultra 9 185H, 22 cores, Linux 7.1.8 | no — sizes the nightly `dqp` lane |
 | [coverage-map-2026-08-14.md](coverage-map-2026-08-14.md) | which live code has never executed under any test | 2026-08-14 | n/a — coverage, not timing | no, **deliberately** |
+| [index-scan-counter-2026-08-27.md](index-scan-counter-2026-08-27.md) | what `idx_scans` counts — one scan path of ~40 operators, and why two thirds of the gap is not a wiring omission at all | 2026-08-27 | n/a — a wiring audit | no |
 | [build-baseline-2026-05-19.md](build-baseline-2026-05-19.md) | post-consolidation build wall-time reference | 2026-05-19 | under-recorded — "see `git log`" | no |
 
 ## Reading these safely

@@ -1698,6 +1698,25 @@ impl StorageManager {
         columns: &[&str],
         additional_filter: Option<&FilterExpr>,
     ) -> Result<Option<arrow_array::RecordBatch>> {
+        self.scan_delta_table_counted(edge_type, direction, columns, additional_filter, None)
+            .await
+    }
+
+    /// [`Self::scan_delta_table`], carrying a query's counters into the backend.
+    ///
+    /// Edge scans were invisible to `idx_scans` and, more importantly, to
+    /// `scans_reported` — the denominator that lets a zero in `idx_scans` be
+    /// told apart from silence. See `docs/perf/index-scan-counter-2026-08-27.md`
+    /// for what the counter does and does not observe; this closes the part of
+    /// the gap that was purely an omission.
+    pub async fn scan_delta_table_counted(
+        &self,
+        edge_type: &str,
+        direction: &str,
+        columns: &[&str],
+        additional_filter: Option<&FilterExpr>,
+        counters: Option<&Arc<crate::runtime::counters::QueryCounters>>,
+    ) -> Result<Option<arrow_array::RecordBatch>> {
         // Edge path: manifest pin only. A transaction version pin must NOT
         // version-filter edge reads — the edge tier is not version-pinned
         // (the live AdjacencyManager + tx-L0 overlay carry unflushed and
@@ -1718,7 +1737,9 @@ impl StorageManager {
 
         let filter = combine_hwm_filter(edge_hwm, additional_filter);
 
-        let mut request = ScanRequest::all(&table_name).with_columns(actual_columns);
+        let mut request = ScanRequest::all(&table_name)
+            .with_columns(actual_columns)
+            .with_counters(counters.cloned());
         if let Some(f) = filter {
             request = request.with_filter(f);
         }
@@ -1735,6 +1756,21 @@ impl StorageManager {
         columns: &[&str],
         filter: Option<&FilterExpr>,
     ) -> Result<Option<arrow_array::RecordBatch>> {
+        self.scan_main_vertex_table_counted(columns, filter, None)
+            .await
+    }
+
+    /// [`Self::scan_main_vertex_table`], carrying a query's counters.
+    ///
+    /// Same reason as `scan_delta_table_counted`: a scan the counter never sees
+    /// is missing from `scans_reported` as well as `idx_scans`, and it is the
+    /// denominator that makes the zero readable.
+    pub async fn scan_main_vertex_table_counted(
+        &self,
+        columns: &[&str],
+        filter: Option<&FilterExpr>,
+        counters: Option<&Arc<crate::runtime::counters::QueryCounters>>,
+    ) -> Result<Option<arrow_array::RecordBatch>> {
         let backend = self.backend();
         let table_name = table_names::main_vertex_table_name();
 
@@ -1746,7 +1782,8 @@ impl StorageManager {
         let full_filter = combine_hwm_filter(self.version_high_water_mark(), filter);
 
         let request = ScanRequest::all(table_name)
-            .with_columns(columns.iter().map(|s| s.to_string()).collect());
+            .with_columns(columns.iter().map(|s| s.to_string()).collect())
+            .with_counters(counters.cloned());
         let request = match full_filter {
             Some(f) => request.with_filter(f),
             None => request,

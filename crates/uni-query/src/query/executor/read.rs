@@ -4925,11 +4925,14 @@ impl Executor {
     ) -> Result<()> {
         if let Ok(Some(batch)) = self
             .storage
-            .scan_delta_table(
+            .scan_delta_table_counted(
                 edge_type,
                 "fwd",
                 &["eid", "src_vid", "dst_vid", "op", "_version"],
                 None,
+                // Counted so an edge scan reaches `scans_reported`; see
+                // `docs/perf/index-scan-counter-2026-08-27.md`.
+                Some(&self.counters),
             )
             .await
         {

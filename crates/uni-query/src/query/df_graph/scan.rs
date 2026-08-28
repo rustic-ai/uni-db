@@ -2092,11 +2092,14 @@ async fn columnar_scan_schemaless_vertex_batch_static(
         }
     };
 
-    // Single Lance query via StorageManager domain method
+    // Single Lance query via StorageManager domain method. Counted, so this
+    // scan appears in `scans_reported` — the schemaless path was invisible to
+    // the counters the labelled path already reports through.
     let lance_batch = storage
-        .scan_main_vertex_table(
+        .scan_main_vertex_table_counted(
             &["_vid", "_deleted", "labels", "props_json", "_version"],
             filter.as_ref(),
+            graph_ctx.counters(),
         )
         .await
         .map_err(exec_err)?;
