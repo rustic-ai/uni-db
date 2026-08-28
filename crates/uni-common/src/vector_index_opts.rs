@@ -263,7 +263,10 @@ mod tests {
             (1536, 192),
         ] {
             assert_eq!(default_sub_vectors(Some(dim)), want, "dim {dim}");
-            assert!(dim as u32 % want == 0, "dim {dim}: {want} must divide it");
+            assert!(
+                (dim as u32).is_multiple_of(want),
+                "dim {dim}: {want} must divide it"
+            );
             assert!(
                 (dim * 4) as u32 / want <= 32,
                 "dim {dim}: compression must stay <= 32x"
