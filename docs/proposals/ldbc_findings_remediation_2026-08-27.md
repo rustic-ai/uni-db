@@ -281,8 +281,8 @@ other would hide the discrepancy.
 | 2.1 cooperative deadlines | done |
 | 2.2 `max_query_memory` (#185) | done |
 | 3 column pruning (#184) | the `UNWIND`-source case fixed; **not re-run at SF1** |
-| 4.1 `startNode`/`endNode` (#187) | directed MATCH-bound fixed; two shapes open (#187, #188) |
-| 4.2 whole entity from a comprehension | done, nodes and relationships; map values open (#189) |
+| 4.1 `startNode`/`endNode` (#187) | directed and undirected fixed (#188 closed); the post-`WITH` shape open (#187) |
+| 4.2 whole entity from a comprehension | done; map values and map projections fixed (#189 closed) |
 | 4.3 `COLLECT { }` | done — and `COUNT { }`, which this plan did not list as broken |
 | 5.1 is `index_scans` wired? | **answered**: `docs/perf/index-scan-counter-2026-08-27.md` |
 | 5.2–5.5 | not started — see the note below |
@@ -346,9 +346,81 @@ consulted an index. That is the gate on 5.2–5.4, not effort.
   untouched. **Unverified at SF1.**
 - #187 — `startNode` after a `WITH`: the endpoint variables leave scope and
   recovering a node from the relationship's `_src_vid` needs a vertex lookup.
-- #188 — `startNode`/`endNode` on an undirected relationship: a per-row fact,
-  so no static rewrite applies. The cheap workaround is refused there, with the
-  reason recorded.
-- #189 — a comprehension map value reading an inner variable's property; one
-  root cause covers both open shapes.
+  The undirected shape that had been split out as #188 is closed (below).
 - #175 — the `nearest()` reporting gap above.
+
+## Closed since — 2026-08-28
+
+### #189 — the container, not the map
+
+The report reads as a fact about maps: a map value fails where a list value
+works. It is not. `translate_property_access` chooses between
+`Column("x.name")` and `index(Column("x"), 'name')` on whether the translation
+context calls `x` a graph entity, and the comprehension compiled its inner
+expressions with the **outer** context, which has never heard of the pattern's
+own variables. Every container that reaches that leaf was broken; the list
+literal worked only because a separate pre-pass, `resolve_flat_column_properties`,
+happens to have a `List` arm and no `Map` arm.
+
+So the fix is at the leaf, not the container: the comprehension now compiles its
+predicate and map expression with a context in which its own variables are
+registered as nodes and edges. `CASE`, `IN`, map literals, map projections and
+edge properties were all fixed by the one change, and each has a test.
+
+`collect_inner_properties` needed the second half — it had no `MapProjection`
+arm at all, so `x {.name}` never got its column built. Its `_ => {}` catch-all
+is now gone: the match is exhaustive, and a new `Expr` variant is a compile
+error rather than a column that silently fails to appear.
+
+**The same catch-all still exists in `resolve_flat_column_properties`** (5 arms
+of 27 variants, behind `other => other.clone()`). It is no longer the cause of
+anything known, but it is the same latent defect in a second place — worth
+closing on its own.
+
+### #188 — the orientation was known and discarded
+
+The issue argues that no static rewrite applies because which end of `-[e]-` is
+the relationship's tail is a per-row fact. True — and the traversal *knew* that
+fact and threw it away. `build_edge_adjacency_map` holds `(eid, src_vid,
+dst_vid)` and files the edge under both endpoints without recording which side
+it filed under; `AdjacencyManager::get_neighbors` loops `direction.expand()` and
+drops `dir`.
+
+The traversal now reports it on `{r}._fwd` and the planner rewrites the call to
+a `CASE` over the hop's two variables, both already in scope with their
+properties materialised — so there is no `{_vid}`-only stand-in anywhere in the
+path, and the silent-NULL trade the issue refuses cannot arise. `_fwd` is
+computed only when a query asks for it, so an undirected traversal that never
+calls `startNode`/`endNode` costs exactly what it cost before.
+
+Three things this turned up that the plan did not predict:
+
+- **The `#[ignore]`d test passes without any of the work.** `_fwd` did not
+  exist, so it resolved to NULL, so the `CASE` always took its `ELSE` branch —
+  which happens to be right for a fixture anchored at `b`. Anchoring the same
+  query at `a` returns the *other* endpoint. The discriminating test runs both
+  anchors and asserts they agree; a single-anchor test passes with the
+  orientation inverted and passes again with it missing entirely.
+- **There are two single-hop operators, and a schema'd fixture only exercises
+  one.** `GraphTraverseExec` serves a declared schema and
+  `GraphTraverseMainByType` serves a schemaless one. Fixing the first left the
+  second silently returning the wrong endpoint, caught only by adding a
+  schemaless fixture. Every other test in that file declares a schema.
+- **An aggregate over `startNode(r)` was already broken, directed included.**
+  This pass runs after planning, so an `Aggregate`'s outputs are already named
+  by their rendered expression and the projection above refers to them by that
+  string; rewriting the aggregate renamed the column out from under its own
+  consumer. It failed for the directed case that had already shipped — the
+  directed fix's tests never put an endpoint call under an aggregate. Fixed by
+  publishing the repr rename upward alongside the bindings.
+
+The `CASE` is deliberately never lifted across an aggregate: `_fwd` varies per
+row while an aggregate spans rows, so `CASE WHEN r._fwd THEN count(x) ELSE
+count(y) END` is not `count(CASE WHEN r._fwd THEN x ELSE y END)` — the first
+splits one group in two and undercounts.
+
+**Still unsupported, loudly:** returning the *whole* endpoint of an undirected
+relationship (`RETURN startNode(e)` under `-[e]-`) needs a `CASE` over two node
+structs, which the expression compiler cannot unify. It raises an error, and a
+test pins that it does — so if it ever starts returning a row, that has to be
+the right endpoint rather than a null-filled stand-in.
