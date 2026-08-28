@@ -260,8 +260,9 @@ impl HybridPhysicalPlanner {
         all_properties: &HashMap<String, HashSet<String>>,
     ) -> Vec<String> {
         // System columns managed by the engine — never treat as user properties.
-        const SYSTEM_COLUMNS: &[&str] =
-            &["_vid", "_labels", "_eid", "_src_vid", "_dst_vid", "_type"];
+        const SYSTEM_COLUMNS: &[&str] = &[
+            "_vid", "_labels", "_eid", "_src_vid", "_dst_vid", "_type", "_fwd",
+        ];
 
         all_properties
             .get(variable)

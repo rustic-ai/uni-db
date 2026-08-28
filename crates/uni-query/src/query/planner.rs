@@ -10845,79 +10845,275 @@ fn set_map_property(props: &mut Option<Expr>, prop: &str, value: Expr) -> bool {
 /// traversal-bound relationship, so a second run changes nothing.
 #[must_use]
 pub fn resolve_traversal_endpoints(plan: LogicalPlan) -> LogicalPlan {
-    let mut endpoints = HashMap::new();
+    let mut endpoints = EndpointScope::default();
     resolve_endpoints_node(plan, &mut endpoints)
 }
 
+/// The column an undirected traversal carries its per-row orientation on.
+///
+/// True when the row's *source* variable is bound to the vid Lance stores as the
+/// edge's `_src_vid` — that is, when the traversal walked the edge forwards.
+pub(crate) const COL_FWD: &str = "_fwd";
+
 /// The node variables a traversal binds at the two ends of its relationship.
 #[derive(Clone, Debug)]
-struct TraversalEndpoints {
-    /// Bound at the relationship's tail — what `startNode` returns.
-    start: String,
-    /// Bound at the relationship's head — what `endNode` returns.
-    end: String,
+enum TraversalEndpoints {
+    /// The hop's direction is known at plan time, so each end is one variable.
+    Static {
+        /// Bound at the relationship's tail — what `startNode` returns.
+        start: String,
+        /// Bound at the relationship's head — what `endNode` returns.
+        end: String,
+    },
+    /// An undirected hop. Which end is the relationship's tail is a per-row
+    /// fact, so both candidates are kept and the choice is deferred to a `CASE`
+    /// over the traversal's [`COL_FWD`] column.
+    PerRow {
+        /// The traversal's own source variable — the tail when `_fwd` is true.
+        source: String,
+        /// The traversal's own target variable — the tail when `_fwd` is false.
+        target: String,
+    },
+}
+
+impl TraversalEndpoints {
+    /// The two node variables this binding depends on, in no particular order.
+    ///
+    /// Used to decide whether the binding survives a projection: it does only
+    /// while both variables are still in scope.
+    fn variables(&self) -> (&str, &str) {
+        match self {
+            Self::Static { start, end } => (start, end),
+            Self::PerRow { source, target } => (source, target),
+        }
+    }
+
+    /// The same binding with its two variables renamed, preserving the variant.
+    fn renamed(&self, first: String, second: String) -> Self {
+        match self {
+            Self::Static { .. } => Self::Static {
+                start: first,
+                end: second,
+            },
+            Self::PerRow { .. } => Self::PerRow {
+                source: first,
+                target: second,
+            },
+        }
+    }
+}
+
+/// What the endpoint pass carries up the plan tree.
+///
+/// `bindings` is the relationship -> endpoints map. `renames` exists because
+/// this pass runs *after* planning: an `Aggregate`'s output columns were already
+/// named by `Expr::to_string_repr()`, and the projection above refers to them by
+/// that rendered string. Rewriting `collect(startNode(e).name)` into
+/// `collect(x.name)` therefore changes the column's name out from under its own
+/// consumer, which surfaces as `No field named "collect(startNode(e).name)"`.
+/// Recording old-repr -> new-repr here and applying it to every expression above
+/// keeps the two in step.
+#[derive(Clone, Default)]
+struct EndpointScope {
+    bindings: HashMap<String, TraversalEndpoints>,
+    renames: HashMap<String, String>,
+}
+
+/// Rewrite one expression for this scope: resolve endpoint calls, then follow
+/// any aggregate-output renames the rewrite caused below.
+fn rewrite_scoped(expr: Expr, scope: &EndpointScope) -> Expr {
+    let expr = rewrite_endpoint_calls(expr, &scope.bindings);
+    apply_renames(expr, &scope.renames)
+}
+
+/// Apply [`rewrite_scoped`] through an `Option<Expr>`.
+fn rewrite_scoped_opt(expr: Option<Expr>, scope: &EndpointScope) -> Option<Expr> {
+    expr.map(|e| rewrite_scoped(e, scope))
+}
+
+/// Follow renamed aggregate outputs, which are referenced as bare variables.
+fn apply_renames(expr: Expr, renames: &HashMap<String, String>) -> Expr {
+    if renames.is_empty() {
+        return expr;
+    }
+    if let Expr::Variable(name) = &expr
+        && let Some(renamed) = renames.get(name)
+    {
+        return Expr::Variable(renamed.clone());
+    }
+    expr.map_children(&mut |child| apply_renames(child, renames))
 }
 
 /// Pair a traversal's source/target variables with the relationship's ends.
 ///
 /// `Direction::Incoming` means the traversal walks against the arrow, so the
-/// traversal's *target* is the relationship's tail. `Direction::Both` is
-/// unresolvable at plan time and yields `None`.
+/// traversal's *target* is the relationship's tail. `Direction::Both` cannot be
+/// settled at plan time and becomes a [`TraversalEndpoints::PerRow`] binding
+/// rather than nothing: the orientation is a fact the traversal knows per row
+/// and reports on [`COL_FWD`], so the call is still resolvable — just not to a
+/// single variable.
 fn endpoints_for_direction(
     direction: &Direction,
     source_variable: &str,
     target_variable: &str,
 ) -> Option<TraversalEndpoints> {
-    match direction {
-        Direction::Outgoing => Some(TraversalEndpoints {
+    Some(match direction {
+        Direction::Outgoing => TraversalEndpoints::Static {
             start: source_variable.to_string(),
             end: target_variable.to_string(),
-        }),
-        Direction::Incoming => Some(TraversalEndpoints {
+        },
+        Direction::Incoming => TraversalEndpoints::Static {
             start: target_variable.to_string(),
             end: source_variable.to_string(),
-        }),
-        Direction::Both => None,
+        },
+        Direction::Both => TraversalEndpoints::PerRow {
+            source: source_variable.to_string(),
+            target: target_variable.to_string(),
+        },
+    })
+}
+
+/// The relationship an endpoint call names, when it is one of ours.
+///
+/// Returns the relationship variable and whether the call was `startNode`.
+fn endpoint_call_target<'e>(
+    expr: &'e Expr,
+    endpoints: &HashMap<String, TraversalEndpoints>,
+) -> Option<(&'e str, bool)> {
+    let Expr::FunctionCall { name, args, .. } = expr else {
+        return None;
+    };
+    if args.len() != 1 {
+        return None;
+    }
+    let Expr::Variable(rel) = &args[0] else {
+        return None;
+    };
+    if !endpoints.contains_key(rel) {
+        return None;
+    }
+    match name.to_ascii_lowercase().as_str() {
+        "startnode" => Some((rel.as_str(), true)),
+        "endnode" => Some((rel.as_str(), false)),
+        _ => None,
     }
 }
 
 /// Replace every `startNode(r)`/`endNode(r)` over a known relationship with the
 /// endpoint variable, leaving every other call untouched.
+///
+/// A statically-directed hop resolves outright. An undirected one cannot: which
+/// end is the relationship's tail is a per-row fact, so there is no single
+/// variable to rewrite to. Those are handled by
+/// [`lift_per_row_endpoints`] in a second pass.
 fn rewrite_endpoint_calls(expr: Expr, endpoints: &HashMap<String, TraversalEndpoints>) -> Expr {
-    if let Expr::FunctionCall { name, args, .. } = &expr
-        && args.len() == 1
-        && let Expr::Variable(rel) = &args[0]
-        && let Some(bound) = endpoints.get(rel)
-    {
-        let lowered = name.to_ascii_lowercase();
-        if lowered == "startnode" {
-            return Expr::Variable(bound.start.clone());
-        }
-        if lowered == "endnode" {
-            return Expr::Variable(bound.end.clone());
-        }
-    }
-    expr.map_children(&mut |child| rewrite_endpoint_calls(child, endpoints))
+    let expr = rewrite_static_endpoint_calls(expr, endpoints);
+    lift_per_row_endpoints(expr, endpoints)
 }
 
-/// Apply [`rewrite_endpoint_calls`] through an `Option<Expr>`.
-fn rewrite_endpoint_calls_opt(
-    expr: Option<Expr>,
+/// Resolve the calls whose endpoint is known at plan time.
+fn rewrite_static_endpoint_calls(
+    expr: Expr,
     endpoints: &HashMap<String, TraversalEndpoints>,
-) -> Option<Expr> {
-    expr.map(|e| rewrite_endpoint_calls(e, endpoints))
+) -> Expr {
+    if let Some((rel, is_start)) = endpoint_call_target(&expr, endpoints)
+        && let Some(TraversalEndpoints::Static { start, end }) = endpoints.get(rel)
+    {
+        return Expr::Variable(if is_start { start.clone() } else { end.clone() });
+    }
+    expr.map_children(&mut |child| rewrite_static_endpoint_calls(child, endpoints))
+}
+
+/// The first undirected relationship an endpoint call in `expr` names.
+fn first_per_row_rel(
+    expr: &Expr,
+    endpoints: &HashMap<String, TraversalEndpoints>,
+) -> Option<String> {
+    if let Some((rel, _)) = endpoint_call_target(expr, endpoints)
+        && matches!(endpoints.get(rel), Some(TraversalEndpoints::PerRow { .. }))
+    {
+        return Some(rel.to_string());
+    }
+    let mut found = None;
+    expr.for_each_child(&mut |child| {
+        if found.is_none() {
+            found = first_per_row_rel(child, endpoints);
+        }
+    });
+    found
+}
+
+/// Replace `startNode(rel)`/`endNode(rel)` with fixed variables for one orientation.
+fn substitute_endpoints(
+    expr: Expr,
+    rel: &str,
+    start: &str,
+    end: &str,
+    endpoints: &HashMap<String, TraversalEndpoints>,
+) -> Expr {
+    if let Some((called, is_start)) = endpoint_call_target(&expr, endpoints)
+        && called == rel
+    {
+        return Expr::Variable(if is_start {
+            start.to_string()
+        } else {
+            end.to_string()
+        });
+    }
+    expr.map_children(&mut |child| substitute_endpoints(child, rel, start, end, endpoints))
+}
+
+/// Resolve undirected endpoint calls by duplicating their enclosing expression
+/// under a `CASE` on the traversal's per-row orientation.
+///
+/// `startNode(r).name` becomes
+/// `CASE WHEN r._fwd THEN x.name ELSE y.name END`. Both branches reference
+/// variables already in scope, so the endpoint's properties are materialised by
+/// the ordinary property-collection pass — there is no lookup, and no
+/// `{_vid}`-only stand-in that would make `id(startNode(r))` work while
+/// `startNode(r).name` returned NULL.
+///
+/// **The `CASE` is never lifted across an aggregate.** `_fwd` varies per row
+/// while an aggregate spans rows, so
+/// `CASE WHEN r._fwd THEN count(x) ELSE count(y) END` is not
+/// `count(CASE WHEN r._fwd THEN x ELSE y END)`: the first splits one group into
+/// two and silently undercounts. Where the expression contains an aggregate the
+/// rewrite descends into it instead, so the `CASE` lands inside the aggregate's
+/// argument where it belongs.
+fn lift_per_row_endpoints(expr: Expr, endpoints: &HashMap<String, TraversalEndpoints>) -> Expr {
+    let Some(rel) = first_per_row_rel(&expr, endpoints) else {
+        return expr;
+    };
+    if expr.is_aggregate() {
+        return expr.map_children(&mut |child| lift_per_row_endpoints(child, endpoints));
+    }
+    let Some(TraversalEndpoints::PerRow { source, target }) = endpoints.get(&rel) else {
+        return expr;
+    };
+    let forward = substitute_endpoints(expr.clone(), &rel, source, target, endpoints);
+    let reverse = substitute_endpoints(expr, &rel, target, source, endpoints);
+    Expr::Case {
+        expr: None,
+        when_then: vec![(
+            Expr::Property(Box::new(Expr::Variable(rel.clone())), COL_FWD.to_string()),
+            lift_per_row_endpoints(forward, endpoints),
+        )],
+        else_expr: Some(Box::new(lift_per_row_endpoints(reverse, endpoints))),
+    }
 }
 
 /// Drop every binding that names `variable`, which is about to be rebound.
-fn invalidate_binding(endpoints: &mut HashMap<String, TraversalEndpoints>, variable: &str) {
-    endpoints
-        .retain(|rel, bound| rel != variable && bound.start != variable && bound.end != variable);
+fn invalidate_binding(endpoints: &mut EndpointScope, variable: &str) {
+    endpoints.bindings.retain(|rel, bound| {
+        let (a, b) = bound.variables();
+        rel != variable && a != variable && b != variable
+    });
 }
 
 /// Narrow the bindings to those whose relationship and both endpoints survive a
 /// projection, renaming through bare-variable aliases (`WITH n AS m`).
 fn narrow_endpoints_through_projection(
-    endpoints: &mut HashMap<String, TraversalEndpoints>,
+    endpoints: &mut EndpointScope,
     projections: &[(Expr, Option<String>)],
 ) {
     // `WITH *` / `RETURN *` forwards the whole scope, so nothing is lost.
@@ -10938,21 +11134,20 @@ fn narrow_endpoints_through_projection(
         }
     }
     let narrowed: HashMap<String, TraversalEndpoints> = endpoints
+        .bindings
         .iter()
         .filter_map(|(rel, bound)| {
             let rel_out = visible_as.get(rel.as_str())?;
-            let start = visible_as.get(bound.start.as_str())?;
-            let end = visible_as.get(bound.end.as_str())?;
+            let (a, b) = bound.variables();
+            let first = visible_as.get(a)?;
+            let second = visible_as.get(b)?;
             Some((
                 rel_out.clone(),
-                TraversalEndpoints {
-                    start: start.clone(),
-                    end: end.clone(),
-                },
+                bound.renamed(first.clone(), second.clone()),
             ))
         })
         .collect();
-    *endpoints = narrowed;
+    endpoints.bindings = narrowed;
 }
 
 /// The relationship binding a traversal contributes, when it is a single hop in
@@ -10979,10 +11174,7 @@ fn single_hop_binding(
 ///
 /// `endpoints` is threaded in/out: on entry it holds the bindings visible from
 /// below, on return the bindings visible to this node's parent.
-fn resolve_endpoints_node(
-    plan: LogicalPlan,
-    endpoints: &mut HashMap<String, TraversalEndpoints>,
-) -> LogicalPlan {
+fn resolve_endpoints_node(plan: LogicalPlan, endpoints: &mut EndpointScope) -> LogicalPlan {
     match plan {
         // A traversal both carries expressions of its own and contributes the
         // binding every rewrite above it depends on.
@@ -11013,9 +11205,8 @@ fn resolve_endpoints_node(
                     edge_filter_expr,
                     ..
                 } => {
-                    *target_filter = rewrite_endpoint_calls_opt(target_filter.take(), endpoints);
-                    *edge_filter_expr =
-                        rewrite_endpoint_calls_opt(edge_filter_expr.take(), endpoints);
+                    *target_filter = rewrite_scoped_opt(target_filter.take(), endpoints);
+                    *edge_filter_expr = rewrite_scoped_opt(edge_filter_expr.take(), endpoints);
                     single_hop_binding(
                         direction,
                         source_variable,
@@ -11029,7 +11220,7 @@ fn resolve_endpoints_node(
                 _ => None,
             };
             if let Some((step, bound)) = binding {
-                endpoints.insert(step, bound);
+                endpoints.bindings.insert(step, bound);
             }
             plan
         }
@@ -11041,7 +11232,7 @@ fn resolve_endpoints_node(
             let input = Box::new(resolve_endpoints_node(*input, endpoints));
             LogicalPlan::Filter {
                 input,
-                predicate: rewrite_endpoint_calls(predicate, endpoints),
+                predicate: rewrite_scoped(predicate, endpoints),
                 optional_variables,
             }
         }
@@ -11049,7 +11240,7 @@ fn resolve_endpoints_node(
             let input = Box::new(resolve_endpoints_node(*input, endpoints));
             let projections: Vec<(Expr, Option<String>)> = projections
                 .into_iter()
-                .map(|(expr, alias)| (rewrite_endpoint_calls(expr, endpoints), alias))
+                .map(|(expr, alias)| (rewrite_scoped(expr, endpoints), alias))
                 .collect();
             narrow_endpoints_through_projection(endpoints, &projections);
             LogicalPlan::Project { input, projections }
@@ -11059,7 +11250,7 @@ fn resolve_endpoints_node(
             let order_by = order_by
                 .into_iter()
                 .map(|item| SortItem {
-                    expr: rewrite_endpoint_calls(item.expr, endpoints),
+                    expr: rewrite_scoped(item.expr, endpoints),
                     ascending: item.ascending,
                 })
                 .collect();
@@ -11071,13 +11262,26 @@ fn resolve_endpoints_node(
             aggregates,
         } => {
             let input = Box::new(resolve_endpoints_node(*input, endpoints));
+            // An aggregate's outputs are named by their rendered expression, and
+            // the projection above refers to them by that name, so a rewrite here
+            // has to be published upward or it renames a column its own consumer
+            // is still looking for.
+            let rewrite_and_record = |expr: Expr, scope: &mut EndpointScope| -> Expr {
+                let before = expr.to_string_repr();
+                let after = rewrite_scoped(expr, scope);
+                let after_repr = after.to_string_repr();
+                if before != after_repr {
+                    scope.renames.insert(before, after_repr);
+                }
+                after
+            };
             let group_by: Vec<Expr> = group_by
                 .into_iter()
-                .map(|expr| rewrite_endpoint_calls(expr, endpoints))
+                .map(|expr| rewrite_and_record(expr, endpoints))
                 .collect();
             let aggregates = aggregates
                 .into_iter()
-                .map(|expr| rewrite_endpoint_calls(expr, endpoints))
+                .map(|expr| rewrite_and_record(expr, endpoints))
                 .collect();
             // Only the grouping keys survive an aggregation, so a binding
             // outlives it on exactly the terms a projection would give it.
@@ -11097,7 +11301,7 @@ fn resolve_endpoints_node(
             let input = Box::new(resolve_endpoints_node(*input, endpoints));
             let window_exprs = window_exprs
                 .into_iter()
-                .map(|expr| rewrite_endpoint_calls(expr, endpoints))
+                .map(|expr| rewrite_scoped(expr, endpoints))
                 .collect();
             LogicalPlan::Window {
                 input,
@@ -11110,7 +11314,7 @@ fn resolve_endpoints_node(
             variable,
         } => {
             let input = Box::new(resolve_endpoints_node(*input, endpoints));
-            let expr = rewrite_endpoint_calls(expr, endpoints);
+            let expr = rewrite_scoped(expr, endpoints);
             invalidate_binding(endpoints, &variable);
             LogicalPlan::Unwind {
                 input,
@@ -11126,7 +11330,7 @@ fn resolve_endpoints_node(
             let input = Box::new(resolve_endpoints_node(*input, endpoints));
             let items = items
                 .into_iter()
-                .map(|expr| rewrite_endpoint_calls(expr, endpoints))
+                .map(|expr| rewrite_scoped(expr, endpoints))
                 .collect();
             LogicalPlan::Delete {
                 input,
@@ -11160,7 +11364,7 @@ fn resolve_endpoints_node(
             input_filter,
         } => {
             let input = Box::new(resolve_endpoints_node(*input, endpoints));
-            let input_filter = rewrite_endpoint_calls_opt(input_filter, endpoints);
+            let input_filter = rewrite_scoped_opt(input_filter, endpoints);
             let mut inner = endpoints.clone();
             let subquery = Box::new(resolve_endpoints_node(*subquery, &mut inner));
             LogicalPlan::Apply {

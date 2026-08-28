@@ -44,6 +44,7 @@ use crate::query::df_graph::pred_dag::PredecessorDag;
 use crate::query::df_graph::scan::{
     build_property_column_static, property_field, resolve_property_type,
 };
+use crate::query::planner::COL_FWD;
 use arrow::compute::take;
 use arrow_array::{Array, ArrayRef, RecordBatch, UInt64Array};
 use arrow_schema::{DataType, Field, Schema, SchemaRef};
@@ -171,6 +172,16 @@ fn prepend_existing_path(
 /// Resolve edge property Arrow type, falling back to `LargeBinary` (CypherValue) for
 /// schemaless properties. Unlike vertex properties, schemaless edge properties must
 /// preserve original JSON value types (int, float, etc.) since edge types commonly
+/// One expanded traversal row: `(input row, target vid, eid, edge type id, orientation)`.
+///
+/// The last element answers "is the input row's vertex this edge's stored
+/// `_src_vid`?" and is `None` when the traversal did not track orientation —
+/// which is every traversal that was not asked for [`COL_FWD`]. It is read only
+/// when that column is being built, and its absence there is an error rather
+/// than a default, so an untracked orientation can never be mistaken for a
+/// backwards one.
+type Expansion = (usize, Vid, u64, u32, Option<bool>);
+
 /// lack explicit property definitions.
 fn resolve_edge_property_type(
     prop: &str,
@@ -180,6 +191,9 @@ fn resolve_edge_property_type(
 ) -> DataType {
     if prop == "overflow_json" {
         DataType::LargeBinary
+    } else if prop == COL_FWD {
+        // Per-row traversal orientation, not a stored property. See [`COL_FWD`].
+        DataType::Boolean
     } else if prop == "_created_at" || prop == "_updated_at" {
         // System-managed timestamps surfaced via `created_at(r)` /
         // `updated_at(r)`. Stored on every edge by the L0 buffer and
@@ -727,7 +741,7 @@ struct GraphTraverseStream {
 impl GraphTraverseStream {
     /// Expand neighbors synchronously and return expansions.
     /// Returns (row_idx, target_vid, eid_u64, edge_type_id).
-    fn expand_neighbors(&self, batch: &RecordBatch) -> DFResult<Vec<(usize, Vid, u64, u32)>> {
+    fn expand_neighbors(&self, batch: &RecordBatch) -> DFResult<Vec<Expansion>> {
         let source_col = batch.column_by_name(&self.source_column).ok_or_else(|| {
             datafusion::error::DataFusionError::Execution(format!(
                 "Source column '{}' not found",
@@ -752,8 +766,13 @@ impl GraphTraverseStream {
         let used_edge_arrays: Vec<&UInt64Array> =
             super::common::used_edge_id_arrays(batch, &self.used_edge_columns)?;
 
-        let mut expanded_rows: Vec<(usize, Vid, u64, u32)> = Vec::new();
+        let mut expanded_rows: Vec<Expansion> = Vec::new();
         let is_undirected = matches!(self.direction, Direction::Both);
+        // Orientation is only tracked when someone asked for it. An undirected
+        // hop otherwise costs exactly what it costs today; the second adjacency
+        // lookup below is paid only by a query that actually calls
+        // `startNode`/`endNode` over an undirected relationship.
+        let track_orientation = is_undirected && self.edge_properties.iter().any(|p| p == COL_FWD);
 
         for (row_idx, source_vid) in source_vids.iter().enumerate() {
             let Some(src) = source_vid else {
@@ -792,6 +811,22 @@ impl GraphTraverseStream {
 
             for &edge_type in &self.edge_type_ids {
                 let neighbors = self.graph_ctx.get_neighbors(vid, edge_type, self.direction);
+
+                // Which of these edges leave `vid` along the arrow. Asking the
+                // same path a second time — rather than threading a flag down
+                // through the adjacency layers — is what keeps the answer right
+                // for *every* layer: version-filtered reads and the transaction
+                // L0 overlay both resolve orientation here exactly as they
+                // resolve the undirected read above. A flag plumbed through only
+                // the main CSR would be correct on one path and quietly wrong on
+                // the other two.
+                let outgoing_eids: Option<HashSet<u64>> = track_orientation.then(|| {
+                    self.graph_ctx
+                        .get_neighbors(vid, edge_type, Direction::Outgoing)
+                        .into_iter()
+                        .map(|(_, eid)| eid.as_u64())
+                        .collect()
+                });
 
                 for (target_vid, eid) in neighbors {
                     let eid_u64 = eid.as_u64();
@@ -834,7 +869,8 @@ impl GraphTraverseStream {
                         // else: unknown to L0 and the index → trust storage-level filtering
                     }
 
-                    expanded_rows.push((row_idx, target_vid, eid_u64, edge_type));
+                    let is_fwd = outgoing_eids.as_ref().map(|fwd| fwd.contains(&eid_u64));
+                    expanded_rows.push((row_idx, target_vid, eid_u64, edge_type, is_fwd));
                 }
             }
         }
@@ -1045,7 +1081,7 @@ fn build_all_props_column(
 
 /// Build edge ID, type, and property columns for bound edge variables.
 async fn build_edge_columns(
-    expansions: &[(usize, Vid, u64, u32)],
+    expansions: &[Expansion],
     edge_properties: &[String],
     edge_type_ids: &[u32],
     graph_ctx: &Arc<GraphExecutionContext>,
@@ -1054,7 +1090,7 @@ async fn build_edge_columns(
 
     let eids: Vec<Eid> = expansions
         .iter()
-        .map(|(_, _, eid, _)| Eid::from(*eid))
+        .map(|(_, _, eid, _, _)| Eid::from(*eid))
         .collect();
     let eid_u64s: Vec<u64> = eids.iter().map(|e| e.as_u64()).collect();
     columns.push(Arc::new(UInt64Array::from(eid_u64s)) as ArrayRef);
@@ -1063,7 +1099,7 @@ async fn build_edge_columns(
     {
         let uni_schema = graph_ctx.storage().schema_manager().schema();
         let mut type_builder = arrow_array::builder::StringBuilder::new();
-        for (_, _, _, edge_type_id) in expansions {
+        for (_, _, _, edge_type_id, _) in expansions {
             if let Some(name) = uni_schema.edge_type_name_by_id_unified(*edge_type_id) {
                 type_builder.append_value(&name);
             } else {
@@ -1094,6 +1130,29 @@ async fn build_edge_columns(
         let vid_keys: Vec<Vid> = eids.iter().map(|e| Vid::from(e.as_u64())).collect();
 
         for prop_name in edge_properties {
+            // Not a stored property at all: the traversal's own per-row
+            // orientation, computed during expansion. See [`COL_FWD`].
+            //
+            // A missing value is an internal error rather than a null. Nulls
+            // here would make the `CASE` the planner built fall to its ELSE
+            // branch, which is a *wrong endpoint*, not a missing one — the exact
+            // silent wrong answer this column exists to prevent.
+            if prop_name == COL_FWD {
+                let mut builder = arrow_array::builder::BooleanBuilder::new();
+                for (_, _, _, _, is_fwd) in expansions {
+                    let Some(fwd) = is_fwd else {
+                        return Err(exec_err(anyhow::anyhow!(
+                            "traversal was asked for `{COL_FWD}` but did not track \
+                             orientation; this is a planner/executor mismatch, not a \
+                             property that happens to be absent"
+                        )));
+                    };
+                    builder.append_value(*fwd);
+                }
+                columns.push(Arc::new(builder.finish()) as ArrayRef);
+                continue;
+            }
+
             // System-managed edge timestamps live outside the property bag.
             // Read them directly from L0 (earliest creation, latest update).
             // Disk-only edges will surface as null — acceptable for the
@@ -1183,7 +1242,7 @@ fn traverse_empty_expansion_batch(
 )]
 async fn build_traverse_output_batch(
     input: RecordBatch,
-    expansions: Vec<(usize, Vid, u64, u32)>,
+    expansions: Vec<Expansion>,
     schema: SchemaRef,
     edge_variable: Option<String>,
     edge_properties: Vec<String>,
@@ -1204,7 +1263,7 @@ async fn build_traverse_output_batch(
     // Expand input columns via index array
     let indices: Vec<u64> = expansions
         .iter()
-        .map(|(idx, _, _, _)| *idx as u64)
+        .map(|(idx, _, _, _, _)| *idx as u64)
         .collect();
     let indices_array = UInt64Array::from(indices);
     let mut columns: Vec<ArrayRef> = input
@@ -1214,7 +1273,7 @@ async fn build_traverse_output_batch(
         .collect::<Result<_, _>>()?;
 
     // Target VID column
-    let target_vids: Vec<Vid> = expansions.iter().map(|(_, vid, _, _)| *vid).collect();
+    let target_vids: Vec<Vid> = expansions.iter().map(|(_, vid, _, _, _)| *vid).collect();
     let target_vid_u64s: Vec<u64> = target_vids.iter().map(|v| v.as_u64()).collect();
     columns.push(Arc::new(UInt64Array::from(target_vid_u64s)));
 
@@ -1243,7 +1302,7 @@ async fn build_traverse_output_batch(
             build_edge_columns(&expansions, &edge_properties, &edge_type_ids, &graph_ctx).await?;
         columns.extend(edge_cols);
     } else {
-        let eid_u64s: Vec<u64> = expansions.iter().map(|(_, _, eid, _)| *eid).collect();
+        let eid_u64s: Vec<u64> = expansions.iter().map(|(_, _, eid, _, _)| *eid).collect();
         columns.push(Arc::new(UInt64Array::from(eid_u64s)));
     }
 
@@ -1252,7 +1311,7 @@ async fn build_traverse_output_batch(
     // Append null rows for unmatched optional sources
     if optional {
         let matched_indices: HashSet<usize> =
-            expansions.iter().map(|(idx, _, _, _)| *idx).collect();
+            expansions.iter().map(|(idx, _, _, _, _)| *idx).collect();
         let unmatched = collect_unmatched_optional_group_rows(
             &input,
             &matched_indices,
@@ -1555,7 +1614,7 @@ impl Stream for GraphTraverseStream {
 #[expect(clippy::too_many_arguments)]
 fn build_traverse_output_batch_sync(
     input: &RecordBatch,
-    expansions: &[(usize, Vid, u64, u32)],
+    expansions: &[Expansion],
     schema: &SchemaRef,
     edge_variable: Option<&String>,
     target_label_name: &Option<String>,
@@ -1572,7 +1631,7 @@ fn build_traverse_output_batch_sync(
 
     let indices: Vec<u64> = expansions
         .iter()
-        .map(|(idx, _, _, _)| *idx as u64)
+        .map(|(idx, _, _, _, _)| *idx as u64)
         .collect();
     let indices_array = UInt64Array::from(indices);
 
@@ -1585,7 +1644,7 @@ fn build_traverse_output_batch_sync(
     // Add target VID column
     let target_vids: Vec<u64> = expansions
         .iter()
-        .map(|(_, vid, _, _)| vid.as_u64())
+        .map(|(_, vid, _, _, _)| vid.as_u64())
         .collect();
     columns.push(Arc::new(UInt64Array::from(target_vids)));
 
@@ -1593,7 +1652,7 @@ fn build_traverse_output_batch_sync(
     // persisted VidLabelsIndex (shared with the async path), so labels that
     // live only in Lance storage after a flush or on a fork are not dropped.
     {
-        let target_vids: Vec<Vid> = expansions.iter().map(|(_, vid, _, _)| *vid).collect();
+        let target_vids: Vec<Vid> = expansions.iter().map(|(_, vid, _, _, _)| *vid).collect();
         columns.push(build_target_labels_column(
             &target_vids,
             target_label_name,
@@ -1603,13 +1662,13 @@ fn build_traverse_output_batch_sync(
 
     // Add edge columns if edge is bound (no properties in sync path)
     if edge_variable.is_some() {
-        let edge_ids: Vec<u64> = expansions.iter().map(|(_, _, eid, _)| *eid).collect();
+        let edge_ids: Vec<u64> = expansions.iter().map(|(_, _, eid, _, _)| *eid).collect();
         columns.push(Arc::new(UInt64Array::from(edge_ids)));
 
         // Add edge _type column
         let uni_schema = graph_ctx.storage().schema_manager().schema();
         let mut type_builder = arrow_array::builder::StringBuilder::new();
-        for (_, _, _, edge_type_id) in expansions {
+        for (_, _, _, edge_type_id, _) in expansions {
             if let Some(name) = uni_schema.edge_type_name_by_id_unified(*edge_type_id) {
                 type_builder.append_value(&name);
             } else {
@@ -1619,7 +1678,7 @@ fn build_traverse_output_batch_sync(
         columns.push(Arc::new(type_builder.finish()));
     } else {
         // Internal EID column for relationship uniqueness tracking (matches schema)
-        let edge_ids: Vec<u64> = expansions.iter().map(|(_, _, eid, _)| *eid).collect();
+        let edge_ids: Vec<u64> = expansions.iter().map(|(_, _, eid, _, _)| *eid).collect();
         columns.push(Arc::new(UInt64Array::from(edge_ids)));
     }
 
@@ -1627,7 +1686,7 @@ fn build_traverse_output_batch_sync(
 
     if optional {
         let matched_indices: HashSet<usize> =
-            expansions.iter().map(|(idx, _, _, _)| *idx).collect();
+            expansions.iter().map(|(idx, _, _, _, _)| *idx).collect();
         let unmatched = collect_unmatched_optional_group_rows(
             input,
             &matched_indices,
@@ -1659,12 +1718,18 @@ impl RecordBatchStream for GraphTraverseStream {
     }
 }
 
-/// Adjacency map type: maps source VID to list of (target_vid, eid, edge_type_name, properties).
+/// Adjacency map type: maps source VID to list of
+/// (target_vid, eid, edge_type_name, properties, is_fwd).
 ///
 /// Type name and properties are `Arc`-shared: an undirected (`Both`) traversal
 /// stores every edge under both endpoints, which used to deep-clone the whole
 /// property map per edge (review perf #5).
-type EdgeAdjacencyMap = HashMap<Vid, Vec<(Vid, Eid, Arc<str>, Arc<uni_common::Properties>)>>;
+///
+/// `is_fwd` is true when the map *key* is the edge's stored `_src_vid`. Storing
+/// every edge under both endpoints is exactly what loses that fact, so it is
+/// recorded at the point where both endpoints are still in hand. See
+/// [`COL_FWD`].
+type EdgeAdjacencyMap = HashMap<Vid, Vec<(Vid, Eid, Arc<str>, Arc<uni_common::Properties>, bool)>>;
 
 /// Graph traversal execution plan for schemaless edge types (TraverseMainByType).
 ///
@@ -1852,6 +1917,12 @@ impl GraphTraverseMainExec {
             // Int, Float, etc. round-trip correctly through Arrow.
             for prop in edge_properties {
                 let col_name = format!("{}.{}", edge_var, prop);
+                // Per-row traversal orientation, not a stored property, so it is
+                // a plain Boolean rather than a CypherValue blob. See [`COL_FWD`].
+                if prop == COL_FWD {
+                    fields.push(Field::new(&col_name, DataType::Boolean, true));
+                    continue;
+                }
                 let mut metadata = std::collections::HashMap::new();
                 metadata.insert("cv_encoded".to_string(), "true".to_string());
                 fields.push(
@@ -2160,9 +2231,11 @@ impl GraphTraverseMainStream {
         let used_edge_arrays: Vec<&UInt64Array> =
             super::common::used_edge_id_arrays(input, &self.used_edge_columns)?;
 
-        // Build expansions: (input_row_idx, target_vid, eid, edge_type, edge_props).
+        // Build expansions:
+        // (input_row_idx, target_vid, eid, edge_type, edge_props, is_fwd).
         // Type/props are Arc-shared with the adjacency map (pointer clones).
-        type Expansion = (usize, Vid, Eid, Arc<str>, Arc<uni_common::Properties>);
+        // `is_fwd` rides along from the adjacency entry; see [`COL_FWD`].
+        type Expansion = (usize, Vid, Eid, Arc<str>, Arc<uni_common::Properties>, bool);
         let mut expansions: Vec<Expansion> = Vec::new();
 
         for (row_idx, src_u64) in source_vids.iter().enumerate() {
@@ -2182,7 +2255,7 @@ impl GraphTraverseMainStream {
                     .collect();
 
                 if let Some(neighbors) = adjacency.get(&src_vid) {
-                    for (target_vid, eid, edge_type, props) in neighbors {
+                    for (target_vid, eid, edge_type, props, is_fwd) in neighbors {
                         // Skip edges already used in previous hops (relationship uniqueness)
                         if used_eids.contains(&eid.as_u64()) {
                             continue;
@@ -2206,6 +2279,7 @@ impl GraphTraverseMainStream {
                             *eid,
                             Arc::clone(edge_type),
                             Arc::clone(props),
+                            *is_fwd,
                         ));
                     }
                 }
@@ -2226,7 +2300,7 @@ impl GraphTraverseMainStream {
 
         // Track matched rows for OPTIONAL handling
         let matched_rows: HashSet<usize> = if self.optional {
-            expansions.iter().map(|(idx, _, _, _, _)| *idx).collect()
+            expansions.iter().map(|(idx, _, _, _, _, _)| *idx).collect()
         } else {
             HashSet::new()
         };
@@ -2235,7 +2309,7 @@ impl GraphTraverseMainStream {
         let mut columns: Vec<ArrayRef> = Vec::new();
         let indices: Vec<u64> = expansions
             .iter()
-            .map(|(idx, _, _, _, _)| *idx as u64)
+            .map(|(idx, _, _, _, _, _)| *idx as u64)
             .collect();
         let indices_array = UInt64Array::from(indices);
 
@@ -2248,7 +2322,7 @@ impl GraphTraverseMainStream {
         let target_vid_name = format!("{}._vid", self.target_variable);
         let target_vids: Vec<u64> = expansions
             .iter()
-            .map(|(_, vid, _, _, _)| vid.as_u64())
+            .map(|(_, vid, _, _, _, _)| vid.as_u64())
             .collect();
         if input.schema().column_with_name(&target_vid_name).is_none() {
             columns.push(Arc::new(UInt64Array::from(target_vids)));
@@ -2269,7 +2343,7 @@ impl GraphTraverseMainStream {
             // there too. (GitHub #99)
             let query_ctx = self.graph_ctx.query_context();
             let mut labels_builder = ListBuilder::new(StringBuilder::new());
-            for (_, target_vid, _, _, _) in &expansions {
+            for (_, target_vid, _, _, _, _) in &expansions {
                 let row_labels = self
                     .graph_ctx
                     .resolve_vertex_labels(*target_vid, &query_ctx)
@@ -2289,14 +2363,14 @@ impl GraphTraverseMainStream {
             // Add edge ._eid column
             let eids: Vec<u64> = expansions
                 .iter()
-                .map(|(_, _, eid, _, _)| eid.as_u64())
+                .map(|(_, _, eid, _, _, _)| eid.as_u64())
                 .collect();
             columns.push(Arc::new(UInt64Array::from(eids)));
 
             // Add edge ._type column
             {
                 let mut type_builder = arrow_array::builder::StringBuilder::new();
-                for (_, _, _, edge_type, _) in &expansions {
+                for (_, _, _, edge_type, _, _) in &expansions {
                     type_builder.append_value(edge_type);
                 }
                 columns.push(Arc::new(type_builder.finish()));
@@ -2304,11 +2378,21 @@ impl GraphTraverseMainStream {
 
             // Add edge property columns as cv_encoded LargeBinary to preserve types
             for prop_name in &self.edge_properties {
+                // Not a stored property: the traversal's own per-row orientation,
+                // carried here from the adjacency entry. See [`COL_FWD`].
+                if prop_name == COL_FWD {
+                    let mut builder = arrow_array::builder::BooleanBuilder::new();
+                    for (_, _, _, _, _, is_fwd) in &expansions {
+                        builder.append_value(*is_fwd);
+                    }
+                    columns.push(Arc::new(builder.finish()));
+                    continue;
+                }
                 let mut builder = arrow_array::builder::LargeBinaryBuilder::new();
                 if prop_name == "_all_props" {
                     // Serialize all edge properties to a CypherValue blob directly
                     // from `Value` so typed values (temporals) are preserved.
-                    for (_, _, _, _, props) in &expansions {
+                    for (_, _, _, _, props, _) in &expansions {
                         if props.is_empty() {
                             builder.append_null();
                         } else {
@@ -2321,7 +2405,7 @@ impl GraphTraverseMainStream {
                     }
                 } else {
                     // Named property as cv_encoded CypherValue
-                    for (_, _, _, _, props) in &expansions {
+                    for (_, _, _, _, props, _) in &expansions {
                         match props.get(prop_name) {
                             Some(uni_common::Value::Null) | None => builder.append_null(),
                             Some(val) => {
@@ -2335,7 +2419,7 @@ impl GraphTraverseMainStream {
         } else {
             let eids: Vec<u64> = expansions
                 .iter()
-                .map(|(_, _, eid, _, _)| eid.as_u64())
+                .map(|(_, _, eid, _, _, _)| eid.as_u64())
                 .collect();
             columns.push(Arc::new(UInt64Array::from(eids)));
         }
@@ -2350,7 +2434,7 @@ impl GraphTraverseMainStream {
                 if prop_name == "_all_props" {
                     // Build a full CypherValue blob from all target properties.
                     let mut builder = arrow_array::builder::LargeBinaryBuilder::new();
-                    for (_, target_vid, _, _, _) in &expansions {
+                    for (_, target_vid, _, _, _, _) in &expansions {
                         // Merge in `Value` space so typed values (temporals) survive.
                         let merged_props: HashMap<String, uni_common::Value> = target_props
                             .get(target_vid)
@@ -2374,7 +2458,7 @@ impl GraphTraverseMainStream {
                 } else {
                     // Extract an individual property and encode as CypherValue.
                     let mut builder = arrow_array::builder::LargeBinaryBuilder::new();
-                    for (_, target_vid, _, _, _) in &expansions {
+                    for (_, target_vid, _, _, _, _) in &expansions {
                         match target_props
                             .get(target_vid)
                             .and_then(|props| props.get(prop_name.as_str()))
@@ -2444,7 +2528,7 @@ impl GraphExecutionContext {
         let mut rs = read_set.lock();
         for (src, neighbors) in adjacency {
             rs.vertices.insert(*src);
-            for (nbr, eid, _type, _props) in neighbors {
+            for (nbr, eid, _type, _props, _fwd) in neighbors {
                 rs.vertices.insert(*nbr);
                 rs.edges.insert(*eid);
             }
@@ -2569,18 +2653,22 @@ async fn build_edge_adjacency_map(
     for (eid, src_vid, dst_vid, edge_type, props) in unique_edges {
         let edge_type: Arc<str> = edge_type.into();
         let props = Arc::new(props);
+        // The last element of each entry is `is_fwd`: whether the key it is
+        // filed under is the edge's stored `_src_vid`. Keyed by `src_vid` it is
+        // true, keyed by `dst_vid` it is false — the one place both endpoints
+        // are still in hand, and therefore the only place it can be recorded.
         match direction {
             Direction::Outgoing => {
                 adjacency
                     .entry(src_vid)
                     .or_default()
-                    .push((dst_vid, eid, edge_type, props));
+                    .push((dst_vid, eid, edge_type, props, true));
             }
             Direction::Incoming => {
                 adjacency
                     .entry(dst_vid)
                     .or_default()
-                    .push((src_vid, eid, edge_type, props));
+                    .push((src_vid, eid, edge_type, props, false));
             }
             Direction::Both => {
                 adjacency.entry(src_vid).or_default().push((
@@ -2588,16 +2676,18 @@ async fn build_edge_adjacency_map(
                     eid,
                     Arc::clone(&edge_type),
                     Arc::clone(&props),
+                    true,
                 ));
                 // A self-loop (src == dst) would otherwise be listed TWICE under
                 // the same source — once per orientation — and an undirected match
                 // `(a)-[:R]-(b)` over it would yield a duplicate row. It is a single
-                // relationship, so list it only once.
+                // relationship, so list it only once. Its two endpoints are the
+                // same vertex, so the `true` above names it correctly either way.
                 if dst_vid != src_vid {
                     adjacency
                         .entry(dst_vid)
                         .or_default()
-                        .push((src_vid, eid, edge_type, props));
+                        .push((src_vid, eid, edge_type, props, false));
                 }
             }
         }
@@ -2644,7 +2734,7 @@ async fn build_edge_adjacency_and_target_props(
     let mut target_vids: Vec<Vid> = Vec::new();
     let mut seen: HashSet<Vid> = HashSet::new();
     for neighbors in adjacency.values() {
-        for (tvid, _, _, _) in neighbors {
+        for (tvid, _, _, _, _) in neighbors {
             if seen.insert(*tvid) {
                 target_vids.push(*tvid);
             }
@@ -2766,7 +2856,7 @@ pub(super) async fn build_vertex_property_filter(
     let mut candidates: Vec<Vid> = Vec::new();
     let mut seen: FxHashSet<u64> = FxHashSet::default();
     for entries in adjacency.values() {
-        for (neighbor, _eid, _etype, _props) in entries {
+        for (neighbor, _eid, _etype, _props, _fwd) in entries {
             if seen.insert(neighbor.as_u64()) {
                 candidates.push(*neighbor);
             }
@@ -2845,7 +2935,7 @@ pub(super) async fn build_edge_property_filter(
     let mut max_eid: u64 = 0;
     let mut seen: FxHashSet<u64> = FxHashSet::default();
     for edges in adjacency.values() {
-        for (_neighbor, eid, _etype, props) in edges {
+        for (_neighbor, eid, _etype, props, _fwd) in edges {
             let raw = eid.as_u64();
             // `Direction::Both` lists each edge under both endpoints — dedup so
             // the density heuristic in `from_eids` sees a true count.
@@ -4957,7 +5047,7 @@ impl GraphVariableLengthTraverseMainStream {
                 let is_undirected = matches!(self.direction, Direction::Both);
                 let mut seen_edges_at_hop: HashSet<u64> = HashSet::new();
 
-                for (neighbor, eid, _edge_type, props) in neighbors {
+                for (neighbor, eid, _edge_type, props, _fwd) in neighbors {
                     // Deduplicate edges for undirected patterns
                     if is_undirected && !seen_edges_at_hop.insert(eid.as_u64()) {
                         continue;
@@ -5534,7 +5624,7 @@ mod tests {
         .unwrap();
         let output_schema =
             GraphTraverseExec::build_schema(input_schema, "m", None, &[], &[], None, None, false);
-        let expansions = vec![(0usize, target_vid, 0u64, 0u32)];
+        let expansions = vec![(0usize, target_vid, 0u64, 0u32, None)];
 
         let out = build_traverse_output_batch_sync(
             &input,
