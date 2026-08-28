@@ -188,23 +188,61 @@ fn split_time_travel(
     }
 }
 
+/// Internal helper columns a plan emits beside the projected ones.
+///
+/// A traversal row carries `b._vid`, `b._labels`, `b.name` next to the `n` the
+/// user asked for. These names are the fingerprint of the guessing path below
+/// having been handed rows it cannot name.
+const INTERNAL_COLUMN_SUFFIXES: [&str; 6] = [
+    "._vid",
+    "._labels",
+    "._eid",
+    "._type",
+    "._all_props",
+    ".overflow_json",
+];
+
 /// Determine the output column order for a result set.
 ///
 /// Uses the planner's projection order when available; otherwise falls back to
 /// the first row's keys, sorted for deterministic output. An empty result set
 /// yields no columns.
+///
+/// # Errors
+///
+/// Returns [`UniError::Query`] when the projection order is unknown *and* the
+/// rows carry internal helper columns. That combination is never a valid
+/// answer: the guess would order `b._labels` ahead of `n` and the caller,
+/// which reads column 0, would receive the label list instead of the node
+/// (#190). Failing here is the loud version of a defect that was silent for as
+/// long as this function was allowed to guess.
 fn columns_for_results(
     results: &[HashMap<String, ApiValue>],
     projection_order: Option<Vec<String>>,
-) -> Arc<Vec<String>> {
+) -> Result<Arc<Vec<String>>> {
     if results.is_empty() {
-        Arc::new(vec![])
+        Ok(Arc::new(vec![]))
     } else if let Some(order) = projection_order {
-        Arc::new(order)
+        Ok(Arc::new(order))
     } else {
         let mut cols: Vec<String> = results[0].keys().cloned().collect();
         cols.sort();
-        Arc::new(cols)
+        if let Some(internal) = cols.iter().find(|c| {
+            INTERNAL_COLUMN_SUFFIXES
+                .iter()
+                .any(|suffix| c.ends_with(suffix))
+        }) {
+            return Err(UniError::Query {
+                message: format!(
+                    "Plan: cannot name the result columns — no projection was found at the \
+                     top of the plan, and the rows carry the internal column `{internal}`. \
+                     Naming them by guesswork here would return an internal column in place \
+                     of a projected one. This is a planner bug; please file an issue."
+                ),
+                query: None,
+            });
+        }
+        Ok(Arc::new(cols))
     }
 }
 
@@ -428,30 +466,16 @@ fn enforce_memory_limit(
     Ok(())
 }
 
-/// Extract projection column names from a LogicalPlan, preserving query order.
-/// Returns None if the plan doesn't have projections at the top level.
+/// Output column names for a plan, in query order, or `None` when the plan
+/// has no top-level projection.
+///
+/// Delegates to the planner's canonical [`projection_columns`]. This used to
+/// be a second, independent copy that had no `Union` and no `Distinct` arm,
+/// so those two shapes fell through to the row-key guess in
+/// [`columns_for_results`] and returned an internal helper column where the
+/// user asked for a node (#190).
 fn extract_projection_order(plan: &LogicalPlan) -> Option<Vec<String>> {
-    match plan {
-        LogicalPlan::Project { projections, .. } => Some(
-            projections
-                .iter()
-                .map(|(expr, alias)| alias.clone().unwrap_or_else(|| expr.to_string_repr()))
-                .collect(),
-        ),
-        LogicalPlan::Aggregate {
-            group_by,
-            aggregates,
-            ..
-        } => {
-            let mut names: Vec<String> = group_by.iter().map(|e| e.to_string_repr()).collect();
-            names.extend(aggregates.iter().map(|e| e.to_string_repr()));
-            Some(names)
-        }
-        LogicalPlan::Limit { input, .. }
-        | LogicalPlan::Sort { input, .. }
-        | LogicalPlan::Filter { input, .. } => extract_projection_order(input),
-        _ => None,
-    }
+    uni_query::query::planner::projection_columns(plan)
 }
 
 impl crate::api::UniInner {
@@ -619,7 +643,7 @@ impl crate::api::UniInner {
             .await
             .map_err(|e| into_execution_error(e, cypher, self.config.query_timeout))?;
 
-        let columns = columns_for_results(&results, projection_order);
+        let columns = columns_for_results(&results, projection_order)?;
         let rows = rows_for_results(results, &columns, true);
 
         // PROFILE used to return `Default::default()` here, i.e. a result whose
@@ -750,7 +774,7 @@ impl crate::api::UniInner {
                 if results.is_empty() {
                     return Ok(vec![]);
                 }
-                let columns = columns_for_results(&results, projection_order_for_rows.clone());
+                let columns = columns_for_results(&results, projection_order_for_rows.clone())?;
                 Ok(rows_for_results(results, &columns, false))
             })
             // Re-chunk into batch_size-sized pieces
@@ -989,7 +1013,7 @@ impl crate::api::UniInner {
         // materializing — which is the shape of defect this work removes.
         enforce_memory_limit(&results, self.config.max_query_memory, cypher)?;
 
-        let columns = columns_for_results(&results, projection_order);
+        let columns = columns_for_results(&results, projection_order)?;
         let rows = rows_for_results(results, &columns, true);
 
         let metrics = QueryMetrics {
@@ -1053,7 +1077,7 @@ impl crate::api::UniInner {
             .await
             .map_err(|e| into_execution_error(e, cypher, self.config.query_timeout))?;
 
-        let columns = columns_for_results(&results, projection_order);
+        let columns = columns_for_results(&results, projection_order)?;
         let rows = rows_for_results(results, &columns, true);
 
         let metrics = QueryMetrics {
@@ -1221,7 +1245,7 @@ impl crate::api::UniInner {
             return Err(query_timed_out_error(timeout_duration));
         }
 
-        let columns = columns_for_results(&results, projection_order);
+        let columns = columns_for_results(&results, projection_order)?;
         let rows = rows_for_results(results, &columns, true);
 
         let metrics = QueryMetrics {
@@ -1289,7 +1313,7 @@ impl crate::api::UniInner {
 
         enforce_memory_limit(&results, config.max_query_memory, cypher)?;
 
-        let columns = columns_for_results(&results, projection_order);
+        let columns = columns_for_results(&results, projection_order)?;
         let rows = rows_for_results(results, &columns, true);
 
         let metrics = QueryMetrics {
@@ -1388,7 +1412,7 @@ impl crate::api::UniInner {
 
         enforce_memory_limit(&results, config.max_query_memory, cypher)?;
 
-        let columns = columns_for_results(&results, projection_order);
+        let columns = columns_for_results(&results, projection_order)?;
         let rows = rows_for_results(results, &columns, true);
 
         let metrics = QueryMetrics {
@@ -1403,5 +1427,69 @@ impl crate::api::UniInner {
         let mut result = QueryResult::new(columns, rows, executor.take_warnings(), metrics);
         result.set_counters(executor.take_counters());
         Ok(result)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn row(keys: &[&str]) -> HashMap<String, ApiValue> {
+        keys.iter()
+            .map(|k| ((*k).to_string(), ApiValue::Null))
+            .collect()
+    }
+
+    /// The planner's order wins, and it wins *unsorted* — query order is the
+    /// contract, not alphabetical order.
+    #[test]
+    fn a_known_projection_order_is_used_verbatim() {
+        let results = vec![row(&["zeta", "alpha"])];
+        let cols =
+            columns_for_results(&results, Some(vec!["zeta".into(), "alpha".into()])).unwrap();
+        assert_eq!(*cols, vec!["zeta".to_string(), "alpha".to_string()]);
+    }
+
+    /// DDL and admin plans have no projection and no internal columns. The
+    /// measured shapes across the integration suite are all of this form
+    /// (`success`, `registered`, `plan`, `labels`), so the fallback has to
+    /// keep working for them.
+    #[test]
+    fn an_unknown_order_still_falls_back_for_plain_column_names() {
+        let results = vec![row(&["success"])];
+        let cols = columns_for_results(&results, None).unwrap();
+        assert_eq!(*cols, vec!["success".to_string()]);
+    }
+
+    /// The guard. These are exactly the row keys a traversal produced under a
+    /// `UNION`, where the fallback sorted `b._labels` into position 0 and the
+    /// caller returned the label list in place of the node (#190).
+    #[test]
+    fn an_unknown_order_over_internal_columns_is_an_error_not_a_guess() {
+        let results = vec![row(&["b._labels", "b._vid", "b.name", "n"])];
+        let err = columns_for_results(&results, None)
+            .expect_err("guessing here returns an internal column as if it were the answer");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("b._labels"),
+            "error must name the column: {msg}"
+        );
+        assert!(
+            msg.contains("please file an issue"),
+            "the guard reports a planner bug, not user error: {msg}"
+        );
+    }
+
+    /// A user property named with a dot-suffix that merely *resembles* an
+    /// internal column must not trip the guard — `RETURN n.name` legitimately
+    /// produces the column name `n.name`.
+    #[test]
+    fn a_dotted_user_column_does_not_trip_the_guard() {
+        let results = vec![row(&["n.name", "n.type_of_thing"])];
+        let cols = columns_for_results(&results, None).unwrap();
+        assert_eq!(
+            *cols,
+            vec!["n.name".to_string(), "n.type_of_thing".to_string()]
+        );
     }
 }

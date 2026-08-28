@@ -2958,37 +2958,13 @@ impl QueryPlanner {
         format!("_anon_{}", id)
     }
 
-    /// Extract projection column names from a logical plan.
-    /// Used for UNION column validation.
+    /// Column names used to validate that both `UNION` branches agree.
+    ///
+    /// Delegates to [`projection_columns`]; an unknown shape yields an empty
+    /// list, which compares equal to another unknown and so does not reject
+    /// the union on its own.
     fn extract_projection_columns(plan: &LogicalPlan) -> Vec<String> {
-        match plan {
-            LogicalPlan::Project { projections, .. } => projections
-                .iter()
-                .map(|(expr, alias)| alias.clone().unwrap_or_else(|| expr.to_string_repr()))
-                .collect(),
-            LogicalPlan::Limit { input, .. }
-            | LogicalPlan::Sort { input, .. }
-            | LogicalPlan::Distinct { input, .. }
-            | LogicalPlan::Filter { input, .. } => Self::extract_projection_columns(input),
-            LogicalPlan::Union { left, right, .. } => {
-                let left_cols = Self::extract_projection_columns(left);
-                if left_cols.is_empty() {
-                    Self::extract_projection_columns(right)
-                } else {
-                    left_cols
-                }
-            }
-            LogicalPlan::Aggregate {
-                group_by,
-                aggregates,
-                ..
-            } => {
-                let mut cols: Vec<String> = group_by.iter().map(|e| e.to_string_repr()).collect();
-                cols.extend(aggregates.iter().map(|e| e.to_string_repr()));
-                cols
-            }
-            _ => Vec::new(),
-        }
+        projection_columns(plan).unwrap_or_default()
     }
 
     fn plan_return_clause(
@@ -8571,6 +8547,119 @@ impl QueryPlanner {
             }
             other => other,
         }
+    }
+}
+
+/// The user-visible output column names of `plan`, in query order.
+///
+/// `None` means the plan carries no projection at its top level. That is a
+/// genuine answer for DDL and admin plans, and callers must treat it as
+/// "unknown" rather than reconstructing a column list from the result rows:
+/// a row map carries the traversal's internal helper columns (`b._vid`,
+/// `b._labels`, `b.name`) alongside the projected ones, so guessing from it
+/// returns whichever key happens to sort first. That is how
+/// `MATCH (a:P)-[:KNOWS]->(b:P) RETURN b AS n UNION ALL ...` came to return
+/// the node's `_labels` list instead of the node (#190), and why
+/// `RETURN DISTINCT b AS n` did the same with no union in sight.
+///
+/// The match is deliberately exhaustive. Two copies of this logic existed and
+/// disagreed about `Union` and `Distinct`; each disagreement was a silent
+/// wrong answer, and neither is a shape anyone would call exotic. A new
+/// `LogicalPlan` variant must be a compile error here rather than a variant
+/// that quietly joins the guessing path.
+pub fn projection_columns(plan: &LogicalPlan) -> Option<Vec<String>> {
+    match plan {
+        LogicalPlan::Project { projections, .. } => Some(
+            projections
+                .iter()
+                .map(|(expr, alias)| alias.clone().unwrap_or_else(|| expr.to_string_repr()))
+                .collect(),
+        ),
+        LogicalPlan::Aggregate {
+            group_by,
+            aggregates,
+            ..
+        } => {
+            let mut names: Vec<String> = group_by.iter().map(|e| e.to_string_repr()).collect();
+            names.extend(aggregates.iter().map(|e| e.to_string_repr()));
+            Some(names)
+        }
+        // Row-preserving wrappers: the columns are whatever the input projects.
+        LogicalPlan::Limit { input, .. }
+        | LogicalPlan::Sort { input, .. }
+        | LogicalPlan::Distinct { input, .. }
+        | LogicalPlan::Filter { input, .. } => projection_columns(input),
+        // Both branches are validated to carry the same column names when the
+        // union is built (`plan_with_scope`), so either side answers for both.
+        // The right side is consulted only when the left cannot answer.
+        LogicalPlan::Union { left, right, .. } => {
+            projection_columns(left).or_else(|| projection_columns(right))
+        }
+        // No top-level projection. Listed rather than matched with `_` so that
+        // adding a variant forces a decision here.
+        LogicalPlan::Scan { .. }
+        | LogicalPlan::FusedIndexScan { .. }
+        | LogicalPlan::FusedIndexScanWrapped { .. }
+        | LogicalPlan::ExtIdLookup { .. }
+        | LogicalPlan::ScanAll { .. }
+        | LogicalPlan::ScanMainByLabels { .. }
+        | LogicalPlan::Empty
+        | LogicalPlan::Unwind { .. }
+        | LogicalPlan::Traverse { .. }
+        | LogicalPlan::TraverseMainByType { .. }
+        | LogicalPlan::Create { .. }
+        | LogicalPlan::CreateBatch { .. }
+        | LogicalPlan::Merge { .. }
+        | LogicalPlan::Set { .. }
+        | LogicalPlan::Remove { .. }
+        | LogicalPlan::Delete { .. }
+        | LogicalPlan::Foreach { .. }
+        | LogicalPlan::Window { .. }
+        | LogicalPlan::CrossJoin { .. }
+        | LogicalPlan::Apply { .. }
+        | LogicalPlan::RecursiveCTE { .. }
+        | LogicalPlan::ProcedureCall { .. }
+        | LogicalPlan::SubqueryCall { .. }
+        | LogicalPlan::VectorKnn { .. }
+        | LogicalPlan::InvertedIndexLookup { .. }
+        | LogicalPlan::ShortestPath { .. }
+        | LogicalPlan::AllShortestPaths { .. }
+        | LogicalPlan::QuantifiedPattern { .. }
+        | LogicalPlan::CreateVectorIndex { .. }
+        | LogicalPlan::CreateSparseIndex { .. }
+        | LogicalPlan::CreateFullTextIndex { .. }
+        | LogicalPlan::CreateScalarIndex { .. }
+        | LogicalPlan::CreateJsonFtsIndex { .. }
+        | LogicalPlan::DropIndex { .. }
+        | LogicalPlan::ShowIndexes { .. }
+        | LogicalPlan::Copy { .. }
+        | LogicalPlan::Backup { .. }
+        | LogicalPlan::Explain { .. }
+        | LogicalPlan::ShowDatabase
+        | LogicalPlan::ShowConfig
+        | LogicalPlan::ShowStatistics
+        | LogicalPlan::Vacuum
+        | LogicalPlan::Checkpoint
+        | LogicalPlan::CopyTo { .. }
+        | LogicalPlan::CopyFrom { .. }
+        | LogicalPlan::CreateLabel(..)
+        | LogicalPlan::CreateEdgeType(..)
+        | LogicalPlan::AlterLabel(..)
+        | LogicalPlan::AlterEdgeType(..)
+        | LogicalPlan::DropLabel(..)
+        | LogicalPlan::DropEdgeType(..)
+        | LogicalPlan::CreateConstraint(..)
+        | LogicalPlan::DropConstraint(..)
+        | LogicalPlan::ShowConstraints(..)
+        | LogicalPlan::BindZeroLengthPath { .. }
+        | LogicalPlan::BindPath { .. }
+        | LogicalPlan::LocyProgram { .. }
+        | LogicalPlan::LocyFold { .. }
+        | LogicalPlan::LocyBestBy { .. }
+        | LogicalPlan::LocyPriority { .. }
+        | LogicalPlan::LocyDerivedScan { .. }
+        | LogicalPlan::LocyProject { .. }
+        | LogicalPlan::LocyModelInvoke { .. } => None,
     }
 }
 

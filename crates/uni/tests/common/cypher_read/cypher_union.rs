@@ -47,19 +47,29 @@ async fn test_cypher_union() -> anyhow::Result<()> {
     let plan = planner.plan(ast)?;
     executor.execute(plan, &prop_manager, &params).await?;
 
-    // 3. UNION ALL
-    // NOTE: This test currently fails due to UNION ALL not properly combining results
-    // This is a separate issue from the L0 buffer context problem
+    // 3. UNION ALL returns one row per branch.
+    //
+    // This assertion was commented out with a note that UNION ALL "only
+    // returns first query results", leaving the only union test in the crate
+    // asserting nothing at all. It passes, so the note was stale — and a test
+    // that asserts nothing is why a union could return the wrong value for as
+    // long as it did (#190). Whole-entity unions are covered separately in
+    // `union_entity_test`.
     let query = "MATCH (n:Person {name: 'Alice'}) RETURN n.name UNION ALL MATCH (n:Person {name: 'Bob'}) RETURN n.name";
     let ast = uni_cypher::parse(query)?;
     let plan = planner.plan(ast)?;
     let res = executor.execute(plan, &prop_manager, &params).await?;
-    // TODO: Fix UNION ALL implementation - currently only returns first query results
-    // assert_eq!(res.len(), 2);
-    eprintln!(
-        "WARNING: UNION ALL only returns {} results instead of 2 (known issue)",
-        res.len()
-    );
+    assert_eq!(res.len(), 2, "UNION ALL must return a row from each branch");
+
+    let mut names: Vec<String> = res
+        .iter()
+        .filter_map(|row| match row.get("n.name") {
+            Some(uni_db::Value::String(s)) => Some(s.clone()),
+            _ => None,
+        })
+        .collect();
+    names.sort();
+    assert_eq!(names, vec!["Alice".to_string(), "Bob".to_string()]);
 
     Ok(())
 }

@@ -341,8 +341,6 @@ consulted an index. That is the gate on 5.2–5.4, not effort.
 
 ### Open, with issues
 
-- #190 — **`UNION` over a whole node or relationship returns the wrong value,
-  silently.** Filed 2026-08-28; the most severe item now open here.
 - #191 — a node's Arrow struct differs between the scan path and the traversal
   path, breaking `UNION` loudly. Filed 2026-08-28.
 - #192 — `resolve_flat_column_properties` handles 5 of 27 `Expr` variants behind
@@ -605,3 +603,42 @@ throughout. That is the same mechanism `docs/testing/single-shape-coverage-2026-
 describes, arriving from the other direction: a claim of "not observable" is
 bounded by the paths actually probed, in exactly the way a green TCK is bounded
 by the shapes it contains.
+
+### #190 — the columns, not the union
+
+Closed 2026-08-28. The report guessed at positional column misalignment inside
+the union. The batches were never wrong: dumped at the read boundary, column
+`n` held a correct struct on both branches, declared type matching actual. The
+defect was one layer further out, in *naming* the result's columns.
+
+`extract_projection_order` had no `Union` arm and no `Distinct` arm, so both
+shapes fell through its catch-all into a fallback that "falls back to the first
+row's keys, sorted". A traversal's rows carry `b._vid`, `b._labels`, `b.name`
+beside the projected `n`, so sorted keys put `b._labels` at index 0 — the only
+column the caller reads. The second row came from the other branch, keyed
+`d.*`, and had no `b._labels` at all, which is where the `Null` came from.
+
+A second copy of that logic already existed in the planner and *did* handle
+both variants. Two implementations of one idea, disagreeing; the disagreement
+was the bug. Both now delegate to one canonical `projection_columns` with an
+exhaustive match over all 70 `LogicalPlan` variants — the same recurrence fix
+this document asked for in 1.3 and again for #189, in a third place.
+
+Three things this turned up that the issue did not say:
+
+- **`UNION` was never the requirement.** `RETURN DISTINCT b AS n`, with no
+  union anywhere, returned the same labels list. It reaches the same catch-all,
+  and it is the more ordinary of the two queries.
+- **The issue's own control passed by luck.** Its scan-scan union works because
+  the helper prefix `z` sorts *after* `n`. Rebound to `a`, the identical query
+  fails. A test written only against the `z` shape reports the feature working.
+- **The fallback cannot simply be deleted.** Instrumented across the
+  integration suite it takes 51 legitimate hits — all DDL and admin plans
+  (`success`, `registered`, `plan`, `labels`), none carrying an internal
+  column. That measurement is why the guard added alongside is narrow: it
+  errors only when the order is unknown *and* the rows carry internal columns,
+  which is exactly the combination that produced a wrong answer.
+
+The guard was checked by neutralising the fix: the same query then raises
+`cannot name the result columns … the internal column \`b._labels\`` instead
+of returning a value. Had it existed before, #190 would have been loud.
