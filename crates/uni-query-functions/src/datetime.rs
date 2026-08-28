@@ -22,6 +22,52 @@ use uni_common::{TemporalValue, Value};
 // Constants
 // ============================================================================
 
+/// True when `s` — already known to begin with `P`/`p` — is shaped like an
+/// ISO-8601 duration, rather than being an ordinary string that happens to
+/// start with the same letter.
+///
+/// Accepts the designator form (`P1Y2M3D`, `PT1H30M`, `P1W`, `PT-1H`) and the
+/// date-time form (`P2012-02-02T14:37:21.545`). Rejects a bare `P`, a number
+/// with no designator (`P0`), a designator with no number in front of it, and
+/// any string containing a character a duration cannot contain (`paris`).
+///
+/// This is a *shape* test, not a parse: it is on the comparison path, so it
+/// allocates nothing and makes one pass. The parsers below fail closed on the
+/// same inputs, so a shape that slips through is still rejected.
+fn is_iso_duration_shaped(s: &str) -> bool {
+    let body = &s[1..];
+    if body.is_empty() {
+        return false;
+    }
+    // Date-time form: `P` then `YYYY-…`. Mirrors the detection in
+    // `parse_iso8601_duration_cypher`, which delegates these to a separate
+    // parser.
+    if body.len() >= 10
+        && body.as_bytes()[0].is_ascii_digit()
+        && body.as_bytes().get(4) == Some(&b'-')
+    {
+        return true;
+    }
+    let mut saw_designator = false;
+    let mut number_pending = false;
+    for c in body.chars() {
+        match c {
+            '0'..='9' | '.' | '-' | '+' => number_pending = true,
+            'T' | 't' => number_pending = false,
+            'Y' | 'y' | 'W' | 'w' | 'D' | 'd' | 'H' | 'h' | 'S' | 's' | 'M' | 'm' => {
+                if !number_pending {
+                    return false;
+                }
+                number_pending = false;
+                saw_designator = true;
+            }
+            _ => return false,
+        }
+    }
+    // A trailing number no designator closes (`P0`) is not a duration either.
+    saw_designator && !number_pending
+}
+
 const MICROS_PER_SECOND: i64 = 1_000_000;
 const MICROS_PER_MINUTE: i64 = 60 * MICROS_PER_SECOND;
 const MICROS_PER_HOUR: i64 = 60 * MICROS_PER_MINUTE;
@@ -39,9 +85,15 @@ pub fn classify_temporal(s: &str) -> Option<TemporalType> {
         s
     };
 
-    // Duration: starts with P (case insensitive)
+    // Duration: an ISO-8601 duration, not merely a string that starts with the
+    // same letter. `starts_with(['P', 'p'])` alone classified `paris`, `p0` and
+    // every product code beginning with P as a Duration; because a Duration has
+    // no ordering its sort key is a constant, so `ORDER BY` over such values
+    // silently did not sort and `ORDER BY … LIMIT n` silently returned the
+    // wrong rows. The shape check costs one pass over the string and no
+    // allocation.
     if base.starts_with(['P', 'p']) {
-        return Some(TemporalType::Duration);
+        return is_iso_duration_shaped(base).then_some(TemporalType::Duration);
     }
 
     // Check for date component (YYYY-MM-DD pattern)
@@ -631,6 +683,7 @@ fn parse_iso8601_duration_cypher(s: &str) -> Result<CypherDuration> {
     let mut nanos: i64 = 0;
     let mut in_time_part = false;
     let mut num_buf = String::new();
+    let mut saw_designator = false;
 
     for c in s.chars() {
         if c == 'T' || c == 't' {
@@ -641,13 +694,19 @@ fn parse_iso8601_duration_cypher(s: &str) -> Result<CypherDuration> {
         if c.is_ascii_digit() || c == '.' || c == '-' {
             num_buf.push(c);
         } else {
+            // A designator with no number in front of it. Skipping it silently
+            // is what let `paris` parse as a zero duration.
             if num_buf.is_empty() {
-                continue;
+                return Err(anyhow!(
+                    "Invalid ISO 8601 duration: designator '{}' with no preceding number",
+                    c
+                ));
             }
             let num: f64 = num_buf
                 .parse()
                 .map_err(|_| anyhow!("Invalid duration number"))?;
             num_buf.clear();
+            saw_designator = true;
 
             match c {
                 'Y' | 'y' => {
@@ -705,6 +764,19 @@ fn parse_iso8601_duration_cypher(s: &str) -> Result<CypherDuration> {
                 _ => return Err(anyhow!("Invalid ISO 8601 duration designator: {}", c)),
             }
         }
+    }
+
+    // A trailing number no designator closes (`P0`), or no components at all
+    // (`P`, `PT`). Returning a zero duration for either is what made every
+    // string beginning with `P` sort as the same value.
+    if !num_buf.is_empty() {
+        return Err(anyhow!(
+            "Invalid ISO 8601 duration: trailing number '{}' with no designator",
+            num_buf
+        ));
+    }
+    if !saw_designator {
+        return Err(anyhow!("Invalid ISO 8601 duration: no components"));
     }
 
     Ok(CypherDuration::new(months, days, nanos))
@@ -3348,6 +3420,7 @@ fn parse_iso8601_duration(s: &str) -> Result<i64> {
     let mut total_micros: i64 = 0;
     let mut in_time_part = false;
     let mut num_buf = String::new();
+    let mut saw_designator = false;
 
     for c in s.chars() {
         if c == 'T' || c == 't' {
@@ -3358,13 +3431,20 @@ fn parse_iso8601_duration(s: &str) -> Result<i64> {
         if c.is_ascii_digit() || c == '.' || c == '-' {
             num_buf.push(c);
         } else {
+            // Fails closed for the same reason as the CypherDuration parser
+            // above: a silently skipped designator makes any `P…` string a
+            // valid zero duration.
             if num_buf.is_empty() {
-                continue;
+                return Err(anyhow!(
+                    "Invalid ISO 8601 duration: designator '{}' with no preceding number",
+                    c
+                ));
             }
             let num: f64 = num_buf
                 .parse()
                 .map_err(|_| anyhow!("Invalid duration number"))?;
             num_buf.clear();
+            saw_designator = true;
 
             let micros = match c {
                 'Y' | 'y' => (num * 365.0 * MICROS_PER_DAY as f64) as i64,
@@ -3378,6 +3458,16 @@ fn parse_iso8601_duration(s: &str) -> Result<i64> {
             };
             total_micros += micros;
         }
+    }
+
+    if !num_buf.is_empty() {
+        return Err(anyhow!(
+            "Invalid ISO 8601 duration: trailing number '{}' with no designator",
+            num_buf
+        ));
+    }
+    if !saw_designator {
+        return Err(anyhow!("Invalid ISO 8601 duration: no components"));
     }
 
     Ok(total_micros)

@@ -30,6 +30,7 @@ pub mod normalization_test;
 pub mod not_operator_test;
 pub mod null_handling_test;
 pub mod order_by_flow_test;
+pub mod order_by_sort_key_test;
 pub mod path_property_access;
 pub mod pattern_predicate_in_projection_test;
 pub mod prepared_query_test;
