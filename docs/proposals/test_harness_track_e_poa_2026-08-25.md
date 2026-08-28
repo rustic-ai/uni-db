@@ -1,7 +1,8 @@
 # Track E — Plan of Action
 
 **Date:** 2026-08-25
-**Status:** Plan of action, not yet started
+**Status:** In progress — E0, E1, E2a and E5 done; **E3 partial** (§3, E3);
+E2b and E4 not started. Status re-checked against the tree 2026-08-27.
 **Extends:** `docs/proposals/test_harness_track_poa_2026-08-24.md` §T5
 **Sources the items from:** `docs/proposals/test_harness_and_benchmarks_2026-08-11.md`
 §§8–10 (B2/B3/B4), §5 (C3), and `test_harness_implementation_plan_2026-08-12.md`
@@ -374,6 +375,37 @@ published; Graphalytics results for six kernels; SF0.1 nightly and green.
 defect. That is B2 **succeeding** — it fixes the defect and reports it, exactly
 as C1's levers and C2's seams did.
 
+#### Status, checked against the tree 2026-08-27
+
+| sub-item | state | artifact |
+|---|---|---|
+| 1 generate offline, commit small | **done** | `crates/uni/benches/ldbc/` |
+| 2 loader on `BulkWriter` | **done** | `crates/uni/benches/ldbc/mod.rs`, `params.rs` |
+| 3 the 14 complex reads as Cypher | **done** | `crates/uni/benches/ldbc/queries/ic{1..14}.cypher`, 14 files |
+| 4 validate at SF0.1 vs reference answers | **not started** | no reference-answer fixture or comparison anywhere in `benches/` or `tests/` |
+| 5 SF1 percentiles to `docs/perf/` | **not started** | `docs/perf/` has no `ldbc_*` document |
+| 6 Graphalytics, incl. LCC | **not started** | `uni-algo` still has no clustering coefficient (§2.4 unchanged) |
+| 7 nightly SF0.1 lane | **not started** | no `ldbc` in any workflow |
+
+**The clause that fired is "stops the chain".** Running the 14 at SF1 found
+defects rather than percentiles, and E3 has been paying out as a *correctness*
+benchmark since — which is the outcome that clause anticipates, so it is E3
+succeeding rather than stalling. Two rounds so far: nine product fixes on the
+first pass, and the remediation of what those exposed in
+`docs/proposals/ldbc_findings_remediation_2026-08-27.md`, which is now largely
+implemented. Five of the combined set were silent wrong answers.
+
+It also means E3 has not yet delivered a single **number**. Sub-items 4–7 are
+what turn it from a bug-finder into the benchmark it was scoped as, and 4 is the
+one that closes the loop the defects came through: every wrong answer so far was
+found by hand, against LDBC's documented semantics, rather than by a reference
+comparison that would have found them automatically.
+
+**Not re-run at SF1 since the remediation.** The earlier pass recorded 9 of 14
+queries answering. Fixes have since landed for the named blockers of IC6, IC9
+and IC14, but the count has not been re-measured and should not be quoted until
+it has.
+
 ### E4 — C3 Elle *(independent; sequenced last)*
 
 Last on the proposal's own reasoning: Elle *demonstrates* a property there is
@@ -454,7 +486,9 @@ E1  B4 contention curves          ── DONE 2026-08-25
 E5  docs/perf index               ── DONE 2026-08-25
 E2a B3 ANN Pareto curves          ── DONE 2026-08-26
 E2b B3 BEIR nDCG@10               ── depends on E0, needs an embedder
-E3  B2 LDBC SNB                   ── depends on E0, largest
+E3  B2 LDBC SNB                   ── PARTIAL: loader + 14 queries done;
+                                     reference answers, percentiles,
+                                     Graphalytics and the nightly lane open
 E4  C3 Elle                       ── independent, sequenced last
 ```
 

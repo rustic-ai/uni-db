@@ -256,6 +256,99 @@ Pre-existing open issues #174–#179 predate this work and are not ordered here.
 
 ## Status of the work already done
 
-All committed on `feat/test-harness-track-e`, **not pushed**. Nine product fixes,
-five of them silent wrong answers; LDBC went from 7 of 14 answering to 9 of 14.
-TCK held at 3980/3980 throughout.
+Nine product fixes, five of them silent wrong answers; LDBC went from 7 of 14
+answering to 9 of 14. TCK held at 3980/3980 throughout.
+
+## Status of this plan — 2026-08-27
+
+Implemented on `feat/test-harness-track-e`, **not pushed**. Gates green on the
+committed state: `fmt`, workspace `clippy --all-targets -D warnings`, `cargo doc
+-D warnings`, openCypher TCK 3925/3925, workspace suite 6646/6646.
+
+The TCK count above is 3925, against the 3980 recorded for the earlier pass.
+Both runs were green, so this is a difference in scenarios *collected*, not in
+failures — most likely a mode or filter difference between the two invocations
+(`cargo nextest run -p uni-tck --test tck` here). Flagged rather than reconciled
+silently, since neither number is a pass rate and quietly replacing one with the
+other would hide the discrepancy.
+
+| item | state |
+|---|---|
+| Track 0 — differential oracle | **not started** — needs a Neo4j instance |
+| 1.1 `ORDER BY` (#186) | fixed |
+| 1.2 `extract_vid` verify | verified **not reachable**; left as the plan directs, then folded into 1.3 |
+| 1.3 canonical extractor | done — five implementations to two |
+| 2.1 cooperative deadlines | done |
+| 2.2 `max_query_memory` (#185) | done |
+| 3 column pruning (#184) | the `UNWIND`-source case fixed; **not re-run at SF1** |
+| 4.1 `startNode`/`endNode` (#187) | directed MATCH-bound fixed; two shapes open (#187, #188) |
+| 4.2 whole entity from a comprehension | done, nodes and relationships; map values open (#189) |
+| 4.3 `COLLECT { }` | done — and `COUNT { }`, which this plan did not list as broken |
+| 5.1 is `index_scans` wired? | **answered**: `docs/perf/index-scan-counter-2026-08-27.md` |
+| 5.2–5.5 | not started — see the note below |
+| 6.1 single-shape blind spot | `docs/testing/single-shape-coverage-2026-08-27.md` |
+| 6.2 audit other TCK areas | done; `relationships(` is the next one-shape case |
+| 6.3 flaky sparse test | fixed as a **product** defect, not a test retry |
+| 6.4 small debts | README corrected; probes decided and committed |
+
+### Where this plan was wrong
+
+Three of the four root causes differ from what is written above, and in each
+case one cheap discriminating test is what showed it. Recorded because the
+diagnoses here were confident and wrong, not vague:
+
+- **1.1 is not about traversals.** "A plain scan-plus-sort is stable; the
+  traversal is what makes the difference" — both halves are false. A plain scan
+  over `p3, p1, p0, p2` reproduces it. Any string starting with `P` was
+  classified as an ISO-8601 duration and neither parser could reject anything,
+  so they collapsed to one sort key. The control that made the traversal look
+  guilty had input already in sorted order, so a sort doing nothing was
+  indistinguishable from a sort that worked.
+- **4.1's stated hypothesis is disproved by its own error message.** There is no
+  `e._src_vid` on a traversal — the message quoted in #187 lists the whole
+  schema. The endpoint *variables* are in scope, which is a different fix.
+- **6.3 is not a test flake.** Four secondary-index writers committed to Lance
+  with no retry while the vertex and delta paths had one all along. Retrying in
+  the test would have hidden a defect users can hit.
+
+### Found while implementing, not listed here
+
+- `COUNT { }` was broken identically to `COLLECT { }` — both classified as
+  aggregates by `Expr::is_aggregate()` when both are scalar subqueries.
+- A silent wrong answer in multi-hop pattern comprehensions: the inner schema
+  ordered property columns by kind and the batch builder by step, so
+  `r.since + '/' + x.tag` returned `TAGGED/YEAR`. Every column is
+  `LargeBinary`, so Arrow accepted the mismatch.
+- `VectorIndexConfig`'s `default_refine_factor` was never propagated to the
+  Python bindings, so the workspace clippy lane was already red on this branch.
+- The `df_session_template` "hot path" is dead for every database with a plugin
+  registry, i.e. all of them — which is why the memory pool had to be installed
+  on both session-construction paths.
+
+### What 5.1's answer means for the rest of Wave 5
+
+`idx_scans` counts `ScanRequest`-based Lance scans that reported index activity,
+and it was wired to one such path. The gap splits three ways and only one third
+was an omission: the schemaless vertex scan and the L1 edge scan are now
+counted; `vector_knn` and FTS go through Lance's `nearest()` and build no
+`ScanRequest`, so they need their own callback and remain open; and the
+traversal serves from the in-memory adjacency and issues no Lance scan at all,
+so a zero there is correct rather than missing.
+
+5.4 says "do after 5.1, so attribution is possible". Attribution is **not** yet
+possible: until the `nearest()` path reports, an index lookup cannot say it
+consulted an index. That is the gate on 5.2–5.4, not effort.
+
+### Open, with issues
+
+- #184 — the `UNWIND`-source allocation is gone; there is still no general
+  column-pruning pass, and the unbounded `MutableArrayData` allocation is
+  untouched. **Unverified at SF1.**
+- #187 — `startNode` after a `WITH`: the endpoint variables leave scope and
+  recovering a node from the relationship's `_src_vid` needs a vertex lookup.
+- #188 — `startNode`/`endNode` on an undirected relationship: a per-row fact,
+  so no static rewrite applies. The cheap workaround is refused there, with the
+  reason recorded.
+- #189 — a comprehension map value reading an inner variable's property; one
+  root cause covers both open shapes.
+- #175 — the `nearest()` reporting gap above.
