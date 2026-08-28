@@ -29,12 +29,13 @@
 //! pattern comprehensions. The MERGE case is kept below as a control, so a
 //! failure there is a regression rather than the old gap.
 //!
-//! One shape is still open, and `start_node_after_a_with_on_a_match_bound_relationship`
-//! stays `#[ignore]`d for it: once a `WITH` drops the endpoint variables from
-//! scope, the relationship value is all that is left, and turning its
-//! `_src_vid` back into a node with properties needs a lookup against the
-//! vertex table. A scalar UDF cannot do IO, so that is a missing capability
-//! rather than the resolution bug the rest of this file covers.
+//! Two shapes are still open, each `#[ignore]`d against the issue that tracks
+//! it. Once a `WITH` drops the endpoint variables from scope the relationship
+//! value is all that is left, and turning its `_src_vid` back into a node with
+//! properties needs a lookup against the vertex table that a scalar UDF cannot
+//! do — the remaining work under #187. An undirected relationship is #188: the
+//! rewrite below is sound only because a directed single hop makes the start
+//! node statically knowable, and `-[e]-` makes it a per-row fact instead.
 
 use uni_db::{Uni, Value};
 
@@ -162,8 +163,8 @@ async fn start_and_end_node_follow_the_arrow_not_the_traversal() {
 /// never to move in. Closing it properly means resolving the endpoint per row
 /// against both candidate variables, with their properties materialised.
 #[tokio::test]
-#[ignore = "#187 remainder: an undirected relationship's start node is a \
-            per-row fact; resolving it needs a runtime endpoint match"]
+#[ignore = "#188: an undirected relationship's start node is a per-row fact; \
+            resolving it needs a runtime endpoint match"]
 async fn start_and_end_node_on_an_undirected_match() {
     let db = fixture().await;
     let r = db

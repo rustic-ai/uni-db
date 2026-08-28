@@ -135,7 +135,7 @@ async fn a_property_projection_still_works() {
 /// widening `x` to the whole entity, which would defeat the projection pruning
 /// the test above pins.
 #[tokio::test]
-#[ignore = "inner pattern variables are absent from the comprehension's \
+#[ignore = "#189: inner pattern variables are absent from the comprehension's \
             TranslationContext, so a map value compiles as index(bare x, …)"]
 async fn a_map_literal_over_an_inner_property() {
     let db = fixture().await;
@@ -152,7 +152,7 @@ async fn a_map_literal_over_an_inner_property() {
 
 /// Same cause, through map-projection syntax.
 #[tokio::test]
-#[ignore = "same cause as a_map_literal_over_an_inner_property"]
+#[ignore = "#189: same cause as a_map_literal_over_an_inner_property"]
 async fn a_map_projection_over_an_inner_entity() {
     let db = fixture().await;
     let items = list_for_a(
