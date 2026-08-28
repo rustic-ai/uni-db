@@ -712,3 +712,116 @@ async fn a_transaction_statement_honours_query_timeout() -> Result<()> {
     );
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// A whole-node group key must not materialise the whole node — #196
+// ---------------------------------------------------------------------------
+//
+// `WITH p, count(*)` needs only the entity's *identity*: grouping cannot depend
+// on a property the query never reads. The analysis marked a bare group-key
+// variable `"*"` anyway, which pulled the full schema — `_all_props` and
+// `overflow_json` included — into the scan, and the physical group key then
+// appends every `{v}.`-prefixed column beside the entity struct. The node is
+// hashed and copied per group, twice over.
+//
+// At LDBC SF1 that made
+// `MATCH (p:Person)-[:KNOWS]-() WITH p, count(*) RETURN p.id` request 1.76 GB
+// against a 1 GiB pool and abort the bench during parameter derivation, for a
+// query that reads one property.
+//
+// The test below is that shape at a scale the suite can afford: wide payload
+// properties the query never touches, a ceiling sized so materialising them
+// would exceed it, and a single property actually read.
+
+/// Adding a property the query never reads must not change what the aggregate
+/// costs.
+///
+/// Measured on this fixture, 20 001 groups, before and after the fix:
+///
+/// | `pad` length | before | after |
+/// |---|---|---|
+/// | 4 chars   |  9.8 MB | 4.4 MB |
+/// | 256 chars | 65.5 MB | 4.4 MB |
+///
+/// The ceiling below sits above the constant cost and far below the 256-char
+/// figure, so this passes only if the group key is insensitive to the payload.
+/// Asserting insensitivity rather than an absolute number is deliberate: the
+/// first version of this test asserted a ceiling, and a ceiling cannot tell a
+/// materialised payload from an aggregate that is simply large. Both arms run
+/// at the same limit for the same reason.
+#[tokio::test]
+async fn an_unread_property_does_not_change_what_a_group_key_costs() -> Result<()> {
+    async fn run(pad_len: usize) -> Result<()> {
+        // 16 MiB: above the ~4.4 MB the 20k groups genuinely need, well below
+        // the ~65 MB the same query cost when the payload rode along.
+        let db = db_with_memory_limit(16 * 1024 * 1024).await?;
+        db.schema()
+            .label("G")
+            .property("tag", uni_db::DataType::String)
+            .property("pad", uni_db::DataType::String)
+            .apply()
+            .await?;
+        let pad = "x".repeat(pad_len);
+        let tx = db.session().tx().await?;
+        tx.execute(&format!(
+            "UNWIND range(0, 20000) AS i CREATE (:G {{tag: 'tag-' + toString(i % 50), \
+             pad: '{pad}' + toString(i)}})"
+        ))
+        .await?;
+        tx.commit().await?;
+
+        db.session()
+            // No ORDER BY: sorting 20k rows reserves through the same pool and
+            // would make this a test of the sorter instead of the group key.
+            // The outer aggregate collapses the groups to one row, which also
+            // keeps the post-hoc result-size check out of the picture.
+            .query("MATCH (p:G) WITH p, count(*) AS c RETURN count(c) AS n")
+            .await
+            .map(|_| ())
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "grouping by a whole node exhausted the ceiling with pad_len={pad_len}: {e}. \
+                     The query reads only `tag`; a property it never mentions must not be \
+                     materialised into the group key."
+                )
+            })
+    }
+
+    // The narrow arm establishes the ceiling is workable at all; the wide arm
+    // is the one that fails when the payload is carried.
+    run(4).await?;
+    run(256).await?;
+    Ok(())
+}
+
+/// The control: the same shape where the node *is* returned whole must still
+/// work, and must still carry its properties. Narrowing a group key that is
+/// genuinely returned would be a wrong answer, not a smaller one.
+#[tokio::test]
+async fn a_group_key_returned_whole_still_carries_its_properties() -> Result<()> {
+    let db = Uni::in_memory().build().await?;
+    db.schema()
+        .label("G")
+        .property("tag", uni_db::DataType::String)
+        .apply()
+        .await?;
+    let tx = db.session().tx().await?;
+    tx.execute("UNWIND range(0, 5) AS i CREATE (:G {tag: 'tag-' + toString(i)})")
+        .await?;
+    tx.commit().await?;
+
+    let rows = db
+        .session()
+        .query("MATCH (p:G) WITH p, count(*) AS c RETURN p ORDER BY p.tag LIMIT 1")
+        .await?;
+
+    match &rows.rows()[0].values()[0] {
+        uni_db::Value::Node(n) => assert_eq!(
+            n.properties.get("tag"),
+            Some(&uni_db::Value::String("tag-0".to_string())),
+            "a group key returned whole lost its properties"
+        ),
+        other => panic!("expected a Node, got {other:?}"),
+    }
+    Ok(())
+}

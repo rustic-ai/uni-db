@@ -768,6 +768,8 @@ The single current list. Everything above this point is narrative.
 | #190 | no `Union` or `Distinct` arm in the projection-order extractor, so result columns were guessed from sorted row keys |
 | #191 | `_all_props` pushed unconditionally on the scan path, conditionally on the schema'd traversal path — plus a branch-width mismatch |
 | #193 | undirected hops built the edge struct from the traversal's source, reporting the same edge reversed on half the rows |
+| #194 | a filtered FTS query was bounded by `k` *before* the filter, so excluded rows consumed the top-k slots — measured 0 rows of 10 with 50 matches |
+| #196 | an aggregate group key was marked "*", so the whole entity — `_all_props` and `overflow_json` included — was scanned and hashed per group |
 | #175 | not unobservable as filed — the scalar half already shipped; the gap was vector/FTS, where the scan path's predicate is *unsound* rather than merely absent |
 
 Gates on the current tip: `fmt`, workspace `clippy --all-targets -D warnings`,
@@ -784,7 +786,7 @@ reported, latency work could not attribute anything to an index. It reports now.
 
 | item | state | gate |
 |---|---|---|
-| #184 | no general column-pruning pass; the unbounded `MutableArrayData` allocation is untouched | **Unverified at SF1.** The `UNWIND`-source case is fixed; the bench has not been re-run. |
+| #184 | no general column-pruning pass; the unbounded `MutableArrayData` allocation is untouched | **SF1 now runs** — #196 unblocked it. Measured: peak RSS **13.8 GB** against a 1 GiB pool, ending in SIGKILL; IC2/IC9 fail on external sort, IC4 wants 1098.5 MB for one aggregate, IC5/IC6 exceed 300 s. IC1/IC3/IC7/IC8 answer. |
 | #192 | `resolve_flat_column_properties` covers 5 of 27 `Expr` variants behind a catch-all | Folded into #184's sweep. Still **no user-visible repro** across 16 probed shapes. |
 | Track 0 | differential oracle | Not started; blocked on infrastructure, not code. |
 | Wave 5.2–5.5 | comprehension hoisting, anchoring, latency, decorrelation | **Ungated** — #175 closed. Start with 5.4's latency attribution, which now has a witness. |

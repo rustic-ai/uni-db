@@ -9796,9 +9796,39 @@ fn collect_properties_recursive(
             aggregates,
         } => {
             for expr in group_by {
-                collect_properties_from_expr_into(expr, properties);
+                // A bare entity variable used as a group key needs only the
+                // entity's *identity*; grouping cannot depend on a property the
+                // query never reads. Left to the bare-`Variable` arm it marks
+                // the source "*", which pulls the full schema — `_all_props`
+                // and `overflow_json` included — into the scan *and* into the
+                // physical group key, which appends every `{v}.`-prefixed
+                // column beside the entity struct.
+                //
+                // On LDBC SF1 that is what made
+                // `MATCH (p:Person)-[:KNOWS]-() WITH p, count(*) RETURN p.id`
+                // request 1.76 GB and blow the query memory pool, for a query
+                // that reads one property (#196).
+                //
+                // Same provenance marker the `Project` arm above emits, and the
+                // same downstream treatment: `reconcile_passthrough_properties`
+                // keeps "*" for variables returned whole and downgrades the
+                // rest to a struct-only projection of the properties actually
+                // accessed.
+                if let Expr::Variable(src) = expr
+                    && !src.contains('.')
+                {
+                    properties
+                        .entry(src.clone())
+                        .or_default()
+                        .insert(WITH_PASSTHROUGH_SENTINEL.to_string());
+                } else {
+                    collect_properties_from_expr_into(expr, properties);
+                }
             }
             for expr in aggregates {
+                // Aggregate *arguments* are unchanged: `collect(n)` really does
+                // return the entity whole, and narrowing it would be a wrong
+                // answer rather than a smaller one.
                 collect_properties_from_expr_into(expr, properties);
             }
             collect_properties_recursive(input, properties);
@@ -12214,6 +12244,87 @@ mod pushdown_tests {
         let set: HashSet<String> = narrowable.iter().map(|s| s.to_string()).collect();
         reconcile_passthrough_properties(plan, &mut props, &set);
         props
+    }
+
+    fn aggregate(input: LogicalPlan, group_by: Vec<Expr>, aggregates: Vec<Expr>) -> LogicalPlan {
+        LogicalPlan::Aggregate {
+            input: Box::new(input),
+            group_by,
+            aggregates,
+        }
+    }
+
+    /// `MATCH (p)-[]-() WITH p, count(*) RETURN p.id` must materialise only
+    /// `id` for `p`.
+    ///
+    /// A group key needs the entity's *identity*; grouping cannot depend on a
+    /// property the query never reads. Marking it "*" pulled the whole schema —
+    /// `_all_props` and `overflow_json` included — into both the scan and the
+    /// physical group key, which is what made this shape request 1.76 GB at
+    /// LDBC SF1 for a query that reads one property (#196).
+    #[test]
+    fn test_group_key_entity_does_not_widen() {
+        let plan = project(
+            aggregate(
+                scan("p"),
+                vec![Expr::Variable("p".to_string())],
+                vec![func("count", vec![Expr::Wildcard])],
+            ),
+            vec![(prop("p", "id"), Some("id".to_string()))],
+        );
+        let props = reconciled(&plan, &["p"]);
+        assert!(
+            !widened(&props, "p"),
+            "a bare group key widened p to '*': {:?}",
+            props.get("p")
+        );
+        assert!(
+            props.get("p").unwrap().contains("id"),
+            "the property the query actually reads must survive: {:?}",
+            props.get("p")
+        );
+    }
+
+    /// The control that must not move. `collect(n)` returns the entity whole, so
+    /// narrowing it would be a wrong answer rather than a smaller one — and the
+    /// fix above touches group keys only, never aggregate arguments.
+    #[test]
+    fn test_group_key_narrowing_does_not_touch_aggregate_arguments() {
+        let plan = project(
+            aggregate(
+                scan("n"),
+                vec![],
+                vec![func("collect", vec![Expr::Variable("n".to_string())])],
+            ),
+            vec![(Expr::Variable("collect(n)".to_string()), None)],
+        );
+        let props = reconciled(&plan, &["n"]);
+        assert!(
+            widened(&props, "n"),
+            "collect(n) must still widen n to '*': {:?}",
+            props.get("n")
+        );
+    }
+
+    /// A group key that *is* returned whole stays wide. `reconcile_passthrough_properties`
+    /// already makes that call for projections; this pins that the group-key
+    /// marker reaches the same decision rather than narrowing unconditionally.
+    #[test]
+    fn test_group_key_returned_whole_stays_wide() {
+        let plan = project(
+            aggregate(
+                scan("p"),
+                vec![Expr::Variable("p".to_string())],
+                vec![func("count", vec![Expr::Wildcard])],
+            ),
+            vec![(Expr::Variable("p".to_string()), None)],
+        );
+        let props = reconciled(&plan, &["p"]);
+        assert!(
+            widened(&props, "p"),
+            "a group key returned whole must stay '*': {:?}",
+            props.get("p")
+        );
     }
 
     #[test]
