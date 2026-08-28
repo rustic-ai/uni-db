@@ -250,40 +250,13 @@ pub fn used_edge_id_arrays<'a>(
         .collect()
 }
 
-/// Extract a VID from a CypherValue.
+/// Extract a VID from a CypherValue that is a vertex.
 ///
-/// Handles both `Value::Node` (native node) and `Value::Map` with `_id` field
-/// (JSON round-tripped node from `cv_array_to_large_list`).
+/// Delegates to [`uni_common::Value::entity_vid`], the one definition of vertex
+/// identity. Kept as a named wrapper because this module's callers work in
+/// `u64` rather than `Vid`.
 fn extract_vid_from_value(val: &Value) -> Option<u64> {
-    match val {
-        Value::Node(node) => Some(node.vid.as_u64()),
-        Value::Map(map) => {
-            // Handle round-tripped nodes that became Maps.
-            // Path nodes use struct fields (_vid, _label, properties) which
-            // round-trip through arrow_to_json_value as { "_vid": Int(N), ... }.
-            // Value::Node → serde_json uses { "_id": "N", ... }.
-            // Check both keys to handle either path.
-
-            // Check _vid first (from path struct → arrow_to_json_value round-trip)
-            if let Some(Value::Int(vid)) = map.get("_vid") {
-                return Some(*vid as u64);
-            }
-            // Also check _id (from Value::Node → serde_json round-trip)
-            if let Some(Value::String(id_str)) = map.get("_id") {
-                return id_str
-                    .strip_prefix("Vid(")
-                    .and_then(|s| s.strip_suffix(')'))
-                    .unwrap_or(id_str)
-                    .parse::<u64>()
-                    .ok();
-            }
-            if let Some(Value::Int(id)) = map.get("_id") {
-                return Some(*id as u64);
-            }
-            None
-        }
-        _ => None,
-    }
+    val.entity_vid().map(|vid| vid.as_u64())
 }
 
 /// Extract VIDs from a `LargeBinaryArray` of CypherValue-encoded values.

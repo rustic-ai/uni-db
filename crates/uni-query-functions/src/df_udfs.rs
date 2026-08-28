@@ -1239,12 +1239,22 @@ fn extract_endpoint_vid(val: &Value, is_start: bool) -> Option<u64> {
     }
 }
 
-/// Extract _vid from a node value.
+/// Extract the VID of a node argument.
+///
+/// Delegates to [`uni_common::Value::entity_vid`]: the narrow reader is the
+/// right one here, because this decides whether a *node argument* is the
+/// endpoint being looked for. A lenient reader would let a plain integer column
+/// match an endpoint by coincidence and be returned as the node.
+///
+/// Recognising only `Value::Map` — as this did — meant a node arriving in its
+/// native `Value::Node` encoding never matched, and `startNode(r)` silently
+/// returned the vid-only stand-in instead of the node, so `startNode(r).name`
+/// came back NULL. That is not reachable through the node-argument path today
+/// (a structural projection always yields the map form) but it costs nothing to
+/// be correct for both, and the divergence is exactly what this consolidation
+/// exists to remove.
 fn extract_vid(val: &Value) -> Option<u64> {
-    match val {
-        Value::Map(map) => map.get("_vid").and_then(|v| v.as_u64()),
-        _ => None,
-    }
+    val.entity_vid().map(|vid| vid.as_u64())
 }
 
 // ============================================================================

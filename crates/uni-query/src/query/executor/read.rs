@@ -346,29 +346,18 @@ impl Executor {
             .await
     }
 
+    /// The VID a value denotes, as an entity or as a raw id.
+    ///
+    /// This is the write path's lenient reader — `SET`, `DELETE` and the
+    /// importers all accept an id where an entity would do — so it delegates to
+    /// [`uni_common::Value::coerce_vid`] rather than the narrow
+    /// `entity_vid`. It is the only one of the five former hand-rolled
+    /// extractors that reports a failure instead of returning `None`, and that
+    /// is kept: a write that cannot identify its target must not proceed
+    /// silently.
     pub(crate) fn vid_from_value(val: &Value) -> Result<Vid> {
-        // Handle Value::Node directly (has vid field)
-        if let Value::Node(node) = val {
-            return Ok(node.vid);
-        }
-        // Handle Object (node) containing _vid field
-        if let Value::Map(map) = val
-            && let Some(vid_val) = map.get("_vid")
-            && let Some(v) = vid_val.as_u64()
-        {
-            return Ok(Vid::from(v));
-        }
-        // Handle string format
-        if let Some(s) = val.as_str()
-            && let Ok(id) = s.parse::<u64>()
-        {
-            return Ok(Vid::new(id));
-        }
-        // Handle raw u64
-        if let Some(v) = val.as_u64() {
-            return Ok(Vid::from(v));
-        }
-        Err(anyhow!("Invalid Vid format: {:?}", val))
+        val.coerce_vid()
+            .ok_or_else(|| anyhow!("Invalid Vid format: {:?}", val))
     }
 
     /// Find a node value in the row by VID.

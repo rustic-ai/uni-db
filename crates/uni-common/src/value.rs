@@ -480,6 +480,73 @@ pub enum Value {
 // ---------------------------------------------------------------------------
 
 impl Value {
+    /// The vertex id of a value that *is* a graph vertex.
+    ///
+    /// One definition, because five hand-rolled ones disagreed. A vertex
+    /// reaches an expression as either of two encodings — a native
+    /// [`Value::Node`], or a [`Value::Map`] that a round-trip flattened it into
+    /// — and which one arrives depends on the path, not on the query. Every
+    /// site that recognised only one of them silently treated the other as
+    /// "not a vertex", which reads downstream as an empty result rather than an
+    /// error.
+    ///
+    /// The map form appears with either key, since the two round-trips spell it
+    /// differently: `_vid` from a path/struct column via `arrow_to_json_value`,
+    /// `_id` from a `Value::Node` through serde, which renders the id as the
+    /// string `"Vid(7)"`.
+    ///
+    /// Deliberately narrow: a bare [`Value::Int`] is **not** a vertex. It may
+    /// well be a vertex id, but "this value is the entity with id 7" and "this
+    /// value is the number 7" are different claims, and conflating them lets a
+    /// plain integer column match an entity by coincidence. Callers that hold a
+    /// raw id want [`Value::coerce_vid`].
+    #[must_use]
+    pub fn entity_vid(&self) -> Option<Vid> {
+        match self {
+            Value::Node(node) => Some(node.vid),
+            Value::Map(map) => {
+                if let Some(v) = map.get("_vid").and_then(Value::as_u64) {
+                    return Some(Vid::from(v));
+                }
+                match map.get("_id") {
+                    Some(Value::String(id)) => id
+                        .strip_prefix("Vid(")
+                        .and_then(|s| s.strip_suffix(')'))
+                        .unwrap_or(id)
+                        .parse::<u64>()
+                        .ok()
+                        .map(Vid::from),
+                    Some(Value::Int(id)) if *id >= 0 => Some(Vid::from(*id as u64)),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// The vertex id a value denotes, accepting a raw id as well as an entity.
+    ///
+    /// [`Value::entity_vid`] first, then a bare integer or a numeric string —
+    /// for the call sites that genuinely receive an id rather than an entity
+    /// (a single-column CTE working set, a `$vid` parameter). Use it only where
+    /// a raw id is a legitimate input; where an entity is expected, the narrow
+    /// form is what keeps a stray integer from matching one.
+    ///
+    /// A negative integer is rejected rather than wrapped: `as_u64` requires a
+    /// non-negative value, so `-1` yields `None` instead of `u64::MAX`.
+    #[must_use]
+    pub fn coerce_vid(&self) -> Option<Vid> {
+        if let Some(vid) = self.entity_vid() {
+            return Some(vid);
+        }
+        if let Some(v) = self.as_u64() {
+            return Some(Vid::from(v));
+        }
+        self.as_str()
+            .and_then(|s| s.parse::<u64>().ok())
+            .map(Vid::from)
+    }
+
     /// Returns `true` if this value is `Null`.
     pub fn is_null(&self) -> bool {
         matches!(self, Value::Null)
