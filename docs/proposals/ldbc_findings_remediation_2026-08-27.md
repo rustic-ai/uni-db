@@ -341,8 +341,6 @@ consulted an index. That is the gate on 5.2–5.4, not effort.
 
 ### Open, with issues
 
-- #191 — a node's Arrow struct differs between the scan path and the traversal
-  path, breaking `UNION` loudly. Filed 2026-08-28.
 - #192 — `resolve_flat_column_properties` handles 5 of 27 `Expr` variants behind
   a catch-all. Filed 2026-08-28 as hardening, **with no user-visible repro**.
 - #184 — the `UNWIND`-source allocation is gone; there is still no general
@@ -642,3 +640,51 @@ Three things this turned up that the issue did not say:
 The guard was checked by neutralising the fix: the same query then raises
 `cannot name the result columns … the internal column \`b._labels\`` instead
 of returning a value. Had it existed before, #190 would have been loud.
+
+### #191 — and the label pair the asymmetry was hiding
+
+Closed 2026-08-28. The asymmetry was where the issue said it was.
+`plan_scan_*` pushes `_all_props` whenever a whole entity is requested; the
+schema'd traversal path required `target_properties.is_empty()` as well, a
+condition a schema-defined label can never meet, because `resolve_properties`
+expands `"*"` into the declared property names. Its comment claimed to mirror
+`plan_scan_all` and did the opposite. The two schemaless traverse planners in
+the same file already applied the scan's rule, so the fix had a precedent
+beside it rather than being a new policy.
+
+That alone did not make the union work, and the reason is worth recording.
+The branches differed in **width** as well as in the struct: a scan of `:P`
+emits six columns to a traversal's four, because each carries the internal
+helper columns its own operators produced. So the union now narrows each
+branch to the columns the query projects before comparing them. That is the
+more valuable half — it also stops helper columns escaping above a union at
+all, which is the leak that made #190 possible.
+
+**The part that was nearly left undone.** With widths and the `_all_props`
+field reconciled, `MATCH (p:P) RETURN p UNION ALL MATCH (q:Q) RETURN q` still
+failed: two labels have different properties, so their structs differ by
+construction. It was recorded as a limitation and pinned with a test — the
+second time in one session that a valid openCypher query was written off as an
+acceptable loud error. The tell, both times, was naming the mechanism in the
+same sentence that declined to apply it: `find_common_result_type` already
+coerces entity structs to the CypherValue encoding for `CASE`, its `schema`
+parameter is unused, and `_cypher_scalar_to_cv` already performs the encoding.
+"Separate work" was a claim about effort that the reading had already
+contradicted.
+
+The union path now asks the same question `CASE` does, and two labels union
+correctly. The coercion is deliberately narrow: only positions where both
+sides are entity-ish are encoded, so `RETURN p UNION ALL RETURN id(q)` — a
+node against an integer — still fails loudly rather than inventing a
+conversion. Both sides of that line have a test.
+
+The property assertion matters more than it looks: an encoding round-trip that
+dropped properties would still produce `Value::Node`, so the test asserts
+label *and* property (`P:a`, `Q:q1`) rather than node-ness.
+
+### Still open after this round
+
+- #184 — no general column-pruning pass; unverified at SF1.
+- #187 — `startNode` after a `WITH`.
+- #175 — the `nearest()` reporting gap.
+- #192 — the `resolve_flat_column_properties` catch-all, folded into #184.

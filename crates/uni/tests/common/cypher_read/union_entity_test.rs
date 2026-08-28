@@ -225,3 +225,136 @@ async fn union_preserves_declared_column_order() {
     assert_eq!(r.rows()[0].values()[0], Value::String("b".to_string()));
     assert_eq!(r.rows()[0].values()[1], Value::String("a".to_string()));
 }
+
+// ---------------------------------------------------------------------------
+// #191 — the same node has two Arrow struct shapes depending on how the plan
+// reached it. `GraphScanExec` materialises `_all_props`; the schema'd
+// `GraphTraverseExec` does not, so a union of the two is rejected on
+// mismatched schemas even though both branches return a `:P` node.
+// ---------------------------------------------------------------------------
+
+/// A scan and a traversal of the same label must union.
+#[tokio::test]
+async fn a_scan_and_a_traversal_of_one_label_can_be_unioned() {
+    let db = fixture().await;
+    let r = db
+        .session()
+        .query("MATCH (z:P) RETURN z AS n UNION ALL MATCH (x:P)-[:KNOWS]->(y:P) RETURN y AS n")
+        .await
+        .unwrap();
+    assert_eq!(r.columns(), &["n".to_string()]);
+    let vals = column_zero(&r);
+    assert_eq!(vals.len(), 4, "3 from the scan, 1 from the traversal");
+    for v in &vals {
+        assert!(matches!(v, Value::Node(_)), "expected a Node, got {v:?}");
+    }
+}
+
+/// Order must not matter: the traversal on the left is the same query.
+#[tokio::test]
+async fn the_scan_traversal_union_works_in_either_order() {
+    let db = fixture().await;
+    let r = db
+        .session()
+        .query("MATCH (x:P)-[:KNOWS]->(y:P) RETURN y AS n UNION ALL MATCH (z:P) RETURN z AS n")
+        .await
+        .unwrap();
+    let vals = column_zero(&r);
+    assert_eq!(vals.len(), 4);
+    for v in &vals {
+        assert!(matches!(v, Value::Node(_)), "expected a Node, got {v:?}");
+    }
+}
+
+/// Properties must survive the union, not just node identity — an `_all_props`
+/// mismatch is precisely a mismatch about where properties live, so asserting
+/// only `id()` here would pass with the properties dropped.
+#[tokio::test]
+async fn nodes_keep_their_properties_across_a_scan_traversal_union() {
+    let db = fixture().await;
+    let r = db
+        .session()
+        .query(
+            "MATCH (z:P {name:'a'}) RETURN z AS n \
+             UNION ALL MATCH (x:P)-[:KNOWS]->(y:P) RETURN y AS n",
+        )
+        .await
+        .unwrap();
+    let mut names: Vec<String> = column_zero(&r)
+        .iter()
+        .map(|v| match v {
+            Value::Node(n) => match n.properties.get("name") {
+                Some(Value::String(s)) => s.clone(),
+                other => panic!("node lost its properties: {other:?}"),
+            },
+            other => panic!("expected a Node, got {other:?}"),
+        })
+        .collect();
+    names.sort();
+    assert_eq!(names, vec!["a".to_string(), "b".to_string()]);
+}
+
+/// Two *different* labels have genuinely different structs — `P` carries
+/// `name`, `Q` carries `title` — so no parity work between the scan and
+/// traversal paths can make them identical. `MATCH (p:P) RETURN p UNION ALL
+/// MATCH (q:Q) RETURN q` is nonetheless valid openCypher.
+///
+/// `CASE` over two labels was solved by coercing entity structs to the
+/// CypherValue `LargeBinary` encoding in `find_common_result_type`. The union
+/// path now applies the same rule, so the two clauses agree instead of one
+/// working while the other reports a planner bug.
+///
+/// Asserted on the *properties*, not on node-ness: an encoding round-trip that
+/// dropped them would still produce `Value::Node`.
+#[tokio::test]
+async fn two_different_labels_can_be_unioned() {
+    let db = fixture().await;
+    let tx = db.session().tx().await.unwrap();
+    tx.execute("CREATE LABEL Q (title STRING)").await.unwrap();
+    tx.execute("CREATE (:Q {title:'q1'})").await.unwrap();
+    tx.commit().await.unwrap();
+    let r = db
+        .session()
+        .query("MATCH (p:P {name:'a'}) RETURN p AS n UNION ALL MATCH (q:Q) RETURN q AS n")
+        .await
+        .unwrap();
+    assert_eq!(r.columns(), &["n".to_string()]);
+    let vals = column_zero(&r);
+    assert_eq!(vals.len(), 2);
+    let mut seen: Vec<String> = vals
+        .iter()
+        .map(|v| match v {
+            Value::Node(n) => {
+                let label = n.labels.first().cloned().unwrap_or_default();
+                let prop = match label.as_str() {
+                    "P" => n.properties.get("name"),
+                    _ => n.properties.get("title"),
+                };
+                match prop {
+                    Some(Value::String(s)) => format!("{label}:{s}"),
+                    other => panic!("node lost its properties: {label} -> {other:?}"),
+                }
+            }
+            other => panic!("expected a Node, got {other:?}"),
+        })
+        .collect();
+    seen.sort();
+    assert_eq!(seen, vec!["P:a".to_string(), "Q:q1".to_string()]);
+}
+
+/// A genuine type conflict must still be rejected. Coercing an `Int64` against
+/// a node would be inventing a conversion, so this stays a loud error.
+#[tokio::test]
+async fn a_non_entity_type_conflict_is_still_rejected() {
+    let db = fixture().await;
+    let err = db
+        .session()
+        .query("MATCH (p:P) RETURN p AS n UNION ALL MATCH (q:P) RETURN id(q) AS n")
+        .await
+        .expect_err("a node and an integer are not the same Cypher type");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("mismatched schemas"),
+        "expected the union schema guard, got: {msg}"
+    );
+}

@@ -479,7 +479,12 @@ pub(crate) fn find_common_result_type(
 /// Identified by the identity field the plan always materialises for one
 /// (`_vid` for a node, `_eid` for a relationship) rather than by the full field
 /// list, which varies with the properties a given query asked for.
-fn is_entity_struct(t: &DataType) -> bool {
+///
+/// Public because `UNION` needs the same judgement the `CASE` coercion above
+/// makes: two branches returning entities of different labels are the same
+/// Cypher type with different Arrow types, and both paths resolve that by
+/// coercing to the CypherValue encoding.
+pub fn is_entity_struct(t: &DataType) -> bool {
     let DataType::Struct(fields) = t else {
         return false;
     };

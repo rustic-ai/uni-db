@@ -55,7 +55,7 @@ use crate::query::df_graph::{
 };
 use crate::query::planner::{
     LogicalPlan, STRUCT_ONLY_SENTINEL, WITH_PASSTHROUGH_SENTINEL, aggregate_column_name,
-    collect_properties_from_plan, reconcile_passthrough_properties,
+    collect_properties_from_plan, projection_columns, reconcile_passthrough_properties,
 };
 use anyhow::{Result, anyhow};
 use arrow_schema::{DataType, Schema, SchemaRef};
@@ -3342,12 +3342,22 @@ impl HybridPhysicalPlanner {
             // names.
             target_properties.retain(|p| p != "*" && p != STRUCT_ONLY_SENTINEL);
 
-            // When wildcard access was requested but no specific properties resolved,
-            // add _all_props to ensure properties are loaded (mirrors plan_scan_all behavior).
+            // When wildcard access was requested, add `_all_props` — the same
+            // rule `plan_scan_*` applies, and the same rule the two schemaless
+            // traverse planners below already apply.
+            //
+            // This used to require `target_properties.is_empty()` as well, so a
+            // schema-defined label never reached it: `resolve_properties`
+            // expands `"*"` into the declared property names, leaving the list
+            // non-empty. The result was that `RETURN n` produced a node struct
+            // carrying `_all_props` from a scan and not from a traversal — the
+            // same Cypher type with two Arrow types, which `UNION` rejects
+            // outright (#191). The comment claimed to mirror `plan_scan_all`
+            // and did not.
             let target_has_wildcard = all_properties
                 .get(target_variable)
                 .is_some_and(|p| p.contains("*"));
-            if target_has_wildcard && target_properties.is_empty() {
+            if target_has_wildcard && !target_properties.iter().any(|p| p == "_all_props") {
                 target_properties.push("_all_props".to_string());
             }
 
@@ -5513,6 +5523,123 @@ impl HybridPhysicalPlanner {
         }
     }
 
+    /// Project `plan` down to `cols`, in that order.
+    ///
+    /// Returns the plan untouched when any name is missing from its schema —
+    /// a naming mismatch is a separate defect, and silently dropping a column
+    /// here would turn it into a wrong answer. The caller's schema check then
+    /// reports it.
+    fn narrow_to_columns(
+        plan: Arc<dyn ExecutionPlan>,
+        cols: &[String],
+    ) -> Result<Arc<dyn ExecutionPlan>> {
+        let schema = plan.schema();
+        let mut exprs: Vec<(Arc<dyn datafusion::physical_expr::PhysicalExpr>, String)> =
+            Vec::with_capacity(cols.len());
+        for name in cols {
+            let Ok(idx) = schema.index_of(name) else {
+                return Ok(plan);
+            };
+            exprs.push((
+                Arc::new(datafusion::physical_plan::expressions::Column::new(
+                    name, idx,
+                )),
+                name.clone(),
+            ));
+        }
+        if exprs.len() == schema.fields().len()
+            && exprs
+                .iter()
+                .enumerate()
+                .all(|(i, (_, name))| schema.field(i).name() == name)
+        {
+            // Already exactly these columns in this order.
+            return Ok(plan);
+        }
+        Ok(Arc::new(ProjectionExec::try_new(exprs, plan)?))
+    }
+
+    /// Encode a column as CypherValue `LargeBinary`.
+    ///
+    /// The same conversion `coerce_branch_to` applies for `CASE`; reused here
+    /// so the two paths agree on what a mixed pair of entities becomes.
+    fn encode_column_as_cypher_value(
+        expr: Arc<dyn datafusion::physical_expr::PhysicalExpr>,
+        name: &str,
+    ) -> Arc<dyn datafusion::physical_expr::PhysicalExpr> {
+        let udf = Arc::new(crate::query::df_udfs::create_cypher_scalar_to_cv_udf());
+        Arc::new(datafusion::physical_expr::ScalarFunctionExpr::new(
+            "_cypher_scalar_to_cv",
+            udf,
+            vec![expr],
+            Arc::new(arrow_schema::Field::new(name, DataType::LargeBinary, true)),
+            Arc::new(datafusion::config::ConfigOptions::default()),
+        ))
+    }
+
+    /// Reconcile per-position type differences between two union branches.
+    ///
+    /// Two branches can return the same *Cypher* type as different *Arrow*
+    /// types. `MATCH (p:P) RETURN p UNION ALL MATCH (q:Q) RETURN q` is valid
+    /// openCypher, but `P` and `Q` have different properties, so their node
+    /// structs differ by construction and no amount of consistency work
+    /// between the scan and traversal paths can make them identical.
+    ///
+    /// `find_common_result_type` already answers this for `CASE`: entities
+    /// coerce to the CypherValue `LargeBinary` encoding, which represents any
+    /// entity. This applies the same rule to union branches, so both clauses
+    /// agree on what a mixed pair becomes rather than one working and the
+    /// other reporting a planner bug.
+    ///
+    /// Only entity columns are touched. A genuine conflict between, say, an
+    /// `Int64` and a `Utf8` is left for the caller's schema check to reject —
+    /// coercing that pair would invent a conversion the user did not ask for.
+    fn coerce_union_entity_columns(
+        left: Arc<dyn ExecutionPlan>,
+        right: Arc<dyn ExecutionPlan>,
+    ) -> Result<(Arc<dyn ExecutionPlan>, Arc<dyn ExecutionPlan>)> {
+        let (ls, rs) = (left.schema(), right.schema());
+        if ls.fields().len() != rs.fields().len() {
+            return Ok((left, right));
+        }
+        let coercible = |l: &DataType, r: &DataType| {
+            l != r
+                && [l, r].iter().all(|t| {
+                    uni_query_functions::cypher_type_coerce::is_entity_struct(t)
+                        || matches!(t, DataType::LargeBinary)
+                })
+        };
+        let positions: Vec<usize> = (0..ls.fields().len())
+            .filter(|&i| coercible(ls.field(i).data_type(), rs.field(i).data_type()))
+            .collect();
+        if positions.is_empty() {
+            return Ok((left, right));
+        }
+        let project = |plan: Arc<dyn ExecutionPlan>| -> Result<Arc<dyn ExecutionPlan>> {
+            let schema = plan.schema();
+            let exprs = schema
+                .fields()
+                .iter()
+                .enumerate()
+                .map(|(i, f)| {
+                    let col: Arc<dyn datafusion::physical_expr::PhysicalExpr> = Arc::new(
+                        datafusion::physical_plan::expressions::Column::new(f.name(), i),
+                    );
+                    let expr = if positions.contains(&i)
+                        && !matches!(f.data_type(), DataType::LargeBinary)
+                    {
+                        Self::encode_column_as_cypher_value(col, f.name())
+                    } else {
+                        col
+                    };
+                    (expr, f.name().clone())
+                })
+                .collect::<Vec<_>>();
+            Ok(Arc::new(ProjectionExec::try_new(exprs, plan)?) as Arc<dyn ExecutionPlan>)
+        };
+        Ok((project(left)?, project(right)?))
+    }
+
     /// Plan a union operation.
     fn plan_union(
         &self,
@@ -5523,6 +5650,36 @@ impl HybridPhysicalPlanner {
     ) -> Result<Arc<dyn ExecutionPlan>> {
         let left_plan = self.plan_internal(left, all_properties)?;
         let right_plan = self.plan_internal(right, all_properties)?;
+
+        // Narrow each branch to the columns the query actually projects.
+        //
+        // A branch's physical schema carries the internal helper columns its
+        // operators emitted (`y._vid`, `z.overflow_json`) beside the projected
+        // one, and which helpers appear depends on how the branch reached its
+        // rows. A scan of `:P` produces six columns where a traversal to the
+        // same label produces four, so two branches returning the same node
+        // could not be unioned at all (#191).
+        //
+        // Narrowing here rather than teaching the union to reconcile widths
+        // also stops the helpers escaping above the union, which is the leak
+        // that let a result's columns be named `b._labels` (#190).
+        let (left_plan, right_plan) =
+            match projection_columns(left).or_else(|| projection_columns(right)) {
+                Some(cols) => (
+                    Self::narrow_to_columns(left_plan, &cols)?,
+                    Self::narrow_to_columns(right_plan, &cols)?,
+                ),
+                // No projection to narrow to. Leave both branches alone; the
+                // width/type check below still guards DataFusion's panicking
+                // `union_schema`.
+                None => (left_plan, right_plan),
+            };
+
+        // Two branches can return the same Cypher type as different Arrow
+        // types — most obviously two different labels, whose node structs
+        // differ by their property columns. Reconcile those the way `CASE`
+        // already does, before the schema check below rejects the pair.
+        let (left_plan, right_plan) = Self::coerce_union_entity_columns(left_plan, right_plan)?;
 
         // Guard against schema mismatches reaching DataFusion's
         // `union_schema`, which panics with `index out of bounds` rather
