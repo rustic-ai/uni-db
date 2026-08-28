@@ -1056,7 +1056,18 @@ pub fn build_inner_schema(
         }
     }
 
-    // Add property columns for vertex variables
+    // Property columns, interleaved per step: this step's vertex properties,
+    // then this step's edge properties.
+    //
+    // The order has to match `build_inner_batch`, which fills the columns in
+    // exactly that sequence. This used to emit every step's vertex properties
+    // and then every step's edge properties, which agrees only while at most
+    // one step contributes. With an edge property on an early hop and a vertex
+    // property on a later one the two orders diverge — and because every
+    // property column is `LargeBinary`, `RecordBatch::try_new` accepts the
+    // mismatch and the values silently swap:
+    // `[(n)-[r:R1]->(m)-[:R2]->(x:Q) | r.since + '/' + x.tag]` returned
+    // `TAGGED/YEAR`.
     for step in steps {
         if let Some(ref target_var) = step.target_variable
             && let Some(props) = vertex_props.get(target_var)
@@ -1069,10 +1080,6 @@ pub fn build_inner_schema(
                 )));
             }
         }
-    }
-
-    // Add property columns for edge variables
-    for step in steps {
         if let Some(ref edge_var) = step.edge_variable
             && let Some(props) = edge_props.get(edge_var)
         {
