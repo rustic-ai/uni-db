@@ -1,7 +1,14 @@
 # Remediation plan for the LDBC SNB findings — 2026-08-27
 
 Running LDBC SNB Interactive against SF1 found more defects than percentiles.
-This orders what remains.
+This ordered what remained.
+
+> **Status is at the end — [Status — 2026-08-28](#status--2026-08-28).**
+> Everything before it is the plan as written, plus the record of what
+> executing it turned up. Both are kept because in most cases the
+> diagnosis here was confident and wrong, and the correction is the part
+> that does not survive being summarised. Do not execute the wave or PR
+> sections below without checking that table first.
 
 ## Ordering principle
 
@@ -18,6 +25,13 @@ One track runs **in parallel from the start** rather than in a wave, because it
 changes how everything else is found.
 
 ---
+
+### The original waves — discharged
+
+Waves 1 to 6 below are the plan as first written. Every item in them is
+closed or reassigned, several for a reason the wave text gets wrong —
+which is why the text stays. The exceptions are Track 0, never started,
+and Wave 5.2–5.5, unblocked only now.
 
 ## Track 0 (parallel, start now) — the differential oracle
 
@@ -523,11 +537,18 @@ PR 7  #184 spike: catch-all removal + SF1 re-run + design doc
       #192 folded into PR 7's catch-all sweep
 ```
 
-PRs 3 to 5 landed. Two of the three closed by a mechanism other than the one
-written below, and #191 turned out **not** to share a root cause with #190 — the
-conditional scope in the notes that follow was written for a shared cause that
-did not materialise. Those notes are kept as the reasoning they were, not as a
-description of what happened; the sections after them record that.
+**All seven are now discharged.** PR 6 closed #175 — whose headline
+claim was already stale — and PR 7's spike closed #184, splitting what
+was left into #197 and #198.
+
+Four of the five closed by a mechanism other than the one written
+below. #191 turned out **not** to share a root cause with #190, so the
+conditional scope written for a shared cause never applied. #187 was
+closed by hydration rather than the projection widening proposed here,
+which the measurement retired. And #184's spike argued against the
+general pruning pass it was chartered to design. The notes are kept as
+the reasoning they were, not as a description of what happened; the
+sections after them record what.
 
 ### PR 3 — #190, first
 
@@ -772,9 +793,10 @@ The single current list. Everything above this point is narrative.
 | #196 | an aggregate group key was marked "*", so the whole entity — `_all_props` and `overflow_json` included — was scanned and hashed per group |
 | #184 | the `UNWIND` source really was the crash — with it pruned, IC6 answers 10 rows at SF1 rather than aborting on a 14 TB allocation |
 | #175 | not unobservable as filed — the scalar half already shipped; the gap was vector/FTS, where the scan path's predicate is *unsound* rather than merely absent |
+| #195 | no benchmark exercises the new vector/FTS counters — filed as coverage, not a defect |
 
 Gates on the current tip: `fmt`, workspace `clippy --all-targets -D warnings`,
-workspace suite 6693/6693, openCypher TCK 3925/3925.
+workspace suite 6710/6710, openCypher TCK 3925/3925.
 
 **LDBC IC14 plans and executes.** It was the stated reason #187 mattered, and it
 is the only one of these verified against the real query text rather than a
@@ -790,28 +812,59 @@ reported, latency work could not attribute anything to an index. It reports now.
 | #192 | `resolve_flat_column_properties` covers 5 of 27 `Expr` variants behind a catch-all | Still **no user-visible repro** across 16 probed shapes. Fold into #197's sweep, which is the same defect class with a live consequence. |
 | #197 | a subquery-body read can go unrecorded, so a **live** `UNWIND` source can be proven dead and pruned | Split from #184. Ranked first of what remains: an under-report here is a silent wrong answer, not a missed optimisation. |
 | #198 | peak RSS 13.8 GB against a 1 GiB pool, ending in SIGKILL | Split from #184. Bound the unwind output into chunks; pruning cannot cover a list that is legitimately live. |
+| SF1 residuals | IC5 exceeds the 300 s budget; IC2 and IC9 fail inside DataFusion's external sort with no spill path configured | Measured 2026-08-28, unfiled. Latency and engine config, not #184 — recorded so they are not mistaken for it returning. |
 | Track 0 | differential oracle | Not started; blocked on infrastructure, not code. |
 | Wave 5.2–5.5 | comprehension hoisting, anchoring, latency, decorrelation | **Ungated** — #175 closed. Start with 5.4's latency attribution, which now has a witness. |
 
+### What to do next
+
+In this order, and the order is the ordering principle rather than
+size:
+
+1. **#197.** The only open item whose failure mode is a wrong answer,
+   and it is live in shipped code. First task is to find a repro or
+   prove there is none — if every clause that can read a variable is
+   already covered, that is the result and it belongs on the issue,
+   not a formality of making the arms exhaustive. #192 folds in here.
+2. **#198.** Bound the unwind output into chunks. This is what turns
+   a SIGKILL into a slow query, and it is the last thing standing
+   between SF1 and a completing bench run.
+3. **Wave 5.2–5.5.** Ungated for the first time. 5.4 first: latency
+   attribution now has a witness, and the other three are
+   optimisations that should be measured against it rather than
+   assumed.
+
+Track 0 stays where it is: a differential oracle is the one thing
+that would have found most of the twelve above without anyone
+probing for them, and it is still blocked on a Neo4j instance
+rather than on code.
+
 ### What this round is evidence for
 
-Three of the eight closed above were **silent wrong answers** — #186, #190 and
-#193. The rest failed loudly: #187, #189 and #191 raised planner errors, #185
-was a limit that did not limit, and #188 was a rewrite that resolved to the
-wrong endpoint only once its `#[ignore]` came off.
+Four of the twelve closed above were **silent wrong answers** — #186, #190,
+#193 and #194. The rest failed loudly, and in different ways worth keeping
+distinct: #187, #189 and #191 raised planner errors; #185 was a limit that
+did not limit; #196 and #184 aborted; #175 and #195 are observability, not
+behaviour; and #188 was a rewrite that resolved to the wrong endpoint only
+once its `#[ignore]` came off.
 
-Separately, and more usefully: **#190, #191 and #193 were all found by probing
-something this document had already recorded as harmless or absent** — not by a
-failing test. The suite was green before and after each. That is a fact about
-how they were discovered rather than how bad they were, and it is the reason
-this section exists.
+Separately, and more usefully: **#190, #191, #193 and #194 were all found by
+probing something this document had already recorded as harmless, absent, or
+out of scope** — not by a failing test. The suite was green before and after
+each. That is a fact about how they were discovered rather than how bad they
+were, and it is the reason this section exists.
 
-Twice a defect was written off as an acceptable loud error and had to be
-reopened: `CASE` over two entities, and two labels through a `UNION`. Both times
-the tell was the same, and worth naming so it is recognisable next time — a
-sentence that identifies the mechanism precisely and then declines to apply it.
-Naming a fix that specifically is evidence it is cheap, not evidence it is out
-of scope.
+A fifth, #196, was found by running a verification step this document had
+written off as unexecutable. The stated reason for skipping it was true and
+was not what stopped it.
+
+**Four** defects were written off and had to be reopened, and the tell is the
+same every time: a sentence that identifies the mechanism precisely and then
+declines to apply it. `CASE` over two entities; two labels through a `UNION`;
+the FTS filter that could starve top-k, noted as "out of scope, but noticed"
+in a plan and measured at 0 rows of 10 a day later; and the bench step called
+unexecutable. Naming a fix that specifically is evidence it is cheap, not
+evidence it is out of scope.
 
 The lesson this document keeps re-learning, now from three directions: a claim
 of "not observable" is bounded by the paths actually probed, in exactly the way
