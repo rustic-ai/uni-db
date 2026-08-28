@@ -65,6 +65,11 @@ that `attach_scan_stats` is not attached to and cannot be attached to as-is.
 Full-text search is the same shape. These need their own stats callback, not a
 threaded parameter.
 
+**Closed 2026-08-28.** They now have one, and it is deliberately *not*
+`attach_scan_stats`'s predicate — see the note on `partitions_searched` at the
+end of this document. Counted separately as `vector_index_scans` and
+`fts_index_scans`, with `searches_reported` as their denominator.
+
 **(c) Work that is not a Lance scan at all.** This is the correction that
 matters, and it is the opposite of what the operator-count table suggests on
 first reading. `traverse.rs` reads neighbours through
@@ -99,15 +104,15 @@ observed and none used an index", which is a claim narrow enough to falsify.
    schemaless vertex scan and the L1 edge scan route through them. Pinned by
    `a_schemaless_scan_reaches_the_denominator`, which was observed failing with
    `scans_reported=0` before the wiring landed.
-3. **Category (b)** — give `vector_search` and `full_text_search` their own
-   stats callback. This is the most misleading gap, because an *index lookup*
-   that cannot report consulting an index is precisely the operator a reader
-   expects `idx_scans` to be about.
+3. **Category (b) — done.** `vector_search`, `multivector_search` and
+   `full_text_search` have their own stats callback. This was the most
+   misleading gap, because an *index lookup* that cannot report consulting an
+   index is precisely the operator a reader expects `idx_scans` to be about.
 4. **Category (c) needs a different counter, not this one.** Traversal cost is
    adjacency-cache work. Reporting it under a Lance-scan counter would make the
    number less honest, not more.
 
-With (2) landed and (3) open, the honest reading of `idx_scans` is
+With (2) and (3) landed, the honest reading of `idx_scans` is
 "`ScanRequest` Lance scans that consulted an index". It must not be used to
 compare query plans that differ in how much work they do outside such a scan —
 which is most LDBC plans, because their time is in category (c).
@@ -143,3 +148,62 @@ count of zero is correct rather than missing.
 - `crates/uni/tests/common/bugs/issue_175_index_consulted.rs` — pins that the
   counter fires when a vertex scan *does* consult an index, which is why this
   audit concluded "under-wired" rather than "broken".
+
+
+## Closing category (b) — 2026-08-28
+
+### Why the scan predicate could not be reused
+
+`attach_scan_stats` ORs `indices_loaded`, `parts_loaded` and
+`index_comparisons`. That is sound on a plain scan only because of the call
+site: a scanner that never calls `nearest()` can produce nothing but
+scalar-index nodes. On the search paths that guarantee is gone, and
+`vector_search` sets `prefilter(true)` with a SQL filter — so a *scalar* index
+serving the prefilter lights all three terms while the KNN runs brute force.
+
+Measured, 500 rows, no vector index, filter on a Hash-indexed column:
+
+```
+indices_loaded=1  parts_loaded=1  index_comparisons=4096
+all_counts = batches_processed, fragments_scanned, ranges_scanned,
+             row_replacements, rows_scanned        <- no partitions_searched
+```
+
+The OR would have reported an ANN search there. That is the same class of
+result as `recall@10 = 1.000 while the index under test never ran`.
+
+### The discriminator
+
+`all_counts["partitions_searched"]`. Only `AnnIndexMetrics` and
+`FtsIndexMetrics` register it, and Lance's brute-force `KNNVectorDistanceExec`
+builds no index metric at all, so a scalar prefilter cannot produce it.
+
+Two caveats live in the code beside the constant:
+
+- Lance documents `all_counts` as "subject to change ... debugging purposes".
+  This is an unpinned dependency on a metric *name*, so the positive tests say
+  "Lance may have renamed `partitions_searched`" rather than "the index was not
+  used" — a rename must produce a diagnosis, not a false negative.
+- It counts IVF partitions probed. Lance wraps HNSW as an IVF sub-index and
+  builds `Flat` as a single partition, so a consulted `Flat` index reads 1. It
+  answers *was an index searched*, never *how approximate was the search*.
+
+### What actually blocked the wiring
+
+Not the predicate. Two places dropped the counters before they could reach a
+search: `GraphExecutionContext::query_context()` propagated the deadline but not
+the counters, and `QueryProcedureHost` had no counters field at all — so every
+`CALL uni.vector.query(...)` ran with none. Both are fixed; a `ScanRequest` had
+hidden the problem on the scan path because it carries counters itself.
+
+### The measurement that surprised us
+
+Corpus size was expected to be the constraint — Lance falls back to brute force
+on small datasets. It is not: 500 rows produce a real IVF plan, and the whole
+test file runs in about a second.
+
+The real trap is **index build order**. An index applied to an empty table has
+nothing to train on, and Lance plans a flat scan from then on — `indices_loaded
+= 0`, every row scanned, and a positive test that silently proves nothing.
+`an_index_built_before_ingest_is_not_consulted` pins that as an observable
+outcome rather than a comment.

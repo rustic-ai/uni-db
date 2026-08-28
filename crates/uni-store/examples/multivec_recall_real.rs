@@ -306,6 +306,7 @@ async fn fde_ann_topk(
                 nprobes,
                 ..Default::default()
             },
+            None,
         )
         .await?;
     let mut out: Vec<(u64, f32)> = Vec::new();
@@ -489,6 +490,7 @@ async fn query_topk(
                 refine_factor: refine,
                 ..Default::default()
             },
+            None,
         )
         .await?;
 

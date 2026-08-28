@@ -181,6 +181,7 @@ async fn run_maxsim_query(
             metric,
             FilterExpr::Literal(true),
             VectorQueryOpts::default(),
+            None,
         )
         .await?;
 

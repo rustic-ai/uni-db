@@ -20,6 +20,7 @@ use super::lance_branch;
 use super::lance_directory::LanceDirectory;
 use super::traits::{RecordBatchStream, StorageBackend};
 use super::types::*;
+use crate::runtime::counters::{QueryCounters, SearchKind};
 
 /// Lance implementation of [`StorageBackend`].
 ///
@@ -796,6 +797,7 @@ impl StorageBackend for LanceDbBackend {
         metric: DistanceMetric,
         filter: FilterExpr,
         opts: VectorQueryOpts,
+        counters: Option<Arc<QueryCounters>>,
     ) -> Result<Vec<RecordBatch>> {
         let dataset = self.directory.open(table).await?;
         let key = arrow_array::Float32Array::from(query.to_vec());
@@ -830,6 +832,8 @@ impl StorageBackend for LanceDbBackend {
                 .map_err(|e| anyhow!("Vector search filter '{}' on '{}': {}", sql, table, e))?;
         }
 
+        attach_search_stats(&mut scanner, counters, SearchKind::Vector);
+
         scanner
             .try_into_stream()
             .await
@@ -855,6 +859,7 @@ impl StorageBackend for LanceDbBackend {
         metric: DistanceMetric,
         filter: FilterExpr,
         opts: VectorQueryOpts,
+        counters: Option<Arc<QueryCounters>>,
     ) -> Result<Vec<RecordBatch>> {
         if query.is_empty() {
             return Err(anyhow!("multivector_search on '{}': empty query", table));
@@ -900,6 +905,8 @@ impl StorageBackend for LanceDbBackend {
             })?;
         }
 
+        attach_search_stats(&mut scanner, counters, SearchKind::Vector);
+
         scanner
             .try_into_stream()
             .await
@@ -922,6 +929,7 @@ impl StorageBackend for LanceDbBackend {
         query: &str,
         k: usize,
         filter: FilterExpr,
+        counters: Option<Arc<QueryCounters>>,
     ) -> Result<Vec<RecordBatch>> {
         use lance_index::scalar::FullTextSearchQuery;
         use lance_index::scalar::inverted::query::MatchQuery;
@@ -954,6 +962,8 @@ impl StorageBackend for LanceDbBackend {
                 .filter(&sql)
                 .map_err(|e| anyhow!("FTS filter '{}' on '{}': {}", sql, table, e))?;
         }
+
+        attach_search_stats(&mut scanner, counters, SearchKind::FullText);
 
         scanner
             .try_into_stream()
@@ -1259,6 +1269,57 @@ impl StorageBackend for LanceDbBackend {
 /// from the call site: a scanner that never calls `nearest()` or
 /// `full_text_search()` can only produce scalar-index nodes. Attaching this to
 /// the vector or FTS search paths would destroy that, and nothing would fail.
+/// Lance's metric name for "an index partition was probed".
+///
+/// The only signal that separates a real ANN or FTS index search from a
+/// brute-force scan. Lance documents `all_counts` as "subject to change ...
+/// should only be used for debugging purposes", so this is an unpinned
+/// dependency on a *name*: if a Lance upgrade renames it, the counter reads zero
+/// everywhere. That is why it lives in one place and why the tests that depend
+/// on it say so in their failure messages.
+const PARTITIONS_SEARCHED: &str = "partitions_searched";
+
+/// Attaches the execution-stats callback to a vector or full-text search.
+///
+/// Deliberately **not** [`attach_scan_stats`], and the difference is the whole
+/// point. That predicate ORs `indices_loaded`, `parts_loaded` and
+/// `index_comparisons`, which is sound for a plain scan because a scanner that
+/// never calls `nearest()` can only produce scalar-index nodes. Here it is
+/// unsound: `vector_search` sets `prefilter(true)` with a SQL filter, so a
+/// *scalar* index serving the prefilter lights all three terms while the KNN
+/// itself runs brute force.
+///
+/// Measured, on a 5000-row table with no vector index and a filter on a
+/// Hash-indexed column: `indices_loaded=1, index_comparisons=4096`, and no
+/// `partitions_searched` at all. The OR would have called that an index search.
+///
+/// `partitions_searched` cannot be produced that way. Only `AnnIndexMetrics`
+/// and `FtsIndexMetrics` register it, and Lance's brute-force
+/// `KNNVectorDistanceExec` builds no index metric of any kind.
+///
+/// Two encodings of "no index" both occur and both must read as zero: the key
+/// is *absent* for a vector search with no index, and *present and zero* for an
+/// FTS search with none.
+///
+/// Note this counts IVF partitions probed, not graph traversal — Lance always
+/// wraps HNSW as an IVF sub-index, and a `Flat` index is a single partition, so
+/// it reads 1. It answers "was a vector index searched", never "how hard".
+fn attach_search_stats(
+    scanner: &mut lance::dataset::scanner::Scanner,
+    counters: Option<Arc<QueryCounters>>,
+    kind: SearchKind,
+) {
+    let Some(counters) = counters else {
+        return;
+    };
+    scanner.scan_stats_callback(Arc::new(
+        move |s: &lance::dataset::scanner::ExecutionSummaryCounts| {
+            let consulted = s.all_counts.get(PARTITIONS_SEARCHED).copied().unwrap_or(0) > 0;
+            counters.add_search(kind, consulted);
+        },
+    ));
+}
+
 fn attach_scan_stats(scanner: &mut lance::dataset::scanner::Scanner, request: &ScanRequest) {
     let Some(counters) = request.counters.clone() else {
         return;

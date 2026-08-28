@@ -2196,6 +2196,7 @@ impl StorageManager {
                     backend_metric,
                     combined_filter,
                     opts,
+                    ctx.and_then(|c| c.counters.clone()),
                 )
                 .await?;
 
@@ -2278,6 +2279,7 @@ impl StorageManager {
                 BackendMetric::Dot,
                 combined_filter,
                 opts,
+                ctx.and_then(|c| c.counters.clone()),
             )
             .await?;
         extract_vid_score_pairs(&batches, "_vid", "_distance")
@@ -2397,6 +2399,7 @@ impl StorageManager {
                     backend_metric,
                     combined_filter,
                     opts,
+                    ctx.and_then(|c| c.counters.clone()),
                 )
                 .await?;
             results = extract_vid_score_pairs(&batches, "_vid", "_distance")?;
@@ -2531,7 +2534,14 @@ impl StorageManager {
             let combined_filter = FilterExpr::all(filter_parts);
 
             let batches = backend
-                .full_text_search(&name, property, query, k, combined_filter)
+                .full_text_search(
+                    &name,
+                    property,
+                    query,
+                    k,
+                    combined_filter,
+                    ctx.and_then(|c| c.counters.clone()),
+                )
                 .await?;
 
             let mut fts_results = extract_vid_score_pairs(&batches, "_vid", "_score")?;

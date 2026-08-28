@@ -589,6 +589,14 @@ impl GraphExecutionContext {
         if let Some(deadline) = self.deadline {
             ctx.set_deadline(deadline);
         }
+        // Carry the counters through. The scan path does not need this — it
+        // builds a `ScanRequest` and puts them there directly — but vector and
+        // FTS search have no `ScanRequest`, so this `QueryContext` is the only
+        // channel by which their index-consultation counts can be attributed to
+        // the query that caused them.
+        if let Some(counters) = self.counters.clone() {
+            ctx.set_counters(counters);
+        }
         ctx
     }
 

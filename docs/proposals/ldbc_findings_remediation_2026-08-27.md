@@ -768,6 +768,7 @@ The single current list. Everything above this point is narrative.
 | #190 | no `Union` or `Distinct` arm in the projection-order extractor, so result columns were guessed from sorted row keys |
 | #191 | `_all_props` pushed unconditionally on the scan path, conditionally on the schema'd traversal path — plus a branch-width mismatch |
 | #193 | undirected hops built the edge struct from the traversal's source, reporting the same edge reversed on half the rows |
+| #175 | not unobservable as filed — the scalar half already shipped; the gap was vector/FTS, where the scan path's predicate is *unsound* rather than merely absent |
 
 Gates on the current tip: `fmt`, workspace `clippy --all-targets -D warnings`,
 workspace suite 6693/6693, openCypher TCK 3925/3925.
@@ -776,15 +777,17 @@ workspace suite 6693/6693, openCypher TCK 3925/3925.
 is the only one of these verified against the real query text rather than a
 reduction of it.
 
+**Wave 5 is unblocked.** 5.2–5.5 were gated on #175: until the `nearest()` path
+reported, latency work could not attribute anything to an index. It reports now.
+
 ### Open
 
 | item | state | gate |
 |---|---|---|
-| #175 | vector/FTS index consultation is unreported | **P0 probe first.** If `partitions_searched` cannot separate ANN from a brute-force scan with a scalar prefilter, do not wire the counter — record that on the issue and stop. |
 | #184 | no general column-pruning pass; the unbounded `MutableArrayData` allocation is untouched | **Unverified at SF1.** The `UNWIND`-source case is fixed; the bench has not been re-run. |
 | #192 | `resolve_flat_column_properties` covers 5 of 27 `Expr` variants behind a catch-all | Folded into #184's sweep. Still **no user-visible repro** across 16 probed shapes. |
 | Track 0 | differential oracle | Not started; blocked on infrastructure, not code. |
-| Wave 5.2–5.5 | comprehension hoisting, anchoring, latency, decorrelation | Gated on #175: until the `nearest()` path reports, latency work cannot attribute anything. |
+| Wave 5.2–5.5 | comprehension hoisting, anchoring, latency, decorrelation | **Ungated** — #175 closed. Start with 5.4's latency attribution, which now has a witness. |
 
 ### What this round is evidence for
 

@@ -607,8 +607,13 @@ fn main() {
                     .expect("write result");
                 let rss = peak_rss_mib();
                 eprintln!(
-                    "[ldbc]   {name:<5} {rows:>6} rows  {ms:>9.1} ms                       idx_scans={} cmp={} scans_reported={} peak_rss={rss}MiB",
-                    m.index_scans, m.index_comparisons, m.scans_reported
+                    "[ldbc]   {name:<5} {rows:>6} rows  {ms:>9.1} ms                       scalar_idx={} vec_idx={} fts_idx={} cmp={} scans_reported={} searches_reported={} peak_rss={rss}MiB",
+                    m.index_scans,
+                    m.vector_index_scans,
+                    m.fts_index_scans,
+                    m.index_comparisons,
+                    m.scans_reported,
+                    m.searches_reported
                 );
                 let run = QueryRun {
                     name,

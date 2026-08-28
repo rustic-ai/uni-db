@@ -57,6 +57,12 @@ pub struct QueryProcedureHost {
     property_manager: Option<Arc<PropertyManager>>,
     l0_context: L0Context,
     deadline: Option<Instant>,
+    /// Per-query counters, inherited from the `GraphExecutionContext`.
+    ///
+    /// Procedures reach storage through [`Self::query_context`] rather than a
+    /// `ScanRequest`, so without this a `CALL uni.vector.query(...)` executes
+    /// with no way to attribute what it consulted back to the query (#175).
+    counters: Option<Arc<uni_store::QueryCounters>>,
     cancellation_token: Option<CancellationToken>,
     /// Per-request projection map: output variable name → requested
     /// property names. Populated from the surrounding query's plan in
@@ -138,6 +144,7 @@ impl QueryProcedureHost {
             xervo_runtime: graph_ctx.xervo_runtime().cloned(),
             property_manager: Some(Arc::clone(graph_ctx.property_manager())),
             l0_context: graph_ctx.l0_context().clone(),
+            counters: graph_ctx.counters().cloned(),
             deadline: graph_ctx.deadline_for_host(),
             cancellation_token: graph_ctx.cancellation_token_for_host(),
             target_properties,
@@ -166,6 +173,7 @@ impl QueryProcedureHost {
             property_manager: None,
             l0_context: L0Context::empty(),
             deadline: None,
+            counters: None,
             cancellation_token: None,
             target_properties: HashMap::new(),
             yield_items: Vec::new(),
@@ -207,6 +215,7 @@ impl QueryProcedureHost {
             property_manager: Some(property_manager),
             l0_context,
             deadline: None,
+            counters: None,
             cancellation_token: None,
             target_properties: HashMap::new(),
             yield_items: Vec::new(),
@@ -346,6 +355,9 @@ impl QueryProcedureHost {
         );
         if let Some(deadline) = self.deadline {
             ctx.set_deadline(deadline);
+        }
+        if let Some(counters) = self.counters.clone() {
+            ctx.set_counters(counters);
         }
         ctx
     }

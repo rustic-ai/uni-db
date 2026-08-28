@@ -57,6 +57,16 @@ pub struct PyQueryMetrics {
     /// Number of Lance scans for which the stats callback fired — the
     /// denominator that makes `index_scans == 0` unambiguous.
     pub scans_reported: u64,
+    /// Vector searches that consulted a vector index.
+    ///
+    /// Separate from `index_scans`, which counts scalar scans only. Zero with
+    /// `searches_reported` nonzero means the search ran brute force.
+    pub vector_index_scans: u64,
+    /// Full-text searches that consulted an inverted index.
+    pub fts_index_scans: u64,
+    /// Vector and full-text searches for which the stats callback fired — the
+    /// denominator for the two counters above.
+    pub searches_reported: u64,
 }
 
 #[pymethods]

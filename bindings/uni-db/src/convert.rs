@@ -1095,6 +1095,9 @@ pub fn query_metrics_to_py(py: Python, m: &::uni_db::QueryMetrics) -> PyResult<P
     dict.set_item("index_scans", m.index_scans)?;
     dict.set_item("index_comparisons", m.index_comparisons)?;
     dict.set_item("scans_reported", m.scans_reported)?;
+    dict.set_item("vector_index_scans", m.vector_index_scans)?;
+    dict.set_item("fts_index_scans", m.fts_index_scans)?;
+    dict.set_item("searches_reported", m.searches_reported)?;
     dict.set_item("storage_reads", m.storage_reads)?;
     dict.set_item("cache_hits", m.cache_hits)?;
     Ok(dict.into())
@@ -1332,6 +1335,9 @@ pub fn query_metrics_to_py_class(
         index_scans: m.index_scans,
         index_comparisons: m.index_comparisons,
         scans_reported: m.scans_reported,
+        vector_index_scans: m.vector_index_scans,
+        fts_index_scans: m.fts_index_scans,
+        searches_reported: m.searches_reported,
     };
     Py::new(py, metrics)
 }

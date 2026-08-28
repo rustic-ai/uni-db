@@ -254,6 +254,7 @@ impl StorageBackend for BranchedBackend {
         metric: DistanceMetric,
         filter: FilterExpr,
         opts: VectorQueryOpts,
+        counters: Option<std::sync::Arc<crate::runtime::counters::QueryCounters>>,
     ) -> Result<Vec<RecordBatch>> {
         // Phase 5b: when the fork has a branch for this dataset,
         // route through Lance's per-branch nearest-K — its
@@ -274,7 +275,7 @@ impl StorageBackend for BranchedBackend {
                 .await;
         }
         self.inner
-            .vector_search(table, column, query, k, metric, filter, opts)
+            .vector_search(table, column, query, k, metric, filter, opts, counters)
             .await
     }
 
@@ -288,6 +289,7 @@ impl StorageBackend for BranchedBackend {
         metric: DistanceMetric,
         filter: FilterExpr,
         opts: VectorQueryOpts,
+        counters: Option<std::sync::Arc<crate::runtime::counters::QueryCounters>>,
     ) -> Result<Vec<RecordBatch>> {
         // Multi-vector retrieval over a forked/branched dataset has no Lance ANN
         // path — there is no per-branch multi-vector `nearest` (and lancedb
@@ -304,7 +306,7 @@ impl StorageBackend for BranchedBackend {
             );
         }
         self.inner
-            .multivector_search(table, column, query, k, metric, filter, opts)
+            .multivector_search(table, column, query, k, metric, filter, opts, counters)
             .await
     }
 
@@ -315,6 +317,7 @@ impl StorageBackend for BranchedBackend {
         query: &str,
         k: usize,
         filter: FilterExpr,
+        counters: Option<std::sync::Arc<crate::runtime::counters::QueryCounters>>,
     ) -> Result<Vec<RecordBatch>> {
         // Phase 5b: same per-branch routing as vector_search. Lance's
         // FTS query on a branch surfaces fork-local + parent-inherited
@@ -327,7 +330,7 @@ impl StorageBackend for BranchedBackend {
                 .await;
         }
         self.inner
-            .full_text_search(table, column, query, k, filter)
+            .full_text_search(table, column, query, k, filter, counters)
             .await
     }
 

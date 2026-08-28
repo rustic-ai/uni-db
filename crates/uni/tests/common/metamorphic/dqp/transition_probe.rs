@@ -25,11 +25,14 @@
 //! auto-flush timer when `flush_smoke` reported 25.8% activation for a witness
 //! that measured 60/60 correct in isolation.
 //!
-//! The index and compaction probes are **tripwires**. They assert the
+//! The index and compaction probes **were** tripwires: they asserted the
 //! unobservability that justified deferring those two levers, so a deferral
-//! recorded in a document cannot quietly become false. Their failure messages
-//! open with "good news" and point at Phase 4B: a counter beginning to move
-//! there is not a regression, it is the deferral expiring.
+//! recorded in a document could not quietly become false. Both deferrals have
+//! since expired and both probes now assert the measurement instead — index
+//! consultation became observable with #175, compaction with the `lance_iops`
+//! counter. What is left of the original role is the shape: each still pairs a
+//! must-move case with a must-not-move one, because a probe that only ever
+//! asserts one direction passes for free.
 //!
 //! Run with output:
 //!
