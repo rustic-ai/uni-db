@@ -32,6 +32,14 @@ pub struct ListComprehensionExecExpr {
     /// Whether to extract VIDs from CypherValue-encoded loop variable
     /// for nested pattern comprehension anchor binding
     needs_vid_extraction: bool,
+    /// Parallel lists of hydrated endpoint nodes, `(src, dst)`.
+    ///
+    /// `startNode(r)` inside `[r IN rels | ...]` names a loop variable, so there
+    /// is no column to read the endpoint's properties from. `EndpointHydrateExec`
+    /// materialises them for the *list* before the comprehension runs; these
+    /// expressions read those columns, and they are flattened with the same
+    /// offsets as the elements so element `i` lines up with endpoint `i`.
+    endpoint_lists: Option<(Arc<dyn PhysicalExpr>, Arc<dyn PhysicalExpr>)>,
 }
 
 impl Clone for ListComprehensionExecExpr {
@@ -44,8 +52,25 @@ impl Clone for ListComprehensionExecExpr {
             input_schema: self.input_schema.clone(),
             output_item_type: self.output_item_type.clone(),
             needs_vid_extraction: self.needs_vid_extraction,
+            endpoint_lists: self.endpoint_lists.clone(),
         }
     }
+}
+
+/// What the comprehension binds for each element of the list.
+///
+/// The loop variable itself, plus the columns that have to be derived from it
+/// per element: a VID for a nested pattern comprehension's anchor, and the
+/// hydrated endpoints `startNode`/`endNode` need. They travel together because
+/// they are all functions of the same element.
+pub struct LoopBindings {
+    /// Name of the loop variable (e.g. `x` in `[x IN xs | ...]`).
+    pub variable_name: String,
+    /// Whether to extract VIDs from the CypherValue-encoded loop variable for
+    /// nested pattern comprehension anchor binding.
+    pub needs_vid_extraction: bool,
+    /// Parallel lists of hydrated endpoint nodes, `(src, dst)`.
+    pub endpoint_lists: Option<(Arc<dyn PhysicalExpr>, Arc<dyn PhysicalExpr>)>,
 }
 
 impl ListComprehensionExecExpr {
@@ -53,19 +78,19 @@ impl ListComprehensionExecExpr {
         input_list: Arc<dyn PhysicalExpr>,
         map_expr: Arc<dyn PhysicalExpr>,
         predicate: Option<Arc<dyn PhysicalExpr>>,
-        variable_name: String,
+        bindings: LoopBindings,
         input_schema: Arc<Schema>,
         output_item_type: DataType,
-        needs_vid_extraction: bool,
     ) -> Self {
         Self {
             input_list,
             map_expr,
             predicate,
-            variable_name,
+            variable_name: bindings.variable_name,
             input_schema,
             output_item_type,
-            needs_vid_extraction,
+            needs_vid_extraction: bindings.needs_vid_extraction,
+            endpoint_lists: bindings.endpoint_lists,
         }
     }
 }
@@ -212,6 +237,38 @@ impl PhysicalExpr for ListComprehensionExecExpr {
             inner_fields.push(loop_field);
         }
 
+        // Flatten the hydrated endpoint lists alongside the elements. Same
+        // offsets, so element `i` and endpoint `i` stay paired; a row whose list
+        // is shorter (or whose column is null) contributes nulls rather than
+        // shifting the alignment.
+        if let Some((src_expr, dst_expr)) = &self.endpoint_lists {
+            for (is_start, expr) in [(true, src_expr), (false, dst_expr)] {
+                let name = crate::query::df_graph::endpoint_hydrate::endpoint_column(
+                    &self.variable_name,
+                    is_start,
+                );
+                if inner_fields.iter().any(|f| f.name() == &name) {
+                    continue;
+                }
+                let outer = expr.evaluate(batch)?.into_array(num_rows)?;
+                let flat = crate::query::df_graph::common::cv_array_to_large_list(
+                    outer.as_ref(),
+                    &DataType::LargeBinary,
+                )?;
+                let flat = flat
+                    .as_any()
+                    .downcast_ref::<datafusion::arrow::array::LargeListArray>()
+                    .ok_or_else(|| {
+                        datafusion::error::DataFusionError::Execution(
+                            "endpoint hydration did not produce a list".to_string(),
+                        )
+                    })?;
+                let aligned = align_to_offsets(flat, offsets)?;
+                inner_fields.push(Arc::new(Field::new(&name, DataType::LargeBinary, true)));
+                inner_columns.push(aligned);
+            }
+        }
+
         // Materialize VID column from CypherValue-encoded loop variable for nested
         // pattern comprehension anchor binding
         if self.needs_vid_extraction {
@@ -336,6 +393,7 @@ impl PhysicalExpr for ListComprehensionExecExpr {
             input_schema: self.input_schema.clone(),
             output_item_type: self.output_item_type.clone(),
             needs_vid_extraction: self.needs_vid_extraction,
+            endpoint_lists: self.endpoint_lists.clone(),
         }))
     }
 
@@ -354,4 +412,48 @@ impl PhysicalExpr for ListComprehensionExecExpr {
             )
         }
     }
+}
+
+/// Flatten `list` so it lines up element-for-element with `offsets`.
+///
+/// The comprehension flattens its elements using the input list's own offsets.
+/// A parallel list built from the same source has the same shape, but nothing
+/// enforces that at runtime — a shorter row, or a null, must contribute nulls at
+/// the right positions rather than sliding every later element by one. Padding
+/// explicitly is what keeps `startNode(r)` paired with the `r` it belongs to.
+fn align_to_offsets(
+    list: &datafusion::arrow::array::LargeListArray,
+    offsets: &OffsetBuffer<i64>,
+) -> Result<datafusion::arrow::array::ArrayRef> {
+    use datafusion::arrow::array::{LargeBinaryArray, LargeBinaryBuilder};
+
+    let values = list.values();
+    let values = values
+        .as_any()
+        .downcast_ref::<LargeBinaryArray>()
+        .ok_or_else(|| {
+            datafusion::error::DataFusionError::Execution(
+                "endpoint hydration produced non-binary elements".to_string(),
+            )
+        })?;
+    let src_offsets = list.offsets();
+
+    let mut builder = LargeBinaryBuilder::new();
+    for row in 0..offsets.len().saturating_sub(1) {
+        let want = (offsets[row + 1] - offsets[row]) as usize;
+        let (start, have) = if row + 1 < src_offsets.len() && !list.is_null(row) {
+            let s = src_offsets[row] as usize;
+            (s, (src_offsets[row + 1] - src_offsets[row]) as usize)
+        } else {
+            (0, 0)
+        };
+        for i in 0..want {
+            if i < have && values.is_valid(start + i) {
+                builder.append_value(values.value(start + i));
+            } else {
+                builder.append_null();
+            }
+        }
+    }
+    Ok(Arc::new(builder.finish()))
 }

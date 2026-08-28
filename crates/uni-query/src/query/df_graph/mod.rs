@@ -42,6 +42,7 @@ pub mod bitmap;
 pub mod catalog_scan;
 pub mod common;
 pub mod comprehension;
+pub mod endpoint_hydrate;
 pub mod expr_compiler;
 pub mod ext_id_lookup;
 pub mod iteration_driver;

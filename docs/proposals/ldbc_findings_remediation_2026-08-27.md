@@ -346,9 +346,6 @@ consulted an index. That is the gate on 5.2–5.4, not effort.
 - #184 — the `UNWIND`-source allocation is gone; there is still no general
   column-pruning pass, and the unbounded `MutableArrayData` allocation is
   untouched. **Unverified at SF1.**
-- #187 — `startNode` after a `WITH`: the endpoint variables leave scope and
-  recovering a node from the relationship's `_src_vid` needs a vertex lookup.
-  The undirected shape that had been split out as #188 is closed (below).
 - #175 — the `nearest()` reporting gap above.
 
 ## Closed since — 2026-08-28
@@ -686,5 +683,70 @@ label *and* property (`P:a`, `Q:q1`) rather than node-ness.
 
 - #184 — no general column-pruning pass; unverified at SF1.
 - #187 — `startNode` after a `WITH`.
+- #175 — the `nearest()` reporting gap.
+- #192 — the `resolve_flat_column_properties` catch-all, folded into #184.
+
+### #187 — the injection, not the endpoint pass
+
+Closed 2026-08-28, and the diagnosis in this document was wrong twice over.
+
+**It did not return NULL.** The plan for this work argued that the `{_vid}`
+stand-in in `startnode_endnode_impl` was live, making #187 a silent wrong
+answer. Measured, every post-`WITH` shape raised `No field named _anon_1`. The
+issue's own transcript was right; the reasoning that predicted otherwise was
+not.
+
+**The stale reference came from argument injection.** `startNode`/`endNode`
+resolve by being handed every known node variable as an extra argument, and
+`collect_variable_kinds` walks the whole plan subtree — so after `WITH e AS rel`
+the context still named the traversal's `_anon_0`/`_anon_1` and injected columns
+the schema no longer had. Nothing checked the column existed. Three scopes reach
+that injection — projections, filters, and pattern-comprehension sub-plans — and
+each needed the schema it actually compiles against. IC14 failed at each one in
+turn, the error moving inward as the outer scope was fixed.
+
+Filtering the injection alone would have been a regression from a loud error to
+exactly the silent NULL the plan wrongly believed was already happening, so it
+only ships alongside real hydration.
+
+**Projection widening could not have worked.** It was the earlier
+recommendation, and the measurement retired it: `WITH relationships(p)[0] AS r`
+fails identically and has no traversal binding anywhere to widen. IC14's
+relationship is a list-comprehension variable over `relationships(path)`, which
+is further still from any endpoint variable.
+
+`EndpointHydrateExec` materialises the endpoints from the `_src`/`_dst` the
+relationship already carries, using the batched pre-fetch discipline
+`bind_fixed_path` uses. For a comprehension it emits a parallel list flattened
+with the element list's own offsets, so element *i* stays paired with endpoint
+*i* — padded explicitly rather than trusting the two lists to have the same
+shape. The hydrated columns reach the *existing* UDF as extra arguments, so
+neither the UDF nor property-access compilation moved.
+
+**LDBC IC14 now plans and executes**, which is what the issue said this was for.
+The test runs the real query text, not a paraphrase.
+
+The `{_vid}` stand-in is gone. Returning a map that answers `id()` correctly and
+every property as NULL is the defect, not a fallback for it; 358 related tests
+pass without it.
+
+### Found while fixing it: an undirected match reversed the relationship
+
+`MATCH ()-[e:KNOWS]-() RETURN e` returned the *same* edge twice — once as
+`src:0, dst:1` and once as `src:1, dst:0`. The second is fabricated. No error,
+and nothing to do with `startNode`.
+
+`add_edge_structural_projection` built `_src`/`_dst` from the traversal's own
+source and target variables, which for an undirected hop are whichever end the
+row matched from rather than the edge's stored tail. `_fwd` — which #188 already
+computes for exactly this ambiguity — now orients them back to storage order.
+
+It was found only because the hydrated `startNode` disagreed with
+`undirected_endpoints_do_not_depend_on_the_anchor`, a test #188 had already
+written. Fixing the struct rather than special-casing the hydration closed both.
+
+### Open after this round
+
+- #184 — no general column-pruning pass; unverified at SF1.
 - #175 — the `nearest()` reporting gap.
 - #192 — the `resolve_flat_column_properties` catch-all, folded into #184.

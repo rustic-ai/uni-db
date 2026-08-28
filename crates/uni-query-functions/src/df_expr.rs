@@ -627,6 +627,17 @@ pub struct TranslationContext {
     /// edge identity as `_eid` instead of the default `_vid`.
     pub mutation_edge_hints: Vec<String>,
 
+    /// Columns that actually exist in the schema these expressions compile
+    /// against, when the caller knows it.
+    ///
+    /// `variable_kinds` is collected by walking the whole logical subtree, so it
+    /// keeps naming variables a `WITH` has since dropped. `startNode`/`endNode`
+    /// inject one column per known node variable, and injecting a name the
+    /// schema no longer has fails the whole query with `No field named _anon_1`
+    /// (#187). `None` means "unknown, inject everything" — the behaviour before
+    /// this field existed.
+    pub available_columns: Option<std::collections::HashSet<String>>,
+
     /// Frozen statement clock for consistent temporal function evaluation.
     /// All bare temporal constructors (`time()`, `datetime()`, etc.) and their
     /// `.statement()`/`.transaction()` variants use this frozen instant so that
@@ -643,6 +654,7 @@ impl Default for TranslationContext {
             variable_kinds: std::collections::HashMap::new(),
             node_variable_hints: Vec::new(),
             mutation_edge_hints: Vec::new(),
+            available_columns: None,
             statement_time: chrono::Utc::now(),
         }
     }
@@ -2182,16 +2194,27 @@ fn translate_graph_function(
             let mut udf_args = df_args.to_vec();
             let mut seen = std::collections::HashSet::new();
             if let Some(ctx) = context {
+                // Only inject a column the schema actually has. `variable_kinds`
+                // is collected from the whole subtree, so after `WITH e AS rel`
+                // it still names the traversal's `_anon_0`/`_anon_1`; injecting
+                // those failed the query outright (#187).
+                let exists = |var: &String| {
+                    ctx.available_columns
+                        .as_ref()
+                        .is_none_or(|cols| cols.contains(var))
+                };
                 // Add node variables from MATCH (registered in variable_kinds)
                 for (var, kind) in &ctx.variable_kinds {
-                    if matches!(kind, VariableKind::Node) && seen.insert(var.clone()) {
+                    if matches!(kind, VariableKind::Node) && exists(var) && seen.insert(var.clone())
+                    {
                         udf_args.push(DfExpr::Column(Column::from_name(var.clone())));
                     }
                 }
                 // Add node variables from CREATE/MERGE patterns (not in variable_kinds
-                // to avoid affecting ID/TYPE/HASLABEL dotted-column resolution)
+                // to avoid affecting ID/TYPE/HASLABEL dotted-column resolution),
+                // plus any endpoint column `EndpointHydrateExec` materialised.
                 for var in &ctx.node_variable_hints {
-                    if seen.insert(var.clone()) {
+                    if exists(var) && seen.insert(var.clone()) {
                         udf_args.push(DfExpr::Column(Column::from_name(var.clone())));
                     }
                 }

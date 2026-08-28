@@ -1204,10 +1204,20 @@ fn startnode_endnode_impl(val_args: &[Value], is_start: bool) -> DFResult<Value>
         }
     }
 
-    // Fallback: return minimal node map with just _vid
-    let mut map = std::collections::HashMap::new();
-    map.insert("_vid".to_string(), Value::Int(target_vid as i64));
-    Ok(Value::Map(map))
+    // No node argument matched the endpoint. This used to answer with a map
+    // holding only `_vid`, which reads as a node and answers `id()` correctly
+    // while every property on it is NULL — the silent trade #188 refused in
+    // writing, and the shape #187's remaining case produced.
+    //
+    // The endpoint is materialised by `EndpointHydrateExec` wherever the
+    // planner can reach the relationship. Somewhere it could not, so say so
+    // rather than return a node that is not one.
+    let fn_name = if is_start { "startNode" } else { "endNode" };
+    Err(datafusion::error::DataFusionError::Execution(format!(
+        "{fn_name}(): the relationship's endpoint (vid {target_vid}) is not \
+         available in this scope, so its properties cannot be read. This is a \
+         planner gap; please file an issue with the query."
+    )))
 }
 
 /// Extract the src or dst VID from an edge value.

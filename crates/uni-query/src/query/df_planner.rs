@@ -54,7 +54,7 @@ use crate::query::df_graph::{
     OptionalFilterExec,
 };
 use crate::query::planner::{
-    LogicalPlan, STRUCT_ONLY_SENTINEL, WITH_PASSTHROUGH_SENTINEL, aggregate_column_name,
+    COL_FWD, LogicalPlan, STRUCT_ONLY_SENTINEL, WITH_PASSTHROUGH_SENTINEL, aggregate_column_name,
     collect_properties_from_plan, projection_columns, reconcile_passthrough_properties,
 };
 use anyhow::{Result, anyhow};
@@ -3328,6 +3328,28 @@ impl HybridPhysicalPlanner {
                 if has_wildcard && !edge_properties.contains(&"_all_props".to_string()) {
                     edge_properties.push("_all_props".to_string());
                 }
+
+                // An undirected hop files the edge under both endpoints, so the
+                // traversal's source is whichever end this row matched from —
+                // not the edge's stored tail. Materialising the whole
+                // relationship without knowing which is which reports the same
+                // edge as `b->a` on the row that walked it backwards. `_fwd`
+                // carries the per-row answer; `add_edge_structural_projection`
+                // uses it to put `_src`/`_dst` back the way they are stored.
+                //
+                // Requested only when a struct will actually be built: tracking
+                // orientation costs the traversal a second adjacency probe, and
+                // a directed hop knows the answer statically.
+                let builds_struct = all_properties.get(edge_var).is_some_and(|props| {
+                    props.contains("*") || props.contains(STRUCT_ONLY_SENTINEL)
+                });
+                if matches!(direction, uni_cypher::ast::Direction::Both)
+                    && !is_variable_length
+                    && builds_struct
+                    && !edge_properties.iter().any(|p| p == COL_FWD)
+                {
+                    edge_properties.push(COL_FWD.to_string());
+                }
             }
 
             // Extract target vertex properties, expanding "*" wildcards
@@ -4067,7 +4089,9 @@ impl HybridPhysicalPlanner {
 
         // Use CypherPhysicalExprCompiler for all filters (handles both schema-typed
         // and schemaless LargeBinary/CypherValue columns without coercion failures).
-        let ctx = self.translation_context_for_plan(input);
+        let mut ctx = self.translation_context_for_plan(input);
+        ctx.available_columns = Some(schema.fields().iter().map(|f| f.name().clone()).collect());
+        let ctx = ctx;
         let session = self.session_ctx.read();
         let state = session.state();
         let compiler = self.expr_compiler(&state, Some(&ctx));
@@ -4530,6 +4554,50 @@ impl HybridPhysicalPlanner {
         self.plan_project_from_input(input_plan, projections, Some(input))
     }
 
+    /// Wrap `input_plan` so every relationship an unresolved `startNode` /
+    /// `endNode` call names has its endpoints materialised as node values.
+    ///
+    /// A call only reaches here when `resolve_traversal_endpoints` could not
+    /// rewrite it to a variable — either a projection dropped the endpoints
+    /// (`WITH e AS rel`) or the relationship never came from a traversal
+    /// (`relationships(path)`). In both cases the relationship value still
+    /// carries `_src` / `_dst`; what it lacks is the endpoint's properties.
+    ///
+    /// Relationships whose column is not in the input schema are skipped —
+    /// nothing can be read for them here, and the existing error is a better
+    /// report than a column of nulls.
+    fn hydrate_endpoints_for(
+        &self,
+        input_plan: Arc<dyn ExecutionPlan>,
+        projections: &[(Expr, Option<String>)],
+    ) -> Result<Arc<dyn ExecutionPlan>> {
+        use crate::query::df_graph::endpoint_hydrate::EndpointHydrateExec;
+
+        let mut rels: Vec<String> = Vec::new();
+        for (expr, _) in projections {
+            collect_endpoint_relationships(expr, &mut rels);
+        }
+        if rels.is_empty() {
+            return Ok(input_plan);
+        }
+
+        let mut plan = input_plan;
+        for rel in rels {
+            let schema = plan.schema();
+            if schema.index_of(&rel).is_err()
+                || schema
+                    .index_of(&crate::query::df_graph::endpoint_hydrate::endpoint_column(
+                        &rel, true,
+                    ))
+                    .is_ok()
+            {
+                continue;
+            }
+            plan = Arc::new(EndpointHydrateExec::new(plan, rel, self.graph_ctx.clone()));
+        }
+        Ok(plan)
+    }
+
     /// Build projection expressions from an already-planned input.
     fn plan_project_from_input(
         &self,
@@ -4537,13 +4605,29 @@ impl HybridPhysicalPlanner {
         projections: &[(Expr, Option<String>)],
         context_plan: Option<&LogicalPlan>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
+        // `startNode(r)` normally never reaches the UDF — the planner rewrites
+        // it to the traversal's endpoint variable. Once a projection stops
+        // carrying those variables, or the relationship never came from a
+        // traversal at all, the call survives and the UDF has only the
+        // relationship to work with. Materialise its endpoints first.
+        let input_plan = self.hydrate_endpoints_for(input_plan, projections)?;
         let schema = input_plan.schema();
 
         let session = self.session_ctx.read();
         let state = session.state();
 
         // Build translation context with variable kinds if we have a logical plan
-        let ctx = context_plan.map(|p| self.translation_context_for_plan(p));
+        let mut ctx = context_plan.map(|p| self.translation_context_for_plan(p));
+        if let Some(ctx) = ctx.as_mut() {
+            ctx.available_columns =
+                Some(schema.fields().iter().map(|f| f.name().clone()).collect());
+            for name in schema.fields().iter().map(|f| f.name()) {
+                if name.starts_with(ENDPOINT_COLUMN_PREFIX) {
+                    ctx.node_variable_hints.push(name.clone());
+                }
+            }
+        }
+        let ctx = ctx;
 
         let mut exprs: Vec<(Arc<dyn datafusion::physical_expr::PhysicalExpr>, String)> = Vec::new();
 
@@ -6348,15 +6432,32 @@ impl HybridPhysicalPlanner {
         };
         let src_col_name = resolve_vid_col(source_variable);
         let dst_col_name = resolve_vid_col(target_variable);
+        let src_col = DfExpr::Column(datafusion::common::Column::from_name(src_col_name));
+        let dst_col = DfExpr::Column(datafusion::common::Column::from_name(dst_col_name));
+
+        // For an undirected hop the traversal's source is whichever end this row
+        // matched from, so using it directly reports the edge reversed on every
+        // row that walked it backwards — the same relationship coming back as
+        // `b->a`. `_fwd` says whether this row walked it forwards; when the
+        // traversal published it, put the endpoints back the way they are
+        // stored. A directed hop has no `_fwd` column and needs none.
+        let fwd_col = format!("{}.{}", variable, crate::query::planner::COL_FWD);
+        let (src_expr, dst_expr) = if input_schema.column_with_name(&fwd_col).is_some() {
+            let fwd = DfExpr::Column(datafusion::common::Column::from_name(fwd_col));
+            (
+                datafusion::logical_expr::when(fwd.clone(), src_col.clone())
+                    .otherwise(dst_col.clone())?,
+                datafusion::logical_expr::when(fwd, dst_col).otherwise(src_col)?,
+            )
+        } else {
+            (src_col, dst_col)
+        };
+
         struct_args.push(lit("_src"));
-        struct_args.push(DfExpr::Column(datafusion::common::Column::from_name(
-            src_col_name,
-        )));
+        struct_args.push(src_expr);
 
         struct_args.push(lit("_dst"));
-        struct_args.push(DfExpr::Column(datafusion::common::Column::from_name(
-            dst_col_name,
-        )));
+        struct_args.push(dst_expr);
 
         // Include _all_props if present (for keys()/properties() on schemaless edges)
         let all_props_col = format!("{}._all_props", variable);
@@ -6898,6 +6999,48 @@ fn apply_passthrough_reconciliation(
 ///
 /// This information is used by the expression translator to resolve bare variable
 /// references to their identity columns (e.g., `n` → `n._vid` for nodes).
+/// Prefix of the columns `EndpointHydrateExec` appends.
+pub(crate) const ENDPOINT_COLUMN_PREFIX: &str = "_endpoint.";
+
+/// Collect the relationship variables named by `startNode(x)` / `endNode(x)`.
+///
+/// Only a bare variable argument is collected. `startNode(<expr>)` has no column
+/// to read endpoints from, so there is nothing to hydrate and the call keeps
+/// whatever behaviour it had.
+fn collect_endpoint_relationships(expr: &Expr, out: &mut Vec<String>) {
+    if let Expr::FunctionCall { name, args, .. } = expr {
+        let upper = name.to_uppercase();
+        if (upper == "STARTNODE" || upper == "ENDNODE")
+            && let Some(Expr::Variable(rel)) = args.first()
+            && !out.contains(rel)
+        {
+            out.push(rel.clone());
+        }
+    }
+    // `[r IN rels | startNode(r).id]` names `r`, which is a loop variable and
+    // never a column. What has to be hydrated is the *list* it iterates, so the
+    // per-element endpoints can be carried into the comprehension's inner batch
+    // alongside the element itself.
+    if let Expr::ListComprehension {
+        variable,
+        list,
+        where_clause,
+        map_expr,
+    } = expr
+        && let Expr::Variable(list_var) = list.as_ref()
+    {
+        let mut inner = Vec::new();
+        collect_endpoint_relationships(map_expr, &mut inner);
+        if let Some(w) = where_clause {
+            collect_endpoint_relationships(w, &mut inner);
+        }
+        if inner.contains(variable) && !out.contains(list_var) {
+            out.push(list_var.clone());
+        }
+    }
+    expr.for_each_child(&mut |child| collect_endpoint_relationships(child, out));
+}
+
 fn collect_variable_kinds(plan: &LogicalPlan, kinds: &mut HashMap<String, VariableKind>) {
     match plan {
         // Phase 5b followup: recurse into the wrapped node so the

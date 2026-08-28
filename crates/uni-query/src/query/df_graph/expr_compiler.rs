@@ -239,6 +239,49 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
     ///
     /// The caller must own `scoped_ctx_slot` and keep it alive for the returned compiler's
     /// lifetime.
+    /// A scoped compiler that also advertises extra node columns.
+    ///
+    /// `startNode`/`endNode` resolve by being handed every in-scope node column
+    /// as an extra argument. Inside a comprehension the hydrated endpoint columns
+    /// are exactly that, but they exist only in the *inner* schema, so they have
+    /// to be added to the hints and to `available_columns` — which otherwise
+    /// filters them out as names the outer schema does not have.
+    fn scoped_compiler_with_hints<'b>(
+        &'b self,
+        exclude_vars: &[&str],
+        extra_node_hints: &[String],
+        available: &[String],
+        scoped_ctx_slot: &'b mut Option<TranslationContext>,
+    ) -> CypherPhysicalExprCompiler<'b>
+    where
+        'a: 'b,
+    {
+        let mut ctx = self.translation_ctx.cloned().unwrap_or_default();
+        for v in exclude_vars {
+            ctx.variable_kinds.remove(*v);
+        }
+        for hint in extra_node_hints {
+            if !ctx.node_variable_hints.contains(hint) {
+                ctx.node_variable_hints.push(hint.clone());
+            }
+        }
+        // The body compiles against the inner schema, so that is the set of
+        // columns an injected argument may name.
+        ctx.available_columns = Some(available.iter().cloned().collect());
+        *scoped_ctx_slot = Some(ctx);
+
+        CypherPhysicalExprCompiler {
+            state: self.state,
+            translation_ctx: scoped_ctx_slot.as_ref(),
+            graph_ctx: self.graph_ctx.clone(),
+            uni_schema: self.uni_schema.clone(),
+            session_ctx: self.session_ctx.clone(),
+            storage: self.storage.clone(),
+            params: self.params.clone(),
+            outer_entity_vars: self.outer_entity_vars.clone(),
+        }
+    }
+
     fn scoped_compiler<'b>(
         &'b self,
         exclude_vars: &[&str],
@@ -266,6 +309,7 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
                 variable_kinds: new_kinds,
                 node_variable_hints: ctx.node_variable_hints.clone(),
                 mutation_edge_hints: ctx.mutation_edge_hints.clone(),
+                available_columns: ctx.available_columns.clone(),
                 statement_time: ctx.statement_time,
             });
             scoped_ctx_slot.as_ref()
@@ -304,17 +348,26 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
     fn entity_scoped_compiler<'b>(
         &'b self,
         entity_vars: &[(String, VariableKind)],
+        available: &[String],
         scoped_ctx_slot: &'b mut Option<TranslationContext>,
     ) -> CypherPhysicalExprCompiler<'b>
     where
         'a: 'b,
     {
-        let ctx_ref = if entity_vars.is_empty() {
+        let ctx_ref = if entity_vars.is_empty() && available.is_empty() {
             self.translation_ctx
         } else {
             let mut ctx = self.translation_ctx.cloned().unwrap_or_default();
             for (var, kind) in entity_vars {
                 ctx.variable_kinds.insert(var.clone(), *kind);
+            }
+            // The comprehension's entity variables are *flat* here — `a._vid`,
+            // `a.id` — with no bare `a` column. `startNode`/`endNode` inject one
+            // column per known node variable, so without this they ask for a
+            // bare `a` the inner schema does not have and the whole sub-plan
+            // fails (LDBC IC14).
+            if !available.is_empty() {
+                ctx.available_columns = Some(available.iter().cloned().collect());
             }
             *scoped_ctx_slot = Some(ctx);
             scoped_ctx_slot.as_ref()
@@ -1434,11 +1487,64 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
             fields.push(vid_field);
         }
 
+        // `startNode(r)` inside the body names the loop variable, which is not a
+        // column. `EndpointHydrateExec` materialised the endpoints of the *list*
+        // before this expression runs; carry them into the inner schema under
+        // the loop variable's name so the body can reach them.
+        let endpoint_lists = if let Expr::Variable(list_var) = list {
+            let src = crate::query::df_graph::endpoint_hydrate::endpoint_column(list_var, true);
+            let dst = crate::query::df_graph::endpoint_hydrate::endpoint_column(list_var, false);
+            match (input_schema.index_of(&src), input_schema.index_of(&dst)) {
+                (Ok(si), Ok(di)) => {
+                    for is_start in [true, false] {
+                        fields.push(Arc::new(Field::new(
+                            crate::query::df_graph::endpoint_hydrate::endpoint_column(
+                                variable, is_start,
+                            ),
+                            DataType::LargeBinary,
+                            true,
+                        )));
+                    }
+                    Some((
+                        Arc::new(datafusion::physical_plan::expressions::Column::new(
+                            &src, si,
+                        )) as Arc<dyn PhysicalExpr>,
+                        Arc::new(datafusion::physical_plan::expressions::Column::new(
+                            &dst, di,
+                        )) as Arc<dyn PhysicalExpr>,
+                    ))
+                }
+                _ => None,
+            }
+        } else {
+            None
+        };
+
         let inner_schema = Arc::new(Schema::new(fields));
 
         // Compile inner expressions with scoped translation context
+        let endpoint_hints: Vec<String> = if endpoint_lists.is_some() {
+            [true, false]
+                .iter()
+                .map(|is_start| {
+                    crate::query::df_graph::endpoint_hydrate::endpoint_column(variable, *is_start)
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let inner_names: Vec<String> = inner_schema
+            .fields()
+            .iter()
+            .map(|f| f.name().clone())
+            .collect();
         let mut scoped_ctx = None;
-        let inner_compiler = self.scoped_compiler(&[variable], &mut scoped_ctx);
+        let inner_compiler = self.scoped_compiler_with_hints(
+            &[variable],
+            &endpoint_hints,
+            &inner_names,
+            &mut scoped_ctx,
+        );
 
         let predicate_phy = if let Some(pred) = where_clause {
             Some(inner_compiler.compile(pred, &inner_schema)?)
@@ -1453,10 +1559,13 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
             input_list_phy,
             map_phy,
             predicate_phy,
-            variable.to_string(),
+            crate::query::df_graph::comprehension::LoopBindings {
+                variable_name: variable.to_string(),
+                needs_vid_extraction,
+                endpoint_lists,
+            },
             Arc::new(input_schema.clone()),
             output_item_type,
-            needs_vid_extraction,
         )))
     }
 
@@ -1644,8 +1753,14 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
                     .chain(s.edge_variable.clone().map(|v| (v, VariableKind::Edge)))
             })
             .collect();
+        let inner_names: Vec<String> = inner_schema
+            .fields()
+            .iter()
+            .map(|f| f.name().clone())
+            .collect();
         let mut inner_ctx_slot = None;
-        let inner_compiler = self.entity_scoped_compiler(&entity_vars, &mut inner_ctx_slot);
+        let inner_compiler =
+            self.entity_scoped_compiler(&entity_vars, &inner_names, &mut inner_ctx_slot);
 
         let pred_phy = where_clause
             .map(|p| inner_compiler.compile(p, &inner_schema))

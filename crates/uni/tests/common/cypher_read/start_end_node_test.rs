@@ -127,20 +127,170 @@ async fn id_of_start_node_on_a_match_bound_relationship() {
     assert_eq!(via_edge.rows()[0].values()[0], direct.rows()[0].values()[0]);
 }
 
-/// The one shape still open. A `WITH` narrows scope to `rel`, so the endpoint
-/// variables the rewrite would resolve to are gone by the time `startNode` is
-/// called, and only a vertex lookup could recover them.
+/// A `WITH` narrows scope to `rel`, so the endpoint variables the rewrite would
+/// resolve to are gone by the time `startNode` is called.
+///
+/// The relationship value still carries `_src` / `_dst`; what it lacks is the
+/// endpoint's *properties*. `EndpointHydrateExec` fetches them before the
+/// projection and hands them to the existing UDF as extra arguments.
+///
+/// Both `id()` and the property are asserted, deliberately. Before this,
+/// `startnode_endnode_impl` answered an unresolvable endpoint with a stand-in
+/// map holding only `_vid` — so an `id()`-only assertion passes while every
+/// property reads NULL, which is exactly the trade #188 refused.
 #[tokio::test]
-#[ignore = "#187 remainder: a WITH drops the endpoint variables, and resolving \
-            the relationship's _src_vid back to a node needs a vertex lookup"]
 async fn start_node_after_a_with_on_a_match_bound_relationship() {
     let db = fixture().await;
     let r = db
         .session()
-        .query("MATCH ()-[e:KNOWS]->() WITH e AS rel RETURN startNode(rel).name AS s")
+        .query(
+            "MATCH ()-[e:KNOWS]->() WITH e AS rel \
+             RETURN id(startNode(rel)) AS i, startNode(rel).name AS s",
+        )
+        .await
+        .unwrap();
+    assert_eq!(r.rows()[0].values()[0], Value::Int(0));
+    assert_eq!(r.rows()[0].values()[1], Value::String("a".to_string()));
+}
+
+/// `endNode` has to travel the same path — the stand-in failed both identically,
+/// so a `startNode`-only suite bounds nothing here.
+#[tokio::test]
+async fn end_node_after_a_with_on_a_match_bound_relationship() {
+    let db = fixture().await;
+    let r = db
+        .session()
+        .query(
+            "MATCH ()-[e:KNOWS]->() WITH e AS rel \
+             RETURN id(endNode(rel)) AS i, endNode(rel).name AS t",
+        )
+        .await
+        .unwrap();
+    assert_eq!(r.rows()[0].values()[0], Value::Int(1));
+    assert_eq!(r.rows()[0].values()[1], Value::String("b".to_string()));
+}
+
+/// The whole node, not just one property — a hydration that returned an
+/// identity would still satisfy the property assertions above if the property
+/// happened to be the only one materialised.
+#[tokio::test]
+async fn the_whole_start_node_after_a_with_carries_its_properties() {
+    let db = fixture().await;
+    let r = db
+        .session()
+        .query("MATCH ()-[e:KNOWS]->() WITH e AS rel RETURN startNode(rel) AS s")
+        .await
+        .unwrap();
+    match &r.rows()[0].values()[0] {
+        Value::Node(n) => {
+            assert_eq!(n.labels, vec!["P".to_string()]);
+            assert_eq!(
+                n.properties.get("name"),
+                Some(&Value::String("a".to_string()))
+            );
+        }
+        other => panic!("expected a Node, got {other:?}"),
+    }
+}
+
+/// No traversal binding exists here at all: `r` is an element of a path's
+/// relationship list, so there is no endpoint *variable* anywhere to resolve to.
+/// This is the shape carrying an endpoint through `relationships(path)` that
+/// projection widening could never have reached.
+#[tokio::test]
+async fn start_node_of_a_relationship_taken_from_a_path() {
+    let db = fixture().await;
+    let r = db
+        .session()
+        .query(
+            "MATCH p = ()-[:KNOWS]->() WITH relationships(p)[0] AS r \
+             RETURN startNode(r).name AS s, endNode(r).name AS t",
+        )
         .await
         .unwrap();
     assert_eq!(r.rows()[0].values()[0], Value::String("a".to_string()));
+    assert_eq!(r.rows()[0].values()[1], Value::String("b".to_string()));
+}
+
+/// LDBC IC14's shape, reduced: the relationship is a *list comprehension*
+/// variable over `relationships(path)`, so the endpoint has to be materialised
+/// per element and stay aligned with the element it belongs to.
+#[tokio::test]
+async fn start_node_inside_a_list_comprehension_over_a_paths_relationships() {
+    let db = fixture().await;
+    let r = db
+        .session()
+        .query(
+            "MATCH p = ()-[:KNOWS]->() WITH relationships(p) AS rels \
+             RETURN [x IN rels | startNode(x).name] AS s, \
+                    [x IN rels | endNode(x).name] AS t",
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        r.rows()[0].values()[0],
+        Value::List(vec![Value::String("a".to_string())])
+    );
+    assert_eq!(
+        r.rows()[0].values()[1],
+        Value::List(vec![Value::String("b".to_string())])
+    );
+}
+
+/// An undirected hop files the edge under both endpoints, so the traversal walks
+/// it once from each end. `startNode` is a fact about the relationship, not about
+/// how it was matched, so both rows must agree — and they must agree *after* a
+/// `WITH`, where the `_fwd` rewrite no longer applies and the hydration reads
+/// `_src` off the relationship instead.
+#[tokio::test]
+async fn undirected_start_node_after_a_with_is_the_same_on_both_rows() {
+    let db = fixture().await;
+    let r = db
+        .session()
+        .query("MATCH ()-[e:KNOWS]-() WITH e AS rel RETURN startNode(rel).name AS s")
+        .await
+        .unwrap();
+    let names: Vec<Value> = r.rows().iter().map(|x| x.values()[0].clone()).collect();
+    assert_eq!(names.len(), 2, "the edge is walked from each end");
+    assert_eq!(
+        names,
+        vec![
+            Value::String("a".to_string()),
+            Value::String("a".to_string())
+        ],
+        "startNode is the edge's stored tail on both rows"
+    );
+}
+
+/// The relationship *value* an undirected match yields must also describe the
+/// edge the way it is stored.
+///
+/// This failed independently of `startNode`: the edge struct took `_src`/`_dst`
+/// from the traversal's own source and target, which for an undirected hop are
+/// whichever end the row matched from. The same edge came back as `a->b` on one
+/// row and `b->a` on the other, with no error — a fabricated relationship.
+#[tokio::test]
+async fn an_undirected_match_does_not_reverse_the_relationship_it_returns() {
+    let db = fixture().await;
+    let r = db
+        .session()
+        .query("MATCH ()-[e:KNOWS]-() RETURN e AS r")
+        .await
+        .unwrap();
+    let edges: Vec<(u64, u64)> = r
+        .rows()
+        .iter()
+        .map(|row| match &row.values()[0] {
+            Value::Edge(e) => (e.src.as_u64(), e.dst.as_u64()),
+            other => panic!("expected an Edge, got {other:?}"),
+        })
+        .collect();
+    assert_eq!(edges.len(), 2, "the edge is walked from each end");
+    assert_eq!(
+        edges,
+        vec![(0, 1), (0, 1)],
+        "the edge is a->b; matching it backwards must not report b->a"
+    );
 }
 
 /// Direction is what makes the rewrite sound, so it is worth a test of its own:
@@ -585,4 +735,109 @@ async fn schemaless_undirected_endpoints_do_not_depend_on_the_anchor() {
     assert_eq!(from_a, from_b, "endpoints changed with the anchor");
     assert_eq!(from_a[0], Value::String("a".to_string()));
     assert_eq!(from_a[1], Value::String("b".to_string()));
+}
+
+/// The hydration is an operator, so pin that it actually runs.
+///
+/// Bag-comparing the rows cannot tell "the endpoint was hydrated" from "the
+/// endpoint happened to be in scope"; only the plan shape can. Without this the
+/// operator could stop being emitted and every assertion above would still pass
+/// through the older rewrite path — which is exactly what the plan-shape gate
+/// exists to prevent.
+#[tokio::test]
+async fn the_post_with_endpoint_query_runs_the_hydration_operator() {
+    let db = fixture().await;
+    let session = db.session();
+    crate::plan_shape::assert_plan_uses(
+        &session,
+        "MATCH ()-[e:KNOWS]->() WITH e AS rel RETURN startNode(rel).name AS s",
+        "EndpointHydrateExec",
+    )
+    .await;
+}
+
+/// And that it is *not* emitted when the endpoints are still in scope — the
+/// rewrite handles those without any lookup, and paying for a batched property
+/// fetch there would be a silent regression in the common case.
+#[tokio::test]
+async fn an_in_scope_endpoint_does_not_pay_for_hydration() {
+    let db = fixture().await;
+    let session = db.session();
+    crate::plan_shape::assert_plan_avoids(
+        &session,
+        "MATCH (a)-[e:KNOWS]->(b) RETURN startNode(e).name AS s",
+        "EndpointHydrateExec",
+    )
+    .await;
+}
+
+/// LDBC SNB Interactive **IC14**, the query this issue was filed for, run in
+/// full against a miniature graph.
+///
+/// IC14 is the reason #187 mattered: it correlates a pattern comprehension with
+/// `a.id = startNode(r).id AND b.id = endNode(r).id`, where `r` is a list
+/// comprehension variable over `relationships(path)`. No endpoint variable
+/// exists anywhere in that scope, which is why carrying variables through the
+/// projection could never have reached it.
+///
+/// The fixture is deliberately tiny; the assertion is that the query *plans and
+/// executes*, and that the weight it computes reflects the one qualifying
+/// comment path rather than coming back zero because every endpoint was NULL.
+#[tokio::test]
+async fn ldbc_ic14_plans_and_executes() {
+    let db = Uni::in_memory().build().await.unwrap();
+    let tx = db.session().tx().await.unwrap();
+    for ddl in [
+        "CREATE LABEL Person (id INT)",
+        "CREATE LABEL Comment (id INT)",
+        "CREATE LABEL Post (id INT)",
+        "CREATE EDGE TYPE KNOWS FROM Person TO Person",
+        "CREATE EDGE TYPE HAS_CREATOR FROM Comment TO Person",
+        "CREATE EDGE TYPE REPLY_OF FROM Comment TO Post",
+    ] {
+        tx.execute(ddl).await.unwrap();
+    }
+    tx.execute("CREATE (:Person {id:1}), (:Person {id:2})")
+        .await
+        .unwrap();
+    tx.execute("MATCH (a:Person {id:1}), (b:Person {id:2}) CREATE (a)-[:KNOWS]->(b)")
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+
+    let query = "
+MATCH path = allShortestPaths((person1:Person { id: 1 })-[:KNOWS*0..]-(person2:Person { id: 2 }))
+WITH collect(path) as paths
+UNWIND paths as path
+WITH path, relationships(path) as rels_in_path
+WITH
+    [n in nodes(path) | n.id ] as personIdsInPath,
+    [r in rels_in_path |
+        reduce(w=0.0, v in [
+            (a:Person)<-[:HAS_CREATOR]-(:Comment)-[:REPLY_OF]->(:Post)-[:HAS_CREATOR]->(b:Person)
+            WHERE
+                (a.id = startNode(r).id and b.id=endNode(r).id) OR (a.id=endNode(r).id and b.id=startNode(r).id)
+            | 1.0] | w+v)
+    ] as weight1
+WITH
+    personIdsInPath,
+    reduce(w=0.0,v in weight1| w+v) as w1
+RETURN personIdsInPath, w1 AS pathWeight
+ORDER BY pathWeight desc";
+
+    let r = db
+        .session()
+        .query(query)
+        .await
+        .expect("IC14 must plan and execute");
+    assert!(!r.rows().is_empty(), "IC14 returned no rows");
+    assert_eq!(
+        r.columns(),
+        &["personIdsInPath".to_string(), "pathWeight".to_string()]
+    );
+    // The shortest path is person1 -> person2, so the id list is [1, 2].
+    assert_eq!(
+        r.rows()[0].values()[0],
+        Value::List(vec![Value::Int(1), Value::Int(2)])
+    );
 }

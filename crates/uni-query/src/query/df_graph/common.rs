@@ -544,7 +544,7 @@ impl EntityPropertyCache {
         Ok(cache)
     }
 
-    fn vertex(&self, vid: uni_common::core::id::Vid) -> Option<&uni_common::Properties> {
+    pub(crate) fn vertex(&self, vid: uni_common::core::id::Vid) -> Option<&uni_common::Properties> {
         self.vertices.get(&vid)
     }
 
