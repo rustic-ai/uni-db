@@ -281,7 +281,7 @@ other would hide the discrepancy.
 | 2.1 cooperative deadlines | done |
 | 2.2 `max_query_memory` (#185) | done |
 | 3 column pruning (#184) | the `UNWIND`-source case fixed; **not re-run at SF1** |
-| 4.1 `startNode`/`endNode` (#187) | directed and undirected fixed (#188 closed); the post-`WITH` shape open (#187) |
+| 4.1 `startNode`/`endNode` (#187) | done — directed, undirected (#188), and post-`WITH` (#187) all closed |
 | 4.2 whole entity from a comprehension | done; map values and map projections fixed (#189 closed) |
 | 4.3 `COLLECT { }` | done — and `COUNT { }`, which this plan did not list as broken |
 | 5.1 is `index_scans` wired? | **answered**: `docs/perf/index-scan-counter-2026-08-27.md` |
@@ -341,12 +341,9 @@ consulted an index. That is the gate on 5.2–5.4, not effort.
 
 ### Open, with issues
 
-- #192 — `resolve_flat_column_properties` handles 5 of 27 `Expr` variants behind
-  a catch-all. Filed 2026-08-28 as hardening, **with no user-visible repro**.
-- #184 — the `UNWIND`-source allocation is gone; there is still no general
-  column-pruning pass, and the unbounded `MutableArrayData` allocation is
-  untouched. **Unverified at SF1.**
-- #175 — the `nearest()` reporting gap above.
+Superseded — **Status — 2026-08-28** at the end of this document is the single
+current list. The narrative sections between here and there record how each item
+was closed; they are kept for the reasoning, not for the status.
 
 ## Closed since — 2026-08-28
 
@@ -518,13 +515,19 @@ the items now open did not exist when it was written and one of them is a silent
 wrong answer.
 
 ```
-PR 3  #190 UNION over a traversal-bound entity      (silent wrong answer)
-PR 4  #191 struct parity scan vs traversal          (likely the same root cause)
-PR 5  #187 startNode after a WITH                   (projection widening)
+PR 3  #190 UNION over a traversal-bound entity      DONE
+PR 4  #191 struct parity scan vs traversal          DONE
+PR 5  #187 startNode after a WITH                   DONE  (not by widening)
 PR 6  #175 vector/FTS reporting        P0 gate first
 PR 7  #184 spike: catch-all removal + SF1 re-run + design doc
       #192 folded into PR 7's catch-all sweep
 ```
+
+PRs 3 to 5 landed. Two of the three closed by a mechanism other than the one
+written below, and #191 turned out **not** to share a root cause with #190 — the
+conditional scope in the notes that follow was written for a shared cause that
+did not materialise. Those notes are kept as the reasoning they were, not as a
+description of what happened; the sections after them record that.
 
 ### PR 3 — #190, first
 
@@ -589,7 +592,7 @@ idea instead of two.
 Both are exhaustiveness work with no known user-visible symptom, which is why
 neither justifies a PR of its own and why neither should be sold as a bug fix.
 
-### What this round should be read as evidence for
+### What the #189/#188 round was evidence for
 
 Two of the three newly-open items were found by trying to write a failing test
 for something already recorded as harmless. Neither would have been found by
@@ -679,13 +682,6 @@ The property assertion matters more than it looks: an encoding round-trip that
 dropped properties would still produce `Value::Node`, so the test asserts
 label *and* property (`P:a`, `Q:q1`) rather than node-ness.
 
-### Still open after this round
-
-- #184 — no general column-pruning pass; unverified at SF1.
-- #187 — `startNode` after a `WITH`.
-- #175 — the `nearest()` reporting gap.
-- #192 — the `resolve_flat_column_properties` catch-all, folded into #184.
-
 ### #187 — the injection, not the endpoint pass
 
 Closed 2026-08-28, and the diagnosis in this document was wrong twice over.
@@ -756,8 +752,61 @@ undirected match can catch it, and #188's endpoint tests go through the `_fwd`
 rewrite rather than through the edge struct. Two paths to the same fact, one
 tested.
 
-### Open after this round
+## Status — 2026-08-28
 
-- #184 — no general column-pruning pass; unverified at SF1.
-- #175 — the `nearest()` reporting gap.
-- #192 — the `resolve_flat_column_properties` catch-all, folded into #184.
+The single current list. Everything above this point is narrative.
+
+### Closed
+
+| item | what it turned out to be |
+|---|---|
+| #186 | not traversals at all — every `P…` string parsed as a duration, collapsing the sort key |
+| #185 | `max_query_memory` measured only the finished result set |
+| #187 | argument injection naming columns a `WITH` had dropped — not the endpoint pass, and not a silent NULL |
+| #188 | orientation the adjacency computed and discarded; surfaced as `_fwd` |
+| #189 | the container was innocent; the leaf chose its column from the wrong translation context |
+| #190 | no `Union` or `Distinct` arm in the projection-order extractor, so result columns were guessed from sorted row keys |
+| #191 | `_all_props` pushed unconditionally on the scan path, conditionally on the schema'd traversal path — plus a branch-width mismatch |
+| #193 | undirected hops built the edge struct from the traversal's source, reporting the same edge reversed on half the rows |
+
+Gates on the current tip: `fmt`, workspace `clippy --all-targets -D warnings`,
+workspace suite 6693/6693, openCypher TCK 3925/3925.
+
+**LDBC IC14 plans and executes.** It was the stated reason #187 mattered, and it
+is the only one of these verified against the real query text rather than a
+reduction of it.
+
+### Open
+
+| item | state | gate |
+|---|---|---|
+| #175 | vector/FTS index consultation is unreported | **P0 probe first.** If `partitions_searched` cannot separate ANN from a brute-force scan with a scalar prefilter, do not wire the counter — record that on the issue and stop. |
+| #184 | no general column-pruning pass; the unbounded `MutableArrayData` allocation is untouched | **Unverified at SF1.** The `UNWIND`-source case is fixed; the bench has not been re-run. |
+| #192 | `resolve_flat_column_properties` covers 5 of 27 `Expr` variants behind a catch-all | Folded into #184's sweep. Still **no user-visible repro** across 16 probed shapes. |
+| Track 0 | differential oracle | Not started; blocked on infrastructure, not code. |
+| Wave 5.2–5.5 | comprehension hoisting, anchoring, latency, decorrelation | Gated on #175: until the `nearest()` path reports, latency work cannot attribute anything. |
+
+### What this round is evidence for
+
+Three of the eight closed above were **silent wrong answers** — #186, #190 and
+#193. The rest failed loudly: #187, #189 and #191 raised planner errors, #185
+was a limit that did not limit, and #188 was a rewrite that resolved to the
+wrong endpoint only once its `#[ignore]` came off.
+
+Separately, and more usefully: **#190, #191 and #193 were all found by probing
+something this document had already recorded as harmless or absent** — not by a
+failing test. The suite was green before and after each. That is a fact about
+how they were discovered rather than how bad they were, and it is the reason
+this section exists.
+
+Twice a defect was written off as an acceptable loud error and had to be
+reopened: `CASE` over two entities, and two labels through a `UNION`. Both times
+the tell was the same, and worth naming so it is recognisable next time — a
+sentence that identifies the mechanism precisely and then declines to apply it.
+Naming a fix that specifically is evidence it is cheap, not evidence it is out
+of scope.
+
+The lesson this document keeps re-learning, now from three directions: a claim
+of "not observable" is bounded by the paths actually probed, in exactly the way
+a green TCK is bounded by the shapes it contains
+(`docs/testing/single-shape-coverage-2026-08-27.md`).
