@@ -33,6 +33,7 @@ pub mod order_by_flow_test;
 pub mod order_by_sort_key_test;
 pub mod path_property_access;
 pub mod pattern_comprehension_column_order_test;
+pub mod pattern_comprehension_entity_test;
 pub mod pattern_predicate_in_projection_test;
 pub mod prepared_query_test;
 pub mod procedure_call_df_test;

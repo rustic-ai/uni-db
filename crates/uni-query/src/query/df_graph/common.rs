@@ -581,7 +581,7 @@ impl EdgeAppendCtx<'_> {
     /// endpoint sibling), and the adjacency probe identifies a flushed edge's
     /// type as a by-product of locating it but never runs for a resident one.
     /// Consulting both is what keeps `_type_name` correct across a flush.
-    fn type_name(&self, eid: Eid, probed_type_id: Option<u32>) -> String {
+    pub(crate) fn type_name(&self, eid: Eid, probed_type_id: Option<u32>) -> String {
         if let Some(name) = uni_store::runtime::l0_visibility::get_edge_type(eid, self.query_ctx) {
             return name;
         }
