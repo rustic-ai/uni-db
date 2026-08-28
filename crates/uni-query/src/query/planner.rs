@@ -2798,7 +2798,22 @@ impl QueryPlanner {
     ///
     /// `vars` lists variable names already in scope before this query executes
     /// (e.g., from an enclosing Locy rule body).
+    ///
+    /// Every logical plan this crate hands out is produced here, so this is
+    /// where a rewrite that the plan is not *valid* without belongs — as
+    /// opposed to `rewrite_for_fork_fusion` and `fuse_create_set`, which need
+    /// live storage state and only forfeit an optimisation when skipped, and so
+    /// are applied by the API layer. `resolve_traversal_endpoints` is of the
+    /// first kind: eight call sites construct a plan from Cypher and each one
+    /// that skipped it would fail `startNode(r)` over a MATCH-bound
+    /// relationship rather than merely plan it worse.
     pub fn plan_with_scope(&self, query: Query, vars: Vec<String>) -> Result<LogicalPlan> {
+        Ok(resolve_traversal_endpoints(
+            self.plan_with_scope_unresolved(query, vars)?,
+        ))
+    }
+
+    fn plan_with_scope_unresolved(&self, query: Query, vars: Vec<String>) -> Result<LogicalPlan> {
         // Apply query rewrites before planning
         let rewritten_query = crate::query::rewrite::rewrite_query(query)?;
         // M5 follow-up #5: function-call rewrite via ReplacementScanProvider.
@@ -10568,6 +10583,385 @@ fn set_map_property(props: &mut Option<Expr>, prop: &str, value: Expr) -> bool {
             true
         }
         Some(_) => false,
+    }
+}
+
+/// Resolve `startNode(r)` / `endNode(r)` to the node variable the traversal that
+/// bound `r` already has in scope.
+///
+/// A relationship bound by a MATCH traversal has no whole-entity column: the
+/// traversal produces `r._eid` and `r._type` and nothing else, so the
+/// `startnode`/`endnode` UDF — which expects the relationship value as its first
+/// argument — plans against a bare `r` column that does not exist and the query
+/// fails with `Schema error: No field named r` (#187). The endpoint VIDs are not
+/// on the edge columns either; what *is* available is the traversal's own
+/// `source_variable` and `target_variable`, which are exactly the two nodes the
+/// functions have to return.
+///
+/// So the resolution is static. For a single-hop traversal with a known
+/// direction, `startNode(r)` is the variable bound at the relationship's tail and
+/// `endNode(r)` the one at its head — reversed when the traversal runs against
+/// the arrow. Rewriting to that variable makes the endpoint an ordinary variable
+/// reference, which is worth more than making the UDF work: this pass runs before
+/// `collect_properties_from_plan`, so `startNode(r).name` narrows to the single
+/// column `n.name` instead of materialising the whole endpoint entity.
+///
+/// Deliberately **not** rewritten, each falling through to the UDF unchanged:
+/// - undirected patterns (`-[r]-`), where which end is the start is a per-row
+///   fact the plan cannot know;
+/// - variable-length and quantified patterns, where the step variable holds a
+///   *list* of relationships rather than one;
+/// - a relationship that reaches the call any other way — bound by
+///   `MERGE`/`CREATE`, or carried in a list through `UNWIND`/`collect` — where a
+///   whole-entity column genuinely exists and the UDF path already works.
+///
+/// A binding stops being usable where its endpoints stop being projected, so at
+/// each `Project` the map is narrowed to the relationships whose two endpoints
+/// both survive, following bare-variable renames (`WITH n AS m`). `UNWIND` over a
+/// name drops that name's binding for the same reason.
+///
+/// Idempotent: a rewritten plan holds no `startNode`/`endNode` call over a
+/// traversal-bound relationship, so a second run changes nothing.
+#[must_use]
+pub fn resolve_traversal_endpoints(plan: LogicalPlan) -> LogicalPlan {
+    let mut endpoints = HashMap::new();
+    resolve_endpoints_node(plan, &mut endpoints)
+}
+
+/// The node variables a traversal binds at the two ends of its relationship.
+#[derive(Clone, Debug)]
+struct TraversalEndpoints {
+    /// Bound at the relationship's tail — what `startNode` returns.
+    start: String,
+    /// Bound at the relationship's head — what `endNode` returns.
+    end: String,
+}
+
+/// Pair a traversal's source/target variables with the relationship's ends.
+///
+/// `Direction::Incoming` means the traversal walks against the arrow, so the
+/// traversal's *target* is the relationship's tail. `Direction::Both` is
+/// unresolvable at plan time and yields `None`.
+fn endpoints_for_direction(
+    direction: &Direction,
+    source_variable: &str,
+    target_variable: &str,
+) -> Option<TraversalEndpoints> {
+    match direction {
+        Direction::Outgoing => Some(TraversalEndpoints {
+            start: source_variable.to_string(),
+            end: target_variable.to_string(),
+        }),
+        Direction::Incoming => Some(TraversalEndpoints {
+            start: target_variable.to_string(),
+            end: source_variable.to_string(),
+        }),
+        Direction::Both => None,
+    }
+}
+
+/// Replace every `startNode(r)`/`endNode(r)` over a known relationship with the
+/// endpoint variable, leaving every other call untouched.
+fn rewrite_endpoint_calls(expr: Expr, endpoints: &HashMap<String, TraversalEndpoints>) -> Expr {
+    if let Expr::FunctionCall { name, args, .. } = &expr
+        && args.len() == 1
+        && let Expr::Variable(rel) = &args[0]
+        && let Some(bound) = endpoints.get(rel)
+    {
+        let lowered = name.to_ascii_lowercase();
+        if lowered == "startnode" {
+            return Expr::Variable(bound.start.clone());
+        }
+        if lowered == "endnode" {
+            return Expr::Variable(bound.end.clone());
+        }
+    }
+    expr.map_children(&mut |child| rewrite_endpoint_calls(child, endpoints))
+}
+
+/// Apply [`rewrite_endpoint_calls`] through an `Option<Expr>`.
+fn rewrite_endpoint_calls_opt(
+    expr: Option<Expr>,
+    endpoints: &HashMap<String, TraversalEndpoints>,
+) -> Option<Expr> {
+    expr.map(|e| rewrite_endpoint_calls(e, endpoints))
+}
+
+/// Drop every binding that names `variable`, which is about to be rebound.
+fn invalidate_binding(endpoints: &mut HashMap<String, TraversalEndpoints>, variable: &str) {
+    endpoints
+        .retain(|rel, bound| rel != variable && bound.start != variable && bound.end != variable);
+}
+
+/// Narrow the bindings to those whose relationship and both endpoints survive a
+/// projection, renaming through bare-variable aliases (`WITH n AS m`).
+fn narrow_endpoints_through_projection(
+    endpoints: &mut HashMap<String, TraversalEndpoints>,
+    projections: &[(Expr, Option<String>)],
+) {
+    // `WITH *` / `RETURN *` forwards the whole scope, so nothing is lost.
+    if projections.iter().any(|(e, _)| matches!(e, Expr::Wildcard)) {
+        return;
+    }
+    // Variable -> the names it is visible under above this projection. A dotted
+    // name is a property access that survived an earlier transform, not a
+    // whole-entity passthrough.
+    let mut visible_as: HashMap<&str, String> = HashMap::new();
+    for (expr, alias) in projections {
+        if let Expr::Variable(v) = expr
+            && !v.contains('.')
+        {
+            visible_as
+                .entry(v.as_str())
+                .or_insert_with(|| alias.clone().unwrap_or_else(|| v.clone()));
+        }
+    }
+    let narrowed: HashMap<String, TraversalEndpoints> = endpoints
+        .iter()
+        .filter_map(|(rel, bound)| {
+            let rel_out = visible_as.get(rel.as_str())?;
+            let start = visible_as.get(bound.start.as_str())?;
+            let end = visible_as.get(bound.end.as_str())?;
+            Some((
+                rel_out.clone(),
+                TraversalEndpoints {
+                    start: start.clone(),
+                    end: end.clone(),
+                },
+            ))
+        })
+        .collect();
+    *endpoints = narrowed;
+}
+
+/// The relationship binding a traversal contributes, when it is a single hop in
+/// a known direction. Anything else — a variable-length step variable holding a
+/// list, an undirected pattern, an unnamed relationship — contributes nothing.
+fn single_hop_binding(
+    direction: &Direction,
+    source_variable: &str,
+    target_variable: &str,
+    step_variable: Option<&String>,
+    is_variable_length: bool,
+    min_hops: usize,
+    max_hops: usize,
+) -> Option<(String, TraversalEndpoints)> {
+    let step = step_variable?;
+    if is_variable_length || min_hops != 1 || max_hops != 1 {
+        return None;
+    }
+    let bound = endpoints_for_direction(direction, source_variable, target_variable)?;
+    Some((step.clone(), bound))
+}
+
+/// Rewrite one node, then update `endpoints` to what is in scope above it.
+///
+/// `endpoints` is threaded in/out: on entry it holds the bindings visible from
+/// below, on return the bindings visible to this node's parent.
+fn resolve_endpoints_node(
+    plan: LogicalPlan,
+    endpoints: &mut HashMap<String, TraversalEndpoints>,
+) -> LogicalPlan {
+    match plan {
+        // A traversal both carries expressions of its own and contributes the
+        // binding every rewrite above it depends on.
+        plan @ (LogicalPlan::Traverse { .. } | LogicalPlan::TraverseMainByType { .. }) => {
+            let mut plan = plan.map_input(|input| resolve_endpoints_node(input, endpoints));
+            let binding = match &mut plan {
+                LogicalPlan::Traverse {
+                    direction,
+                    source_variable,
+                    target_variable,
+                    step_variable,
+                    is_variable_length,
+                    min_hops,
+                    max_hops,
+                    target_filter,
+                    edge_filter_expr,
+                    ..
+                }
+                | LogicalPlan::TraverseMainByType {
+                    direction,
+                    source_variable,
+                    target_variable,
+                    step_variable,
+                    is_variable_length,
+                    min_hops,
+                    max_hops,
+                    target_filter,
+                    edge_filter_expr,
+                    ..
+                } => {
+                    *target_filter = rewrite_endpoint_calls_opt(target_filter.take(), endpoints);
+                    *edge_filter_expr =
+                        rewrite_endpoint_calls_opt(edge_filter_expr.take(), endpoints);
+                    single_hop_binding(
+                        direction,
+                        source_variable,
+                        target_variable,
+                        step_variable.as_ref(),
+                        *is_variable_length,
+                        *min_hops,
+                        *max_hops,
+                    )
+                }
+                _ => None,
+            };
+            if let Some((step, bound)) = binding {
+                endpoints.insert(step, bound);
+            }
+            plan
+        }
+        LogicalPlan::Filter {
+            input,
+            predicate,
+            optional_variables,
+        } => {
+            let input = Box::new(resolve_endpoints_node(*input, endpoints));
+            LogicalPlan::Filter {
+                input,
+                predicate: rewrite_endpoint_calls(predicate, endpoints),
+                optional_variables,
+            }
+        }
+        LogicalPlan::Project { input, projections } => {
+            let input = Box::new(resolve_endpoints_node(*input, endpoints));
+            let projections: Vec<(Expr, Option<String>)> = projections
+                .into_iter()
+                .map(|(expr, alias)| (rewrite_endpoint_calls(expr, endpoints), alias))
+                .collect();
+            narrow_endpoints_through_projection(endpoints, &projections);
+            LogicalPlan::Project { input, projections }
+        }
+        LogicalPlan::Sort { input, order_by } => {
+            let input = Box::new(resolve_endpoints_node(*input, endpoints));
+            let order_by = order_by
+                .into_iter()
+                .map(|item| SortItem {
+                    expr: rewrite_endpoint_calls(item.expr, endpoints),
+                    ascending: item.ascending,
+                })
+                .collect();
+            LogicalPlan::Sort { input, order_by }
+        }
+        LogicalPlan::Aggregate {
+            input,
+            group_by,
+            aggregates,
+        } => {
+            let input = Box::new(resolve_endpoints_node(*input, endpoints));
+            let group_by: Vec<Expr> = group_by
+                .into_iter()
+                .map(|expr| rewrite_endpoint_calls(expr, endpoints))
+                .collect();
+            let aggregates = aggregates
+                .into_iter()
+                .map(|expr| rewrite_endpoint_calls(expr, endpoints))
+                .collect();
+            // Only the grouping keys survive an aggregation, so a binding
+            // outlives it on exactly the terms a projection would give it.
+            let surviving: Vec<(Expr, Option<String>)> =
+                group_by.iter().map(|e| (e.clone(), None)).collect();
+            narrow_endpoints_through_projection(endpoints, &surviving);
+            LogicalPlan::Aggregate {
+                input,
+                group_by,
+                aggregates,
+            }
+        }
+        LogicalPlan::Window {
+            input,
+            window_exprs,
+        } => {
+            let input = Box::new(resolve_endpoints_node(*input, endpoints));
+            let window_exprs = window_exprs
+                .into_iter()
+                .map(|expr| rewrite_endpoint_calls(expr, endpoints))
+                .collect();
+            LogicalPlan::Window {
+                input,
+                window_exprs,
+            }
+        }
+        LogicalPlan::Unwind {
+            input,
+            expr,
+            variable,
+        } => {
+            let input = Box::new(resolve_endpoints_node(*input, endpoints));
+            let expr = rewrite_endpoint_calls(expr, endpoints);
+            invalidate_binding(endpoints, &variable);
+            LogicalPlan::Unwind {
+                input,
+                expr,
+                variable,
+            }
+        }
+        LogicalPlan::Delete {
+            input,
+            items,
+            detach,
+        } => {
+            let input = Box::new(resolve_endpoints_node(*input, endpoints));
+            let items = items
+                .into_iter()
+                .map(|expr| rewrite_endpoint_calls(expr, endpoints))
+                .collect();
+            LogicalPlan::Delete {
+                input,
+                items,
+                detach,
+            }
+        }
+        // Each branch is its own scope, and nothing a branch binds is reliably
+        // addressable above the union, so the outer scope keeps only what it
+        // arrived with.
+        LogicalPlan::Union { left, right, all } => {
+            let outer = endpoints.clone();
+            let mut left_scope = outer.clone();
+            let left = Box::new(resolve_endpoints_node(*left, &mut left_scope));
+            let mut right_scope = outer.clone();
+            let right = Box::new(resolve_endpoints_node(*right, &mut right_scope));
+            *endpoints = outer;
+            LogicalPlan::Union { left, right, all }
+        }
+        // A cross join concatenates two disjoint sets of variables, so both
+        // sides' bindings are addressable above it.
+        LogicalPlan::CrossJoin { left, right } => {
+            let left = Box::new(resolve_endpoints_node(*left, endpoints));
+            let right = Box::new(resolve_endpoints_node(*right, endpoints));
+            LogicalPlan::CrossJoin { left, right }
+        }
+        // The subquery sees the outer bindings but does not export its own.
+        LogicalPlan::Apply {
+            input,
+            subquery,
+            input_filter,
+        } => {
+            let input = Box::new(resolve_endpoints_node(*input, endpoints));
+            let input_filter = rewrite_endpoint_calls_opt(input_filter, endpoints);
+            let mut inner = endpoints.clone();
+            let subquery = Box::new(resolve_endpoints_node(*subquery, &mut inner));
+            LogicalPlan::Apply {
+                input,
+                subquery,
+                input_filter,
+            }
+        }
+        LogicalPlan::SubqueryCall { input, subquery } => {
+            let input = Box::new(resolve_endpoints_node(*input, endpoints));
+            let mut inner = endpoints.clone();
+            let subquery = Box::new(resolve_endpoints_node(*subquery, &mut inner));
+            LogicalPlan::SubqueryCall { input, subquery }
+        }
+        LogicalPlan::Explain { plan } => LogicalPlan::Explain {
+            plan: Box::new(resolve_endpoints_node(*plan, endpoints)),
+        },
+        // Everything else either carries no expression that can name a
+        // relationship endpoint or is a leaf. `map_input` still walks the single
+        // child, so a traversal underneath is reached and a rewrite above it
+        // still fires.
+        other => other.map_input(|input| resolve_endpoints_node(input, endpoints)),
     }
 }
 

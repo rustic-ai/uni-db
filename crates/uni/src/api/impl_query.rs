@@ -456,6 +456,12 @@ impl crate::api::UniInner {
     /// invariant, any planner call site that skips it makes fork-local indexes
     /// silently stop fusing. `fuse_create_set` follows it. Centralised here so
     /// the pair cannot drift apart across the call sites in this file.
+    ///
+    /// Rewrites a plan is not *valid* without do not belong here — this helper
+    /// is one of eight places a plan is built from Cypher, and the other seven
+    /// would silently skip them. Those live at the end of
+    /// `QueryPlanner::plan_with_scope`, which every one of the eight goes
+    /// through.
     fn plan_and_rewrite(
         &self,
         planner: &uni_query::QueryPlanner,
