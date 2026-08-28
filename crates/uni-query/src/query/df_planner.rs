@@ -713,6 +713,9 @@ impl HybridPhysicalPlanner {
         // Resolve WITH-passthrough markers: narrow forwarded entities to the
         // properties actually accessed downstream (issue #134 family).
         apply_passthrough_reconciliation(&logical_rewritten, &mut all_properties);
+        // Record which UNWIND sources are dead so `plan_unwind` can stop
+        // carrying them past the operator that consumed them (#184).
+        crate::query::planner::mark_dead_unwind_sources(&logical_rewritten, &mut all_properties);
 
         // Delegate to internal planning with properties context
         self.plan_internal(&logical_rewritten, &all_properties)
@@ -735,6 +738,7 @@ impl HybridPhysicalPlanner {
             all_properties.entry(var).or_default().extend(props);
         }
         apply_passthrough_reconciliation(&logical_rewritten, &mut all_properties);
+        crate::query::planner::mark_dead_unwind_sources(&logical_rewritten, &mut all_properties);
         self.plan_internal(&logical_rewritten, &all_properties)
     }
 
@@ -1948,7 +1952,24 @@ impl HybridPhysicalPlanner {
         // Recursively plan the input
         let input_plan = self.plan_internal(&input, all_properties)?;
 
-        let unwind = GraphUnwindExec::new(input_plan, expr, variable, self.params.clone());
+        // Drop the source list when the planner proved nothing above reads it.
+        // Without this the list rides through every operator above, and a
+        // traversal replicates it once per fan-out row (#184).
+        let drop_source = match &expr {
+            Expr::Variable(name) => all_properties
+                .get(crate::query::planner::DEAD_UNWIND_SOURCES_KEY)
+                .filter(|dead| dead.contains(name))
+                .map(|_| name.clone()),
+            _ => None,
+        };
+
+        let unwind = GraphUnwindExec::new_dropping_source(
+            input_plan,
+            expr,
+            variable,
+            self.params.clone(),
+            drop_source.as_deref(),
+        );
 
         Ok(Arc::new(unwind))
     }

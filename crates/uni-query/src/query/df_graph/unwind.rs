@@ -74,6 +74,10 @@ pub struct GraphUnwindExec {
     /// Output schema.
     schema: SchemaRef,
 
+    /// Input column indices carried into the output, in order. Anything not
+    /// listed belongs to a consumed UNWIND source and is dropped.
+    kept: Vec<usize>,
+
     /// Cached plan properties.
     properties: Arc<PlanProperties>,
 
@@ -105,10 +109,45 @@ impl GraphUnwindExec {
         variable: impl Into<String>,
         params: HashMap<String, Value>,
     ) -> Self {
-        let variable = variable.into();
+        Self::new_dropping_source(input, expr, variable, params, None)
+    }
 
-        // Build output schema: input schema + new variable column
-        let schema = Self::build_schema(input.schema(), &variable, &expr);
+    /// [`Self::new`], additionally dropping the source variable's columns from
+    /// the output when the planner has proven nothing above reads them.
+    ///
+    /// `UNWIND xs AS x` consumes `xs`, but every input column is copied
+    /// forward — and copied again *per fan-out row* by any traversal above. A
+    /// collected list of *n* entities is therefore re-materialised `rows × n`
+    /// times in the stream's `build_output_batch` `take` over the input columns,
+    /// which is the allocation that aborts the process on LDBC IC6/IC9 at SF1
+    /// (#184).
+    /// Dropping the column here is the whole fix: the list has already been
+    /// expanded into rows, so nothing downstream can want it back.
+    ///
+    /// Liveness is decided in the planner, not here — see
+    /// `mark_dead_unwind_sources`, which refuses the rewrite for `RETURN *`,
+    /// for a list unwound more than once, and for a non-variable source.
+    pub fn new_dropping_source(
+        input: Arc<dyn ExecutionPlan>,
+        expr: Expr,
+        variable: impl Into<String>,
+        params: HashMap<String, Value>,
+        drop_source: Option<&str>,
+    ) -> Self {
+        let variable = variable.into();
+        let input_schema = input.schema();
+
+        // Input column indices that survive into the output. The bare column
+        // and any dotted columns the variable owns both go, so an entity list
+        // does not leave `xs._vid` behind.
+        let kept: Vec<usize> = (0..input_schema.fields().len())
+            .filter(|&i| {
+                let name = input_schema.field(i).name();
+                drop_source.is_none_or(|src| name != src && !name.starts_with(&format!("{src}.")))
+            })
+            .collect();
+
+        let schema = Self::build_schema(&input_schema, &kept, &variable, &expr);
         let properties = compute_plan_properties(schema.clone());
 
         Self {
@@ -117,6 +156,7 @@ impl GraphUnwindExec {
             variable,
             params,
             schema,
+            kept,
             properties,
             metrics: ExecutionPlanMetricsSet::new(),
         }
@@ -176,8 +216,16 @@ impl GraphUnwindExec {
     /// Uses type inference on the UNWIND expression to emit natively-typed
     /// columns when possible. Falls back to JSON-encoded `Utf8` for
     /// heterogeneous or non-inferrable expressions.
-    fn build_schema(input_schema: SchemaRef, variable: &str, expr: &Expr) -> SchemaRef {
-        let mut fields: Vec<Arc<Field>> = input_schema.fields().to_vec();
+    fn build_schema(
+        input_schema: &SchemaRef,
+        kept: &[usize],
+        variable: &str,
+        expr: &Expr,
+    ) -> SchemaRef {
+        let mut fields: Vec<Arc<Field>> = kept
+            .iter()
+            .map(|&i| Arc::clone(&input_schema.fields()[i]))
+            .collect();
 
         let type_info = Self::infer_element_type(expr);
 
@@ -254,6 +302,7 @@ impl ExecutionPlan for GraphUnwindExec {
             expr: self.expr.clone(),
             params: self.params.clone(),
             schema: Arc::clone(&self.schema),
+            kept: self.kept.clone(),
             metrics,
         }))
     }
@@ -276,6 +325,9 @@ struct GraphUnwindStream {
 
     /// Output schema.
     schema: SchemaRef,
+
+    /// Input column indices carried into the output; see `GraphUnwindExec`.
+    kept: Vec<usize>,
 
     /// Metrics.
     metrics: BaselineMetrics,
@@ -561,9 +613,12 @@ impl GraphUnwindStream {
         let indices_array = UInt64Array::from(indices);
 
         // Expand input columns
-        let mut columns: Vec<ArrayRef> = Vec::new();
-        for col in input.columns() {
-            let expanded = take(col.as_ref(), &indices_array, None)?;
+        // Expand only the surviving input columns. Skipping a dropped column
+        // skips its `take`, which is the point: that `take` is what replicated
+        // a whole collected list onto every fan-out row.
+        let mut columns: Vec<ArrayRef> = Vec::with_capacity(self.kept.len() + 1);
+        for &i in &self.kept {
+            let expanded = take(input.column(i).as_ref(), &indices_array, None)?;
             columns.push(expanded);
         }
 
@@ -783,7 +838,12 @@ mod tests {
 
         // Variable reference -> falls back to JSON-encoded Utf8
         let expr = Expr::Variable("some_list".to_string());
-        let output_schema = GraphUnwindExec::build_schema(input_schema, "item", &expr);
+        let output_schema = GraphUnwindExec::build_schema(
+            &input_schema,
+            &(0..input_schema.fields().len()).collect::<Vec<_>>(),
+            "item",
+            &expr,
+        );
 
         assert_eq!(output_schema.fields().len(), 3);
         assert_eq!(output_schema.field(0).name(), "n._vid");
@@ -813,7 +873,12 @@ mod tests {
             Expr::Literal(CypherLiteral::Bool(false)),
             Expr::Literal(CypherLiteral::Null),
         ]);
-        let output_schema = GraphUnwindExec::build_schema(input_schema, "a", &expr);
+        let output_schema = GraphUnwindExec::build_schema(
+            &input_schema,
+            &(0..input_schema.fields().len()).collect::<Vec<_>>(),
+            "a",
+            &expr,
+        );
 
         let field = output_schema.field(1);
         assert_eq!(field.name(), "a");
@@ -834,7 +899,12 @@ mod tests {
             Expr::Literal(CypherLiteral::Integer(2)),
             Expr::Literal(CypherLiteral::Integer(3)),
         ]);
-        let output_schema = GraphUnwindExec::build_schema(input_schema, "x", &expr);
+        let output_schema = GraphUnwindExec::build_schema(
+            &input_schema,
+            &(0..input_schema.fields().len()).collect::<Vec<_>>(),
+            "x",
+            &expr,
+        );
 
         let field = output_schema.field(1);
         assert_eq!(field.name(), "x");
@@ -854,7 +924,12 @@ mod tests {
             Expr::Literal(CypherLiteral::Float(1.5)),
             Expr::Literal(CypherLiteral::Float(2.5)),
         ]);
-        let output_schema = GraphUnwindExec::build_schema(input_schema, "x", &expr);
+        let output_schema = GraphUnwindExec::build_schema(
+            &input_schema,
+            &(0..input_schema.fields().len()).collect::<Vec<_>>(),
+            "x",
+            &expr,
+        );
 
         let field = output_schema.field(1);
         assert_eq!(field.name(), "x");
@@ -874,7 +949,12 @@ mod tests {
             Expr::Literal(CypherLiteral::String("hello".to_string())),
             Expr::Literal(CypherLiteral::String("world".to_string())),
         ]);
-        let output_schema = GraphUnwindExec::build_schema(input_schema, "x", &expr);
+        let output_schema = GraphUnwindExec::build_schema(
+            &input_schema,
+            &(0..input_schema.fields().len()).collect::<Vec<_>>(),
+            "x",
+            &expr,
+        );
 
         let field = output_schema.field(1);
         assert_eq!(field.name(), "x");
@@ -895,7 +975,12 @@ mod tests {
             Expr::Literal(CypherLiteral::Integer(1)),
             Expr::Literal(CypherLiteral::String("hello".to_string())),
         ]);
-        let output_schema = GraphUnwindExec::build_schema(input_schema, "x", &expr);
+        let output_schema = GraphUnwindExec::build_schema(
+            &input_schema,
+            &(0..input_schema.fields().len()).collect::<Vec<_>>(),
+            "x",
+            &expr,
+        );
 
         let field = output_schema.field(1);
         assert_eq!(field.name(), "x");
@@ -944,6 +1029,8 @@ mod tests {
                 Expr::Literal(CypherLiteral::Integer(3)),
             ]),
             params: HashMap::new(),
+            // These fixtures feed a one-column input and keep it.
+            kept: vec![0],
             schema: Arc::new(Schema::new(vec![
                 Field::new("n._vid", DataType::UInt64, false),
                 Field::new("x", DataType::Utf8, true),
@@ -999,6 +1086,8 @@ mod tests {
                 ),
             ]),
             params: HashMap::new(),
+            // These fixtures feed a one-column input and keep it.
+            kept: vec![0],
             schema: Arc::new(Schema::new(vec![
                 Field::new("n._vid", DataType::UInt64, false),
                 Field::new("x", DataType::LargeBinary, true),
@@ -1056,6 +1145,8 @@ mod tests {
             input: Box::pin(empty_stream),
             expr: prop_expr.clone(),
             params: HashMap::new(),
+            // These fixtures feed a one-column input and keep it.
+            kept: vec![0],
             schema: Arc::new(Schema::new(vec![
                 Field::new("n._vid", DataType::UInt64, false),
                 Field::new("x", DataType::LargeBinary, true),
@@ -1109,6 +1200,8 @@ mod tests {
             input: Box::pin(empty_stream),
             expr: expr.clone(),
             params: HashMap::new(),
+            // This harness only evaluates an expression; no column is dropped.
+            kept: (0..schema.fields().len()).collect(),
             schema,
             metrics: BaselineMetrics::new(&ExecutionPlanMetricsSet::new(), 0),
         };

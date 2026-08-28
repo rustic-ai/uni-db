@@ -58,6 +58,14 @@ pub(crate) const WITH_PASSTHROUGH_SENTINEL: &str = "__with_passthrough__";
 /// Recorded by [`collect_properties_from_plan`] during the same complete plan
 /// walk that gathers properties — so alias discovery is guaranteed complete —
 /// and consumed and removed by [`reconcile_passthrough_properties`]. Never
+/// Reserved key in the collected-properties map holding the UNWIND source
+/// variables that nothing else in the plan reads.
+///
+/// Not a Cypher variable: the leading and trailing double underscores keep it
+/// out of the namespace user variables live in, the same trick the sentinels
+/// below use for property names.
+pub(crate) const DEAD_UNWIND_SOURCES_KEY: &str = "__dead_unwind_sources__";
+
 /// reaches scan planning.
 pub(crate) const ALIAS_OF_PREFIX: &str = "__alias_of__";
 
@@ -2253,6 +2261,65 @@ impl LogicalPlan {
             | LogicalPlan::LocyProject { input, .. }
             | LogicalPlan::LocyModelInvoke { input, .. } => Some(input),
             _ => None,
+        }
+    }
+
+    /// This node's child plans, in evaluation order.
+    ///
+    /// The immutable counterpart to [`Self::input_mut`], widened to the
+    /// multi-child variants so a read-only survey can reach every node. A
+    /// missing arm here silently hides a subtree from any analysis built on it,
+    /// so the single-input list is kept identical to `input_mut`'s.
+    fn children(&self) -> Vec<&LogicalPlan> {
+        match self {
+            LogicalPlan::Union { left, right, .. } | LogicalPlan::CrossJoin { left, right, .. } => {
+                vec![left, right]
+            }
+            LogicalPlan::Apply {
+                input, subquery, ..
+            }
+            | LogicalPlan::SubqueryCall { input, subquery } => vec![input, subquery],
+            LogicalPlan::RecursiveCTE {
+                initial, recursive, ..
+            } => vec![initial, recursive],
+            LogicalPlan::Explain { plan } => vec![plan],
+            LogicalPlan::QuantifiedPattern {
+                input,
+                pattern_plan,
+                ..
+            } => vec![input, pattern_plan],
+            LogicalPlan::Foreach { input, body, .. } => {
+                let mut kids = vec![&**input];
+                kids.extend(body.iter());
+                kids
+            }
+            LogicalPlan::Unwind { input, .. }
+            | LogicalPlan::Traverse { input, .. }
+            | LogicalPlan::TraverseMainByType { input, .. }
+            | LogicalPlan::Filter { input, .. }
+            | LogicalPlan::Create { input, .. }
+            | LogicalPlan::CreateBatch { input, .. }
+            | LogicalPlan::Merge { input, .. }
+            | LogicalPlan::Set { input, .. }
+            | LogicalPlan::Remove { input, .. }
+            | LogicalPlan::Delete { input, .. }
+            | LogicalPlan::Sort { input, .. }
+            | LogicalPlan::Limit { input, .. }
+            | LogicalPlan::Aggregate { input, .. }
+            | LogicalPlan::Distinct { input, .. }
+            | LogicalPlan::Window { input, .. }
+            | LogicalPlan::Project { input, .. }
+            | LogicalPlan::ShortestPath { input, .. }
+            | LogicalPlan::AllShortestPaths { input, .. }
+            | LogicalPlan::BindZeroLengthPath { input, .. }
+            | LogicalPlan::BindPath { input, .. }
+            | LogicalPlan::FusedIndexScanWrapped { inner: input, .. }
+            | LogicalPlan::LocyFold { input, .. }
+            | LogicalPlan::LocyBestBy { input, .. }
+            | LogicalPlan::LocyPriority { input, .. }
+            | LogicalPlan::LocyProject { input, .. }
+            | LogicalPlan::LocyModelInvoke { input, .. } => vec![input],
+            _ => Vec::new(),
         }
     }
 
@@ -9419,6 +9486,160 @@ fn terminal_projection(plan: &LogicalPlan) -> Option<&Vec<(Expr, Option<String>)
     }
 }
 
+/// Record, under [`DEAD_UNWIND_SOURCES_KEY`], every `UNWIND` source variable
+/// that nothing else in the plan reads.
+///
+/// `UNWIND xs AS x` consumes `xs`, but the list column keeps flowing: every
+/// operator above it copies its input columns forward, and a traversal copies
+/// them once **per fan-out row**. So a collected list of *n* entities unwound
+/// and then traversed is re-materialised `rows × n` times, in
+/// `GraphUnwindStream::build_output_batch`'s `take` over the input columns —
+/// which is `rows × list_size` bytes and is the 14 TB allocation that aborts
+/// the process on LDBC SNB IC6 and IC9 at SF1 (#184). Inserting a bare `WITH f`
+/// after the `UNWIND` makes the identical query answer correctly, because the
+/// projection drops the list; this does the same thing without the user having
+/// to know.
+///
+/// Liveness is decided by absence, not by a top-down required-set walk: a
+/// source is dead when the *whole* plan, with the `UNWIND` expressions
+/// themselves blanked out, never mentions it. Re-using
+/// [`collect_properties_from_plan`] for that is the point — it is the
+/// exhaustive walker this crate already maintains, so a plan variant added
+/// later cannot quietly escape the analysis and leave a live column pruned.
+///
+/// Three deliberate refusals, each of which would otherwise be a wrong answer
+/// rather than a slow query:
+///
+/// - **`RETURN *` / `WITH *`.** A wildcard names nothing, so absence proves
+///   nothing. Any wildcard anywhere and the whole analysis stands down.
+/// - **A source unwound more than once.** Blanking removes every `UNWIND`
+///   expression at once, so two `UNWIND xs` nodes would each look unreferenced
+///   by the other. Only a source used by exactly one is considered.
+/// - **A non-variable source.** `UNWIND range(1,10) AS i` has no column to
+///   drop; only a bare variable is a candidate.
+pub(crate) fn mark_dead_unwind_sources(
+    plan: &LogicalPlan,
+    properties: &mut HashMap<String, HashSet<String>>,
+) {
+    let mut sources: HashMap<String, usize> = HashMap::new();
+    let mut saw_wildcard = false;
+    survey_unwind_sources(plan, &mut sources, &mut saw_wildcard);
+    if saw_wildcard || sources.is_empty() {
+        return;
+    }
+
+    let blanked = blank_unwind_sources(plan.clone());
+    let referenced = collect_properties_from_plan(&blanked);
+
+    let dead: HashSet<String> = sources
+        .into_iter()
+        .filter(|(name, uses)| *uses == 1 && !is_read_anywhere(&referenced, name))
+        .map(|(name, _)| name)
+        .collect();
+    if !dead.is_empty() {
+        properties.insert(DEAD_UNWIND_SOURCES_KEY.to_string(), dead);
+    }
+}
+
+/// True when the collected map records an actual *read* of `name`.
+///
+/// Presence in the map is not enough. `WITH collect(x) AS xs` records
+/// `xs → __alias_of__collect(x)` on the alias, which is provenance for
+/// `reconcile_passthrough_properties` — a note about where `xs` came *from*,
+/// not evidence that anyone consumes it. Counting that as a read makes every
+/// collected list look live, which is exactly the case #184 is about. A genuine
+/// read leaves a property name, a `*`, or a passthrough sentinel.
+fn is_read_anywhere(referenced: &HashMap<String, HashSet<String>>, name: &str) -> bool {
+    referenced
+        .get(name)
+        .is_some_and(|props| props.iter().any(|p| !p.starts_with(ALIAS_OF_PREFIX)))
+}
+
+/// Count `UNWIND` sources that are bare variables, and notice any wildcard.
+fn survey_unwind_sources(
+    plan: &LogicalPlan,
+    sources: &mut HashMap<String, usize>,
+    saw_wildcard: &mut bool,
+) {
+    if let LogicalPlan::Unwind { expr, .. } = plan
+        && let Expr::Variable(name) = expr
+        && !name.contains('.')
+    {
+        *sources.entry(name.clone()).or_insert(0) += 1;
+    }
+    // Only a projection that *is* a wildcard — `RETURN *` / `WITH *`. Not a
+    // wildcard nested inside an expression: `count(*)` carries an
+    // `Expr::Wildcard` argument and names nothing extra, so treating it as one
+    // would disable pruning for essentially every aggregate query, including
+    // the LDBC shapes this exists for.
+    if let LogicalPlan::Project { projections, .. } = plan
+        && projections.iter().any(|(e, _)| matches!(e, Expr::Wildcard))
+    {
+        *saw_wildcard = true;
+    }
+    for child in plan.children() {
+        survey_unwind_sources(child, sources, saw_wildcard);
+    }
+}
+
+/// Replace each `UNWIND`'s source expression with a null literal, so the only
+/// remaining mentions of a source variable are genuine other readers.
+fn blank_unwind_sources(plan: LogicalPlan) -> LogicalPlan {
+    match plan {
+        LogicalPlan::Unwind {
+            input,
+            expr,
+            variable,
+        } => {
+            let expr = if matches!(&expr, Expr::Variable(v) if !v.contains('.')) {
+                Expr::Literal(CypherLiteral::Null)
+            } else {
+                expr
+            };
+            LogicalPlan::Unwind {
+                input: Box::new(blank_unwind_sources(*input)),
+                expr,
+                variable,
+            }
+        }
+        LogicalPlan::Union { left, right, all } => LogicalPlan::Union {
+            left: Box::new(blank_unwind_sources(*left)),
+            right: Box::new(blank_unwind_sources(*right)),
+            all,
+        },
+        LogicalPlan::CrossJoin { left, right } => LogicalPlan::CrossJoin {
+            left: Box::new(blank_unwind_sources(*left)),
+            right: Box::new(blank_unwind_sources(*right)),
+        },
+        LogicalPlan::Apply {
+            input,
+            subquery,
+            input_filter,
+        } => LogicalPlan::Apply {
+            input: Box::new(blank_unwind_sources(*input)),
+            subquery: Box::new(blank_unwind_sources(*subquery)),
+            input_filter,
+        },
+        LogicalPlan::SubqueryCall { input, subquery } => LogicalPlan::SubqueryCall {
+            input: Box::new(blank_unwind_sources(*input)),
+            subquery: Box::new(blank_unwind_sources(*subquery)),
+        },
+        LogicalPlan::RecursiveCTE {
+            cte_name,
+            initial,
+            recursive,
+        } => LogicalPlan::RecursiveCTE {
+            cte_name,
+            initial: Box::new(blank_unwind_sources(*initial)),
+            recursive: Box::new(blank_unwind_sources(*recursive)),
+        },
+        LogicalPlan::Explain { plan } => LogicalPlan::Explain {
+            plan: Box::new(blank_unwind_sources(*plan)),
+        },
+        other => other.map_input(blank_unwind_sources),
+    }
+}
+
 /// Recursively walk the LogicalPlan tree and collect all property references.
 fn collect_properties_recursive(
     plan: &LogicalPlan,
@@ -11932,5 +12153,188 @@ mod fts_tokenizer_option_tests {
             }
             other => panic!("expected Analyzer, got {other:?}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod dead_unwind_source_tests {
+    use super::*;
+
+    /// `WITH collect(x) AS xs UNWIND xs AS f …`, with `body` above the UNWIND.
+    ///
+    /// The lower projection is a bare-variable passthrough of the aggregate's
+    /// output column, which is the shape the real planner produces and the one
+    /// that matters: it records `xs → __alias_of__collect(friend)`, so a
+    /// liveness test based on mere presence in the properties map calls `xs`
+    /// live and prunes nothing.
+    fn collect_unwind_plan(body: Vec<(Expr, Option<String>)>) -> LogicalPlan {
+        let collected = LogicalPlan::Project {
+            input: Box::new(LogicalPlan::Empty),
+            projections: vec![(
+                Expr::Variable("collect(friend)".to_string()),
+                Some("xs".to_string()),
+            )],
+        };
+        let unwound = LogicalPlan::Unwind {
+            input: Box::new(collected),
+            expr: Expr::Variable("xs".to_string()),
+            variable: "f".to_string(),
+        };
+        LogicalPlan::Project {
+            input: Box::new(unwound),
+            projections: body,
+        }
+    }
+
+    fn dead(plan: &LogicalPlan) -> HashSet<String> {
+        let mut properties = HashMap::new();
+        mark_dead_unwind_sources(plan, &mut properties);
+        properties
+            .get(DEAD_UNWIND_SOURCES_KEY)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn a_collected_list_is_dead_once_unwind_has_consumed_it() {
+        // Only `f` is read above, so the list must not ride through (#184).
+        let plan = collect_unwind_plan(vec![(Expr::Variable("f".to_string()), None)]);
+        assert!(dead(&plan).contains("xs"), "xs should be prunable");
+    }
+
+    #[test]
+    fn a_list_still_returned_is_not_dead() {
+        let plan = collect_unwind_plan(vec![
+            (Expr::Variable("f".to_string()), None),
+            (Expr::Variable("xs".to_string()), None),
+        ]);
+        assert!(
+            !dead(&plan).contains("xs"),
+            "xs is returned, so pruning it would lose a column"
+        );
+    }
+
+    #[test]
+    fn a_property_read_of_the_list_keeps_it() {
+        let plan = collect_unwind_plan(vec![(
+            Expr::FunctionCall {
+                name: "size".to_string(),
+                args: vec![Expr::Variable("xs".to_string())],
+                distinct: false,
+                window_spec: None,
+            },
+            Some("n".to_string()),
+        )]);
+        assert!(!dead(&plan).contains("xs"), "size(xs) reads xs");
+    }
+
+    #[test]
+    fn a_wildcard_anywhere_stands_the_analysis_down() {
+        // `RETURN *` names nothing, so absence from the map proves nothing.
+        let plan = collect_unwind_plan(vec![(Expr::Wildcard, None)]);
+        assert!(
+            dead(&plan).is_empty(),
+            "a wildcard must disable pruning entirely"
+        );
+    }
+
+    #[test]
+    fn a_list_unwound_twice_is_not_pruned() {
+        // Blanking removes both UNWIND expressions at once, so each would look
+        // unreferenced by the other. Only a single use is safe.
+        let inner = collect_unwind_plan(vec![(Expr::Variable("f".to_string()), None)]);
+        let plan = LogicalPlan::Unwind {
+            input: Box::new(inner),
+            expr: Expr::Variable("xs".to_string()),
+            variable: "g".to_string(),
+        };
+        assert!(
+            !dead(&plan).contains("xs"),
+            "two UNWINDs over one list must not prune it"
+        );
+    }
+
+    #[test]
+    fn a_non_variable_source_has_no_column_to_drop() {
+        let plan = LogicalPlan::Project {
+            input: Box::new(LogicalPlan::Unwind {
+                input: Box::new(LogicalPlan::Empty),
+                expr: Expr::List(vec![Expr::Literal(CypherLiteral::Integer(1))]),
+                variable: "i".to_string(),
+            }),
+            projections: vec![(Expr::Variable("i".to_string()), None)],
+        };
+        assert!(dead(&plan).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod dead_unwind_wildcard_tests {
+    use super::*;
+
+    /// `count(*)` must not read as `RETURN *`.
+    ///
+    /// Both carry an `Expr::Wildcard`, but only the bare projection widens the
+    /// scope. Recursing into expressions to find one made every aggregate query
+    /// opt out of pruning — including LDBC IC6, whose final clause is a
+    /// `count`.
+    #[test]
+    fn count_star_is_not_a_wildcard_projection() {
+        let collected = LogicalPlan::Project {
+            input: Box::new(LogicalPlan::Empty),
+            projections: vec![(
+                Expr::Variable("collect(friend)".to_string()),
+                Some("xs".to_string()),
+            )],
+        };
+        let unwound = LogicalPlan::Unwind {
+            input: Box::new(collected),
+            expr: Expr::Variable("xs".to_string()),
+            variable: "f".to_string(),
+        };
+        let plan = LogicalPlan::Project {
+            input: Box::new(unwound),
+            projections: vec![(
+                Expr::FunctionCall {
+                    name: "count".to_string(),
+                    args: vec![Expr::Wildcard],
+                    distinct: false,
+                    window_spec: None,
+                },
+                Some("c".to_string()),
+            )],
+        };
+        let mut properties = HashMap::new();
+        mark_dead_unwind_sources(&plan, &mut properties);
+        assert!(
+            properties
+                .get(DEAD_UNWIND_SOURCES_KEY)
+                .is_some_and(|d| d.contains("xs")),
+            "count(*) must not stand the analysis down"
+        );
+    }
+
+    /// A bare `RETURN *` still does.
+    #[test]
+    fn a_bare_wildcard_projection_still_stands_it_down() {
+        let collected = LogicalPlan::Project {
+            input: Box::new(LogicalPlan::Empty),
+            projections: vec![(
+                Expr::Variable("collect(friend)".to_string()),
+                Some("xs".to_string()),
+            )],
+        };
+        let unwound = LogicalPlan::Unwind {
+            input: Box::new(collected),
+            expr: Expr::Variable("xs".to_string()),
+            variable: "f".to_string(),
+        };
+        let plan = LogicalPlan::Project {
+            input: Box::new(unwound),
+            projections: vec![(Expr::Wildcard, None)],
+        };
+        let mut properties = HashMap::new();
+        mark_dead_unwind_sources(&plan, &mut properties);
+        assert!(!properties.contains_key(DEAD_UNWIND_SOURCES_KEY));
     }
 }
