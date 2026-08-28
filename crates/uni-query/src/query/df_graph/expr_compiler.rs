@@ -468,6 +468,16 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
                 }
             }
 
+            // The other two members of the subquery family. They reach here
+            // rather than the aggregate machinery because they are scalar
+            // subqueries, evaluated once per outer row.
+            Expr::CountSubquery(query) => {
+                self.compile_scalar_subquery(query, SubqueryResult::Count)
+            }
+            Expr::CollectSubquery(query) => {
+                self.compile_scalar_subquery(query, SubqueryResult::Collect)
+            }
+
             // FunctionCall wrapping a custom expression (e.g. size(comprehension))
             // A coalesce that mixes a raw-`Bytes` arg with a non-raw, non-null one:
             // rewrite to an explicit CASE whose THEN/ELSE values are CypherValue-
@@ -881,16 +891,38 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
         )
     }
 
-    /// Compile EXISTS subquery expression.
+    /// Compile an `EXISTS { … }` subquery expression.
     fn compile_exists(&self, query: &Query) -> Result<Arc<dyn PhysicalExpr>> {
-        // 7.1: Validate no mutation clauses in EXISTS body
+        self.compile_scalar_subquery(query, SubqueryResult::Exists)
+    }
+
+    /// Compile `EXISTS { … }` / `COUNT { … }` / `COLLECT { … }`.
+    ///
+    /// All three are per-row scalar subqueries over the same body and differ
+    /// only in what they report, so they share one operator. `COUNT` and
+    /// `COLLECT` used to be classified as *aggregates* by the AST, which routed
+    /// them into the planner's aggregate list where the physical planner
+    /// expects an `Expr::FunctionCall`; every such query died with `Expected
+    /// aggregate function, got: CountSubquery(…)`. `EXISTS` was never
+    /// classified that way, which is the only reason it worked.
+    fn compile_scalar_subquery(
+        &self,
+        query: &Query,
+        mode: SubqueryResult,
+    ) -> Result<Arc<dyn PhysicalExpr>> {
+        let form = match mode {
+            SubqueryResult::Exists => "EXISTS",
+            SubqueryResult::Count => "COUNT",
+            SubqueryResult::Collect => "COLLECT",
+        };
+        // A subquery in an expression position cannot write.
         if has_mutation_clause(query) {
             return Err(anyhow!(
-                "SyntaxError: InvalidClauseComposition - EXISTS subquery cannot contain updating clauses"
+                "SyntaxError: InvalidClauseComposition - {form} subquery cannot contain updating clauses"
             ));
         }
 
-        let err = |dep: &str| anyhow!("EXISTS requires {}", dep);
+        let err = |dep: &str| anyhow!("{form} requires {}", dep);
 
         let graph_ctx = self
             .graph_ctx
@@ -905,6 +937,7 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
 
         Ok(Arc::new(ExistsExecExpr::new(
             query.clone(),
+            mode,
             graph_ctx,
             session_ctx,
             storage,
@@ -1163,6 +1196,9 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
                 Self::contains_custom_expr(l) || Self::contains_custom_expr(r)
             }
             Expr::Exists { .. } => true,
+            // Same reason as EXISTS: a per-row subquery has no DataFusion
+            // translation and must be compiled as a custom physical expression.
+            Expr::CountSubquery(_) | Expr::CollectSubquery(_) => true,
             Expr::LabelCheck { expr, .. } => Self::contains_custom_expr(expr),
             _ => false,
         }
@@ -2388,8 +2424,27 @@ impl PhysicalExpr for StructFieldAccessExpr {
 /// NOT EXISTS is handled by the caller wrapping this in a NOT expression.
 /// Nested EXISTS works because `execute_subplan` creates a full planner that
 /// handles nested EXISTS recursively.
+/// What a per-row scalar subquery reports about its result set.
+///
+/// `EXISTS { … }`, `COUNT { … }` and `COLLECT { … }` differ only in this:
+/// each plans the same body, runs it once per outer row, and then asks a
+/// different question of the rows that come back. Sharing one operator is what
+/// keeps them from drifting — correlated-variable extraction, the nested
+/// runtime, and mutation rejection are subtle and were solved once for EXISTS.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum SubqueryResult {
+    /// Whether any row came back.
+    Exists,
+    /// How many rows came back.
+    Count,
+    /// The values of the single column the body returns.
+    Collect,
+}
+
 struct ExistsExecExpr {
     query: Query,
+    /// Which of the three subquery forms this is.
+    mode: SubqueryResult,
     graph_ctx: Arc<GraphExecutionContext>,
     session_ctx: Arc<RwLock<SessionContext>>,
     storage: Arc<StorageManager>,
@@ -2407,8 +2462,13 @@ impl std::fmt::Debug for ExistsExecExpr {
 }
 
 impl ExistsExecExpr {
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "mirrors the subquery's dependencies"
+    )]
     fn new(
         query: Query,
+        mode: SubqueryResult,
         graph_ctx: Arc<GraphExecutionContext>,
         session_ctx: Arc<RwLock<SessionContext>>,
         storage: Arc<StorageManager>,
@@ -2418,6 +2478,7 @@ impl ExistsExecExpr {
     ) -> Self {
         Self {
             query,
+            mode,
             graph_ctx,
             session_ctx,
             storage,
@@ -2469,7 +2530,14 @@ impl PhysicalExpr for ExistsExecExpr {
         &self,
         _input_schema: &Schema,
     ) -> datafusion::error::Result<arrow_schema::DataType> {
-        Ok(DataType::Boolean)
+        Ok(match self.mode {
+            SubqueryResult::Exists => DataType::Boolean,
+            SubqueryResult::Count => DataType::Int64,
+            // The same item type the pattern-comprehension fallback produces,
+            // so a list from `COLLECT { … }` decodes exactly like one from
+            // `[(a)-[:R]->(x) | x]`.
+            SubqueryResult::Collect => DataType::LargeList(comprehension_item_field()),
+        })
     }
 
     fn nullable(&self, _input_schema: &Schema) -> datafusion::error::Result<bool> {
@@ -2481,7 +2549,11 @@ impl PhysicalExpr for ExistsExecExpr {
         batch: &arrow_array::RecordBatch,
     ) -> datafusion::error::Result<datafusion::physical_plan::ColumnarValue> {
         let num_rows = batch.num_rows();
-        let mut builder = BooleanBuilder::with_capacity(num_rows);
+        let mode = self.mode;
+        // Row count and, in `Collect` mode, the body's single column. Gathered
+        // rather than appended to a typed builder because the builder's type
+        // depends on the mode.
+        let mut per_row: Vec<(usize, Vec<Value>)> = Vec::with_capacity(num_rows);
 
         // 7.2: Extract entity variable names from batch schema.
         // Entity columns follow the pattern "varname._vid" (flattened) or are struct columns.
@@ -2582,8 +2654,13 @@ impl PhysicalExpr for ExistsExecExpr {
                         None, // EXISTS compile-time rejects mutations (expr_compiler:693)
                     ))?;
 
-                    let has_rows = batches.iter().any(|b| b.num_rows() > 0);
-                    builder.append_value(has_rows);
+                    let matched: usize = batches.iter().map(|b| b.num_rows()).sum();
+                    let values = if mode == SubqueryResult::Collect {
+                        collect_single_column(&batches)?
+                    } else {
+                        Vec::new()
+                    };
+                    per_row.push((matched, values));
                 }
 
                 Ok::<_, datafusion::error::DataFusionError>(())
@@ -2603,9 +2680,44 @@ impl PhysicalExpr for ExistsExecExpr {
             )));
         }
 
-        Ok(datafusion::physical_plan::ColumnarValue::Array(Arc::new(
-            builder.finish(),
-        )))
+        let array: arrow_array::ArrayRef = match self.mode {
+            SubqueryResult::Exists => {
+                let mut builder = BooleanBuilder::with_capacity(num_rows);
+                for (matched, _) in &per_row {
+                    builder.append_value(*matched > 0);
+                }
+                Arc::new(builder.finish())
+            }
+            SubqueryResult::Count => {
+                let mut builder = arrow_array::builder::Int64Builder::with_capacity(num_rows);
+                for (matched, _) in &per_row {
+                    builder.append_value(*matched as i64);
+                }
+                Arc::new(builder.finish())
+            }
+            SubqueryResult::Collect => {
+                let mut values = arrow_array::builder::LargeBinaryBuilder::new();
+                let mut offsets: Vec<i64> = Vec::with_capacity(num_rows + 1);
+                offsets.push(0);
+                let mut total: i64 = 0;
+                for (_, row_values) in &per_row {
+                    for v in row_values {
+                        values.append_value(uni_common::cypher_value_codec::encode(v));
+                        total += 1;
+                    }
+                    offsets.push(total);
+                }
+                Arc::new(arrow_array::LargeListArray::new(
+                    comprehension_item_field(),
+                    datafusion::arrow::buffer::OffsetBuffer::new(
+                        datafusion::arrow::buffer::ScalarBuffer::from(offsets),
+                    ),
+                    Arc::new(values.finish()),
+                    None,
+                ))
+            }
+        };
+        Ok(datafusion::physical_plan::ColumnarValue::Array(array))
     }
 
     fn children(&self) -> Vec<&Arc<dyn PhysicalExpr>> {
@@ -2691,6 +2803,30 @@ impl Hash for PatternComprehensionSubqueryExpr {
     fn hash<H: Hasher>(&self, state: &mut H) {
         format!("{:?}", self.query).hash(state);
     }
+}
+
+/// The values of the single column a `COLLECT { … }` body returns.
+///
+/// openCypher requires the body to end in a `RETURN` of exactly one column, so
+/// anything else is a query error rather than an arbitrary pick — silently
+/// taking the first of several would make the answer depend on column order.
+fn collect_single_column(
+    batches: &[arrow_array::RecordBatch],
+) -> datafusion::error::Result<Vec<Value>> {
+    let mut out = Vec::new();
+    for batch in batches {
+        if batch.num_columns() != 1 {
+            return Err(datafusion::error::DataFusionError::Execution(format!(
+                "COLLECT {{ … }} must return exactly one column, got {}",
+                batch.num_columns()
+            )));
+        }
+        let column = batch.column(0);
+        for row in 0..batch.num_rows() {
+            out.push(arrow_to_json_value(column, row));
+        }
+    }
+    Ok(out)
 }
 
 /// The item type of the produced list.

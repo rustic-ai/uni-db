@@ -42,6 +42,7 @@ pub mod pushdown_hydration_e2e;
 pub mod recursive_cte_execution_test;
 pub mod reduce_execution_test;
 pub mod return_expressions_test;
+pub mod scalar_subquery_test;
 pub mod start_end_node_test;
 pub mod stddev_variance_test;
 pub mod temporal_property_type_test;

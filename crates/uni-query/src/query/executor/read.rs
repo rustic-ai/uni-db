@@ -1510,9 +1510,40 @@ impl Executor {
                         "Pattern comprehensions are handled by DataFusion executor"
                     ))
                 }
-                Expr::CollectSubquery(_) => Err(anyhow::anyhow!(
-                    "COLLECT subqueries not yet supported in executor"
-                )),
+                Expr::CollectSubquery(query) => {
+                    // The twin of `CountSubquery` below: plan the body with the
+                    // current row's variables in scope so a correlated
+                    // reference resolves, run it, and gather the single column
+                    // it returns.
+                    let planner = QueryPlanner::new(this.storage.schema_manager().schema());
+                    let vars_in_scope: Vec<String> = row.keys().cloned().collect();
+                    let plan = planner
+                        .plan_with_scope(*query.clone(), vars_in_scope)
+                        .map_err(|e| anyhow!("COLLECT subquery planning failed: {e}"))?;
+
+                    let mut sub_params = params.clone();
+                    sub_params.extend(row.clone());
+                    let results = this
+                        .execute(plan, prop_manager, &sub_params)
+                        .await
+                        .map_err(|e| anyhow!("COLLECT subquery execution failed: {e}"))?;
+
+                    let mut collected = Vec::with_capacity(results.len());
+                    for mut result_row in results {
+                        // openCypher requires the body to return exactly one
+                        // column; anything else is a query error rather than an
+                        // arbitrary pick.
+                        if result_row.len() != 1 {
+                            return Err(anyhow!(
+                                "COLLECT {{ … }} must return exactly one column, got {}",
+                                result_row.len()
+                            ));
+                        }
+                        let (_, value) = result_row.drain().next().expect("one column");
+                        collected.push(value);
+                    }
+                    Ok(Value::List(collected))
+                }
                 Expr::Variable(name) => {
                     if let Some(val) = row.get(name) {
                         Ok(val.clone())

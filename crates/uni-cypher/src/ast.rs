@@ -1218,7 +1218,15 @@ impl Expr {
                             | "percentilecont"
                     ) || crate::plugin_aggregates::is_known_plugin_aggregate(name))
             }
-            Expr::CountSubquery(_) | Expr::CollectSubquery(_) => true,
+            // `COUNT { … }` and `COLLECT { … }` are **scalar subqueries**, not
+            // aggregating functions: each is evaluated once per outer row and
+            // aggregates over its own result, never over the outer one. Calling
+            // them aggregates put them in the planner's aggregate list, where
+            // the physical planner expects an `Expr::FunctionCall` and every
+            // such query died with `Expected aggregate function, got:
+            // CountSubquery(…)`. `EXISTS { … }`, the third of the family, was
+            // never classified this way and has always worked.
+            Expr::CountSubquery(_) | Expr::CollectSubquery(_) => false,
             // All other variants: recurse into direct children. `for_each_child`
             // already returns nothing for leaves (Literal/Parameter/Variable/Wildcard)
             // and skips into `Exists` — both of which used to fall through the
