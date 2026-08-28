@@ -419,8 +419,29 @@ row while an aggregate spans rows, so `CASE WHEN r._fwd THEN count(x) ELSE
 count(y) END` is not `count(CASE WHEN r._fwd THEN x ELSE y END)` — the first
 splits one group in two and undercounts.
 
-**Still unsupported, loudly:** returning the *whole* endpoint of an undirected
-relationship (`RETURN startNode(e)` under `-[e]-`) needs a `CASE` over two node
-structs, which the expression compiler cannot unify. It raises an error, and a
-test pins that it does — so if it ever starts returning a row, that has to be
-the right endpoint rather than a null-filled stand-in.
+### A wider gap underneath: `CASE` over two entities
+
+Returning the *whole* endpoint of an undirected relationship errored at first,
+and it was tempting to record that as a narrow limit of the rewrite. It was not
+one. `RETURN CASE WHEN true THEN x ELSE y END` over two node variables failed
+identically with no endpoint call anywhere in the query — a shape a user can
+write directly, broken before any of this work.
+
+`find_common_result_type` had no rule for entity structs. Two nodes are the same
+*Cypher* type without being the same *Arrow* type: the struct's fields are
+whatever the plan materialised for that variable, so a scanned anchor carrying
+`_all_props` and a traversal target without it differ by a field, and two
+different labels differ by their property columns outright. The pair matched no
+rule and fell through to the Utf8 fallback, dying on `Unsupported CAST from
+Struct(..) to Utf8`.
+
+Entity structs now coerce to CypherValue `LargeBinary`, which is already the
+codebase's universal encoding and already the answer Rule 6 gives for every
+other mixed pair. `RETURN startNode(e)` under `-[e]-` returns a node with its
+properties, across two labels as well as one.
+
+The general lesson is the one this document keeps re-learning: the first
+explanation was "the rewrite produces a shape the compiler cannot handle," which
+is true and useless. The discriminating test — the same `CASE` with no
+`startNode` in it — took one minute and moved the defect somewhere else
+entirely.

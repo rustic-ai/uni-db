@@ -451,8 +451,41 @@ pub(crate) fn find_common_result_type(
         return DataType::LargeBinary;
     }
 
-    // Rule 7: Fallback → Utf8
+    // Rule 7: All graph entities → LargeBinary (CypherValue).
+    //
+    // Two node structs are the *same* Cypher type but not the same Arrow type:
+    // the shape depends on which properties the plan materialised for each
+    // variable, so a scanned anchor carrying `_all_props` and a traversal target
+    // without it differ by a field, and two different labels differ by their
+    // property columns outright. Rule 1 only catches the case where they happen
+    // to coincide, and without this the pair falls through to the Utf8 fallback
+    // below and dies on `Unsupported CAST from Struct(..) to Utf8`.
+    //
+    // CypherValue is the encoding that already represents any entity, so it is
+    // the common type here for the same reason it is in Rule 6. This is what
+    // makes `CASE WHEN .. THEN a ELSE b END` over two node variables work at
+    // all — including `startNode(r)` over an undirected relationship, which the
+    // planner rewrites into exactly that shape.
+    if non_null_types.iter().all(|t| is_entity_struct(t)) {
+        return DataType::LargeBinary;
+    }
+
+    // Rule 8: Fallback → Utf8
     DataType::Utf8
+}
+
+/// Is this Arrow type a graph entity struct — a node or a relationship?
+///
+/// Identified by the identity field the plan always materialises for one
+/// (`_vid` for a node, `_eid` for a relationship) rather than by the full field
+/// list, which varies with the properties a given query asked for.
+fn is_entity_struct(t: &DataType) -> bool {
+    let DataType::Struct(fields) = t else {
+        return false;
+    };
+    fields
+        .iter()
+        .any(|f| f.name() == "_vid" || f.name() == "_eid")
 }
 
 /// Coerce a single CASE branch expression from `from_type` to `target_type`.

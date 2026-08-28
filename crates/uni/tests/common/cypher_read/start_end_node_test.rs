@@ -397,27 +397,122 @@ async fn aggregate_fixture() -> Uni {
     db
 }
 
-/// Returning the *whole* endpoint of an undirected relationship is not
-/// supported, and fails loudly.
+/// Returning the *whole* endpoint of an undirected relationship.
 ///
-/// The rewrite produces a `CASE` whose two branches are node structs, which the
-/// expression compiler cannot yet unify. Pinned as a test rather than left
-/// undocumented because the failure mode that matters is the other one: if this
-/// ever starts returning a row, it must return the *right* endpoint and not a
-/// null-filled stand-in. A test that asserts the error is what makes that
-/// transition visible instead of silent.
+/// This is the shape that exposed a gap wider than `startNode`: a `CASE` whose
+/// branches are two node variables did not work at all, with or without any
+/// endpoint call. `find_common_result_type` had no rule for entity structs, and
+/// two nodes are the same *Cypher* type without being the same *Arrow* type —
+/// a scanned anchor carries `_all_props` and a traversal target does not — so
+/// the pair fell through to the Utf8 fallback and died on `Unsupported CAST
+/// from Struct(..) to Utf8`.
+///
+/// Both anchors are asserted, and the properties are read rather than just the
+/// id, for the same reason as everywhere else in this file: an endpoint that
+/// resolves to the right vertex with an empty property bag is the failure this
+/// feature exists to avoid.
 #[tokio::test]
-async fn whole_endpoint_of_an_undirected_relationship_errors_rather_than_guessing() {
+async fn the_whole_endpoint_of_an_undirected_relationship_resolves() {
     let db = fixture().await;
-    let err = db
-        .session()
-        .query("MATCH (x:P)-[e:KNOWS]-(y:P) RETURN startNode(e) AS s")
+    for anchor in ["a", "b"] {
+        let r = db
+            .session()
+            .query(&format!(
+                "MATCH (x:P {{name:'{anchor}'}})-[e:KNOWS]-(y:P) \
+                 RETURN startNode(e) AS s, endNode(e) AS t"
+            ))
+            .await
+            .unwrap_or_else(|e| panic!("anchored at {anchor}: {e}"));
+        let row = r.rows()[0].values().to_vec();
+        for (value, expected) in [(&row[0], "a"), (&row[1], "b")] {
+            let Value::Node(node) = value else {
+                panic!("anchored at {anchor}: expected a node, got {value:?}");
+            };
+            assert_eq!(
+                node.properties.get("name"),
+                Some(&Value::String(expected.to_string())),
+                "anchored at {anchor}: wrong endpoint, or an endpoint with no properties"
+            );
+            assert_eq!(node.labels, vec!["P".to_string()]);
+        }
+    }
+}
+
+/// The endpoints of an undirected relationship between two *different* labels.
+///
+/// Their structs differ by real property columns, not just by `_all_props`, so
+/// this is the case a same-label fixture cannot reach: any fix that works by
+/// making the two shapes coincide would pass the test above and fail here.
+#[tokio::test]
+async fn undirected_endpoints_across_two_labels_resolve() {
+    let db = Uni::in_memory().build().await.unwrap();
+    let tx = db.session().tx().await.unwrap();
+    tx.execute("CREATE LABEL Person (name STRING)")
         .await
-        .expect_err("a CASE over two node structs is not supported yet");
-    let msg = err.to_string();
-    assert!(
-        msg.contains("Struct") || msg.contains("not implemented"),
-        "expected an unsupported-shape error, got: {msg}"
+        .unwrap();
+    tx.execute("CREATE LABEL City (title STRING, pop INT)")
+        .await
+        .unwrap();
+    tx.execute("CREATE EDGE TYPE LIVES_IN FROM Person TO City")
+        .await
+        .unwrap();
+    tx.execute("CREATE (:Person {name:'ann'}), (:City {title:'oslo', pop: 7})")
+        .await
+        .unwrap();
+    tx.execute(
+        "MATCH (p:Person {name:'ann'}), (c:City {title:'oslo'}) CREATE (p)-[:LIVES_IN]->(c)",
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+
+    // Anchored at the City end, so the traversal walks against the arrow and the
+    // relationship's tail is the *other* variable.
+    let r = db
+        .session()
+        .query("MATCH (c:City)-[e:LIVES_IN]-(p:Person) RETURN startNode(e) AS s, endNode(e) AS t")
+        .await
+        .unwrap();
+    let row = r.rows()[0].values().to_vec();
+    let Value::Node(start) = &row[0] else {
+        panic!("expected a node, got {:?}", row[0]);
+    };
+    let Value::Node(end) = &row[1] else {
+        panic!("expected a node, got {:?}", row[1]);
+    };
+    assert_eq!(start.labels, vec!["Person".to_string()]);
+    assert_eq!(
+        start.properties.get("name"),
+        Some(&Value::String("ann".to_string()))
+    );
+    assert_eq!(end.labels, vec!["City".to_string()]);
+    assert_eq!(
+        end.properties.get("title"),
+        Some(&Value::String("oslo".to_string()))
+    );
+}
+
+/// A `CASE` over two node variables, with no endpoint call involved.
+///
+/// The regression test for the underlying gap: a user can write this directly,
+/// and it failed the same way before the entity-struct coercion rule existed.
+#[tokio::test]
+async fn a_case_over_two_node_variables_resolves() {
+    let db = fixture().await;
+    let r = db
+        .session()
+        .query(
+            "MATCH (x:P {name:'a'})-[:KNOWS]->(y:P) \
+             RETURN CASE WHEN x.name = 'a' THEN y ELSE x END AS n",
+        )
+        .await
+        .unwrap();
+    let Value::Node(node) = &r.rows()[0].values()[0] else {
+        panic!("expected a node, got {:?}", r.rows()[0].values()[0]);
+    };
+    assert_eq!(
+        node.properties.get("name"),
+        Some(&Value::String("b".to_string()))
     );
 }
 
