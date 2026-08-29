@@ -13,6 +13,12 @@
 //!
 //! Being busy is a heuristic, not a guarantee. The runner still asserts every
 //! query returned rows, and that assertion is what actually protects the result.
+//!
+//! Every derivation imposes a total order (issue #208). Scan order is not
+//! deterministic, so `LIMIT` without a tie-free `ORDER BY` — or positional
+//! indexing into `collect()`, whose element order is undefined — selects
+//! different parameters on different runs against the same store, and two runs
+//! of "IC3" are then not the same query.
 
 use std::collections::HashMap;
 
@@ -46,7 +52,7 @@ pub async fn derive(db: &Uni) -> anyhow::Result<HashMap<String, Value>> {
         scalar(
             db,
             "MATCH (p:Person)-[:KNOWS]-() WITH p, count(*) AS d \
-             RETURN p.id AS id ORDER BY d DESC LIMIT 1",
+             RETURN p.id AS id ORDER BY d DESC, id LIMIT 1",
         )
         .await?,
         "a hub person",
@@ -63,7 +69,7 @@ pub async fn derive(db: &Uni) -> anyhow::Result<HashMap<String, Value>> {
             db,
             &format!(
                 "MATCH (a:Person {{id: {hub_id}}})-[:KNOWS*2..3]-(b:Person) \
-                 WHERE a <> b RETURN b.id AS id LIMIT 1"
+                 WHERE a <> b RETURN b.id AS id ORDER BY id LIMIT 1"
             ),
         )
         .await?,
@@ -79,7 +85,7 @@ pub async fn derive(db: &Uni) -> anyhow::Result<HashMap<String, Value>> {
             &format!(
                 "MATCH (a:Person {{id: {hub_id}}})-[:KNOWS*1..3]-(f:Person) \
                  WITH f.firstName AS n, count(*) AS c \
-                 RETURN n ORDER BY c DESC LIMIT 1"
+                 RETURN n ORDER BY c DESC, n LIMIT 1"
             ),
         )
         .await?,
@@ -114,7 +120,7 @@ pub async fn derive(db: &Uni) -> anyhow::Result<HashMap<String, Value>> {
         scalar(
             db,
             "MATCH (t:Tag)<-[:HAS_TAG]-() WITH t, count(*) AS c \
-             RETURN t.name AS n ORDER BY c DESC LIMIT 1",
+             RETURN t.name AS n ORDER BY c DESC, n LIMIT 1",
         )
         .await?,
         "the most-used tag",
@@ -125,7 +131,7 @@ pub async fn derive(db: &Uni) -> anyhow::Result<HashMap<String, Value>> {
         scalar(
             db,
             "MATCH (tc:TagClass)<-[:HAS_TYPE]-(t:Tag) WITH tc, count(t) AS c \
-             RETURN tc.name AS n ORDER BY c DESC LIMIT 1",
+             RETURN tc.name AS n ORDER BY c DESC, n LIMIT 1",
         )
         .await?,
         "the largest tag class",
@@ -146,6 +152,10 @@ pub async fn derive(db: &Uni) -> anyhow::Result<HashMap<String, Value>> {
     // *both*. So the pair is derived from a friend that already has that shape,
     // which makes non-emptiness structural rather than hoped for. The global
     // ranking stays as a fallback for a graph where no such friend exists.
+    // The friend is picked by lowest id, and the collected list is sorted below
+    // before taking two — `collect()` element order is undefined, so `cs[0]` /
+    // `cs[1]` would be an arbitrary (and run-varying) pair. Any two elements of
+    // `cs` satisfy the IC3 shape, so sorted-first-two is as valid as any.
     let paired = db
         .session()
         .query(&format!(
@@ -155,10 +165,23 @@ pub async fn derive(db: &Uni) -> anyhow::Result<HashMap<String, Value>> {
              WHERE c.name <> home.name \
              WITH f, collect(DISTINCT c.name) AS cs \
              WHERE size(cs) >= 2 \
-             RETURN cs[0] AS a, cs[1] AS b LIMIT 1"
+             RETURN f.id AS fid, cs ORDER BY fid LIMIT 1"
         ))
         .await?;
-    let countries = if paired.rows().is_empty() {
+    let names: Vec<String> = if let Some(row) = paired.rows().first() {
+        let mut cs: Vec<String> = row
+            .values()
+            .get(1)
+            .and_then(|v| v.as_array())
+            .map(|l| {
+                l.iter()
+                    .filter_map(|v| v.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default();
+        cs.sort_unstable();
+        cs
+    } else {
         eprintln!(
             "[ldbc] no friend of the hub posted from two countries outside their own; \
              falling back to the globally busiest pair, which may leave IC3 empty"
@@ -166,28 +189,29 @@ pub async fn derive(db: &Uni) -> anyhow::Result<HashMap<String, Value>> {
         db.session()
             .query(
                 "MATCH (c:Country)<-[:IS_LOCATED_IN]-(m:Message) \
-                 WITH c, count(m) AS n RETURN c.name AS n2 ORDER BY n DESC LIMIT 2",
+                 WITH c, count(m) AS cnt \
+                 RETURN c.name AS name ORDER BY cnt DESC, name LIMIT 2",
             )
             .await?
-    } else {
-        paired
+            .rows()
+            .iter()
+            .filter_map(|r| {
+                r.values()
+                    .first()
+                    .and_then(|v| v.as_str())
+                    .map(str::to_owned)
+            })
+            .collect()
     };
-    // The paired form returns one row of two columns; the fallback returns two
-    // rows of one. Flattening handles both.
-    let names: Vec<Value> = countries
-        .rows()
-        .iter()
-        .flat_map(|r| r.values().iter().cloned())
-        .collect();
     anyhow::ensure!(
         names.len() >= 2,
         "need two populated countries for IC3; found {}",
         names.len()
     );
-    p.insert("countryXName".to_string(), names[0].clone());
-    p.insert("countryYName".to_string(), names[1].clone());
+    p.insert("countryXName".to_string(), Value::String(names[0].clone()));
+    p.insert("countryYName".to_string(), Value::String(names[1].clone()));
     // IC11 filters on a single country.
-    p.insert("countryName".to_string(), names[0].clone());
+    p.insert("countryName".to_string(), Value::String(names[0].clone()));
 
     // A work-start year late enough that `workFrom < $workFromYear` admits rows.
     let work_year = need(
@@ -199,18 +223,28 @@ pub async fn derive(db: &Uni) -> anyhow::Result<HashMap<String, Value>> {
         Value::Int(as_i64(&work_year) + 1),
     );
 
-    // IC10 filters on birthday month; pick the most common one.
-    let month = need(
-        scalar(
-            db,
-            "MATCH (p:Person) WITH p.birthday AS b WHERE b IS NOT NULL \
-             RETURN b AS m LIMIT 1",
-        )
-        .await?,
-        "a birthday",
-    )?;
-    // `birthday` is epoch millis; month is 1-12 derived from it.
-    let month_num = epoch_ms_to_month(as_i64(&month));
+    // IC10 filters on birthday month; pick the most common one. `birthday` is
+    // epoch millis, so the modal month is computed here from all birthdays
+    // (there is no month() over an integer in Cypher); ties break toward the
+    // smaller month number.
+    let birthdays = db
+        .session()
+        .query("MATCH (p:Person) WHERE p.birthday IS NOT NULL RETURN p.birthday AS b")
+        .await?;
+    let mut by_month = [0u64; 13];
+    for row in birthdays.rows() {
+        if let Some(v) = row.values().first() {
+            by_month[epoch_ms_to_month(as_i64(v)) as usize] += 1;
+        }
+    }
+    let month_num = (1..=12i64)
+        .max_by_key(|&m| (by_month[m as usize], std::cmp::Reverse(m)))
+        .expect("static range is non-empty");
+    anyhow::ensure!(
+        by_month[month_num as usize] > 0,
+        "could not derive a birthday month from the loaded graph — the load is probably \
+         incomplete, and running with a guessed value would make the comparison vacuous"
+    );
     p.insert("month".to_string(), Value::Int(month_num));
 
     Ok(p)

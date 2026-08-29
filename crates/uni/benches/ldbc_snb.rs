@@ -20,6 +20,11 @@
 //! `std::env::temp_dir()`, and a tmpfs `/tmp` will run out of space part way
 //! through a load of this size — which now surfaces as a flush-barrier error
 //! rather than a silently half-written dataset, but still fails the run.
+//!
+//! `LDBC_DERIVE_ONLY=1` derives and prints the substitution parameters, then
+//! exits without running any query — the observation point for the parameter
+//! determinism check (issue #208). Combine with `LDBC_FROM=0` so the process
+//! runs in child mode instead of handing off to the supervisor.
 
 #![recursion_limit = "256"]
 
@@ -597,6 +602,9 @@ fn main() {
     println!("\n## Parameters\n");
     for k in names {
         println!("- `{k}` = `{:?}`", bound[k]);
+    }
+    if std::env::var("LDBC_DERIVE_ONLY").is_ok() {
+        return;
     }
 
     let mut runs: Vec<QueryRun> = Vec::new();
