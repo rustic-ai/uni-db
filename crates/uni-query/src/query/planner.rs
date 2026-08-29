@@ -66,6 +66,15 @@ pub(crate) const WITH_PASSTHROUGH_SENTINEL: &str = "__with_passthrough__";
 /// below use for property names.
 pub(crate) const DEAD_UNWIND_SOURCES_KEY: &str = "__dead_unwind_sources__";
 
+/// Key recorded when a subquery body projects `RETURN *`.
+///
+/// `mark_dead_unwind_sources` reasons from absence, so a projection that names
+/// nothing proves nothing. It already stands down for a `LogicalPlan`-level
+/// wildcard; a body-level one is the same hazard reached through the AST, and
+/// measurement confirms `RETURN *` inside a body does export outer-scope
+/// variables (a correlated `q` shows up beside the body's own bindings).
+pub(crate) const SUBQUERY_WILDCARD_KEY: &str = "__subquery_wildcard__";
+
 /// reaches scan planning.
 pub(crate) const ALIAS_OF_PREFIX: &str = "__alias_of__";
 
@@ -9600,7 +9609,9 @@ fn terminal_projection(plan: &LogicalPlan) -> Option<&Vec<(Expr, Option<String>)
 /// rather than a slow query:
 ///
 /// - **`RETURN *` / `WITH *`.** A wildcard names nothing, so absence proves
-///   nothing. Any wildcard anywhere and the whole analysis stands down.
+///   nothing. Any wildcard anywhere and the whole analysis stands down — both a
+///   `LogicalPlan::Project` wildcard and one inside a subquery body, which is
+///   AST hanging off an expression and so invisible to the plan-level survey.
 /// - **A source unwound more than once.** Blanking removes every `UNWIND`
 ///   expression at once, so two `UNWIND xs` nodes would each look unreferenced
 ///   by the other. Only a source used by exactly one is considered.
@@ -9619,6 +9630,12 @@ pub(crate) fn mark_dead_unwind_sources(
 
     let blanked = blank_unwind_sources(plan.clone());
     let referenced = collect_properties_from_plan(&blanked);
+    // A `RETURN *` in a subquery body is a wildcard the plan-level survey above
+    // cannot see, because the body is AST hanging off an expression rather than
+    // a `LogicalPlan::Project`. It names nothing, so absence proves nothing.
+    if referenced.contains_key(SUBQUERY_WILDCARD_KEY) {
+        return;
+    }
 
     let dead: HashSet<String> = sources
         .into_iter()
@@ -10226,13 +10243,16 @@ fn collect_properties_from_expr_into(
 ) {
     match expr {
         Expr::PatternComprehension {
+            pattern,
             where_clause,
             map_expr,
             ..
         } => {
-            // Collect properties from the WHERE clause and map expression.
-            // The pattern itself creates local bindings that don't need
-            // property collection from the outer scope.
+            // The pattern's *variables* are local bindings and need nothing
+            // collected. Its inline property maps and element-level WHERE
+            // clauses are a different matter — they read outer scope, and
+            // missing them let a live UNWIND source be pruned (#197).
+            collect_properties_from_pattern(pattern, properties);
             if let Some(where_expr) = where_clause {
                 collect_properties_from_expr_into(where_expr, properties);
             }
@@ -10479,11 +10499,122 @@ fn collect_properties_from_expr_into(
     }
 }
 
+/// Walk an AST pattern and collect the property references its elements carry.
+///
+/// A node or relationship pattern holds two expressions besides its label and
+/// variable — an inline property map (`(r:P {name: xs[0]})`) and an inline
+/// `WHERE` (`(r:P WHERE r.name IN xs)`) — and both can read outer-scope
+/// variables. The pattern's *variables* are local bindings and need nothing
+/// collected; its *expressions* are not.
+///
+/// Missing these is not merely pessimistic. `mark_dead_unwind_sources` proves an
+/// `UNWIND` source dead by absence, so a read it cannot see is a read that does
+/// not exist, and the source column is dropped out from under the reader
+/// (#197).
+fn collect_properties_from_pattern(
+    pattern: &Pattern,
+    properties: &mut HashMap<String, HashSet<String>>,
+) {
+    for path in &pattern.paths {
+        collect_properties_from_path_pattern(path, properties);
+    }
+}
+
+/// Walk one path of a pattern, recursing through parenthesized sub-paths.
+fn collect_properties_from_path_pattern(
+    path: &PathPattern,
+    properties: &mut HashMap<String, HashSet<String>>,
+) {
+    for element in &path.elements {
+        match element {
+            PatternElement::Node(NodePattern {
+                properties: props,
+                where_clause,
+                ..
+            })
+            | PatternElement::Relationship(RelationshipPattern {
+                properties: props,
+                where_clause,
+                ..
+            }) => {
+                if let Some(props) = props {
+                    collect_properties_from_expr_into(props, properties);
+                }
+                if let Some(where_clause) = where_clause {
+                    collect_properties_from_expr_into(where_clause, properties);
+                }
+            }
+            PatternElement::Parenthesized { pattern, .. } => {
+                collect_properties_from_path_pattern(pattern, properties);
+            }
+        }
+    }
+}
+
+/// Collect the property references carried by a list of `SET` items.
+fn collect_properties_from_set_items(
+    items: &[SetItem],
+    properties: &mut HashMap<String, HashSet<String>>,
+) {
+    for item in items {
+        match item {
+            SetItem::Property { expr, value } => {
+                collect_properties_from_expr_into(expr, properties);
+                collect_properties_from_expr_into(value, properties);
+            }
+            SetItem::Variable { value, .. } | SetItem::VariablePlus { value, .. } => {
+                collect_properties_from_expr_into(value, properties);
+            }
+            // Label mutation names a variable and literal labels, no expression.
+            SetItem::Labels { .. } => {}
+        }
+    }
+}
+
+/// Collect the property references carried by a projection list plus its
+/// `ORDER BY` / `SKIP` / `LIMIT` tail.
+fn collect_properties_from_return_items(
+    items: &[ReturnItem],
+    order_by: Option<&Vec<SortItem>>,
+    skip: Option<&Expr>,
+    limit: Option<&Expr>,
+    properties: &mut HashMap<String, HashSet<String>>,
+) {
+    for item in items {
+        match item {
+            ReturnItem::Expr { expr, .. } => collect_properties_from_expr_into(expr, properties),
+            // `RETURN *` names nothing, so it cannot be recorded as a read of
+            // anything — and that is exactly why it is dangerous to an analysis
+            // that reasons from absence. Flag it and let
+            // `mark_dead_unwind_sources` stand down.
+            ReturnItem::All => {
+                properties
+                    .entry(SUBQUERY_WILDCARD_KEY.to_string())
+                    .or_default()
+                    .insert("*".to_string());
+            }
+        }
+    }
+    for sort in order_by.into_iter().flatten() {
+        collect_properties_from_expr_into(&sort.expr, properties);
+    }
+    for expr in skip.into_iter().chain(limit) {
+        collect_properties_from_expr_into(expr, properties);
+    }
+}
+
 /// Walk a subquery (EXISTS/COUNT/COLLECT body) and collect property references.
 ///
 /// This is needed so that correlated property accesses like `a.city` inside
 /// `WHERE EXISTS { (a)-[:KNOWS]->(b) WHERE b.city = a.city }` cause the outer
 /// scan to include `a.city` in its projected columns.
+///
+/// Both matches below are **exhaustive on purpose**. For most consumers of the
+/// property map an under-report costs a wasted column; for
+/// `mark_dead_unwind_sources` it inverts — an unrecorded read is
+/// indistinguishable from no read, so the source is proven dead and deleted
+/// (#197). A new `Clause` or `Query` variant must therefore be a compile error
+/// here, not a silent gap. Do not add a `_ => {}` arm.
 fn collect_properties_from_subquery(
     query: &Query,
     properties: &mut HashMap<String, HashSet<String>>,
@@ -10491,38 +10622,96 @@ fn collect_properties_from_subquery(
     match query {
         Query::Single(stmt) => {
             for clause in &stmt.clauses {
-                match clause {
-                    Clause::Match(m) => {
-                        if let Some(ref wc) = m.where_clause {
-                            collect_properties_from_expr_into(wc, properties);
-                        }
-                    }
-                    Clause::With(w) => {
-                        for item in &w.items {
-                            if let ReturnItem::Expr { expr, .. } = item {
-                                collect_properties_from_expr_into(expr, properties);
-                            }
-                        }
-                        if let Some(ref wc) = w.where_clause {
-                            collect_properties_from_expr_into(wc, properties);
-                        }
-                    }
-                    Clause::Return(r) => {
-                        for item in &r.items {
-                            if let ReturnItem::Expr { expr, .. } = item {
-                                collect_properties_from_expr_into(expr, properties);
-                            }
-                        }
-                    }
-                    _ => {}
-                }
+                collect_properties_from_subquery_clause(clause, properties);
             }
         }
         Query::Union { left, right, .. } => {
             collect_properties_from_subquery(left, properties);
             collect_properties_from_subquery(right, properties);
         }
-        _ => {}
+        Query::Explain(inner) => collect_properties_from_subquery(inner, properties),
+        Query::TimeTravel { query, .. } => collect_properties_from_subquery(query, properties),
+        // DDL and admin commands read no query variables.
+        Query::Schema(_) => {}
+    }
+}
+
+/// Collect the property references one clause of a subquery body carries.
+///
+/// See [`collect_properties_from_subquery`] for why this match is exhaustive.
+fn collect_properties_from_subquery_clause(
+    clause: &Clause,
+    properties: &mut HashMap<String, HashSet<String>>,
+) {
+    match clause {
+        Clause::Match(m) => {
+            collect_properties_from_pattern(&m.pattern, properties);
+            if let Some(ref wc) = m.where_clause {
+                collect_properties_from_expr_into(wc, properties);
+            }
+        }
+        Clause::With(w) => {
+            collect_properties_from_return_items(
+                &w.items,
+                w.order_by.as_ref(),
+                w.skip.as_ref(),
+                w.limit.as_ref(),
+                properties,
+            );
+            if let Some(ref wc) = w.where_clause {
+                collect_properties_from_expr_into(wc, properties);
+            }
+        }
+        Clause::Return(r) => collect_properties_from_return_items(
+            &r.items,
+            r.order_by.as_ref(),
+            r.skip.as_ref(),
+            r.limit.as_ref(),
+            properties,
+        ),
+        Clause::WithRecursive(wr) => {
+            collect_properties_from_subquery(&wr.query, properties);
+            collect_properties_from_return_items(&wr.items, None, None, None, properties);
+        }
+        Clause::Unwind(u) => collect_properties_from_expr_into(&u.expr, properties),
+        Clause::Call(c) => {
+            match &c.kind {
+                CallKind::Procedure { arguments, .. } => {
+                    for arg in arguments {
+                        collect_properties_from_expr_into(arg, properties);
+                    }
+                }
+                CallKind::Subquery(inner) => collect_properties_from_subquery(inner, properties),
+            }
+            if let Some(ref wc) = c.where_clause {
+                collect_properties_from_expr_into(wc, properties);
+            }
+        }
+        // Mutation clauses cannot appear in an EXISTS/COUNT/COLLECT body today,
+        // but they are cheap to handle and must not become a silent gap if the
+        // grammar ever admits them.
+        Clause::Create(c) => collect_properties_from_pattern(&c.pattern, properties),
+        Clause::Merge(m) => {
+            collect_properties_from_pattern(&m.pattern, properties);
+            collect_properties_from_set_items(&m.on_match, properties);
+            collect_properties_from_set_items(&m.on_create, properties);
+        }
+        Clause::Set(s) => collect_properties_from_set_items(&s.items, properties),
+        Clause::Remove(r) => {
+            for item in &r.items {
+                match item {
+                    RemoveItem::Property(expr) => {
+                        collect_properties_from_expr_into(expr, properties)
+                    }
+                    RemoveItem::Labels { .. } => {}
+                }
+            }
+        }
+        Clause::Delete(d) => {
+            for expr in &d.items {
+                collect_properties_from_expr_into(expr, properties);
+            }
+        }
     }
 }
 
@@ -12669,6 +12858,199 @@ mod dead_unwind_source_tests {
             projections: vec![(Expr::Variable("i".to_string()), None)],
         };
         assert!(dead(&plan).is_empty());
+    }
+
+    // ---- #197: a read hidden inside a subquery body ----
+    //
+    // `mark_dead_unwind_sources` proves a source dead by *absence*, so any read
+    // the AST walker cannot see is a read that does not exist and the column is
+    // dropped out from under its reader. Each case below is a shape whose only
+    // read of `xs` sits somewhere the walker used to skip; all four were
+    // measured returning `{"xs"}` — wrongly dead — before the fix.
+
+    use uni_cypher::ast::{LabelExpr, UnwindClause};
+
+    /// A one-element MATCH pattern, `(r:P {name: <value>})`.
+    fn match_with_inline_property(value: Expr) -> Clause {
+        Clause::Match(MatchClause {
+            optional: false,
+            pattern: Pattern {
+                paths: vec![PathPattern {
+                    variable: None,
+                    elements: vec![PatternElement::Node(NodePattern {
+                        variable: Some("r".to_string()),
+                        labels: LabelExpr::Conjunction(vec!["P".to_string()]),
+                        properties: Some(Expr::Map(vec![("name".to_string(), value)])),
+                        where_clause: None,
+                    })],
+                    shortest_path_mode: None,
+                }],
+            },
+            where_clause: None,
+            for_update: false,
+        })
+    }
+
+    fn single(clauses: Vec<Clause>) -> Box<Query> {
+        Box::new(Query::Single(Statement { clauses }))
+    }
+
+    /// `… RETURN f, EXISTS { <body> }` above the UNWIND.
+    fn plan_with_exists_body(body: Box<Query>) -> LogicalPlan {
+        collect_unwind_plan(vec![
+            (Expr::Variable("f".to_string()), None),
+            (
+                Expr::Exists {
+                    query: body,
+                    from_pattern_predicate: false,
+                },
+                Some("e".to_string()),
+            ),
+        ])
+    }
+
+    #[test]
+    fn a_read_in_an_exists_pattern_property_map_keeps_the_list() {
+        // `EXISTS { MATCH (r:P {name: xs}) }` — the read is in the pattern, not
+        // in the clause's WHERE, so the Match arm used to walk straight past it.
+        let plan = plan_with_exists_body(single(vec![match_with_inline_property(Expr::Variable(
+            "xs".to_string(),
+        ))]));
+        assert!(
+            !dead(&plan).contains("xs"),
+            "an inline property map reads xs"
+        );
+    }
+
+    #[test]
+    fn a_read_in_a_pattern_element_where_keeps_the_list() {
+        // `EXISTS { MATCH (r WHERE xs) }` — a pattern element carries its own
+        // WHERE, distinct from the clause's.
+        let body = single(vec![Clause::Match(MatchClause {
+            optional: false,
+            pattern: Pattern {
+                paths: vec![PathPattern {
+                    variable: None,
+                    elements: vec![PatternElement::Node(NodePattern {
+                        variable: Some("r".to_string()),
+                        labels: LabelExpr::Empty,
+                        properties: None,
+                        where_clause: Some(Expr::Variable("xs".to_string())),
+                    })],
+                    shortest_path_mode: None,
+                }],
+            },
+            where_clause: None,
+            for_update: false,
+        })]);
+        assert!(
+            !dead(&plan_with_exists_body(body)).contains("xs"),
+            "a pattern-element WHERE reads xs"
+        );
+    }
+
+    #[test]
+    fn a_read_in_a_subquery_unwind_keeps_the_list() {
+        // `COUNT { UNWIND xs AS y }`. `survey_unwind_sources` walks the
+        // LogicalPlan, so an UNWIND living in an AST subquery body is invisible
+        // to it — the read has to come from this walker or from nowhere.
+        let body = single(vec![Clause::Unwind(UnwindClause {
+            expr: Expr::Variable("xs".to_string()),
+            variable: "y".to_string(),
+        })]);
+        let plan = collect_unwind_plan(vec![
+            (Expr::Variable("f".to_string()), None),
+            (Expr::CountSubquery(body), Some("c".to_string())),
+        ]);
+        assert!(!dead(&plan).contains("xs"), "the body's UNWIND reads xs");
+    }
+
+    #[test]
+    fn a_read_in_a_pattern_comprehension_property_map_keeps_the_list() {
+        // Same omission, different consumer: the comprehension arm collected
+        // its WHERE and map expression but never its pattern.
+        let plan = collect_unwind_plan(vec![
+            (Expr::Variable("f".to_string()), None),
+            (
+                Expr::PatternComprehension {
+                    path_variable: None,
+                    pattern: Pattern {
+                        paths: vec![PathPattern {
+                            variable: None,
+                            elements: vec![PatternElement::Node(NodePattern {
+                                variable: Some("b".to_string()),
+                                labels: LabelExpr::Empty,
+                                properties: Some(Expr::Map(vec![(
+                                    "tag".to_string(),
+                                    Expr::Variable("xs".to_string()),
+                                )])),
+                                where_clause: None,
+                            })],
+                            shortest_path_mode: None,
+                        }],
+                    },
+                    where_clause: None,
+                    map_expr: Box::new(Expr::Variable("b.id".to_string())),
+                },
+                Some("l".to_string()),
+            ),
+        ]);
+        assert!(
+            !dead(&plan).contains("xs"),
+            "the comprehension's pattern reads xs"
+        );
+    }
+
+    #[test]
+    fn a_read_in_an_exists_where_keeps_the_list() {
+        // The control: this arm was always handled. If it ever reports `xs`
+        // dead the walker has regressed wholesale, not just in the new arms.
+        let body = single(vec![Clause::Match(MatchClause {
+            optional: false,
+            pattern: Pattern { paths: vec![] },
+            where_clause: Some(Expr::Variable("xs".to_string())),
+            for_update: false,
+        })]);
+        assert!(
+            !dead(&plan_with_exists_body(body)).contains("xs"),
+            "a clause WHERE reads xs"
+        );
+    }
+
+    #[test]
+    fn a_wildcard_inside_a_subquery_body_stands_the_analysis_down() {
+        // `EXISTS { MATCH (r:P) RETURN * }`. The body's `*` is AST hanging off
+        // an expression, so `survey_unwind_sources` — which only inspects
+        // `LogicalPlan::Project` — cannot see it. Measured: a body `RETURN *`
+        // does export outer-scope variables, so absence proves nothing here
+        // either and the whole analysis must stand down.
+        let body = single(vec![
+            match_with_inline_property(Expr::Literal(CypherLiteral::String("b".to_string()))),
+            Clause::Return(ReturnClause {
+                distinct: false,
+                items: vec![ReturnItem::All],
+                order_by: None,
+                skip: None,
+                limit: None,
+            }),
+        ]);
+        assert!(
+            dead(&plan_with_exists_body(body)).is_empty(),
+            "a wildcard in a subquery body must disable pruning entirely"
+        );
+    }
+
+    #[test]
+    fn a_subquery_that_never_mentions_the_list_still_prunes() {
+        // The control in the other direction. Collecting more must not make
+        // *everything* look live, or #184's pruning is silently disabled.
+        let body = single(vec![match_with_inline_property(Expr::Literal(
+            CypherLiteral::String("b".to_string()),
+        ))]);
+        assert!(
+            dead(&plan_with_exists_body(body)).contains("xs"),
+            "a body that does not read xs must leave it prunable"
+        );
     }
 }
 

@@ -792,15 +792,60 @@ async fn ldbc_ic14_plans_and_executes() {
         "CREATE LABEL Comment (id INT)",
         "CREATE LABEL Post (id INT)",
         "CREATE EDGE TYPE KNOWS FROM Person TO Person",
-        "CREATE EDGE TYPE HAS_CREATOR FROM Comment TO Person",
         "CREATE EDGE TYPE REPLY_OF FROM Comment TO Post",
     ] {
         tx.execute(ddl).await.unwrap();
     }
+    tx.commit().await.unwrap();
+    // LDBC's HAS_CREATOR runs from *either* message type to a Person, which the
+    // single-source DDL form cannot express — and without the Post source the
+    // weight pattern below cannot match at all.
+    db.schema()
+        .edge_type("HAS_CREATOR", &["Comment", "Post"], &["Person"])
+        .apply()
+        .await
+        .unwrap();
+
+    let tx = db.session().tx().await.unwrap();
     tx.execute("CREATE (:Person {id:1}), (:Person {id:2})")
         .await
         .unwrap();
+    tx.execute("CREATE (:Comment {id:10}), (:Post {id:20})")
+        .await
+        .unwrap();
     tx.execute("MATCH (a:Person {id:1}), (b:Person {id:2}) CREATE (a)-[:KNOWS]->(b)")
+        .await
+        .unwrap();
+    // One qualifying weight path: comment 10 by person 1, replying to post 20,
+    // which person 2 created. That makes the pattern comprehension match with
+    // a.id = 1 and b.id = 2 — the endpoints of the KNOWS relationship `r`.
+    tx.execute("MATCH (c:Comment {id:10}), (p:Person {id:1}) CREATE (c)-[:HAS_CREATOR]->(p)")
+        .await
+        .unwrap();
+    tx.execute("MATCH (c:Comment {id:10}), (p:Post {id:20}) CREATE (c)-[:REPLY_OF]->(p)")
+        .await
+        .unwrap();
+    tx.execute("MATCH (p:Post {id:20}), (q:Person {id:2}) CREATE (p)-[:HAS_CREATOR]->(q)")
+        .await
+        .unwrap();
+    // A second, NON-qualifying comment path between two other people. The
+    // pattern matches it too, so the `WHERE` has to evaluate
+    // `a.id = startNode(r).id` for a row whose `a` and `b` are *not* the
+    // relationship's endpoints — which is the ordinary case at any real scale,
+    // and the one a single qualifying pair hides completely.
+    tx.execute("CREATE (:Person {id:3}), (:Person {id:4})")
+        .await
+        .unwrap();
+    tx.execute("CREATE (:Comment {id:11}), (:Post {id:21})")
+        .await
+        .unwrap();
+    tx.execute("MATCH (c:Comment {id:11}), (p:Person {id:3}) CREATE (c)-[:HAS_CREATOR]->(p)")
+        .await
+        .unwrap();
+    tx.execute("MATCH (c:Comment {id:11}), (p:Post {id:21}) CREATE (c)-[:REPLY_OF]->(p)")
+        .await
+        .unwrap();
+    tx.execute("MATCH (p:Post {id:21}), (q:Person {id:4}) CREATE (p)-[:HAS_CREATOR]->(q)")
         .await
         .unwrap();
     tx.commit().await.unwrap();
@@ -839,5 +884,14 @@ ORDER BY pathWeight desc";
     assert_eq!(
         r.rows()[0].values()[0],
         Value::List(vec![Value::Int(1), Value::Int(2)])
+    );
+    // The weight, which is the half that actually exercises `startNode(r)`.
+    // Without the qualifying comment path above, the pattern comprehension
+    // matches nothing, the `reduce` never evaluates its body, and this test
+    // passes without ever calling the endpoint code it exists to cover.
+    assert_eq!(
+        r.rows()[0].values()[1],
+        Value::Float(1.0),
+        "one qualifying comment path contributes weight 1.0"
     );
 }

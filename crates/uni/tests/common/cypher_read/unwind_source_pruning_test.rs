@@ -208,3 +208,112 @@ async fn count_star_does_not_disable_pruning() {
         .unwrap();
     assert_eq!(r.rows()[0].values()[0], Value::Int(2));
 }
+
+// ---- #197: a read the planner could not see, so the column was dropped ----
+//
+// `mark_dead_unwind_sources` proves the source dead by absence. A read the AST
+// walker skipped therefore looked like no read at all, and the column was
+// pruned out from under its reader. Measured before the fix, each of these
+// failed with a hard schema error ("No field named names") and answered
+// correctly the moment pruning was disabled — so the pruning, not the subquery
+// support, was the cause.
+
+/// `EXISTS { MATCH (r:P {name: …}) }` — the read lives in the pattern's inline
+/// property map, which the `Match` arm walked straight past.
+#[tokio::test]
+async fn a_list_read_in_an_exists_pattern_survives_the_unwind() {
+    let db = fixture().await;
+    let got = strings(
+        &db,
+        "MATCH (person:P {name:'a'})-[:KNOWS]->(friend:P) \
+         WITH collect(DISTINCT friend.name) AS names \
+         UNWIND names AS n \
+         MATCH (q:P) WHERE q.name = n AND EXISTS { MATCH (r:P {name: head(names)}) } \
+         RETURN q.name AS t",
+    )
+    .await;
+    assert_eq!(got, vec!["b".to_string(), "c".to_string()]);
+}
+
+/// The same read from a `RETURN` projection rather than a `WHERE`.
+#[tokio::test]
+async fn a_list_read_in_a_projected_exists_survives_the_unwind() {
+    let db = fixture().await;
+    let rows = db
+        .session()
+        .query(
+            "MATCH (person:P {name:'a'})-[:KNOWS]->(friend:P) \
+             WITH collect(DISTINCT friend.name) AS names \
+             UNWIND names AS n \
+             MATCH (q:P) WHERE q.name = n \
+             RETURN q.name AS t, EXISTS { MATCH (r:P {name: head(names)}) } AS e",
+        )
+        .await
+        .expect("the list is read inside the EXISTS body");
+    assert_eq!(rows.rows().len(), 2);
+    for row in rows.rows() {
+        assert_eq!(row.values()[1], Value::Bool(true));
+    }
+}
+
+/// `COLLECT { … }` reaches the same walker as `EXISTS`.
+#[tokio::test]
+async fn a_list_read_in_a_collect_subquery_survives_the_unwind() {
+    let db = fixture().await;
+    let rows = db
+        .session()
+        .query(
+            "MATCH (person:P {name:'a'})-[:KNOWS]->(friend:P) \
+             WITH collect(DISTINCT friend.name) AS names \
+             UNWIND names AS n \
+             MATCH (q:P) WHERE q.name = n \
+             RETURN q.name AS t, \
+                    COLLECT { MATCH (r:P {name: head(names)}) RETURN r.name } AS l",
+        )
+        .await
+        .expect("the list is read inside the COLLECT body");
+    assert_eq!(rows.rows().len(), 2);
+    for row in rows.rows() {
+        // head(names) is a single name, so exactly one P matches it.
+        match &row.values()[1] {
+            Value::List(items) => assert_eq!(items.len(), 1, "one match for head(names)"),
+            other => panic!("expected a list, got {other:?}"),
+        }
+    }
+}
+
+/// A pattern comprehension carries a pattern too, and had the identical gap.
+#[tokio::test]
+async fn a_list_read_in_a_pattern_comprehension_survives_the_unwind() {
+    let db = fixture().await;
+    let rows = db
+        .session()
+        .query(
+            "MATCH (person:P {name:'a'})-[:KNOWS]->(friend:P) \
+             WITH collect(DISTINCT friend.name) AS names \
+             UNWIND names AS n \
+             MATCH (q:P) WHERE q.name = n \
+             RETURN q.name AS t, [(x:P {name: head(names)})-[:KNOWS]->(y) | y.name] AS l",
+        )
+        .await
+        .expect("the list is read inside the comprehension's pattern");
+    assert_eq!(rows.rows().len(), 2);
+}
+
+/// A `RETURN *` inside a subquery body is a wildcard the plan-level survey
+/// cannot see, and it does export outer-scope variables — so the analysis must
+/// stand down rather than reason from absence.
+#[tokio::test]
+async fn a_wildcard_in_a_subquery_body_does_not_break_the_query() {
+    let db = fixture().await;
+    let got = strings(
+        &db,
+        "MATCH (person:P {name:'a'})-[:KNOWS]->(friend:P) \
+         WITH collect(DISTINCT friend.name) AS names \
+         UNWIND names AS n \
+         MATCH (q:P) WHERE q.name = n AND EXISTS { MATCH (r:P) RETURN * } \
+         RETURN q.name AS t",
+    )
+    .await;
+    assert_eq!(got, vec!["b".to_string(), "c".to_string()]);
+}

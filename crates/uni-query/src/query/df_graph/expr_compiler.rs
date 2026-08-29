@@ -891,10 +891,26 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
         pattern: &uni_cypher::ast::Pattern,
         where_clause: Option<&Expr>,
         map_expr: &Expr,
+        input_schema: &Schema,
     ) -> Result<Arc<dyn PhysicalExpr>> {
         use uni_cypher::ast::{Clause, MatchClause, Query, ReturnClause, ReturnItem, Statement};
 
         let err = |dep: &str| anyhow!("Pattern comprehension fallback requires {}", dep);
+
+        // `startNode(r)` resolves its endpoint by scanning the node arguments in
+        // scope, which only ever succeeds when the endpoint happens to be one of
+        // the pattern's own bindings. IC14's `WHERE` compares every matching
+        // `(a, b)` pair against the relationship's endpoints, so for all the
+        // pairs that do *not* match there is no such node and the lookup fails
+        // outright instead of evaluating false.
+        //
+        // `EndpointHydrateExec` already materialised the endpoint on the outer
+        // row, and `extract_row_params` supplies every outer column by name.
+        // Passing it in as an extra argument lets the UDF's existing vid search
+        // find it by construction, whatever the pattern bound.
+        let where_clause = where_clause.map(|w| rewrite_endpoint_calls(w.clone(), input_schema));
+        let where_clause = where_clause.as_ref();
+        let map_expr = &rewrite_endpoint_calls(map_expr.clone(), input_schema);
 
         let query = Query::Single(Statement {
             clauses: vec![
@@ -1367,8 +1383,34 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
     /// access on graph-scan variables is compiled as a direct column reference
     /// rather than an ArrayIndex UDF call, which would fail when the variable
     /// column holds a VID integer instead of a Map/Node struct.
+    ///
+    /// The match is **exhaustive on purpose** (#192). It previously covered five
+    /// of `Expr`'s 27 variants behind `other => other.clone()`, so a `Property`
+    /// nested inside a `Case`, `In`, `Map` or `ArrayIndex` kept its UDF form and
+    /// surfaced far from its cause — as `No field named x`, or as a null. A new
+    /// variant must be a compile error here, not a silently missing rewrite.
+    ///
+    /// Three groups, and the third is the one worth reading:
+    ///
+    /// - **Leaves** — nothing to rewrite.
+    /// - **Structural** — rewrite every child.
+    /// - **Scope-introducing** — a subquery body, or a comprehension body whose
+    ///   loop variable shadows the outer scope. `schema` describes the *outer*
+    ///   row, so rewriting a body against it would bind the wrong column. These
+    ///   are listed individually with that reason rather than swept into a
+    ///   wildcard. Where such a node also has an outer-scope child — the list a
+    ///   comprehension iterates, `reduce`'s initial value — that child *is*
+    ///   rewritten, because it is evaluated in the outer row.
     fn resolve_flat_column_properties(expr: &Expr, schema: &Schema) -> Expr {
+        // Shorthand for the common "rewrite this child" step.
+        let go = |e: &Expr| Box::new(Self::resolve_flat_column_properties(e, schema));
+        let go_opt = |e: &Option<Box<Expr>>| {
+            e.as_ref()
+                .map(|inner| Box::new(Self::resolve_flat_column_properties(inner, schema)))
+        };
+
         match expr {
+            // ---- the rewrite itself ----
             Expr::Property(base, prop) => {
                 if let Expr::Variable(var) = base.as_ref() {
                     let flat_col = format!("{}.{}", var, prop);
@@ -1376,17 +1418,27 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
                         return Expr::Variable(flat_col);
                     }
                 }
-                // Recurse into the base expression
-                Expr::Property(
-                    Box::new(Self::resolve_flat_column_properties(base, schema)),
-                    prop.clone(),
-                )
+                Expr::Property(go(base), prop.clone())
             }
-            Expr::BinaryOp { left, op, right } => Expr::BinaryOp {
-                left: Box::new(Self::resolve_flat_column_properties(left, schema)),
-                op: *op,
-                right: Box::new(Self::resolve_flat_column_properties(right, schema)),
-            },
+
+            // ---- leaves ----
+            Expr::Literal(_) | Expr::Parameter(_) | Expr::Variable(_) | Expr::Wildcard => {
+                expr.clone()
+            }
+
+            // ---- structural: rewrite every child ----
+            Expr::List(items) => Expr::List(
+                items
+                    .iter()
+                    .map(|i| Self::resolve_flat_column_properties(i, schema))
+                    .collect(),
+            ),
+            Expr::Map(entries) => Expr::Map(
+                entries
+                    .iter()
+                    .map(|(k, v)| (k.clone(), Self::resolve_flat_column_properties(v, schema)))
+                    .collect(),
+            ),
             Expr::FunctionCall {
                 name,
                 args,
@@ -1401,18 +1453,126 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
                 distinct: *distinct,
                 window_spec: window_spec.clone(),
             },
+            Expr::BinaryOp { left, op, right } => Expr::BinaryOp {
+                left: go(left),
+                op: *op,
+                right: go(right),
+            },
             Expr::UnaryOp { op, expr: inner } => Expr::UnaryOp {
                 op: *op,
-                expr: Box::new(Self::resolve_flat_column_properties(inner, schema)),
+                expr: go(inner),
             },
-            Expr::List(items) => Expr::List(
-                items
+            Expr::Case {
+                expr: subject,
+                when_then,
+                else_expr,
+            } => Expr::Case {
+                expr: go_opt(subject),
+                when_then: when_then
                     .iter()
-                    .map(|i| Self::resolve_flat_column_properties(i, schema))
+                    .map(|(w, t)| {
+                        (
+                            Self::resolve_flat_column_properties(w, schema),
+                            Self::resolve_flat_column_properties(t, schema),
+                        )
+                    })
                     .collect(),
-            ),
-            // For all other expression types, return as-is (literals, variables, etc.)
-            other => other.clone(),
+                else_expr: go_opt(else_expr),
+            },
+            Expr::IsNull(inner) => Expr::IsNull(go(inner)),
+            Expr::IsNotNull(inner) => Expr::IsNotNull(go(inner)),
+            Expr::IsUnique(inner) => Expr::IsUnique(go(inner)),
+            Expr::In { expr: inner, list } => Expr::In {
+                expr: go(inner),
+                list: go(list),
+            },
+            Expr::ArrayIndex { array, index } => Expr::ArrayIndex {
+                array: go(array),
+                index: go(index),
+            },
+            Expr::ArraySlice { array, start, end } => Expr::ArraySlice {
+                array: go(array),
+                start: go_opt(start),
+                end: go_opt(end),
+            },
+            Expr::ValidAt {
+                entity,
+                timestamp,
+                start_prop,
+                end_prop,
+            } => Expr::ValidAt {
+                entity: go(entity),
+                timestamp: go(timestamp),
+                start_prop: start_prop.clone(),
+                end_prop: end_prop.clone(),
+            },
+            Expr::MapProjection { base, items } => Expr::MapProjection {
+                base: go(base),
+                items: items
+                    .iter()
+                    .map(|item| match item {
+                        uni_cypher::ast::MapProjectionItem::LiteralEntry(k, v) => {
+                            uni_cypher::ast::MapProjectionItem::LiteralEntry(k.clone(), go(v))
+                        }
+                        // `.prop`, `.*` and a bare variable name no expression.
+                        other => other.clone(),
+                    })
+                    .collect(),
+            },
+            Expr::LabelCheck {
+                expr: inner,
+                labels,
+            } => Expr::LabelCheck {
+                expr: go(inner),
+                labels: labels.clone(),
+            },
+
+            // ---- scope-introducing: deliberately not rewritten ----
+            //
+            // A subquery body is planned against its own schema, not this one.
+            Expr::Exists { .. } | Expr::CountSubquery(_) | Expr::CollectSubquery(_) => expr.clone(),
+            // The pattern binds its own variables; `schema` describes the outer
+            // row and would resolve them to the wrong columns.
+            Expr::PatternComprehension { .. } => expr.clone(),
+            // The iterated list is an outer-scope expression and is rewritten;
+            // the body is not, because the loop variable shadows the outer row.
+            Expr::Quantifier {
+                quantifier,
+                variable,
+                list,
+                predicate,
+            } => Expr::Quantifier {
+                quantifier: *quantifier,
+                variable: variable.clone(),
+                list: go(list),
+                predicate: predicate.clone(),
+            },
+            Expr::ListComprehension {
+                variable,
+                list,
+                where_clause,
+                map_expr,
+            } => Expr::ListComprehension {
+                variable: variable.clone(),
+                list: go(list),
+                where_clause: where_clause.clone(),
+                map_expr: map_expr.clone(),
+            },
+            // `init` is evaluated once in the outer row; `expr` sees the
+            // accumulator and the loop variable.
+            Expr::Reduce {
+                accumulator,
+                init,
+                variable,
+                list,
+                expr: body,
+            } => Expr::Reduce {
+                accumulator: accumulator.clone(),
+                init: go(init),
+                variable: variable.clone(),
+                list: go(list),
+                expr: body.clone(),
+            },
         }
     }
 
@@ -1720,6 +1880,7 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
                     pattern,
                     where_clause,
                     map_expr,
+                    input_schema,
                 );
             }
         };
@@ -3287,6 +3448,47 @@ fn has_mutation_in_expr(expr: &Expr) -> bool {
 /// For each `Property(Variable(v), key)` where `v` is an outer-scope entity variable,
 /// replaces it with `Parameter("{v}.{key}")`. This enables plan-once optimization since
 /// the rewritten query is parameterized (same structure for every row).
+/// Pass the hydrated endpoint node to `startNode(r)` / `endNode(r)` as an extra
+/// argument, when the outer row carries one.
+///
+/// The UDF finds the endpoint by scanning its node arguments for a matching
+/// vid. In a correlated pattern-comprehension subquery the only nodes in scope
+/// are the pattern's own bindings, so the lookup succeeds only for rows where
+/// the endpoint coincides with one of them — and errors on every other row
+/// rather than letting the predicate be false. LDBC IC14 is that shape: its
+/// `WHERE` tests `a.id = startNode(r).id` across all matching `(a, b)` pairs.
+///
+/// `EndpointHydrateExec` put the endpoint on the outer row as
+/// `_endpoint.src.<rel>`, and `extract_row_params` supplies every outer column
+/// as a parameter, so referencing it here resolves per row.
+fn rewrite_endpoint_calls(expr: Expr, schema: &Schema) -> Expr {
+    if let Expr::FunctionCall {
+        ref name, ref args, ..
+    } = expr
+    {
+        let upper = name.to_uppercase();
+        if (upper == "STARTNODE" || upper == "ENDNODE")
+            && let Some(Expr::Variable(rel)) = args.first()
+        {
+            let col = crate::query::df_graph::endpoint_hydrate::endpoint_column(
+                rel,
+                upper == "STARTNODE",
+            );
+            if schema.index_of(&col).is_ok() {
+                let mut args = args.clone();
+                args.push(Expr::Parameter(col));
+                return Expr::FunctionCall {
+                    name: name.clone(),
+                    args,
+                    distinct: false,
+                    window_spec: None,
+                };
+            }
+        }
+    }
+    expr.map_children(&mut |c| rewrite_endpoint_calls(c, schema))
+}
+
 fn rewrite_query_correlated(query: &Query, outer_vars: &HashSet<String>) -> Query {
     match query {
         Query::Single(stmt) => Query::Single(Statement {
@@ -3464,4 +3666,152 @@ fn resolve_metric_for_property(
         }
     }
     None
+}
+
+#[cfg(test)]
+mod flat_column_resolution_tests {
+    use super::*;
+    use arrow_schema::{DataType, Field, Schema};
+    use uni_cypher::ast::Expr;
+
+    /// A schema holding the flat column `n.name` and nothing else.
+    fn flat_schema() -> Schema {
+        Schema::new(vec![Field::new("n.name", DataType::Utf8, true)])
+    }
+
+    fn n_name() -> Expr {
+        Expr::Property(
+            Box::new(Expr::Variable("n".to_string())),
+            "name".to_string(),
+        )
+    }
+
+    fn resolved(expr: &Expr) -> Expr {
+        CypherPhysicalExprCompiler::resolve_flat_column_properties(expr, &flat_schema())
+    }
+
+    /// The baseline the five original arms already covered.
+    #[test]
+    fn a_bare_property_resolves_to_the_flat_column() {
+        assert_eq!(resolved(&n_name()), Expr::Variable("n.name".to_string()));
+    }
+
+    /// #192: every one of these sat behind `other => other.clone()` and kept its
+    /// UDF form. Each asserts the *nested* property is now rewritten.
+    #[test]
+    fn a_property_nested_in_a_previously_unhandled_variant_resolves() {
+        let flat = Expr::Variable("n.name".to_string());
+
+        // CASE WHEN n.name ... THEN n.name ELSE n.name END
+        let case = Expr::Case {
+            expr: Some(Box::new(n_name())),
+            when_then: vec![(n_name(), n_name())],
+            else_expr: Some(Box::new(n_name())),
+        };
+        assert_eq!(
+            resolved(&case),
+            Expr::Case {
+                expr: Some(Box::new(flat.clone())),
+                when_then: vec![(flat.clone(), flat.clone())],
+                else_expr: Some(Box::new(flat.clone())),
+            }
+        );
+
+        // n.name IN n.name
+        assert_eq!(
+            resolved(&Expr::In {
+                expr: Box::new(n_name()),
+                list: Box::new(n_name()),
+            }),
+            Expr::In {
+                expr: Box::new(flat.clone()),
+                list: Box::new(flat.clone()),
+            }
+        );
+
+        // {k: n.name}
+        assert_eq!(
+            resolved(&Expr::Map(vec![("k".to_string(), n_name())])),
+            Expr::Map(vec![("k".to_string(), flat.clone())])
+        );
+
+        // n.name[n.name]
+        assert_eq!(
+            resolved(&Expr::ArrayIndex {
+                array: Box::new(n_name()),
+                index: Box::new(n_name()),
+            }),
+            Expr::ArrayIndex {
+                array: Box::new(flat.clone()),
+                index: Box::new(flat.clone()),
+            }
+        );
+
+        // n.name IS NOT NULL
+        assert_eq!(
+            resolved(&Expr::IsNotNull(Box::new(n_name()))),
+            Expr::IsNotNull(Box::new(flat.clone()))
+        );
+
+        // n.name[n.name..n.name]
+        assert_eq!(
+            resolved(&Expr::ArraySlice {
+                array: Box::new(n_name()),
+                start: Some(Box::new(n_name())),
+                end: Some(Box::new(n_name())),
+            }),
+            Expr::ArraySlice {
+                array: Box::new(flat.clone()),
+                start: Some(Box::new(flat.clone())),
+                end: Some(Box::new(flat.clone())),
+            }
+        );
+
+        // n:Label over a property expression
+        assert_eq!(
+            resolved(&Expr::LabelCheck {
+                expr: Box::new(n_name()),
+                labels: vec!["L".to_string()],
+            }),
+            Expr::LabelCheck {
+                expr: Box::new(flat.clone()),
+                labels: vec!["L".to_string()],
+            }
+        );
+    }
+
+    /// The deliberate non-recursion, which is the half that would be a *bug* if
+    /// it changed: a comprehension body binds its own variable, and `schema`
+    /// describes the outer row.
+    #[test]
+    fn a_comprehension_body_is_left_alone_but_its_list_is_not() {
+        let comp = Expr::ListComprehension {
+            variable: "n".to_string(),
+            list: Box::new(n_name()),
+            where_clause: Some(Box::new(n_name())),
+            map_expr: Box::new(n_name()),
+        };
+        assert_eq!(
+            resolved(&comp),
+            Expr::ListComprehension {
+                variable: "n".to_string(),
+                // the iterated list is outer-scope, so it resolves
+                list: Box::new(Expr::Variable("n.name".to_string())),
+                // the body is not, so it must be untouched
+                where_clause: Some(Box::new(n_name())),
+                map_expr: Box::new(n_name()),
+            }
+        );
+    }
+
+    /// A property whose flat column does not exist must keep its UDF form —
+    /// otherwise the rewrite would invent columns.
+    #[test]
+    fn an_absent_flat_column_is_not_invented() {
+        let other = Expr::Property(Box::new(Expr::Variable("n".to_string())), "age".to_string());
+        assert_eq!(
+            resolved(&Expr::IsNull(Box::new(other.clone()))),
+            Expr::IsNull(Box::new(other))
+        );
+    }
 }
