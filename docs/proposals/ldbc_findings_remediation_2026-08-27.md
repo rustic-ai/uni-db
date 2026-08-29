@@ -3,7 +3,11 @@
 Running LDBC SNB Interactive against SF1 found more defects than percentiles.
 This ordered what remained.
 
-> **Status is at the end — [Status — 2026-08-28](#status--2026-08-28).**
+> **Status is at the end — [Status — 2026-08-28](#status--2026-08-28) for the
+> closed/open ledger, [Step 0 executed — 2026-08-29](#step-0-executed--2026-08-29)
+> for the current SF1 measurements, and the current ordering in
+> [Plan — revised after triage, 2026-08-29](#plan--revised-after-triage-2026-08-29),
+> which supersedes the earlier [Plan ahead](#plan-ahead).**
 > Everything before it is the plan as written, plus the record of what
 > executing it turned up. Both are kept because in most cases the
 > diagnosis here was confident and wrong, and the correction is the part
@@ -794,13 +798,39 @@ The single current list. Everything above this point is narrative.
 | #184 | the `UNWIND` source really was the crash — with it pruned, IC6 answers 10 rows at SF1 rather than aborting on a 14 TB allocation |
 | #175 | not unobservable as filed — the scalar half already shipped; the gap was vector/FTS, where the scan path's predicate is *unsound* rather than merely absent |
 | #195 | no benchmark exercises the new vector/FTS counters — filed as coverage, not a defect |
+| #197 | **not a silent wrong answer** — the pruned column is caught downstream, so a *valid* query fails with `No field named …`. Also not the `_ => {}` arms it named: the reachable hole was inside a **handled** arm, `Clause::Match` never walking its pattern's inline property maps and `WHERE`s |
+| #201 | IC14's endpoint lookup searched the *nodes in scope*, which only succeeds when the endpoint happens to be one of the pattern's own bindings — so every non-matching `(a,b)` pair errored instead of evaluating false. The hydrated endpoint is now passed into the correlated subquery. **Fix verified locally; not yet re-run at SF1** |
+| #192 | all 27 `Expr` variants enumerated, scope-introducing ones listed individually rather than swept into a wildcard. Filed as hardening with no user-visible repro, and that still holds — but it is **not inert**: it changed the rewrite for `Case`, `In`, `Map`, `ArrayIndex`, `ArraySlice`, `IsNull`/`IsNotNull`, `LabelCheck`, `ValidAt`, `MapProjection`, and for the iterated list of a comprehension |
 
-Gates on the current tip: `fmt`, workspace `clippy --all-targets -D warnings`,
-workspace suite 6710/6710, openCypher TCK 3925/3925.
+Gates on the current tip: `fmt` and workspace
+`clippy --all-targets -D warnings` clean; `uni-db` 2770/2770;
+`uni-query` + `uni-cypher` + `uni-query-functions` 1183/1183; openCypher TCK
+3925/3925 ("no change vs previous run").
 
-**LDBC IC14 plans and executes.** It was the stated reason #187 mattered, and it
-is the only one of these verified against the real query text rather than a
-reduction of it.
+An earlier tip (before the #201 fix) ran the **full workspace** at 6726/6726,
+up from a 6710 baseline. That full run has **not** been repeated since #201
+landed — `uni-store` and the remaining crates are untouched by planner and
+expression changes, but they were not re-measured, and this line should not be
+read as though they were.
+
+Every fix arm across both issues was **discriminated** — neutralised one at a
+time, each breaking only its own tests, with #184's genuinely-dead-source
+control still pruning throughout. That matters more than usual here: both
+changes are largely "add match arms that agree with the old behaviour", which is
+the exact shape in which a decorative test hides.
+
+**LDBC IC14 — this document's claim was wrong, and the way it was wrong is the
+lesson.** It read: *"IC14 plans and executes … the only one of these verified
+against the real query text rather than a reduction of it."* True of the text,
+false of the data. The test used IC14's real query but a fixture with no
+`Comment`, `Post`, `HAS_CREATOR` or `REPLY_OF`, so the weight pattern matched
+nothing, `reduce` never evaluated its body, and `startNode(r)` — the whole point
+— was never called. It asserted `personIdsInPath` and never asserted
+`pathWeight`. At SF1, where the pattern does match, IC14 failed.
+
+Filed as #201 and fixed; the vacuous-fixture mechanism is #205. The distinction
+worth keeping: **real query text over reduced data is not verification of the
+query**, and nothing about such a test looks wrong on review.
 
 **Wave 5 is unblocked.** 5.2–5.5 were gated on #175: until the `nearest()` path
 reported, latency work could not attribute anything to an index. It reports now.
@@ -809,44 +839,78 @@ reported, latency work could not attribute anything to an index. It reports now.
 
 | item | state | gate |
 |---|---|---|
-| #192 | `resolve_flat_column_properties` covers 5 of 27 `Expr` variants behind a catch-all | Still **no user-visible repro** across 16 probed shapes. Fold into #197's sweep, which is the same defect class with a live consequence. |
-| #197 | a subquery-body read can go unrecorded, so a **live** `UNWIND` source can be proven dead and pruned | Split from #184. Ranked first of what remains: an under-report here is a silent wrong answer, not a missed optimisation. |
-| #198 | peak RSS 13.8 GB against a 1 GiB pool, ending in SIGKILL | Split from #184. Bound the unwind output into chunks; pruning cannot cover a list that is legitimately live. |
-| SF1 residuals | IC5 exceeds the 300 s budget; IC2 and IC9 fail inside DataFusion's external sort with no spill path configured | Measured 2026-08-28, unfiled. Latency and engine config, not #184 — recorded so they are not mistaken for it returning. |
+| #198 | peak child RSS **37.11 GB** against a 1 GiB pool; IC10 killed by the **kernel OOM killer** (123 GB virtual, 19.5 GB resident at kill) | Split from #184. Re-measured 2026-08-28: the figure in the issue, 13.8 GB, understated it by ~2.7×. The guard is not under-counting this path, it is absent from it. Bound the unwind output into chunks; pruning cannot cover a list that is legitimately live. |
+| #202 | IC2 and IC9 fail inside DataFusion's external sort, which has no spill path | **The opposite failure to #198, and deliberately not folded into it.** Here the sorter *does* reserve, the pool *does* refuse, and the query fails cleanly — the guard works. The gap is that a sort above the pool should spill rather than fail. Raising the pool is not a fix: IC9 asks for 5.1 GB and the figure is data-dependent. |
+| #203 | IC4 still exceeds the pool in `GroupedHashAggregateStream` (1476.5 MB vs 1024 MB) **after** #196 | Same operator and same message as #196, which fixed it for the parameter-derivation query by narrowing a `"*"` group key. IC4 still fails on the tree carrying that fix — either a second instance the fix does not reach, or a genuinely large aggregate. Could not be distinguished earlier because the bench never reached IC4. |
+| #204 | IC12 10.5 min, IC3 4.5 min, IC5 over the 300 s budget — **no index consulted by any of them** (`scalar_idx=0 vec_idx=0 fts_idx=0`) | Latency, filed apart from the memory items so it is not mistaken for them. IC3 and IC12 answer correctly but peak at 31.8 GB and 38 GB, so **#198 should land first** or the profile will mostly rediscover it. The zero index counters are only visible because #175 shipped. |
+| #205 | audit for vacuously-passing tests | The mechanism that hid #201: a fixture that cannot match the query's pattern, so the feature under test never runs and every assertion passes honestly. Real query text over reduced data reads as verification on review. |
+| #199 | `COUNT { UNWIND outer AS y … }` fails with `Column 'outer' not found for UNWIND` | Found while probing #197. Confirmed pre-existing: fails identically with pruning disabled, so it predates #184 and is untouched by #197. The planner now records the read correctly; the execution path does not support the shape. |
+| #200 | one `flush_to_l1 barrier not established` in fixture setup, first full-suite run of 2026-08-28 | **Unexplained, not dismissed.** Did not recur across two later full runs (6720/6720, 6726/6726). Disk space and `TMPDIR` both ruled out — `/home` had 1.2 TB free and the run was confirmed writing there. Recorded rather than called a flake. |
 | Track 0 | differential oracle | Not started; blocked on infrastructure, not code. |
 | Wave 5.2–5.5 | comprehension hoisting, anchoring, latency, decorrelation | **Ungated** — #175 closed. Start with 5.4's latency attribution, which now has a witness. |
 
-### What to do next
+### SF1, measured 2026-08-28
 
-In this order, and the order is the ordering principle rather than
-size:
+The first full SF1 run this document has on record. **6 of 14 queries fail**,
+and the run is the source of #198's corrected figures and of #202–#204.
 
-1. **#197.** The only open item whose failure mode is a wrong answer,
-   and it is live in shipped code. First task is to find a repro or
-   prove there is none — if every clause that can read a variable is
-   already covered, that is the result and it belongs on the issue,
-   not a formality of making the arms exhaustive. #192 folds in here.
-2. **#198.** Bound the unwind output into chunks. This is what turns
-   a SIGKILL into a slow query, and it is the last thing standing
-   between SF1 and a completing bench run.
-3. **Wave 5.2–5.5.** Ungated for the first time. 5.4 first: latency
-   attribution now has a witness, and the other three are
-   optimisations that should be measured against it rather than
-   assumed.
+| query | rows | ms | peak RSS | outcome |
+|---|---:|---:|---:|---|
+| IC1 | 20 | 2 277 | 2.9 GB | ok |
+| IC2 | — | — | 3.1 GB | external sort out of memory (#202) |
+| IC3 | 20 | 272 110 | 31.8 GB | ok, 4.5 min (#204) |
+| IC4 | — | — | 31.8 GB | aggregate over pool (#203) |
+| IC5 | — | — | 31.8 GB | over the 300 s budget (#204) |
+| IC6 | 10 | 298 366 | 31.8 GB | ok — the query #184 was filed for |
+| IC7 | 20 | 22 154 | 31.8 GB | ok |
+| IC8 | 20 | 3 528 | 31.8 GB | ok |
+| IC9 | — | — | 31.8 GB | external sort out of memory (#202) |
+| IC10 | — | — | — | **SIGKILL, OS OOM** (#198) |
+| IC11 | 10 | 32 083 | 2.9 GB | ok |
+| IC12 | 20 | 628 624 | 38.0 GB | ok, 10.5 min (#204) |
+| IC13 | 1 | 86 | 38.0 GB | ok |
+| IC14 | — | — | 38.0 GB | endpoint not in scope (#201, now fixed) |
 
-Track 0 stays where it is: a differential oracle is the one thing
-that would have found most of the twelve above without anyone
-probing for them, and it is still blocked on a Neo4j instance
-rather than on code.
+Peak `VmHWM` across every bench child: **37.11 GB**.
+
+Two things this run establishes that no earlier one could. The bench **forks one
+child per query**, so a `SIGKILL` line is not the end of the run — the parent
+records it and continues, which is why IC11–IC14 have results after IC10 died.
+And the prior run (2026-08-27) stopped around IC10, so it **never reached
+IC14**; the absence of an `IC14.tsv` from that run is not evidence IC14 was
+already broken. Reasoning from absence, in a document about an analysis that
+reasons from absence.
 
 ### What this round is evidence for
 
-Four of the twelve closed above were **silent wrong answers** — #186, #190,
+Four of the fifteen closed above were **silent wrong answers** — #186, #190,
 #193 and #194. The rest failed loudly, and in different ways worth keeping
-distinct: #187, #189 and #191 raised planner errors; #185 was a limit that
-did not limit; #196 and #184 aborted; #175 and #195 are observability, not
-behaviour; and #188 was a rewrite that resolved to the wrong endpoint only
-once its `#[ignore]` came off.
+distinct: #187, #189, #191, #197 and #201 raised planner errors; #185 was a limit that
+did not limit; #196 and #184 aborted; #175, #192 and #195 are observability and
+hardening, not behaviour; and #188 was a rewrite that resolved to the wrong
+endpoint only once its `#[ignore]` came off.
+
+**#197 is the one whose severity this document got wrong, and in the unsafe
+direction.** It was ranked first of everything open specifically because an
+under-report in `mark_dead_unwind_sources` was believed to prune a live column
+and answer wrongly in silence. It does prune the column; what follows is a hard
+`No field named …` on a query that is perfectly valid and worked before #184's
+pruning shipped. Both are bugs and one change fixes both, but the ranking rested
+on a prediction nobody had run. The prediction was written here, not measured
+here — which is the same failure this section is otherwise about.
+
+**#201 is the sharpest instance of the same failure.** It was not found by
+probing a claim — it was found because the claim was *checked against SF1*. A
+test asserting the wrong thing had certified it, and this document repeated the
+certification. The chain is worth keeping intact: a fixture that could not match
+the pattern → a test that never ran the code → a headline verification in this
+document → a query that fails on real data. Every link passed review.
+
+Its fix also produced a wrong turn worth recording. The first attempt rebuilt
+the scan anchor's struct from flat columns; it made the local repro pass while
+**SF1 still failed, with the vid moving 1028 → 847**. A symptom moving rather
+than a cause going away — and the only reason that was visible is that the SF1
+error names the vid it could not find.
 
 Separately, and more usefully: **#190, #191, #193 and #194 were all found by
 probing something this document had already recorded as harmless, absent, or
@@ -858,15 +922,314 @@ A fifth, #196, was found by running a verification step this document had
 written off as unexecutable. The stated reason for skipping it was true and
 was not what stopped it.
 
-**Four** defects were written off and had to be reopened, and the tell is the
+**Five** defects were written off and had to be reopened, and the tell is the
 same every time: a sentence that identifies the mechanism precisely and then
 declines to apply it. `CASE` over two entities; two labels through a `UNION`;
 the FTS filter that could starve top-k, noted as "out of scope, but noticed"
-in a plan and measured at 0 rows of 10 a day later; and the bench step called
-unexecutable. Naming a fix that specifically is evidence it is cheap, not
-evidence it is out of scope.
+in a plan and measured at 0 rows of 10 a day later; the bench step called
+unexecutable; and IC14, certified by this document on the strength of a test
+that never executed its own subject. Naming a fix that specifically is evidence
+it is cheap, not evidence it is out of scope.
 
 The lesson this document keeps re-learning, now from three directions: a claim
 of "not observable" is bounded by the paths actually probed, in exactly the way
 a green TCK is bounded by the shapes it contains
 (`docs/testing/single-shape-coverage-2026-08-27.md`).
+
+### Plan ahead
+
+Superseded — [Plan — revised after triage, 2026-08-29](#plan--revised-after-triage-2026-08-29)
+is the current ordering; step 0 below was executed and is measured in
+[Step 0 executed — 2026-08-29](#step-0-executed--2026-08-29). Kept for
+the reasoning, per this document's convention.
+
+Ordered by what each unblocks, not by size.
+
+**0. Re-run SF1 and the full workspace suite.** Both are outstanding and both
+are cheap relative to what they gate. #201's fix is verified locally against a
+reproduction of SF1's actual failure mode, but IC14 has not been observed
+returning rows at SF1, and the issue should stay open until it is. The full
+workspace suite has not run since #201 landed. Everything below is measured
+against a run that predates the current tip.
+
+**1. #198 — bound the unwind output.** The last thing between SF1
+and a completing bench run, and the only remaining item that ends in
+a killed process rather than a wrong or slow answer.
+
+The site is `GraphUnwindStream::build_output_batch`
+(`df_graph/unwind.rs:600`). `process_batch` (`:337`) accumulates
+*every* expansion for an input batch into one `Vec<(usize, Value)>`,
+then does one `take` per surviving column over the whole set
+(`:621`). Peak is `rows × list_size` for the batch, allocated in one
+shot and — because it builds an Arrow buffer directly rather than
+reserving — invisible to the memory pool. That is why peak RSS
+reached 13.8 GB against a 1 GiB pool: the guard is bounding the
+operators that ask it and missing roughly an order of magnitude.
+
+The fix is to emit the expansion in fixed-size slices — several
+output batches per input batch, each with its own `take` — capping
+peak at `chunk × columns` with no change to semantics or row order.
+`GraphUnwindStream` holds the pending remainder across `poll_next`,
+the same shape `EndpointHydrateStream` and `BindZeroLengthPathStream`
+already use.
+
+Do this **whether or not** any further pruning lands: #197 and #184
+remove the *dead* case, but a list that is legitimately live still
+replicates. Pruning removes one case; chunking bounds the other.
+
+Success is the process surviving, not a latency number. It will not
+by itself fix IC5/IC6 (a time budget, not a memory one) nor IC2/IC9
+(DataFusion's external sort with no spill path) — those are the SF1
+residuals above and should not be folded in.
+
+**2. #203, then #202.** Both are memory, and they want opposite fixes, which
+is why the order matters. #203 is plausibly a second instance of #196's
+narrowing gap — cheap to check, and if it is, it is one arm again. #202 is a
+configuration decision rather than a defect: either set up spilling so a large
+sort completes, or say a sort above the pool is out of scope and make the error
+say so.
+
+**3. #205 — the vacuous-fixture audit.** Placed here rather than last because
+it governs how much the rest of this list can be trusted. #201 was certified by
+a test that never ran its own subject; nothing establishes that it is the only
+one. The signature to grep for is a fixture omitting an entity type the query's
+pattern requires.
+
+**4. The marker audit.** #196 was found by measuring, not by reading,
+and it cost one match arm. The same method applies to the remaining
+sites that consume expressions without emitting a provenance marker.
+For each, the question is: *does this context need the entity whole,
+or only its identity?*
+
+- `Distinct` — `LogicalPlan::Distinct` (`df_planner.rs:1061`) groups
+  by **all** schema columns with no narrowing. This is #196's shape
+  exactly; `RETURN DISTINCT n` over a wide label is the obvious next
+  candidate and should be measured before it is assumed.
+- `Union` dedup (`df_planner.rs:5822`) — likewise groups by every
+  column.
+- `Sort` keys, `Window` partition/order keys, `CrossJoin` / `Apply`
+  correlation keys.
+
+Only if this turns up a shape a marker *cannot* express is the
+general top-down pruning pass worth building. The argument against
+building it now is in
+`docs/proposals/column_pruning_spike_2026-08-28.md` and is unchanged
+by this round.
+
+**5. #204 and Wave 5.2–5.5.** Latency, and ungated for the first time. 5.4 first: latency
+attribution now has a witness in the vector/FTS counters, and the
+other three (comprehension hoisting, anchoring, decorrelation) are
+optimisations that should be measured against it rather than assumed
+to help.
+
+**6. Track 0 — the differential oracle.** Stays last, and the reason
+is worth restating rather than inheriting: it is the one thing that
+would have found most of the fifteen closed items without anyone
+probing for them. Four of them were found only because someone went
+back to something this document had already recorded as harmless,
+absent, or out of scope. That is not a repeatable process. It is
+still blocked on a Neo4j instance rather than on code, which is the
+only reason it is not first.
+
+## Step 0 executed — 2026-08-29
+
+Both halves of step 0 ran. The workspace suite is green on the tip
+carrying #201: **6726/6726** (102 skipped), so the caveat above about
+`uni-store` and the rest being unmeasured since #201 is discharged.
+
+### SF1, measured 2026-08-29, machine idle
+
+Results in `~/uni-bench-tmp/ldbc-results-20260829`. A first attempt the
+evening before ran concurrently with an unrelated 20 GB model-loading
+job on the same machine; its numbers are discarded here except as the
+control they turned out to be (see the contention note below).
+
+| query | rows | ms | peak RSS | outcome |
+|---|---:|---:|---:|---|
+| IC1 | 20 | 2 043 | 3.0 GB | ok |
+| IC2 | — | — | — | external sort out of memory (#202) |
+| IC3 | 20 | 252 299 | 29.3 GB | ok — back **under** the 300 s budget |
+| IC4 | — | — | — | aggregate over pool, 1530.5 MB vs 1024 MB (#203) |
+| IC5 | — | — | — | over the 300 s budget (#204) |
+| IC6 | 10 | 270 186 | 29.3 GB | ok |
+| IC7 | 20 | 19 594 | 29.3 GB | ok |
+| IC8 | 20 | 3 137 | 29.3 GB | ok |
+| IC9 | — | — | — | external sort asks 5.1 GB, out of memory (#202) |
+| IC10 | 10 | 297 261 | 43.8 GB | **ok — completes for the first time on record** |
+| IC11 | 10 | 31 306 | 43.8 GB | ok |
+| IC12 | 20 | 536 629 | 45.0 GB | ok, 8.9 min — over budget, not cut off (#204, 2.1) |
+| IC13 | 1 | 62 | 45.0 GB | ok |
+| IC14 | — | — | 19.2 GB and climbing | **executes; killed by hand after 111 min** (see below) |
+
+**8 of 14 answer**, up from 6 in the 2026-08-28 run. The two changes
+are IC10 and IC14, and they move in opposite directions worth keeping
+apart.
+
+**IC10 survives, which reframes #198 without closing it.** The OS kill
+was never the defect; the ~44 GB allocation is, and it is fully intact —
+IC10 completes only because an idle 62 GB machine happens to fit it.
+Peak `VmHWM` this run: **45.0 GB** against a 1 GiB pool. The chunking
+fix stands as specified.
+
+**IC14: #201's error mode is gone at SF1; rows are still unobserved.**
+It no longer errors with `endpoint not in scope` — it plans, executes,
+and grinds real per-row work, which is what the fix was for. What it
+executes *into* is the known-deferred per-row fallback. A stack sample
+of the live query reads, trimmed:
+
+```
+SortExec → ProjectionStream::poll_next
+  → Projector::project_batch
+    → ListComprehensionExecExpr::evaluate
+      → ReduceExecExpr::evaluate
+        → PatternComprehensionSubqueryExpr::evaluate
+          → std::thread::scoped::scope → pthread_join   ← blocked
+```
+
+IC14's `reduce` over `relationships(p)` evaluates its correlated
+weight pattern through `PatternComprehensionSubqueryExpr` — a sub-plan
+per element per row, each on a scoped thread — which is precisely the
+cost Wave 5.2/5.3 exists to remove, and 5.3's own note named IC14 as
+its motivation. Killed after 111 minutes at 100 % CPU with no output.
+So IC14's residual is a #204-class latency item gated on 5.2/5.3, not
+a correctness one. Filed 2026-08-29 with a verified isolated repro
+(`crates/uni/examples/pc_perrow_probe.rs`) as **#206** — the per-row
+fallback is 95× the anchored form at N=400 and super-linear in N —
+and "IC14 returns rows at SF1" is now #206's acceptance criterion;
+#201 can close against it.
+
+**The same sample gives 2.1's cooperative-deadline gap a named worst
+case.** The budget mechanism was live in this exact process
+configuration — IC5 was cut at 300 s in the same run — yet IC14 ran
+22× past it, because the per-row evaluation happens inside
+`poll_next` and blocks on a thread join: the future never reaches an
+await point where the deadline could fire. IC12 shows the same shape
+milder, completing at 536 s against the 300 s budget. Filed as
+**#207**, with a repro in the same probe whose overrun scales with
+data: a 250 ms timeout returns `UniError::Timeout` after 355 ms at
+N=400 and after 7.1 s (29× late) at N=2000. The enforcement gap was
+already documented in `impl_query.rs`'s own comments — the outer
+timeout plus post-hoc elapsed check, and `check_timeout` reached by
+no scan/join/traverse plan — but had no tracking issue.
+
+### Two evidence-hygiene notes from running it
+
+- **Parameter derivation is nondeterministic across invocations.**
+  `params::derive` drew `countryName=Finland/Jordan` in one run and
+  `Tunisia/Tanzania` in the next, with `person2Id` differing too — and
+  each supervisor child re-derives its own parameters, so a supervised
+  run that crosses a restart boundary is not internally comparable
+  either. Cross-run latency and row-count comparisons in this document
+  are looser than the tables imply. Root-caused and filed as **#208**:
+  no RNG anywhere — `LIMIT 1` with no `ORDER BY` (`person2Id`, `month`),
+  positional `cs[0]`/`cs[1]` indexing into `collect(DISTINCT …)`
+  (the country parameters), and tie-unstable `ORDER BY count DESC`
+  rankings. `personId` is stable only because SF1's max-degree person
+  is unique. The fix is total-order tiebreakers throughout.
+- **SF1 latency figures are only comparable machine-idle.** Under a
+  competing 20 GB job, IC3 read as over-budget (a wrong conclusion —
+  it passes at 252 s alone). The contended run was discarded for this
+  reason; treat any future over-budget reading taken on a busy machine
+  as unmeasured.
+
+## Plan — revised after triage, 2026-08-29
+
+Supersedes [Plan ahead](#plan-ahead). Everything open was re-ranked
+against the ordering principle at the top of this document, and two
+facts changed the order.
+
+**The wrong-answer tier is empty.** For the first time since this
+document exists, no known silent wrong answer is open. That promotes
+the self-defense tier to the top — and that tier now holds exactly two
+items, one per resource axis: **#198** (memory: the largest allocator
+in the system is invisible to the pool) and **#207** (time: the
+deadline cannot preempt execution that never yields). Both have their
+fixes already designed.
+
+**Every SF1 non-answer maps to exactly one issue.** The path to 14/14
+is enumerable now, which the sequencing below follows:
+
+| query | blocked on |
+|---|---|
+| IC2, IC9 | #202 (sort spill decision) |
+| IC4 | #203 (aggregate over pool) |
+| IC5 | #204 latency, with #207 as why the budget doesn't even cut it |
+| IC10 | answers today only by luck — #198 makes it lawful |
+| IC14 | #206 (per-row comprehension fallback) |
+
+### The order
+
+**0. #208 — bench parameter determinism. First, alone, and before
+anything is re-measured.** An hour of mechanical tiebreakers, and it
+is this round's Track-0-shaped item: it changes the trust of every
+measurement taken after it. It must precede #198's verification
+re-run, or before/after runs compare different queries.
+
+> **Done — 2026-08-29.** Every derivation in `benches/ldbc/params.rs`
+> now imposes a total order: tiebreak keys on every `ORDER BY … DESC
+> LIMIT 1`, `ORDER BY id` on the var-length `person2Id` pick, the
+> country pair from a lowest-id friend with the collected list sorted
+> in Rust (positional `cs[0]`/`cs[1]` removed), and `month` computed
+> as the actual modal birthday month instead of an arbitrary row. A
+> `LDBC_DERIVE_ONLY=1` escape in `ldbc_snb.rs` prints the parameter
+> block and exits, so the check doesn't have to run IC14. Verified:
+> three derive-only runs against the step-0 SF1 store produced
+> byte-identical parameter blocks (previously `person2Id` and the
+> country pair drifted across runs). The lawful values differ from
+> earlier runs' arbitrary ones — `person2Id` 94, countries
+> Belarus/Belgium, month 10 — so **post-#208 numbers are not
+> comparable to the step-0 table**; IC13 smoke with the new set
+> returns 1 row in 38.2 ms (non-vacuous). The next full SF1 run is
+> the new baseline.
+
+**1. #198 — chunk the unwind output.** Unchanged in content from the
+previous plan; re-framed by measurement. IC10 completing on an idle
+62 GB machine is not success — success is IC10 completing where the
+allocation *doesn't* happen to fit, so the verification run should
+constrain memory (smaller machine or artificial pressure), not just
+re-run idle. Expect broad peak-RSS drops (IC3 through IC12 all ride
+the 29–45 GB plateau).
+
+**2. #207 — the minimal deadline checkpoint.** A deadline check
+between per-row sub-plan evaluations in
+`PatternComprehensionSubqueryExpr::evaluate` caps the overrun at one
+evaluation instead of all of them. Deliberately **not** folded into
+#206: the checkpoint outlives the hoist — it defends against the next
+non-yielding site, whatever it is. The broader audit of
+blocking-inside-`poll` sites is the follow-up, not the gate.
+
+**3. #203 + the marker audit — one discriminating check, then
+measure.** #203's first step is unchanged: determine whether IC4 is a
+second instance of #196's `"*"` group key (one match arm) or a
+genuinely large aggregate. The marker audit (`Distinct` at
+`df_planner.rs:1061`, `Union` dedup at `:5822`, `Sort`/`Window` keys)
+rides along — it is the same question asked systematically, and #196
+proved it is answered by measuring, not reading.
+
+**4. #202 — a decision, not a defect.** Configure DataFusion spill so
+a large sort completes, or declare above-pool sorts out of scope and
+make the error say so. Timebox it; either outcome closes IC2/IC9's
+issue.
+
+**5. #199 — the `COUNT { UNWIND outer … }` gap.** A valid shape that
+errors loudly; conformance tier, after defense and memory.
+
+**6. #206, with #204 and Wave 5.2–5.5 — the performance track.**
+Hoist the uncorrelated comprehension (5.2), batched anchoring for the
+correlated one (5.3), then 5.4's latency attribution — witnessed by
+the #175 counters and finally comparable thanks to #208. 5.5 stays
+gated on measurement. Acceptance is written into #206: the probe's
+ratio column stops growing with N, and IC14 returns rows at SF1 —
+at which point #201 closes against it.
+
+**7. Hygiene, parallelizable anytime: #205 and #195.** The
+vacuous-fixture audit and the counter bench are read-mostly work that
+contends with nothing above; their position here is about focus, not
+dependency.
+
+**8. #200 — keep watching, keep it recorded.** Still unexplained,
+still not recurring.
+
+**9. Track 0 — unchanged.** Still the one thing that would have found
+most of this document's closed items without anyone probing; still
+blocked on a Neo4j instance, not on code.
