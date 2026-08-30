@@ -4551,22 +4551,43 @@ async fn hydrate_vlp_target_properties(
     let mut property_columns: Vec<ArrayRef> = Vec::new();
 
     if let Some(ref label_name) = target_label_name {
-        let property_manager = graph_ctx.property_manager();
-        let query_ctx = graph_ctx.query_context();
+        // Same split as `build_target_property_columns`: named properties are
+        // read as columns, `_all_props` stays on the map path because a
+        // whole-entity request has no narrower columnar form (#209).
+        //
+        // The null-row sentinel (`u64::MAX`) simply matches no stored row, so
+        // the gather yields null for those rows — the behaviour this function
+        // already depended on, now by construction rather than by a map miss.
+        let wants_all = target_properties.iter().any(|p| p == "_all_props");
+        if !wants_all {
+            property_columns = crate::query::df_graph::scan::hydrate_vids_columnar(
+                graph_ctx.as_ref(),
+                label_name,
+                // Internal to that call: only the property columns come back,
+                // and this function positions them itself.
+                "t",
+                &target_properties,
+                &target_vids,
+            )
+            .await?;
+        } else {
+            let property_manager = graph_ctx.property_manager();
+            let query_ctx = graph_ctx.query_context();
 
-        let props_map = property_manager
-            .get_batch_vertex_props_for_label(&target_vids, label_name, Some(&query_ctx))
-            .await
-            .map_err(exec_err)?;
+            let props_map = property_manager
+                .get_batch_vertex_props_for_label(&target_vids, label_name, Some(&query_ctx))
+                .await
+                .map_err(exec_err)?;
 
-        let uni_schema = graph_ctx.storage().schema_manager().schema();
-        let label_props = uni_schema.properties.get(label_name.as_str());
+            let uni_schema = graph_ctx.storage().schema_manager().schema();
+            let label_props = uni_schema.properties.get(label_name.as_str());
 
-        for prop_name in &target_properties {
-            let data_type = resolve_property_type(prop_name, label_props);
-            let column =
-                build_property_column_static(&target_vids, &props_map, prop_name, &data_type)?;
-            property_columns.push(column);
+            for prop_name in &target_properties {
+                let data_type = resolve_property_type(prop_name, label_props);
+                let column =
+                    build_property_column_static(&target_vids, &props_map, prop_name, &data_type)?;
+                property_columns.push(column);
+            }
         }
     } else {
         // No label name — use label-agnostic property lookup.
