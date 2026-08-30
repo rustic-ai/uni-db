@@ -232,67 +232,11 @@ impl std::fmt::Debug for GraphExecutionContext {
 
 /// L0 buffer visibility context for MVCC reads.
 ///
-/// Maintains references to all L0 buffers that should be visible to a query:
-/// - Current L0: The active write buffer
-/// - Transaction L0: Buffer for the current transaction (if any)
-/// - Pending flush L0s: Buffers being flushed to disk (still visible to reads)
-///
-/// The visibility order is: pending flush L0s (oldest first) → current L0 → transaction L0.
-#[derive(Clone, Default)]
-pub struct L0Context {
-    /// Current active L0 buffer.
-    pub current_l0: Option<Arc<RwLock<L0Buffer>>>,
-
-    /// Transaction-local L0 buffer (if in a transaction).
-    pub transaction_l0: Option<Arc<RwLock<L0Buffer>>>,
-
-    /// L0 buffers pending flush to disk.
-    /// These remain visible until flush completes.
-    pub pending_flush_l0s: Vec<Arc<RwLock<L0Buffer>>>,
-}
-
-impl std::fmt::Debug for L0Context {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("L0Context")
-            .field("current_l0", &self.current_l0.is_some())
-            .field("transaction_l0", &self.transaction_l0.is_some())
-            .field("pending_flush_l0s_count", &self.pending_flush_l0s.len())
-            .finish()
-    }
-}
-
-impl L0Context {
-    /// Create an empty L0 context with no buffers.
-    pub fn empty() -> Self {
-        Self::default()
-    }
-
-    /// Create L0 context with just a current buffer.
-    pub fn with_current(l0: Arc<RwLock<L0Buffer>>) -> Self {
-        Self {
-            current_l0: Some(l0),
-            ..Self::default()
-        }
-    }
-
-    /// Create L0 context from a query context.
-    pub fn from_query_context(ctx: &QueryContext) -> Self {
-        Self {
-            current_l0: Some(ctx.l0.clone()),
-            transaction_l0: ctx.transaction_l0.clone(),
-            pending_flush_l0s: ctx.pending_flush_l0s.clone(),
-        }
-    }
-
-    /// Iterate over all L0 buffers in visibility order.
-    /// Order: pending flush L0s (oldest first), then current L0, then transaction L0.
-    pub fn iter_l0_buffers(&self) -> impl Iterator<Item = &Arc<RwLock<L0Buffer>>> {
-        self.pending_flush_l0s
-            .iter()
-            .chain(self.current_l0.iter())
-            .chain(self.transaction_l0.iter())
-    }
-}
+/// Defined in `uni-store` beside the rest of the L0 visibility machinery — it
+/// is made entirely of `uni-store` types and the storage layer needs it too.
+/// Re-exported here so the ~30 references across the workspace, including the
+/// struct-literal constructions in `crates/uni/src/api/`, are unaffected.
+pub use uni_store::runtime::l0_visibility::L0Context;
 
 /// An edge's stored orientation, plus the type the probe identified on the way.
 ///
