@@ -1749,19 +1749,35 @@ pub(crate) async fn hydrate_vids_columnar(
         GraphScanExec::build_vertex_schema(variable, label, properties, &uni_schema);
 
     let raw: Vec<u64> = vids.iter().map(|v| v.as_u64()).collect();
-    let batch = columnar_scan_vertex_batch_static(
-        graph_ctx,
-        label,
-        variable,
-        properties,
-        &output_schema,
-        &None,
-        Some(&raw),
-        None,
-        None,
-        None,
-    )
-    .await?;
+    // Chunk the vid list. `FilterExpr::to_sql` renders `IN (…)` as SQL *text*,
+    // so an unchunked 60,000-vid request becomes a ~500 KB predicate string
+    // that Lance re-parses on every scan. `VidLookupJoinExec` already chunks
+    // this exact shape at the same constant.
+    let mut parts: Vec<RecordBatch> = Vec::new();
+    for chunk in raw.chunks(crate::query::df_graph::vid_lookup_join::MAX_VIDS_PER_CHUNK) {
+        parts.push(
+            columnar_scan_vertex_batch_static(
+                graph_ctx,
+                label,
+                variable,
+                properties,
+                &output_schema,
+                &None,
+                Some(chunk),
+                None,
+                None,
+                None,
+            )
+            .await?,
+        );
+    }
+    let batch = if parts.len() == 1 {
+        parts
+            .pop()
+            .unwrap_or_else(|| RecordBatch::new_empty(Arc::clone(&output_schema)))
+    } else {
+        arrow::compute::concat_batches(&output_schema, &parts).map_err(arrow_err)?
+    };
 
     // Map each returned vid to its row, then gather. One u64 hash per row,
     // against one HashMap<String, Value> allocation per row on the old path.

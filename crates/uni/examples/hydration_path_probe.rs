@@ -117,10 +117,16 @@ async fn run(session: &uni_db::Session, arm: &str, q: &str, rows: usize) -> anyh
         Value::Int(n) => *n,
         other => anyhow::bail!("expected a count, got {other:?}"),
     };
+    // `scans_reported` is the denominator: `index_scans == 0` only means "no
+    // index consulted" when a scan actually reported. Zero reported scans means
+    // the counter never fired and the zero says nothing (`counters.rs:203`).
+    let m = out.metrics();
     println!(
-        "{arm:<34} {got:>10} {:>12.1} {:>12.0} {ms:>9.0}",
+        "{arm:<34} {got:>10} {:>12.1} {:>12.0} {ms:>9.0} {:>6}/{:<6}",
         peak / (1024.0 * 1024.0),
-        peak / rows as f64
+        peak / rows as f64,
+        m.index_scans,
+        m.scans_reported
     );
     std::io::stdout().flush().ok();
     Ok(())
@@ -149,6 +155,7 @@ async fn probe(decoys: usize) -> anyhow::Result<()> {
          {:<34} {:>10} {:>12} {:>12} {:>9}",
         "arm", "n", "peak MiB", "bytes/row", "ms"
     );
+    println!("{:>96}", "idx/scans");
     // Rows each arm actually produces: a scan sees every target row including
     // the decoys, a traversal only the reachable ones.
     let scanned = N + decoys;
@@ -220,6 +227,43 @@ async fn probe(decoys: usize) -> anyhow::Result<()> {
         (
             "traverse, source property",
             "MATCH (s:Src)-[:R]->(t) RETURN count(s.idx) AS n",
+            N,
+        ),
+    ] {
+        run(&session, arm, q, rows).await?;
+    }
+
+    // Step 0 of the vid-lookup plan: compaction reaches `optimize_indices`,
+    // which re-covers a scalar index over fragments written after it was built.
+    // If cost tracks *uncovered* fragments -- Lance answers those with a full
+    // scan unioned into the indexed take -- these arms collapse. If they do
+    // not, the coverage hypothesis is dead and nothing should be built on it.
+    let t = Instant::now();
+    db.compaction().compact("Tgt").await?;
+    println!(
+        "\n-- after compact(\"Tgt\") in {:.0} ms\n",
+        t.elapsed().as_secs_f64() * 1e3
+    );
+    for (arm, q, rows) in [
+        (
+            "post-compact scan, 1 property",
+            "MATCH (t:Tgt) RETURN count(t.p1) AS n",
+            scanned,
+        ),
+        (
+            "post-compact traverse, no prop",
+            "MATCH (s:Src)-[:R]->(t) RETURN count(*) AS n",
+            N,
+        ),
+        (
+            "post-compact traverse, 1 prop",
+            "MATCH (s:Src)-[:R]->(t) RETURN count(t.p1) AS n",
+            N,
+        ),
+        (
+            "post-compact traverse, 3 props",
+            "MATCH (s:Src)-[:R]->(t) \
+             RETURN count(t.p1) + count(t.p2) + count(t.p3) AS n",
             N,
         ),
     ] {
