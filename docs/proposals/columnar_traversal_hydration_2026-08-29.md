@@ -189,6 +189,32 @@ top. IC3 has already been attributed twice to mechanisms it does not use; the
 criterion here is the per-row cost, and whether IC3 passes is a measurement to
 take afterwards, not a prediction to make now.
 
+## Negative result: do not chunk the map path
+
+Chunking the vid list is what removed the table-size dependence on the columnar
+path (815 -> 226 MiB, decoy sensitivity 6.5x -> 1.18x). The obvious follow-up —
+apply the same chunking to the four unbounded `IN` sites in
+`property_manager.rs` (`:565`, `:835`, `:1259`, `:1477`), one change benefiting
+every caller still on the map API — was tried and **measured as a regression**:
+
+| typed traversal arm, 300k-row table | peak |
+|---|---|
+| map path unchunked | 1626.3 MiB |
+| map path chunked | 1929.5 MiB |
+
+18% worse, reproduced by A/B with only that change stashed, and no benefit to
+the path already fixed.
+
+The reason is what chunking actually does: it caps *residency*. On the columnar
+path each chunk's scan buffers are released before the next is read. The map
+path accumulates every row into one `HashMap<Vid, Properties>` regardless, so
+chunking caps no peak and only adds repeated scan setup.
+
+**So the two fixes are not independently applicable per call site.** Chunking
+pays only where the result is consumed columnarly and released per chunk — it is
+a property of the columnar path, not a separate improvement to roll out. A
+caller gets it by migrating, or not at all.
+
 ## Risks
 
 - **MVCC and L0 correctness.** The map path applies version ranking, tombstones
