@@ -304,6 +304,28 @@ async fn main() -> anyhow::Result<()> {
         #[allow(clippy::never_loop)]
         for _ in 0..0 {}
     }
+    // Scan versus traversal, reading the same column off the same label.
+    // A scan reads columns from storage columnarly; a traversal hydrates each
+    // target vid through `PropertyManager`. If the scan pays no per-row
+    // overhead for the read and the traversal does, the fix is to make
+    // traversal hydration columnar rather than per-vid.
+    println!(
+        "\n{:<34} {:>8} {:>12} {:>12} {:>10}",
+        "scan arm", "-", "rows", "peak MiB", "ms"
+    );
+    std::io::stdout().flush().ok();
+    for (arm, projection) in [
+        ("j scan Comment count(*)", "count(*)"),
+        ("k scan Comment creationDate", "count(m.creationDate)"),
+        (
+            "l scan Comment 3 properties",
+            "count(m.creationDate) + count(m.length) + count(m.browserUsed)",
+        ),
+    ] {
+        let q = format!("MATCH (m:Comment) RETURN {projection} AS n");
+        run(&db, arm, 0, &q).await;
+    }
+
     Ok(())
 }
 
