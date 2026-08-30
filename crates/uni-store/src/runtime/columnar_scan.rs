@@ -14,11 +14,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use arrow_array::Array;
-use arrow_array::builder::{LargeBinaryBuilder, ListBuilder, StringBuilder};
-use arrow_array::{ArrayRef, LargeBinaryArray, RecordBatch, UInt64Array};
+use arrow_array::{ArrayRef, RecordBatch, UInt64Array};
 use arrow_schema::{DataType, Field, TimeUnit};
 use uni_common::core::id::Vid;
-use uni_common::core::schema::PropertyMeta;
 use uni_common::{Properties, Value};
 
 use crate::runtime::l0_visibility::L0Context;

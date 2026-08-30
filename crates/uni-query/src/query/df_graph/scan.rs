@@ -59,9 +59,9 @@ use uni_common::core::id::Vid;
 use uni_common::core::schema::Schema as UniSchema;
 use uni_store::backend::types::{FilterExpr, Scalar};
 use uni_store::runtime::columnar_scan::{
-    append_value_as_cypher_binary, build_all_props_column_for_schema_scan,
-    build_overflow_property_column, extract_from_overflow_blob, get_property_value,
-    push_column_if_absent, resolve_l0_property, temporal_to_struct_map,
+    build_all_props_column_for_schema_scan, build_overflow_property_column,
+    extract_from_overflow_blob, get_property_value, push_column_if_absent, resolve_l0_property,
+    temporal_to_struct_map,
 };
 pub(crate) use uni_store::runtime::columnar_scan::{property_field, resolve_property_type};
 
