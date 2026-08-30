@@ -582,16 +582,12 @@ fn main() {
     // Interactive workload is supposed to be measured under.
     let resume_from: Option<usize> = std::env::var("LDBC_FROM").ok().and_then(|v| v.parse().ok());
     if resume_from.is_none() && persist.is_some() {
-        supervise(&out_dir);
-        return;
-    }
-    let start = resume_from.unwrap_or(0);
-    if resume_from.is_none() && persist.is_some() {
         // Close this handle before any child opens the same directory.
         drop(db);
         supervise(&out_dir);
         return;
     }
+    let start = resume_from.unwrap_or(0);
 
     eprintln!("[ldbc] deriving substitution parameters…");
     let bound = rt
