@@ -234,6 +234,54 @@ async fn probe(decoys: usize) -> anyhow::Result<()> {
         run(&session, arm, q, rows).await?;
     }
 
+    // Why is the typed arm (`(t:Tgt)`) ~7x the untyped one on the same graph,
+    // same rows, same property? These separate the label *filter* from the
+    // label *column* it is evaluated over.
+    println!("\n-- typed-arm bisection\n");
+    for (arm, q, rows) in [
+        // The filter, via the pattern.
+        (
+            "y1 pattern label (t:Tgt)",
+            "MATCH (s:Src)-[:R]->(t:Tgt) RETURN count(*) AS n",
+            N,
+        ),
+        // The same predicate written explicitly, so it is a WHERE rather than
+        // a pattern label.
+        (
+            "y2 WHERE 'Tgt' IN labels(t)",
+            "MATCH (s:Src)-[:R]->(t) WHERE 'Tgt' IN labels(t) RETURN count(*) AS n",
+            N,
+        ),
+        // The labels column with no filter over it at all: isolates building
+        // the column from evaluating a predicate on it.
+        (
+            "y3 labels(t) read, no filter",
+            "MATCH (s:Src)-[:R]->(t) RETURN count(labels(t)) AS n",
+            N,
+        ),
+        // Control: no label anywhere.
+        (
+            "y4 no label at all",
+            "MATCH (s:Src)-[:R]->(t) RETURN count(*) AS n",
+            N,
+        ),
+        // The same label read reached by a scan instead of a traversal. If the
+        // scan is cheap, label resolution is traversal-specific, exactly as
+        // property hydration was.
+        (
+            "y5 scan, labels(t) read",
+            "MATCH (t:Tgt) RETURN count(labels(t)) AS n",
+            N + decoys,
+        ),
+        (
+            "y6 scan, no labels",
+            "MATCH (t:Tgt) RETURN count(*) AS n",
+            N + decoys,
+        ),
+    ] {
+        run(&session, arm, q, rows).await?;
+    }
+
     // Step 0 of the vid-lookup plan: compaction reaches `optimize_indices`,
     // which re-covers a scalar index over fragments written after it was built.
     // If cost tracks *uncovered* fragments -- Lance answers those with a full
