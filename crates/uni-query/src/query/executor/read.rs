@@ -818,7 +818,12 @@ impl Executor {
             w.extend(graph_warnings);
         }
 
-        result.map(|batches| (batches, plan_clone))
+        // Results outlive this function, and the planner owning the interning
+        // scope does not — so any handle still in the batches has to become
+        // real bytes before they leave.
+        let mut batches = result?;
+        crate::query::df_graph::common::materialize_handles_in_batches(&mut batches)?;
+        Ok((batches, plan_clone))
     }
 
     /// Execute a MERGE read sub-plan through the DataFusion engine.

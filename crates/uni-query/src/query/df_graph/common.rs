@@ -27,6 +27,59 @@ use super::GraphExecutionContext;
 use super::procedure_call::map_yield_to_canonical;
 use super::unwind::arrow_to_json_value;
 use crate::query::df_graph::MutationContext;
+
+/// Replace any interned-value handle in `batches` with its self-contained
+/// encoding.
+///
+/// A handle is only meaningful while the query scope that registered it is
+/// alive, and results outlive that scope — `execute_datafusion_with_plan`
+/// returns its batches and drops the planner that owns the scope. So the
+/// engine's boundary is where handles stop: call this before results escape.
+///
+/// Cheap when there is nothing to do — a column with no handle in it is passed
+/// through by `Arc` rather than rebuilt — and it operates on the *final* row
+/// count, not the intermediate fan-out the interning existed to protect.
+///
+/// # Errors
+///
+/// If a handle can no longer be resolved, which means its scope ended early.
+pub(crate) fn materialize_handles_in_batches(batches: &mut [RecordBatch]) -> DFResult<()> {
+    use arrow_array::LargeBinaryArray;
+    use uni_common::cypher_value_codec::{is_handle, materialize};
+
+    for batch in batches.iter_mut() {
+        let mut replaced: Option<Vec<ArrayRef>> = None;
+        for (idx, col) in batch.columns().iter().enumerate() {
+            let Some(lb) = col.as_any().downcast_ref::<LargeBinaryArray>() else {
+                continue;
+            };
+            if !(0..lb.len()).any(|i| !lb.is_null(i) && is_handle(lb.value(i))) {
+                continue;
+            }
+            let mut out: Vec<Option<Vec<u8>>> = Vec::with_capacity(lb.len());
+            for i in 0..lb.len() {
+                if lb.is_null(i) {
+                    out.push(None);
+                    continue;
+                }
+                let bytes = materialize(lb.value(i))
+                    .map_err(|e| datafusion::error::DataFusionError::Execution(e.to_string()))?;
+                out.push(Some(bytes.into_owned()));
+            }
+            let rebuilt: ArrayRef = Arc::new(LargeBinaryArray::from_iter(out));
+            if let Some(slot) = replaced
+                .get_or_insert_with(|| batch.columns().to_vec())
+                .get_mut(idx)
+            {
+                *slot = rebuilt;
+            }
+        }
+        if let Some(columns) = replaced {
+            *batch = RecordBatch::try_new(batch.schema(), columns).map_err(arrow_err)?;
+        }
+    }
+    Ok(())
+}
 use crate::query::df_planner::HybridPhysicalPlanner;
 use crate::query::executor::core::{OperatorStats, collect_plan_metrics};
 use crate::query::planner::LogicalPlan;

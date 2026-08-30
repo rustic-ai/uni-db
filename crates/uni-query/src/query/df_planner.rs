@@ -5255,8 +5255,16 @@ impl HybridPhysicalPlanner {
                 "collect" => {
                     // Use custom Cypher collect UDAF that filters nulls and returns
                     // empty list (not null) when all inputs are null.
+                    //
+                    // The query's interning scope goes with it: a large enough
+                    // list then travels as a handle, so the operators above copy
+                    // 9 bytes per row instead of the whole list.
                     let arg = get_arg()?;
-                    crate::query::df_udfs::create_cypher_collect_expr(arg, *distinct)
+                    crate::query::df_udfs::create_cypher_collect_expr(
+                        arg,
+                        *distinct,
+                        Some(Arc::clone(self.graph_ctx.handle_scope())),
+                    )
                 }
                 "btic_min" => {
                     let arg = get_arg()?;

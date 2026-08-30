@@ -1,5 +1,6 @@
 pub mod aggregate_window_test;
 pub mod case_test;
+pub mod collected_list_interning_test;
 pub mod comparison_test;
 pub mod cypher_aggregation;
 pub mod cypher_call;

@@ -109,6 +109,7 @@ pub mod search_procedures;
 use uni_xervo::runtime::ModelRuntime;
 
 use crate::types::QueryWarning;
+use uni_common::cypher_value_codec::handle::HandleScope;
 
 pub use apply::GraphApplyExec;
 pub use ext_id_lookup::GraphExtIdLookupExec;
@@ -209,6 +210,15 @@ pub struct GraphExecutionContext {
     /// the outer transaction's L0. `Arc<Writer>` (interior-mutable,
     /// no outer lock) matches the executor's writer handle type.
     writer: Option<Arc<uni_store::Writer>>,
+
+    /// Owns the values interned during this query.
+    ///
+    /// A `collect()` large enough to be worth interning registers its list here
+    /// and travels as a 9-byte handle, so the operators above copy the handle
+    /// per row instead of the whole list. The scope is dropped with the
+    /// context, which is what releases the ids — see
+    /// `uni_common::cypher_value_codec::handle`.
+    handle_scope: Arc<HandleScope>,
 }
 
 impl std::fmt::Debug for GraphExecutionContext {
@@ -322,7 +332,13 @@ impl GraphExecutionContext {
             counters: None,
             cancellation_token,
             writer: None,
+            handle_scope: Arc::new(HandleScope::new()),
         }
+    }
+
+    /// The interning scope owning values registered during this query.
+    pub fn handle_scope(&self) -> &Arc<HandleScope> {
+        &self.handle_scope
     }
 
     /// Create a new graph execution context.

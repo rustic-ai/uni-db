@@ -1623,9 +1623,12 @@ fn translate_aggregate_function(
         }
         "COLLECT" => {
             check_args!(1, df_args, "COLLECT");
+            // No execution context reaches this translator, so nothing is
+            // interned here; the list is carried inline as it always was.
             Some(Ok(crate::df_udfs::create_cypher_collect_expr(
                 first_arg(df_args),
                 distinct,
+                None,
             )))
         }
         // BTIC aggregates

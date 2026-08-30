@@ -41,6 +41,7 @@ use std::any::Any;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use uni_common::Value;
+use uni_common::cypher_value_codec::handle::HandleScope;
 use uni_cypher::ast::BinaryOp;
 use uni_store::storage::arrow_convert::values_to_array;
 
@@ -5969,17 +5970,32 @@ pub fn create_cypher_sum_udaf() -> AggregateUDF {
 // Cypher-aware COLLECT UDAF
 // ============================================================================
 
+/// Encoded size above which a collected list is interned rather than carried
+/// inline.
+///
+/// The criterion is bytes, not element count, because bytes are what gets
+/// copied: interning costs one registry insert per group and saves
+/// `encoded_len - 9` bytes on every row the list is carried onto. An element
+/// count is a poor proxy for that — twenty entities is ~6 KB (LDBC IC3, whose
+/// list a 32-element threshold skipped entirely) while thirty-two small
+/// integers is ~160 bytes. Below this the list stays on the path it has always
+/// taken, which bounds what this change can regress.
+const COLLECT_INTERN_MIN_BYTES: usize = 1024;
+
 /// Custom UDAF for Cypher collect() that filters nulls and returns [] (not null)
 /// when all inputs are null.
 #[derive(Debug, Clone)]
 struct CypherCollectUdaf {
     signature: Signature,
+    /// Scope owning anything this aggregate interns; `None` disables interning.
+    scope: Option<Arc<HandleScope>>,
 }
 
 impl CypherCollectUdaf {
-    fn new() -> Self {
+    fn new(scope: Option<Arc<HandleScope>>) -> Self {
         Self {
             signature: Signature::new(TypeSignature::Any(1), Volatility::Immutable),
+            scope,
         }
     }
 }
@@ -6030,6 +6046,7 @@ impl AggregateUDFImpl for CypherCollectUdaf {
             values: Vec::new(),
             distinct: acc_args.is_distinct,
             raw_bytes,
+            scope: self.scope.clone(),
         }))
     }
     fn state_fields(
@@ -6051,6 +6068,8 @@ struct CypherCollectAccumulator {
     /// Input column is a raw `DataType::Bytes` column (`uni_raw_bytes=true`); its
     /// `LargeBinary` elements are verbatim bytes, not tagged CypherValue payloads.
     raw_bytes: bool,
+    /// Scope owning anything this accumulator interns; `None` disables it.
+    scope: Option<Arc<HandleScope>>,
 }
 
 impl CypherCollectAccumulator {
@@ -6136,6 +6155,22 @@ impl DfAccumulator for CypherCollectAccumulator {
         // Always return a list (empty list, not null)
         let val = Value::List(self.values.clone());
         let bytes = uni_common::cypher_value_codec::encode(&val);
+        // Past the threshold the list travels as a handle, so every operator
+        // above copies 9 bytes per row rather than the whole encoding.
+        // `decode` resolves it transparently, so consumers are unchanged.
+        //
+        // The encoding above is measured and then dropped on this path. That is
+        // one wasted encode per group, against a saving on every row the group
+        // fans out to — and the inline path below needs those bytes anyway, so
+        // nothing is spent when interning does not fire.
+        if bytes.len() >= COLLECT_INTERN_MIN_BYTES
+            && let Some(scope) = &self.scope
+        {
+            let id = scope.register(Arc::new(val));
+            return Ok(ScalarValue::LargeBinary(Some(
+                uni_common::cypher_value_codec::encode_handle(id),
+            )));
+        }
         Ok(ScalarValue::LargeBinary(Some(bytes)))
     }
     fn size(&self) -> usize {
@@ -6166,18 +6201,25 @@ impl DfAccumulator for CypherCollectAccumulator {
     }
 }
 
+/// The name-registered `_cypher_collect`, reachable when an expression names
+/// the UDAF rather than being built by the planner. It has no scope, so it
+/// never interns — correct, just without the saving.
 pub fn create_cypher_collect_udaf() -> AggregateUDF {
-    AggregateUDF::from(CypherCollectUdaf::new())
+    AggregateUDF::from(CypherCollectUdaf::new(None))
 }
 
 /// Create a Cypher collect() UDAF expression with optional distinct.
+///
+/// `scope` is the query's interning scope; pass `None` where no execution
+/// context is available and the list will simply be carried inline.
 pub fn create_cypher_collect_expr(
     arg: datafusion::logical_expr::Expr,
     distinct: bool,
+    scope: Option<Arc<HandleScope>>,
 ) -> datafusion::logical_expr::Expr {
     // We use the UDAF's call() but need to set distinct separately.
     // For now, always include arg directly - distinct is handled in the accumulator.
-    let udaf = Arc::new(create_cypher_collect_udaf());
+    let udaf = Arc::new(AggregateUDF::from(CypherCollectUdaf::new(scope)));
     if distinct {
         // Create with distinct flag set
         datafusion::logical_expr::Expr::AggregateFunction(
