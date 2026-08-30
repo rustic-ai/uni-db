@@ -1712,7 +1712,6 @@ fn map_to_output_schema(
 /// for known-label vertex scans. Reads all needed columns in a single Lance query,
 /// performs MVCC dedup via Arrow compute, merges L0 buffer data, filters tombstones,
 /// and maps to the output schema.
-#[expect(clippy::too_many_arguments)]
 /// Hydrate `vids` through the columnar scan path, aligned to `vids` order.
 ///
 /// The traversal used to reach target properties through
@@ -1798,6 +1797,7 @@ pub(crate) async fn hydrate_vids_columnar(
     Ok(columns)
 }
 
+#[expect(clippy::too_many_arguments)]
 pub(crate) async fn columnar_scan_vertex_batch_static(
     graph_ctx: &GraphExecutionContext,
     label: &str,
