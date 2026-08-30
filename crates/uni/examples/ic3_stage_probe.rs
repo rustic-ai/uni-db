@@ -231,35 +231,100 @@ async fn main() -> anyhow::Result<()> {
     // (`count(*)` at LIMIT 50000 costs the same 4.2 GB as the full 2.84M-row
     // join). Limiting friends shrinks the join itself.
     for limit in [50usize, 100, 200] {
-        for (arm, projection) in [
-            ("a count(*)", "count(*)"),
-            ("b count(creationDate) small", "count(message.creationDate)"),
-            ("c count(content) large", "count(message.content)"),
+        // `HAS_CREATOR` declares two source labels, so `(message)` is
+        // unlabelled and takes the multi-label property path; naming a label
+        // takes the per-label one. Same rows, same column read -- the only
+        // difference is which hydration path runs.
+        for (arm, pattern, projection) in [
+            ("a count(*) unlabelled", "(message)", "count(*)"),
+            (
+                "b creationDate unlabelled",
+                "(message)",
+                "count(message.creationDate)",
+            ),
+            (
+                "c creationDate :Comment",
+                "(message:Comment)",
+                "count(message.creationDate)",
+            ),
+            (
+                "d creationDate :Post",
+                "(message:Post)",
+                "count(message.creationDate)",
+            ),
         ] {
             let q = format!(
                 "{friends} WITH friend LIMIT {limit} \
-                 MATCH (friend)<-[:HAS_CREATOR]-(message) RETURN {projection} AS n"
+                 MATCH (friend)<-[:HAS_CREATOR]-{pattern} RETURN {projection} AS n"
             );
-            let before = LIVE.load(Ordering::Relaxed);
-            PEAK.store(before, Ordering::Relaxed);
-            let t = Instant::now();
-            let out = db.session().query(&q).await;
-            let ms = t.elapsed().as_secs_f64() * 1e3;
-            let peak =
-                (PEAK.load(Ordering::Relaxed).saturating_sub(before)) as f64 / (1024.0 * 1024.0);
-            let rows = match &out {
-                Ok(r) => r
-                    .rows()
-                    .first()
-                    .map(|row| format!("{:?}", row.values()[0]))
-                    .unwrap_or_else(|| "-".to_string()),
-                Err(e) => format!("ERROR {e}"),
-            };
-            println!("{arm:<32} {limit:>10} {rows:>12} {peak:>12.1} {ms:>10.0}");
-            std::io::stdout().flush().ok();
+            run(&db, arm, limit, &q).await;
         }
+
+        // How many properties are read, holding rows fixed. If the per-row
+        // cost is a heap-allocated map per vid, one property and three cost
+        // nearly the same; if it is per value, three costs about triple.
+        for (arm, projection) in [
+            ("g 1 property", "count(message.creationDate)"),
+            (
+                "h 2 properties",
+                "count(message.creationDate) + count(message.length)",
+            ),
+            (
+                "i 3 properties",
+                "count(message.creationDate) + count(message.length) \
+                 + count(message.browserUsed)",
+            ),
+        ] {
+            let q = format!(
+                "{friends} WITH friend LIMIT {limit} \
+                 MATCH (friend)<-[:HAS_CREATOR]-(message) \
+                 WITH message RETURN {projection} AS n"
+            );
+            run(&db, arm, limit, &q).await;
+        }
+
+        // Same read with the carried entity columns projected away first. If
+        // this is much cheaper, the cost is not the property read at all but
+        // `friend`/`countryX`/`countryY` being copied onto every fan-out row --
+        // the entity-struct analogue of #184's collected-list carry.
+        for (arm, projection) in [
+            (
+                "e WITH message, then creationDate",
+                "count(message.creationDate)",
+            ),
+            ("f WITH message, then count(*)", "count(*)"),
+        ] {
+            let q = format!(
+                "{friends} WITH friend LIMIT {limit} \
+                 MATCH (friend)<-[:HAS_CREATOR]-(message) \
+                 WITH message RETURN {projection} AS n"
+            );
+            run(&db, arm, limit, &q).await;
+        }
+        #[allow(clippy::never_loop)]
+        for _ in 0..0 {}
     }
     Ok(())
+}
+
+/// Run one arm and print its row count, peak and wall time.
+async fn run(db: &Uni, arm: &str, limit: usize, q: &str) {
+    let before = LIVE.load(Ordering::Relaxed);
+    PEAK.store(before, Ordering::Relaxed);
+    let t = Instant::now();
+    let out = db.session().query(q).await;
+    let ms = t.elapsed().as_secs_f64() * 1e3;
+    let peak = (PEAK.load(Ordering::Relaxed).saturating_sub(before)) as f64 / (1024.0 * 1024.0);
+    let rows = match &out {
+        Ok(r) => r
+            .rows()
+            .first()
+            .map(|row| format!("{:?}", row.values()[0]))
+            .unwrap_or_else(|| "-".to_string()),
+        Err(e) => format!("ERROR {e}"),
+    };
+    println!("{arm:<34} {limit:>8} {rows:>12} {peak:>12.1} {ms:>10.0}");
+    std::io::stdout().flush().ok();
 }
 
 /// IC3 through `WITH DISTINCT friend`, shared by the bounded arms.
