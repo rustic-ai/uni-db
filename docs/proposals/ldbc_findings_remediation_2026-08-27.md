@@ -1251,6 +1251,55 @@ the 29–45 GB plateau).
 > attempt died silently at IC2 for this reason. Pass
 > `-p OOMPolicy=continue`.
 
+**1b. The collected-list carry — two of the four kills, and two
+misattributions. 2026-08-29.**
+
+The open question above was answered by probing it.
+`crates/uni/examples/collected_list_carry_probe.rs` (allocator-
+instrumented, so it can report a peak that goes back down, which RSS
+cannot) showed the excess over a control growing as `rows × elements`,
+~300 B per pair — and a third arm showed a list **in scope but never
+read** costing *identically* to one that is read. The price is the
+column copy, not the predicate: `collect()` yields one opaque
+`LargeBinary` blob, and `CrossJoinExec::to_array_of_size` plus every
+traversal `take` re-copies it per row.
+
+The fix interns a collected list past 1 KiB behind a 9-byte handle
+resolved inside `cypher_value_codec::decode`, so the physical type
+stays `LargeBinary` and no consumer changes. Same SF1 protocol,
+16 GiB cap:
+
+| query | before | after |
+|---|---|---|
+| IC10 | **SIGKILL** | 10 rows, 26.5 s |
+| IC12 | **SIGKILL** | 20 rows, 79.9 s |
+| IC3 | **SIGKILL** | **SIGKILL** |
+| IC14 | **SIGKILL** | **SIGKILL** (#206) |
+
+Probe excess: 26.7 → 232.5 MiB across the scaling range, now 0.2 →
+0.9 MiB, flat at 1.0×.
+
+Two predictions in this document were wrong, and both are worth
+keeping visible because the same reasoning error produced each:
+
+- **IC10 was called out of scope** on the grounds that its
+  `collect(post)` is grouped and therefore "not an invariant column".
+  True and irrelevant — interning applies per group, and each
+  friend's post list clears the threshold. It was fixed by a change
+  argued not to cover it.
+- **IC3 was attributed to this defect** on an extrapolation — "~10²
+  cities × ~10⁶ rows ≈ 30 GB, against the 31.8 GB recorded". The list
+  is **20 cities**. With a byte-based threshold that admits its ~6 KB
+  list, IC3 is *still* OOM-killed, so the carry is not its cause.
+  That is now twice IC3 has been attributed to a mechanism it does
+  not use — first `UNWIND` (#198), then this.
+
+**IC3 needs its own investigation**, and the standard set by the two
+successes is a probe that can falsify a named hypothesis, not an
+arithmetic coincidence. The candidates its query actually contains:
+the `KNOWS*1..2` var-length expansion, and the `WITH DISTINCT` above
+it.
+
 **2. #207 — the minimal deadline checkpoint.** A deadline check
 between per-row sub-plan evaluations in
 `PatternComprehensionSubqueryExpr::evaluate` caps the overrun at one
