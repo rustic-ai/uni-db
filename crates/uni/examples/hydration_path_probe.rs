@@ -122,11 +122,12 @@ async fn run(session: &uni_db::Session, arm: &str, q: &str, rows: usize) -> anyh
     // the counter never fired and the zero says nothing (`counters.rs:203`).
     let m = out.metrics();
     println!(
-        "{arm:<34} {got:>10} {:>12.1} {:>12.0} {ms:>9.0} {:>6}/{:<6}",
+        "{arm:<34} {got:>10} {:>12.1} {:>12.0} {ms:>9.0} {:>5}/{:<4} {:>12}",
         peak / (1024.0 * 1024.0),
         peak / rows as f64,
         m.index_scans,
-        m.scans_reported
+        m.scans_reported,
+        m.index_comparisons
     );
     std::io::stdout().flush().ok();
     Ok(())
@@ -155,7 +156,7 @@ async fn probe(decoys: usize) -> anyhow::Result<()> {
          {:<34} {:>10} {:>12} {:>12} {:>9}",
         "arm", "n", "peak MiB", "bytes/row", "ms"
     );
-    println!("{:>96}", "idx/scans");
+    println!("{:>96} {:>12}", "idx/scans", "idx_compares");
     // Rows each arm actually produces: a scan sees every target row including
     // the decoys, a traversal only the reachable ones.
     let scanned = N + decoys;

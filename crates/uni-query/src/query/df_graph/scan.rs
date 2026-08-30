@@ -1749,10 +1749,21 @@ pub(crate) async fn hydrate_vids_columnar(
         GraphScanExec::build_vertex_schema(variable, label, properties, &uni_schema);
 
     let raw: Vec<u64> = vids.iter().map(|v| v.as_u64()).collect();
-    // Chunk the vid list. `FilterExpr::to_sql` renders `IN (…)` as SQL *text*,
-    // so an unchunked 60,000-vid request becomes a ~500 KB predicate string
-    // that Lance re-parses on every scan. `VidLookupJoinExec` already chunks
-    // this exact shape at the same constant.
+    // Chunk the vid list, bounding how much is resident at once.
+    //
+    // The `_vid` index is used either way, and the index work itself does not
+    // scale with the table: `index_comparisons` is ~1 per requested vid and
+    // barely moves when the table grows 5x (60,000 -> 61,440). What scales is
+    // what happens *after* the lookup — the matching rows are scattered across
+    // proportionally more pages in a larger table, and unchunked they are all
+    // materialised at once. Chunking caps the peak at one chunk's worth:
+    // 60,000 vids read from a 300k-row table went from 815 MiB to 226 MiB,
+    // and stopped tracking the table's size.
+    //
+    // `VidLookupJoinExec` already chunks this exact shape at the same constant.
+    // Note the trade: at 100% selectivity — asking for every row in the table —
+    // one full scan beats six chunked ones, so this costs ~66 MiB on the small
+    // fixture. A selectivity-aware choice would beat a fixed constant.
     let mut parts: Vec<RecordBatch> = Vec::new();
     for chunk in raw.chunks(crate::query::df_graph::vid_lookup_join::MAX_VIDS_PER_CHUNK) {
         parts.push(
