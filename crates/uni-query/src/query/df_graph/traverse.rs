@@ -1000,7 +1000,8 @@ async fn build_target_property_columns(
         for prop_name in target_properties {
             let data_type = resolve_property_type(prop_name, label_props);
             let column =
-                build_property_column_static(target_vids, &props_map, prop_name, &data_type)?;
+                build_property_column_static(target_vids, &props_map, prop_name, &data_type)
+                    .map_err(exec_err)?;
             columns.push(column);
         }
     } else {
@@ -1051,7 +1052,8 @@ async fn build_target_property_columns(
                     &props_map,
                     prop_name,
                     &arrow::datatypes::DataType::LargeBinary,
-                )?;
+                )
+                .map_err(exec_err)?;
                 columns.push(column);
             }
         }
@@ -1206,8 +1208,8 @@ async fn build_edge_columns(
                 continue;
             }
             let data_type = resolve_edge_property_type(prop_name, edge_type_props);
-            let column =
-                build_property_column_static(&vid_keys, &props_map, prop_name, &data_type)?;
+            let column = build_property_column_static(&vid_keys, &props_map, prop_name, &data_type)
+                .map_err(exec_err)?;
             columns.push(column);
         }
     }
@@ -4585,7 +4587,8 @@ async fn hydrate_vlp_target_properties(
             for prop_name in &target_properties {
                 let data_type = resolve_property_type(prop_name, label_props);
                 let column =
-                    build_property_column_static(&target_vids, &props_map, prop_name, &data_type)?;
+                    build_property_column_static(&target_vids, &props_map, prop_name, &data_type)
+                        .map_err(exec_err)?;
                 property_columns.push(column);
             }
         }
@@ -4655,7 +4658,8 @@ async fn hydrate_vlp_target_properties(
                     &props_map,
                     prop_name,
                     &arrow::datatypes::DataType::LargeBinary,
-                )?;
+                )
+                .map_err(exec_err)?;
                 property_columns.push(column);
             }
         }

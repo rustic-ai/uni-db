@@ -36,7 +36,7 @@ use uni_store::storage::direction::Direction;
 
 use super::GraphExecutionContext;
 use crate::query::df_graph::common::{
-    block_on_scoped, build_path_struct_field, column_as_vid_array,
+    block_on_scoped, build_path_struct_field, column_as_vid_array, exec_err,
 };
 use crate::query::df_graph::scan::build_property_column_static;
 
@@ -326,7 +326,8 @@ impl PhysicalExpr for PatternComprehensionExecExpr {
                             &props_map,
                             prop,
                             &DataType::LargeBinary,
-                        )?
+                        )
+                        .map_err(exec_err)?
                     };
                     inner_columns.push(col);
                 }
@@ -389,7 +390,8 @@ impl PhysicalExpr for PatternComprehensionExecExpr {
                             &props_map,
                             prop,
                             &DataType::LargeBinary,
-                        )?
+                        )
+                        .map_err(exec_err)?
                     };
                     inner_columns.push(col);
                 }
