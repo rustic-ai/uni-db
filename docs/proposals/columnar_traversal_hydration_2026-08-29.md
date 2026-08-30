@@ -31,6 +31,32 @@ Three things follow, and each is a control for the others:
    property read at all, because `hasLabel` resolution hydrates too. Any
    target-side attribute access pays this, not just properties.
 
+### Controls: it is not adjacency, and not a one-time build
+
+Three alternatives were tested rather than argued away, since a per-query peak
+can easily be something other than what it looks like.
+
+| control (240k decoys, 60,000 rows produced) | peak MiB |
+|---|---|
+| traverse untyped, no property | 75.0 |
+| traverse untyped, 1 property | 1619.0 |
+| the same property arm, repeated | 1620.7 |
+| repeated again | 1617.4 |
+| traverse, **source** property (`count(s.idx)`) | **76.0** |
+
+- **Not CSR or adjacency.** The source-property arm is the same query shape over
+  the same edges with the same adjacency and the same row count; reading a
+  *source* property costs 76.0 MiB where a *target* property costs 1620 MiB.
+  Adjacency is byte-identical between them. The asymmetry also corroborates the
+  cause: `s` arrives from a `Scan` so its columns are already in the batch, and
+  only the traversal target goes through `PropertyManager`.
+- **Not a one-time structure build.** A lazily-built CSR, vid→labels index or
+  property cache is paid by whichever query runs first and is free afterwards.
+  This repeats to within 0.2% across three consecutive runs.
+- **Decoy rows still drive it.** The same arm costs +79 MiB over its
+  no-property baseline at 0 decoys and +1545 MiB at 240k — 5× the table for
+  ~19× the increment.
+
 At LDBC SF1 the same defect OOM-kills IC3 at a 16 GiB cap; `count(*)` over its
 2.84M-row join costs 4.1 GB while `count(message.creationDate)` over the identical
 join does not complete.

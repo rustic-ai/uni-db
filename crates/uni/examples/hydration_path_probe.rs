@@ -196,6 +196,32 @@ async fn probe(decoys: usize) -> anyhow::Result<()> {
             "MATCH (s:Src)-[:R]->(t) RETURN count(t.p1) AS n",
             N,
         ),
+        // Repeats. A one-time structure build (CSR, a vid->labels index, a
+        // property cache) is paid by whichever arm runs first and is free
+        // afterwards; a per-query cost repeats. This is what separates them.
+        (
+            "traverse untyped, no property #2",
+            "MATCH (s:Src)-[:R]->(t) RETURN count(*) AS n",
+            N,
+        ),
+        (
+            "traverse untyped, 1 property #2",
+            "MATCH (s:Src)-[:R]->(t) RETURN count(t.p1) AS n",
+            N,
+        ),
+        (
+            "traverse untyped, 1 property #3",
+            "MATCH (s:Src)-[:R]->(t) RETURN count(t.p1) AS n",
+            N,
+        ),
+        // Same edges, same adjacency, reading a property of the *source*
+        // instead of the target. The CSR is identical; only which side is
+        // hydrated differs.
+        (
+            "traverse, source property",
+            "MATCH (s:Src)-[:R]->(t) RETURN count(s.idx) AS n",
+            N,
+        ),
     ] {
         run(&session, arm, q, rows).await?;
     }
