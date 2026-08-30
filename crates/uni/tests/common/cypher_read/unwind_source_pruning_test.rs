@@ -317,3 +317,55 @@ async fn a_wildcard_in_a_subquery_body_does_not_break_the_query() {
     .await;
     assert_eq!(got, vec!["b".to_string(), "c".to_string()]);
 }
+
+/// The operator emits its expansion in `batch_size` chunks rather than one
+/// batch per input batch (#198), so an expansion larger than a chunk crosses
+/// boundaries the cursor has to carry. The count is the cheap assertion that
+/// no row was dropped or duplicated there.
+#[tokio::test]
+async fn an_expansion_larger_than_one_chunk_keeps_every_row() {
+    let db = fixture().await;
+    let r = db
+        .session()
+        .query("UNWIND range(1, 20000) AS x RETURN count(x) AS c")
+        .await
+        .expect("unwind a list spanning several output chunks");
+    assert_eq!(r.rows()[0].values()[0], Value::Int(20000));
+}
+
+/// Chunking moves the batch boundary and nothing else: order across the
+/// boundary must still be the list's own order.
+#[tokio::test]
+async fn order_survives_the_chunk_boundary() {
+    let db = fixture().await;
+    let r = db
+        .session()
+        .query("UNWIND range(1, 20000) AS x RETURN collect(x) AS xs")
+        .await
+        .expect("collect an expansion spanning several output chunks");
+    let Value::List(xs) = &r.rows()[0].values()[0] else {
+        panic!("expected a list, got {:?}", r.rows()[0].values()[0]);
+    };
+    let expected: Vec<Value> = (1..=20000).map(Value::Int).collect();
+    assert_eq!(xs, &expected);
+}
+
+/// A row that expands to nothing sits between rows that do. It must not shift
+/// the rows around it onto the wrong input row — the failure a per-row cursor
+/// makes possible and the whole-batch form could not.
+#[tokio::test]
+async fn empty_and_null_rows_do_not_desynchronise_the_expansion() {
+    let db = fixture().await;
+    let got = strings(
+        &db,
+        "UNWIND [{k:'a', xs:[]}, {k:'b', xs:['b1','b2']}, {k:'c', xs:null}, \
+                 {k:'d', xs:['d1']}] AS row \
+         UNWIND row.xs AS x \
+         RETURN row.k + ':' + x AS t",
+    )
+    .await;
+    assert_eq!(
+        got,
+        vec!["b:b1".to_string(), "b:b2".to_string(), "d:d1".to_string()]
+    );
+}
