@@ -1190,6 +1190,67 @@ constrain memory (smaller machine or artificial pressure), not just
 re-run idle. Expect broad peak-RSS drops (IC3 through IC12 all ride
 the 29–45 GB plateau).
 
+> **Shipped, and it does not close #198 — 2026-08-29.**
+> `GraphUnwindStream` now expands row by row and emits in
+> `session_config().batch_size()` chunks, holding the cursor across
+> `poll_next`; peak is `chunk × columns` plus the one list being
+> expanded, instead of `input_rows × list_size` in a single
+> allocation. Verified at the operator: `UNWIND range(1, 20000)`
+> emits exactly 3 batches (8192 + 8192 + 3616) where it previously
+> emitted 1.
+>
+> **The expectation quoted above was wrong, and measurement is what
+> showed it.** Both runs below are SF1, post-#208 parameters, under
+> `systemd-run --scope -p MemoryMax=16G -p MemorySwapMax=0`:
+>
+> | query | before | after |
+> |---|---|---|
+> | IC3 | **SIGKILL** | **SIGKILL** |
+> | IC6 | 300 s budget exceeded, no rows | **10 rows, 293.5 s**, peak 15083 MiB |
+> | IC7 | 20 rows, 23586 ms | 20 rows, 19532 ms |
+> | IC8 | 20 rows, 3830 ms | 20 rows, 3174 ms |
+> | IC10 | **SIGKILL** | **SIGKILL** |
+> | IC11 | 10 rows, 37970 ms | 10 rows, 29381 ms |
+> | IC12 | **SIGKILL** | **SIGKILL** |
+> | IC14 | **SIGKILL** | **SIGKILL** |
+>
+> IC2/IC4/IC5/IC9 fail identically before and after, as intended —
+> they are #202, #203 and #204.
+>
+> **IC3, IC10 and IC12 contain no `UNWIND`.** Only IC6 and IC14 do.
+> So the 29–45 GB plateau is *not* attributable to this operator for
+> three of the four killed queries, and the sentence above predicting
+> "broad peak-RSS drops (IC3 through IC12)" could never have come
+> true. #198's headline — that the peak lives in
+> `GraphUnwindStream::build_output_batch` — holds for the query #184
+> actually measured (IC6) and is unevidenced for the rest. **Where
+> IC3/IC10/IC12's allocation lives is now an open question and wants
+> its own issue**, rather than being folded into #198 retroactively.
+>
+> On the two queries that do reach the operator: IC6 goes from
+> returning nothing to returning 10 rows, and IC14 is still killed —
+> its cost is the per-row comprehension fallback (#206), upstream of
+> the unwind. IC6's margin is thin (293.5 s of a 300 s budget), and
+> its higher peak (15083 vs 11934 MiB) is not a regression: the
+> before figure is the high-water mark at the moment the query was
+> cut off, not the cost of a completed one. Note also that
+> `peak_rss_mib` reads `VmHWM`, a *process* high-water mark, so
+> within one child the column is monotonic and only the query that
+> set a new high is telling you anything.
+>
+> **#198's own success criterion — "the process surviving with peak
+> RSS bounded" — is therefore not met, and the issue stays open.**
+> The change is worth keeping on its merits (IC6 answers; the
+> unbounded allocation is gone from the operator), but the bench
+> still takes four kills under a 16 GiB cap.
+>
+> Harness note for anyone repeating this: systemd's default
+> `OOMPolicy=stop` tears down the whole scope when the kernel OOM
+> killer fires, which kills the bench's supervisor — the very thing
+> that records the abort and restarts after it. The first baseline
+> attempt died silently at IC2 for this reason. Pass
+> `-p OOMPolicy=continue`.
+
 **2. #207 — the minimal deadline checkpoint.** A deadline check
 between per-row sub-plan evaluations in
 `PatternComprehensionSubqueryExpr::evaluate` caps the overrun at one
