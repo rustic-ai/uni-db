@@ -3391,11 +3391,34 @@ impl HybridPhysicalPlanner {
             } else {
                 None
             };
+            // Whether a name is declared by the schema, when the target's label
+            // is known and when it is not.
+            //
+            // An uninferable label is not the same as a schemaless property. A
+            // traversal whose edge type has several source labels — LDBC's
+            // `HAS_CREATOR`, whose sources are `Comment` and `Post` — leaves
+            // `target_label_id` at 0, and treating every name as non-schema
+            // then forced `_all_props` onto a read that had asked for one
+            // column. `_all_props` subsumes the narrow list downstream
+            // (`build_target_property_columns`), so the traversal encoded every
+            // property of every target row: at LDBC SF1, reading an 8-byte
+            // `creationDate` off 83k rows cost 1131 MiB against 185 MiB for
+            // binding the entity and reading nothing, and reading the 2000-char
+            // `content` instead cost 1232 MiB — within 6%, because the name
+            // requested made no difference (#209).
+            //
+            // So when the label is unknown, ask whether *any* label declares
+            // the name. Only a name no label declares is genuinely schemaless
+            // and needs the wildcard payload.
+            let is_schema_prop = |p: &str| match target_label_props {
+                Some(lp) => lp.contains_key(p),
+                None => self.schema.properties.values().any(|lp| lp.contains_key(p)),
+            };
             let has_non_schema_props = target_properties.iter().any(|p| {
                 p != "overflow_json"
                     && p != "_all_props"
                     && !p.starts_with('_')
-                    && !target_label_props.is_some_and(|lp| lp.contains_key(p.as_str()))
+                    && !is_schema_prop(p.as_str())
             });
             if has_non_schema_props && !target_properties.iter().any(|p| p == "_all_props") {
                 target_properties.push("_all_props".to_string());
@@ -3403,11 +3426,12 @@ impl HybridPhysicalPlanner {
             // Also check the filter for non-schema property references
             if let Some(filter_expr) = target_filter {
                 let filter_props = crate::query::df_expr::collect_properties(filter_expr);
+                // Same reasoning as above: an unknown label does not make a
+                // filtered property schemaless.
                 let has_overflow_filter = filter_props.iter().any(|(var, prop)| {
                     var == target_variable
                         && !prop.starts_with('_')
-                        && !target_label_props
-                            .is_some_and(|props| props.contains_key(prop.as_str()))
+                        && !is_schema_prop(prop.as_str())
                 });
                 if has_overflow_filter && !target_properties.iter().any(|p| p == "_all_props") {
                     target_properties.push("_all_props".to_string());
