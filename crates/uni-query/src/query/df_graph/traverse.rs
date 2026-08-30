@@ -968,6 +968,24 @@ async fn build_target_property_columns(
     let mut columns = Vec::new();
 
     if let Some(label_name) = target_label_name {
+        // `_all_props` is a whole-entity request with no narrower columnar
+        // form, so it stays on the map path; everything else is read as
+        // columns and never becomes a per-row map (#209).
+        let wants_all = target_properties.iter().any(|p| p == "_all_props");
+        if !wants_all {
+            return crate::query::df_graph::scan::hydrate_vids_columnar(
+                graph_ctx,
+                label_name,
+                // The scan names its columns `{variable}.{prop}`; the name is
+                // internal to that call, since only the property columns are
+                // returned and the caller positions them itself.
+                "t",
+                target_properties,
+                target_vids,
+            )
+            .await;
+        }
+
         let property_manager = graph_ctx.property_manager();
         let query_ctx = graph_ctx.query_context();
 

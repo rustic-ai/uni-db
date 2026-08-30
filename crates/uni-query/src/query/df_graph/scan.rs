@@ -399,7 +399,7 @@ impl GraphScanExec {
     }
 
     /// Build output schema for vertex scan with proper Arrow types.
-    fn build_vertex_schema(
+    pub(crate) fn build_vertex_schema(
         variable: &str,
         label: &str,
         properties: &[String],
@@ -1713,7 +1713,92 @@ fn map_to_output_schema(
 /// performs MVCC dedup via Arrow compute, merges L0 buffer data, filters tombstones,
 /// and maps to the output schema.
 #[expect(clippy::too_many_arguments)]
-async fn columnar_scan_vertex_batch_static(
+/// Hydrate `vids` through the columnar scan path, aligned to `vids` order.
+///
+/// The traversal used to reach target properties through
+/// `PropertyManager::get_batch_vertex_props*`, which scans the same rows and
+/// then shreds the `RecordBatch` into a `HashMap<Vid, HashMap<String, Value>>`
+/// for the caller to walk back into an Arrow array. That cost scales with the
+/// target *table* rather than with the rows produced: growing a target table 5x
+/// with rows no edge reaches raised a traversal's peak 10.6x while its output
+/// stayed at 60,000 rows, and reading one column cost 86x the scan path over
+/// the same data (#209).
+///
+/// This routes the same request through the scan path instead, which already
+/// does the Lance read, MVCC dedup, L0 merge and tombstone filtering in Arrow.
+/// Reusing it rather than adding a storage-side columnar API is deliberate:
+/// `uni-store` cannot see this module, so a `PropertyManager` variant would
+/// have to reimplement version ranking and the L0 overlay — a second
+/// implementation of the part where a mistake is a wrong answer.
+///
+/// # Ordering
+///
+/// The scan returns rows in scan order and omits vids with no visible row, so
+/// the result is gathered back into `vids` order here. A vid with no row — not
+/// visible under this snapshot — yields null in every column, which is how the
+/// map API's "absent from the map" signal survives. Duplicate vids in `vids`
+/// are fine: each occurrence gathers the same row.
+pub(crate) async fn hydrate_vids_columnar(
+    graph_ctx: &GraphExecutionContext,
+    label: &str,
+    variable: &str,
+    properties: &[String],
+    vids: &[Vid],
+) -> DFResult<Vec<ArrayRef>> {
+    let uni_schema = graph_ctx.storage().schema_manager().schema();
+    let output_schema =
+        GraphScanExec::build_vertex_schema(variable, label, properties, &uni_schema);
+
+    let raw: Vec<u64> = vids.iter().map(|v| v.as_u64()).collect();
+    let batch = columnar_scan_vertex_batch_static(
+        graph_ctx,
+        label,
+        variable,
+        properties,
+        &output_schema,
+        &None,
+        Some(&raw),
+        None,
+        None,
+        None,
+    )
+    .await?;
+
+    // Map each returned vid to its row, then gather. One u64 hash per row,
+    // against one HashMap<String, Value> allocation per row on the old path.
+    let vid_col = batch
+        .column_by_name(&format!("{variable}._vid"))
+        .and_then(|c| c.as_any().downcast_ref::<UInt64Array>())
+        .ok_or_else(|| {
+            datafusion::error::DataFusionError::Internal(
+                "columnar hydration returned no _vid column".to_string(),
+            )
+        })?;
+    let mut row_of: HashMap<u64, u32> = HashMap::with_capacity(vid_col.len());
+    for row in 0..vid_col.len() {
+        if !vid_col.is_null(row) {
+            // A later row wins, matching the scan path's own MVCC dedup, which
+            // has already reduced this to one row per vid.
+            row_of.insert(vid_col.value(row), row as u32);
+        }
+    }
+    let indices: arrow_array::UInt32Array = raw
+        .iter()
+        .map(|vid| row_of.get(vid).copied())
+        .collect::<Vec<Option<u32>>>()
+        .into();
+
+    // Skip `_vid`/`_labels`; the caller wants the property columns only, in the
+    // order it asked for them.
+    let mut columns = Vec::with_capacity(properties.len());
+    for (idx, _) in properties.iter().enumerate() {
+        let col = batch.column(idx + 2);
+        columns.push(arrow::compute::take(col.as_ref(), &indices, None).map_err(arrow_err)?);
+    }
+    Ok(columns)
+}
+
+pub(crate) async fn columnar_scan_vertex_batch_static(
     graph_ctx: &GraphExecutionContext,
     label: &str,
     variable: &str,
