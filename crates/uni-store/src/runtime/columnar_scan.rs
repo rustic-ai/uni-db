@@ -174,6 +174,24 @@ pub fn append_value_as_cypher_binary(
 /// 1. Schema-defined columns from the batch
 /// 2. Overflow_json properties
 /// 3. L0 buffer properties
+///
+/// # Precondition
+///
+/// `projected_properties` must already contain every declared property the
+/// caller expects to find in `_all_props`. This is a *projected* whole-entity
+/// map, not an exhaustive one: step 1 reads only the columns named there, so a
+/// declared property the caller did not project is silently absent -- which is
+/// indistinguishable from the property being unset.
+///
+/// The planner satisfies this by not pushing the `_all_props` sentinel down
+/// (`STRUCT_ONLY_SENTINEL`): a whole-node request arrives with every declared
+/// property already in the projection, so the two sets coincide. The row-wise
+/// `PropertyManager` path has no such precondition -- it reads every declared
+/// property regardless -- so a caller that reaches this function with a
+/// narrowed projection gets a quietly smaller map than the same request served
+/// row-wise. Widening this to re-derive the column set from the batch would
+/// undo the projection narrowing that keeps columnar hydration cheap, so the
+/// precondition is the contract rather than a defect to fix here.
 pub fn build_all_props_column_for_schema_scan(
     batch: &RecordBatch,
     vid_arr: &UInt64Array,
@@ -212,7 +230,7 @@ pub fn build_all_props_column_for_schema_scan(
             && let Ok(uni_common::Value::Map(map)) =
                 uni_common::cypher_value_codec::decode(arr.value(i))
         {
-            merged_props.extend(map);
+            crate::storage::property_builder::merge_overflow_into(&mut merged_props, map);
         }
 
         // 3. L0 buffer overlay (pending → current → transaction)
@@ -2322,6 +2340,84 @@ mod tests {
     use arrow_array::UInt64Array;
     use arrow_schema::Schema;
     use std::sync::Arc;
+
+    /// A declared column beats `overflow_json` residue for the same key.
+    ///
+    /// The blob only ever holds schemaless properties -- every writer excludes
+    /// declared keys via `build_overflow_json_column` -- so a collision means
+    /// pre-declaration residue on a row whose typed column is the later write.
+    /// This pinned nothing before: the merge was `extend`, so the blob won,
+    /// disagreeing with the row-wise reader on the same data.
+    ///
+    /// No writer can currently produce a colliding row, so the batch is built
+    /// by hand. That is the point of the test -- it fixes the contract while
+    /// the state is still unreachable, rather than after something reaches it.
+    #[test]
+    fn all_props_prefers_the_declared_column_over_overflow_residue() {
+        use uni_common::Value;
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("_vid", DataType::UInt64, false),
+            Field::new("score", DataType::Int64, true),
+            Field::new("overflow_json", DataType::LargeBinary, true),
+        ]));
+
+        // The same key in both places, plus a schemaless-only key as a control
+        // that the blob is genuinely being read.
+        let residue = Value::Map(HashMap::from([
+            ("score".to_string(), Value::Int(1)),
+            ("nickname".to_string(), Value::String("only-in-blob".into())),
+        ]));
+        let blob = uni_common::cypher_value_codec::encode(&residue);
+
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(UInt64Array::from(vec![7u64])),
+                Arc::new(arrow_array::Int64Array::from(vec![Some(2i64)])),
+                Arc::new(arrow_array::LargeBinaryArray::from(vec![Some(
+                    blob.as_slice(),
+                )])),
+            ],
+        )
+        .unwrap();
+
+        let vid_arr = UInt64Array::from(vec![7u64]);
+        let overflow_arr = batch
+            .column_by_name("overflow_json")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<arrow_array::LargeBinaryArray>()
+            .unwrap()
+            .clone();
+
+        let out = build_all_props_column_for_schema_scan(
+            &batch,
+            &vid_arr,
+            Some(&overflow_arr),
+            &["score".to_string()],
+            &L0Context::empty(),
+        );
+
+        let out = out
+            .as_any()
+            .downcast_ref::<arrow_array::LargeBinaryArray>()
+            .unwrap();
+        let Ok(Value::Map(merged)) = uni_common::cypher_value_codec::decode(out.value(0)) else {
+            panic!("_all_props did not decode to a map");
+        };
+
+        assert_eq!(
+            merged.get("score"),
+            Some(&Value::Int(2)),
+            "the declared column is the later write and must win: {merged:?}"
+        );
+        assert_eq!(
+            merged.get("nickname"),
+            Some(&Value::String("only-in-blob".into())),
+            "schemaless keys must still come through from the blob"
+        );
+    }
 
     /// Helper to build a RecordBatch with _vid, _deleted, _version columns for testing.
     fn make_mvcc_batch(vids: &[u64], versions: &[u64], deleted: &[bool]) -> RecordBatch {
