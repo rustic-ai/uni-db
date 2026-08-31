@@ -37,6 +37,23 @@ pub fn is_vertex_deleted(vid: Vid, ctx: Option<&QueryContext>) -> bool {
     visit_l0_buffers(Some(ctx), |buf| buf.vertex_tombstones.contains(&vid))
 }
 
+/// Whether any L0 buffer holds a *partial* property row for this vid.
+///
+/// `Writer::insert_vertex_partial` stages only the touched keys when
+/// `partial_lance_writes` is on, recording them in `vertex_partial_keys`. Such
+/// a row is a delta, not the complete property set, so a reader must not treat
+/// its presence as "L0 has everything" and skip storage.
+pub fn has_partial_vertex_keys(vid: Vid, ctx: Option<&QueryContext>) -> bool {
+    let Some(ctx) = ctx else {
+        return false;
+    };
+    visit_l0_buffers(Some(ctx), |buf| {
+        buf.vertex_partial_keys
+            .get(&vid)
+            .is_some_and(|keys| !keys.is_empty())
+    })
+}
+
 /// Check if an edge is deleted in the L0 chain.
 /// Returns true if a tombstone is found at any layer.
 pub fn is_edge_deleted(eid: Eid, ctx: Option<&QueryContext>) -> bool {

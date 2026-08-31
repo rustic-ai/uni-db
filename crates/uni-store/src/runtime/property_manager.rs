@@ -1250,10 +1250,30 @@ impl PropertyManager {
                 continue;
             }
             let l0_props = l0_visibility::accumulate_vertex_props(vid, ctx);
-            if let Some(props) = l0_props {
-                result.insert(vid, props);
-            } else {
-                need_storage.push(vid);
+            // Skipping storage when L0 has the vid is only sound while L0 rows
+            // are *complete* -- the invariant `insert_vertex_partial_full`
+            // documents, and the default write path upholds by merging a full
+            // map before staging.
+            //
+            // `partial_lance_writes` breaks it: `insert_vertex_partial` stages
+            // only the touched keys, so the L0 row is a delta and the stored
+            // properties are still the rest of the truth. Reading L0 alone
+            // dropped them -- and since the SET prefetch merges over this map
+            // and writes the result back, a dropped property was deleted, not
+            // just missing from one read.
+            let partial = l0_visibility::has_partial_vertex_keys(vid, ctx);
+            match l0_props {
+                Some(props) if !partial => {
+                    result.insert(vid, props);
+                }
+                Some(props) => {
+                    // Delta row: keep it, but read storage underneath. The L0
+                    // values win on shared keys, applied after the storage
+                    // merge below.
+                    result.insert(vid, props);
+                    need_storage.push(vid);
+                }
+                None => need_storage.push(vid),
             }
         }
 
