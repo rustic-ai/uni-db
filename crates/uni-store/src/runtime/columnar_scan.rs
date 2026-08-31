@@ -21,13 +21,14 @@ use arrow_array::builder::{
     Time64NanosecondBuilder, TimestampNanosecondBuilder, UInt64Builder,
 };
 use arrow_array::{ArrayRef, RecordBatch, UInt64Array};
-use arrow_schema::{DataType, Field, Fields, IntervalUnit, SchemaRef, TimeUnit};
+use arrow_schema::{DataType, Field, Fields, IntervalUnit, Schema, SchemaRef, TimeUnit};
 use uni_common::core::id::Vid;
 use uni_common::{Properties, Value};
 
 use crate::backend::types::{FilterExpr, Scalar};
 use crate::runtime::l0_visibility::L0Context;
 use crate::storage::arrow_convert;
+use crate::storage::manager::StorageManager;
 
 /// Resolve the Arrow data type for a property, handling system columns like `overflow_json`.
 ///
@@ -1950,6 +1951,308 @@ pub fn map_to_output_schema(
     RecordBatch::try_new(output_schema.clone(), columns).map_err(anyhow::Error::from)
 }
 
+/// Arrow type of the `_labels` column.
+///
+/// `uni-query`'s `common.rs` keeps its own copy for six other callers; one
+/// line, and duplicating it beats a cross-crate dependency in the wrong
+/// direction.
+fn labels_data_type() -> DataType {
+    DataType::List(Arc::new(Field::new("item", DataType::Utf8, true)))
+}
+
+/// What to read in one columnar vertex scan.
+pub struct ColumnarVertexScanRequest<'a> {
+    /// Label whose table is scanned.
+    pub label: &'a str,
+    /// Properties to materialise, in output order.
+    pub projected_properties: &'a [String],
+    /// Positional target for the result; the caller owns column naming.
+    pub output_schema: &'a SchemaRef,
+    /// Single-vid short circuit, already resolved from the caller's filter.
+    pub target_vid: Option<u64>,
+    /// Multi-vid restriction (`_vid IN (…)`).
+    pub vid_list_filter: Option<&'a [u64]>,
+    /// Rendered SQL from the planner's hash-index pushdown; passed through
+    /// verbatim, nothing here parses it.
+    pub extra_lance_filter: Option<&'a str>,
+}
+
+/// Read a batch of vertices columnarly: Lance + L0, MVCC-resolved.
+///
+/// The storage half of what used to be `columnar_scan_vertex_batch_static` in
+/// `uni-query`. Everything DataFusion-shaped -- resolving a `PhysicalExpr` down
+/// to a target vid, the runtime filter, the `Count` metric -- stays with the
+/// caller, so this function has no DataFusion types and `uni-store` needs no
+/// dependency on it (#209). That is what lets crates below the query layer read
+/// properties columnarly instead of through a per-vid map.
+///
+/// Rows come back positionally against `req.output_schema`; the caller owns the
+/// `{var}.{prop}` naming.
+///
+/// # Errors
+///
+/// Propagates storage, plugin and Arrow failures.
+pub async fn columnar_scan_vertex_batch(
+    storage: &Arc<StorageManager>,
+    l0_ctx: &L0Context,
+    plugin_registry: Option<&Arc<uni_plugin::PluginRegistry>>,
+    counters: Option<&Arc<crate::QueryCounters>>,
+    req: ColumnarVertexScanRequest<'_>,
+    index_consulted: Option<&mut usize>,
+) -> anyhow::Result<RecordBatch> {
+    let ColumnarVertexScanRequest {
+        label,
+        projected_properties,
+        output_schema,
+        target_vid,
+        vid_list_filter,
+        extra_lance_filter,
+    } = req;
+    let uni_schema = storage.schema_manager().schema();
+    let label_props = uni_schema.properties.get(label);
+
+    // Build the list of columns to request from Lance
+    let mut lance_columns: Vec<String> = vec![
+        "_vid".to_string(),
+        "_deleted".to_string(),
+        "_version".to_string(),
+    ];
+    // `_labels` is REQUIRED, not a projection nicety. Without it
+    // `build_labels_column_for_known_label` fabricates `[label]`, and that
+    // fabricated set is what the executor writes back — truncating a
+    // multi-label vertex on DELETE, SET/REMOVE label, and even a plain
+    // `SET n.prop`, as well as returning a wrong `labels(n)`.
+    //
+    // Requesting it is safe on legacy tables that predate the column:
+    // `StorageManager::scan_vertex_table_counted` narrows the projection to
+    // physically-present columns, and the builder's `[label]` fallback covers
+    // the absence.
+    push_column_if_absent(&mut lance_columns, "_labels");
+    for prop in projected_properties {
+        if prop == "overflow_json" {
+            push_column_if_absent(&mut lance_columns, "overflow_json");
+        } else if prop == "_created_at" || prop == "_updated_at" {
+            // System-managed timestamps live on every vertex table regardless
+            // of label schema. Request them directly from Lance.
+            push_column_if_absent(&mut lance_columns, prop);
+        } else {
+            let exists_in_schema = label_props.is_some_and(|lp| lp.contains_key(prop));
+            if exists_in_schema {
+                push_column_if_absent(&mut lance_columns, prop);
+            }
+        }
+    }
+
+    // Ensure overflow_json is present when any projected property is not in the schema
+    // (excluding system-managed columns like `_created_at` / `_updated_at`).
+    let needs_overflow = projected_properties.iter().any(|p| {
+        p == "overflow_json"
+            || (!matches!(p.as_str(), "_created_at" | "_updated_at")
+                && !label_props.is_some_and(|lp| lp.contains_key(p)))
+    });
+    if needs_overflow {
+        push_column_if_absent(&mut lance_columns, "overflow_json");
+    }
+
+    // Push _vid filter to Lance for O(log N) BTree index lookup instead of full scan.
+    // Prefer the multi-VID list (formats as `_vid IN (...)`); fall back to
+    // single-VID `_vid = N` from the WHERE-clause path. AND-combined with
+    // any indexed-property pushdown (issue #57).
+    let vid_part = match (vid_list_filter, target_vid) {
+        (Some(vs), _) if !vs.is_empty() => Some(FilterExpr::one_of(
+            "_vid",
+            vs.iter().map(|v| Scalar::UInt(*v)),
+        )),
+        (_, Some(v)) => Some(FilterExpr::equals("_vid", Scalar::UInt(v))),
+        _ => None,
+    };
+    // `extra_lance_filter` arrives as rendered SQL from the planner's
+    // hash-index pushdown, so it stays `Raw` — nothing in the engine parses it.
+    let combined_filter = match (vid_part, extra_lance_filter) {
+        (Some(v), Some(e)) => Some(FilterExpr::all([v, FilterExpr::Raw(e.to_string())])),
+        (Some(v), None) => Some(v),
+        (None, Some(e)) => Some(FilterExpr::Raw(e.to_string())),
+        (None, None) => None,
+    };
+    let lance_columns_refs: Vec<&str> = lance_columns.iter().map(|s| s.as_str()).collect();
+
+    // M5h.2: route through plugin Storage if one is registered for
+    // this label. v1 ships reads only — writes still go to native
+    // backend. v1 ignores `combined_filter` when delegating (the
+    // planner re-filters via the surrounding Filter node); per-plugin
+    // filter pushdown is a v1.1 follow-up (`TODO(M5h.2-filter)`).
+    let plugin_batch: Option<arrow::record_batch::RecordBatch> = match plugin_registry {
+        Some(reg) => match reg.lookup_label_storage(label) {
+            Some(plugin_storage) => {
+                let mut stream = plugin_storage.read_batch(label, None).await.map_err(|e| {
+                    anyhow::anyhow!(format!(
+                        "plugin Storage::read_batch({label}) failed: {} (code 0x{:x})",
+                        e.message, e.code
+                    ))
+                })?;
+                use futures::StreamExt;
+                let mut batches: Vec<arrow::record_batch::RecordBatch> = Vec::new();
+                let mut schema_ref: Option<SchemaRef> = None;
+                while let Some(b) = stream.next().await {
+                    let b = b.map_err(|e| {
+                        anyhow::anyhow!(format!("plugin Storage stream({label}) errored: {e}"))
+                    })?;
+                    if schema_ref.is_none() {
+                        schema_ref = Some(b.schema());
+                    }
+                    batches.push(b);
+                }
+                if let Some(s) = schema_ref {
+                    Some(arrow::compute::concat_batches(&s, &batches).map_err(|e| {
+                        anyhow::anyhow!(format!("plugin Storage concat({label}) failed: {e}"))
+                    })?)
+                } else {
+                    None
+                }
+            }
+            None => None,
+        },
+        None => None,
+    };
+
+    // Track whether the batch came through the property-filtered native scan:
+    // plugin batches ignore `combined_filter` (re-filtered by the planner), so
+    // they need no stale-version verification.
+    let (lance_batch, pushdown_filtered) = match plugin_batch {
+        Some(b) => (Some(b), false),
+        None => (
+            {
+                // A scan-local counter set, merged into the query's afterwards.
+                // Taking a delta on the shared set instead would misattribute
+                // whenever two scans of the same query overlap; `merge_from`
+                // exists for exactly this fan-out.
+                let scan_local = Arc::new(crate::QueryCounters::new());
+                let batch = storage
+                    .scan_vertex_table_counted(
+                        label,
+                        &lance_columns_refs,
+                        combined_filter.as_ref(),
+                        Some(&scan_local),
+                    )
+                    .await?;
+                if let Some(q) = counters {
+                    q.merge_from(&scan_local);
+                }
+                if let Some(m) = index_consulted {
+                    *m += scan_local.index_scans() as usize;
+                }
+                batch
+            },
+            extra_lance_filter.is_some(),
+        ),
+    };
+
+    // A pushed property predicate hides a vid's CURRENT row from the scan when
+    // that row no longer matches (MVCC-append: the stale still-matching row
+    // would win the dedup by default) — drop superseded rows first.
+    let lance_batch = match (lance_batch, pushdown_filtered) {
+        (Some(b), true) => Some(drop_superseded_pushdown_rows(storage, Some(label), b).await?),
+        (b, _) => b,
+    };
+
+    // MVCC dedup the Lance batch
+    let lance_deduped = mvcc_dedup_to_option(lance_batch, "_vid")?;
+
+    // Build the internal Lance schema for L0 batch construction.
+    // Use the Lance batch schema if available, otherwise build from scratch.
+    let internal_schema = match &lance_deduped {
+        Some(batch) => batch.schema(),
+        None => {
+            let mut fields = vec![
+                Field::new("_vid", DataType::UInt64, false),
+                Field::new("_deleted", DataType::Boolean, false),
+                Field::new("_version", DataType::UInt64, false),
+            ];
+            for col in &lance_columns {
+                if matches!(col.as_str(), "_vid" | "_deleted" | "_version") {
+                    continue;
+                }
+                if col == "overflow_json" {
+                    fields.push(Field::new("overflow_json", DataType::LargeBinary, true));
+                } else if col == "_labels" {
+                    // Typed explicitly: falling through to the `label_props`
+                    // lookup below would default it to LargeBinary, since
+                    // `_labels` is never a declared user property.
+                    fields.push(Field::new("_labels", labels_data_type(), true));
+                } else if col == "_created_at" || col == "_updated_at" {
+                    fields.push(Field::new(
+                        col,
+                        DataType::Timestamp(TimeUnit::Nanosecond, Some("UTC".into())),
+                        true,
+                    ));
+                } else {
+                    let arrow_type = label_props
+                        .and_then(|lp| lp.get(col.as_str()))
+                        .map(|meta| meta.r#type.to_arrow())
+                        .unwrap_or(DataType::LargeBinary);
+                    fields.push(Field::new(col, arrow_type, true));
+                }
+            }
+            Arc::new(Schema::new(fields))
+        }
+    };
+
+    // Build L0 batch. Prefer the multi-VID list when present (IN-list pushdown
+    // from issue #55 PR #4 — must restrict L0 to the same VID set Lance was
+    // filtered against, see issue #72 item 1). Fall back to single-VID
+    // (`id(x) = $literal` short-circuit). One-element buffer keeps the
+    // borrowed slice alive for the single-VID case.
+    let single_vid_buf: [u64; 1];
+    let l0_target_vids: Option<&[u64]> = match (vid_list_filter, target_vid) {
+        (Some(vs), _) if !vs.is_empty() => Some(vs),
+        (_, Some(v)) => {
+            single_vid_buf = [v];
+            Some(&single_vid_buf)
+        }
+        _ => None,
+    };
+    let l0_batch =
+        build_l0_vertex_batch(l0_ctx, label, &internal_schema, label_props, l0_target_vids)?;
+
+    // Merge Lance + L0
+    let Some(merged) =
+        merge_lance_and_l0(lance_deduped, l0_batch, &internal_schema, "_vid", counters)?
+    else {
+        return Ok(RecordBatch::new_empty(output_schema.clone()));
+    };
+
+    // Filter out MVCC deletion tombstones (_deleted = true)
+    let merged = filter_deleted_rows(&merged)?;
+    if merged.num_rows() == 0 {
+        return Ok(RecordBatch::new_empty(output_schema.clone()));
+    }
+
+    // Filter L0 tombstones
+    let filtered = filter_l0_tombstones(&merged, l0_ctx)?;
+
+    // Symmetric with the schemaless path: drop a flushed row whose scanned label
+    // was REMOVE'd in L0 (a no-op unless a vid carries a label-overwrite marker
+    // that no longer includes `label`).
+    let filtered = filter_l0_label_overwrites(&filtered, label, l0_ctx)?;
+
+    if filtered.num_rows() == 0 {
+        return Ok(RecordBatch::new_empty(output_schema.clone()));
+    }
+
+    // Map to output schema
+    let mapped = map_to_output_schema(
+        &filtered,
+        label,
+        // `map_to_output_schema` ignores this; the caller owns column naming.
+        "",
+        projected_properties,
+        output_schema,
+        l0_ctx,
+    )?;
+
+    Ok(mapped)
+}
+
 #[cfg(test)]
 mod tests {
     //! Relocation validators. These moved with the pipeline they cover, so a
@@ -1959,15 +2262,6 @@ mod tests {
     use arrow_array::UInt64Array;
     use arrow_schema::Schema;
     use std::sync::Arc;
-
-    /// Arrow type of the `_labels` column.
-    ///
-    /// `uni-query`'s `common.rs` keeps its own copy for six other callers; one
-    /// line, and duplicating it beats a cross-crate dependency in the wrong
-    /// direction.
-    fn labels_data_type() -> DataType {
-        DataType::List(Arc::new(Field::new("item", DataType::Utf8, true)))
-    }
 
     /// Helper to build a RecordBatch with _vid, _deleted, _version columns for testing.
     fn make_mvcc_batch(vids: &[u64], versions: &[u64], deleted: &[bool]) -> RecordBatch {
