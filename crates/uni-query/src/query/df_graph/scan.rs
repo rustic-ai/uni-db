@@ -53,9 +53,10 @@ use uni_common::core::id::Vid;
 use uni_common::core::schema::Schema as UniSchema;
 use uni_store::backend::types::{FilterExpr, Scalar};
 use uni_store::runtime::columnar_scan::{
-    build_all_props_column_for_schema_scan, build_l0_property_column,
-    build_overflow_property_column, extract_from_overflow_blob, push_column_if_absent,
-    resolve_l0_property,
+    build_l0_vertex_batch, build_overflow_property_column, drop_superseded_pushdown_rows,
+    extract_from_overflow_blob, filter_deleted_rows, filter_l0_label_overwrites,
+    filter_l0_tombstones, map_to_output_schema, merge_lance_and_l0, mvcc_dedup_to_option,
+    push_column_if_absent, resolve_l0_property,
 };
 pub(crate) use uni_store::runtime::columnar_scan::{
     build_property_column_static, property_field, resolve_property_type,
@@ -607,166 +608,6 @@ impl GraphScanStream {
 // Columnar-first scan helpers
 // ============================================================================
 
-/// MVCC deduplication: keep only the highest-version row for each `_vid`.
-///
-/// Sorts by (_vid ASC, _version DESC), then keeps the first occurrence of each
-/// _vid (= the highest version). This is a pure Arrow-compute operation.
-#[cfg(test)]
-fn mvcc_dedup_batch(batch: &RecordBatch) -> DFResult<RecordBatch> {
-    mvcc_dedup_batch_by(batch, "_vid")
-}
-
-/// Dedup a Lance batch and return `Some` only when rows remain.
-///
-/// Wraps the common pattern of dedup + empty-check that appears in every
-/// columnar scan path (vertex, edge, schemaless).
-fn mvcc_dedup_to_option(
-    batch: Option<RecordBatch>,
-    id_column: &str,
-) -> DFResult<Option<RecordBatch>> {
-    match batch {
-        Some(b) => {
-            let deduped = mvcc_dedup_batch_by(&b, id_column)?;
-            Ok(if deduped.num_rows() > 0 {
-                Some(deduped)
-            } else {
-                None
-            })
-        }
-        None => Ok(None),
-    }
-}
-
-/// Merge a deduped Lance batch with an L0 batch, re-deduplicating the combined
-/// result. Returns an empty batch (against `output_schema`) when both inputs
-/// are empty.
-///
-/// `counters`, when present, records how many rows each tier contributed. This
-/// is the one place in the scan path that already knows the answer — the
-/// `match` below exists precisely to distinguish storage-only, L0-only and
-/// both — so counting here costs a pair of adds and needs no new branching.
-/// Rows are counted **before** the combined dedup, so the numbers describe what
-/// each tier *served*, not what survived MVCC resolution.
-fn merge_lance_and_l0(
-    lance_deduped: Option<RecordBatch>,
-    l0_batch: RecordBatch,
-    internal_schema: &SchemaRef,
-    id_column: &str,
-    counters: Option<&Arc<uni_store::QueryCounters>>,
-) -> DFResult<Option<RecordBatch>> {
-    let has_l0 = l0_batch.num_rows() > 0;
-    if let Some(c) = counters {
-        let lance_rows = lance_deduped.as_ref().map_or(0, |b| b.num_rows());
-        let l0_rows = l0_batch.num_rows();
-        c.add_storage_rows(lance_rows);
-        c.add_l0_rows(l0_rows);
-        c.add_rows_scanned(lance_rows + l0_rows);
-    }
-    match (lance_deduped, has_l0) {
-        (Some(lance), true) => {
-            let combined = arrow::compute::concat_batches(internal_schema, &[lance, l0_batch])
-                .map_err(arrow_err)?;
-            Ok(Some(mvcc_dedup_batch_by(&combined, id_column)?))
-        }
-        (Some(lance), false) => Ok(Some(lance)),
-        (None, true) => Ok(Some(l0_batch)),
-        (None, false) => Ok(None),
-    }
-}
-
-/// Drop rows superseded by a newer persisted version that the pushed
-/// property predicate filtered out (issue #57 × MVCC-append tables).
-///
-/// Lance evaluates a pushed property predicate per ROW, before the per-vid
-/// max-`_version` pick — so when a vid's property was rewritten and
-/// re-flushed, its CURRENT row fails the predicate and never reaches the
-/// dedup, while the stale still-matching row wins it by default. Re-reads
-/// `_vid`/`_version` for the candidate vids WITHOUT the property predicate
-/// (per-label table when `label_table` is `Some`, the main vertex table
-/// otherwise) and keeps only rows carrying their vid's true maximum
-/// persisted version. Must run on the RAW filtered batch, before
-/// [`mvcc_dedup_to_option`].
-async fn drop_superseded_pushdown_rows(
-    storage: &Arc<uni_store::storage::manager::StorageManager>,
-    label_table: Option<&str>,
-    batch: RecordBatch,
-) -> DFResult<RecordBatch> {
-    if batch.num_rows() == 0 {
-        return Ok(batch);
-    }
-    let (Some(vid_col), Some(ver_col)) = (
-        batch
-            .column_by_name("_vid")
-            .and_then(|c| c.as_any().downcast_ref::<UInt64Array>()),
-        batch
-            .column_by_name("_version")
-            .and_then(|c| c.as_any().downcast_ref::<UInt64Array>()),
-    ) else {
-        return Err(datafusion::error::DataFusionError::Execution(
-            "pushdown version verification: scan batch missing _vid/_version".to_string(),
-        ));
-    };
-
-    let mut candidates: Vec<u64> = Vec::new();
-    let mut seen: HashSet<u64> = HashSet::new();
-    for i in 0..vid_col.len() {
-        let vid = vid_col.value(i);
-        if seen.insert(vid) {
-            candidates.push(vid);
-        }
-    }
-
-    // True max persisted version per candidate vid — unfiltered apart from
-    // the vid list, so rewritten-key rows and deletion tombstones are seen.
-    // Chunked to bound the `_vid IN (…)` filter-string size.
-    const VERIFY_CHUNK: usize = 1000;
-    let mut max_ver: HashMap<u64, u64> = HashMap::with_capacity(candidates.len());
-    for chunk in candidates.chunks(VERIFY_CHUNK) {
-        let filter = FilterExpr::one_of("_vid", chunk.iter().map(|v| Scalar::UInt(*v)));
-        let scanned = match label_table {
-            Some(label) => {
-                storage
-                    .scan_vertex_table(label, &["_vid", "_version"], Some(&filter))
-                    .await
-            }
-            None => {
-                storage
-                    .scan_main_vertex_table(&["_vid", "_version"], Some(&filter))
-                    .await
-            }
-        }
-        .map_err(exec_err)?;
-        let Some(vbatch) = scanned else { continue };
-        let (Some(v_vid), Some(v_ver)) = (
-            vbatch
-                .column_by_name("_vid")
-                .and_then(|c| c.as_any().downcast_ref::<UInt64Array>()),
-            vbatch
-                .column_by_name("_version")
-                .and_then(|c| c.as_any().downcast_ref::<UInt64Array>()),
-        ) else {
-            return Err(datafusion::error::DataFusionError::Execution(
-                "pushdown version verification: rescan missing _vid/_version".to_string(),
-            ));
-        };
-        for i in 0..v_vid.len() {
-            let entry = max_ver.entry(v_vid.value(i)).or_insert(0);
-            *entry = (*entry).max(v_ver.value(i));
-        }
-    }
-
-    let keep: arrow_array::BooleanArray = (0..batch.num_rows())
-        .map(|i| {
-            Some(
-                max_ver
-                    .get(&vid_col.value(i))
-                    .is_none_or(|&max| ver_col.value(i) >= max),
-            )
-        })
-        .collect();
-    arrow::compute::filter_record_batch(&batch, &keep).map_err(arrow_err)
-}
-
 /// Build the `_all_props` column by overlaying L0 buffer properties onto
 /// the batch's `props_json` column.
 ///
@@ -815,199 +656,6 @@ fn build_all_props_column_with_l0_overlay(
         }
     }
     Arc::new(builder.finish())
-}
-
-/// MVCC deduplication: keep only the highest-version row for each unique value
-/// in the given `id_column`.
-///
-/// Sorts by (id_column ASC, _version DESC), then keeps the first occurrence of
-/// each id (= the highest version). This is a pure Arrow-compute operation.
-fn mvcc_dedup_batch_by(batch: &RecordBatch, id_column: &str) -> DFResult<RecordBatch> {
-    if batch.num_rows() == 0 {
-        return Ok(batch.clone());
-    }
-
-    let id_col = batch
-        .column_by_name(id_column)
-        .ok_or_else(|| {
-            datafusion::error::DataFusionError::Internal(format!("Missing {} column", id_column))
-        })?
-        .clone();
-    let version_col = batch
-        .column_by_name("_version")
-        .ok_or_else(|| {
-            datafusion::error::DataFusionError::Internal("Missing _version column".to_string())
-        })?
-        .clone();
-
-    // Sort by (id_column ASC, _version DESC)
-    let sort_columns = vec![
-        arrow::compute::SortColumn {
-            values: id_col,
-            options: Some(arrow::compute::SortOptions {
-                descending: false,
-                nulls_first: false,
-            }),
-        },
-        arrow::compute::SortColumn {
-            values: version_col,
-            options: Some(arrow::compute::SortOptions {
-                descending: true,
-                nulls_first: false,
-            }),
-        },
-    ];
-    let indices = arrow::compute::lexsort_to_indices(&sort_columns, None).map_err(arrow_err)?;
-
-    // Reorder all columns by sorted indices
-    let sorted_columns: Vec<ArrayRef> = batch
-        .columns()
-        .iter()
-        .map(|col| arrow::compute::take(col.as_ref(), &indices, None))
-        .collect::<Result<_, _>>()
-        .map_err(arrow_err)?;
-    let sorted = RecordBatch::try_new(batch.schema(), sorted_columns).map_err(arrow_err)?;
-
-    // Build dedup mask: keep first occurrence of each id
-    let sorted_id = sorted
-        .column_by_name(id_column)
-        .unwrap()
-        .as_any()
-        .downcast_ref::<UInt64Array>()
-        .unwrap();
-
-    let mut keep = vec![false; sorted.num_rows()];
-    if !keep.is_empty() {
-        keep[0] = true;
-        for (i, flag) in keep.iter_mut().enumerate().skip(1) {
-            if sorted_id.value(i) != sorted_id.value(i - 1) {
-                *flag = true;
-            }
-        }
-    }
-
-    let mask = arrow_array::BooleanArray::from(keep);
-    arrow::compute::filter_record_batch(&sorted, &mask).map_err(arrow_err)
-}
-
-/// Filter out rows where `_deleted = true` after MVCC dedup.
-fn filter_deleted_rows(batch: &RecordBatch) -> DFResult<RecordBatch> {
-    if batch.num_rows() == 0 {
-        return Ok(batch.clone());
-    }
-    let deleted_col = match batch.column_by_name("_deleted") {
-        Some(col) => col
-            .as_any()
-            .downcast_ref::<arrow_array::BooleanArray>()
-            .unwrap(),
-        None => return Ok(batch.clone()),
-    };
-    let keep: Vec<bool> = (0..deleted_col.len())
-        .map(|i| !deleted_col.value(i))
-        .collect();
-    let mask = arrow_array::BooleanArray::from(keep);
-    arrow::compute::filter_record_batch(batch, &mask).map_err(arrow_err)
-}
-
-/// Filter out rows whose `_vid` appears in L0 tombstones.
-fn filter_l0_tombstones(
-    batch: &RecordBatch,
-    l0_ctx: &crate::query::df_graph::L0Context,
-) -> DFResult<RecordBatch> {
-    if batch.num_rows() == 0 {
-        return Ok(batch.clone());
-    }
-
-    let mut tombstones: HashSet<u64> = HashSet::new();
-    for l0 in l0_ctx.iter_l0_buffers() {
-        let guard = l0.read();
-        for vid in guard.vertex_tombstones.iter() {
-            tombstones.insert(vid.as_u64());
-        }
-    }
-
-    if tombstones.is_empty() {
-        return Ok(batch.clone());
-    }
-
-    let vid_col = batch
-        .column_by_name("_vid")
-        .ok_or_else(|| {
-            datafusion::error::DataFusionError::Internal("Missing _vid column".to_string())
-        })?
-        .as_any()
-        .downcast_ref::<UInt64Array>()
-        .unwrap();
-
-    let keep: Vec<bool> = (0..vid_col.len())
-        .map(|i| !tombstones.contains(&vid_col.value(i)))
-        .collect();
-    let mask = arrow_array::BooleanArray::from(keep);
-    arrow::compute::filter_record_batch(batch, &mask).map_err(arrow_err)
-}
-
-/// Drop rows for a known-label scan whose newest L0 label-overwrite no longer
-/// includes the scanned label(s).
-///
-/// A flushed vertex's stored `labels` array still lists a label after a
-/// `REMOVE n:Label` — the removal only updated L0. The label-scan candidate set
-/// unions that stale flushed row, and neither the `_deleted` nor the vid-tombstone
-/// filter drops it. When the newest L0 buffer carrying the vid flagged it in
-/// `vertex_label_overwrites` (a `SET`/`REMOVE` that resolved its full label set),
-/// that set is authoritative: keep the row only if it still contains every
-/// requested label. Otherwise the label was resurrected in `MATCH (n:Label)`.
-///
-/// `label` may be `"A:B"` (all required) or empty (bare `MATCH (n)` — nothing to
-/// filter). Mirrors the multi-label membership check in
-/// `build_l0_schemaless_vertex_batch`.
-///
-/// # Errors
-/// Returns an error if the `_vid` column is missing or the mask filter fails.
-fn filter_l0_label_overwrites(
-    batch: &RecordBatch,
-    label: &str,
-    l0_ctx: &crate::query::df_graph::L0Context,
-) -> DFResult<RecordBatch> {
-    if batch.num_rows() == 0 || label.is_empty() {
-        return Ok(batch.clone());
-    }
-    let required: Vec<&str> = label.split(':').collect();
-
-    // vid -> resolved label set from the NEWEST buffer that marked it as a full
-    // label overwrite. `iter_l0_buffers` yields oldest -> newest, so later writes
-    // win.
-    let mut overwritten: HashMap<u64, Vec<String>> = HashMap::new();
-    for l0 in l0_ctx.iter_l0_buffers() {
-        let guard = l0.read();
-        for vid in guard.vertex_label_overwrites.iter() {
-            let labels = guard.vertex_labels.get(vid).cloned().unwrap_or_default();
-            overwritten.insert(vid.as_u64(), labels);
-        }
-    }
-    if overwritten.is_empty() {
-        return Ok(batch.clone());
-    }
-
-    let vid_col = batch
-        .column_by_name("_vid")
-        .ok_or_else(|| {
-            datafusion::error::DataFusionError::Internal("Missing _vid column".to_string())
-        })?
-        .as_any()
-        .downcast_ref::<UInt64Array>()
-        .unwrap();
-
-    let keep: Vec<bool> = (0..vid_col.len())
-        .map(|i| match overwritten.get(&vid_col.value(i)) {
-            // The vid's newest overwrite resolved its full label set: keep only
-            // if that set still contains every requested label.
-            Some(resolved) => required.iter().all(|lf| resolved.iter().any(|l| l == lf)),
-            // No overwrite for this vid: the stored (Lance or L0) labels stand.
-            None => true,
-        })
-        .collect();
-    let mask = arrow_array::BooleanArray::from(keep);
-    arrow::compute::filter_record_batch(batch, &mask).map_err(arrow_err)
 }
 
 /// Extract a target VID from a DataFusion physical filter expression.
@@ -1084,403 +732,6 @@ fn scalar_to_u64(sv: &datafusion::common::ScalarValue) -> Option<u64> {
         ScalarValue::Int32(Some(v)) if *v >= 0 => Some(*v as u64),
         _ => None,
     }
-}
-
-/// Build a RecordBatch from L0 buffer data for a given label, matching the
-/// Lance query's column set.
-///
-/// Merges L0 buffers in visibility order (pending_flush → current → transaction),
-/// with later buffers overwriting earlier ones for the same VID.
-///
-/// When `target_vids` is `Some`, only those VIDs are collected (direct HashMap
-/// lookups instead of iterating all VIDs for the label). This must mirror the
-/// Lance-side VID pushdown — otherwise L0-only (unflushed) rows bypass the
-/// filter and the scan emits the full label table. See issue #72 item 1.
-fn build_l0_vertex_batch(
-    l0_ctx: &crate::query::df_graph::L0Context,
-    label: &str,
-    lance_schema: &SchemaRef,
-    label_props: Option<&HashMap<String, uni_common::core::schema::PropertyMeta>>,
-    target_vids: Option<&[u64]>,
-) -> DFResult<RecordBatch> {
-    // Collect all L0 vertex data, merging in visibility order
-    let mut vid_data: HashMap<u64, (Properties, u64)> = HashMap::new(); // vid -> (props, version)
-    let mut tombstones: HashSet<u64> = HashSet::new();
-    // System-managed timestamps: created_at takes the earliest seen
-    // timestamp across L0 buffers (preserving the original creation
-    // moment when a row has been touched in multiple buffers); updated_at
-    // takes the latest (most recent write). Used by `created_at(n)` /
-    // `updated_at(n)` Cypher functions.
-    let mut vid_created_at: HashMap<u64, i64> = HashMap::new();
-    let mut vid_updated_at: HashMap<u64, i64> = HashMap::new();
-
-    for l0 in l0_ctx.iter_l0_buffers() {
-        let guard = l0.read();
-        // Collect tombstones
-        for vid in guard.vertex_tombstones.iter() {
-            tombstones.insert(vid.as_u64());
-        }
-        // Collect vertices — restrict to target_vids (single- or multi-VID
-        // pushdown from id(x) = ? / id(x) IN [...]) when set, else all
-        // vertices for the label. See issue #72 item 1: without this filter,
-        // freshly-inserted L0 rows bypass the IN-list pushdown that Lance
-        // already honors, defeating the optimization.
-        let candidate_vids: Vec<Vid> = if let Some(tvs) = target_vids {
-            let mut out = Vec::with_capacity(tvs.len());
-            for &tv in tvs {
-                let vid = Vid::from(tv);
-                if guard.vertex_properties.contains_key(&vid)
-                    && (label.is_empty()
-                        || guard
-                            .label_to_vids
-                            .get(label)
-                            .is_some_and(|s| s.contains(&vid)))
-                {
-                    out.push(vid);
-                }
-            }
-            out
-        } else {
-            guard.vids_for_label(label)
-        };
-        for vid in candidate_vids {
-            let vid_u64 = vid.as_u64();
-            if tombstones.contains(&vid_u64) {
-                continue;
-            }
-            let version = guard.vertex_versions.get(&vid).copied().unwrap_or(0);
-            let entry = vid_data
-                .entry(vid_u64)
-                .or_insert_with(|| (Properties::new(), 0));
-            // Merge properties (later L0 overwrites)
-            if let Some(props) = guard.vertex_properties.get(&vid) {
-                for (k, v) in props {
-                    entry.0.insert(k.clone(), v.clone());
-                }
-            }
-            // Take the highest version
-            if version > entry.1 {
-                entry.1 = version;
-            }
-            // Merge system timestamps: earliest creation, latest update
-            if let Some(&ts) = guard.vertex_created_at.get(&vid) {
-                vid_created_at
-                    .entry(vid_u64)
-                    .and_modify(|cur| {
-                        if ts < *cur {
-                            *cur = ts;
-                        }
-                    })
-                    .or_insert(ts);
-            }
-            if let Some(&ts) = guard.vertex_updated_at.get(&vid) {
-                vid_updated_at
-                    .entry(vid_u64)
-                    .and_modify(|cur| {
-                        if ts > *cur {
-                            *cur = ts;
-                        }
-                    })
-                    .or_insert(ts);
-            }
-        }
-    }
-
-    // Remove tombstoned VIDs
-    for t in &tombstones {
-        vid_data.remove(t);
-    }
-
-    if vid_data.is_empty() {
-        return Ok(RecordBatch::new_empty(lance_schema.clone()));
-    }
-
-    // Sort VIDs for deterministic output
-    let mut vids: Vec<u64> = vid_data.keys().copied().collect();
-    vids.sort_unstable();
-
-    let num_rows = vids.len();
-    let mut columns: Vec<ArrayRef> = Vec::with_capacity(lance_schema.fields().len());
-
-    // Determine which schema property names exist
-    let schema_prop_names: HashSet<&str> = label_props
-        .map(|lp| lp.keys().map(|k| k.as_str()).collect())
-        .unwrap_or_default();
-
-    for field in lance_schema.fields() {
-        let col_name = field.name().as_str();
-        match col_name {
-            "_vid" => {
-                columns.push(Arc::new(UInt64Array::from(vids.clone())));
-            }
-            "_deleted" => {
-                // L0 vertices are always live (tombstoned ones are already excluded)
-                let vals = vec![false; num_rows];
-                columns.push(Arc::new(arrow_array::BooleanArray::from(vals)));
-            }
-            "_version" => {
-                let vals: Vec<u64> = vids.iter().map(|v| vid_data[v].1).collect();
-                columns.push(Arc::new(UInt64Array::from(vals)));
-            }
-            "_created_at" => {
-                let mut builder =
-                    arrow_array::builder::TimestampNanosecondBuilder::new().with_timezone("UTC");
-                for v in &vids {
-                    match vid_created_at.get(v) {
-                        Some(&ts) => builder.append_value(ts),
-                        None => builder.append_null(),
-                    }
-                }
-                columns.push(Arc::new(builder.finish()));
-            }
-            "_updated_at" => {
-                let mut builder =
-                    arrow_array::builder::TimestampNanosecondBuilder::new().with_timezone("UTC");
-                for v in &vids {
-                    match vid_updated_at.get(v) {
-                        Some(&ts) => builder.append_value(ts),
-                        None => builder.append_null(),
-                    }
-                }
-                columns.push(Arc::new(builder.finish()));
-            }
-            "overflow_json" => {
-                // Collect non-schema properties as CypherValue
-                let mut builder = arrow_array::builder::LargeBinaryBuilder::new();
-                for vid_u64 in &vids {
-                    let (props, _) = &vid_data[vid_u64];
-                    let mut overflow: HashMap<String, Value> = HashMap::new();
-                    for (k, v) in props {
-                        if k == "ext_id" || k.starts_with('_') {
-                            continue;
-                        }
-                        if !schema_prop_names.contains(k.as_str()) {
-                            overflow.insert(k.clone(), v.clone());
-                        }
-                    }
-                    if overflow.is_empty() {
-                        builder.append_null();
-                    } else {
-                        builder.append_value(uni_common::cypher_value_codec::encode(&Value::Map(
-                            overflow,
-                        )));
-                    }
-                }
-                columns.push(Arc::new(builder.finish()));
-            }
-            "_labels" => {
-                // Rows in this batch exist only in L0, so there is no stored
-                // label set to carry. Emitting nulls is not a shortcut: a null
-                // row makes `build_labels_column_for_known_label` fall back to
-                // `[label]`, and its L0 overlay then resolves the true set from
-                // `vertex_labels` — the same path these rows took before
-                // `_labels` joined the projection, and the one that is already
-                // correct for unflushed vertices.
-                //
-                // Without this arm the column falls through to
-                // `build_l0_property_column`, which does not handle
-                // `List<Utf8>`, and `RecordBatch::try_new` below fails.
-                let mut builder = ListBuilder::new(StringBuilder::new())
-                    .with_field(Arc::new(Field::new("item", DataType::Utf8, true)));
-                for _ in 0..num_rows {
-                    builder.append_null();
-                }
-                columns.push(Arc::new(builder.finish()));
-            }
-            _ => {
-                // Schema property column: convert L0 Value → Arrow typed value
-                let col = build_l0_property_column(&vids, &vid_data, col_name, field.data_type())
-                    .map_err(exec_err)?;
-                columns.push(col);
-            }
-        }
-    }
-
-    RecordBatch::try_new(lance_schema.clone(), columns).map_err(arrow_err)
-}
-
-/// Build the `_labels` column for known-label vertices.
-///
-/// Reads `_labels` from the stored Lance batch if available. Falls back to
-/// `[label]` when the column is absent (legacy data). Additional labels from
-/// L0 buffers are merged in.
-fn build_labels_column_for_known_label(
-    vid_arr: &UInt64Array,
-    label: &str,
-    l0_ctx: &crate::query::df_graph::L0Context,
-    batch_labels_col: Option<&arrow_array::ListArray>,
-) -> DFResult<ArrayRef> {
-    use uni_store::storage::arrow_convert::labels_from_list_array;
-
-    let mut labels_builder = ListBuilder::new(StringBuilder::new());
-
-    for i in 0..vid_arr.len() {
-        let vid = Vid::from(vid_arr.value(i));
-
-        // Start with labels from the stored column, falling back to [label]
-        let mut labels = match batch_labels_col {
-            Some(list_arr) => {
-                let stored = labels_from_list_array(list_arr, i);
-                if stored.is_empty() {
-                    vec![label.to_string()]
-                } else {
-                    stored
-                }
-            }
-            None => vec![label.to_string()],
-        };
-
-        // Ensure the scanned label is present (defensive)
-        if !labels.iter().any(|l| l == label) {
-            labels.push(label.to_string());
-        }
-
-        // Merge additional labels from L0 buffers, honoring label-overwrite
-        // markers: a vid flagged in `vertex_label_overwrites` has its full label
-        // set resolved by a SET/REMOVE, which REPLACES the stored labels (newest
-        // buffer wins) — so a REMOVE of the scanned label is respected rather
-        // than resurrected by the union or the defensive push above.
-        let mut overwrite_labels: Option<Vec<String>> = None;
-        for l0 in l0_ctx.iter_l0_buffers() {
-            let guard = l0.read();
-            if guard.vertex_label_overwrites.contains(&vid) {
-                overwrite_labels = guard.vertex_labels.get(&vid).cloned();
-            } else if let Some(l0_labels) = guard.vertex_labels.get(&vid) {
-                for lbl in l0_labels {
-                    if !labels.contains(lbl) {
-                        labels.push(lbl.clone());
-                    }
-                }
-            }
-        }
-        if let Some(resolved) = overwrite_labels {
-            labels = resolved;
-        }
-
-        let values = labels_builder.values();
-        for lbl in &labels {
-            values.append_value(lbl);
-        }
-        labels_builder.append(true);
-    }
-
-    Ok(Arc::new(labels_builder.finish()))
-}
-
-/// Map a Lance-schema batch to the DataFusion output schema.
-///
-/// The output schema has `{variable}.{property}` column names, while Lance
-/// uses bare property names. This function performs the positional mapping,
-/// adds the `_labels` column, and drops internal columns like `_deleted`/`_version`.
-fn map_to_output_schema(
-    batch: &RecordBatch,
-    label: &str,
-    _variable: &str,
-    projected_properties: &[String],
-    output_schema: &SchemaRef,
-    l0_ctx: &crate::query::df_graph::L0Context,
-) -> DFResult<RecordBatch> {
-    if batch.num_rows() == 0 {
-        return Ok(RecordBatch::new_empty(output_schema.clone()));
-    }
-
-    let mut columns: Vec<ArrayRef> = Vec::with_capacity(output_schema.fields().len());
-
-    // 1. {var}._vid
-    let vid_col = batch
-        .column_by_name("_vid")
-        .ok_or_else(|| {
-            datafusion::error::DataFusionError::Internal("Missing _vid column".to_string())
-        })?
-        .clone();
-    let vid_arr = vid_col
-        .as_any()
-        .downcast_ref::<UInt64Array>()
-        .ok_or_else(|| {
-            datafusion::error::DataFusionError::Internal("_vid not UInt64".to_string())
-        })?;
-
-    // 2. {var}._labels — read from stored column, overlay L0 additions
-    let batch_labels_col = batch
-        .column_by_name("_labels")
-        .and_then(|c| c.as_any().downcast_ref::<arrow_array::ListArray>());
-    let labels_col = build_labels_column_for_known_label(vid_arr, label, l0_ctx, batch_labels_col)?;
-    columns.push(vid_col.clone());
-    columns.push(labels_col);
-
-    // 3. Projected properties
-    // Pre-load overflow_json column for extracting non-schema properties
-    let overflow_arr = batch
-        .column_by_name("overflow_json")
-        .and_then(|c| c.as_any().downcast_ref::<arrow_array::LargeBinaryArray>());
-
-    for prop in projected_properties {
-        if prop == "overflow_json" {
-            match batch.column_by_name("overflow_json") {
-                Some(col) => columns.push(col.clone()),
-                None => {
-                    // No overflow_json in Lance — return null column
-                    columns.push(arrow_array::new_null_array(
-                        &DataType::LargeBinary,
-                        batch.num_rows(),
-                    ));
-                }
-            }
-        } else if prop == "_all_props" {
-            // Build _all_props from overflow_json + L0 overlay.
-            // Fast path: if no L0 buffer has vertex property mutations AND
-            // there are no schema columns to merge, pass through overflow_json.
-            let any_l0_has_vertex_props = l0_ctx.iter_l0_buffers().any(|l0| {
-                let guard = l0.read();
-                !guard.vertex_properties.is_empty()
-            });
-            // Check if this label has schema-defined columns (besides system columns)
-            let has_schema_cols = projected_properties
-                .iter()
-                .any(|p| p != "overflow_json" && p != "_all_props" && !p.starts_with('_'));
-
-            if !any_l0_has_vertex_props && !has_schema_cols {
-                // No L0 mutations, no schema cols to merge: overflow_json IS _all_props
-                match batch.column_by_name("overflow_json") {
-                    Some(col) => columns.push(col.clone()),
-                    None => {
-                        columns.push(arrow_array::new_null_array(
-                            &DataType::LargeBinary,
-                            batch.num_rows(),
-                        ));
-                    }
-                }
-            } else {
-                // Need to merge: schema columns + overflow_json + L0 overlay
-                let col = build_all_props_column_for_schema_scan(
-                    batch,
-                    vid_arr,
-                    overflow_arr,
-                    projected_properties,
-                    l0_ctx,
-                );
-                columns.push(col);
-            }
-        } else {
-            match batch.column_by_name(prop) {
-                Some(col) => columns.push(col.clone()),
-                None => {
-                    // Column missing in Lance -- extract from overflow_json
-                    // CypherValue blob with L0 overlay
-                    let col = build_overflow_property_column(
-                        batch.num_rows(),
-                        vid_arr,
-                        overflow_arr,
-                        prop,
-                        l0_ctx,
-                    );
-                    columns.push(col);
-                }
-            }
-        }
-    }
-
-    RecordBatch::try_new(output_schema.clone(), columns).map_err(arrow_err)
 }
 
 /// Columnar-first vertex scan: single Lance query with MVCC dedup and L0 overlay.
@@ -1774,12 +1025,16 @@ pub(crate) async fn columnar_scan_vertex_batch_static(
     // that row no longer matches (MVCC-append: the stale still-matching row
     // would win the dedup by default) — drop superseded rows first.
     let lance_batch = match (lance_batch, pushdown_filtered) {
-        (Some(b), true) => Some(drop_superseded_pushdown_rows(storage, Some(label), b).await?),
+        (Some(b), true) => Some(
+            drop_superseded_pushdown_rows(storage, Some(label), b)
+                .await
+                .map_err(exec_err)?,
+        ),
         (b, _) => b,
     };
 
     // MVCC dedup the Lance batch
-    let lance_deduped = mvcc_dedup_to_option(lance_batch, "_vid")?;
+    let lance_deduped = mvcc_dedup_to_option(lance_batch, "_vid").map_err(exec_err)?;
 
     // Build the internal Lance schema for L0 batch construction.
     // Use the Lance batch schema if available, otherwise build from scratch.
@@ -1839,7 +1094,8 @@ pub(crate) async fn columnar_scan_vertex_batch_static(
         _ => None,
     };
     let l0_batch =
-        build_l0_vertex_batch(l0_ctx, label, &internal_schema, label_props, l0_target_vids)?;
+        build_l0_vertex_batch(l0_ctx, label, &internal_schema, label_props, l0_target_vids)
+            .map_err(exec_err)?;
 
     // Merge Lance + L0
     let Some(merged) = merge_lance_and_l0(
@@ -1848,24 +1104,25 @@ pub(crate) async fn columnar_scan_vertex_batch_static(
         &internal_schema,
         "_vid",
         graph_ctx.counters(),
-    )?
+    )
+    .map_err(exec_err)?
     else {
         return Ok(RecordBatch::new_empty(output_schema.clone()));
     };
 
     // Filter out MVCC deletion tombstones (_deleted = true)
-    let merged = filter_deleted_rows(&merged)?;
+    let merged = filter_deleted_rows(&merged).map_err(exec_err)?;
     if merged.num_rows() == 0 {
         return Ok(RecordBatch::new_empty(output_schema.clone()));
     }
 
     // Filter L0 tombstones
-    let filtered = filter_l0_tombstones(&merged, l0_ctx)?;
+    let filtered = filter_l0_tombstones(&merged, l0_ctx).map_err(exec_err)?;
 
     // Symmetric with the schemaless path: drop a flushed row whose scanned label
     // was REMOVE'd in L0 (a no-op unless a vid carries a label-overwrite marker
     // that no longer includes `label`).
-    let filtered = filter_l0_label_overwrites(&filtered, label, l0_ctx)?;
+    let filtered = filter_l0_label_overwrites(&filtered, label, l0_ctx).map_err(exec_err)?;
 
     if filtered.num_rows() == 0 {
         return Ok(RecordBatch::new_empty(output_schema.clone()));
@@ -1879,7 +1136,8 @@ pub(crate) async fn columnar_scan_vertex_batch_static(
         projected_properties,
         output_schema,
         l0_ctx,
-    )?;
+    )
+    .map_err(exec_err)?;
 
     // Apply indexed-property runtime filter (issue #57). Lance has already
     // filtered the on-disk side via `extra_lance_filter`; this catches any
@@ -1997,12 +1255,16 @@ async fn columnar_scan_schemaless_vertex_batch_static(
     // that row no longer matches (MVCC-append: the stale still-matching row
     // would win the dedup by default) — drop superseded rows first.
     let lance_batch = match (lance_batch, extra_lance_filter.is_some()) {
-        (Some(b), true) => Some(drop_superseded_pushdown_rows(storage, None, b).await?),
+        (Some(b), true) => Some(
+            drop_superseded_pushdown_rows(storage, None, b)
+                .await
+                .map_err(exec_err)?,
+        ),
         (b, _) => b,
     };
 
     // MVCC dedup the Lance batch
-    let lance_deduped = mvcc_dedup_to_option(lance_batch, "_vid")?;
+    let lance_deduped = mvcc_dedup_to_option(lance_batch, "_vid").map_err(exec_err)?;
 
     // Build the internal schema for L0 batch construction.
     // Use the Lance batch schema if available, otherwise build from scratch.
@@ -2039,23 +1301,24 @@ async fn columnar_scan_schemaless_vertex_batch_static(
         &internal_schema,
         "_vid",
         graph_ctx.counters(),
-    )?
+    )
+    .map_err(exec_err)?
     else {
         return Ok(RecordBatch::new_empty(output_schema.clone()));
     };
 
     // Filter out MVCC deletion tombstones (_deleted = true)
-    let merged = filter_deleted_rows(&merged)?;
+    let merged = filter_deleted_rows(&merged).map_err(exec_err)?;
     if merged.num_rows() == 0 {
         return Ok(RecordBatch::new_empty(output_schema.clone()));
     }
 
     // Filter L0 tombstones
-    let filtered = filter_l0_tombstones(&merged, l0_ctx)?;
+    let filtered = filter_l0_tombstones(&merged, l0_ctx).map_err(exec_err)?;
 
     // Drop stale flushed rows whose label was REMOVE'd in L0 (the flushed
     // `labels` array still lists it, but the newest L0 overwrite doesn't).
-    let filtered = filter_l0_label_overwrites(&filtered, label, l0_ctx)?;
+    let filtered = filter_l0_label_overwrites(&filtered, label, l0_ctx).map_err(exec_err)?;
 
     if filtered.num_rows() == 0 {
         return Ok(RecordBatch::new_empty(output_schema.clone()));
@@ -2581,195 +1844,5 @@ mod tests {
         let single_bytes = uni_common::cypher_value_codec::encode(&Value::Int(30));
         let single_decoded = uni_common::cypher_value_codec::decode(&single_bytes).unwrap();
         assert_eq!(single_decoded, uni_common::Value::Int(30));
-    }
-
-    /// Helper to build a RecordBatch with _vid, _deleted, _version columns for testing.
-    fn make_mvcc_batch(vids: &[u64], versions: &[u64], deleted: &[bool]) -> RecordBatch {
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("_vid", DataType::UInt64, false),
-            Field::new("_deleted", DataType::Boolean, false),
-            Field::new("_version", DataType::UInt64, false),
-            Field::new("name", DataType::Utf8, true),
-        ]));
-        // Generate name values like "v{vid}_ver{version}" for tracking which row wins
-        let names: Vec<String> = vids
-            .iter()
-            .zip(versions.iter())
-            .map(|(v, ver)| format!("v{}_ver{}", v, ver))
-            .collect();
-        let name_arr: arrow_array::StringArray = names.iter().map(|s| Some(s.as_str())).collect();
-
-        RecordBatch::try_new(
-            schema,
-            vec![
-                Arc::new(UInt64Array::from(vids.to_vec())),
-                Arc::new(arrow_array::BooleanArray::from(deleted.to_vec())),
-                Arc::new(UInt64Array::from(versions.to_vec())),
-                Arc::new(name_arr),
-            ],
-        )
-        .unwrap()
-    }
-
-    #[test]
-    fn test_mvcc_dedup_multiple_versions() {
-        // VID 1 at versions 3, 1, 5 — should keep version 5
-        // VID 2 at versions 2, 4 — should keep version 4
-        let batch = make_mvcc_batch(
-            &[1, 1, 1, 2, 2],
-            &[3, 1, 5, 2, 4],
-            &[false, false, false, false, false],
-        );
-
-        let result = mvcc_dedup_batch(&batch).unwrap();
-        assert_eq!(result.num_rows(), 2);
-
-        let vid_col = result
-            .column_by_name("_vid")
-            .unwrap()
-            .as_any()
-            .downcast_ref::<UInt64Array>()
-            .unwrap();
-        let ver_col = result
-            .column_by_name("_version")
-            .unwrap()
-            .as_any()
-            .downcast_ref::<UInt64Array>()
-            .unwrap();
-        let name_col = result
-            .column_by_name("name")
-            .unwrap()
-            .as_any()
-            .downcast_ref::<arrow_array::StringArray>()
-            .unwrap();
-
-        // VID 1 → version 5, VID 2 → version 4
-        assert_eq!(vid_col.value(0), 1);
-        assert_eq!(ver_col.value(0), 5);
-        assert_eq!(name_col.value(0), "v1_ver5");
-
-        assert_eq!(vid_col.value(1), 2);
-        assert_eq!(ver_col.value(1), 4);
-        assert_eq!(name_col.value(1), "v2_ver4");
-    }
-
-    #[test]
-    fn test_mvcc_dedup_single_rows() {
-        // Each VID appears once — nothing should change
-        let batch = make_mvcc_batch(&[1, 2, 3], &[1, 1, 1], &[false, false, false]);
-        let result = mvcc_dedup_batch(&batch).unwrap();
-        assert_eq!(result.num_rows(), 3);
-    }
-
-    #[test]
-    fn test_mvcc_dedup_empty() {
-        let batch = make_mvcc_batch(&[], &[], &[]);
-        let result = mvcc_dedup_batch(&batch).unwrap();
-        assert_eq!(result.num_rows(), 0);
-    }
-
-    #[test]
-    fn test_filter_l0_tombstones_removes_tombstoned() {
-        use crate::query::df_graph::L0Context;
-
-        // Create a batch with VIDs 1, 2, 3
-        let batch = make_mvcc_batch(&[1, 2, 3], &[1, 1, 1], &[false, false, false]);
-
-        // Create L0 context with VID 2 tombstoned
-        let l0 = uni_store::runtime::l0::L0Buffer::new(1, None);
-        {
-            // We need to insert a tombstone — L0Buffer has pub vertex_tombstones
-            // But we can't easily create one with tombstones through the constructor.
-            // Use a direct approach.
-        }
-        let l0_buf = std::sync::Arc::new(parking_lot::RwLock::new(l0));
-        l0_buf.write().vertex_tombstones.insert(Vid::from(2u64));
-
-        let l0_ctx = L0Context {
-            current_l0: Some(l0_buf),
-            transaction_l0: None,
-            pending_flush_l0s: vec![],
-        };
-
-        let result = filter_l0_tombstones(&batch, &l0_ctx).unwrap();
-        assert_eq!(result.num_rows(), 2);
-
-        let vid_col = result
-            .column_by_name("_vid")
-            .unwrap()
-            .as_any()
-            .downcast_ref::<UInt64Array>()
-            .unwrap();
-        assert_eq!(vid_col.value(0), 1);
-        assert_eq!(vid_col.value(1), 3);
-    }
-
-    #[test]
-    fn test_filter_l0_tombstones_none() {
-        use crate::query::df_graph::L0Context;
-
-        let batch = make_mvcc_batch(&[1, 2, 3], &[1, 1, 1], &[false, false, false]);
-        let l0_ctx = L0Context::default();
-
-        let result = filter_l0_tombstones(&batch, &l0_ctx).unwrap();
-        assert_eq!(result.num_rows(), 3);
-    }
-
-    #[test]
-    fn test_map_to_output_schema_basic() {
-        use crate::query::df_graph::L0Context;
-
-        // Input: Lance-schema batch with _vid, _deleted, _version, name columns
-        let lance_schema = Arc::new(Schema::new(vec![
-            Field::new("_vid", DataType::UInt64, false),
-            Field::new("_deleted", DataType::Boolean, false),
-            Field::new("_version", DataType::UInt64, false),
-            Field::new("name", DataType::Utf8, true),
-        ]));
-        let name_arr: arrow_array::StringArray =
-            vec![Some("Alice"), Some("Bob")].into_iter().collect();
-        let batch = RecordBatch::try_new(
-            lance_schema,
-            vec![
-                Arc::new(UInt64Array::from(vec![1u64, 2])),
-                Arc::new(arrow_array::BooleanArray::from(vec![false, false])),
-                Arc::new(UInt64Array::from(vec![1u64, 1])),
-                Arc::new(name_arr),
-            ],
-        )
-        .unwrap();
-
-        // Output schema: n._vid, n._labels, n.name
-        let output_schema = Arc::new(Schema::new(vec![
-            Field::new("n._vid", DataType::UInt64, false),
-            Field::new("n._labels", labels_data_type(), true),
-            Field::new("n.name", DataType::Utf8, true),
-        ]));
-
-        let l0_ctx = L0Context::default();
-        let result = map_to_output_schema(
-            &batch,
-            "Person",
-            "n",
-            &["name".to_string()],
-            &output_schema,
-            &l0_ctx,
-        )
-        .unwrap();
-
-        assert_eq!(result.num_rows(), 2);
-        assert_eq!(result.schema().fields().len(), 3);
-        assert_eq!(result.schema().field(0).name(), "n._vid");
-        assert_eq!(result.schema().field(1).name(), "n._labels");
-        assert_eq!(result.schema().field(2).name(), "n.name");
-
-        // Check name values carried through
-        let name_col = result
-            .column(2)
-            .as_any()
-            .downcast_ref::<arrow_array::StringArray>()
-            .unwrap();
-        assert_eq!(name_col.value(0), "Alice");
-        assert_eq!(name_col.value(1), "Bob");
     }
 }
