@@ -12,6 +12,7 @@
 
 use crate::algo::IdMap;
 use anyhow::{Result, anyhow};
+use arrow_array::Array;
 use uni_common::core::id::{Eid, Vid};
 use uni_store::runtime::L0Manager;
 use uni_store::runtime::property_manager::PropertyManager;
@@ -790,12 +791,6 @@ impl ProjectionBuilder {
         }
         // Vids in slot order: column index i corresponds to vertex slot i.
         let vids: Vec<Vid> = id_map.iter().map(|(_, vid)| vid).collect();
-        let name_refs: Vec<&str> = names.iter().map(String::as_str).collect();
-        let pm = PropertyManager::new(
-            self.storage.clone(),
-            self.storage.schema_manager_arc(),
-            1000,
-        );
         // Overlay the pinned L0 snapshot (committed-but-unflushed) so stored
         // node-property values are read consistently with the structure read
         // (G12) instead of returning NaN until flush.
@@ -806,25 +801,114 @@ impl ProjectionBuilder {
                 snap.extra.clone(),
             )
         });
-        let batch = pm
-            .get_batch_vertex_props(&vids, &name_refs, node_ctx.as_ref())
-            .await?;
+        // Read columnarly rather than through `get_batch_vertex_props`, whose
+        // `HashMap<Vid, HashMap<String, Value>>` costs a heap map per vertex --
+        // for a whole-projection read that is every vertex of every scoped
+        // label (#209). `columnar_scan_vertex_batch` is single-label, so scan
+        // each scoped label in turn and scatter the rows back into slot order;
+        // that mirrors what the map path did internally anyway, since it also
+        // looped the candidate label tables.
+        let schema = self.storage.schema_manager().schema();
         let mut cols: std::collections::HashMap<String, Vec<f64>> = names
             .iter()
-            .map(|n| (n.clone(), Vec::with_capacity(vids.len())))
+            .map(|n| (n.clone(), vec![f64::NAN; vids.len()]))
             .collect();
-        for vid in &vids {
-            let props = batch.get(vid);
-            for name in names {
-                let v = props
-                    .and_then(|m| m.get(name))
-                    .and_then(uni_common::Value::as_f64)
-                    .unwrap_or(f64::NAN);
-                cols.get_mut(name)
-                    .expect("column pre-inserted for every name")
-                    .push(v);
+
+        // Slot of each vid, so a scanned row can be placed without a search.
+        let slot_of: std::collections::HashMap<u64, usize> = vids
+            .iter()
+            .enumerate()
+            .map(|(i, v)| (v.as_u64(), i))
+            .collect();
+
+        let l0_ctx = node_ctx
+            .as_ref()
+            .map(uni_store::runtime::l0_visibility::L0Context::from_query_context)
+            .unwrap_or_default();
+        let raw_vids: Vec<u64> = vids.iter().map(|v| v.as_u64()).collect();
+
+        for label in self.scoped_label_names(&schema) {
+            let label_props = schema.properties.get(&label);
+            // Only the requested names this label actually declares; a name it
+            // does not have simply leaves NaN in place, as before.
+            let wanted: Vec<String> = names
+                .iter()
+                .filter(|n| label_props.is_some_and(|lp| lp.contains_key(n.as_str())))
+                .cloned()
+                .collect();
+            if wanted.is_empty() {
+                continue;
+            }
+            let mut fields =
+                vec![
+                    arrow_schema::Field::new("_vid", arrow_schema::DataType::UInt64, false),
+                    arrow_schema::Field::new(
+                        "_labels",
+                        arrow_schema::DataType::List(std::sync::Arc::new(
+                            arrow_schema::Field::new("item", arrow_schema::DataType::Utf8, true),
+                        )),
+                        true,
+                    ),
+                ];
+            for prop in &wanted {
+                let ty =
+                    uni_store::runtime::columnar_scan::resolve_property_type(prop, label_props);
+                fields.push(uni_store::runtime::columnar_scan::property_field(
+                    prop,
+                    ty,
+                    label_props.and_then(|lp| lp.get(prop)).map(|m| &m.r#type),
+                ));
+            }
+            let out_schema: arrow_schema::SchemaRef =
+                std::sync::Arc::new(arrow_schema::Schema::new(fields));
+
+            let batch = uni_store::runtime::columnar_scan::columnar_scan_vertex_batch(
+                &self.storage,
+                &l0_ctx,
+                None,
+                None,
+                uni_store::runtime::columnar_scan::ColumnarVertexScanRequest {
+                    label: &label,
+                    projected_properties: &wanted,
+                    output_schema: &out_schema,
+                    target_vid: None,
+                    vid_list_filter: Some(&raw_vids),
+                    extra_lance_filter: None,
+                },
+                None,
+            )
+            .await?;
+
+            // Rows come back in scan order; place each by its `_vid`.
+            let Some(vid_col) = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<arrow_array::UInt64Array>()
+            else {
+                continue;
+            };
+            for (col_idx, prop) in wanted.iter().enumerate() {
+                let arr = batch.column(col_idx + 2);
+                let out = cols
+                    .get_mut(prop)
+                    .expect("column pre-inserted for every name");
+                for row in 0..batch.num_rows() {
+                    if vid_col.is_null(row) {
+                        continue;
+                    }
+                    let Some(&slot) = slot_of.get(&vid_col.value(row)) else {
+                        continue;
+                    };
+                    if let Some(v) =
+                        uni_store::storage::arrow_convert::arrow_to_value(arr.as_ref(), row, None)
+                            .as_f64()
+                    {
+                        out[slot] = v;
+                    }
+                }
             }
         }
+
         Ok(cols)
     }
 }
