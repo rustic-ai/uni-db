@@ -2089,6 +2089,28 @@ pub async fn columnar_scan_vertex_batch(
     let uni_schema = storage.schema_manager().schema();
     let label_props = uni_schema.properties.get(label);
 
+    // `build_all_props_column_for_schema_scan` assembles the whole-entity map
+    // from `projected_properties` alone, so a narrowed projection yields a map
+    // that is quietly missing declared properties -- indistinguishable from
+    // those properties being unset. Today the planner emits `_all_props` only
+    // from its `"*"` branches, which widen the projection to the full declared
+    // set in the same step, and both traversal hydration paths route
+    // `_all_props` to the row-wise `PropertyManager` instead of here. That is
+    // four sites holding one invariant by convention, with nothing checking it.
+    debug_assert!(
+        !projected_properties.iter().any(|p| p == "_all_props")
+            || label_props.is_none_or(|declared| {
+                declared
+                    .keys()
+                    .all(|d| projected_properties.iter().any(|p| p == d))
+            }),
+        "columnar `_all_props` for label `{label}` was requested with a narrowed \
+         projection, so the whole-entity map would silently omit declared \
+         properties. Either widen the projection to the full declared set or \
+         route this caller through `PropertyManager`. Projected: \
+         {projected_properties:?}"
+    );
+
     // Build the list of columns to request from Lance
     let mut lance_columns: Vec<String> = vec![
         "_vid".to_string(),
