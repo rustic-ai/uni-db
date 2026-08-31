@@ -401,14 +401,29 @@ pub fn build_property_column_static(
             Ok(Arc::new(builder.finish()))
         }
         DataType::Binary => {
-            // CRDT binary properties: JSON-decoded CRDTs re-encoded to MessagePack
+            // CRDT binary properties: JSON-decoded CRDTs re-encoded to MessagePack.
+            //
+            // The string form has to be parsed as JSON text first. Cypher stores
+            // a CRDT literal verbatim -- `DataType::accepts` passes a
+            // `Value::String` through untouched, and the writer only parses when
+            // a prior value exists to merge with -- so a freshly created,
+            // unflushed CRDT sits in L0 as a string. Handing that to
+            // `from_value` yields `Err` and the column came back null, so the
+            // property was readable after a flush and null before one.
+            //
+            // The flush-side builder in `storage::arrow_convert` already splits
+            // these two cases; this is the same split, kept in step with it.
             let mut builder = BinaryBuilder::new();
             for vid in vids {
                 let bytes = get_property_value(vid, props_map, prop_name)
                     .filter(|v| !v.is_null())
                     .and_then(|v| {
-                        let json_val: serde_json::Value = v.into();
-                        serde_json::from_value::<uni_crdt::Crdt>(json_val).ok()
+                        if let Some(s) = v.as_str() {
+                            serde_json::from_str::<uni_crdt::Crdt>(s).ok()
+                        } else {
+                            let json_val: serde_json::Value = v.into();
+                            serde_json::from_value::<uni_crdt::Crdt>(json_val).ok()
+                        }
                     })
                     .and_then(|crdt| crdt.to_msgpack().ok());
                 match bytes {
