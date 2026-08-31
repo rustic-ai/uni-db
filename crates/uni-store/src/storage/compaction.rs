@@ -304,9 +304,7 @@ impl Compactor {
                 {
                     // Schemaless properties merge exactly like declared ones;
                     // `build_overflow_json_column` re-splits them on the way out.
-                    for (key, value) in overflow {
-                        row_props.insert(key, value);
-                    }
+                    crate::storage::property_builder::merge_overflow_into(&mut row_props, overflow);
                 }
 
                 // `_created_at` is the earliest we have seen for this vid and

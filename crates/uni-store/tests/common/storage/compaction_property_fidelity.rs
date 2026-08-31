@@ -403,3 +403,88 @@ async fn a_truncated_delete_still_tombstones_every_label() -> Result<()> {
     }
     Ok(())
 }
+
+/// A declared column beats `overflow_json` residue, and compaction persists it.
+///
+/// Compaction is the sharp end of this rule: the readers merely *return* the
+/// value they pick, while `compact_vertices` writes it back, so picking the
+/// blob would bake pre-declaration residue into the table permanently.
+///
+/// The colliding row has to be written by hand. Every writer routes through
+/// `build_overflow_json_column`, which excludes declared keys from the blob, so
+/// no normal path produces a row carrying `name` in both places -- which is
+/// also why this divergence went unnoticed. The state is reachable only by
+/// schema evolution over an older on-disk layout, so the test fixes the
+/// contract while it is still cheap.
+#[tokio::test]
+async fn compaction_persists_the_declared_column_over_overflow_residue() -> Result<()> {
+    use arrow_array::{BooleanArray, RecordBatch};
+
+    let (fx, _seeded_vid) = seeded_person().await?;
+    let schema = fx.schema_manager.schema();
+    let ds = fx.storage.vertex_dataset(LABEL)?;
+    let arrow_schema = ds.get_arrow_schema(&schema)?;
+
+    // `name` is declared, so it gets a typed column; the blob carries a stale
+    // value for the same key plus a schemaless key as a control that the blob
+    // is genuinely read rather than ignored wholesale.
+    let residue = Value::Map(HashMap::from([
+        (
+            "name".to_string(),
+            Value::String("stale-residue".to_string()),
+        ),
+        (
+            SCHEMALESS_PROP.to_string(),
+            Value::String(SCHEMALESS_VALUE.to_string()),
+        ),
+    ]));
+    let blob = uni_common::cypher_value_codec::encode(&residue);
+
+    let vid = fx.writer.next_vid().await?.as_u64();
+    // Built by field name rather than position: `RecordBatch::try_new` is
+    // positional and the reserved-column order is not this test's business.
+    let columns: Vec<arrow_array::ArrayRef> = arrow_schema
+        .fields()
+        .iter()
+        .map(|f| -> arrow_array::ArrayRef {
+            match f.name().as_str() {
+                "_vid" => Arc::new(UInt64Array::from(vec![vid])),
+                "_deleted" => Arc::new(BooleanArray::from(vec![false])),
+                "_version" => Arc::new(UInt64Array::from(vec![1u64])),
+                "name" => Arc::new(StringArray::from(vec![Some("declared-wins")])),
+                "overflow_json" => Arc::new(LargeBinaryArray::from(vec![Some(blob.as_slice())])),
+                _ => arrow_array::new_null_array(f.data_type(), 1),
+            }
+        })
+        .collect();
+
+    let batch = RecordBatch::try_new(arrow_schema, columns)?;
+    ds.write_batch(fx.storage.backend(), batch, &schema).await?;
+
+    let before = scan_columns(&fx.storage).await?;
+    let row = row_of(&before, vid).expect("the hand-built row is in the table");
+    assert!(
+        overflow_at(&before, row).is_some(),
+        "precondition: the colliding row must actually carry a blob, or this \
+         test proves nothing"
+    );
+
+    Compactor::new(fx.storage.clone())
+        .compact_vertices(LABEL)
+        .await?;
+
+    let pm = PropertyManager::new(fx.storage.clone(), fx.schema_manager.clone(), 0);
+    let props = pm.get_all_vertex_props(uni_common::Vid::from(vid)).await?;
+    assert_eq!(
+        props.get("name"),
+        Some(&Value::String("declared-wins".to_string())),
+        "semantic compaction wrote the overflow blob's stale value over the \
+         declared column, persisting it"
+    );
+    assert_eq!(
+        props.get(SCHEMALESS_PROP),
+        Some(&Value::String(SCHEMALESS_VALUE.to_string())),
+        "the schemaless key must still survive the merge"
+    );
+    Ok(())
+}

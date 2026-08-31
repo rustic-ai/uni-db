@@ -50,7 +50,7 @@ index 032307e69..b0bffab3a 100644
              for i in 0..batch.num_rows() {
                  let vid = Vid::from(vid_col.value(i));
                  let version = ver_col.value(i);
-@@ -259,47 +234,6 @@ impl Compactor {
+@@ -259,45 +234,6 @@ impl Compactor {
                      }
                  }
  
@@ -70,9 +70,7 @@ index 032307e69..b0bffab3a 100644
 -                {
 -                    // Schemaless properties merge exactly like declared ones;
 -                    // `build_overflow_json_column` re-splits them on the way out.
--                    for (key, value) in overflow {
--                        row_props.insert(key, value);
--                    }
+-                    crate::storage::property_builder::merge_overflow_into(&mut row_props, overflow);
 -                }
 -
 -                // `_created_at` is the earliest we have seen for this vid and
