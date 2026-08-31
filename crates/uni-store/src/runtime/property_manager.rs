@@ -782,6 +782,10 @@ impl PropertyManager {
         // one (finding [3]); without this, an out-of-order DELETE/live pair
         // resurrected a deleted edge's props depending on scan order.
         let mut best_version: HashMap<uni_common::core::id::Eid, u64> = HashMap::new();
+        // Eids whose winning delta row is a delete. Gates the main-edges
+        // fallback below so a tombstoned edge is not resurrected (C2).
+        let mut tombstoned: std::collections::HashSet<uni_common::core::id::Eid> =
+            std::collections::HashSet::new();
 
         // In the new storage model, EIDs are pure auto-increment and don't embed type info.
         // We need to scan all edge type datasets to find the edges.
@@ -895,8 +899,16 @@ impl PropertyManager {
                     // op=1 is Delete
                     if op_col.value(row) == 1 {
                         result.remove(&Vid::from(eid.as_u64()));
+                        // Record it, or the main-edges fallback below will
+                        // re-hydrate the edge precisely *because* it is
+                        // missing from `result` -- review finding C2, which
+                        // the vertex path guards with its own `tombstoned`
+                        // set and this one did not.
+                        tombstoned.insert(eid);
                         continue;
                     }
+                    // A newer live row un-deletes the edge.
+                    tombstoned.remove(&eid);
 
                     let mut props =
                         Self::extract_row_properties(&batch, row, &valid_props, type_props)?;
@@ -953,7 +965,11 @@ impl PropertyManager {
         {
             use crate::storage::main_edge::MainEdgeDataset;
             for &eid in eids {
-                if l0_visibility::is_edge_deleted(eid, ctx) {
+                // Skip both L0 deletes and delta-table deletes: either is a
+                // tombstone the fallback must not undo.
+                // Skip both L0 deletes and delta-table deletes: either is a
+                // tombstone the fallback must not undo (C2).
+                if l0_visibility::is_edge_deleted(eid, ctx) || tombstoned.contains(&eid) {
                     continue;
                 }
                 // This map is keyed by Vid-from-Eid, matching the delta scan above.
@@ -1532,6 +1548,9 @@ impl PropertyManager {
             }
         }
 
+        // Eids whose replay ends in a delete; gates the fallback below (C2).
+        let mut replay_tombstoned: std::collections::HashSet<uni_common::core::id::Eid> =
+            std::collections::HashSet::new();
         for (eid, mut rows) in per_eid_rows {
             rows.sort_by_key(|(ver, _, _)| *ver);
 
@@ -1569,6 +1588,11 @@ impl PropertyManager {
                 // have been recorded under this EID by Phase 1 (matches
                 // is_edge_deleted single-EID semantics).
                 result.remove(&eid);
+                // And record it, or the main-edges fallback below re-hydrates
+                // the edge *because* its entry is now missing -- review
+                // finding C2, which the vertex path guards and this one did
+                // not.
+                replay_tombstoned.insert(eid);
                 continue;
             }
 
@@ -1592,7 +1616,11 @@ impl PropertyManager {
         // fast-path is preserved for fully-typed edges.
         use crate::storage::main_edge::MainEdgeDataset;
         for &eid in eids {
-            if l0_visibility::is_edge_deleted(eid, ctx) {
+            // Skip both L0 deletes and edges the delta replay ended by
+            // deleting: either is a tombstone the fallback must not undo.
+            // Skip both L0 deletes and edges whose replay ended in a delete:
+            // either is a tombstone the fallback must not undo (C2).
+            if l0_visibility::is_edge_deleted(eid, ctx) || replay_tombstoned.contains(&eid) {
                 continue;
             }
             let needs_fallback = result.get(&eid).is_none_or(|p| p.is_empty());
