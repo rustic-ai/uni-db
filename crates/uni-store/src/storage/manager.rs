@@ -165,18 +165,44 @@ impl Drop for FlushInProgressGuard {
 /// Overwrite (create_table). See the Lance commit-conflict-resolver in
 /// `lance-3.0.1/src/io/commit/conflict_resolver.rs`.
 fn is_lance_conflict(err: &anyhow::Error) -> bool {
+    // Match the typed error, not its message. The message is Lance's to
+    // reword, and matching it got this wrong twice in the same way: the
+    // concurrent-creation case reaches us as `DatasetAlreadyExists` (Lance
+    // maps `CommitError::CommitConflict` onto it, so the name is misleading
+    // rather than the classification) and `TooMuchWriteContention` displays
+    // as "Too many concurrent writers" -- neither contains "conflict" or
+    // "Incompatible transaction", so both were treated as fatal.
+    let mut saw_lance_error = false;
+    for cause in err.chain() {
+        if let Some(lance_err) = cause.downcast_ref::<lance::Error>() {
+            saw_lance_error = true;
+            if matches!(
+                lance_err,
+                lance::Error::CommitConflict { .. }
+                    | lance::Error::RetryableCommitConflict { .. }
+                    | lance::Error::IncompatibleTransaction { .. }
+                    | lance::Error::TooMuchWriteContention { .. }
+                    | lance::Error::DatasetAlreadyExists { .. }
+            ) {
+                return true;
+            }
+            // Keep walking rather than returning: `Error::Wrapped` and
+            // `Error::External` can carry a retryable error underneath.
+        }
+    }
+    if saw_lance_error {
+        return false;
+    }
+
+    // Fallback for an error that crossed a boundary erasing the concrete type
+    // (stringified across a task, or re-wrapped by a caller). Deliberately
+    // second: it cannot distinguish a retryable conflict from a message that
+    // merely mentions one.
     let msg = err.to_string();
     msg.contains("Incompatible transaction")
         || msg.contains("conflict")
-        // The concurrent-creation case above, which Lance reports as
-        // `Dataset already exists` -- a string containing neither of the
-        // other two patterns, so it was classified fatal and the losing
-        // flush's L0 was stranded on `pending_flush`. Retrying is what the
-        // loser wants: the table exists by then, so its `WriteMode::Append`
-        // appends instead of creating. This is `async_flush_repro`'s R2/R3
-        // failure, which needs >=2 concurrent stream phases and so is
-        // invisible at `max_pending_flushes = 1`.
         || msg.contains("already exists")
+        || msg.contains("Too many concurrent writers")
 }
 
 /// Runs `op` with exponential-backoff retry on Lance commit conflicts.
@@ -3154,4 +3180,69 @@ fn merge_l0_into_fts_results(
     // Re-sort by score descending (higher relevance first).
     results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
     results.truncate(k);
+}
+
+#[cfg(test)]
+mod conflict_classification_tests {
+    use super::is_lance_conflict;
+
+    /// Concurrent table creation is retryable.
+    ///
+    /// `DatasetAlreadyExists` is what Lance raises when two writers race to
+    /// create the same table -- it maps `CommitError::CommitConflict` onto it,
+    /// so the name understates what it is -- and its message contains neither
+    /// "conflict" nor "Incompatible transaction", so the message matcher
+    /// classified it fatal and stranded a losing async flush's L0
+    /// (`async_flush_repro` R2/R3).
+    #[test]
+    fn concurrent_creation_is_retryable() {
+        let already_exists: anyhow::Error =
+            lance::Error::dataset_already_exists("/tmp/x/index.lance").into();
+        assert!(
+            !already_exists.to_string().contains("conflict"),
+            "precondition: if Lance ever adds 'conflict' to this message the \
+             test stops covering the case it was written for"
+        );
+        assert!(is_lance_conflict(&already_exists));
+    }
+
+    // `TooMuchWriteContention` is the other variant the message matcher missed
+    // ("Too many concurrent writers"), but its Snafu selector lives in
+    // `lance_core::error`, which `lance` does not re-export -- constructing one
+    // would mean a dev-dependency on `lance-core` for a single `matches!` arm.
+    // It is covered by `stringified_conflicts_still_match_via_the_fallback`
+    // instead, which pins the message; the typed arm is unexercised.
+
+    /// A non-conflict Lance error must not be retried, and must not reach the
+    /// string fallback -- which would match any message mentioning a conflict.
+    #[test]
+    fn unrelated_lance_errors_are_not_retryable() {
+        let corrupt: anyhow::Error =
+            lance::Error::io_source("disk quota exceeded".to_string().into()).into();
+        assert!(!is_lance_conflict(&corrupt));
+
+        let misleading: anyhow::Error =
+            lance::Error::io_source("failed while resolving a conflict".to_string().into()).into();
+        assert!(
+            !is_lance_conflict(&misleading),
+            "a typed non-conflict error must not fall through to message matching"
+        );
+    }
+
+    /// Retained for errors that crossed a boundary erasing the concrete type.
+    #[test]
+    fn stringified_conflicts_still_match_via_the_fallback() {
+        for msg in [
+            "Incompatible transaction: ...",
+            "Retryable commit conflict for version 3",
+            "Dataset already exists: /tmp/x",
+            "Too many concurrent writers. retry limit reached",
+        ] {
+            assert!(
+                is_lance_conflict(&anyhow::anyhow!("{msg}")),
+                "fallback missed: {msg}"
+            );
+        }
+        assert!(!is_lance_conflict(&anyhow::anyhow!("schema mismatch")));
+    }
 }
