@@ -7611,7 +7611,17 @@ fn sanitize_vlp_target_properties(
 ) -> Vec<String> {
     properties.retain(|p| p != "*");
 
-    if target_has_wildcard && properties.is_empty() {
+    // A wildcard needs `_all_props` whether or not named properties survived
+    // it. `resolve_properties` has already expanded `"*"` into the label's full
+    // declared set, so requiring `properties.is_empty()` here meant a label
+    // that declares anything never got `_all_props` -- and schemaless
+    // properties, which live only in the overflow blob that `_all_props`
+    // carries, were dropped from every whole-entity VLP result. `RETURN n`
+    // over `(h)-[:R*1..2]->(n)` returned the declared columns and silently lost
+    // the rest, where the same match at fixed length returned all of them.
+    // This is the single-hop rule at the `target_has_wildcard` site in
+    // `plan_traverse_main_by_type`, which never carried the extra condition.
+    if target_has_wildcard && !properties.iter().any(|p| p == "_all_props") {
         properties.push("_all_props".to_string());
     }
 
@@ -8887,13 +8897,26 @@ mod tests {
         ));
     }
 
+    /// The `"*"` marker itself is dropped, but the wildcard still demands
+    /// `_all_props`.
+    ///
+    /// This previously asserted `["name"]` -- that a wildcard alongside named
+    /// properties added nothing. That was the defect, not the contract:
+    /// `resolve_properties` expands `"*"` to the declared set before this runs,
+    /// so on any label that declares a property the list is non-empty and
+    /// `_all_props` was never added, dropping every schemaless property from
+    /// whole-entity VLP results. `whole_entity_results_carry_every_property`
+    /// covers it end to end.
     #[test]
     fn test_sanitize_vlp_target_properties_removes_wildcard() {
         let props = vec!["*".to_string(), "name".to_string()];
         let label_props = HashSet::from(["name".to_string()]);
         let sanitized = sanitize_vlp_target_properties(props, true, Some(&label_props));
 
-        assert_eq!(sanitized, vec!["name".to_string()]);
+        assert_eq!(
+            sanitized,
+            vec!["name".to_string(), "_all_props".to_string()]
+        );
     }
 
     #[test]

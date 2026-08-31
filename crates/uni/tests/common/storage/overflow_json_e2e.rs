@@ -925,3 +925,141 @@ async fn test_bulk_insert_vertices_overflow_properties() -> Result<()> {
 
     Ok(())
 }
+
+/// A whole-entity result must carry every property, by every route to one.
+///
+/// `build_all_props_column_for_schema_scan` assembles `_all_props` from the
+/// projection it was handed, so a caller that asks for a whole entity beside a
+/// narrowed projection would get a map missing declared properties -- and a
+/// missing property is indistinguishable from an unset one. The row-wise
+/// `PropertyManager` has no such limitation, so the two paths would disagree.
+///
+/// Three separate mechanisms currently prevent that, none of them local to the
+/// builder: the planner adds `_all_props` only in its `"*"` branches, which
+/// widen the projection to the full declared set in the same step; both
+/// traversal hydration paths send `_all_props` to `PropertyManager` rather than
+/// the columnar path; and schemaless/multi-label scans use a different builder
+/// entirely. This asserts the property those mechanisms exist to produce,
+/// rather than any one of them, so it survives a change to which one applies.
+#[tokio::test]
+async fn whole_entity_results_carry_every_property() -> Result<()> {
+    let temp_dir = tempdir()?;
+    let db = Uni::open(temp_dir.path().to_str().unwrap()).build().await?;
+
+    db.schema()
+        .label("P")
+        .property("a", uni_db::DataType::Int)
+        .property("b", uni_db::DataType::Int)
+        .property("c", uni_db::DataType::String)
+        .apply()
+        .await?;
+    db.schema()
+        .label("H")
+        .property("id", uni_db::DataType::Int)
+        .apply()
+        .await?;
+    db.schema().edge_type("HAS", &["H"], &["P"]).apply().await?;
+
+    let tx = db.session().tx().await?;
+    // `extra` is schemaless, so it rides in overflow_json rather than a column
+    // and catches a builder that drops the blob instead of the columns.
+    tx.execute("CREATE (:P {a: 1, b: 2, c: 'three', extra: 'schemaless'})")
+        .await?;
+    tx.execute("CREATE (:H {id: 1})").await?;
+    tx.execute("MATCH (h:H {id: 1}), (p:P {a: 1}) CREATE (h)-[:HAS]->(p)")
+        .await?;
+    tx.commit().await?;
+
+    // Shapes that reach a whole entity differently: a plain scan, a scan whose
+    // WHERE or sibling projection could narrow the pushed-down column list, the
+    // traversal-target path, and the collection/comprehension paths that carry
+    // entities through an intermediate representation.
+    let shapes: Vec<(&str, &str)> = vec![
+        ("scan whole node", "MATCH (n:P) RETURN n"),
+        (
+            "scan + WHERE on one prop",
+            "MATCH (n:P) WHERE n.a = 1 RETURN n",
+        ),
+        (
+            "scan + narrow projection beside",
+            "MATCH (n:P) RETURN n.a, n",
+        ),
+        ("traversal target", "MATCH (h:H)-[:HAS]->(n:P) RETURN n"),
+        (
+            "traversal target + WHERE",
+            "MATCH (h:H)-[:HAS]->(n:P) WHERE n.a = 1 RETURN n",
+        ),
+        ("properties()", "MATCH (n:P) RETURN properties(n) AS n"),
+        ("WITH passthrough", "MATCH (p:P) WITH p AS n RETURN n"),
+        (
+            "collect+UNWIND",
+            "MATCH (p:P) WITH collect(p) AS ps UNWIND ps AS n RETURN n",
+        ),
+        (
+            "pattern comprehension",
+            "MATCH (h:H) RETURN [(h)-[:HAS]->(p:P) | p] AS n",
+        ),
+        (
+            "variable-length path",
+            "MATCH (h:H)-[:HAS*1..2]->(n:P) RETURN n",
+        ),
+        (
+            "aggregate then whole node",
+            "MATCH (p:P) WITH p, count(*) AS k WHERE k > 0 RETURN p AS n",
+        ),
+        ("ORDER BY one prop", "MATCH (n:P) RETURN n ORDER BY n.a"),
+        ("DISTINCT", "MATCH (n:P) RETURN DISTINCT n"),
+    ];
+
+    // An entity has two encodings depending on the path that produced it, and
+    // checking only one would pass vacuously wherever the other is used.
+    fn props_of(v: &uni_db::Value) -> Option<std::collections::HashMap<String, uni_db::Value>> {
+        match v {
+            uni_db::Value::Node(n) => Some(n.properties.clone()),
+            uni_db::Value::Map(m) => Some(m.clone()),
+            uni_db::Value::List(items) => items.first().and_then(props_of),
+            _ => None,
+        }
+    }
+
+    let mut failures: Vec<String> = Vec::new();
+    for flushed in [false, true] {
+        if flushed {
+            db.flush().await?;
+        }
+        let stage = if flushed { "flushed" } else { "unflushed" };
+
+        for (name, q) in &shapes {
+            let result = db
+                .session()
+                .query(q)
+                .await
+                .unwrap_or_else(|e| panic!("[{stage}|{name}] query failed: {e}\n  {q}"));
+            let row = result
+                .rows()
+                .first()
+                .unwrap_or_else(|| panic!("[{stage}|{name}] returned no rows: {q}"));
+            let value = row
+                .value("n")
+                .unwrap_or_else(|| panic!("[{stage}|{name}] no column `n`: {q}"));
+            let props = props_of(value)
+                .unwrap_or_else(|| panic!("[{stage}|{name}] not an entity: {value:?}"));
+
+            for expected in ["a", "b", "c", "extra"] {
+                if !props.contains_key(expected) {
+                    failures.push(format!(
+                        "[{stage}|{name}] missing `{expected}`: got {props:?} from: {q}"
+                    ));
+                }
+            }
+        }
+    }
+
+    assert!(
+        failures.is_empty(),
+        "{} whole-entity shape(s) returned an incomplete map:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+    Ok(())
+}
