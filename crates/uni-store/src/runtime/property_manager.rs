@@ -1061,11 +1061,25 @@ impl PropertyManager {
             return Ok(result);
         }
 
-        // Phase 1: Get from L0 layers (oldest to newest)
+        // Phase 1: Get from L0 layers (oldest to newest).
+        //
+        // A plain write adds labels, so it unions; a `SET`/`REMOVE` label
+        // *replaces* the set and records `vertex_label_overwrites`. Unioning
+        // both alike ignored removals entirely -- `REMOVE n:Label` was a no-op
+        // and the label came back on the next read. This mirrors
+        // `columnar_scan::build_labels_column_for_known_label`, which already
+        // gets the rule right: union for plain writes, newest overwrite wins.
+        let mut overwritten: HashMap<Vid, Vec<String>> = HashMap::new();
         if let Some(ctx) = ctx {
             let mut collect_labels = |l0: &L0Buffer| {
                 for &vid in vids {
-                    if let Some(labels) = l0.get_vertex_labels(vid) {
+                    let Some(labels) = l0.get_vertex_labels(vid) else {
+                        continue;
+                    };
+                    if l0.vertex_label_overwrites.contains(&vid) {
+                        // Newest wins: buffers are visited oldest to newest.
+                        overwritten.insert(vid, labels.to_vec());
+                    } else {
                         result
                             .entry(vid)
                             .or_default()
@@ -1096,10 +1110,15 @@ impl PropertyManager {
         }
 
         for &vid in vids {
-            if result.contains_key(&vid) {
-                continue; // Already have labels from L0
+            // An overwrite is authoritative: the stored set is exactly what it
+            // replaced, so merging it back would undo the removal.
+            if overwritten.contains_key(&vid) {
+                continue;
             }
-
+            // Otherwise the stored set is still merged in even when L0 has
+            // entries for this vid. Skipping it truncated a flushed
+            // multi-label vertex to whatever labels one `SET n.prop` happened
+            // to carry.
             if let Some(labels) = self.storage.get_labels_from_index(vid) {
                 merge_labels(result.entry(vid).or_default(), labels);
             } else {
@@ -1121,6 +1140,11 @@ impl PropertyManager {
             for (vid, labels) in storage_labels {
                 merge_labels(result.entry(vid).or_default(), labels);
             }
+        }
+
+        // Apply overwrites last: they replace whatever was accumulated.
+        for (vid, labels) in overwritten {
+            result.insert(vid, labels);
         }
 
         // Deduplicate and sort labels
