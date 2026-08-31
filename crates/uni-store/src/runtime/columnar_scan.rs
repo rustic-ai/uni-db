@@ -1410,7 +1410,17 @@ pub fn mvcc_dedup_batch_by(batch: &RecordBatch, id_column: &str) -> anyhow::Resu
     // later-appended MVCC row takes it. Sorting on a synthetic array rather
     // than a batch column keeps the schema untouched.
     let position: ArrayRef = Arc::new(UInt64Array::from_iter_values(0..batch.num_rows() as u64));
-    let sort_columns = vec![
+    // A delete is monotone, so a tombstone outranks a live row at the same
+    // version. Without this a live row at equal version could win the tie and
+    // resurrect a deleted id -- the same class of bug as review finding C2 on
+    // the main tables, where an *older* live row could beat a tombstone.
+    //
+    // Ranked below `_version`, so a genuinely newer live row still un-deletes,
+    // and above position, so it decides before "later row wins". `_deleted` is
+    // optional: a table without the column is treated as having nothing
+    // deleted, matching `filter_deleted_rows`.
+    let deleted_rank = batch.column_by_name("_deleted").cloned();
+    let mut sort_columns = vec![
         arrow::compute::SortColumn {
             values: id_col,
             options: Some(arrow::compute::SortOptions {
@@ -1425,14 +1435,24 @@ pub fn mvcc_dedup_batch_by(batch: &RecordBatch, id_column: &str) -> anyhow::Resu
                 nulls_first: false,
             }),
         },
-        arrow::compute::SortColumn {
-            values: position,
+    ];
+    if let Some(deleted) = deleted_rank {
+        // `true` sorts above `false` under descending.
+        sort_columns.push(arrow::compute::SortColumn {
+            values: deleted,
             options: Some(arrow::compute::SortOptions {
                 descending: true,
                 nulls_first: false,
             }),
-        },
-    ];
+        });
+    }
+    sort_columns.push(arrow::compute::SortColumn {
+        values: position,
+        options: Some(arrow::compute::SortOptions {
+            descending: true,
+            nulls_first: false,
+        }),
+    });
     let indices =
         arrow::compute::lexsort_to_indices(&sort_columns, None).map_err(anyhow::Error::from)?;
 
@@ -2419,6 +2439,51 @@ mod tests {
             format!("pos{}", TIED - 1),
             "the last tied row must win, deterministically"
         );
+    }
+
+    /// A tombstone must win a version tie: a delete is monotone, so a live row
+    /// at the *same* version must not resurrect a deleted id.
+    ///
+    /// This is the C2 pattern -- the main tables were fixed for the case where
+    /// an older live row beat a tombstone; the equal-version case is the same
+    /// bug one step in. Note the existing dedup tests all pass `deleted`
+    /// all-false, so this is also the first coverage of a tombstone surviving
+    /// the dedup at all.
+    #[test]
+    fn test_mvcc_dedup_tombstone_wins_a_version_tie() {
+        // Live row first, tombstone second, then the reverse: neither
+        // ordering may resurrect the vid.
+        for (deleted, label) in [
+            (vec![false, true], "live first"),
+            (vec![true, false], "tombstone first"),
+        ] {
+            let batch = make_mvcc_batch(&[1, 1], &[7, 7], &deleted);
+            let out = mvcc_dedup_batch(&batch).unwrap();
+            assert_eq!(out.num_rows(), 1, "{label}: one row survives");
+            let del = out
+                .column_by_name("_deleted")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<arrow_array::BooleanArray>()
+                .expect("_deleted is Boolean");
+            assert!(del.value(0), "{label}: the tombstone must win the tie");
+        }
+    }
+
+    /// A genuinely newer live row still un-deletes, so the tombstone rank must
+    /// sit below `_version` rather than above it.
+    #[test]
+    fn test_mvcc_dedup_newer_live_row_beats_an_older_tombstone() {
+        let batch = make_mvcc_batch(&[1, 1], &[8, 7], &[false, true]);
+        let out = mvcc_dedup_batch(&batch).unwrap();
+        assert_eq!(out.num_rows(), 1);
+        let del = out
+            .column_by_name("_deleted")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<arrow_array::BooleanArray>()
+            .expect("_deleted is Boolean");
+        assert!(!del.value(0), "v8 live must beat the v7 tombstone");
     }
 
     #[test]
