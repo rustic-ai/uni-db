@@ -1391,7 +1391,25 @@ pub fn mvcc_dedup_batch_by(batch: &RecordBatch, id_column: &str) -> anyhow::Resu
         .ok_or_else(|| anyhow::anyhow!("Missing _version column".to_string()))?
         .clone();
 
-    // Sort by (id_column ASC, _version DESC)
+    // Sort by (id ASC, _version DESC, position DESC).
+    //
+    // The position key is what makes this deterministic.
+    // `lexsort_to_indices` is an *unstable* sort — arrow-ord routes a
+    // fixed-width lexsort to `sort_unstable_by` — so with only (id, version)
+    // as keys the winner of a version tie was whichever row the sort happened
+    // to leave first, and not reproducible between runs.
+    //
+    // Ties are reachable rather than theoretical: a transaction L0 forks
+    // `current_version` from the main L0, so a tx write and a main write can
+    // carry the same version, and `merge_lance_and_l0` concatenates both tiers
+    // into one batch before this runs.
+    //
+    // Position descending resolves them as "the later row wins", which is the
+    // rule the row-wise path already applies: the concatenation puts Lance
+    // first and L0 second, so L0 takes a tie, and within one tier a
+    // later-appended MVCC row takes it. Sorting on a synthetic array rather
+    // than a batch column keeps the schema untouched.
+    let position: ArrayRef = Arc::new(UInt64Array::from_iter_values(0..batch.num_rows() as u64));
     let sort_columns = vec![
         arrow::compute::SortColumn {
             values: id_col,
@@ -1402,6 +1420,13 @@ pub fn mvcc_dedup_batch_by(batch: &RecordBatch, id_column: &str) -> anyhow::Resu
         },
         arrow::compute::SortColumn {
             values: version_col,
+            options: Some(arrow::compute::SortOptions {
+                descending: true,
+                nulls_first: false,
+            }),
+        },
+        arrow::compute::SortColumn {
+            values: position,
             options: Some(arrow::compute::SortOptions {
                 descending: true,
                 nulls_first: false,
@@ -2339,6 +2364,61 @@ mod tests {
         let batch = make_mvcc_batch(&[1, 2, 3], &[1, 1, 1], &[false, false, false]);
         let result = mvcc_dedup_batch(&batch).unwrap();
         assert_eq!(result.num_rows(), 3);
+    }
+
+    /// A version tie must resolve the same way every time.
+    ///
+    /// `lexsort_to_indices` is unstable, so before the position tiebreak the
+    /// winner of a tie was whichever row the sort left first — arbitrary, and
+    /// not reproducible. Enough tied rows are used that an unstable sort
+    /// actually reorders them; two would often survive by luck.
+    ///
+    /// The rule asserted is the one the row-wise path already applies: the
+    /// later row wins, so an L0 row concatenated after a Lance row takes the
+    /// tie.
+    #[test]
+    fn test_mvcc_dedup_tie_resolves_to_the_later_row() {
+        const TIED: usize = 64;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("_vid", DataType::UInt64, false),
+            Field::new("_deleted", DataType::Boolean, false),
+            Field::new("_version", DataType::UInt64, false),
+            Field::new("name", DataType::Utf8, true),
+        ]));
+        // One vid, every row at the same version, `name` recording the
+        // original position so the winner is identifiable.
+        let names: Vec<String> = (0..TIED).map(|i| format!("pos{i}")).collect();
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(UInt64Array::from(vec![1u64; TIED])),
+                Arc::new(arrow_array::BooleanArray::from(vec![false; TIED])),
+                Arc::new(UInt64Array::from(vec![7u64; TIED])),
+                Arc::new(
+                    names
+                        .iter()
+                        .map(|s| Some(s.as_str()))
+                        .collect::<arrow_array::StringArray>(),
+                ),
+            ],
+        )
+        .unwrap();
+
+        let out = mvcc_dedup_batch(&batch).unwrap();
+        assert_eq!(out.num_rows(), 1, "one row survives per vid");
+        let got = out
+            .column_by_name("name")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<arrow_array::StringArray>()
+            .expect("name column is Utf8")
+            .value(0)
+            .to_string();
+        assert_eq!(
+            got,
+            format!("pos{}", TIED - 1),
+            "the last tied row must win, deterministically"
+        );
     }
 
     #[test]
