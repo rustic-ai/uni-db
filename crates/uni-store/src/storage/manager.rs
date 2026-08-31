@@ -166,7 +166,17 @@ impl Drop for FlushInProgressGuard {
 /// `lance-3.0.1/src/io/commit/conflict_resolver.rs`.
 fn is_lance_conflict(err: &anyhow::Error) -> bool {
     let msg = err.to_string();
-    msg.contains("Incompatible transaction") || msg.contains("conflict")
+    msg.contains("Incompatible transaction")
+        || msg.contains("conflict")
+        // The concurrent-creation case above, which Lance reports as
+        // `Dataset already exists` -- a string containing neither of the
+        // other two patterns, so it was classified fatal and the losing
+        // flush's L0 was stranded on `pending_flush`. Retrying is what the
+        // loser wants: the table exists by then, so its `WriteMode::Append`
+        // appends instead of creating. This is `async_flush_repro`'s R2/R3
+        // failure, which needs >=2 concurrent stream phases and so is
+        // invisible at `max_pending_flushes = 1`.
+        || msg.contains("already exists")
 }
 
 /// Runs `op` with exponential-backoff retry on Lance commit conflicts.

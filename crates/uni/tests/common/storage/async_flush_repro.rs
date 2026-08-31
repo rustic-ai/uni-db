@@ -3,20 +3,31 @@
 //
 // Repro suite for the residual async-flush visibility bug (Plan §14).
 //
-// The existing `async_flush_visibility_after_drain` test in
-// `async_flush_basic.rs` is `#[ignore]`d because it's flaky. These
-// repros are narrower and progressively isolate the cause:
+// These are regression tests now: the bug they isolate is fixed. They
+// stay because the fix is a string match in `is_lance_conflict`, and
+// nothing else would notice if a Lance upgrade reworded the error.
 //
-//   R1 — Single-stream async (max_pending=1). Should always pass.
-//        Confirms the baseline async path is correct without any
-//        concurrent-stream interaction.
+//   R1 — Single-stream async (max_pending=1). Always passed, including
+//        while the bug was live: it cannot produce two concurrent
+//        stream phases, which is what the bug required.
 //
-//   R2 — Concurrent streams, single table (max_pending=4). This is
-//        the actual repro of the bug. Fails ~50% of runs (per prior
-//        diagnostics).
+//   R2 — Concurrent streams, single table (max_pending=4). The repro.
 //
 //   R3 — Concurrent streams, multiple tables. Distinguishes per-table
 //        cache staleness from a storage-wide bug.
+//
+// # The cause, since "flaky" was the wrong label for ~50% failures
+//
+// Two concurrent flush streams both created the same per-label UID
+// index dataset. Lance failed the loser with `Dataset already exists`,
+// which `is_lance_conflict` did not recognise despite its doc comment
+// naming concurrent table creation as the case it existed for. The
+// loser was treated as fatal, its rotated L0 was stranded on
+// `pending_flush`, and `flush_to_l1` refused the barrier -- correctly.
+//
+// R2/R3 failed 6 of 12 runs each before the fix and 0 of 12 after.
+// A ~50% failure that is *worse* in isolation than under parallel load
+// is not contention, and should not be filed as flake.
 
 use std::collections::HashMap;
 use std::sync::Arc;
