@@ -12583,6 +12583,55 @@ mod pushdown_tests {
         );
     }
 
+    /// Locates where IC4's oversized `DISTINCT` key comes from (#203).
+    ///
+    /// `WITH DISTINCT tag, post RETURN count(*)` reads no property of either
+    /// entity, yet at LDBC SF1 it asks for 1.4 GB in
+    /// `GroupedHashAggregateStream` — `DISTINCT` plans as a grouped aggregate
+    /// keyed on every projected column, so an entity's full struct becomes hash
+    /// key material. Measured on the same store, the identical query keyed on
+    /// `tag.id, post.id` at the same 522 952 distinct rows completes.
+    ///
+    /// **This is a control, not a repro — it passed the first time it was run.**
+    /// It was written to test whether the width enters through the *projection*
+    /// path, and the answer is no: both variables narrow here, and
+    /// `resolve_properties` turns a sentinel-only set into an empty projection.
+    /// The `Traverse` arm likewise collects only from `target_filter`, so the
+    /// whole logical layer is exonerated and #203's width enters below it, in
+    /// physical target hydration.
+    ///
+    /// Kept because it pins that exoneration: if this ever goes red, the
+    /// projection path has regressed and #203's analysis needs revisiting.
+    #[test]
+    fn test_issue_203_distinct_over_entities_narrows_when_nothing_is_read() {
+        let forwarded = project(
+            scan("post"),
+            vec![
+                (Expr::Variable("tag".to_string()), None),
+                (Expr::Variable("post".to_string()), None),
+            ],
+        );
+        let plan = project(
+            LogicalPlan::Distinct {
+                input: Box::new(forwarded),
+            },
+            vec![(func("count", vec![]), Some("n".to_string()))],
+        );
+
+        let props = reconciled(&plan, &["tag", "post"]);
+        for var in ["tag", "post"] {
+            let set = props
+                .get(var)
+                .unwrap_or_else(|| panic!("{var} must be collected"));
+            assert!(
+                !set.contains("*"),
+                "{var} is forwarded only into a DISTINCT and no property of it is \
+                 ever read, so its identity suffices — keeping it wide puts the \
+                 whole struct in the hash key (#203). Got: {set:?}"
+            );
+        }
+    }
+
     #[test]
     fn test_non_narrowable_variable_stays_wide() {
         // A forwarded variable that is not a narrowable entity (e.g. a path)
