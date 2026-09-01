@@ -637,6 +637,7 @@ impl ExecutionPlan for GraphTraverseExec {
         partition: usize,
         context: Arc<TaskContext>,
     ) -> DFResult<SendableRecordBatchStream> {
+        let slice_size = context.session_config().batch_size().max(1);
         let input_stream = self.input.execute(partition, context)?;
 
         let metrics = BaselineMetrics::new(&self.metrics, partition);
@@ -646,6 +647,7 @@ impl ExecutionPlan for GraphTraverseExec {
             .warming_future(self.edge_type_ids.clone(), self.direction);
 
         Ok(Box::pin(GraphTraverseStream {
+            slice_size,
             input: input_stream,
             source_column: self.source_column.clone(),
             edge_type_ids: self.edge_type_ids.clone(),
@@ -679,12 +681,27 @@ enum TraverseStreamState {
     Reading,
     /// Materializing target vertex properties asynchronously.
     Materializing(Pin<Box<dyn std::future::Future<Output = DFResult<RecordBatch>> + Send>>),
+    /// Handing a materialised batch out in `batch_size` slices.
+    ///
+    /// One input batch fans out to every target its rows reach, so a materialised
+    /// batch can be far larger than the batch that produced it — LDBC IC9 expands
+    /// a person's two-hop friends to every `Message` they created. Emitted whole,
+    /// that hands a downstream sort one indivisible input and nothing to spill
+    /// between: `ExternalSorter` asked for 4.4 GB in a single reservation.
+    /// Slicing is what lets the spill path engage. See issue #202.
+    ///
+    /// `RecordBatch::slice` is zero-copy, so this does not reduce what the
+    /// traversal materialises — only what it hands downstream at once.
+    Slicing { batch: RecordBatch, offset: usize },
     /// Stream is done.
     Done,
 }
 
 /// Stream that performs single-hop traversal with async property materialization.
 struct GraphTraverseStream {
+    /// Rows per emitted slice, from the session's `batch_size`.
+    slice_size: usize,
+
     /// Input stream.
     input: SendableRecordBatchStream,
 
@@ -1606,8 +1623,12 @@ impl Stream for GraphTraverseStream {
                 }
                 TraverseStreamState::Materializing(mut fut) => match fut.as_mut().poll(cx) {
                     Poll::Ready(Ok(batch)) => {
-                        self.state = TraverseStreamState::Reading;
                         self.metrics.record_output(batch.num_rows());
+                        if batch.num_rows() > self.slice_size {
+                            self.state = TraverseStreamState::Slicing { batch, offset: 0 };
+                            continue;
+                        }
+                        self.state = TraverseStreamState::Reading;
                         return Poll::Ready(Some(Ok(batch)));
                     }
                     Poll::Ready(Err(e)) => {
@@ -1619,6 +1640,23 @@ impl Stream for GraphTraverseStream {
                         return Poll::Pending;
                     }
                 },
+                TraverseStreamState::Slicing { batch, offset } => {
+                    let remaining = batch.num_rows() - offset;
+                    if remaining == 0 {
+                        // Back to `Reading`, not `Done`: this stream emits one
+                        // materialised batch per input batch, and the input may
+                        // have more.
+                        self.state = TraverseStreamState::Reading;
+                        continue;
+                    }
+                    let take = self.slice_size.min(remaining);
+                    let slice = batch.slice(offset, take);
+                    self.state = TraverseStreamState::Slicing {
+                        batch,
+                        offset: offset + take,
+                    };
+                    return Poll::Ready(Some(Ok(slice)));
+                }
                 TraverseStreamState::Done => {
                     return Poll::Ready(None);
                 }

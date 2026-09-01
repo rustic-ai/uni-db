@@ -480,7 +480,7 @@ impl ExecutionPlan for GraphScanExec {
     fn execute(
         &self,
         partition: usize,
-        _context: Arc<TaskContext>,
+        context: Arc<TaskContext>,
     ) -> DFResult<SendableRecordBatchStream> {
         let metrics = BaselineMetrics::new(&self.metrics, partition);
         // Named so `collect_plan_metrics` can find it; a scan that consults no
@@ -502,6 +502,7 @@ impl ExecutionPlan for GraphScanExec {
             self.schema.clone(),
             metrics,
             index_consulted,
+            context.session_config().batch_size(),
         )))
     }
 
@@ -516,6 +517,20 @@ enum GraphScanState {
     Init,
     /// Executing the async scan.
     Executing(Pin<Box<dyn std::future::Future<Output = DFResult<Option<RecordBatch>>> + Send>>),
+    /// The scan finished; hand its rows out in `batch_size` slices.
+    ///
+    /// The scan builds one `RecordBatch` for the whole result. Emitting it whole
+    /// gives every downstream operator a single indivisible input, and an
+    /// operator that buffers — sort, hash aggregate, join — then has nothing to
+    /// spill *between*: `ExternalSorter` asked for 5.1 GB in one reservation on
+    /// LDBC IC9 and failed, with a disk manager available the whole time
+    /// (`DiskManagerMode` defaults to `OsTmpDirectory`). Slicing is what lets the
+    /// spill path engage. See issue #202.
+    ///
+    /// `RecordBatch::slice` is zero-copy, so this does not reduce what the scan
+    /// itself holds — the whole result is still built before the first slice is
+    /// emitted. Making the scan produce batches incrementally is the follow-up.
+    Slicing { batch: RecordBatch, offset: usize },
     /// Stream is done.
     Done,
 }
@@ -540,6 +555,8 @@ struct GraphScanStream {
 
     /// Whether this is a schemaless scan.
     is_schemaless: bool,
+    /// Rows per emitted slice, from the session's `batch_size`.
+    slice_size: usize,
 
     /// Pushed-down filter expression (used for VID short-circuit in L0 scans).
     filter: Option<Arc<dyn PhysicalExpr>>,
@@ -584,6 +601,7 @@ impl GraphScanStream {
         schema: SchemaRef,
         metrics: BaselineMetrics,
         index_consulted: Count,
+        slice_size: usize,
     ) -> Self {
         Self {
             graph_ctx,
@@ -599,6 +617,7 @@ impl GraphScanStream {
             state: GraphScanState::Init,
             metrics,
             index_consulted,
+            slice_size: slice_size.max(1),
         }
     }
 }
@@ -1501,10 +1520,22 @@ impl Stream for GraphScanStream {
                 }
                 GraphScanState::Executing(mut fut) => match fut.as_mut().poll(cx) {
                     Poll::Ready(Ok(batch)) => {
-                        self.state = GraphScanState::Done;
                         self.metrics
                             .record_output(batch.as_ref().map(|b| b.num_rows()).unwrap_or(0));
-                        return Poll::Ready(batch.map(Ok));
+                        match batch {
+                            // Hand the result out in `batch_size` slices rather
+                            // than as one batch — see `GraphScanState::Slicing`.
+                            Some(b) if b.num_rows() > 0 => {
+                                self.state = GraphScanState::Slicing {
+                                    batch: b,
+                                    offset: 0,
+                                };
+                            }
+                            other => {
+                                self.state = GraphScanState::Done;
+                                return Poll::Ready(other.map(Ok));
+                            }
+                        }
                     }
                     Poll::Ready(Err(e)) => {
                         self.state = GraphScanState::Done;
@@ -1515,6 +1546,20 @@ impl Stream for GraphScanStream {
                         return Poll::Pending;
                     }
                 },
+                GraphScanState::Slicing { batch, offset } => {
+                    let remaining = batch.num_rows() - offset;
+                    if remaining == 0 {
+                        self.state = GraphScanState::Done;
+                        return Poll::Ready(None);
+                    }
+                    let take = self.slice_size.min(remaining);
+                    let slice = batch.slice(offset, take);
+                    self.state = GraphScanState::Slicing {
+                        batch,
+                        offset: offset + take,
+                    };
+                    return Poll::Ready(Some(Ok(slice)));
+                }
                 GraphScanState::Done => {
                     return Poll::Ready(None);
                 }
