@@ -1511,3 +1511,161 @@ Unchanged from 2026-08-29 apart from the discharged items: SF1 first,
 then **#207**, **#203** + the marker audit, **#202**, **#199**,
 **#206/#204/Wave 5.2–5.5**, hygiene (**#205**, **#195**), **#200**, and
 **Track 0** last.
+
+---
+
+## Status — 2026-09-01
+
+SF1 was re-run and **13 of 14 queries answer**, against 7 before. The four
+that had never completed — IC2, IC3, IC9, IC14 — all do. Only IC5 remains,
+over its 300 s budget, which is #204 and untouched.
+
+Six defects were fixed to get there, three of them found on the way and
+filed during the work. Two of the six are silent wrong answers, so the
+wrong-answer tier — recorded as empty on 2026-08-29 — was not.
+
+### SF1, measured 2026-09-01, idle machine
+
+`systemd-run --user --scope -p MemoryMax=16G -p MemorySwapMax=0 -p
+OOMPolicy=continue`, default 1 GiB `max_query_memory`, store reused.
+
+| query | rows | ms | peak MiB | scans | against 2026-08-29 |
+|---|---:|---:|---:|---:|---|
+| IC1 | 20 | 2 102.8 | 3514 | 7 | |
+| IC2 | 20 | 4 594.7 | 3514 | 53 | **was FAIL (#202)** |
+| IC3 | 20 | 100 532.8 | 3514 | 4 | **was SIGKILL** |
+| IC4 | 10 | 3 808.4 | 3514 | 35 | **was FAIL (#203)** |
+| IC5 | — | — | 3514 | — | over budget, unchanged (#204) |
+| IC6 | 10 | 8 817.7 | 3551 | 2 | 293 500 → 8 818 |
+| IC7 | 20 | 18 721.1 | 3551 | 4 | flat (19 532) |
+| IC8 | 20 | 3 262.8 | 3602 | 5 | flat (3 174) |
+| IC9 | 20 | 36 416.1 | 3847 | 354 | **was FAIL 5.1 GB (#202)** |
+| IC10 | 10 | 3 826.7 | 3977 | 3 | 26 500 → 3 827 |
+| IC11 | 10 | 32 217.5 | 3977 | 8 | flat (29 381) |
+| IC12 | 20 | 23 584.3 | 4090 | 86 | 79 900 → 23 584 |
+| IC13 | 1 | 21.6 | 4090 | 2 | |
+| IC14 | 1 | 53 014.2 | 7748 | 2 | **was SIGKILL** |
+
+Peak RSS tops out at 7 748 MiB against a previous ceiling of 15 772 MiB
+plus four OOM kills.
+
+**Do not read the speedups as pure performance.** #211 below means every
+earlier run returned `Comment`s as `Post`s on traversal targets — a set
+roughly 3× too large — so IC6's 33× and IC10's 7× are part real
+improvement and part no-longer-doing-wrong-work, and this data cannot
+separate them. The honest claim is that these queries now return the right
+answer quickly, not that they got 33× faster.
+
+The flat rows are the cleaner evidence. IC7 and IC8 barely move, which
+settles the 1.4–3× slowdown reported mid-round and withdrawn: that was
+machine contention, not code. It also bounds the chunking cost measured
+below — a 5.9% regression in isolation does not surface here.
+
+### What was fixed
+
+**#207 — `query_timeout` could not preempt execution.** Nine operator-level
+`check_timeout` calls existed and none could ever fire:
+`GraphExecutionContext::deadline` was never populated. `deadline` is a
+private field whose only writers are `with_parts` (called with `None`),
+`with_deadline` and `from_query_context` — the latter two with zero callers
+anywhere. Enforcement was split across two engines with only the
+row-oriented one wired. Fixed by cloning the context in `take_graph_ctx`
+rather than rebuilding it from the base constructor and re-attaching six
+fields by hand, which also restores `warnings` and the `handle_scope`
+bounding the interned collected lists. A 250 ms budget went from 7 145 ms
+to 255 ms at N=2000, flat across N.
+
+**#210 — the cursor path lost an abort's typed variant.** Found by
+activating #207: `into_stream_error` lacked the cancellation and timeout
+arms its sibling has, so an operator-raised abort surfaced as a generic
+`UniError::Query`. Unreachable before, because no operator could raise one.
+
+**#211 — a traversal target's label was ignored above 100k vertices.**
+`rebuild_vid_labels_index` capped its startup scan at `.with_limit(100_000)`,
+and the traversal's label filter *keeps* rows whose vid does not resolve.
+So `MATCH (p:Person)<-[:HAS_CREATOR]-(post:Post)` returned 3 055 774 rows —
+`Comment`s included — against the 1 003 605 the scan-anchored form returns,
+and the labelled and unlabelled forms returned identical counts. A silent
+wrong answer on any graph over 100k vertices; every SF1 measurement before
+this one is void for anything touching those labels.
+
+**#203 — a labelled traversal target materialised its whole entity.**
+`hasLabel` was missing from `FUNCTION_SPECS`, so the predicate the planner
+synthesises for every labelled traversal target took the unknown-function
+fallback and marked its entity `"*"`. Third instance of that fallback
+(#62, #134). Guarded now at plan level rather than by name, so the next
+synthesised predicate cannot repeat it.
+
+**#212 — `NOT(a IN (x) AND a IN (y))` disagreed with Lance on NULL columns.**
+Found by proptest during unrelated work. Second instance of a shape
+`eval.rs` documents; the first covered NULLs in the values list, this one
+arrives via the column.
+
+**#202 — IC2 and IC9's sorts.** The issue attributed it to missing spill
+configuration; a disk manager was available the whole time. A sort spills
+*between* batches and every operator fed it exactly one — `batch_size` was
+honoured in one place in all of `df_graph`. Scan and traversal now slice
+their output, and the traversal hydrates a chunk at a time rather than
+materialising the whole expansion set: IC9 produced one batch of 2 869 951
+rows, and `RecordBatch::slice` is zero-copy, so slicing alone left the
+parent pinned and the sorter unable to free anything.
+
+### Two things measured and rejected
+
+**Pushing `LIMIT` into `SortExec`.** Every `ORDER BY … LIMIT n` in this
+engine is a full sort — the physical planner builds plans directly and
+never runs DataFusion's limit-pushdown pass. Adding it reads like free
+money and is a regression: `ExternalSorter` spills, `TopK` does not, so it
+removes the spill the slicing had just enabled. IC2 went from 20 rows back
+to failing at `TopK[0]` with 977.4 MB already allocated. The real fix for
+that class is a TopK that can spill, not the one-line pushdown.
+
+**Chunked hydration is not free.** Measured on a control chosen to isolate
+the cost — a large fan-out traversal that hydrates a property with no sort
+above it, two runs a side: 4.74/4.75 s and 1 213/1 204 MiB unchunked
+against 5.07/4.96 s and 1 141/1 135 MiB chunked. About 6% slower for ~87
+hydration round trips instead of one. Only traversals whose expansion set
+exceeds `batch_size` chunk at all.
+
+### What this round is evidence for
+
+The same pattern as the two rounds before it, and worth stating in its
+strongest form: **an instance fixed is not a class fixed.** Three of the six
+defects here were second or third instances of mechanisms already found,
+fixed, and documented with an accurate comment explaining them — the
+registry fail-open, the `InList` rewrite, and the limit-path patch that
+covered one of two arms. In each case the earlier author understood the
+mechanism completely and scoped the fix to what was in front of them.
+
+What found the follow-ups was not better analysis. It was constructing the
+next variant by hand and running it: the multi-value `IN` case, the
+intermediate join vertex, the second limit path. Each failed on first run.
+
+A related note on instruments. `EXPLAIN` prints the logical plan;
+`UNI_DUMP_PHYSICAL=1` prints the physical one, and every #202 finding was
+visible there — the `SortExec` with no fetch, no coalescing between
+traverse and sort, and a root `Person` scan projecting every column plus
+`_all_props` *and* `overflow_json` for a query that reads `root.id`. That
+last one is not yet filed.
+
+Four non-discriminating checks were written and caught during this round —
+a cancellation test satisfied by the guard rather than the operator, a
+110k-vertex fixture that passed with the defect restored, a `count(*)`
+benchmark control that never entered the code path it was measuring, and a
+deadline assertion whose flakiness grew as the fix improved. Each looked
+reasonable and each proved nothing. The cheap rule that caught all four:
+before believing a result, check that the code under test actually ran —
+an unchanged number usually means the change did not execute, and a
+suspiciously identical one means the same.
+
+### The order from here
+
+**IC5 (#204)** is the only query left. Then **#199**, **#206**, Wave
+5.2–5.5, hygiene (**#205**, **#195**), **#200**, and **Track 0** last.
+
+Open and unfiled: a spillable TopK, incremental scan materialisation (the
+scan still builds its whole result before slicing), and the root-entity
+widening visible in IC9's physical plan.
+
+Suite at the tip: 4549/4549 across `uni-db`, `uni-query`, `uni-store` and
+`uni-query-functions`; fmt and clippy clean.
