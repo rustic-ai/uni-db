@@ -1491,10 +1491,30 @@ impl StorageManager {
             return Ok(());
         }
 
-        // Scan all non-deleted vertices and collect (VID, labels)
+        // Scan all non-deleted vertices and collect (VID, labels).
+        //
+        // No limit, deliberately. This index is not a cache that may miss — a
+        // traversal's target-label filter consults it and *keeps* the row when a
+        // vid does not resolve (`df_graph/traverse.rs`, "trust storage-level
+        // filtering"), so a truncated index silently disables label filtering
+        // for every vertex it omits.
+        //
+        // It carried `.with_limit(100_000)`. At LDBC SF1 (~3.6M vertices) that
+        // left everything past the first 100k unresolvable, and
+        // `MATCH (p:Person)<-[:HAS_CREATOR]-(post:Post)` returned 3 055 774 rows
+        // — Comments included — against the 1 003 605 the scan-anchored form
+        // returns. No test caught it because every fixture in the repo is
+        // smaller than the cap, so the truncation never fired. See issue #211.
+        // Projected to the two columns actually read below. `ScanRequest::all`
+        // means `ColumnProjection::All`, and the backend materialises every
+        // batch before returning, so without this the rebuild pulls each
+        // vertex's whole row — `content`, `imageFile` and every other wide
+        // column — to extract `_vid` and `labels`. Under the old row cap that
+        // was bounded waste; unbounded it would be the entire vertex table in
+        // memory at once.
         let request = ScanRequest::all(vtable)
-            .with_filter(FilterExpr::not_deleted())
-            .with_limit(100_000);
+            .with_columns(vec!["_vid".to_string(), "labels".to_string()])
+            .with_filter(FilterExpr::not_deleted());
         let batches = backend
             .scan(request)
             .await
