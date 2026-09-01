@@ -293,10 +293,12 @@ async fn index_transition_is_observable_for_hash_equality_only() -> anyhow::Resu
     for (name, q) in PROBE_QUERIES {
         let (w, rows) = probe(&session, q).await?;
         report("before", name, &w, rows);
-        assert_eq!(
-            w.index_scans, 0,
-            "[{name}] consulted an index before one was created"
-        );
+        // Recorded, not asserted zero. `index_scans` counts every Lance index
+        // scan, not only one serving a user-declared index: since #203 stopped
+        // labelled traversal targets being wildcarded, `edge` hydrates through
+        // the columnar path and registers a scan of its own before any index
+        // exists here. What this probe is about is the *delta* the transition
+        // causes, which the after-loop asserts per query.
         before.push((*name, w, rows));
     }
 
@@ -320,17 +322,18 @@ async fn index_transition_is_observable_for_hash_equality_only() -> anyhow::Resu
 
         if expects_index(name) {
             assert!(
-                w_after.index_scans > 0,
+                w_after.index_scans > _w_before.index_scans,
                 "[{name}] an `=` on a freshly Hash-indexed column did not consult the \
                  index. Either the index was declared but never physically built, or \
-                 the pushdown route regressed. witness: {w_after:?}"
+                 the pushdown route regressed. before: {_w_before:?} after: {w_after:?}"
             );
         } else {
             assert_eq!(
-                w_after.index_scans, 0,
-                "[{name}] consulted an index for a shape that cannot reach pushdown. \
-                 If a BTree/range route was added, this test's expectation table is \
-                 stale rather than wrong. witness: {w_after:?}"
+                w_after.index_scans, _w_before.index_scans,
+                "[{name}] creating the index changed how often this shape consults one, \
+                 for a shape that cannot reach pushdown. If a BTree/range route was \
+                 added, this test's expectation table is stale rather than wrong. \
+                 before: {_w_before:?} after: {w_after:?}"
             );
         }
     }
