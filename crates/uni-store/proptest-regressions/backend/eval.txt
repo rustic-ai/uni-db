@@ -10,3 +10,4 @@ cc fbe9eca3594e87af4aeedc6a46204bf076f0daa82c6d96ee9e0028b06490fcf0 # shrinks to
 cc 31ce68a9c787cee920b35bb3bd3b4358e96c447071d46fe2ad8131b3e52c9c2e # shrinks to expr = And([Or([ArrayContains { column: "labels", value: Str("Person") }, Compare { column: "i", op: Eq, value: Int(0) }]), Compare { column: "i", op: Eq, value: Int(0) }])
 cc a69bc97597bc006256f1fd9f17bfc547973ad621dff5493158fc8bfb0a08667c # shrinks to expr = Or([StringMatch { column: "s", kind: StartsWith, pattern: "'" }])
 cc bc28ffecc4e081d124b3635e0716db8a3391f27587ee8f8d6020092a0f9d0390 # shrinks to expr = Not(And([In { column: "i", values: [Null] }, In { column: "i", values: [Int(0)] }]))
+cc 37b54946e0f58cfbd0176e070a796bf718f13303afa3a370d52158e9139ddbe3 # shrinks to expr = Not(And([In { column: "f", values: [Float(1.0)] }, In { column: "f", values: [Float(2.5)] }]))

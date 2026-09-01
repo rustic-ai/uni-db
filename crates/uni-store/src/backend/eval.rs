@@ -757,6 +757,60 @@ mod tests {
         assert_eq!(native.len(), 80, "expected the non-null, non-zero rows");
     }
 
+    /// The same rewrite reached from the *column* side, with multi-value lists.
+    ///
+    /// #212: the fix above renders a single-candidate `IN` as `=`, which leaves
+    /// no `InList` for Lance's multi-`InList`-on-one-column rewrite to pair. Two
+    /// *multi*-value lists still render as two `InList`s, so this checks the
+    /// hole that fix does not cover — every listed value is non-NULL, and the
+    /// unknown comes from `f` being NULL on a third of the rows.
+    #[test]
+    fn not_and_of_two_multi_value_in_lists_agrees_with_lance() {
+        let rt = tokio::runtime::Runtime::new().expect("runtime");
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let uri = tmp.path().join("t.lance").to_string_lossy().to_string();
+        let b = batch();
+        let schema = b.schema();
+        rt.block_on(async {
+            lance::Dataset::write(
+                RecordBatchIterator::new(vec![Ok(b.clone())], schema),
+                &uri,
+                None,
+            )
+            .await
+            .expect("write");
+        });
+        let ds = rt.block_on(lance::Dataset::open(&uri)).expect("open");
+
+        // `f` cycles [-1.5, 0.0, 1.0, 2.5, NULL], three rows each. The two sets
+        // are disjoint, so the conjunction is FALSE wherever `f` is non-NULL and
+        // unknown where it is NULL — and `NOT` keeps it unknown there.
+        let expr = FilterExpr::Not(Box::new(FilterExpr::And(vec![
+            FilterExpr::In {
+                column: "f".into(),
+                values: vec![Scalar::Float(-1.5), Scalar::Float(1.0)],
+            },
+            FilterExpr::In {
+                column: "f".into(),
+                values: vec![Scalar::Float(0.0), Scalar::Float(2.5)],
+            },
+        ])));
+
+        let native = eval_rids(&expr, &b).expect("evaluable");
+        let lance = rt
+            .block_on(sql_rids(&ds, &expr.to_sql().expect("renderable")))
+            .expect("scan");
+        assert_eq!(native, lance, "sql: {}", expr.to_sql().expect("renderable"));
+
+        // Every non-NULL row and no NULL row: four of every five values, three
+        // rows each.
+        assert_eq!(
+            native.len(),
+            ROWS * 4 / 5,
+            "expected exactly the non-NULL rows"
+        );
+    }
+
     #[test]
     fn null_yields_unknown_not_false() {
         let b = batch();
