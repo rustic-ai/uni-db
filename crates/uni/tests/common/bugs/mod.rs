@@ -126,5 +126,6 @@ pub mod repro_issue_181_flush_resurrects_detached_edge;
 // been flushed — the tombstone had no table to merge into.
 pub mod repro_issue_182_delete_before_first_flush;
 pub mod repro_registry_monotonicity_oracle;
+pub mod repro_stream_error_loses_abort_type;
 pub mod vid_lookup_join_payoff;
 pub mod vid_lookup_join_reachability;
