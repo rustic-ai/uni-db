@@ -681,6 +681,31 @@ enum TraverseStreamState {
     Reading,
     /// Materializing target vertex properties asynchronously.
     Materializing(Pin<Box<dyn std::future::Future<Output = DFResult<RecordBatch>> + Send>>),
+    /// Materialising one chunk of a large expansion set at a time.
+    ///
+    /// A traversal fans out: one input batch of source rows expands to every
+    /// target its rows reach, and `build_traverse_output_batch` hydrated *all*
+    /// of them into one `RecordBatch`. LDBC IC9 produced a single batch of
+    /// 2 869 951 rows, about 2.3 GB, which is exactly what `ExternalSorter` then
+    /// failed to reserve.
+    ///
+    /// Slicing that batch afterwards does not help: `RecordBatch::slice` is
+    /// zero-copy, so every slice pins the parent's buffers and the sorter can
+    /// never free one. Hydrating a chunk at a time gives each output batch its
+    /// own storage, which is what lets a downstream operator spill a batch and
+    /// release it. See issue #202.
+    Chunking {
+        input: RecordBatch,
+        expansions: Vec<Expansion>,
+        offset: usize,
+    },
+    /// A chunk's hydration in flight; carries what is needed to resume.
+    MaterializingChunk {
+        fut: Pin<Box<dyn std::future::Future<Output = DFResult<RecordBatch>> + Send>>,
+        input: RecordBatch,
+        expansions: Vec<Expansion>,
+        next_offset: usize,
+    },
     /// Handing a materialised batch out in `batch_size` slices.
     ///
     /// One input batch fans out to every target its rows reach, so a materialised
@@ -1607,6 +1632,17 @@ impl Stream for GraphTraverseStream {
                             let optional = self.optional;
                             let optional_pattern_vars = self.optional_pattern_vars.clone();
 
+                            if expansions.len() > self.slice_size {
+                                // Hydrate in chunks so each output batch owns its
+                                // data — see `TraverseStreamState::Chunking`.
+                                self.state = TraverseStreamState::Chunking {
+                                    input: batch,
+                                    expansions,
+                                    offset: 0,
+                                };
+                                continue;
+                            }
+
                             let fut = build_traverse_output_batch(
                                 batch,
                                 expansions,
@@ -1654,6 +1690,67 @@ impl Stream for GraphTraverseStream {
                     }
                     Poll::Pending => {
                         self.state = TraverseStreamState::Materializing(fut);
+                        return Poll::Pending;
+                    }
+                },
+                TraverseStreamState::Chunking {
+                    input,
+                    expansions,
+                    offset,
+                } => {
+                    if offset >= expansions.len() {
+                        self.state = TraverseStreamState::Reading;
+                        continue;
+                    }
+                    let end = (offset + self.slice_size).min(expansions.len());
+                    let chunk: Vec<Expansion> = expansions[offset..end].to_vec();
+                    let fut = build_traverse_output_batch(
+                        input.clone(),
+                        chunk,
+                        self.schema.clone(),
+                        self.edge_variable.clone(),
+                        self.edge_properties.clone(),
+                        self.edge_type_ids.clone(),
+                        self.target_properties.clone(),
+                        self.target_label_name.clone(),
+                        self.graph_ctx.clone(),
+                        self.optional,
+                        self.optional_pattern_vars.clone(),
+                    );
+                    self.state = TraverseStreamState::MaterializingChunk {
+                        fut: Box::pin(fut),
+                        input,
+                        expansions,
+                        next_offset: end,
+                    };
+                    continue;
+                }
+                TraverseStreamState::MaterializingChunk {
+                    mut fut,
+                    input,
+                    expansions,
+                    next_offset,
+                } => match fut.as_mut().poll(cx) {
+                    Poll::Ready(Ok(batch)) => {
+                        self.metrics.record_output(batch.num_rows());
+                        self.state = TraverseStreamState::Chunking {
+                            input,
+                            expansions,
+                            offset: next_offset,
+                        };
+                        return Poll::Ready(Some(Ok(batch)));
+                    }
+                    Poll::Ready(Err(e)) => {
+                        self.state = TraverseStreamState::Done;
+                        return Poll::Ready(Some(Err(e)));
+                    }
+                    Poll::Pending => {
+                        self.state = TraverseStreamState::MaterializingChunk {
+                            fut,
+                            input,
+                            expansions,
+                            next_offset,
+                        };
                         return Poll::Pending;
                     }
                 },
