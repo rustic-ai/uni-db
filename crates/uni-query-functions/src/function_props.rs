@@ -88,7 +88,8 @@ static FUNCTION_SPECS: LazyLock<HashMap<&'static str, FunctionPropertySpec>> =
             // Third instance of this fallback biting; see #62 and #134 above.
             // The registry fails open — an unregistered function silently
             // degrades to full materialisation, which is always correct and
-            // sometimes ruinous. See issue #203.
+            // sometimes ruinous. `planner::entity_widening_test` guards the
+            // class at the plan level rather than by name. See issue #203.
             ("HASLABEL", entity_arg_only),
             // Relationship endpoint accessors: need only the edge's
             // `_src_vid` / `_dst_vid` metadata, never its property bag.
