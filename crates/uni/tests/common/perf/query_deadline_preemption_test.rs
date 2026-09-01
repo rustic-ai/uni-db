@@ -15,13 +15,21 @@
 //! the budget expired. Asserting only the variant reproduces the original blind
 //! spot.
 //!
-//! # Flakiness
+//! # On the bounds
 //!
-//! These tests assert elapsed time and are sensitive to machine load and to
-//! test parallelism. The bounds are deliberately many times the expected value
-//! — the defect they guard against overshoots by 20x and up, so a loose bound
-//! still discriminates. If they flake, suspect the box before the code: check
-//! `uptime` first.
+//! These tests assert elapsed time, so they are load-sensitive in principle. The
+//! bounds are absolute ceilings set roughly an order of magnitude above the
+//! observed passing values and an order of magnitude below the failing ones, so
+//! ordinary load cannot move a result across them.
+//!
+//! Deliberately no "these may flake, check the machine" note here. An earlier
+//! version of `deadline_overrun_does_not_scale_with_fixture_size` carried one,
+//! and its assertion — a *ratio* of overruns past the budget — became less
+//! stable the better the fix worked, since overrun tends to zero and the ratio
+//! becomes noise over noise. The hedge would have taught the next reader to
+//! discount a red result that was in fact reporting a badly built assertion.
+//! If one of these goes red, treat it as a real signal and measure a failure
+//! rate before concluding anything about the machine.
 
 use std::time::{Duration, Instant};
 
@@ -114,16 +122,29 @@ async fn deadline_overrun_does_not_scale_with_fixture_size() -> Result<()> {
     let small = held_for(&build_chain(300).await?, "n=300").await?;
     let large = held_for(&build_chain(900).await?, "n=900").await?;
 
-    // Tripling the rows must not triple the overshoot. Compared as overrun past
-    // the budget rather than raw elapsed, since the budget itself is a constant
-    // floor that would dilute the ratio.
-    let overrun = |d: Duration| d.saturating_sub(BUDGET).as_secs_f64().max(0.001);
-    let growth = overrun(large) / overrun(small);
-    assert!(
-        growth < 3.0,
-        "overrun grew {growth:.1}x when the fixture grew 3x \
-         ({small:?} -> {large:?}); the deadline is not bounding per-row work"
-    );
+    // Both sizes must clear the *same* fixed ceiling. That is the non-scaling
+    // claim, and it is the stable way to state it.
+    //
+    // This asserted a ratio of overruns past the budget, and that metric defeats
+    // itself: as the fix works, overrun tends to zero and the ratio becomes
+    // noise over noise. It failed a full-suite run at
+    // `55.26ms -> 86.27ms` — a 6.9x "growth" between two timings that are both
+    // excellent — while the absolute numbers were an order of magnitude inside
+    // any sane bound. A test whose flakiness grows as the defect shrinks is
+    // measuring the wrong thing.
+    //
+    // The margin here is wide in both directions: unpreempted, these fixtures
+    // hold the session 837ms and 7.01s (measured against a neutralised fix), so
+    // the ceiling fails hard when the defect is present and passes with roughly
+    // a 10x cushion when it is not.
+    const CEILING: Duration = Duration::from_millis(500);
+    for (label, held) in [("n=300", small), ("n=900", large)] {
+        assert!(
+            held < CEILING,
+            "{label}: held the session {held:?} against a {BUDGET:?} budget \
+             (ceiling {CEILING:?}); per-row work is not being bounded"
+        );
+    }
     Ok(())
 }
 
