@@ -1343,3 +1343,171 @@ still not recurring.
 **9. Track 0 — unchanged.** Still the one thing that would have found
 most of this document's closed items without anyone probing; still
 blocked on a Neo4j instance, not on code.
+
+---
+
+## Status — 2026-08-31
+
+Steps 1 and 2 of the post-triage order are discharged (#198, then #209
+as an insertion ahead of #207). SF1 has **not** been re-run since, and
+that is the one thing standing between this and the rest of the queue.
+
+### #198 — chunked, and it fixed less than the plan claimed
+
+`GraphUnwindStream` now fills a bounded chunk and carries the remainder
+in a `pending` slot rather than materialising the whole fan-out. It
+moved IC6 and nothing else: three of the four SF1 kills contain no
+UNWIND at all, so the plan's framing of this as "the last thing between
+SF1 and a clean run" was wrong. Recorded at the time rather than
+discovered later.
+
+What actually carried IC10 and IC12 was a separate defect the chunking
+could not reach: a collected list is *copied per row* when carried
+through a projection. Interning it behind a handle (`TAG_HANDLE` in
+`cypher_value_codec`, with a `HandleScope` bounding the lifetime) makes
+carrying one cost 9 bytes a row. The decode arm fails closed rather
+than returning a stale value.
+
+### #209 — columnar traversal hydration, and the lift underneath it
+
+Reaching a property through a traversal cost 86x reading the same
+column through a scan, and scaled with the target *table* rather than
+with rows produced. Both are fixed, measured on
+`hydration_path_probe`:
+
+| arm (60 000 rows produced) | before | after |
+|---|---:|---:|
+| traverse, 1 property, 300k-row table | 1620.9 MiB | **226.5 MiB** |
+| decoy sensitivity (60k -> 300k table) | 10.6x | **1.18x** |
+
+Two changes, and they are **not independently applicable**: chunking the
+vid list pays only where the result is consumed columnarly and released
+per chunk. Applying the same chunking to the map path was measured as an
+18% regression (1626.3 -> 1929.5 MiB) and is recorded as a negative
+result in the hydration proposal, not quietly dropped.
+
+The pipeline then moved from `uni-query` to `uni-store` across six
+pure-relocation commits, which is what let `uni-algo`'s projection read
+properties columnarly instead of hand-rolling the same loop.
+
+**The convergence that motivated the lift was declined.** Converging
+`property_manager`'s row-wise MVCC onto the Arrow one is not safe as
+scoped: the row-wise side is four implementations, not one, and they
+disagree with each other more than any disagrees with the columnar one;
+and the columnar path cannot express presence-vs-null, CRDT merge
+across versions, or edge op-replay. The investigation was kept for what
+it found instead — see below.
+
+### Found while doing the above — nine defects, none of them listed here
+
+Five MVCC/L0 defects, each with a fail-before test:
+
+- `mvcc_dedup_batch_by` picked an arbitrary row on a version tie
+  (`lexsort_to_indices` is unstable), live on **every** columnar scan.
+- A live row at the same version as a tombstone could resurrect a
+  deleted id.
+- The main-edges fallback resurrected a tombstoned edge — the vertex
+  path's C2 hole, which the edge path had no guard for.
+- `get_batch_labels` ignored `vertex_label_overwrites`, so `REMOVE
+  n:Label` came back.
+- A partial L0 row shadowed storage instead of merging with it.
+
+Four more, from the divergence analysis that followed:
+
+- **An unflushed CRDT written in its string form read back as NULL**
+  through any columnar read. Cypher stores a CRDT literal verbatim, and
+  the columnar builder could only parse the value form. Pre-existing on
+  scans; the hydration work extended it to traversal targets.
+- **`overflow_json` precedence disagreed three ways** (declared column
+  wins / blob wins / blob wins *and persists* in semantic compaction).
+  Unified on declared-column-wins. Latent — no writer produces a
+  colliding row — but compaction bakes its pick into the table, so it
+  was disarmed rather than left.
+- **`is_lance_conflict` classified retryable Lance errors by message**
+  and missed the exact case its own doc comment named. See below.
+- **Variable-length paths dropped schemaless properties.** `RETURN n`
+  over `(h)-[:R*1..2]->(n)` returned the declared columns and silently
+  lost the rest; the same match at fixed length returned all of them.
+  One stray `properties.is_empty()` in
+  `sanitize_vlp_target_properties`. A unit test asserted the defect as
+  correct behaviour.
+
+### The `async_flush_repro` "known flake" was a real bug
+
+`storage::async_flush_repro::{r2,r3}` had been carried as a
+load-sensitive flake, including in this document's own guidance. It was
+neither.
+
+Two concurrent flush streams both created the same per-label UID index
+dataset; Lance failed the loser with `Dataset already exists`, which
+`is_lance_conflict` did not recognise. The losing flush's rotated L0
+stayed stranded on `pending_flush` with nothing to re-flush it, and
+`flush_to_l1` correctly refused the barrier. **6 of 12 runs failed
+before, 0 of 12 after.** Classification is now by typed `lance::Error`
+variant, which also caught `TooMuchWriteContention` — retryable, and
+still misclassified after the first fix.
+
+`plan_cache_smoke`, carried on the same list, shows no flakiness at all:
+6/6, activation 100.0% against an 80% floor, rows varying 2.7% against
+52% headroom.
+
+**The tell was visible throughout and read past three times: both tests
+failed *more in isolation than under parallel load*, and isolation is
+the absence of load.** A red test annotated as expected-red stops being
+a signal; the repro file's header recorded "~50% of runs" as a known
+property, and has been rewritten to name the cause instead.
+
+### What this round is evidence for
+
+The same pattern as the #197/#201 round this document already recorded,
+in a new place: **a check that resembles verification but cannot fail.**
+
+- A "known flake" label repeated three times before anyone measured a
+  failure rate.
+- A probe whose output filter only detected two of the four properties
+  it was meant to check, so it reported a run containing the VLP defect
+  as clean.
+- A unit test asserting the VLP defect as the contract, so the bug had
+  coverage confirming it.
+- `repro_03`/`repro_07` cannot flake red but *can* flake falsely green,
+  since they rely on Lance preserving an adverse row order.
+
+Every one of these passes for free. Track 0 remains the structural
+answer; in the meantime, the cheap local rule is that a test which has
+only ever been observed passing is not yet evidence — which is what
+`docs/testing/reverts/` and `teeth_validate.sh` exist to enforce.
+(Editing code inside a block a revert patch deletes silently
+un-validates that tooth; `every_revert_patch_still_applies` caught
+exactly that this round, and the patch was regenerated *and* re-run to
+confirm the control still fails under it.)
+
+### Outstanding — the gate before the rest of the queue
+
+**SF1 has not been re-run since #198 landed**, so:
+
+- **#209's acceptance criterion is unmeasured.** The hydration proposal
+  asks that `ic3_stage_probe` stage 7 fall well below its current
+  10.5 GB, and explicitly declines to predict whether IC3 completes.
+  Only the micro-probe has been measured.
+- **Nine correctness fixes have landed since**, and one cuts against the
+  memory goal: the VLP fix adds `_all_props` — the whole overflow blob
+  per target row — whenever a wildcard is requested on a VLP target, and
+  ten of the fourteen queries use variable-length paths. Reading their
+  RETURN clauses the trigger does not appear to fire (IC1 returns named
+  properties, IC13 `length(path)`, IC14 a derived list), but that is a
+  read, and this round is a catalogue of reads that were wrong.
+
+One run under the established protocol — `systemd-run --user --scope -p
+MemoryMax=16G -p MemorySwapMax=0 -p OOMPolicy=continue`, `OOMPolicy`
+being required or systemd kills the bench's own supervisor — closes
+both.
+
+Suite state at the tip: `uni-db` 2783/2783, `uni-store` + `uni-query`
+1482/1482, clippy and the workspace check clean.
+
+### The order from here
+
+Unchanged from 2026-08-29 apart from the discharged items: SF1 first,
+then **#207**, **#203** + the marker audit, **#202**, **#199**,
+**#206/#204/Wave 5.2–5.5**, hygiene (**#205**, **#195**), **#200**, and
+**Track 0** last.
