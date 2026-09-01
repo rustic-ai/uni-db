@@ -1571,11 +1571,28 @@ impl Stream for GraphTraverseStream {
                                     self.optional,
                                     &self.optional_pattern_vars,
                                 );
-                                self.state = TraverseStreamState::Reading;
                                 if let Ok(ref r) = result {
                                     self.metrics.record_output(r.num_rows());
                                 }
-                                return Poll::Ready(Some(result));
+                                // Same slicing as the async arm below. This
+                                // synchronous fast path — taken when the
+                                // traversal materialises no target or edge
+                                // properties — emitted its batch whole, so LDBC
+                                // IC9 handed the sort one 2.3 GB input and the
+                                // slicing added for #202 never applied to it.
+                                match result {
+                                    Ok(b) if b.num_rows() > self.slice_size => {
+                                        self.state = TraverseStreamState::Slicing {
+                                            batch: b,
+                                            offset: 0,
+                                        };
+                                        continue;
+                                    }
+                                    other => {
+                                        self.state = TraverseStreamState::Reading;
+                                        return Poll::Ready(Some(other));
+                                    }
+                                }
                             }
 
                             // Properties needed — create async future for hydration
