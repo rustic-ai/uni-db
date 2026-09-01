@@ -604,6 +604,13 @@ impl Executor {
         // the sense that `take_graph_ctx` preserves it either way — but it must
         // be here at all, or every operator-level count is dropped.
         planner = planner.with_counters(Some(self.counters.clone()));
+        // The deadline and token live on the `QueryContext` built above; without
+        // this hop they never reach a physical operator and every
+        // `graph_ctx.check_timeout()` below is a no-op. See #207.
+        if let Some(ref ctx) = query_ctx {
+            planner = planner
+                .with_deadline_and_cancellation(ctx.deadline, ctx.cancellation_token.clone());
+        }
         planner = planner.with_algo_registry(self.algo_registry.clone());
         if let Some(ref registry) = self.procedure_registry {
             planner = planner.with_procedure_registry(registry.clone());

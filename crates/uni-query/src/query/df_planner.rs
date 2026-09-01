@@ -360,50 +360,47 @@ impl HybridPhysicalPlanner {
         }
     }
 
-    /// Unwrap the inner `GraphExecutionContext` from its `Arc`, preserving all
-    /// existing registries. If other Arc references exist, clones the base context
-    /// and re-attaches the saved registries.
+    /// Produce an owned `GraphExecutionContext` for the consuming `with_*`
+    /// builders, preserving every field.
+    ///
+    /// This used to rebuild from the *base* constructor and re-attach six fields
+    /// by hand, which silently dropped everything not on that list — `deadline`,
+    /// `cancellation_token`, `warnings` and `handle_scope` were all reset by the
+    /// next `with_*` call, and `read.rs` makes several per query. A plain clone
+    /// carries the whole struct, so no future field can fall through the same
+    /// gap. The clone is a handful of refcount bumps and happens only while the
+    /// plan is being built.
+    ///
+    /// Every caller immediately reinstalls the result via
+    /// `self.graph_ctx = Arc::new(ctx)`, so leaving the original in place here
+    /// is intentional.
     fn take_graph_ctx(&mut self) -> GraphExecutionContext {
-        let algo_registry = self.graph_ctx.algo_registry().cloned();
-        let procedure_registry = self.graph_ctx.procedure_registry().cloned();
-        let xervo_runtime = self.graph_ctx.xervo_runtime().cloned();
-        let plugin_registry = self.graph_ctx.plugin_registry().cloned();
-        let writer = self.graph_ctx.writer().cloned();
-        // Must be preserved like every other attachment: `take_graph_ctx`
-        // rebuilds from the *base* constructor, so anything not re-attached here
-        // is silently dropped by the next `with_*` call.
-        let counters = self.graph_ctx.counters().cloned();
+        (*self.graph_ctx).clone()
+    }
 
-        let new_base = |ctx: &Arc<GraphExecutionContext>| {
-            GraphExecutionContext::with_l0_context(
-                ctx.storage().clone(),
-                ctx.l0_context().clone(),
-                ctx.property_manager().clone(),
-            )
-        };
-        let placeholder = Arc::new(new_base(&self.graph_ctx));
-        let arc = std::mem::replace(&mut self.graph_ctx, placeholder);
-        let mut ctx = Arc::try_unwrap(arc).unwrap_or_else(|arc| new_base(&arc));
-
-        if let Some(registry) = algo_registry {
-            ctx = ctx.with_algo_registry(registry);
+    /// Thread the surrounding query's deadline and cancellation token into the
+    /// graph context every physical operator receives.
+    ///
+    /// Without this the operator-level `check_timeout` calls in `scan`,
+    /// `traverse`, `shortest_path`, `vector_knn`, `procedure_call` and
+    /// `ext_id_lookup` compare against `None` and can never fire, so
+    /// `query_timeout` is bounded only by the outer `tokio::time::timeout` —
+    /// which cannot preempt work that never yields. See issue #207.
+    #[must_use]
+    pub fn with_deadline_and_cancellation(
+        mut self,
+        deadline: Option<std::time::Instant>,
+        token: Option<tokio_util::sync::CancellationToken>,
+    ) -> Self {
+        let mut ctx = self.take_graph_ctx();
+        if let Some(deadline) = deadline {
+            ctx = ctx.with_deadline(deadline);
         }
-        if let Some(registry) = procedure_registry {
-            ctx = ctx.with_procedure_registry(registry);
+        if let Some(token) = token {
+            ctx = ctx.with_cancellation_token(token);
         }
-        if let Some(runtime) = xervo_runtime {
-            ctx = ctx.with_xervo_runtime(runtime);
-        }
-        if let Some(registry) = plugin_registry {
-            ctx = ctx.with_plugin_registry(registry);
-        }
-        if let Some(w) = writer {
-            ctx = ctx.with_writer(w);
-        }
-        if counters.is_some() {
-            ctx = ctx.with_counters(counters);
-        }
-        ctx
+        self.graph_ctx = Arc::new(ctx);
+        self
     }
 
     /// Attach the per-query counter set, threading it into the graph context

@@ -2971,6 +2971,15 @@ impl PhysicalExpr for ExistsExecExpr {
                 combined_entity_vars.extend(entity_vars.iter().cloned());
 
                 for row_idx in 0..num_rows {
+                    // One full sub-plan execution happens below, inside a single
+                    // `poll_next` on a scoped thread, so nothing between here and
+                    // the end of the batch can be preempted. Checking per row
+                    // caps the overrun at one evaluation instead of `num_rows`
+                    // of them. See #207.
+                    graph_ctx.check_timeout().map_err(|e| {
+                        datafusion::error::DataFusionError::Execution(e.to_string())
+                    })?;
+
                     let row_params = extract_row_params(batch, row_idx);
                     let mut sub_params = base_params.clone();
                     sub_params.extend(row_params);
@@ -3292,6 +3301,13 @@ impl PhysicalExpr for PatternComprehensionSubqueryExpr {
                 combined_entity_vars.extend(correlated_vars.iter().cloned());
 
                 for row_idx in 0..num_rows {
+                    // Same shape as `ExistsExecExpr` above: a whole sub-plan per
+                    // outer row inside one `poll_next`. This is the site #207
+                    // names, and the checkpoint is what bounds IC14's overrun.
+                    graph_ctx.check_timeout().map_err(|e| {
+                        datafusion::error::DataFusionError::Execution(e.to_string())
+                    })?;
+
                     let row_params = extract_row_params(batch, row_idx);
                     let mut sub_params = base_params.clone();
                     sub_params.extend(row_params);

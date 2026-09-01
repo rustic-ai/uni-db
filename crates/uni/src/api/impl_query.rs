@@ -142,17 +142,34 @@ fn into_execution_error(
 
 /// Map a streaming-execution error into the appropriate `UniError`.
 ///
-/// This is the [`into_execution_error`] classification minus its cancellation
-/// and timeout arms. Those are still not reachable *here* — the cursor's own
-/// guard in [`UniInner::build_guarded_cursor`] raises them around the stream
-/// rather than letting the executor surface them through this function — so
-/// there is nothing for those two arms to match.
-fn into_stream_error(e: impl std::fmt::Display, cypher: &str) -> UniError {
+/// Mirrors [`into_execution_error`], including its cancellation and timeout
+/// arms. Those arms were previously absent on the grounds that only the
+/// cursor's own guard in [`UniInner::build_guarded_cursor`] could raise an
+/// abort, and it raises one already typed. That held solely because
+/// `GraphExecutionContext` carried no deadline or token, so no operator-level
+/// `check_timeout` could fire; once #207 plumbed them through, an operator
+/// aborting mid-stream reached this function and was reported as a generic
+/// `UniError::Query`. Keep the two classifications in step.
+fn into_stream_error(
+    e: impl std::fmt::Display,
+    cypher: &str,
+    timeout: std::time::Duration,
+) -> UniError {
     let msg = normalize_error_message(&e.to_string(), cypher);
     if let Some(detail) = uni_common::GraphComputeIncomplete::from_tagged_message(&msg) {
         UniError::GraphComputeIncomplete {
             detail: Box::new(detail),
         }
+    } else if msg.contains("Query cancelled") {
+        // Reachable only since #207: before the deadline and token were plumbed
+        // into `GraphExecutionContext`, no operator-level check could fire, so a
+        // streamed abort always came from the outer `timeout_at`/`cancelled`
+        // race below and arrived already typed. An operator raising it now must
+        // land on the same variants, or the cursor reports a cooperative abort
+        // as a generic `Query` error.
+        UniError::Cancelled
+    } else if msg.contains("Query timed out") {
+        query_timed_out_error(timeout)
     } else if msg.contains("TypeError:") {
         UniError::Type {
             expected: msg,
@@ -754,7 +771,8 @@ impl crate::api::UniInner {
         // Convert raw hash-map batches to Row batches, chunked by batch_size.
         let row_stream = stream
             .map(move |batch_res| {
-                let results = batch_res.map_err(|e| into_stream_error(e, &cypher_for_error))?;
+                let results = batch_res
+                    .map_err(|e| into_stream_error(e, &cypher_for_error, query_timeout))?;
                 // Applied to the executor's own output, not to the re-chunked
                 // pieces below, so a slow consumer paging an already-computed
                 // result is not charged against the query's execution budget.

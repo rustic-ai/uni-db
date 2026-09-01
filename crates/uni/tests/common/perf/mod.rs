@@ -1,4 +1,5 @@
 pub mod iai_wallclock;
+pub mod query_deadline_preemption_test;
 pub mod query_limits_test;
 pub mod query_streaming_test;
 pub mod stress_test;

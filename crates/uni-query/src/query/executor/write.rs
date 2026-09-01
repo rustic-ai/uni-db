@@ -2510,11 +2510,21 @@ impl Executor {
                     prop_manager.cache_size(),
                 ))
             });
-            crate::query::df_graph::GraphExecutionContext::with_l0_context(
+            let mut gctx = crate::query::df_graph::GraphExecutionContext::with_l0_context(
                 self.effective_storage(),
                 l0_context,
                 pm_arc,
-            )
+            );
+            // Carry the statement's budget into the fastpath's operators; see #207.
+            if let Some(c) = ctx {
+                if let Some(deadline) = c.deadline {
+                    gctx = gctx.with_deadline(deadline);
+                }
+                if let Some(token) = c.cancellation_token.clone() {
+                    gctx = gctx.with_cancellation_token(token);
+                }
+            }
+            gctx
         });
 
         let mut results = Vec::new();

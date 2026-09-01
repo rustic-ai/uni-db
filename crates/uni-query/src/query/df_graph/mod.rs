@@ -164,6 +164,14 @@ pub use locy_traits::{DerivedFactSource, LocyExecutionContext};
 /// // Get neighbors with L0 overlay
 /// let neighbors = ctx.get_neighbors(vid, edge_type_id, Direction::Outgoing);
 /// ```
+/// `Clone` is load-bearing, not a convenience: the physical planner has to take
+/// an owned context out of its `Arc` to run the consuming `with_*` builders, and
+/// it used to do that by rebuilding from the base constructor and re-attaching
+/// fields by hand. Every field not listed in that re-attachment was silently
+/// dropped — which is how `deadline`, `cancellation_token`, `warnings` and
+/// `handle_scope` came to be reset on every query. Cloning preserves the whole
+/// struct by construction, so a field added later cannot reintroduce the bug.
+#[derive(Clone)]
 pub struct GraphExecutionContext {
     /// Storage manager for schema and dataset access.
     storage: Arc<StorageManager>,
@@ -372,8 +380,19 @@ impl GraphExecutionContext {
     }
 
     /// Set query timeout deadline.
+    #[must_use]
     pub fn with_deadline(mut self, deadline: Instant) -> Self {
         self.deadline = Some(deadline);
+        self
+    }
+
+    /// Attach the cooperative cancellation token for the surrounding query.
+    ///
+    /// Paired with [`Self::with_deadline`]: `check_timeout` consults both, and a
+    /// context carrying neither cannot abort anything it is asked to guard.
+    #[must_use]
+    pub fn with_cancellation_token(mut self, token: tokio_util::sync::CancellationToken) -> Self {
+        self.cancellation_token = Some(token);
         self
     }
 

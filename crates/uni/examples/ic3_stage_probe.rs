@@ -301,8 +301,6 @@ async fn main() -> anyhow::Result<()> {
             );
             run(&db, arm, limit, &q).await;
         }
-        #[allow(clippy::never_loop)]
-        for _ in 0..0 {}
     }
     // Scan versus traversal, reading the same column off the same label.
     // A scan reads columns from storage columnarly; a traversal hydrates each

@@ -1464,6 +1464,15 @@ pub async fn execute_subplan_with_outer_vars(
     );
     planner.set_outer_entity_vars(outer_entity_vars.clone());
 
+    // A sub-plan inherits the outer query's budget: the planner builds its own
+    // `GraphExecutionContext` from the L0 context alone, so without this the
+    // deadline stops at the subquery boundary and a correlated comprehension
+    // re-enters unbounded work once per outer row. See #207.
+    planner = planner.with_deadline_and_cancellation(
+        graph_ctx.deadline_for_host(),
+        graph_ctx.cancellation_token_for_host(),
+    );
+
     // Propagate registries from parent context so procedures remain available
     // inside correlated subqueries (Apply operator).
     if let Some(registry) = graph_ctx.algo_registry() {
