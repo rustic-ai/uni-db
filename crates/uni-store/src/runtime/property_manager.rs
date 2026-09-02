@@ -1670,26 +1670,33 @@ impl PropertyManager {
         // relationship read an empty prefetch and wiped the edge's untouched
         // properties (#102). Only misses pay the per-EID lookup, so the batch
         // fast-path is preserved for fully-typed edges.
+        //
+        // The misses are gathered first and resolved in one batched scan, for
+        // the reason given on the sibling fallback in `get_batch_edge_props`:
+        // an entirely schemaless relationship type misses on *every* EID, so a
+        // per-EID lookup here is a full `ScanRequest` per edge.
         use crate::storage::main_edge::MainEdgeDataset;
+
+        let mut unresolved: Vec<uni_common::core::id::Eid> = Vec::new();
         for &eid in eids {
-            // Skip both L0 deletes and edges the delta replay ended by
-            // deleting: either is a tombstone the fallback must not undo.
             // Skip both L0 deletes and edges whose replay ended in a delete:
             // either is a tombstone the fallback must not undo (C2).
             if l0_visibility::is_edge_deleted(eid, ctx) || replay_tombstoned.contains(&eid) {
                 continue;
             }
-            let needs_fallback = result.get(&eid).is_none_or(|p| p.is_empty());
-            if !needs_fallback {
-                continue;
+            if result.get(&eid).is_none_or(|p| p.is_empty()) {
+                unresolved.push(eid);
             }
-            if let Some(props) = MainEdgeDataset::find_props_by_eid(
+        }
+
+        if !unresolved.is_empty() {
+            let fetched = MainEdgeDataset::find_props_by_eids(
                 self.storage.backend(),
-                eid,
+                &unresolved,
                 self.storage.version_high_water_mark(),
             )
-            .await?
-            {
+            .await?;
+            for (eid, props) in fetched {
                 let entry = result.entry(eid).or_default();
                 for (k, v) in props {
                     entry.entry(k).or_insert(v);
