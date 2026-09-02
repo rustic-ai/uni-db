@@ -522,3 +522,106 @@ async fn test_batched_edge_props_keep_deleted_edges_deleted() -> Result<()> {
 
     Ok(())
 }
+
+/// The full-scan read strategy returns only what was asked for, and honours tombstones.
+///
+/// `find_props_by_eids` switches to one unfiltered pass when the request covers
+/// a large enough share of the table, because chunked `_eid IN (...)` lookups
+/// cost the request while a scan costs the table — measured to cross at ~0.024%
+/// of rows. That arm reads **every** row and filters in memory, so it has two
+/// failure modes the chunked arm cannot have: leaking edges nobody requested,
+/// and losing the tombstone rule while merging rows it did not ask about.
+///
+/// The sibling tests above exercise the chunked arm (small requests return
+/// early, below the minimum). This one is sized to take the scan arm: it
+/// requests more EIDs than the minimum while leaving a third of the table
+/// unrequested, so a filtering bug shows up as extra keys rather than as a
+/// wrong value.
+#[tokio::test]
+async fn test_full_scan_strategy_filters_to_the_requested_eids() -> Result<()> {
+    let (_temp_dir, storage, writer, property_manager, edge_type_id) = setup_test_db().await?;
+
+    // Comfortably above MIN_EIDS_FOR_FULL_SCAN, with a third left unrequested.
+    const REQUESTED: usize = 100;
+    const UNREQUESTED: usize = 50;
+
+    let hub = writer.next_vid().await?;
+    writer
+        .insert_vertex_with_labels(hub, HashMap::new(), &["Person".to_string()], None)
+        .await?;
+
+    let mut all_eids = Vec::new();
+    for i in 0..(REQUESTED + UNREQUESTED) {
+        let dst = writer.next_vid().await?;
+        writer
+            .insert_vertex_with_labels(dst, HashMap::new(), &["Person".to_string()], None)
+            .await?;
+        let mut props = Properties::new();
+        props.insert("since".to_string(), Value::Int(3000 + i as i64));
+        let eid = writer.next_eid(edge_type_id).await?;
+        writer
+            .insert_edge(hub, dst, edge_type_id, eid, props, None, None)
+            .await?;
+        all_eids.push((eid, dst));
+    }
+
+    writer.flush_to_l1(None).await?;
+
+    // One of the *requested* edges is deleted, so the tombstone rule is under
+    // test on the scan arm rather than only on the chunked one.
+    let (doomed, doomed_dst) = all_eids[0];
+    writer
+        .delete_edge(doomed, hub, doomed_dst, edge_type_id, None)
+        .await?;
+    writer.flush_to_l1(None).await?;
+
+    let compactor = Compactor::new(storage.clone());
+    let _ = compactor
+        .compact_adjacency("KNOWS", "Person", "fwd")
+        .await?;
+    let _ = compactor
+        .compact_adjacency("KNOWS", "Person", "bwd")
+        .await?;
+
+    let requested: Vec<_> = all_eids[..REQUESTED].iter().map(|(e, _)| *e).collect();
+    let ctx = QueryContext::new(writer.l0_manager.get_current());
+    let props = property_manager
+        .get_batch_edge_props(&requested, &["since"], Some(&ctx))
+        .await?;
+
+    // The deleted edge is requested but must not come back; the other 99 must.
+    assert_eq!(
+        props.len(),
+        REQUESTED - 1,
+        "the scan arm must return exactly the requested, live edges — \
+         extra keys mean it leaked rows it read but was not asked for"
+    );
+
+    for (i, (eid, _)) in all_eids[1..REQUESTED].iter().enumerate() {
+        let key = uni_common::core::id::Vid::from(eid.as_u64());
+        assert_eq!(
+            props.get(&key).and_then(|p| p.get("since")),
+            Some(&Value::Int(3000 + (i + 1) as i64)),
+            "requested edge {i} must carry its own value"
+        );
+    }
+
+    let doomed_key = uni_common::core::id::Vid::from(doomed.as_u64());
+    assert!(
+        props
+            .get(&doomed_key)
+            .is_none_or(|p| !p.contains_key("since")),
+        "a tombstoned edge must stay deleted on the scan arm too"
+    );
+
+    for (eid, _) in &all_eids[REQUESTED..] {
+        let key = uni_common::core::id::Vid::from(eid.as_u64());
+        assert!(
+            !props.contains_key(&key),
+            "an edge that was never requested must not appear, even though the \
+             scan read its row"
+        );
+    }
+
+    Ok(())
+}
