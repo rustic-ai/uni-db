@@ -4631,6 +4631,81 @@ impl QueryPlanner {
         Ok(plan)
     }
 
+    /// A path rewritten to start at its bound end, or `None` to plan as written.
+    ///
+    /// [`Self::plan_path`] walks elements left to right and scans the first node
+    /// when it is unbound. If the *last* node is the bound one, that scan is a
+    /// full `ScanAll` cross-joined against the incoming rows, and the binding is
+    /// only reapplied as a filter above the traversal — where
+    /// `try_plan_cross_join_as_hash_join` can no longer recover it. Measured at
+    /// SF1: `(forum)-[:CONTAINER_OF]->(post)` 349 ms against
+    /// `(post)<-[:CONTAINER_OF]-(forum)` not finishing, for the same rows.
+    ///
+    /// Reversing is semantics-preserving because `source_variable` names the
+    /// traversal *start*, not the arrow's tail: `endpoints_for_direction`
+    /// resolves `(source = a, Incoming)` and `(source = b, Outgoing)` to the
+    /// same start and end, so `startNode`/`endNode` are unaffected. `Incoming`
+    /// is not a slow path either — the CSR is keyed by `(edge_type, Direction)`
+    /// with separate `fwd`/`bwd` datasets.
+    ///
+    /// Deliberately narrow. A bound node in the *middle* is a join-ordering
+    /// problem that reversal does not solve, and paths carrying a path variable,
+    /// a quantified segment, or a shortestPath mode are left alone rather than
+    /// reversed with their accompanying machinery.
+    fn reversed_for_bound_anchor(
+        path: &PathPattern,
+        vars_in_scope: &[VariableInfo],
+    ) -> Option<PathPattern> {
+        // A path variable binds nodes and edges in traversal order, so a
+        // reversed plan would bind `p` backwards. Out of scope here.
+        if path.variable.is_some() || path.shortest_path_mode.is_some() {
+            return None;
+        }
+        // Fewer than three elements is a bare node: nothing to reorder.
+        if path.elements.len() < 3 {
+            return None;
+        }
+        // Quantified segments carry per-step directions of their own.
+        if path
+            .elements
+            .iter()
+            .any(|e| matches!(e, PatternElement::Parenthesized { .. }))
+        {
+            return None;
+        }
+
+        let bound_node = |element: &PatternElement| match element {
+            PatternElement::Node(n) => n
+                .variable
+                .as_deref()
+                .is_some_and(|v| !v.is_empty() && is_var_in_scope(vars_in_scope, v)),
+            _ => false,
+        };
+
+        // Only the both-ends case is decidable here: reversal helps exactly when
+        // the far end is bound and the near end is not.
+        if bound_node(path.elements.first()?) || !bound_node(path.elements.last()?) {
+            return None;
+        }
+
+        let mut elements: Vec<PatternElement> = path.elements.iter().rev().cloned().collect();
+        for element in &mut elements {
+            if let PatternElement::Relationship(rel) = element {
+                rel.direction = match rel.direction {
+                    Direction::Outgoing => Direction::Incoming,
+                    Direction::Incoming => Direction::Outgoing,
+                    Direction::Both => Direction::Both,
+                };
+            }
+        }
+
+        Some(PathPattern {
+            variable: None,
+            elements,
+            shortest_path_mode: None,
+        })
+    }
+
     /// Plan a regular MATCH path (not shortestPath).
     fn plan_path(
         &self,
@@ -4640,6 +4715,17 @@ impl QueryPlanner {
         optional: bool,
         vars_before_pattern: usize,
     ) -> Result<LogicalPlan> {
+        // Start the walk at the bound end when the pattern was written from the
+        // unbound one; see `reversed_for_bound_anchor`.
+        let reversed_storage;
+        let path = match Self::reversed_for_bound_anchor(path, vars_in_scope) {
+            Some(reversed) => {
+                reversed_storage = reversed;
+                &reversed_storage
+            }
+            None => path,
+        };
+
         let mut plan = plan;
         let elements = &path.elements;
         let mut i = 0;
